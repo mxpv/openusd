@@ -211,12 +211,13 @@ impl LayerRegistry {
     /// routed to `on_error` and skipped, so one bad sublayer never fails the
     /// whole stack (C++ `SdfLayer` opens the root and reports the bad sublayer).
     ///
-    /// `ancestor_expr_vars` are the expression variables composed by the stack
-    /// that brought `asset_path` in (empty for the stage root stack, the
-    /// referencing stack's composed set for a reference/payload target). They
-    /// overlay the root's own `expressionVariables` — the ancestor, closer to the
-    /// composed root, wins — and thread down the sublayer stack to evaluate its
-    /// expression-valued `subLayers` paths.
+    /// `ancestor_expr_vars` are the overrides the stack that brought `asset_path`
+    /// in supplies (the session root's own variables for the stage root stack, a
+    /// reference/payload arc's composed set for a target). They overlay the root
+    /// layer's own `expressionVariables` — the overrides win — to form the one
+    /// context the whole stack resolves its expression-valued `subLayers` paths
+    /// against (C++ `PcpExpressionVariables`). Sublayers of the root contribute no
+    /// variables, so the context is fixed for the whole walk.
     ///
     /// This is a pure loader: it reports every load failure raw (a missing or
     /// unreadable sublayer, at whatever site reaches it) and knows nothing of
@@ -226,6 +227,32 @@ impl LayerRegistry {
     /// [`StageBuilder::make_stage`](crate::usd::Stage)). Keeping the muted policy out
     /// of the load walk avoids attributing a diagnostic to whichever branch happened
     /// to reach a shared layer first.
+    /// The `expressionVariables` authored on the single layer at `asset_path`
+    /// (anchored against `anchor`), read without opening its sublayers — the shallow
+    /// read the stage root stack needs to compose its root and session layers' own
+    /// variables into one context before either region's sublayer subtree is
+    /// collected. An empty identifier yields an empty map; a resolve or read failure
+    /// propagates.
+    ///
+    /// TODO(perf): the layer read here is read again when its stack is collected;
+    /// the registry does not cache reads, so a root or session layer is parsed twice
+    /// at open.
+    pub(crate) fn own_expression_variables(
+        &self,
+        asset_path: &str,
+        anchor: Option<&ar::ResolvedPath>,
+    ) -> Result<HashMap<String, sdf::Value>> {
+        let identifier = self.create_identifier(asset_path, anchor);
+        if identifier.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let resolved = self
+            .resolve_layer(&identifier)
+            .with_context(|| format!("failed to resolve asset path: {asset_path}"))?;
+        let data = self.read(&resolved)?;
+        Ok(expr::read_expression_variables(data.as_ref())?.into_owned())
+    }
+
     pub(crate) fn open_stack(
         &self,
         asset_path: &str,
@@ -255,11 +282,17 @@ impl LayerRegistry {
         let data = self.read(&resolved)?;
         visited.insert(identifier.clone());
 
+        // The whole stack resolves its `${VAR}` sublayers against one context (C++
+        // `PcpExpressionVariables`): the root layer's own `expressionVariables`
+        // overlaid by the inherited overrides. Sublayers contribute nothing, so it
+        // is fixed for the walk.
+        let stack_vars = expr::stack_expression_variables(data.as_ref(), ancestor_expr_vars)?;
+
         self.open_sublayers(
             identifier,
             resolved,
             data,
-            ancestor_expr_vars,
+            &stack_vars,
             reload,
             on_error,
             already_present,
@@ -311,30 +344,24 @@ impl LayerRegistry {
     /// below) so a sublayer's read failure is routed to `on_error` while the
     /// root's propagates.
     ///
-    /// `ancestor_expr_vars` are the expression variables composed from the layers
-    /// that sublayer this one (empty at the root). They are applied over this
-    /// layer's own `expressionVariables` so a closer-to-root layer's override
-    /// wins (C++ `PcpExpressionVariables`); the combined set drives expression
-    /// evaluation in this layer's sublayer paths and is threaded into each one.
+    /// `stack_vars` is the one context the whole stack resolves against (the root
+    /// layer's own `expressionVariables` overlaid by the inherited overrides,
+    /// computed once in [`open_stack`](Self::open_stack)). This layer's own
+    /// `expressionVariables` do not contribute — only the stack root's do (C++
+    /// `PcpExpressionVariables`) — so it is passed down unchanged.
     #[allow(clippy::too_many_arguments)]
     fn open_sublayers(
         &self,
         identifier: String,
         resolved: ar::ResolvedPath,
         data: sdf::LayerData,
-        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        stack_vars: &HashMap<String, sdf::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<()>,
         already_present: &dyn Fn(&str) -> bool,
         visited: &mut HashSet<String>,
         layers: &mut Vec<sdf::Layer>,
     ) -> Result<()> {
-        // Compose this layer's authored expression variables with those inherited
-        // from the layers that sublayer it; the inherited (closer-to-root) set is
-        // applied last so it overrides this layer's own (C++ `PcpExpressionVariables`).
-        let mut expr_vars = expr::read_expression_variables(data.as_ref())?.into_owned();
-        expr::compose_over(&mut expr_vars, ancestor_expr_vars);
-
         let sub_paths = Self::sublayer_paths(data.as_ref());
 
         // Emit this layer ahead of its sublayers so the collected stack is
@@ -363,7 +390,7 @@ impl LayerRegistry {
             // or unreadable one — rather than failing the whole stack open. It has no
             // resolved identifier to key on, so it deduplicates per referrer by its
             // authored path, keeping the three load-failure branches consistent.
-            let sub_asset = match expr::evaluate_asset_path(&sub_path, &expr_vars) {
+            let sub_asset = match expr::evaluate_asset_path(&sub_path, stack_vars) {
                 Ok(evaluated) => evaluated,
                 Err(reason) => {
                     if failed.insert(sub_path.clone()) {
@@ -424,7 +451,7 @@ impl LayerRegistry {
                 sub_id,
                 sub_resolved,
                 sub_data,
-                &expr_vars,
+                stack_vars,
                 reload,
                 on_error,
                 already_present,
@@ -477,11 +504,15 @@ impl LayerRegistry {
         };
         visited.insert(identifier.clone());
         let data = self.read(&resolved)?;
-        let mut expr_vars = expr::read_expression_variables(data.as_ref())?.into_owned();
-        expr::compose_over(&mut expr_vars, ancestor_expr_vars);
+        // Resolve this layer's arc/sublayer paths against its stack context (root
+        // own overlaid by the inherited overrides). This eager test closure loads a
+        // superset of what any one stack references; the `LayerGraph` re-derives the
+        // actual per-stack membership with the same stack-level context, so a layer
+        // reached here that no stack includes is simply an unused node.
+        let stack_vars = expr::stack_expression_variables(data.as_ref(), ancestor_expr_vars)?;
         for dep in Self::arc_dependencies(data.as_ref())? {
-            let dep_asset = expr::evaluate_asset_path(&dep, &expr_vars)?;
-            self.collect_with_arcs_in(&dep_asset, Some(&resolved), &expr_vars, layers, visited)?;
+            let dep_asset = expr::evaluate_asset_path(&dep, &stack_vars)?;
+            self.collect_with_arcs_in(&dep_asset, Some(&resolved), &stack_vars, layers, visited)?;
         }
         layers.push(sdf::Layer::new_resolved(identifier, &resolved, data));
         Ok(())

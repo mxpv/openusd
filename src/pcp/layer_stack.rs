@@ -55,16 +55,11 @@ impl LayerStackId {
 /// Index of an interned expression-variable context (a canonicalized, name-sorted
 /// `(name, value)` list). [`Value`] is not `Eq`/`Hash`, so a context cannot key a
 /// hash map directly; interning it to this `Copy` handle lets a stack be keyed by
-/// `(root, seed)` and lets the contextual sublayer walk key its edges by
-/// `(layer, context)`.
+/// `(root, seed)`.
 ///
 /// An `ExprVarId` is meaningful only within the [`ExprVarInterner`] that minted it.
-/// The registry holds one persistent interner for stack seeds; each contextual
-/// sublayer walk uses its own transient one. Each numbers independently from 0, so
-/// ids from different interners are not comparable — a walk id must never be stored
-/// in or compared against a [`LayerStackKey::Target`] seed. They stay separate by
-/// construction: a walk id never leaves `compose_contextual_edges_with`, and a seed
-/// id is only ever produced by the registry.
+/// The registry holds one interner for stack seeds, so a seed id is only ever
+/// produced by the registry.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ExprVarId(u32);
 
@@ -78,9 +73,8 @@ impl ExprVarId {
 /// structural equality so two equal contexts share one id. [`Value`] is not
 /// `Eq`/`Hash`, so the dedup is a linear scan comparing the canonicalized,
 /// name-sorted forms with [`value_eq`]. The registry holds one to key stacks by
-/// their seed; a fresh one per contextual sublayer walk keys `(layer, context)`
-/// edges. The context count is tiny (bounded by the variable-authoring layers), so
-/// the linear scan is not a concern.
+/// their seed. The context count is tiny (bounded by the variable-authoring
+/// layers), so the linear scan is not a concern.
 // TODO(perf): a hash-indexed table would drop the linear `value_eq` scan if a
 // pathological stack ever interns many distinct contexts.
 #[derive(Default)]

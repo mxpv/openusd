@@ -596,13 +596,13 @@ fn expr_sublayer_composes() -> Result<()> {
     Ok(())
 }
 
-/// A `${VAR}` sublayer resolves against a variable authored on an *intermediate*
-/// sublayer ancestor — neither the layer that authors the expression nor the
-/// root. The root sublayers `a`; `a` defines `V` and sublayers `b`; `b`'s `${V}`
-/// sublayer must compose against `a`'s value, threaded down from the intermediate
-/// layer.
+/// A layer stack's expression variables come from its root layer, not its
+/// sublayers (C++ `PcpExpressionVariables`): a variable authored on a *sublayer*
+/// is ignored. The root sublayers `a`; `a` defines `V` and sublayers `b`; `b`'s
+/// `${V}` sublayer therefore does not resolve, so `leaf` never composes and `/P`
+/// has no opinion.
 #[test]
-fn intermediate_expr_sublayer() -> Result<()> {
+fn sublayer_expr_var_ignored() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let a = dir.path().join("a.usda");
@@ -619,8 +619,8 @@ fn intermediate_expr_sublayer() -> Result<()> {
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
         stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(7.0)),
-        "the intermediate layer's variable resolves the deeper expression sublayer"
+        None,
+        "`a` is a sublayer, so its `V` is ignored and `b`'s expression sublayer does not resolve"
     );
     Ok(())
 }
@@ -1320,67 +1320,114 @@ fn session_var_loads_sublayer() -> Result<()> {
     Ok(())
 }
 
-/// Muting a session layer at open time prunes its whole sublayer subtree from the
-/// variables that drive root `${VAR}` sublayer collection, not just the exact
-/// layer: `strong.usda` (muted) sublayers `vars.usda` (WHICH="b"), `weak.usda`
-/// authors WHICH="a", so muting `strong` must compose WHICH="a" and open a.usda —
-/// the weaker opinion's sublayer — not the muted subtree's b.usda.
+/// A stage's expression variables come from the session layer's *root*, not its
+/// sublayers: a `${VAR}` authored on a session *sublayer* is ignored, while the
+/// same variable on the session root applies. C++ `PcpExpressionVariables`
+/// composes only the stage root and session root layers' own metadata.
 #[test]
-fn muted_session_collects_sublayer() -> Result<()> {
-    let root = fixture_path("session_expr_mute/root.usda");
-    let session = fixture_path("session_expr_mute/session.usda");
-    let stage = Stage::builder()
-        .session_layer(&session)
-        .mute([fixture_path("session_expr_mute/strong.usda")])
-        .open(&root)?;
+fn session_sublayer_var_ignored() -> Result<()> {
+    let resolves = |session_body: &str| -> Result<Option<f64>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("root.usda");
+        let session = dir.path().join("session.usda");
+        std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\n")?;
+        std::fs::write(&session, session_body)?;
+        std::fs::write(
+            dir.path().join("sub.usda"),
+            "#usda 1.0\n(\n    expressionVariables = { string WHICH = \"a\" }\n)\n",
+        )?;
+        std::fs::write(
+            dir.path().join("a.usda"),
+            "#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n",
+        )?;
+        let stage = Stage::builder()
+            .session_layer(session.to_str().expect("utf-8 temp path"))
+            .open(root.to_str().expect("utf-8 temp path"))?;
+        stage.attribute("/A.x").get::<f64>()
+    };
+    // WHICH authored on a session sublayer is ignored, so the root's expression
+    // sublayer does not resolve and `/A` never composes.
     assert_eq!(
-        stage.attribute("/A.x").get::<f64>()?,
+        resolves("#usda 1.0\n(\n    subLayers = [@sub.usda@]\n)\n")?,
+        None,
+        "a session sublayer's WHICH must not resolve the root's expression sublayer",
+    );
+    // WHICH authored on the session root applies, selecting a.usda.
+    assert_eq!(
+        resolves("#usda 1.0\n(\n    expressionVariables = { string WHICH = \"a\" }\n)\n")?,
         Some(1.0),
-        "muting the stronger session opinion composes the weaker's root sublayer (a.usda)"
+        "the session root's WHICH resolves the root's expression sublayer",
     );
     Ok(())
 }
 
-/// A muted session subtree is pruned after resolving its expression-valued
-/// sublayer paths with the session stack variables. The descendant `vars.usda`
-/// must not contribute `WHICH=b` after `strong.usda` is muted.
+/// A session layer's `${VAR}` sublayer resolves against a variable authored on the
+/// *stage root* layer: the root and session form one layer stack sharing a single
+/// expression-variable context (C++ `PcpExpressionVariables`), so `strong.usda` — named
+/// only through the stage root's `CHILD` — is loaded and composed.
 #[test]
-fn muted_session_expr_subtree() -> Result<()> {
+fn session_sublayer_root_var() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let session = dir.path().join("session.usda");
-    let strong = dir.path().join("strong.usda");
-    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\n")?;
     std::fs::write(
-        &session,
-        "#usda 1.0\n(\n    expressionVariables = {\n        string CHILD = \"vars\"\n    }\n    subLayers = [@strong.usda@, @weak.usda@]\n)\n",
+        &root,
+        "#usda 1.0\n(\n    expressionVariables = { string CHILD = \"strong\" }\n)\n",
     )?;
-    std::fs::write(&strong, "#usda 1.0\n(\n    subLayers = [@`\"${CHILD}.usda\"`@]\n)\n")?;
+    std::fs::write(&session, "#usda 1.0\n(\n    subLayers = [@`\"${CHILD}.usda\"`@]\n)\n")?;
     std::fs::write(
-        dir.path().join("vars.usda"),
-        "#usda 1.0\n(\n    expressionVariables = {\n        string WHICH = \"b\"\n    }\n)\n",
-    )?;
-    std::fs::write(
-        dir.path().join("weak.usda"),
-        "#usda 1.0\n(\n    expressionVariables = {\n        string WHICH = \"a\"\n    }\n)\n",
-    )?;
-    std::fs::write(
-        dir.path().join("a.usda"),
+        dir.path().join("strong.usda"),
         "#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n",
-    )?;
-    std::fs::write(
-        dir.path().join("b.usda"),
-        "#usda 1.0\ndef \"A\" {\n    custom double x = 2\n}\n",
     )?;
 
     let stage = Stage::builder()
         .session_layer(session.to_str().expect("utf-8 temp path"))
-        .mute([strong.to_str().expect("utf-8 temp path")])
         .open(root.to_str().expect("utf-8 temp path"))?;
     assert_eq!(
         stage.attribute("/A.x").get::<f64>()?,
         Some(1.0),
-        "the muted expression subtree's WHICH=b does not select b.usda"
+        "the session sublayer resolves the stage root's CHILD to strong.usda",
+    );
+    Ok(())
+}
+
+/// Muting then unmuting the session root prunes and restores a session descendant its
+/// `${VAR}` sublayer selects through a variable authored on the stage root. The subtree
+/// walk and mute fanout resolve session sublayers against the combined root+session
+/// context, so `strong.usda`'s `/A/Child` disappears while muted and returns on unmute.
+#[test]
+fn unmute_session_root_subtree() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\n(\n    expressionVariables = { string CHILD = \"strong\" }\n)\ndef \"A\" {\n    custom double z = 0\n}\n",
+    )?;
+    std::fs::write(&session, "#usda 1.0\n(\n    subLayers = [@`\"${CHILD}.usda\"`@]\n)\n")?;
+    std::fs::write(
+        dir.path().join("strong.usda"),
+        "#usda 1.0\ndef \"A\" {\n    def \"Child\" {\n        custom double y = 5\n    }\n}\n",
+    )?;
+
+    let stage = Stage::builder()
+        .session_layer(session.to_str().expect("utf-8 temp path"))
+        .open(root.to_str().expect("utf-8 temp path"))?;
+    assert!(
+        stage.prim("/A/Child").is_valid()?,
+        "the stage root's CHILD selects strong.usda in the session"
+    );
+
+    stage.mute_layer(session.to_str().expect("utf-8 temp path"));
+    assert!(
+        !stage.prim("/A/Child").is_valid()?,
+        "muting the session root prunes the selected strong.usda"
+    );
+
+    stage.unmute_layer(session.to_str().expect("utf-8 temp path"));
+    assert!(
+        stage.prim("/A/Child").is_valid()?,
+        "unmuting restores the pruned session subtree"
     );
     Ok(())
 }
@@ -1388,31 +1435,24 @@ fn muted_session_expr_subtree() -> Result<()> {
 /// Open-time muted session paths are anchored against the resolved root layer,
 /// not the bare package path. A packaged root whose default layer is
 /// `dir/root.usda` therefore mutes `dir/strong.usda` for a relative
-/// `mute("strong.usda")` request.
+/// `mute("strong.usda")` request, dropping its stronger `/A.x` opinion so the
+/// weaker session sublayer wins.
 #[test]
 fn packaged_root_mute_anchor() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let package = dir.path().join("package.usdz");
     {
         let mut writer = ArchiveWriter::create(&package)?;
-        writer.add_layer(
-            "dir/root.usda",
-            b"#usda 1.0\n(\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\n",
-        )?;
+        writer.add_layer("dir/root.usda", b"#usda 1.0\n")?;
         writer.add_layer(
             "dir/session.usda",
             b"#usda 1.0\n(\n    subLayers = [@strong.usda@, @weak.usda@]\n)\n",
         )?;
         writer.add_layer(
             "dir/strong.usda",
-            b"#usda 1.0\n(\n    expressionVariables = {\n        string WHICH = \"b\"\n    }\n)\n",
+            b"#usda 1.0\ndef \"A\" {\n    custom double x = 2\n}\n",
         )?;
-        writer.add_layer(
-            "dir/weak.usda",
-            b"#usda 1.0\n(\n    expressionVariables = {\n        string WHICH = \"a\"\n    }\n)\n",
-        )?;
-        writer.add_layer("dir/a.usda", b"#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n")?;
-        writer.add_layer("dir/b.usda", b"#usda 1.0\ndef \"A\" {\n    custom double x = 2\n}\n")?;
+        writer.add_layer("dir/weak.usda", b"#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n")?;
         writer.finish()?;
     }
 
@@ -1425,7 +1465,7 @@ fn packaged_root_mute_anchor() -> Result<()> {
     assert_eq!(
         stage.attribute("/A.x").get::<f64>()?,
         Some(1.0),
-        "mute(\"strong.usda\") is anchored relative to the packaged root layer"
+        "mute(\"strong.usda\") is anchored relative to the packaged root layer, dropping strong's opinion"
     );
     Ok(())
 }

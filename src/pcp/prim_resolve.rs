@@ -482,8 +482,10 @@ impl PrimIndex {
     /// Composes the `expressionVariables` visible at `node`, a port of
     /// `Indexer::composed_expr_vars` over the finished index. Walking node→root,
     /// each root/reference/payload arc boundary contributes its layer stack's
-    /// authored variables, with the closer-to-root stack overriding the farther
-    /// one (C++ `PcpExpressionVariables`).
+    /// expression variables (its root layer's own overlaid by the inherited
+    /// overrides — not its sublayers'; `LayerGraph::stack_expression_variables`),
+    /// with the closer-to-root stack overriding the farther one (C++
+    /// `PcpExpressionVariables`).
     ///
     /// Keep this walk in sync with `Indexer::composed_expr_vars`: both must
     /// agree on which arcs are boundaries and how stacks compose. By resolve
@@ -495,12 +497,7 @@ impl PrimIndex {
         let mut cur = Some(node);
         while let Some(n) = cur {
             if matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload) {
-                // Members are strongest-first; apply weakest-first so the strongest wins.
-                for &(layer, _) in stack.layer_stack(n.layer_stack_id()).iter().rev() {
-                    if let Ok(dict) = sdf::expr::read_expression_variables(stack.layer(layer).data()) {
-                        sdf::expr::compose_over(&mut composed, &dict);
-                    }
-                }
+                composed.extend(stack.stack_expression_variables(n.layer_stack_id()));
             }
             cur = n.parent().map(|id| self.node(id));
         }

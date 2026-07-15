@@ -57,24 +57,32 @@ pub fn compose_over(base: &mut HashMap<String, sdf::Value>, overlay: &HashMap<St
     base.extend(overlay.iter().map(|(k, v)| (k.clone(), v.clone())));
 }
 
-/// Composes the `expressionVariables` authored across `layers`, given strongest
-/// first, the strongest opinion winning. Reads each layer's own dictionary and
-/// overlays them weakest-first (so the strongest is applied last, per
-/// [`compose_over`]) — the composed set both a layer stack's own sublayer
-/// expansion and an arc-inherited context resolve `${VAR}` against (C++
-/// `PcpExpressionVariables`).
-pub fn compose_layer_variables<'a, I>(strongest_first: I) -> HashMap<String, sdf::Value>
-where
-    I: IntoIterator<Item = &'a dyn sdf::AbstractData>,
-    I::IntoIter: DoubleEndedIterator,
-{
-    let mut vars = HashMap::new();
-    for data in strongest_first.into_iter().rev() {
-        if let Ok(dict) = read_expression_variables(data) {
-            compose_over(&mut vars, &dict);
-        }
-    }
-    vars
+/// A layer stack's composed expression variables (C++ `PcpExpressionVariables`):
+/// the stack **root** layer's own `expressionVariables` overlaid by `overrides`,
+/// the overrides winning on a key collision. `overrides` is the session root
+/// layer's own variables for the root stage stack, or a reference/payload arc's
+/// inherited overrides for a referenced stack. This is the single set every
+/// `${VAR}` sublayer path, reference/payload asset path, and value-time asset
+/// attribute in the stack resolves against; sublayers of the root contribute
+/// nothing — matching C++, and avoiding the bootstrapping cycle where a sublayer's
+/// variable would be needed to resolve the `${VAR}` that pulled it in.
+///
+/// Parity note: this models the directly-authored `expressionVariables` subset.
+/// C++'s `PcpExpressionVariablesSource` / override-source dependency mechanics are
+/// not modeled.
+///
+/// Propagates a backend read error on the root layer's `expressionVariables`
+/// field so the loader aborts a corrupt open rather than silently composing
+/// against empty variables (which would drop every `${VAR}`-dependent sublayer and
+/// reference). Pure-composition callers reading an already-loaded layer discard the
+/// error — the loader already validated the read at open time.
+pub fn stack_expression_variables(
+    root_data: &dyn sdf::AbstractData,
+    overrides: &HashMap<String, sdf::Value>,
+) -> Result<HashMap<String, sdf::Value>> {
+    let mut vars = read_expression_variables(root_data)?.into_owned();
+    compose_over(&mut vars, overrides);
+    Ok(vars)
 }
 
 /// Evaluates an expression-valued asset path against `vars`, or returns the path

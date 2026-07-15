@@ -1594,7 +1594,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         while let Some(id) = cur {
             let n = &self.output.nodes[id.idx()];
             if matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload) {
-                composed.extend(self.layer_stack_expr_vars(n.layer_stack_id()));
+                composed.extend(self.inputs.stack.stack_expression_variables(n.layer_stack_id()));
             }
             cur = n.parent;
         }
@@ -1606,18 +1606,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             expr::compose_over(&mut composed, frame.ambient_expr_vars);
         }
         composed
-    }
-
-    /// Reads the `expressionVariables` authored by a layer stack's own layers,
-    /// composing them across the stack with the strongest member winning.
-    fn layer_stack_expr_vars(&self, ambient: LayerStackId) -> HashMap<String, Value> {
-        expr::compose_layer_variables(
-            self.inputs
-                .stack
-                .layer_stack(ambient)
-                .iter()
-                .map(|&(layer, _)| self.inputs.stack.layer(layer).data()),
-        )
     }
 
     /// Composes the class-based arcs (inherits or specializes) authored at
@@ -3383,6 +3371,43 @@ mod tests {
              TARGET=\"wrong.usd\" when Sub's ancestral reference is resolved \
              inside the nested sub-root build, got {:?}",
             graph.iter().map(|n| (n.arc, n.path.as_str())).collect::<Vec<_>>()
+        );
+    }
+
+    /// A variable authored on a **sublayer** of the referencing stack is ignored
+    /// when resolving a reference's `${VAR}` asset path — a stack's expression
+    /// variables come from its root, not its sublayers (C++ `PcpExpressionVariables`).
+    /// The root itself authoring it does resolve the reference. Guards the arc/value
+    /// path (`composed_expr_vars`) against the sublayer semantics diverging from
+    /// stack membership.
+    #[test]
+    fn sublayer_var_ignored_reference() {
+        let target =
+            "#usda 1.0\n(\n    defaultPrim = \"Prim\"\n)\ndef \"Prim\" { custom string source = \"target\" }\n";
+        let referenced = |root: &str, sub: &str| -> bool {
+            let s = multi_stack(&[("root.usd", root), ("sub.usd", sub), ("target.usd", target)]);
+            let target_id = s.id_of("target.usd").expect("target.usd present");
+            build(&s, "/Model")
+                .expect("build")
+                .iter()
+                .any(|n| n.layer_id() == target_id && n.has_specs())
+        };
+        // V authored on the sublayer is ignored, so the reference expression does not
+        // resolve and target.usd is not brought in.
+        assert!(
+            !referenced(
+                "#usda 1.0\n(\n    subLayers = [@sub.usd@]\n)\ndef \"Model\" (\n    references = @`${V}`@\n) {}\n",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string V = \"target.usd\"\n    }\n)\n",
+            ),
+            "a sublayer-authored V must not resolve the reference expression",
+        );
+        // V authored on the root layer applies, so the reference resolves.
+        assert!(
+            referenced(
+                "#usda 1.0\n(\n    subLayers = [@sub.usd@]\n    expressionVariables = {\n        string V = \"target.usd\"\n    }\n)\ndef \"Model\" (\n    references = @`${V}`@\n) {}\n",
+                "#usda 1.0\n",
+            ),
+            "a root-authored V must resolve the reference to target.usd",
         );
     }
 

@@ -2172,7 +2172,7 @@ impl Stage {
         // `expressionVariables` edit (which reaches the cache through the change
         // pipeline, not here) — do not load it: they resolve root sublayers only
         // against already-interned layers. The open-time builder path loads the
-        // initial selection (see `StageBuilder::session_expression_variables`);
+        // initial selection (see `StageBuilder::root_stack_expression_variables`);
         // reloading a newly-selected root sublayer at runtime would need an on-demand
         // sublayer open through the graph, left as remaining work.
         cache.invalidate_muting(&change.affected, &change.changed);
@@ -3131,14 +3131,17 @@ impl StageBuilder {
     /// Session layers (if any) are prepended at the front of the layer stack
     /// so they hold the strongest opinions.
     pub fn open(self, root_path: &str) -> Result<Stage> {
-        let session = self.collect_optional_session_layers()?;
-        // Seed the root collection with the session layers' composed expression
-        // variables (muted ones excluded): the session is part of the root layer
-        // stack, so a `${VAR}` root sublayer the session resolves must be loaded
-        // here — composition later resolves it against the same variables but can
-        // only intern a layer this collection opened.
-        let session_vars = self.session_expression_variables(root_path, &session.layers);
-        let root = self.collect_layers(root_path, &session_vars)?;
+        // The stage root stack is one layer stack whose single expression-variable
+        // context (C++ `PcpExpressionVariables`) — the root layer's own variables
+        // overlaid by the session root's own — resolves the `${VAR}` sublayers of
+        // both the session region and the root region. Compose it once, up front,
+        // and collect both regions against it: a session sublayer can then reference
+        // a variable authored on the stage root layer (and a root sublayer one on the
+        // session), and composition later resolves each `${VAR}` sublayer to the same
+        // layer this collection opened.
+        let root_stack_vars = self.root_stack_expression_variables(root_path)?;
+        let session = self.collect_optional_session_layers(&root_stack_vars)?;
+        let root = self.collect_layers(root_path, &root_stack_vars)?;
         let session_layer_count = session.layers.len();
         let layers = session.layers.into_iter().chain(root.layers).collect();
         let errors = session.errors.into_iter().chain(root.errors).collect();
@@ -3163,7 +3166,10 @@ impl StageBuilder {
     /// ```
     pub fn in_memory(self, identifier: impl Into<String>) -> Result<Stage> {
         let identifier = identifier.into();
-        let session = self.collect_optional_session_layers()?;
+        // The anonymous root layer authors no `expressionVariables`, so the root
+        // stack context reduces to the session root's own — which `open_stack`
+        // composes from the empty ancestor anyway.
+        let session = self.collect_optional_session_layers(&HashMap::new())?;
         let session_layer_count = session.layers.len();
         let layers: Vec<sdf::Layer> = session
             .layers
@@ -3205,10 +3211,16 @@ impl StageBuilder {
         })
     }
 
-    /// Collect the configured session layer (and its dependencies), if any.
-    fn collect_optional_session_layers(&self) -> Result<CollectedLayers> {
+    /// Collect the configured session layer (and its dependencies), if any, resolving
+    /// its `${VAR}` sublayers against `root_stack_vars` — the stage root stack's single
+    /// context, so a session sublayer sees variables authored on the stage root layer
+    /// (C++ `PcpExpressionVariables`).
+    fn collect_optional_session_layers(
+        &self,
+        root_stack_vars: &HashMap<String, sdf::Value>,
+    ) -> Result<CollectedLayers> {
         match self.session_layer.as_deref() {
-            Some(p) => self.collect_layers(p, &HashMap::new()),
+            Some(p) => self.collect_layers(p, root_stack_vars),
             None => Ok(CollectedLayers::default()),
         }
     }
@@ -3236,59 +3248,23 @@ impl StageBuilder {
             .collect()
     }
 
-    /// The composed expression variables of the *effective* session stack — the
-    /// collected session layers minus any muted layer and the whole subtree it
-    /// sublayers. A muted session opinion must not select the root's `${VAR}`
-    /// sublayers, matching the graph's muted-aware resolution once the stage is
-    /// built (the graph would otherwise re-resolve the sublayer to one this
-    /// collection never opened). Pruning uses the shared
-    /// [`muted_subtree`](pcp::muted_subtree) rule the graph applies over its
-    /// resolved edges, walked here over the collected layers' authored sublayer
-    /// paths so the two agree on the effective stack. Mutes and sublayer paths are
-    /// canonicalized against the root / their layer the way the interned
-    /// identifiers were, so any spelling of a muted layer is excluded. Expression-
-    /// valued session sublayers are evaluated with the variables inherited from
-    /// their session ancestors.
-    fn session_expression_variables(
-        &self,
-        root_path: &str,
-        session_layers: &[sdf::Layer],
-    ) -> HashMap<String, sdf::Value> {
-        if self.muted.is_empty() {
-            return sdf::expr::compose_layer_variables(session_layers.iter().map(|l| l.data()));
-        }
-        let muted = self.canonical_muted_set(root_path);
-        let mut scope = HashSet::new();
-        for layer in session_layers {
-            scope.insert(layer.identifier().to_string());
-        }
-        let mut contexts: HashMap<String, HashMap<String, sdf::Value>> = HashMap::new();
-        let mut children: HashMap<String, Vec<String>> = HashMap::new();
-        for layer in session_layers {
-            let inherited = contexts.get(layer.identifier()).cloned().unwrap_or_default();
-            let mut vars = sdf::expr::read_expression_variables(layer.data())
-                .map(|vars| vars.into_owned())
-                .unwrap_or_default();
-            sdf::expr::compose_over(&mut vars, &inherited);
-            let layer_children: Vec<String> = sdf::LayerRegistry::sublayer_paths(layer.data())
-                .iter()
-                .filter_map(|sub| sdf::expr::evaluate_asset_path(sub, &vars).ok())
-                .map(|sub| self.registry.create_identifier_anchored(&sub, layer.real_path()))
-                .collect();
-            for child in &layer_children {
-                contexts.entry(child.clone()).or_insert_with(|| vars.clone());
+    /// The stage root stack's single expression-variable context (C++
+    /// `PcpExpressionVariables`): the stage root layer's own `expressionVariables`
+    /// overlaid by the session root's own (session wins), a muted session root
+    /// contributing none. Read shallowly from the two root layers — their sublayers
+    /// contribute nothing — since it is the fixed context both the session region's
+    /// and the root region's `${VAR}` sublayers resolve against.
+    fn root_stack_expression_variables(&self, root_path: &str) -> Result<HashMap<String, sdf::Value>> {
+        let mut vars = self.registry.own_expression_variables(root_path, None)?;
+        if let Some(session_path) = self.session_layer.as_deref() {
+            let session_id = self.registry.create_identifier(session_path, None);
+            let muted = !self.muted.is_empty() && self.canonical_muted_set(root_path).contains(&session_id);
+            if !muted {
+                let session_own = self.registry.own_expression_variables(session_path, None)?;
+                sdf::expr::compose_over(&mut vars, &session_own);
             }
-            children.insert(layer.identifier().to_string(), layer_children);
         }
-        let pruned = pcp::muted_subtree(&scope, scope.iter().filter(|id| muted.contains(*id)).cloned(), |id| {
-            children.get(id).cloned().unwrap_or_default()
-        });
-        sdf::expr::compose_layer_variables(
-            session_layers
-                .iter()
-                .filter(|l| !pruned.contains(l.identifier()))
-                .map(|l| l.data()),
-        )
+        Ok(vars)
     }
 
     /// Assemble a [`Stage`] from already-collected layers. Shared
@@ -4107,6 +4083,132 @@ def "T" {
 
         stage.unmute_layer("session.usda");
         assert_eq!(read_ax(&stage)?, Some(7.0), "unmuting restores the subtree");
+        Ok(())
+    }
+
+    /// Muting a session layer prunes the session descendants its `${VAR}` sublayers
+    /// bring in, not only the layers a plain sublayer names. The session root's
+    /// `CHILD` variable expands to `strong.usda`; muting the session root must drop
+    /// `strong.usda` from the composed stack even though the edge is an expression the
+    /// context-free graph does not carry.
+    #[test]
+    fn mute_session_expr_subtree() -> Result<()> {
+        let mut session = sdf::Layer::new_in_memory("session.usda");
+        edit_layer(&mut session, |e| {
+            let mut pr = e.pseudo_root_mut().unwrap();
+            pr.set_expression_variables(HashMap::from([(
+                "CHILD".to_string(),
+                sdf::Value::String("strong".into()),
+            )]));
+            pr.set_sublayers([r#"`"${CHILD}.usda"`"#]);
+        });
+        let stage = Stage::builder().make_stage(
+            vec![
+                session,
+                opinion_layer("strong.usda", 2.0)?,
+                opinion_layer("root.usda", 1.0)?,
+            ],
+            2,
+            Vec::new(),
+        );
+        assert_eq!(
+            read_ax(&stage)?,
+            Some(2.0),
+            "the expression-resolved session sublayer contributes"
+        );
+
+        stage.mute_layer("session.usda");
+        assert_eq!(
+            read_ax(&stage)?,
+            Some(1.0),
+            "muting the session root drops its expression-resolved sublayer subtree, so the root wins"
+        );
+
+        stage.unmute_layer("session.usda");
+        assert_eq!(read_ax(&stage)?, Some(2.0), "unmuting restores the expression subtree");
+        Ok(())
+    }
+
+    /// The pruned session subtree follows expression edges below a muted *intermediate*
+    /// session layer too. `mid` (a plain session sublayer) expands `${CHILD}` — a
+    /// variable authored on the session root — to `strong.usda`; muting `mid` drops
+    /// `strong.usda` with it.
+    #[test]
+    fn mute_intermediate_expr_subtree() -> Result<()> {
+        let mut session = sdf::Layer::new_in_memory("session.usda");
+        edit_layer(&mut session, |e| {
+            let mut pr = e.pseudo_root_mut().unwrap();
+            pr.set_expression_variables(HashMap::from([(
+                "CHILD".to_string(),
+                sdf::Value::String("strong".into()),
+            )]));
+            pr.set_sublayers(["mid.usda"]);
+        });
+        let mut mid = sdf::Layer::new_in_memory("mid.usda");
+        edit_layer(&mut mid, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${CHILD}.usda"`"#]);
+        });
+        let stage = Stage::builder().make_stage(
+            vec![
+                session,
+                mid,
+                opinion_layer("strong.usda", 2.0)?,
+                opinion_layer("root.usda", 1.0)?,
+            ],
+            3,
+            Vec::new(),
+        );
+        assert_eq!(
+            read_ax(&stage)?,
+            Some(2.0),
+            "the expression sublayer under mid contributes"
+        );
+
+        stage.mute_layer("mid.usda");
+        assert_eq!(
+            read_ax(&stage)?,
+            Some(1.0),
+            "muting mid drops the strong.usda it expands to"
+        );
+        Ok(())
+    }
+
+    /// Unmuting a layer selected only through a stack variable invalidates the prim
+    /// indices composed against its stack. The root's `${V}` sublayer resolves to
+    /// `strong.usda`, which contributes the child prim `/A/Child`; that edge is absent
+    /// from the context-free graph, so the mute fanout must still reach the root layer,
+    /// or the cached-miss index for `/A/Child` keeps it absent after `strong` returns.
+    #[test]
+    fn unmute_expr_sublayer_recomposes() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            let mut pr = e.pseudo_root_mut().unwrap();
+            pr.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("strong".into()))]));
+            pr.set_sublayers([r#"`"${V}.usda"`"#, "weak.usda"]);
+        });
+        let mut strong = sdf::Layer::new_in_memory("strong.usda");
+        edit_layer(&mut strong, |e| {
+            sdf::AttributeSpec::new(e.data_mut(), "/A/Child.y", "double", sdf::Variability::Varying, true)
+                .unwrap()
+                .set_default(sdf::Value::Double(5.0));
+        });
+        let stage = Stage::builder().make_stage(vec![root, strong, opinion_layer("weak.usda", 1.0)?], 0, Vec::new());
+        assert!(
+            stage.prim("/A/Child").is_valid()?,
+            "the expression sublayer strong.usda contributes /A/Child"
+        );
+
+        stage.mute_layer("strong.usda");
+        assert!(
+            !stage.prim("/A/Child").is_valid()?,
+            "muting strong.usda removes its /A/Child"
+        );
+
+        stage.unmute_layer("strong.usda");
+        assert!(
+            stage.prim("/A/Child").is_valid()?,
+            "unmuting recomposes the index so /A/Child, selected via the expression sublayer, returns"
+        );
         Ok(())
     }
 
