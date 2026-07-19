@@ -126,21 +126,23 @@ pub(crate) struct SpecRefresh {
     pub needs_rebuild: bool,
 }
 
-/// A reference/payload arc's demand for a not-yet-loaded target layer, carried
-/// out of the indexer (in [`BuildOutput`](super::prim_indexer::BuildOutput)) to
-/// the stage's load barrier. The bare asset path alone loses the authoring
-/// context the barrier needs: the referencing layer stack's expression
-/// variables must overlay the target's own when the target's `subLayers` paths
-/// are evaluated, so the right sublayer loads (a `${VAR}` inherited across the
-/// arc resolves against the referrer's value, not only the target's local one).
+/// A reference/payload arc's demand for a not-yet-loaded target layer or
+/// not-yet-interned target stack, carried out of the indexer (in
+/// [`BuildOutput`](super::prim_indexer::BuildOutput)) to the stage's load
+/// barrier. The bare asset path alone loses the authoring context the barrier
+/// needs: the arc-carrying stack's composed expression variables must overlay
+/// the target's own when the target's `subLayers` paths are evaluated, so the
+/// right sublayer loads (a `${VAR}` inherited across the arc resolves against
+/// the referrer's value, not only the target's local one). The demanding node's
+/// stack handle carries that context completely — the barrier reads the
+/// composed map and its interned id off the instance.
 #[derive(Debug, Clone)]
 pub(crate) struct Demand {
-    /// Anchored asset path of the not-yet-loaded reference/payload target.
+    /// Anchored asset path of the demanded reference/payload target.
     pub asset_path: String,
-    /// Expression variables composed at the authoring node, overlaid on the
-    /// target's own when its `subLayers` paths are evaluated (the referrer,
-    /// closer to the root, wins).
-    pub expr_vars: HashMap<String, Value>,
+    /// The demanding node's layer stack, whose composed expression variables are
+    /// the arc's full inherited context.
+    pub context: LayerStackId,
 }
 
 impl PrimIndex {
@@ -1053,15 +1055,9 @@ pub(crate) mod tests {
                 last = Some(index);
             }
             // Mint the layer stacks the demands resolved against and re-run, the way
-            // the stage's load barrier does. The `progress` guard terminates if a
+            // the stage's load barrier does. The progress guard terminates if a
             // demand cannot be satisfied (e.g. an unresolvable target).
-            let mut progress = false;
-            for demand in &pending {
-                if let Some(root) = stack.id_of(demand.asset_path.as_str()) {
-                    progress |= stack.intern_external(root, &demand.expr_vars).1;
-                }
-            }
-            if !progress {
+            if !stack.intern_demanded(&pending) {
                 return last.expect("a non-empty namespace chain");
             }
         }

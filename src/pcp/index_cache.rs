@@ -1076,7 +1076,7 @@ impl IndexCache {
                     graph,
                     asset,
                     anchor.as_ref(),
-                    &vars,
+                    vars,
                 )))
             }
             Value::AssetPathVec(assets) => {
@@ -1084,7 +1084,7 @@ impl IndexCache {
                 let (anchor, vars) = self.asset_context(graph, prim_path, field, prop_suffix, needs_expr);
                 let resolved = assets
                     .into_iter()
-                    .map(|asset| Self::resolve_asset_path(graph, asset, anchor.as_ref(), &vars))
+                    .map(|asset| Self::resolve_asset_path(graph, asset, anchor.as_ref(), vars))
                     .collect();
                 Some(Value::AssetPathVec(resolved))
             }
@@ -1095,29 +1095,26 @@ impl IndexCache {
     /// The inputs for resolving `field`'s asset value, taken from its strongest
     /// opinion: the resolved location of that opinion's layer (the anchor for a
     /// relative path) and, when `needs_expr` is set, the `expressionVariables`
-    /// in scope at that opinion's node. Computed once so every element of an
-    /// `asset[]` reuses it; the variables are read only when an authored path
-    /// is actually an expression.
-    fn asset_context(
+    /// in scope at that opinion's node — its own stack's composed set (C++
+    /// `node.GetLayerStack()->GetExpressionVariables()`). Computed once so
+    /// every element of an `asset[]` reuses it; the variables are read only
+    /// when an authored path is actually an expression.
+    fn asset_context<'g>(
         &self,
-        graph: &LayerGraph,
+        graph: &'g LayerGraph,
         prim_path: &Path,
         field: &str,
         prop_suffix: Option<&str>,
         needs_expr: bool,
-    ) -> (Option<ResolvedPath>, HashMap<String, Value>) {
+    ) -> (Option<ResolvedPath>, Option<&'g HashMap<String, Value>>) {
         let Some(index) = self.store.index_at(prim_path) else {
-            return (None, HashMap::new());
+            return (None, None);
         };
         let Some((layer, node)) = index.strongest_opinion(field, graph, prop_suffix) else {
-            return (None, HashMap::new());
+            return (None, None);
         };
         let anchor = graph.anchor_location(Some(layer));
-        let vars = if needs_expr {
-            index.composed_expr_vars(node, graph)
-        } else {
-            HashMap::new()
-        };
+        let vars = needs_expr.then(|| graph.stack_expression_variables(node.layer_stack_id()));
         (anchor, vars)
     }
 
@@ -1126,9 +1123,11 @@ impl IndexCache {
     ///
     /// A variable expression is evaluated against `expr_vars` to the path used
     /// as input to resolution (C++ `SdfAssetPath::GetAssetPath`); a malformed
-    /// or non-string expression leaves both derived paths unset. Resolution
-    /// owns the derived paths: the result is rebuilt from the authored path so
-    /// any prior evaluated/resolved path is discarded.
+    /// or non-string expression — or an expression with no variables in scope
+    /// (`asset_context` found no composed index or no authoring site for the
+    /// field) — leaves both derived paths unset. Resolution owns the derived
+    /// paths: the result is rebuilt from the authored path so any prior
+    /// evaluated/resolved path is discarded.
     ///
     /// TODO: a failed expression is dropped silently, unlike a reference/payload
     /// arc asset-path expression which records `Error::InvalidExpression`
@@ -1139,7 +1138,7 @@ impl IndexCache {
         graph: &LayerGraph,
         asset: sdf::AssetPath,
         anchor: Option<&ResolvedPath>,
-        expr_vars: &HashMap<String, Value>,
+        expr_vars: Option<&HashMap<String, Value>>,
     ) -> sdf::AssetPath {
         let mut asset = sdf::AssetPath::new(asset.into_string());
         if asset.is_empty() {
@@ -1149,7 +1148,8 @@ impl IndexCache {
         // caller's `needs_expr` is true if *any* element is an expression, so a
         // plain element in a mixed array must still skip evaluation.
         let identifier = if sdf::expr::is_expression(asset.as_str()) {
-            let Ok(evaluated) = sdf::expr::evaluate_asset_path(asset.as_str(), expr_vars) else {
+            let Some(vars) = expr_vars else { return asset };
+            let Ok(evaluated) = sdf::expr::evaluate_asset_path(asset.as_str(), vars) else {
                 return asset;
             };
             let identifier = graph.layer_registry().create_identifier(&evaluated, anchor);
@@ -2253,6 +2253,28 @@ mod tests {
         )
     }
 
+    /// `value_at` with the demand drain the stage's load barrier provides: a
+    /// first-touch `(target, context)` pair leaves a [`Demand`] for its
+    /// not-yet-interned stack, so mint and retry until a pass demands nothing
+    /// new (the fixtures load every layer up front, so a demand only ever needs
+    /// interning).
+    fn settled_value_at(
+        graph: &mut LayerGraph,
+        cache: &mut IndexCache,
+        path: &Path,
+        time: f64,
+    ) -> Result<Option<Value>> {
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        loop {
+            let value = cache.value_at(graph, path, time, &interp)?;
+            let mut pending = Vec::new();
+            cache.swap_pending_loads(&mut pending);
+            if !graph.intern_demanded(&pending) {
+                return Ok(value);
+            }
+        }
+    }
+
     /// Run `f` as one atomic transaction on `layer` and return the recorded change
     /// list, the test-side spelling of an [`sdf::Layer`] edit. Captures the record
     /// the way any observer would — through an `after_commit` sink — since `edit`
@@ -2664,10 +2686,9 @@ def "Scope"
     #[test]
     fn expr_vars_compose_across_reference() -> Result<()> {
         let root = format!("{}/fixtures/expr_vars_compose/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
-        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        let (mut graph, mut cache) = collected_stack(&root);
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Model.source")?, 0.0, &interp)?,
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.source")?, 0.0)?,
             Some(Value::String("right".to_string())),
             "the referencing layer's TARGET override resolves the nested reference to right.usda"
         );
@@ -2683,10 +2704,9 @@ def "Scope"
     #[test]
     fn expr_vars_subroot_reference() -> Result<()> {
         let root = format!("{}/fixtures/expr_vars_compose_subroot/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
-        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        let (mut graph, mut cache) = collected_stack(&root);
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Model.source")?, 0.0, &interp)?,
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.source")?, 0.0)?,
             Some(Value::String("right".to_string())),
             "the outer layer's TARGET override resolves Sub's ancestral reference to right.usda \
              even though it composes inside the sub-root target's nested sub-build"
@@ -2710,11 +2730,10 @@ def "Scope"
         let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, sdf::LayerRegistry::default());
         let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         let root_id = graph.root_id().unwrap();
-        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         let y = sdf::path("/R.y")?;
 
         assert_eq!(
-            cache.value_at(&graph, &y, 0.0, &interp)?,
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
             Some(Value::Double(1.0)),
             "the PICK-valued reference resolves to a.usda"
         );
@@ -2727,9 +2746,46 @@ def "Scope"
         changes.apply(&mut cache, &mut graph);
 
         assert_eq!(
-            cache.value_at(&graph, &y, 0.0, &interp)?,
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
             Some(Value::Double(2.0)),
             "editing PICK re-resolves the reference to b.usda and recomposes the cached index"
+        );
+        Ok(())
+    }
+
+    /// An expression-valued asset with no variables in scope (no composed index
+    /// or no authoring site for the field) stays unevaluated — like a malformed
+    /// expression — rather than aborting.
+    #[test]
+    fn expr_asset_without_vars() {
+        let (graph, _) = in_memory_stack("#usda 1.0\n");
+        let resolved = IndexCache::resolve_asset_path(&graph, sdf::AssetPath::new("`${A}`"), None, None);
+        assert_eq!(resolved.as_str(), "`${A}`", "the authored expression is kept");
+        assert!(resolved.evaluated_path().is_none(), "no evaluated path is derived");
+    }
+
+    /// An asset attribute's `${VAR}` inside a referenced target resolves against
+    /// the variable authored on the referencing root. The target has no
+    /// expression sublayers, so only the context-keyed instance the arc minted
+    /// carries the variable to value-resolution time.
+    #[test]
+    fn expr_asset_inherited_context() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\n(\n    expressionVariables = {\n        string A = \"tex.png\"\n    }\n)\ndef \"M\" (\n    references = @base.usda@</B>\n) {}\n",
+        );
+        let base = parse_named_layer(
+            "base.usda",
+            "#usda 1.0\ndef \"B\" {\n    custom asset tex = @`${A}`@\n}\n",
+        );
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let value = settled_value_at(&mut graph, &mut cache, &sdf::path("/M.tex")?, 0.0)?.expect("tex resolves");
+        let asset = value.try_as_asset_path().expect("attribute is asset-typed");
+        assert_eq!(
+            asset.evaluated_path(),
+            Some("tex.png"),
+            "the referencing root's A evaluates the target's asset expression"
         );
         Ok(())
     }

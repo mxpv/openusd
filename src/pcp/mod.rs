@@ -231,11 +231,17 @@
 //!   (`IndexCache::resolve_asset_path` returns it unevaluated), unlike a
 //!   reference/payload arc, which records [`Error::InvalidExpression`]. Value
 //!   resolution needs an error channel to report it.
-//! - Sharing composed expression variables: `PrimIndex::composed_expr_vars`
-//!   recomputes at value-resolution time what `Indexer::composed_expr_vars`
-//!   already composed during indexing. Storing the composed set on the index
-//!   (or each node) would remove the duplicate walk and the risk of the two
-//!   diverging.
+//! - Expression-variable context identity: every layer stack is keyed by its
+//!   fully composed inherited context and stores the composed set
+//!   (`LayerGraph::stack_expression_variables`), so equal composed maps share
+//!   one `LayerStackId` even when they arrive from distinct override sources.
+//!   C++ keys `PcpLayerStackIdentifier` by an override *source* (another layer
+//!   stack) instead, so it can keep distinct stacks — and distinct site
+//!   identities in duplicate and cycle detection — where this implementation
+//!   coalesces them, which can produce a different graph or composed result in
+//!   that corner. An accepted divergence: membership and expression evaluation
+//!   are unaffected, and source-chained identity would forfeit the registry's
+//!   value-keyed dedup.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -268,15 +274,34 @@
 //!   through an instance (`Prim::prototype`, or any instance-proxy query) first
 //!   registers it, after which masked prototype-content queries (including those
 //!   behind a lazily-loaded payload) resolve correctly.
-//! - Runtime session-selected root sublayers: a session `expressionVariables`
-//!   edit, or a mute that exposes the root layer's own variable, can newly select
-//!   a root `${VAR}` sublayer the initial session variables never opened. Runtime
-//!   session-variable changes resolve root sublayers only against already-interned
-//!   layers (`Stage::apply_mute`), so a newly-selected layer is not loaded — the
-//!   open-time builder path (`StageBuilder::session_expression_variables`) loads
-//!   the initial selection, and a mute that *removes* a variable drops the sublayer
-//!   it selected. Loading a newly-selected one at runtime needs an on-demand
-//!   sublayer open through the graph.
+//! - Runtime variable-selected sublayers: an `expressionVariables` edit (or a
+//!   mute that exposes a different variable) on an already-composed stack's
+//!   root — the session/stage root, or an interned reference/payload target —
+//!   can newly select a `${VAR}` sublayer that was never opened. Recomposition
+//!   re-resolves the stack's stored context and membership, but membership can
+//!   only include layers already present in the graph, so the newly-selected
+//!   layer stays out until something else loads it. The open-time paths load
+//!   the initial selection (`StageBuilder::session_expression_variables` for
+//!   the root stack, the load barrier's contextual open for a target), and a
+//!   change that *removes* a variable drops the sublayer it selected; loading
+//!   a newly-selected one at runtime needs an on-demand sublayer-load output
+//!   from graph recomposition. The same gap covers two open-time shapes: a
+//!   target that joined the graph through another stack (e.g. as a root-stack
+//!   sublayer) and is then demanded under an empty context is not reopened
+//!   (`LayerGraph::needs_contextual_open`), so a sublayer selected by its own
+//!   variables stays unloaded; and the stage's own root layer is deliberately
+//!   never reopened (it may be in-memory or carry unsaved edits), so a
+//!   sublayer newly selected by a back-reference's carried context stays
+//!   unloaded too.
+//! - Reclaiming stale contextual stack instances: the registry is append-only,
+//!   and full-context keying strands a `(target, context)` instance whenever an
+//!   upstream `expressionVariables` edit re-keys the contexts downstream arcs
+//!   carry — the old-seed instance is never matched again, yet
+//!   `LayerStackRegistry::target_rebuild_specs` keeps re-resolving it on every
+//!   rebuild, so a long editing session accretes registry memory and rebuild
+//!   cost. Reclamation needs liveness tracking: cached prim-index nodes hold
+//!   stable `LayerStackId`s, so an instance cannot be dropped while any index
+//!   references it.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 

@@ -311,6 +311,7 @@ mod tests {
     use crate::pcp::layer_graph::ExternalStack;
     use crate::pcp::mapping::MapFunction;
     use crate::pcp::prim_graph::Node;
+    use crate::pcp::LayerStackId;
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid path")
@@ -331,7 +332,9 @@ mod tests {
         for (arc, layer_id, node_path) in nodes {
             // The stack rooted at `layer_id` — `external_stack_id` resolves it to the
             // root or a plain instance the graph minted for each sublayer-free layer.
-            let stack = match g.external_stack_id(layer_id, &HashMap::new()) {
+            // The fixture layers author no variables, so the root stack is the
+            // empty context every arc carries.
+            let stack = match g.external_stack_id(layer_id, LayerStackId::ROOT) {
                 ExternalStack::Ready(id) => id,
                 ExternalStack::Demand => panic!("no minted stack for test layer {layer_id:?}"),
             };

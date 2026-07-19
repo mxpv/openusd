@@ -124,6 +124,8 @@ pub struct Node {
     /// graph's [`layer_stack`](crate::pcp::LayerGraph::layer_stack) rather than
     /// storing them on each node; for value resolution fold each member's
     /// sublayer offset onto this node's arc offset (`map_to_root.time_offset()`).
+    /// The stack also carries the composed expression variables this node's
+    /// opinions resolve against (`LayerGraph::stack_expression_variables`).
     pub(crate) layer_stack: LayerStackId,
     /// The strongest (representative) layer of [`layer_stack`](Self::layer_stack)
     /// (C++ `PcpNode::GetLayerStack()->GetLayers().front()`). Cached so

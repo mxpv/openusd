@@ -479,31 +479,6 @@ impl PrimIndex {
         None
     }
 
-    /// Composes the `expressionVariables` visible at `node`, a port of
-    /// `Indexer::composed_expr_vars` over the finished index. Walking node→root,
-    /// each root/reference/payload arc boundary contributes its layer stack's
-    /// expression variables (its root layer's own overlaid by the inherited
-    /// overrides — not its sublayers'; `LayerGraph::stack_expression_variables`),
-    /// with the closer-to-root stack overriding the farther one (C++
-    /// `PcpExpressionVariables`).
-    ///
-    /// Keep this walk in sync with `Indexer::composed_expr_vars`: both must
-    /// agree on which arcs are boundaries and how stacks compose. By resolve
-    /// time every sub-build has been grafted into one connected arena
-    /// (`Indexer::graft_subindex`), so this plain `node.parent()` walk always
-    /// reaches every boundary.
-    pub(crate) fn composed_expr_vars(&self, node: &Node, stack: &LayerGraph) -> HashMap<String, Value> {
-        let mut composed = HashMap::new();
-        let mut cur = Some(node);
-        while let Some(n) = cur {
-            if matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload) {
-                composed.extend(stack.stack_expression_variables(n.layer_stack_id()));
-            }
-            cur = n.parent().map(|id| self.node(id));
-        }
-        composed
-    }
-
     /// Walks nodes from strongest to weakest, returning the first opinion.
     /// A [`Value::ValueBlock`] returns `None`, blocking weaker layers. When
     /// the strongest opinion is a dictionary, weaker dictionary opinions are

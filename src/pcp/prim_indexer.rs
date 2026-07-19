@@ -91,9 +91,8 @@
 //! relationship/connection target remapping through relocates.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path, Value};
 use crate::tf::Token;
@@ -221,16 +220,6 @@ struct Frame<'f> {
     /// introduces, inherited from the arc that spawned it (C++ `_AddArc`'s
     /// `skipDuplicateNodes`). The top-level build has no frame and never skips.
     skip: bool,
-    /// The fully composed expression variables visible at the site where the
-    /// arc that spawned this sub-build was discovered — not this frame's own
-    /// authored variables, but the outer ambient context.
-    /// [`Indexer::composed_expr_vars`] overlays this once its own graph's
-    /// node→root walk is exhausted, so a reference or payload authored on an
-    /// ancestor composed inside this sub-build's own nested recursion still
-    /// sees the outer overrides. This value is already fully resolved
-    /// through any further-outer frames (each nesting level applies the same
-    /// fallback), so one level here suffices for arbitrarily deep nesting.
-    ambient_expr_vars: &'f HashMap<String, Value>,
     /// The next parent frame, or `None` at the top-level build.
     previous: Option<&'f Frame<'f>>,
 }
@@ -792,7 +781,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
         skip: bool,
         root_contributes: bool,
         arc: ArcType,
-        ambient_expr_vars: &HashMap<String, Value>,
     ) -> BuildResult<BuildOutput> {
         let requested_layer = self.inputs.stack.layer_stack_root(ambient);
         let frame = Frame {
@@ -802,7 +790,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             arc,
             requested_layer,
             skip,
-            ambient_expr_vars,
             previous: self.frame,
         };
         self.new_sub(ambient, Some(&frame), root_contributes).build(target)
@@ -850,11 +837,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         map: MapFunction,
         origin: NodeId,
         sibling: u16,
-        ambient_expr_vars: &HashMap<String, Value>,
     ) -> BuildResult<Option<NodeId>> {
-        let Some(sub) =
-            self.merge_subindex(self.compose_subindex(target, ambient, skip, true, arc, ambient_expr_vars)?)
-        else {
+        let Some(sub) = self.merge_subindex(self.compose_subindex(target, ambient, skip, true, arc)?) else {
             return Ok(None);
         };
         let Some(grafted) = self.graft_subindex(&sub, parent, arc, map, origin, sibling) else {
@@ -1255,14 +1239,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // the target). Its root is salted-earth inert; opinions and implied
         // classes carried up across the relocate node translate the source
         // namespace to the target.
-        let expr_vars = self.composed_expr_vars(node);
         let Some(sub) = self.merge_subindex(self.compose_subindex(
             &source,
             node_ambient,
             self.frame_skip(),
             false,
             ArcType::Relocate,
-            &expr_vars,
         )?) else {
             return Ok(());
         };
@@ -1513,7 +1495,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if self.node(node).is_inert() {
             return Ok(());
         }
-        let expr_vars = self.composed_expr_vars(node);
+        // The expression variables in scope for `${VAR}` asset paths authored at
+        // `node` are its own stack's composed set (C++
+        // `node.GetLayerStack()->GetExpressionVariables()`).
+        let expr_vars = self
+            .inputs
+            .stack
+            .stack_expression_variables(self.node(node).layer_stack_id());
         let site_path = self.node(node).path.clone();
         // Recoverable arc errors (an invalid asset-path expression) are collected
         // locally so the immutable borrow of `self` taken by the composers is
@@ -1524,7 +1512,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 let refs = compose_references_in(
                     self.node_slice(node),
                     self.inputs.stack,
-                    &expr_vars,
+                    expr_vars,
                     &site_path,
                     &mut arc_errors,
                 )?;
@@ -1538,7 +1526,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 let payloads = collect_payloads_in(
                     self.node_slice(node),
                     self.inputs.stack,
-                    &expr_vars,
+                    expr_vars,
                     &site_path,
                     &mut arc_errors,
                 )?;
@@ -1559,53 +1547,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         };
         self.errors.append(&mut arc_errors);
         for (asset_path, prim_path, offset) in &arcs {
-            self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset, &expr_vars)?;
+            self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset)?;
         }
         Ok(())
-    }
-
-    /// Composes the expression variables visible at `node` for evaluating the
-    /// variable expressions in its reference/payload asset paths (C++
-    /// `PcpExpressionVariables::Compute`). Walking from `node` to the root, each
-    /// reference/payload arc enters a new layer stack that contributes its own
-    /// authored `expressionVariables`; the closer-to-root stack overrides the
-    /// farther one (the referencing layer stack wins over the referenced one).
-    ///
-    /// `PrimIndex::composed_expr_vars` is the value-resolution-time twin of this
-    /// walk over the finished index; keep the two in sync.
-    ///
-    /// A sub-root arc target is composed in a nested sub-build whose graph
-    /// holds only the target's own subtree, so the node→root walk stops at
-    /// the sub-build's local root without reaching the outer frames' own
-    /// overrides; once exhausted, the walk falls back to the spawning
-    /// [`Frame`]'s already-resolved ambient, which wins as the closer-to-root
-    /// opinion (recorded on [`Frame::ambient_expr_vars`] when the sub-build
-    /// was spawned).
-    ///
-    /// TODO(perf): this runs per reference/payload eval task and reads each
-    /// boundary layer's `expressionVariables` even when no asset path is an
-    /// expression (the common case). Compute it lazily — only once an authored
-    /// asset path is a backtick expression.
-    fn composed_expr_vars(&self, node: NodeId) -> HashMap<String, Value> {
-        // Walk node→root, applying each reference/payload boundary's variables so
-        // the closer-to-root stack (applied last) overrides the farther one.
-        let mut composed = HashMap::new();
-        let mut cur = Some(node);
-        while let Some(id) = cur {
-            let n = &self.output.nodes[id.idx()];
-            if matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload) {
-                composed.extend(self.inputs.stack.stack_expression_variables(n.layer_stack_id()));
-            }
-            cur = n.parent;
-        }
-        // This build's own graph is disjoint from the outer frame until
-        // grafted; the frame's ambient is already resolved as of the point the
-        // arc that spawned this sub-build fired, so it overrides anything
-        // found within this subtree.
-        if let Some(frame) = self.frame {
-            expr::compose_over(&mut composed, frame.ambient_expr_vars);
-        }
-        composed
     }
 
     /// Composes the class-based arcs (inherits or specializes) authored at
@@ -2014,7 +1958,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if skip && self.find_duplicate(stack_id, &var_path) {
             return Ok(());
         }
-        let expr_vars = self.composed_expr_vars(node);
         let grafted = self.compose_and_graft(
             &var_path,
             stack_id,
@@ -2024,7 +1967,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             map,
             node,
             vt.vset_num,
-            &expr_vars,
         )?;
         if grafted.is_some() {
             self.retry_variant_tasks();
@@ -2192,7 +2134,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A sub-root class needs the opinions above it: compose the target as its
         // own ancestral sub-index and graft it under the parent.
         if direct_should && !inherit_path.is_root_prim() {
-            let expr_vars = self.composed_expr_vars(parent);
             let grafted = self.compose_and_graft(
                 &inherit_path,
                 parent_stack,
@@ -2202,7 +2143,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 inherit_map,
                 origin,
                 arc_num,
-                &expr_vars,
             )?;
             if implied {
                 if let Some(g) = grafted {
@@ -2525,18 +2465,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A sub-root specialize target needs the opinions above it (C++
         // `includeAncestralOpinions = !IsRootPrimPath`).
         if !src_path.is_root_prim() {
-            let expr_vars = self.composed_expr_vars(src);
-            return self.compose_and_graft(
-                &src_path,
-                src_stack,
-                true,
-                root,
-                ArcType::Specialize,
-                map,
-                src,
-                sibling,
-                &expr_vars,
-            );
+            return self.compose_and_graft(&src_path, src_stack, true, root, ArcType::Specialize, map, src, sibling);
         }
 
         let has_specs = self.stack_has_spec(src_stack, &src_path);
@@ -2597,10 +2526,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         prim_path: &Path,
         arc: ArcType,
         arc_offset: LayerOffset,
-        expr_vars: &HashMap<String, Value>,
     ) -> BuildResult<()> {
         let is_internal = asset_path.is_empty();
         let parent_path = self.node(parent).path.clone();
+        // The arc's full inherited expression-variable context is the parent
+        // node's own stack — target-stack selection compares its interned
+        // context id, and a demand carries the handle to the load barrier.
+        let context = self.node(parent).layer_stack_id();
 
         // Resolve the target layer stack. An internal reference targets the
         // referencing node's own layer stack (C++ `node.GetLayerStack()`); an
@@ -2608,7 +2540,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // carries the resolved external root layer for the muted-target trace.
         let mut external_target = None;
         let target_stack = if is_internal {
-            self.node(parent).layer_stack_id()
+            context
         } else {
             let layer_index = match self.inputs.stack.id_of(asset_path) {
                 Some(layer_index) => layer_index,
@@ -2645,7 +2577,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     {
                         self.pending_loads.push(Demand {
                             asset_path: asset_path.to_string(),
-                            expr_vars: expr_vars.clone(),
+                            context,
                         });
                         return Ok(());
                     }
@@ -2680,19 +2612,19 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 }
             };
             external_target = Some(layer_index);
-            // The layer graph decides which stack this arc composes against — the
-            // plain stack, or a context-keyed one when the inherited expression
-            // variables can change the target's `${VAR}` sublayers. A stack not yet
-            // built is demanded: the load barrier mints it (opening any `${VAR}`
-            // sublayers the context resolves) and the query re-runs to find it (this
-            // build is discarded while a load is pending, so abandoning the arc here
-            // is harmless).
-            match self.inputs.stack.external_stack_id(layer_index, expr_vars) {
+            // The layer graph resolves which stack this arc composes against —
+            // every target stack is keyed by its full inherited context, so the
+            // lookup compares the parent stack's interned context id. A stack not
+            // yet built is demanded: the load barrier mints it (opening any
+            // `${VAR}` sublayers the context resolves) and the query re-runs to
+            // find it (this build is discarded while a load is pending, so
+            // abandoning the arc here is harmless).
+            match self.inputs.stack.external_stack_id(layer_index, context) {
                 ExternalStack::Ready(id) => id,
                 ExternalStack::Demand => {
                     self.pending_loads.push(Demand {
                         asset_path: asset_path.to_string(),
-                        expr_vars: expr_vars.clone(),
+                        context,
                     });
                     return Ok(());
                 }
@@ -2790,17 +2722,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `PcpErrorUnresolvedPrimPath`).
         if !source.is_root_prim() {
             let before = self.errors.len();
-            let grafted = self.compose_and_graft(
-                &source,
-                target_stack,
-                self.frame_skip(),
-                parent,
-                arc,
-                map,
-                parent,
-                0,
-                expr_vars,
-            )?;
+            let grafted =
+                self.compose_and_graft(&source, target_stack, self.frame_skip(), parent, arc, map, parent, 0)?;
             // The target is unresolved only when composing it hit a cycle (its own
             // ancestral chain loops back) that left nothing — not when it is merely
             // empty so far (e.g. a variant supplies its opinions later).
@@ -3199,13 +3122,28 @@ mod tests {
         session_stack(layers, 0)
     }
 
-    fn build(stack: &LayerGraph, prim: &str) -> Option<PrimIndexGraph> {
+    /// Runs the raw indexer on `prim`, draining demands the way the stage's load
+    /// barrier does: a first-touch `(target, context)` pair returns a [`Demand`]
+    /// for its not-yet-interned stack, so mint and re-run until a pass demands
+    /// nothing new (the fixtures load every layer up front, so a demand only ever
+    /// needs interning).
+    fn build_full(stack: &mut LayerGraph, prim: &str) -> BuildOutput {
         let ctx = CompositionContext::default();
-        let ambient = stack.root_layer_stack_id();
-        Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient, true)
-            .build(&Path::from(prim))
-            .expect("indexer build")
-            .graph
+        loop {
+            let ambient = stack.root_layer_stack_id();
+            let out = Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient, true)
+                .build(&Path::from(prim))
+                .expect("indexer build");
+            if !stack.intern_demanded(&out.pending_loads) {
+                return out;
+            }
+        }
+    }
+
+    /// [`build_full`](build_full) reduced to the composed graph, for the tests
+    /// that assert structure only.
+    fn build(stack: &mut LayerGraph, prim: &str) -> Option<PrimIndexGraph> {
+        build_full(stack, prim).graph
     }
 
     /// Builds a layer stack whose first `session` layers are session layers.
@@ -3226,7 +3164,7 @@ mod tests {
     /// would find no `defaultPrim` and drop the reference.
     #[test]
     fn internal_default_ref_skips_session() {
-        let s = session_stack(
+        let mut s = session_stack(
             &[
                 ("session.usd", "#usda 1.0\n"),
                 (
@@ -3236,7 +3174,7 @@ mod tests {
             ],
             1,
         );
-        let graph = build(&s, "/P").expect("an internal default reference resolves via the root layer");
+        let graph = build(&mut s, "/P").expect("an internal default reference resolves via the root layer");
         assert!(
             graph
                 .iter()
@@ -3248,8 +3186,8 @@ mod tests {
 
     #[test]
     fn local_prim_supported() {
-        let s = stack("#usda 1.0\ndef \"World\" {\n  def \"Sphere\" {}\n}\n");
-        let graph = build(&s, "/World").expect("a purely local prim is supported");
+        let mut s = stack("#usda 1.0\ndef \"World\" {\n  def \"Sphere\" {}\n}\n");
+        let graph = build(&mut s, "/World").expect("a purely local prim is supported");
         // The synthetic inert root plus one Root-arc site node.
         let arcs: Vec<ArcType> = graph.iter().filter(|n| !n.is_inert()).map(|n| n.arc).collect();
         assert_eq!(arcs, vec![ArcType::Root]);
@@ -3257,8 +3195,9 @@ mod tests {
 
     #[test]
     fn local_inherit_composed() {
-        let s = stack("#usda 1.0\nclass \"C\" { custom double x = 1 }\ndef \"World\" (\n    inherits = </C>\n) {\n}\n");
-        let graph = build(&s, "/World").expect("a local inherit to a root class is composed");
+        let mut s =
+            stack("#usda 1.0\nclass \"C\" { custom double x = 1 }\ndef \"World\" (\n    inherits = </C>\n) {\n}\n");
+        let graph = build(&mut s, "/World").expect("a local inherit to a root class is composed");
         assert!(
             graph
                 .iter()
@@ -3272,9 +3211,9 @@ mod tests {
     /// after every other opinion in the strength order.
     #[test]
     fn local_specialize_composed() {
-        let s =
+        let mut s =
             stack("#usda 1.0\nclass \"C\" { custom double x = 1 }\ndef \"World\" (\n    specializes = </C>\n) {\n}\n");
-        let graph = build(&s, "/World").expect("a local specialize to a root class is composed");
+        let graph = build(&mut s, "/World").expect("a local specialize to a root class is composed");
         assert!(
             graph
                 .iter()
@@ -3294,10 +3233,10 @@ mod tests {
     /// arc node carrying the selected branch's opinions.
     #[test]
     fn authored_variant_composed() {
-        let s = stack(
+        let mut s = stack(
             "#usda 1.0\ndef \"World\" (\n    variantSets = \"v\"\n    variants = { string v = \"hi\" }\n) {\n  variantSet \"v\" = {\n    \"hi\" { custom double x = 1 }\n    \"lo\" { custom double x = 2 }\n  }\n}\n",
         );
-        let graph = build(&s, "/World").expect("a prim with an authored variant selection is composed");
+        let graph = build(&mut s, "/World").expect("a prim with an authored variant selection is composed");
         assert!(
             graph
                 .iter()
@@ -3311,10 +3250,10 @@ mod tests {
     /// unselected — no variant arc is added (C++ `_EvalNodeFallbackVariant`).
     #[test]
     fn variant_no_selection_unselected() {
-        let s = stack(
+        let mut s = stack(
             "#usda 1.0\ndef \"World\" (\n    variantSets = \"v\"\n) {\n  variantSet \"v\" = {\n    \"a\" { custom double x = 1 }\n    \"b\" { custom double x = 2 }\n  }\n}\n",
         );
-        let graph = build(&s, "/World").expect("a prim with an unselected variant set is composed");
+        let graph = build(&mut s, "/World").expect("a prim with an unselected variant set is composed");
         assert!(
             graph.iter().all(|n| n.arc != ArcType::Variant),
             "no variant arc is added without a selection, got {:?}",
@@ -3326,10 +3265,10 @@ mod tests {
     fn subroot_inherit_composed() {
         // A class nested under another prim composes through the ancestral
         // sub-index build (C++ `includeAncestralOpinions`).
-        let s = stack(
+        let mut s = stack(
             "#usda 1.0\ndef \"Scope\" {\n  class \"C\" { custom double x = 1 }\n}\ndef \"World\" (\n    inherits = </Scope/C>\n) {\n}\n",
         );
-        let graph = build(&s, "/World").expect("a sub-root class inherit is composed");
+        let graph = build(&mut s, "/World").expect("a sub-root class inherit is composed");
         assert!(
             graph
                 .iter()
@@ -3344,7 +3283,7 @@ mod tests {
     /// must win over the target file's own `TARGET`.
     #[test]
     fn expr_vars_subroot_frame() {
-        let s = multi_stack(&[
+        let mut s = multi_stack(&[
             (
                 "root.usd",
                 "#usda 1.0\n(\n    expressionVariables = {\n        string TARGET = \"right.usd\"\n    }\n)\ndef \"Model\" (\n    references = @mid.usd@</Sub/Prim>\n) {}\n",
@@ -3362,8 +3301,8 @@ mod tests {
                 "#usda 1.0\n(\n    defaultPrim = \"Wrong\"\n)\ndef \"Wrong\" {\n    def \"Prim\" { custom string source = \"wrong\" }\n}\n",
             ),
         ]);
-        let graph =
-            build(&s, "/Model").expect("a sub-root reference whose ancestor authors an expr-var reference is composed");
+        let graph = build(&mut s, "/Model")
+            .expect("a sub-root reference whose ancestor authors an expr-var reference is composed");
         let right_id = s.id_of("right.usd").expect("right.usd present");
         assert!(
             graph.iter().any(|n| n.layer_id() == right_id && n.has_specs()),
@@ -3377,17 +3316,18 @@ mod tests {
     /// A variable authored on a **sublayer** of the referencing stack is ignored
     /// when resolving a reference's `${VAR}` asset path — a stack's expression
     /// variables come from its root, not its sublayers (C++ `PcpExpressionVariables`).
-    /// The root itself authoring it does resolve the reference. Guards the arc/value
-    /// path (`composed_expr_vars`) against the sublayer semantics diverging from
+    /// The root itself authoring it does resolve the reference. Guards the stack's
+    /// stored composed set (`LayerGraph::stack_expression_variables`, the set the
+    /// arc path evaluates against) against the sublayer semantics diverging from
     /// stack membership.
     #[test]
     fn sublayer_var_ignored_reference() {
         let target =
             "#usda 1.0\n(\n    defaultPrim = \"Prim\"\n)\ndef \"Prim\" { custom string source = \"target\" }\n";
         let referenced = |root: &str, sub: &str| -> bool {
-            let s = multi_stack(&[("root.usd", root), ("sub.usd", sub), ("target.usd", target)]);
+            let mut s = multi_stack(&[("root.usd", root), ("sub.usd", sub), ("target.usd", target)]);
             let target_id = s.id_of("target.usd").expect("target.usd present");
-            build(&s, "/Model")
+            build(&mut s, "/Model")
                 .expect("build")
                 .iter()
                 .any(|n| n.layer_id() == target_id && n.has_specs())
@@ -3411,12 +3351,137 @@ mod tests {
         );
     }
 
+    /// A context-bearing back-reference to the sessionless stage root composes
+    /// against a contextual instance rooted at the stage root layer, not the
+    /// ROOT stack: mid.usd's `Y` stays in force inside the root-layer subtree
+    /// under the arc, so `/Back`'s `${Y}` reference resolves.
+    #[test]
+    fn root_backref_context() {
+        let mut s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\ndef \"Model\" (\n    references = @mid.usd@</M>\n) {}\ndef \"Back\" (\n    references = @`${Y}`@</L>\n) {}\n",
+            ),
+            (
+                "mid.usd",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string Y = \"leaf.usd\"\n    }\n)\ndef \"M\" (\n    references = @root.usd@</Back>\n) {}\n",
+            ),
+            ("leaf.usd", "#usda 1.0\ndef \"L\" { custom string src = \"leaf\" }\n"),
+        ]);
+        let graph = build(&mut s, "/Model").expect("a context-bearing back-reference to the stage root is composed");
+        let leaf_id = s.id_of("leaf.usd").expect("leaf.usd present");
+        assert!(
+            graph.iter().any(|n| n.layer_id() == leaf_id && n.has_specs()),
+            "mid.usd's Y must resolve /Back's `${{Y}}` reference under the back-reference, got {:?}",
+            graph.iter().map(|n| (n.arc, n.path.as_str())).collect::<Vec<_>>()
+        );
+    }
+
+    /// A `${VAR}` reference authored in a class that a specializes copy
+    /// propagates to the local root still evaluates against the class's own
+    /// (referenced) stack — the copy keeps its source stack, and the stack
+    /// carries the composed variables.
+    #[test]
+    fn specialize_copy_context() {
+        let mut s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\ndef \"Model\" (\n    references = @mid.usd@</M>\n) {}\n",
+            ),
+            (
+                "mid.usd",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string T = \"leaf.usd\"\n    }\n)\nclass \"Class\" (\n    references = @`${T}`@</L>\n) {}\ndef \"M\" (\n    specializes = </Class>\n) {}\n",
+            ),
+            ("leaf.usd", "#usda 1.0\ndef \"L\" { custom double x = 1 }\n"),
+        ]);
+        let graph = build(&mut s, "/Model").expect("a specialize class with an expr-var reference is composed");
+        let leaf_id = s.id_of("leaf.usd").expect("leaf.usd present");
+        assert!(
+            graph.iter().any(|n| n.layer_id() == leaf_id && n.has_specs()),
+            "mid.usd's T must resolve the class's `${{T}}` reference at the propagated copy, got {:?}",
+            graph.iter().map(|n| (n.arc, n.path.as_str())).collect::<Vec<_>>()
+        );
+    }
+
+    /// A self-referencing arc carrying variables converges: the second hop's
+    /// seed is the stack's own composed set, which composes to itself
+    /// (own ⊕ (own ⊕ C) = own ⊕ C), so the interned context reaches a fixpoint
+    /// one instance deep and the site-identity cycle check fires instead of
+    /// unrolling further.
+    #[test]
+    fn self_ref_vars_converges() {
+        let mut s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\ndef \"Model\" (\n    references = @t.usd@</T>\n) {}\n",
+            ),
+            (
+                "t.usd",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string V = \"x\"\n    }\n)\ndef \"T\" (\n    references = @t.usd@</T>\n) {\n    custom double x = 1\n}\n",
+            ),
+        ]);
+        let out = build_full(&mut s, "/Model");
+        let graph = out.graph.expect("the self-reference converges to a composed graph");
+        assert!(
+            out.errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
+            "the fixpoint context closes the site cycle, got {:?}",
+            out.errors
+        );
+        let t_id = s.id_of("t.usd").expect("t.usd present");
+        let t_nodes = graph.iter().filter(|n| n.layer_id() == t_id).count();
+        assert_eq!(
+            t_nodes, 2,
+            "one context-free hop plus one fixpoint hop, then the cycle check stops the chain"
+        );
+    }
+
+    /// Two distinct override sources (`s1`, `s2`) carrying equal composed maps
+    /// into the same target share one `LayerStackId`, so the site-identity cycle
+    /// check closes the chain the second time `/T` is reached. Pins the accepted
+    /// divergence from C++: `PcpLayerStackIdentifier` keys by the override
+    /// *source*, so C++ would keep t-via-s1 and t-via-s2 as distinct sites and
+    /// not report a cycle here.
+    #[test]
+    fn equal_context_cycle_coalesced() {
+        let mut s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\ndef \"Model\" (\n    references = @s1.usd@</P>\n) {}\n",
+            ),
+            (
+                "s1.usd",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string V = \"x\"\n    }\n)\ndef \"P\" (\n    references = @t.usd@</T>\n) {}\n",
+            ),
+            (
+                "t.usd",
+                "#usda 1.0\ndef \"T\" (\n    references = @s2.usd@</Q>\n) {\n    custom double marker = 1\n}\n",
+            ),
+            (
+                "s2.usd",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string V = \"x\"\n    }\n)\ndef \"Q\" (\n    references = @t.usd@</T>\n) {}\n",
+            ),
+        ]);
+        let out = build_full(&mut s, "/Model");
+        let graph = out.graph.expect("the coalesced chain converges to a composed graph");
+        assert!(
+            out.errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
+            "equal contexts share the target site, closing the chain as a cycle, got {:?}",
+            out.errors
+        );
+        let t_id = s.id_of("t.usd").expect("t.usd present");
+        let t_nodes = graph.iter().filter(|n| n.layer_id() == t_id).count();
+        assert_eq!(
+            t_nodes, 1,
+            "the second arrival at the shared site is the culled cycle arc"
+        );
+    }
+
     /// A class brought in through a reference is mirrored into the referencing
     /// namespace as an implied class node, so an outer opinion on the class
     /// contributes (C++ `_EvalImpliedClassTree`).
     #[test]
     fn implied_class_from_reference() {
-        let s = multi_stack(&[
+        let mut s = multi_stack(&[
             (
                 "root.usd",
                 "#usda 1.0\ndef \"Model\" (\n    references = @ref.usd@</Model>\n) {}\nclass \"Class\" { custom double x = 1 }\n",
@@ -3426,7 +3491,7 @@ mod tests {
                 "#usda 1.0\ndef \"Model\" (\n    inherits = </Class>\n) {}\nclass \"Class\" {}\n",
             ),
         ]);
-        let graph = build(&s, "/Model").expect("reference + class is composed by the indexer");
+        let graph = build(&mut s, "/Model").expect("reference + class is composed by the indexer");
         // The referenced class node, plus the implied class node in root.usd.
         let class_layers: Vec<LayerId> = graph
             .iter()
@@ -3443,10 +3508,10 @@ mod tests {
 
     #[test]
     fn internal_reference_composed() {
-        let s = stack(
+        let mut s = stack(
             "#usda 1.0\ndef \"Base\" { custom double x = 1 }\ndef \"World\" (\n    references = </Base>\n) {\n}\n",
         );
-        let graph = build(&s, "/World").expect("an internal reference to a root prim is composed");
+        let graph = build(&mut s, "/World").expect("an internal reference to a root prim is composed");
         assert!(
             graph
                 .iter()
@@ -3461,7 +3526,7 @@ mod tests {
     /// distinguishes the queue from the recursive indexer's global set.
     #[test]
     fn reference_diamond_two_targets() {
-        let s = multi_stack(&[
+        let mut s = multi_stack(&[
             (
                 "root.usd",
                 "#usda 1.0\ndef \"Root\" (\n    references = [@A.usd@</A>, @B.usd@</B>]\n) {}\n",
@@ -3470,7 +3535,7 @@ mod tests {
             ("B.usd", "#usda 1.0\ndef \"B\" (\n    references = @C.usd@</C>\n) {}\n"),
             ("C.usd", "#usda 1.0\ndef \"C\" { custom double x = 1 }\n"),
         ]);
-        let graph = build(&s, "/Root").expect("a pure reference diamond is composed by the indexer");
+        let graph = build(&mut s, "/Root").expect("a pure reference diamond is composed by the indexer");
         let c_nodes = graph.iter().filter(|n| n.path.as_str() == "/C").count();
         assert_eq!(c_nodes, 2, "the shared reference target appears once per arc path");
     }

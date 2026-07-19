@@ -2830,7 +2830,12 @@ impl Stage {
         let sublayer_errors: RefCell<Vec<pcp::Error>> = RefCell::new(Vec::new());
         let mut newly_failed = false;
         let mut newly_interned = false;
-        for demand in pending {
+        // Whether an open ran for each demand this pass: the mint loop below
+        // trusts such a demand's contextual selection to be loaded, while a
+        // demand whose open decision was made against a target that joined only
+        // mid-pass (its sublayer edges not yet wired) is re-checked there.
+        let mut opened_this_pass = vec![false; pending.len()];
+        for (demand, opened_flag) in pending.iter().zip(&mut opened_this_pass) {
             let asset_path = demand.asset_path.as_str();
             // Whether the target needs opening, and `reload` whether it is a re-open
             // of an already-interned target reached by a new expression-variable
@@ -2845,12 +2850,13 @@ impl Stage {
                 } else {
                     match graph.id_of(asset_path) {
                         None => Some(false),
-                        Some(target) if graph.needs_contextual_open(target, &demand.expr_vars) => Some(true),
+                        Some(target) if graph.needs_contextual_open(target, demand.context) => Some(true),
                         Some(_) => None,
                     }
                 }
             };
             if let Some(reload) = open {
+                *opened_flag = true;
                 // The shared graph borrow is dropped before `add_layer` /
                 // `mark_load_failed` take a mutable one. The arc anchored `asset_path`
                 // to an absolute identifier, so no anchor is needed.
@@ -2859,7 +2865,7 @@ impl Stage {
                     graph.layer_registry().open_stack(
                         asset_path,
                         None,
-                        &demand.expr_vars,
+                        graph.stack_expression_variables(demand.context),
                         reload,
                         &|error| {
                             sublayer_errors.borrow_mut().push(error.into());
@@ -2900,13 +2906,31 @@ impl Stage {
             }
         }
         // Mint each demand's layer stack now that the edges are wired. The layer
-        // graph applies the plain-vs-contextual policy; `intern_external` is
-        // idempotent, so a plain stack the rebuild above already minted, or a
-        // context reached before, is left unchanged.
-        for demand in pending {
-            let root = self.layers.borrow().id_of(demand.asset_path.as_str());
-            if let Some(root) = root {
-                newly_interned |= self.layers.borrow_mut().intern_external(root, &demand.expr_vars).1;
+        // graph applies the stack-selection policy idempotently, so a stack the
+        // rebuild above already minted, or a context reached before, is left
+        // unchanged. A demand whose layers were already loaded (a first-touch
+        // context to a known target) lands here directly — interned without a
+        // reload. One exception: a demand whose open decision ran against a
+        // target that joined only this pass (two same-batch demands for one
+        // not-yet-loaded target under different contexts) saw unwired sublayer
+        // edges and may have skipped a contextual open it needs; interning it
+        // now would permanently record a stack missing its context-selected
+        // sublayers, so re-check against the wired graph and leave it for the
+        // next pass, which re-demands and reopens correctly. A failed target is
+        // exempt (nothing further can load) and interns whatever is present.
+        {
+            let mut graph = self.layers.borrow_mut();
+            for (demand, &was_opened) in pending.iter().zip(&opened_this_pass) {
+                let asset_path = demand.asset_path.as_str();
+                if let Some(root) = graph.id_of(asset_path) {
+                    if !was_opened
+                        && !graph.load_failed(asset_path)
+                        && graph.needs_contextual_open(root, demand.context)
+                    {
+                        continue;
+                    }
+                    newly_interned |= graph.intern_external(root, demand.context).1;
+                }
             }
         }
         grew || newly_failed || newly_interned

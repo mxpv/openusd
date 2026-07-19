@@ -55,11 +55,13 @@ impl LayerStackId {
 /// Index of an interned expression-variable context (a canonicalized, name-sorted
 /// `(name, value)` list). [`Value`] is not `Eq`/`Hash`, so a context cannot key a
 /// hash map directly; interning it to this `Copy` handle lets a stack be keyed by
-/// `(root, seed)`.
+/// `(root, seed)` and its composed context compared by id.
 ///
 /// An `ExprVarId` is meaningful only within the [`ExprVarInterner`] that minted it.
-/// The registry holds one interner for stack seeds, so a seed id is only ever
-/// produced by the registry.
+/// The registry holds one interner for both roles a context plays — the seed a
+/// target stack is keyed by and the composed set an instance stores — so an id is
+/// only ever produced by the registry, and a child stack's seed id is its parent
+/// instance's composed id.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ExprVarId(u32);
 
@@ -72,9 +74,9 @@ impl ExprVarId {
 /// Interns expression-variable contexts to [`ExprVarId`]s, deduplicating by
 /// structural equality so two equal contexts share one id. [`Value`] is not
 /// `Eq`/`Hash`, so the dedup is a linear scan comparing the canonicalized,
-/// name-sorted forms with [`value_eq`]. The registry holds one to key stacks by
-/// their seed. The context count is tiny (bounded by the variable-authoring
-/// layers), so the linear scan is not a concern.
+/// name-sorted forms with [`value_eq`]. The registry holds one for stack seeds
+/// and composed instance contexts alike. The context count is tiny (bounded by
+/// the variable-authoring layers), so the linear scan is not a concern.
 // TODO(perf): a hash-indexed table would drop the linear `value_eq` scan if a
 // pathological stack ever interns many distinct contexts.
 #[derive(Default)]
@@ -86,19 +88,13 @@ impl ExprVarInterner {
     /// Interns `vars`, returning the existing id of an equal context or minting a
     /// fresh one.
     pub(crate) fn intern(&mut self, vars: &HashMap<String, Value>) -> ExprVarId {
-        let canon = canonical_seed(vars);
+        let canon = canonical_context(vars);
         if let Some(id) = self.find_canonical(&canon) {
             return id;
         }
         let id = ExprVarId(self.contexts.len() as u32);
         self.contexts.push(canon);
         id
-    }
-
-    /// The interned id of `vars`, if it has been interned (read-only twin of
-    /// [`intern`](Self::intern)).
-    pub(crate) fn find(&self, vars: &HashMap<String, Value>) -> Option<ExprVarId> {
-        self.find_canonical(&canonical_seed(vars))
     }
 
     /// Reconstructs an interned context as a variable map.
@@ -126,14 +122,22 @@ enum LayerStackKey {
     /// The stage root layer stack (session layers, the root layer, its sublayers).
     Root,
     /// A reference/payload target's sublayer stack rooted at `root`, resolved with
-    /// the inherited expression-variable context `seed` (the empty seed for a plain
-    /// stack). The same target reached through two contexts gets one instance each,
-    /// so its `${VAR}` sublayers resolve independently.
+    /// the full inherited expression-variable context `seed` — "seed" names the
+    /// role an interned context plays in the key: the arc-carrying stack's composed
+    /// set, which the target's own variables compose under. The same target
+    /// reached through two contexts gets one instance each, so its `${VAR}`
+    /// sublayers and asset paths resolve independently.
+    ///
+    /// Keying by the composed context is a deliberate simplification of C++'s
+    /// `PcpLayerStackIdentifier`, which keys by an override *source* (another
+    /// layer stack) and follows it recursively: equal composed maps arriving from
+    /// distinct sources share one instance — and thus one site identity in
+    /// duplicate and cycle detection — where C++ keeps two.
     Target { root: LayerId, seed: ExprVarId },
 }
 
-/// One composed layer stack: its identity ([`LayerStackKey`]) and resolved
-/// members.
+/// One composed layer stack: its identity ([`LayerStackKey`]), resolved members,
+/// and composed expression-variable context.
 struct LayerStackInstance {
     key: LayerStackKey,
     /// The resolved members in strength order with composed offsets.
@@ -141,6 +145,15 @@ struct LayerStackInstance {
     /// The member layer ids as a set, for fast containment tests (invalidation,
     /// "indices touching layers").
     member_set: HashSet<LayerId>,
+    /// The composed expression variables of the stack — its root layer's own
+    /// `expressionVariables` overlaid by the seed (the seed winning) — the single
+    /// set its `${VAR}` sublayers, reference/payload asset paths, and value-time
+    /// asset attributes all resolve against.
+    expr_vars: HashMap<String, Value>,
+    /// [`expr_vars`](Self::expr_vars) interned, for id-keyed child-stack selection:
+    /// under full-context keying the seed of a stack minted across an arc from this
+    /// one is exactly this id.
+    expr_id: ExprVarId,
 }
 
 /// Every composed layer stack a [`LayerGraph`](super::layer_graph::LayerGraph) has
@@ -160,49 +173,45 @@ struct LayerStackInstance {
 pub(crate) struct LayerStackRegistry {
     instances: Vec<LayerStackInstance>,
     by_key: HashMap<LayerStackKey, LayerStackId>,
-    /// The interned stack seeds, keyed by [`ExprVarId`].
-    seeds: ExprVarInterner,
+    /// The interned expression-variable contexts — stack seeds and composed
+    /// instance contexts — keyed by [`ExprVarId`].
+    contexts: ExprVarInterner,
     /// The interned empty context, the seed of every plain (no-inherited-context)
     /// stack.
-    empty_seed: ExprVarId,
+    empty_context: ExprVarId,
 }
 
 impl Default for LayerStackRegistry {
     fn default() -> Self {
-        // Intern the empty seed as id 0 so plain stacks have a stable key before any
-        // variable context is seen.
-        let mut seeds = ExprVarInterner::default();
-        let empty_seed = seeds.intern(&HashMap::new());
+        // Intern the empty context as id 0 so plain stacks have a stable key before
+        // any variable context is seen.
+        let mut contexts = ExprVarInterner::default();
+        let empty_context = contexts.intern(&HashMap::new());
         Self {
             instances: Vec::new(),
             by_key: HashMap::new(),
-            seeds,
-            empty_seed,
+            contexts,
+            empty_context,
         }
     }
 }
 
 impl LayerStackRegistry {
-    /// The seed of a plain (no-inherited-context) stack.
-    pub(crate) fn empty_seed(&self) -> ExprVarId {
-        self.empty_seed
+    /// The interned empty context, the seed of a plain (no-inherited-context)
+    /// stack.
+    pub(crate) fn empty_context(&self) -> ExprVarId {
+        self.empty_context
     }
 
-    /// Interns `vars` to its stack-seed [`ExprVarId`].
-    pub(crate) fn intern_expr_seed(&mut self, vars: &HashMap<String, Value>) -> ExprVarId {
-        self.seeds.intern(vars)
+    /// Interns `vars` to its context [`ExprVarId`].
+    pub(crate) fn intern_context(&mut self, vars: &HashMap<String, Value>) -> ExprVarId {
+        self.contexts.intern(vars)
     }
 
-    /// The interned id of `vars`, if it has been interned (read-only twin of
-    /// [`intern_expr_seed`](Self::intern_expr_seed)).
-    pub(crate) fn find_expr_seed(&self, vars: &HashMap<String, Value>) -> Option<ExprVarId> {
-        self.seeds.find(vars)
-    }
-
-    /// Reconstructs an interned seed as a variable map, for re-resolving an
+    /// Reconstructs an interned context as a variable map, for re-resolving an
     /// instance's members on a stack rebuild.
-    pub(crate) fn seed_vars(&self, seed: ExprVarId) -> HashMap<String, Value> {
-        self.seeds.vars(seed)
+    pub(crate) fn context_vars(&self, id: ExprVarId) -> HashMap<String, Value> {
+        self.contexts.vars(id)
     }
 
     /// The target stack for `(root, seed)`, if one has been interned.
@@ -210,42 +219,53 @@ impl LayerStackRegistry {
         self.by_key.get(&LayerStackKey::Target { root, seed }).copied()
     }
 
-    /// Records (or, for the root, updates) the stage root stack as instance 0. The
-    /// root is always the first instance, so a rebuild updates it in place.
-    pub(crate) fn set_root(&mut self, members: Vec<(LayerId, LayerOffset)>) {
+    /// Records (or, for the root, updates) the stage root stack as instance 0 with
+    /// its resolved members and composed expression variables. The root is always
+    /// the first instance, so a rebuild updates it in place.
+    pub(crate) fn set_root(&mut self, members: Vec<(LayerId, LayerOffset)>, expr_vars: HashMap<String, Value>) {
         if self.instances.is_empty() {
-            let member_set = members.iter().map(|&(id, _)| id).collect();
-            self.instances.push(LayerStackInstance {
-                key: LayerStackKey::Root,
-                members,
-                member_set,
-            });
-            self.by_key.insert(LayerStackKey::Root, LayerStackId::ROOT);
+            let id = self.insert(LayerStackKey::Root, members, expr_vars);
+            debug_assert_eq!(id, LayerStackId::ROOT, "the root stack must be instance 0");
         } else {
             debug_assert!(
                 matches!(self.instances[LayerStackId::ROOT.idx()].key, LayerStackKey::Root),
                 "instance 0 must be the root stack",
             );
-            self.set_members(LayerStackId::ROOT, members);
+            self.set_composed(LayerStackId::ROOT, members, expr_vars);
         }
     }
 
-    /// Records a freshly composed target stack for `(root, seed)`, returning its id.
-    /// The caller guarantees `(root, seed)` is not already present (via
+    /// Records a freshly composed target stack for `(root, seed)` with its resolved
+    /// members and composed expression variables, returning its id. The caller
+    /// guarantees `(root, seed)` is not already present (via
     /// [`lookup_target`](Self::lookup_target)).
     pub(crate) fn intern_target(
         &mut self,
         root: LayerId,
         seed: ExprVarId,
         members: Vec<(LayerId, LayerOffset)>,
+        expr_vars: HashMap<String, Value>,
     ) -> LayerStackId {
-        let key = LayerStackKey::Target { root, seed };
+        self.insert(LayerStackKey::Target { root, seed }, members, expr_vars)
+    }
+
+    /// Inserts a fresh instance for `key`, deriving its member set and interned
+    /// composed context, and records it in [`by_key`](Self::by_key).
+    fn insert(
+        &mut self,
+        key: LayerStackKey,
+        members: Vec<(LayerId, LayerOffset)>,
+        expr_vars: HashMap<String, Value>,
+    ) -> LayerStackId {
         let member_set = members.iter().map(|&(id, _)| id).collect();
+        let expr_id = self.contexts.intern(&expr_vars);
         let id = LayerStackId(self.instances.len() as u32);
         self.instances.push(LayerStackInstance {
             key,
             members,
             member_set,
+            expr_vars,
+            expr_id,
         });
         self.by_key.insert(key, id);
         id
@@ -287,7 +307,7 @@ impl LayerStackRegistry {
     pub(crate) fn instance_seed_vars(&self, id: LayerStackId) -> HashMap<String, Value> {
         match self.instances[id.idx()].key {
             LayerStackKey::Root => HashMap::new(),
-            LayerStackKey::Target { seed, .. } => self.seed_vars(seed),
+            LayerStackKey::Target { seed, .. } => self.context_vars(seed),
         }
     }
 
@@ -304,11 +324,15 @@ impl LayerStackRegistry {
     }
 
     /// The `(id, root, seed-vars)` of every non-root target stack a rebuild must
-    /// re-resolve. With `affected` set, a stack whose members are disjoint from
-    /// those layers is skipped: the edit changed neither its sublayer edges nor an
-    /// authored `${VAR}` expression it resolves, so its members are unchanged.
-    /// `None` returns every target, for a full rebuild (a load can extend a stack
-    /// with a newly opened member the changed-edge set cannot name).
+    /// re-resolve. With `affected` set, a stack is skipped only when the edited
+    /// layers neither include its target root nor intersect its members: such an
+    /// edit changed neither its sublayer edges, an authored `${VAR}` expression it
+    /// resolves, nor its composed expression variables. The explicit root check
+    /// matters for a muted target root, whose member set is empty (disjoint from
+    /// everything) while its layer data still feeds the stack's composed
+    /// expression variables. `None` returns every target, for a full rebuild (a
+    /// load can extend a stack with a newly opened member the changed-edge set
+    /// cannot name).
     pub(crate) fn target_rebuild_specs(
         &self,
         affected: Option<&HashSet<LayerId>>,
@@ -319,20 +343,47 @@ impl LayerStackRegistry {
             .filter_map(|(i, inst)| match inst.key {
                 LayerStackKey::Root => None,
                 LayerStackKey::Target { root, seed } => {
-                    if affected.is_some_and(|affected| inst.member_set.is_disjoint(affected)) {
+                    if affected
+                        .is_some_and(|affected| !affected.contains(&root) && inst.member_set.is_disjoint(affected))
+                    {
                         return None;
                     }
-                    Some((LayerStackId(i as u32), root, self.seed_vars(seed)))
+                    Some((LayerStackId(i as u32), root, self.context_vars(seed)))
                 }
             })
             .collect()
     }
 
-    /// Replaces a stack's members after a re-resolve, keeping the id stable so a
-    /// handle held by a surviving prim index stays valid.
-    pub(crate) fn set_members(&mut self, id: LayerStackId, members: Vec<(LayerId, LayerOffset)>) {
-        self.instances[id.idx()].member_set = members.iter().map(|&(id, _)| id).collect();
-        self.instances[id.idx()].members = members;
+    /// Replaces a stack's members and composed expression variables after a
+    /// re-resolve, keeping the id stable so a handle held by a surviving prim index
+    /// stays valid.
+    pub(crate) fn set_composed(
+        &mut self,
+        id: LayerStackId,
+        members: Vec<(LayerId, LayerOffset)>,
+        expr_vars: HashMap<String, Value>,
+    ) {
+        let expr_id = self.contexts.intern(&expr_vars);
+        let instance = &mut self.instances[id.idx()];
+        instance.member_set = members.iter().map(|&(id, _)| id).collect();
+        instance.members = members;
+        instance.expr_vars = expr_vars;
+        instance.expr_id = expr_id;
+    }
+
+    /// The composed expression variables of a stack. Unlike [`members`](Self::members)
+    /// there is no pre-finalize empty fallback: an expression lookup always comes
+    /// from a composition node, which always references a minted stack, so an
+    /// unminted handle is an invariant break and panics.
+    pub(crate) fn expression_variables(&self, id: LayerStackId) -> &HashMap<String, Value> {
+        &self.instances[id.idx()].expr_vars
+    }
+
+    /// The interned id of a stack's composed expression variables — the seed of any
+    /// stack minted across a reference/payload arc from this one. Panics on an
+    /// unminted handle, like [`expression_variables`](Self::expression_variables).
+    pub(crate) fn expr_id(&self, id: LayerStackId) -> ExprVarId {
+        self.instances[id.idx()].expr_id
     }
 }
 
@@ -340,20 +391,21 @@ impl LayerStackRegistry {
 /// list, the interning form for an [`ExprVarId`]. Sorting makes the form
 /// independent of the source `HashMap`'s iteration order, so two equal contexts
 /// canonicalize identically and intern to one id.
-fn canonical_seed(vars: &HashMap<String, Value>) -> Vec<(String, Value)> {
+fn canonical_context(vars: &HashMap<String, Value>) -> Vec<(String, Value)> {
     let mut canon: Vec<(String, Value)> = vars.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
     canon.sort_by(|a, b| a.0.cmp(&b.0));
     canon
 }
 
-/// Whether two seed values are equal for deduplication, treating two `NaN`s with
-/// the same bit pattern as equal so a seed always matches its own re-derived clone.
+/// Whether two context values are equal for deduplication, treating two `NaN`s
+/// with the same bit pattern as equal so a context always matches its own
+/// re-derived clone.
 ///
-/// [`Value`] derives `PartialEq`, under which `NaN != NaN`, so a seed carrying a
-/// float `NaN` — only reachable from non-conformant `expressionVariables`, which
+/// [`Value`] derives `PartialEq`, under which `NaN != NaN`, so a context carrying
+/// a float `NaN` — only reachable from non-conformant `expressionVariables`, which
 /// the spec restricts to string/bool/int — would otherwise never dedup, leaving
 /// [`external_stack_id`](super::layer_graph::LayerGraph::external_stack_id)
-/// returning `Demand` and the load barrier interning the same seed forever. A
+/// returning `Demand` and the load barrier interning the same context forever. A
 /// scalar float compares by bit pattern, so a `NaN` equals its clone; a dictionary
 /// recurses, matching values by key (order-independently, reaching a `NaN` nested
 /// in a dictionary value); every other value uses `==`.
@@ -373,15 +425,15 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 mod tests {
     use super::*;
 
-    /// A seed carrying a float `NaN` dedups to one id across re-interning, so the
-    /// load barrier converges instead of minting an identical seed forever. Under
-    /// `Value`'s derived `PartialEq` (`NaN != NaN`) this would return two ids.
+    /// A context carrying a float `NaN` dedups to one id across re-interning, so
+    /// the load barrier converges instead of minting an identical context forever.
+    /// Under `Value`'s derived `PartialEq` (`NaN != NaN`) this would return two ids.
     #[test]
     fn nan_seed_dedups() {
         let mut registry = LayerStackRegistry::default();
         let vars = || HashMap::from([("V".to_string(), Value::Double(f64::NAN))]);
-        let first = registry.intern_expr_seed(&vars());
-        let second = registry.intern_expr_seed(&vars());
-        assert_eq!(first, second, "a NaN-valued seed must intern to a single id");
+        let first = registry.intern_context(&vars());
+        let second = registry.intern_context(&vars());
+        assert_eq!(first, second, "a NaN-valued context must intern to a single id");
     }
 }

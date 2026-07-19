@@ -657,6 +657,55 @@ fn cross_ref_expr_sublayer() -> Result<()> {
     Ok(())
 }
 
+/// One prim's two references reach the same not-yet-loaded target under
+/// different expression-variable contexts, so both demands land in a single
+/// load-barrier pass. The barrier opens the target for the first demand only;
+/// the second context's instance must not intern against the half-wired graph —
+/// its `${V}` sublayer would be silently dropped from the members forever — so
+/// it waits a pass and reopens the target with its own variables.
+#[test]
+fn dual_context_same_pass() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\ndef \"M\" (\n    references = [@s1.usda@, @s2.usda@]\n) {}\n",
+    )?;
+    for (name, sel) in [("s1.usda", "x"), ("s2.usda", "y")] {
+        std::fs::write(
+            dir.path().join(name),
+            format!(
+                "#usda 1.0\n(\n    defaultPrim = \"P\"\n    expressionVariables = {{ string V = \"{sel}\" }}\n)\ndef \"P\" (\n    references = @t.usda@\n) {{}}\n",
+            ),
+        )?;
+    }
+    std::fs::write(
+        dir.path().join("t.usda"),
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
+    )?;
+    std::fs::write(
+        dir.path().join("x.usda"),
+        "#usda 1.0\ndef \"P\" {\n    custom double vx = 1\n}\n",
+    )?;
+    std::fs::write(
+        dir.path().join("y.usda"),
+        "#usda 1.0\ndef \"P\" {\n    custom double vy = 2\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/M.vx").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(1.0)),
+        "s1's V=x resolves the target's sublayer under the first arc"
+    );
+    assert_eq!(
+        stage.attribute("/M.vy").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(2.0)),
+        "s2's V=y resolves the target's sublayer under the second arc"
+    );
+    Ok(())
+}
+
 /// A reference authored inside a `.usdz` package targets a sibling layer in the
 /// same archive: it resolves package-relative (not against the host
 /// filesystem), so the sibling's opinion composes onto the prim and no
