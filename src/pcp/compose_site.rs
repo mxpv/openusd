@@ -58,9 +58,9 @@ pub(super) fn compose_references_in(
             .unwrap_or(1.0)
         },
     )?;
-    // A reference whose expression failed to evaluate keeps its raw backtick
-    // path (the failure is already recorded in `errors`); drop it so it is not
-    // mistaken for a literal asset path and grafted as a broken arc.
+    // A reference whose expression failed to evaluate (recorded in `errors`)
+    // or evaluated to `None` (silent) keeps its raw backtick path; drop it so
+    // it is not mistaken for a literal asset path and grafted as a broken arc.
     refs.retain(|r| !expr::is_expression(&r.asset_path));
     Ok(refs)
 }
@@ -116,9 +116,8 @@ pub(super) fn collect_payloads_in(
             .unwrap_or(1.0)
         },
     )?;
-    // A payload whose expression failed to evaluate keeps its raw backtick path
-    // (the failure is already recorded in `errors`); drop it, as in
-    // [`compose_references_in`].
+    // A payload whose expression failed to evaluate or evaluated to `None`
+    // keeps its raw backtick path; drop it, as in [`compose_references_in`].
     payloads.retain(|p| !expr::is_expression(&p.asset_path));
     Ok(payloads)
 }
@@ -232,7 +231,9 @@ where
 /// A malformed or non-string expression is recoverable (C++
 /// `PcpErrorVariableExpression`): the failure is recorded in `errors`, the path
 /// is left as the raw unevaluated expression for the caller to drop, and `None`
-/// is returned so no scale is folded.
+/// is returned so no scale is folded. An expression evaluating to the
+/// expression-language `None` is dropped the same way but records no error
+/// (C++ skips it silently).
 #[allow(clippy::too_many_arguments)]
 fn resolve_arc_asset_path(
     asset_path: &mut String,
@@ -243,16 +244,21 @@ fn resolve_arc_asset_path(
     site: &Path,
     errors: &mut Vec<Error>,
 ) -> Option<f64> {
-    match expr::evaluate_asset_path(asset_path, expr_vars) {
-        Ok(resolved) => *asset_path = resolved,
-        Err(source) => {
-            errors.push(Error::InvalidExpression {
-                expression: asset_path.clone(),
-                arc,
-                site_path: site.clone(),
-                message: source.to_string(),
-            });
-            return None;
+    if expr::is_expression(asset_path) {
+        let evaluated = expr::evaluate_string(asset_path, expr_vars);
+        match evaluated.value {
+            Some(resolved) => *asset_path = resolved,
+            None => {
+                if !evaluated.errors.is_empty() {
+                    errors.push(Error::InvalidExpression {
+                        expression: asset_path.clone(),
+                        arc,
+                        site_path: site.clone(),
+                        message: evaluated.errors.join("; "),
+                    });
+                }
+                return None;
+            }
         }
     }
     anchor_asset_path(asset_path, graph.layer(authoring_layer), graph.layer_registry());

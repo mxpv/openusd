@@ -1,13 +1,25 @@
-//! Variable expression tokenizer and parser (C++ `SdfVariableExpression`).
+//! Variable expression tokenizer, parser, and evaluator (C++
+//! `SdfVariableExpression`).
 //!
 //! Implements USD variable expressions as described in:
 //! <https://openusd.org/dev/user_guides/variable_expressions.html>
 //!
 //! Expressions are strings enclosed in backticks that are evaluated at runtime
-//! to produce a final value. They support variable substitution, function calls,
-//! and various literal types. Composing the `expressionVariables` an expression
-//! evaluates against across composition arcs is a separate, `pcp`-level concern
-//! (C++ `PcpExpressionVariables`).
+//! to produce a final value. They support variable substitution, function
+//! calls, and various literal types. Composing the `expressionVariables` an
+//! expression evaluates against across composition arcs is a separate,
+//! `pcp`-level concern (C++ `PcpExpressionVariables`).
+//!
+//! Evaluation ([`Expr::evaluate`]) mirrors the C++ evaluator: a variable whose
+//! value is itself a backtick expression is parsed and evaluated recursively
+//! in the same context (with a cycle guard), errors aggregate across list
+//! elements and function arguments rather than short-circuiting, and every
+//! result reports the set of variables the evaluation requested
+//! ([`Evaluation::used_variables`]) — including referenced-but-undefined
+//! names — so change processing can map a variable edit to the expressions it
+//! affects. `matches_regex` patterns use Rust regex syntax (`regex-lite`)
+//! where C++ uses POSIX extended regular expressions; see
+//! [`Func::MatchesRegex`].
 //!
 //! # Example
 //!
@@ -18,17 +30,21 @@
 //! ```
 
 use crate::sdf;
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use logos::{Logos, SpannedIter};
+use regex_lite::Regex;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
+use std::mem;
+use std::slice;
 use std::str::FromStr;
-use strum::EnumString;
+use strum::{Display, EnumString};
 
-/// Returns `true` if the string is a variable expression (backtick-delimited).
+/// Returns `true` if the string is a variable expression: backtick-delimited
+/// with a non-empty body (C++ `Sdf_IsVariableExpression`).
 pub fn is_expression(s: &str) -> bool {
-    s.starts_with('`') && s.ends_with('`') && s.len() >= 2
+    s.len() > 2 && s.starts_with('`') && s.ends_with('`')
 }
 
 /// Reads a layer's pseudo-root `expressionVariables` dictionary, borrowing it
@@ -85,33 +101,117 @@ pub fn stack_expression_variables(
     Ok(vars)
 }
 
-/// Evaluates an expression-valued asset path against `vars`, or returns the path
-/// unchanged when it is not a backtick expression. The expression must evaluate
-/// to a string (C++ `Pcp` resolves variable expressions in reference/payload
-/// asset paths against the composed `PcpExpressionVariables`).
-pub fn evaluate_asset_path(path: &str, vars: &HashMap<String, sdf::Value>) -> Result<String> {
-    if !is_expression(path) {
-        return Ok(path.to_string());
+/// Evaluates a string-valued expression against `vars`, or passes the string
+/// through unchanged when it is not a backtick expression. This is the shape
+/// every string-carrying composition field shares (C++
+/// `Pcp_EvaluateVariableExpression`): reference/payload asset paths, sublayer
+/// paths, and variant selections all evaluate their authored value this way.
+/// A non-string result is an error; the expression-language `None` yields
+/// [`StringEvaluation::value`] `None` with no errors, which callers skip
+/// silently.
+pub fn evaluate_string(s: &str, vars: &HashMap<String, sdf::Value>) -> StringEvaluation {
+    if !is_expression(s) {
+        return StringEvaluation {
+            value: Some(s.to_string()),
+            errors: Vec::new(),
+            used_variables: HashSet::new(),
+        };
     }
-    let expression = Expr::parse(path).with_context(|| format!("failed to parse expression: {path}"))?;
-    match expression
-        .eval(vars)
-        .with_context(|| format!("failed to evaluate expression: {path}"))?
-    {
-        sdf::Value::String(s) => Ok(s),
-        other => bail!("expression must evaluate to a string, got: {other:?}"),
+    // TODO(perf): every call re-parses the expression, once per consuming
+    // composition arc per prim-index build; a parse memo keyed by the authored
+    // string (or a pcp-level `(string, context)` evaluation memo) would
+    // evaluate each distinct expression once.
+    let expr = match Expr::parse(s) {
+        Ok(expr) => expr,
+        Err(err) => {
+            return StringEvaluation {
+                value: None,
+                errors: vec![format!("{err:#}")],
+                used_variables: HashSet::new(),
+            }
+        }
+    };
+    let Evaluation {
+        value,
+        mut errors,
+        used_variables,
+    } = expr.evaluate(vars);
+    let value = match value {
+        Some(EvaluationValue::Value(sdf::Value::String(s))) => Some(s),
+        None => None,
+        Some(other) => {
+            errors.push(format!(
+                "Expression evaluated to '{}' but expected 'string'",
+                result_type_name(&Some(other))
+            ));
+            None
+        }
+    };
+    StringEvaluation {
+        value,
+        errors,
+        used_variables,
     }
+}
+
+/// The result of evaluating an expression (C++
+/// `SdfVariableExpression::Result`), returned by [`Expr::evaluate`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Evaluation {
+    /// The evaluated value, or `None` when the expression produced the
+    /// expression-language `None` or evaluation failed (in which case
+    /// [`errors`](Self::errors) is non-empty).
+    pub value: Option<EvaluationValue>,
+    /// Errors encountered while evaluating the expression.
+    pub errors: Vec<String>,
+    /// Every variable name the evaluation requested, recorded before lookup,
+    /// so the set includes referenced-but-undefined names and names requested
+    /// by recursively evaluated sub-expressions. Also includes
+    /// `defined()`-checked names (which C++ leaves out): the check is a
+    /// dependency, so change processing must see it to know a variable edit
+    /// can flip the result. Populated even when evaluation fails.
+    pub used_variables: HashSet<String>,
+}
+
+/// A successfully evaluated expression value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EvaluationValue {
+    /// A typed value: `String`, `Int64`, `Bool`, or one of their list types
+    /// (`StringVec`, `Int64Vec`, `BoolVec`).
+    Value(sdf::Value),
+    /// The untyped empty list `[]` (C++ `SdfVariableExpression::EmptyList`):
+    /// the expression language has no syntax naming an empty list's element
+    /// type, so it is not representable as a typed `sdf::Value` vector —
+    /// a caller converting it to one chooses the coercion explicitly.
+    EmptyList,
+}
+
+/// The result of evaluating a string-valued expression via
+/// [`evaluate_string`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StringEvaluation {
+    /// The evaluated string (the input unchanged when it is not an
+    /// expression), or `None` when evaluation failed —
+    /// [`errors`](Self::errors) is then non-empty — or produced the
+    /// expression-language `None`, which carries no errors and which callers
+    /// skip silently.
+    pub value: Option<String>,
+    /// Errors encountered while parsing or evaluating the expression.
+    pub errors: Vec<String>,
+    /// See [`Evaluation::used_variables`]; empty for a non-expression.
+    pub used_variables: HashSet<String>,
 }
 
 /// Tokens for USD variable expressions.
 #[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(skip r"[ \t\n\f]+")]
 pub enum Token<'source> {
-    // Literals
-    /// Double-quoted string: "hello world"
-    #[regex(r#""([^"\\]|\\.)*""#, |lex| trim_quotes(lex.slice()))]
-    /// Single-quoted string: 'hello world'
-    #[regex(r#"'([^'\\]|\\.)*'"#, |lex| trim_quotes(lex.slice()))]
+    /// Double-quoted string: `"hello world"`. The slice is raw — enclosing
+    /// quotes and escape sequences included — and is decoded into segments at
+    /// parse time.
+    #[regex(r#""([^"\\]|\\.)*""#, |lex| lex.slice())]
+    /// Single-quoted string: `'hello world'`, raw as above.
+    #[regex(r#"'([^'\\]|\\.)*'"#, |lex| lex.slice())]
     String(&'source str),
 
     /// Integer literal: 42, -100
@@ -130,6 +230,7 @@ pub enum Token<'source> {
 
     /// None value
     #[token("None")]
+    #[token("none")]
     None,
 
     // Variable substitution
@@ -141,8 +242,8 @@ pub enum Token<'source> {
     })]
     Variable(&'source str),
 
-    // Identifiers (function names, variable names in defined())
-    /// Identifier for function names or bare variable references
+    /// Identifier: a function name. A bare identifier anywhere else is a
+    /// parse error (a variable reference is always written `${name}`).
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
     Identifier(&'source str),
 
@@ -168,23 +269,15 @@ pub enum Token<'source> {
     Comma,
 }
 
-/// Trims quote characters from both ends of a string slice.
-fn trim_quotes(s: &str) -> &str {
-    &s[1..s.len() - 1]
-}
-
-/// Tokenize an expression string into tokens.
-pub fn tokenize(input: &str) -> impl Iterator<Item = Result<Token<'_>, ()>> {
-    Token::lexer(input).map(|result| result.map_err(|_| ()))
-}
-
 /// Supported functions in USD variable expressions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
+#[strum(serialize_all = "snake_case")]
 pub enum Func {
-    /// `defined(var1, var2, ...)` - Tests if all variables are defined.
+    /// `defined("var1", "var2", ...)` - Tests if all named variables are
+    /// defined. Each argument must evaluate to a string naming a variable.
     Defined,
-    /// `if(cond, trueVal, falseVal?)` - Conditional expression.
+    /// `if(cond, trueVal, falseVal?)` - Conditional expression. Both branches
+    /// are evaluated and must produce the same type (or `None`).
     If,
     /// `and(x, y, ...)` - Logical AND (short-circuit).
     And,
@@ -206,35 +299,34 @@ pub enum Func {
     Geq,
     /// `contains(list_or_string, value)` - Membership test.
     Contains,
-    /// `at(list_or_string, index)` - Element access (0-based, negative wraps).
+    /// `matches_regex(string_or_list, pattern)` - Unanchored regular-expression
+    /// search: whether the string (or any element of the string list) matches
+    /// `pattern`. Patterns use Rust regex syntax (`regex-lite`) as a practical
+    /// stand-in for the POSIX extended dialect C++'s `TfPatternMatcher` uses:
+    /// the common constructs (POSIX character classes like `[[:digit:]]`,
+    /// alternation, repetition, anchors) behave identically, but the dialects
+    /// differ at the edges (e.g. backslash-escaped interval braces).
+    MatchesRegex,
+    /// `at(list_or_string, index)` - Element access (0-based, negative indices
+    /// count from the end); strings index by character.
     At,
-    /// `len(list_or_string)` - Returns length.
+    /// `len(list_or_string)` - Returns length; strings count characters.
     Len,
 }
 
 impl Func {
-    /// Returns the expected argument count as (min, max).
-    const fn arg_count(self) -> (usize, usize) {
-        match self {
-            Func::Defined => (1, usize::MAX),
-            Func::If => (2, 3),
-            Func::And | Func::Or => (2, usize::MAX),
-            Func::Not | Func::Len => (1, 1),
-            Func::Eq | Func::Neq | Func::Lt | Func::Leq | Func::Gt | Func::Geq | Func::Contains | Func::At => (2, 2),
-        }
-    }
-
-    /// Validates that the given argument count is valid for this function.
+    /// Validates the parsed argument count against the function's arity, with
+    /// the C++ parse-time messages.
     fn validate_arg_count(self, count: usize) -> Result<()> {
-        let (min, max) = self.arg_count();
-        if count < min || count > max {
-            if min == max {
-                bail!("{:?} requires exactly {} argument(s), got {}", self, min, count);
-            } else if max == usize::MAX {
-                bail!("{:?} requires at least {} argument(s), got {}", self, min, count);
-            } else {
-                bail!("{:?} requires {} to {} arguments, got {}", self, min, max, count);
-            }
+        match self {
+            Func::Defined => ensure!(count >= 1, "Function '{self}' requires at least 1 arguments."),
+            Func::And | Func::Or => ensure!(count >= 2, "Function '{self}' requires at least 2 arguments."),
+            Func::If => ensure!(
+                count == 2 || count == 3,
+                "Function '{self}' does not take {count} arguments."
+            ),
+            Func::Not | Func::Len => ensure!(count == 1, "Function '{self}' does not take {count} arguments."),
+            _ => ensure!(count == 2, "Function '{self}' does not take {count} arguments."),
         }
         Ok(())
     }
@@ -243,8 +335,9 @@ impl Func {
 /// Expression tree node representing a parsed USD variable expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    /// String literal, may contain embedded `${var}` references for interpolation.
-    String(String),
+    /// Quoted string literal, split into literal text and embedded `${var}`
+    /// reference segments at parse time.
+    String(Vec<StringSegment>),
     /// 64-bit signed integer literal.
     Integer(i64),
     /// Boolean literal.
@@ -257,6 +350,18 @@ pub enum Expr {
     Array(Vec<Expr>),
     /// Function call.
     Call { func: Func, args: Vec<Expr> },
+}
+
+/// One segment of a quoted string literal (C++ `StringNode::Part`): literal
+/// text with escapes already processed, or an embedded `${var}` reference. An
+/// escaped reference (`\${var}`) is literal text, which is what lets it
+/// survive evaluation as the characters `${var}`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringSegment {
+    /// Literal text.
+    Literal(String),
+    /// An embedded `${var}` reference, holding the variable name.
+    Variable(String),
 }
 
 impl FromStr for Expr {
@@ -274,336 +379,546 @@ impl Expr {
         s.parse()
     }
 
-    /// Evaluate the expression with the given variable context.
-    pub fn eval(&self, vars: &HashMap<String, sdf::Value>) -> Result<sdf::Value> {
+    /// Evaluate the expression against `vars` (C++
+    /// `SdfVariableExpression::Evaluate`).
+    pub fn evaluate(&self, vars: &HashMap<String, sdf::Value>) -> Evaluation {
+        let mut ctx = EvalContext {
+            vars,
+            used: HashSet::new(),
+            stack: Vec::new(),
+        };
+        let result = self.eval_in(&mut ctx);
+        Evaluation {
+            value: result.value,
+            errors: result.errors,
+            used_variables: ctx.used,
+        }
+    }
+
+    /// Evaluate one node within a shared context.
+    fn eval_in(&self, ctx: &mut EvalContext) -> EvalResult {
         match self {
-            Expr::String(s) => Ok(sdf::Value::String(interpolate_string(s, vars)?)),
-            Expr::Integer(n) => Ok(sdf::Value::Int64(*n)),
-            Expr::Bool(b) => Ok(sdf::Value::Bool(*b)),
-            Expr::None => Ok(sdf::Value::None),
-            Expr::Variable(name) => vars
-                .get(name)
-                .cloned()
-                .ok_or_else(|| anyhow!("Undefined variable: {}", name)),
-            Expr::Array(elements) => {
-                let values: Result<Vec<_>> = elements.iter().map(|e| e.eval(vars)).collect();
-                eval_array(values?)
+            Expr::String(segments) => eval_string(segments, ctx),
+            Expr::Integer(n) => EvalResult::ok(sdf::Value::Int64(*n)),
+            Expr::Bool(b) => EvalResult::ok(sdf::Value::Bool(*b)),
+            Expr::None => EvalResult::none(),
+            Expr::Variable(name) => {
+                let (result, has_value) = ctx.lookup(name);
+                if !has_value {
+                    return EvalResult::error(format!("No value for variable '{name}'"));
+                }
+                result
             }
-            Expr::Call { func, args } => eval_func(*func, args, vars),
+            Expr::Array(elements) => eval_array(elements, ctx),
+            Expr::Call { func, args } => eval_func(*func, args, ctx),
         }
     }
 }
 
-/// Interpolate `${var}` references in a string.
-fn interpolate_string(s: &str, vars: &HashMap<String, sdf::Value>) -> Result<String> {
-    let mut result = String::with_capacity(s.len());
-    let mut rest = s;
-
-    while let Some(pos) = rest.find("${") {
-        result.push_str(&rest[..pos]);
-        rest = &rest[pos + 2..];
-
-        let end = rest
-            .find('}')
-            .ok_or_else(|| anyhow!("Unclosed variable reference in string"))?;
-
-        let var_name = &rest[..end];
-        let value = vars
-            .get(var_name)
-            .ok_or_else(|| anyhow!("Undefined variable: {}", var_name))?;
-        result.push_str(&value_to_string(value)?);
-
-        rest = &rest[end + 1..];
-    }
-
-    result.push_str(rest);
-    Ok(result)
+/// Shared state threaded through one evaluation (C++ `EvalContext`): the
+/// variables, the names requested so far, and the stack of variables whose
+/// expression values are currently being recursively evaluated (the circular
+/// substitution guard).
+struct EvalContext<'a> {
+    vars: &'a HashMap<String, sdf::Value>,
+    used: HashSet<String>,
+    stack: Vec<String>,
 }
 
-/// Convert a value to its string representation for interpolation.
-fn value_to_string(value: &sdf::Value) -> Result<String> {
+impl EvalContext<'_> {
+    /// Resolves a variable (C++ `EvalContext::GetVariable`): cycle-checks,
+    /// records the request in [`used`](Self::used) before lookup, coerces
+    /// `Int`/`IntVec` values to their 64-bit forms, and recursively parses and
+    /// evaluates an expression-valued string value in this same context.
+    /// Returns the result and whether the variable had a value at all.
+    fn lookup(&mut self, name: &str) -> (EvalResult, bool) {
+        if self.stack.iter().any(|n| n == name) {
+            let mut names: Vec<String> = self.stack.iter().map(|n| format!("'{n}'")).collect();
+            names.push(format!("'{name}'"));
+            let message = format!("Encountered circular variable substitutions: [{}]", names.join(", "));
+            return (EvalResult::error(message), true);
+        }
+        if !self.used.contains(name) {
+            self.used.insert(name.to_string());
+        }
+
+        let Some(value) = self.vars.get(name) else {
+            return (EvalResult::none(), false);
+        };
+        // TODO(perf): a list-valued variable is cloned per reference; threading
+        // borrows (`Cow`) through `EvalResult` would avoid the copy.
+        let result = match value {
+            sdf::Value::None => EvalResult::none(),
+            sdf::Value::Int(i) => EvalResult::ok(sdf::Value::Int64(i64::from(*i))),
+            sdf::Value::IntVec(v) => EvalResult::ok(sdf::Value::Int64Vec(v.iter().map(|&i| i64::from(i)).collect())),
+            sdf::Value::String(s) if is_expression(s) => match Expr::parse(s) {
+                Ok(sub_expr) => {
+                    self.stack.push(name.to_string());
+                    let result = sub_expr.eval_in(self);
+                    self.stack.pop();
+                    result
+                }
+                Err(err) => EvalResult::error(format!("{err:#} (in variable '{name}')")),
+            },
+            sdf::Value::String(_)
+            | sdf::Value::Bool(_)
+            | sdf::Value::Int64(_)
+            | sdf::Value::StringVec(_)
+            | sdf::Value::BoolVec(_)
+            | sdf::Value::Int64Vec(_) => EvalResult::ok(value.clone()),
+            other => EvalResult::error(format!(
+                "Variable '{name}' has unsupported type {}",
+                value_type_name(other)
+            )),
+        };
+        (result, true)
+    }
+}
+
+/// The outcome of evaluating one expression node (C++ `EvalResult`). An
+/// errored result carries no value; a `None` value with no errors is the
+/// expression-language `None`.
+struct EvalResult {
+    value: Option<EvaluationValue>,
+    errors: Vec<String>,
+}
+
+impl EvalResult {
+    fn ok(value: sdf::Value) -> Self {
+        Self {
+            value: Some(EvaluationValue::Value(value)),
+            errors: Vec::new(),
+        }
+    }
+
+    fn empty_list() -> Self {
+        Self {
+            value: Some(EvaluationValue::EmptyList),
+            errors: Vec::new(),
+        }
+    }
+
+    fn none() -> Self {
+        Self {
+            value: None,
+            errors: Vec::new(),
+        }
+    }
+
+    fn error(message: String) -> Self {
+        Self {
+            value: None,
+            errors: vec![message],
+        }
+    }
+
+    fn errors(errors: Vec<String>) -> Self {
+        Self { value: None, errors }
+    }
+}
+
+/// Drains and concatenates the errors of two operand results, the shape every
+/// two-argument function uses to aggregate before type-checking.
+fn combined_errors(x: &mut EvalResult, y: &mut EvalResult) -> Vec<String> {
+    let mut errors = mem::take(&mut x.errors);
+    errors.append(&mut y.errors);
+    errors
+}
+
+/// The expression-language name of a value's type, as used in error messages
+/// (C++ `GetValueTypeName`): `string`, `int`, `bool`, `list`, or `None`. A
+/// type the language does not support reports its lowercased variant name
+/// (e.g. `double`).
+fn value_type_name(value: &sdf::Value) -> Cow<'static, str> {
     match value {
-        sdf::Value::String(s) => Ok(s.clone()),
-        sdf::Value::Int64(n) => Ok(n.to_string()),
-        sdf::Value::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
-        sdf::Value::None => Ok("None".to_string()),
-        _ => bail!("Cannot interpolate {} into string", value_type_name(value)),
+        sdf::Value::None => "None".into(),
+        sdf::Value::Bool(_) => "bool".into(),
+        sdf::Value::Int(_) | sdf::Value::Int64(_) => "int".into(),
+        sdf::Value::String(_) => "string".into(),
+        sdf::Value::StringVec(_) | sdf::Value::IntVec(_) | sdf::Value::Int64Vec(_) | sdf::Value::BoolVec(_) => {
+            "list".into()
+        }
+        other => <&'static str>::from(other).to_lowercase().into(),
     }
 }
 
-/// Get the type name of a value for error messages.
-fn value_type_name(value: &sdf::Value) -> &'static str {
+/// [`value_type_name`] over an evaluation result: `None` results are `None`,
+/// the empty list is `list`.
+fn result_type_name(value: &Option<EvaluationValue>) -> Cow<'static, str> {
     match value {
-        sdf::Value::None => "None",
-        sdf::Value::Bool(_) => "bool",
-        sdf::Value::BoolVec(_) => "bool[]",
-        sdf::Value::Int64(_) => "int64",
-        sdf::Value::Int64Vec(_) => "int64[]",
-        sdf::Value::String(_) => "string",
-        sdf::Value::StringVec(_) => "string[]",
-        _ => "unsupported type",
+        None => "None".into(),
+        Some(EvaluationValue::EmptyList) => "list".into(),
+        Some(EvaluationValue::Value(v)) => value_type_name(v),
     }
 }
 
-/// Convert evaluated array elements into the appropriate sdf::Value array type.
-fn eval_array(values: Vec<sdf::Value>) -> Result<sdf::Value> {
-    if values.is_empty() {
-        return Ok(sdf::Value::StringVec(vec![]));
+/// Whether two results hold the same expression-language type (C++ compares
+/// the held `VtValue` types): `None` matches only `None`, the empty list only
+/// the empty list, and typed values their own variant.
+fn same_type(x: &Option<EvaluationValue>, y: &Option<EvaluationValue>) -> bool {
+    match (x, y) {
+        (None, None) => true,
+        (Some(EvaluationValue::EmptyList), Some(EvaluationValue::EmptyList)) => true,
+        (Some(EvaluationValue::Value(a)), Some(EvaluationValue::Value(b))) => {
+            mem::discriminant(a) == mem::discriminant(b)
+        }
+        _ => false,
     }
+}
 
-    // Determine array type from first element
-    match &values[0] {
-        sdf::Value::String(_) => {
-            let mut strings = Vec::with_capacity(values.len());
-            for v in values {
-                match v {
-                    sdf::Value::String(s) => strings.push(s),
-                    _ => bail!("Array elements must be the same type"),
+/// Evaluates a quoted string's segments (C++ `StringNode::Evaluate`),
+/// substituting each `${var}` reference. An undefined variable substitutes as
+/// its own name (not an error — C++ leaves the substitution in place for
+/// downstream clients); a `None` value substitutes as the empty string; a
+/// non-string value is an error.
+fn eval_string(segments: &[StringSegment], ctx: &mut EvalContext) -> EvalResult {
+    let mut result = String::new();
+    for segment in segments {
+        match segment {
+            StringSegment::Literal(s) => result.push_str(s),
+            StringSegment::Variable(name) => {
+                let (sub, has_value) = ctx.lookup(name);
+                if !has_value {
+                    result.push_str(name);
+                } else if !sub.errors.is_empty() {
+                    return EvalResult::errors(sub.errors);
+                } else {
+                    match sub.value {
+                        Some(EvaluationValue::Value(sdf::Value::String(s))) => result.push_str(&s),
+                        None => {}
+                        other => {
+                            return EvalResult::error(format!(
+                                "String value required for substituting variable '{name}', got {}.",
+                                result_type_name(&other)
+                            ))
+                        }
+                    }
                 }
             }
-            Ok(sdf::Value::StringVec(strings))
         }
-        sdf::Value::Int64(_) => {
-            let mut ints = Vec::with_capacity(values.len());
-            for v in values {
-                match v {
-                    sdf::Value::Int64(n) => ints.push(n),
-                    _ => bail!("Array elements must be the same type"),
-                }
-            }
-            Ok(sdf::Value::Int64Vec(ints))
-        }
-        sdf::Value::Bool(_) => {
-            let mut bools = Vec::with_capacity(values.len());
-            for v in values {
-                match v {
-                    sdf::Value::Bool(b) => bools.push(b),
-                    _ => bail!("Array elements must be the same type"),
-                }
-            }
-            Ok(sdf::Value::BoolVec(bools))
-        }
-        other => bail!("Unsupported array element type: {}", value_type_name(other)),
     }
+    EvalResult::ok(sdf::Value::String(result))
 }
 
-/// Extract bool from sdf::Value.
-fn value_as_bool(value: &sdf::Value) -> Result<bool> {
-    match value {
-        sdf::Value::Bool(b) => Ok(*b),
-        other => bail!("Expected bool, got {}", value_type_name(other)),
+/// Evaluates a list literal (C++ `ListNode::Evaluate`): every element is
+/// evaluated (errors aggregate), the first valid element fixes the list type,
+/// and an element of any other type — including `None` and nested lists — is
+/// an error. An empty result is the untyped
+/// [`EmptyList`](EvaluationValue::EmptyList).
+fn eval_array(elements: &[Expr], ctx: &mut EvalContext) -> EvalResult {
+    let mut errors = Vec::new();
+    let mut list: Option<sdf::Value> = None;
+    for (i, element) in elements.iter().enumerate() {
+        let mut result = element.eval_in(ctx);
+        if !result.errors.is_empty() {
+            errors.append(&mut result.errors);
+            continue;
+        }
+        match (&mut list, result.value) {
+            (None, Some(EvaluationValue::Value(sdf::Value::String(s)))) => {
+                list = Some(sdf::Value::StringVec(vec![s]));
+            }
+            (None, Some(EvaluationValue::Value(sdf::Value::Int64(n)))) => {
+                list = Some(sdf::Value::Int64Vec(vec![n]));
+            }
+            (None, Some(EvaluationValue::Value(sdf::Value::Bool(b)))) => {
+                list = Some(sdf::Value::BoolVec(vec![b]));
+            }
+            (Some(sdf::Value::StringVec(v)), Some(EvaluationValue::Value(sdf::Value::String(s)))) => v.push(s),
+            (Some(sdf::Value::Int64Vec(v)), Some(EvaluationValue::Value(sdf::Value::Int64(n)))) => v.push(n),
+            (Some(sdf::Value::BoolVec(v)), Some(EvaluationValue::Value(sdf::Value::Bool(b)))) => v.push(b),
+            (_, other) => errors.push(format!(
+                "Unexpected value of type {} in list at element {i}",
+                result_type_name(&other)
+            )),
+        }
     }
-}
-
-/// Extract i64 from sdf::Value.
-fn value_as_int(value: &sdf::Value) -> Result<i64> {
-    match value {
-        sdf::Value::Int64(n) => Ok(*n),
-        other => bail!("Expected int64, got {}", value_type_name(other)),
+    if !errors.is_empty() {
+        return EvalResult::errors(errors);
+    }
+    match list {
+        Some(v) => EvalResult::ok(v),
+        None => EvalResult::empty_list(),
     }
 }
 
 /// Evaluate a function call.
-fn eval_func(func: Func, args: &[Expr], vars: &HashMap<String, sdf::Value>) -> Result<sdf::Value> {
+fn eval_func(func: Func, args: &[Expr], ctx: &mut EvalContext) -> EvalResult {
     match func {
         Func::Defined => {
-            for arg in args {
-                let name = match arg {
-                    Expr::Variable(name) => name,
-                    other => bail!("defined() requires variable names, got {:?}", other),
-                };
-                if !vars.contains_key(name) {
-                    return Ok(sdf::Value::Bool(false));
+            let mut errors = Vec::new();
+            let mut result: Option<bool> = None;
+            for (i, arg) in args.iter().enumerate() {
+                let mut r = arg.eval_in(ctx);
+                if !r.errors.is_empty() {
+                    errors.append(&mut r.errors);
+                    continue;
+                }
+                match r.value {
+                    Some(EvaluationValue::Value(sdf::Value::String(name))) => {
+                        let defined = ctx.vars.contains_key(&name);
+                        ctx.used.insert(name);
+                        result = Some(result.unwrap_or(true) && defined);
+                    }
+                    other => errors.push(format!(
+                        "{func}: Invalid type {} for argument {i}",
+                        result_type_name(&other)
+                    )),
                 }
             }
-            Ok(sdf::Value::Bool(true))
+            finish_bool_fold(result, errors)
         }
 
         Func::If => {
-            let cond = value_as_bool(&args[0].eval(vars)?)?;
-            if cond {
-                args[1].eval(vars)
-            } else if args.len() == 3 {
-                args[2].eval(vars)
+            let condition = args[0].eval_in(ctx);
+            if !condition.errors.is_empty() {
+                return EvalResult::errors(condition.errors);
+            }
+            let Some(EvaluationValue::Value(sdf::Value::Bool(condition))) = condition.value else {
+                return EvalResult::error(format!("{func}: Condition must be a boolean value"));
+            };
+            // Both branches are evaluated so their types can be checked, even
+            // though only one is returned (C++ imposes the same requirement).
+            // The unchosen branch's errors are discarded with it — C++ returns
+            // the chosen branch's result as-is, so a guarded branch like
+            // `if(${USE_A}, ${A}, ${B})` succeeds with only `A` defined —
+            // while its variable lookups stay recorded in `used_variables`.
+            let if_result = args[1].eval_in(ctx);
+            let else_result = match args.get(2) {
+                Some(arg) => arg.eval_in(ctx),
+                None => EvalResult::none(),
+            };
+            if !same_type(&if_result.value, &else_result.value)
+                && if_result.value.is_some()
+                && else_result.value.is_some()
+            {
+                return EvalResult::error(format!(
+                    "{func}: if-value and else-value must evaluate to the same type or None."
+                ));
+            }
+            if condition {
+                if_result
             } else {
-                Ok(sdf::Value::None)
+                else_result
             }
         }
 
-        Func::And => {
-            for arg in args {
-                if !value_as_bool(&arg.eval(vars)?)? {
-                    return Ok(sdf::Value::Bool(false));
+        Func::And | Func::Or => {
+            let mut errors = Vec::new();
+            let mut result: Option<bool> = None;
+            for (i, arg) in args.iter().enumerate() {
+                let mut r = arg.eval_in(ctx);
+                if !r.errors.is_empty() {
+                    errors.append(&mut r.errors);
+                    continue;
+                }
+                match r.value {
+                    Some(EvaluationValue::Value(sdf::Value::Bool(value))) => {
+                        // A non-decisive value is the operation's identity, so
+                        // the fold reduces to keeping the latest value; a
+                        // decisive one short-circuits.
+                        result = Some(value);
+                        let decisive = if func == Func::And { !value } else { value };
+                        if decisive {
+                            break;
+                        }
+                    }
+                    other => errors.push(format!(
+                        "{func}: Invalid type {} for argument {i}",
+                        result_type_name(&other)
+                    )),
                 }
             }
-            Ok(sdf::Value::Bool(true))
-        }
-
-        Func::Or => {
-            for arg in args {
-                if value_as_bool(&arg.eval(vars)?)? {
-                    return Ok(sdf::Value::Bool(true));
-                }
-            }
-            Ok(sdf::Value::Bool(false))
+            finish_bool_fold(result, errors)
         }
 
         Func::Not => {
-            let val = value_as_bool(&args[0].eval(vars)?)?;
-            Ok(sdf::Value::Bool(!val))
-        }
-
-        Func::Eq => {
-            let left = args[0].eval(vars)?;
-            let right = args[1].eval(vars)?;
-            Ok(sdf::Value::Bool(values_equal(&left, &right)?))
-        }
-
-        Func::Neq => {
-            let left = args[0].eval(vars)?;
-            let right = args[1].eval(vars)?;
-            Ok(sdf::Value::Bool(!values_equal(&left, &right)?))
-        }
-
-        Func::Lt => {
-            let left = args[0].eval(vars)?;
-            let right = args[1].eval(vars)?;
-            Ok(sdf::Value::Bool(compare_values(&left, &right)?.is_lt()))
-        }
-
-        Func::Leq => {
-            let left = args[0].eval(vars)?;
-            let right = args[1].eval(vars)?;
-            Ok(sdf::Value::Bool(!compare_values(&left, &right)?.is_gt()))
-        }
-
-        Func::Gt => {
-            let left = args[0].eval(vars)?;
-            let right = args[1].eval(vars)?;
-            Ok(sdf::Value::Bool(compare_values(&left, &right)?.is_gt()))
-        }
-
-        Func::Geq => {
-            let left = args[0].eval(vars)?;
-            let right = args[1].eval(vars)?;
-            Ok(sdf::Value::Bool(!compare_values(&left, &right)?.is_lt()))
-        }
-
-        Func::Contains => {
-            let container = args[0].eval(vars)?;
-            let value = args[1].eval(vars)?;
-            match &container {
-                sdf::Value::String(s) => {
-                    let needle = match &value {
-                        sdf::Value::String(v) => v,
-                        other => bail!(
-                            "contains() with string requires string value, got {}",
-                            value_type_name(other)
-                        ),
-                    };
-                    Ok(sdf::Value::Bool(s.contains(needle.as_str())))
-                }
-                sdf::Value::StringVec(arr) => {
-                    let needle = match &value {
-                        sdf::Value::String(v) => v,
-                        other => bail!(
-                            "contains() with string[] requires string value, got {}",
-                            value_type_name(other)
-                        ),
-                    };
-                    Ok(sdf::Value::Bool(arr.contains(needle)))
-                }
-                sdf::Value::Int64Vec(arr) => {
-                    let needle = value_as_int(&value)?;
-                    Ok(sdf::Value::Bool(arr.contains(&needle)))
-                }
-                sdf::Value::BoolVec(arr) => {
-                    let needle = value_as_bool(&value)?;
-                    Ok(sdf::Value::Bool(arr.contains(&needle)))
-                }
-                other => bail!("contains() requires string or array, got {}", value_type_name(other)),
+            let condition = args[0].eval_in(ctx);
+            if !condition.errors.is_empty() {
+                return EvalResult::errors(condition.errors);
+            }
+            match condition.value {
+                Some(EvaluationValue::Value(sdf::Value::Bool(b))) => EvalResult::ok(sdf::Value::Bool(!b)),
+                other => EvalResult::error(format!(
+                    "{func}: Invalid type {} for argument",
+                    result_type_name(&other)
+                )),
             }
         }
 
+        Func::Eq | Func::Neq | Func::Lt | Func::Leq | Func::Gt | Func::Geq => {
+            let mut x = args[0].eval_in(ctx);
+            let mut y = args[1].eval_in(ctx);
+            let errors = combined_errors(&mut x, &mut y);
+            if !errors.is_empty() {
+                return EvalResult::errors(errors);
+            }
+            eval_comparison(func, x.value, y.value)
+        }
+
+        Func::Contains => {
+            let mut search_in = args[0].eval_in(ctx);
+            let mut search_for = args[1].eval_in(ctx);
+            let errors = combined_errors(&mut search_in, &mut search_for);
+            if !errors.is_empty() {
+                return EvalResult::errors(errors);
+            }
+            use EvaluationValue::Value as V;
+            let found = match (search_in.value, search_for.value) {
+                (Some(EvaluationValue::EmptyList), _) => false,
+                (Some(V(sdf::Value::String(s))), Some(V(sdf::Value::String(n)))) => s.contains(n.as_str()),
+                (Some(V(sdf::Value::StringVec(v))), Some(V(sdf::Value::String(n)))) => v.contains(&n),
+                (Some(V(sdf::Value::Int64Vec(v))), Some(V(sdf::Value::Int64(n)))) => v.contains(&n),
+                (Some(V(sdf::Value::BoolVec(v))), Some(V(sdf::Value::Bool(n)))) => v.contains(&n),
+                (
+                    Some(V(
+                        sdf::Value::String(_)
+                        | sdf::Value::StringVec(_)
+                        | sdf::Value::Int64Vec(_)
+                        | sdf::Value::BoolVec(_),
+                    )),
+                    _,
+                ) => return EvalResult::error(format!("{func}: Invalid search value")),
+                _ => return EvalResult::error(format!("{func}: Value to search must be a list or string")),
+            };
+            EvalResult::ok(sdf::Value::Bool(found))
+        }
+
+        Func::MatchesRegex => {
+            let mut search_in = args[0].eval_in(ctx);
+            let mut pattern = args[1].eval_in(ctx);
+            let errors = combined_errors(&mut search_in, &mut pattern);
+            if !errors.is_empty() {
+                return EvalResult::errors(errors);
+            }
+            let strings: &[String] = match &search_in.value {
+                Some(EvaluationValue::EmptyList) => return EvalResult::ok(sdf::Value::Bool(false)),
+                Some(EvaluationValue::Value(sdf::Value::String(s))) => slice::from_ref(s),
+                Some(EvaluationValue::Value(sdf::Value::StringVec(v))) => v,
+                _ => return EvalResult::error(format!("{func}: Value to search must be string[] or string")),
+            };
+            let Some(EvaluationValue::Value(sdf::Value::String(p))) = pattern.value else {
+                return EvalResult::error(format!("{func}: Pattern to match must be a string"));
+            };
+            let regex = match Regex::new(&p) {
+                Ok(regex) => regex,
+                Err(err) => return EvalResult::error(format!("{func}: Invalid match pattern: {err}")),
+            };
+            EvalResult::ok(sdf::Value::Bool(strings.iter().any(|s| regex.is_match(s))))
+        }
+
         Func::At => {
-            let container = args[0].eval(vars)?;
-            let index = value_as_int(&args[1].eval(vars)?)?;
-            match &container {
-                sdf::Value::String(s) => {
-                    let len = s.chars().count() as i64;
-                    let idx = normalize_index(index, len)?;
-                    let ch = s.chars().nth(idx).ok_or_else(|| anyhow!("Index out of bounds"))?;
-                    Ok(sdf::Value::String(ch.to_string()))
+            let mut source = args[0].eval_in(ctx);
+            let mut index = args[1].eval_in(ctx);
+            let errors = combined_errors(&mut source, &mut index);
+            if !errors.is_empty() {
+                return EvalResult::errors(errors);
+            }
+            let Some(EvaluationValue::Value(sdf::Value::Int64(index))) = index.value else {
+                return EvalResult::error(format!("{func}: Index must be an integer"));
+            };
+            let element = match source.value {
+                Some(EvaluationValue::EmptyList) => None,
+                Some(EvaluationValue::Value(sdf::Value::String(s))) => normalize_index(index, s.chars().count())
+                    .map(|i| sdf::Value::String(s.chars().nth(i).expect("index is in range").to_string())),
+                Some(EvaluationValue::Value(sdf::Value::StringVec(mut v))) => {
+                    normalize_index(index, v.len()).map(|i| sdf::Value::String(v.swap_remove(i)))
                 }
-                sdf::Value::StringVec(arr) => {
-                    let idx = normalize_index(index, arr.len() as i64)?;
-                    Ok(sdf::Value::String(arr[idx].clone()))
+                Some(EvaluationValue::Value(sdf::Value::Int64Vec(v))) => {
+                    normalize_index(index, v.len()).map(|i| sdf::Value::Int64(v[i]))
                 }
-                sdf::Value::Int64Vec(arr) => {
-                    let idx = normalize_index(index, arr.len() as i64)?;
-                    Ok(sdf::Value::Int64(arr[idx]))
+                Some(EvaluationValue::Value(sdf::Value::BoolVec(v))) => {
+                    normalize_index(index, v.len()).map(|i| sdf::Value::Bool(v[i]))
                 }
-                sdf::Value::BoolVec(arr) => {
-                    let idx = normalize_index(index, arr.len() as i64)?;
-                    Ok(sdf::Value::Bool(arr[idx]))
-                }
-                other => bail!("at() requires string or array, got {}", value_type_name(other)),
+                _ => return EvalResult::error(format!("{func}: Only supported for lists or strings")),
+            };
+            match element {
+                Some(value) => EvalResult::ok(value),
+                None => EvalResult::error(format!("{func}: Index out of range")),
             }
         }
 
         Func::Len => {
-            let container = args[0].eval(vars)?;
-            match &container {
-                sdf::Value::String(s) => Ok(sdf::Value::Int64(s.chars().count() as i64)),
-                sdf::Value::StringVec(arr) => Ok(sdf::Value::Int64(arr.len() as i64)),
-                sdf::Value::Int64Vec(arr) => Ok(sdf::Value::Int64(arr.len() as i64)),
-                sdf::Value::BoolVec(arr) => Ok(sdf::Value::Int64(arr.len() as i64)),
-                other => bail!("len() requires string or array, got {}", value_type_name(other)),
+            let source = args[0].eval_in(ctx);
+            if !source.errors.is_empty() {
+                return EvalResult::errors(source.errors);
             }
+            let len = match source.value {
+                Some(EvaluationValue::EmptyList) => 0,
+                Some(EvaluationValue::Value(sdf::Value::String(s))) => s.chars().count(),
+                Some(EvaluationValue::Value(sdf::Value::StringVec(v))) => v.len(),
+                Some(EvaluationValue::Value(sdf::Value::Int64Vec(v))) => v.len(),
+                Some(EvaluationValue::Value(sdf::Value::BoolVec(v))) => v.len(),
+                _ => return EvalResult::error(format!("{func}: Unsupported type")),
+            };
+            EvalResult::ok(sdf::Value::Int64(len as i64))
         }
     }
 }
 
-/// Check if two values are equal (must be same type).
-fn values_equal(left: &sdf::Value, right: &sdf::Value) -> Result<bool> {
-    match (left, right) {
-        (sdf::Value::String(a), sdf::Value::String(b)) => Ok(a == b),
-        (sdf::Value::Int64(a), sdf::Value::Int64(b)) => Ok(a == b),
-        (sdf::Value::Bool(a), sdf::Value::Bool(b)) => Ok(a == b),
-        (sdf::Value::None, sdf::Value::None) => Ok(true),
-        _ => bail!(
-            "Cannot compare {} with {}",
-            value_type_name(left),
-            value_type_name(right)
-        ),
+/// Finishes a `defined`/`and`/`or` argument fold: errors win, and a fold that
+/// never saw a valid argument (only possible alongside errors) has no value.
+fn finish_bool_fold(result: Option<bool>, errors: Vec<String>) -> EvalResult {
+    if !errors.is_empty() {
+        EvalResult::errors(errors)
+    } else {
+        match result {
+            Some(b) => EvalResult::ok(sdf::Value::Bool(b)),
+            None => EvalResult::none(),
+        }
     }
 }
 
-/// Compare two values (must be same type).
-fn compare_values(left: &sdf::Value, right: &sdf::Value) -> Result<std::cmp::Ordering> {
-    match (left, right) {
-        (sdf::Value::String(a), sdf::Value::String(b)) => Ok(a.cmp(b)),
-        (sdf::Value::Int64(a), sdf::Value::Int64(b)) => Ok(a.cmp(b)),
-        (sdf::Value::Bool(a), sdf::Value::Bool(b)) => Ok(a.cmp(b)),
-        _ => bail!(
-            "Cannot compare {} with {}",
-            value_type_name(left),
-            value_type_name(right)
-        ),
+/// Evaluates a comparison over two already-evaluated operands (C++
+/// `ComparisonNode`): the types must match, `None` supports only equality,
+/// and typed lists support no comparison. A pair of untyped empty lists
+/// compares like `None` (equality only) — C++'s `EmptyList` falls through
+/// `VtVisitValue`'s generic overload to the `None` comparison path.
+fn eval_comparison(func: Func, x: Option<EvaluationValue>, y: Option<EvaluationValue>) -> EvalResult {
+    if !same_type(&x, &y) {
+        return EvalResult::error(format!(
+            "{func}: Cannot compare values of type {} and {}",
+            result_type_name(&x),
+            result_type_name(&y)
+        ));
     }
+    let ordering = match (x, y) {
+        (None, None) | (Some(EvaluationValue::EmptyList), Some(EvaluationValue::EmptyList)) => {
+            return match func {
+                Func::Eq => EvalResult::ok(sdf::Value::Bool(true)),
+                Func::Neq => EvalResult::ok(sdf::Value::Bool(false)),
+                _ => EvalResult::error(format!("{func}: Comparison operation not supported for None")),
+            }
+        }
+        (Some(EvaluationValue::Value(a)), Some(EvaluationValue::Value(b))) => match (a, b) {
+            (sdf::Value::String(a), sdf::Value::String(b)) => a.cmp(&b),
+            (sdf::Value::Int64(a), sdf::Value::Int64(b)) => a.cmp(&b),
+            (sdf::Value::Bool(a), sdf::Value::Bool(b)) => a.cmp(&b),
+            _ => return EvalResult::error(format!("{func}: Unsupported type for comparison")),
+        },
+        _ => unreachable!("same_type only matches identical shapes"),
+    };
+    let result = match func {
+        Func::Eq => ordering.is_eq(),
+        Func::Neq => ordering.is_ne(),
+        Func::Lt => ordering.is_lt(),
+        Func::Leq => !ordering.is_gt(),
+        Func::Gt => ordering.is_gt(),
+        Func::Geq => !ordering.is_lt(),
+        _ => unreachable!("eval_comparison is called only for comparison functions"),
+    };
+    EvalResult::ok(sdf::Value::Bool(result))
 }
 
 /// Normalize a possibly-negative index to a valid array/string index.
-fn normalize_index(index: i64, len: i64) -> Result<usize> {
-    let idx = if index < 0 { len + index } else { index };
-    if idx < 0 || idx >= len {
-        bail!("Index {} out of bounds for length {}", index, len);
-    }
-    Ok(idx as usize)
+fn normalize_index(index: i64, len: usize) -> Option<usize> {
+    let idx = if index < 0 { index + len as i64 } else { index };
+    (0..len as i64).contains(&idx).then_some(idx as usize)
 }
 
 /// Parser for USD variable expressions.
 struct Parser<'a> {
+    input: &'a str,
     iter: Peekable<SpannedIter<'a, Token<'a>>>,
 }
 
@@ -617,182 +932,233 @@ impl<'a> Parser<'a> {
             input
         };
         Self {
+            input,
             iter: Token::lexer(input).spanned().peekable(),
         }
     }
 
-    /// Peek at the current token without consuming it.
+    /// Peek at the current token without consuming it. A malformed token peeks
+    /// as `None`; consuming it via [`next`](Self::next) reports the error.
     fn peek(&mut self) -> Option<&Token<'a>> {
         self.iter.peek().and_then(|(result, _)| result.as_ref().ok())
     }
 
-    /// Consume and return the current token.
-    fn next(&mut self) -> Option<Token<'a>> {
-        loop {
-            match self.iter.next() {
-                Some((Ok(token), _)) => return Some(token),
-                Some((Err(_), _)) => continue, // Skip invalid tokens
-                None => return None,
-            }
+    /// Consume and return the current token; a malformed token is a parse
+    /// error.
+    fn next(&mut self) -> Result<Option<Token<'a>>> {
+        match self.iter.next() {
+            Some((Ok(token), _)) => Ok(Some(token)),
+            Some((Err(()), span)) => bail!("Unexpected character '{}'", &self.input[span]),
+            None => Ok(None),
         }
-    }
-
-    /// Check if we've reached the end of tokens.
-    fn is_eof(&mut self) -> bool {
-        self.peek().is_none()
     }
 
     /// Consume a token if it matches the expected token, otherwise return an error.
     fn expect(&mut self, expected: Token<'a>) -> Result<()> {
-        match self.next() {
+        match self.next()? {
             Some(ref token) if *token == expected => Ok(()),
             Some(token) => bail!("Expected {:?}, got {:?}", expected, token),
             None => bail!("Expected {:?}, got end of input", expected),
         }
     }
 
-    /// Parse a complete expression.
+    /// Parse a complete expression: one expression body spanning all input.
     fn parse_expr(&mut self) -> Result<Expr> {
         let expr = self.parse()?;
-        ensure!(self.is_eof(), "Unexpected token after expression: {:?}", self.peek());
-        Ok(expr)
+        match self.next()? {
+            None => Ok(expr),
+            Some(token) => bail!("Unexpected token after expression: {token:?}"),
+        }
     }
 
-    /// Parse a primary expression (literals, variables, arrays, function calls).
+    /// Parse an expression body (C++ `ExpressionBody`): a scalar expression or
+    /// a list. List elements are scalar expressions (C++ `ListElement`), so a
+    /// nested list is a parse error.
     fn parse(&mut self) -> Result<Expr> {
-        let token = self.next().ok_or_else(|| anyhow!("Unexpected end of input"))?;
+        if matches!(self.peek(), Some(Token::LBracket)) {
+            self.next()?;
+            let elements = self.parse_delimited(Token::RBracket, ']', "list", Self::parse_scalar)?;
+            return Ok(Expr::Array(elements));
+        }
+        self.parse_scalar()
+    }
+
+    /// Parse a scalar expression (C++ `ScalarExpression`): a literal, a
+    /// `${var}` reference, or a function call. A bare identifier not followed
+    /// by `(` is a parse error.
+    fn parse_scalar(&mut self) -> Result<Expr> {
+        let token = self.next()?.ok_or_else(|| anyhow!("Unexpected end of input"))?;
 
         match token {
-            Token::String(s) => Ok(Expr::String(unescape_string(s))),
+            Token::String(raw) => Ok(Expr::String(parse_quoted_string(raw)?)),
             Token::Integer(s) => {
-                let value = s.parse::<i64>().map_err(|e| anyhow!("Invalid integer: {}", e))?;
+                let value = s.parse::<i64>().map_err(|_| anyhow!("Integer {s} out of range."))?;
                 Ok(Expr::Integer(value))
             }
             Token::True => Ok(Expr::Bool(true)),
             Token::False => Ok(Expr::Bool(false)),
             Token::None => Ok(Expr::None),
             Token::Variable(name) => Ok(Expr::Variable(name.to_string())),
-            Token::LBracket => self.parse_array(),
             Token::Identifier(name) => {
-                // Check if this is a function call
                 if matches!(self.peek(), Some(Token::LParen)) {
                     self.parse_call(name)
                 } else {
-                    // Bare identifier (used in `defined(VAR_NAME)`)
-                    Ok(Expr::Variable(name.to_string()))
+                    bail!("Unexpected identifier '{name}'");
                 }
             }
             other => bail!("Unexpected token: {:?}", other),
         }
     }
 
-    /// Parse an array literal: `[elem1, elem2, ...]`.
-    fn parse_array(&mut self) -> Result<Expr> {
-        let mut elements = Vec::new();
-
-        // Handle empty array
-        if matches!(self.peek(), Some(Token::RBracket)) {
-            self.next();
-            return Ok(Expr::Array(elements));
-        }
-
-        loop {
-            elements.push(self.parse()?);
-
-            match self.peek() {
-                Some(Token::Comma) => {
-                    self.next();
-                    // Allow trailing comma
-                    if matches!(self.peek(), Some(Token::RBracket)) {
-                        self.next();
-                        break;
-                    }
-                }
-                Some(Token::RBracket) => {
-                    self.next();
-                    break;
-                }
-                other => bail!("Expected ',' or ']' in array, got {:?}", other),
-            }
-        }
-
-        Ok(Expr::Array(elements))
-    }
-
-    /// Parse a function call: `funcName(arg1, arg2, ...)`.
+    /// Parse a function call: `funcName(arg1, arg2, ...)`. Arguments are full
+    /// expression bodies, so a list argument is allowed.
     fn parse_call(&mut self, name: &str) -> Result<Expr> {
-        let func: Func = name.parse()?;
+        let func: Func = name.parse().map_err(|_| anyhow!("Unknown function {name}"))?;
         self.expect(Token::LParen)?;
-
-        let mut args = Vec::new();
-
-        // Handle empty argument list
-        if matches!(self.peek(), Some(Token::RParen)) {
-            self.next();
-            func.validate_arg_count(args.len())?;
-            return Ok(Expr::Call { func, args });
-        }
-
-        loop {
-            args.push(self.parse()?);
-
-            match self.peek() {
-                Some(Token::Comma) => {
-                    self.next();
-                }
-                Some(Token::RParen) => {
-                    self.next();
-                    break;
-                }
-                other => bail!("Expected ',' or ')' in function call, got {:?}", other),
-            }
-        }
-
+        let args = self.parse_delimited(Token::RParen, ')', "function call", Self::parse)?;
         func.validate_arg_count(args.len())?;
         Ok(Expr::Call { func, args })
     }
+
+    /// Parse a possibly-empty comma-separated element sequence up to and
+    /// including the `close` token — the shared shape of list elements and
+    /// function arguments. `close_char` and `what` name the closer and the
+    /// construct in parse-error messages.
+    fn parse_delimited(
+        &mut self,
+        close: Token<'a>,
+        close_char: char,
+        what: &str,
+        parse_element: fn(&mut Self) -> Result<Expr>,
+    ) -> Result<Vec<Expr>> {
+        let mut elements = Vec::new();
+        if self.peek() == Some(&close) {
+            self.next()?;
+            return Ok(elements);
+        }
+        loop {
+            elements.push(parse_element(self)?);
+
+            match self.peek() {
+                Some(Token::Comma) => {
+                    self.next()?;
+                }
+                Some(token) if *token == close => {
+                    self.next()?;
+                    break;
+                }
+                _ => match self.next()? {
+                    Some(token) => bail!("Expected ',' or '{close_char}' in {what}, got {token:?}"),
+                    None => bail!("Missing ending '{close_char}'"),
+                },
+            }
+        }
+        Ok(elements)
+    }
 }
 
-/// Unescape a string literal, processing escape sequences.
-fn unescape_string(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
+/// Splits the body of a quoted string literal (`raw` includes its enclosing
+/// quotes) into literal and `${var}` reference segments, processing escape
+/// sequences (C++ recognizes references with the `QuotedStringVariable`
+/// grammar rule and unescapes literal parts with `TfEscapeString`). A
+/// backslash escapes any character: `\n`, `\r`, and `\t` produce their
+/// control characters, and any other escape — including `` \` ``, `\$`, `\\`,
+/// and the enclosing quote — produces the character itself, so `\${var}` is
+/// the literal text `${var}` rather than a reference. A `$` not starting a
+/// `${name}` reference is an ordinary character.
+fn parse_quoted_string(raw: &str) -> Result<Vec<StringSegment>> {
+    let body = &raw[1..raw.len() - 1];
+    let mut segments = Vec::new();
+    let mut literal = String::new();
+    let mut chars = body.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('\\') => result.push('\\'),
-                Some('"') => result.push('"'),
-                Some('\'') => result.push('\''),
-                Some('$') => result.push('$'),
-                Some('n') => result.push('\n'),
-                Some('r') => result.push('\r'),
-                Some('t') => result.push('\t'),
-                Some(other) => {
-                    // Keep unrecognized escapes as-is
-                    result.push('\\');
-                    result.push(other);
-                }
-                None => result.push('\\'),
+        match c {
+            '\\' => {
+                // The lexer only forms a string token from complete escape
+                // pairs, so a character always follows.
+                let escaped = chars.next().ok_or_else(|| anyhow!("Trailing backslash in string"))?;
+                literal.push(match escaped {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
             }
-        } else {
-            result.push(c);
+            '$' if chars.peek() == Some(&'{') => {
+                chars.next();
+                let mut name = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some(c) if c.is_ascii_alphanumeric() || c == '_' => name.push(c),
+                        Some(_) => bail!("Variables must be a C identifier"),
+                        None => bail!("Missing ending '}}'"),
+                    }
+                }
+                ensure!(
+                    name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_'),
+                    "Variables must be a C identifier"
+                );
+                if !literal.is_empty() {
+                    segments.push(StringSegment::Literal(mem::take(&mut literal)));
+                }
+                segments.push(StringSegment::Variable(name));
+            }
+            other => literal.push(other),
         }
     }
-
-    result
+    if !literal.is_empty() {
+        segments.push(StringSegment::Literal(literal));
+    }
+    Ok(segments)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A single-segment literal string expression.
+    fn lit(s: &str) -> Expr {
+        Expr::String(vec![StringSegment::Literal(s.to_string())])
+    }
+
+    fn make_vars(pairs: &[(&str, sdf::Value)]) -> HashMap<String, sdf::Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    /// Evaluates `src` expecting success, returning the value (`None` for the
+    /// expression-language `None`).
+    fn eval(src: &str, vars: &HashMap<String, sdf::Value>) -> Option<EvaluationValue> {
+        let expr = Expr::parse(src).expect("expression parses");
+        let result = expr.evaluate(vars);
+        assert_eq!(result.errors, Vec::<String>::new(), "evaluating {src}");
+        result.value
+    }
+
+    /// Evaluates `src` expecting a plain value.
+    fn eval_value(src: &str, vars: &HashMap<String, sdf::Value>) -> sdf::Value {
+        match eval(src, vars) {
+            Some(EvaluationValue::Value(v)) => v,
+            other => panic!("expected a value evaluating {src}, got {other:?}"),
+        }
+    }
+
+    /// Evaluates `src` expecting failure, returning the errors.
+    fn eval_errors(src: &str, vars: &HashMap<String, sdf::Value>) -> Vec<String> {
+        let expr = Expr::parse(src).expect("expression parses");
+        let result = expr.evaluate(vars);
+        assert_eq!(result.value, None, "evaluating {src}");
+        assert!(!result.errors.is_empty(), "expected errors evaluating {src}");
+        result.errors
+    }
+
     #[test]
     fn test_is_expression() {
         assert!(is_expression(r#"`"hello"`"#));
         assert!(is_expression(r#"`if(${VAR}, "a", "b")`"#));
-        assert!(is_expression("``"));
 
+        // C++ requires a non-empty body.
+        assert!(!is_expression("``"));
         assert!(!is_expression("hello"));
         assert!(!is_expression("`"));
         assert!(!is_expression("`hello"));
@@ -802,55 +1168,55 @@ mod tests {
 
     #[test]
     fn tokenize_string_literals() {
-        let tokens: Vec<_> = tokenize(r#""hello world""#).collect();
-        assert_eq!(tokens, vec![Ok(Token::String("hello world"))]);
+        let tokens: Vec<_> = Token::lexer(r#""hello world""#).collect();
+        assert_eq!(tokens, vec![Ok(Token::String(r#""hello world""#))]);
 
-        let tokens: Vec<_> = tokenize(r#"'single quoted'"#).collect();
-        assert_eq!(tokens, vec![Ok(Token::String("single quoted"))]);
+        let tokens: Vec<_> = Token::lexer(r#"'single quoted'"#).collect();
+        assert_eq!(tokens, vec![Ok(Token::String("'single quoted'"))]);
     }
 
     #[test]
     fn tokenize_escaped_strings() {
-        let tokens: Vec<_> = tokenize(r#""escaped \"quote\"""#).collect();
-        assert_eq!(tokens, vec![Ok(Token::String(r#"escaped \"quote\""#))]);
+        let tokens: Vec<_> = Token::lexer(r#""escaped \"quote\"""#).collect();
+        assert_eq!(tokens, vec![Ok(Token::String(r#""escaped \"quote\"""#))]);
     }
 
     #[test]
     fn tokenize_integers() {
-        let tokens: Vec<_> = tokenize("42").collect();
+        let tokens: Vec<_> = Token::lexer("42").collect();
         assert_eq!(tokens, vec![Ok(Token::Integer("42"))]);
 
-        let tokens: Vec<_> = tokenize("-100").collect();
+        let tokens: Vec<_> = Token::lexer("-100").collect();
         assert_eq!(tokens, vec![Ok(Token::Integer("-100"))]);
     }
 
     #[test]
     fn tokenize_booleans() {
-        let tokens: Vec<_> = tokenize("True false").collect();
+        let tokens: Vec<_> = Token::lexer("True false").collect();
         assert_eq!(tokens, vec![Ok(Token::True), Ok(Token::False)]);
 
-        let tokens: Vec<_> = tokenize("true False").collect();
+        let tokens: Vec<_> = Token::lexer("true False").collect();
         assert_eq!(tokens, vec![Ok(Token::True), Ok(Token::False)]);
     }
 
     #[test]
     fn tokenize_none() {
-        let tokens: Vec<_> = tokenize("None").collect();
-        assert_eq!(tokens, vec![Ok(Token::None)]);
+        let tokens: Vec<_> = Token::lexer("None none").collect();
+        assert_eq!(tokens, vec![Ok(Token::None), Ok(Token::None)]);
     }
 
     #[test]
     fn tokenize_variables() {
-        let tokens: Vec<_> = tokenize("${ASSET_PATH}").collect();
+        let tokens: Vec<_> = Token::lexer("${ASSET_PATH}").collect();
         assert_eq!(tokens, vec![Ok(Token::Variable("ASSET_PATH"))]);
 
-        let tokens: Vec<_> = tokenize("${my_var_123}").collect();
+        let tokens: Vec<_> = Token::lexer("${my_var_123}").collect();
         assert_eq!(tokens, vec![Ok(Token::Variable("my_var_123"))]);
     }
 
     #[test]
     fn tokenize_function_call() {
-        let tokens: Vec<_> = tokenize("if(${USE_HIGH_RES}, \"high\", \"low\")").collect();
+        let tokens: Vec<_> = Token::lexer("if(${USE_HIGH_RES}, \"high\", \"low\")").collect();
         assert_eq!(
             tokens,
             vec![
@@ -858,23 +1224,9 @@ mod tests {
                 Ok(Token::LParen),
                 Ok(Token::Variable("USE_HIGH_RES")),
                 Ok(Token::Comma),
-                Ok(Token::String("high")),
+                Ok(Token::String("\"high\"")),
                 Ok(Token::Comma),
-                Ok(Token::String("low")),
-                Ok(Token::RParen),
-            ]
-        );
-    }
-
-    #[test]
-    fn tokenize_defined_function() {
-        let tokens: Vec<_> = tokenize("defined(RENDER_PASS)").collect();
-        assert_eq!(
-            tokens,
-            vec![
-                Ok(Token::Identifier("defined")),
-                Ok(Token::LParen),
-                Ok(Token::Identifier("RENDER_PASS")),
+                Ok(Token::String("\"low\"")),
                 Ok(Token::RParen),
             ]
         );
@@ -882,58 +1234,23 @@ mod tests {
 
     #[test]
     fn tokenize_array_literal() {
-        let tokens: Vec<_> = tokenize("[\"a\", \"b\", \"c\"]").collect();
+        let tokens: Vec<_> = Token::lexer("[\"a\", \"b\"]").collect();
         assert_eq!(
             tokens,
             vec![
                 Ok(Token::LBracket),
-                Ok(Token::String("a")),
+                Ok(Token::String("\"a\"")),
                 Ok(Token::Comma),
-                Ok(Token::String("b")),
-                Ok(Token::Comma),
-                Ok(Token::String("c")),
+                Ok(Token::String("\"b\"")),
                 Ok(Token::RBracket),
             ]
         );
     }
 
     #[test]
-    fn tokenize_nested_function() {
-        let tokens: Vec<_> = tokenize("if(and(${A}, ${B}), \"yes\", \"no\")").collect();
-        assert_eq!(
-            tokens,
-            vec![
-                Ok(Token::Identifier("if")),
-                Ok(Token::LParen),
-                Ok(Token::Identifier("and")),
-                Ok(Token::LParen),
-                Ok(Token::Variable("A")),
-                Ok(Token::Comma),
-                Ok(Token::Variable("B")),
-                Ok(Token::RParen),
-                Ok(Token::Comma),
-                Ok(Token::String("yes")),
-                Ok(Token::Comma),
-                Ok(Token::String("no")),
-                Ok(Token::RParen),
-            ]
-        );
-    }
-
-    #[test]
-    fn tokenize_comparison_functions() {
-        let tokens: Vec<_> = tokenize("lt(${VALUE}, 10)").collect();
-        assert_eq!(
-            tokens,
-            vec![
-                Ok(Token::Identifier("lt")),
-                Ok(Token::LParen),
-                Ok(Token::Variable("VALUE")),
-                Ok(Token::Comma),
-                Ok(Token::Integer("10")),
-                Ok(Token::RParen),
-            ]
-        );
+    fn tokenize_invalid_character() {
+        let tokens: Vec<_> = Token::lexer("${FO-O}").collect();
+        assert!(tokens.iter().any(|t| t.is_err()));
     }
 
     // Expr parsing tests
@@ -941,13 +1258,42 @@ mod tests {
     #[test]
     fn parse_string_literal() {
         let expr: Expr = r#""hello world""#.parse().unwrap();
-        assert_eq!(expr, Expr::String("hello world".to_string()));
+        assert_eq!(expr, lit("hello world"));
     }
 
     #[test]
     fn parse_escaped_string() {
         let expr: Expr = r#""say \"hello\"""#.parse().unwrap();
-        assert_eq!(expr, Expr::String("say \"hello\"".to_string()));
+        assert_eq!(expr, lit("say \"hello\""));
+    }
+
+    #[test]
+    fn parse_string_segments() {
+        let expr: Expr = r#""a_${VAR}_b""#.parse().unwrap();
+        assert_eq!(
+            expr,
+            Expr::String(vec![
+                StringSegment::Literal("a_".to_string()),
+                StringSegment::Variable("VAR".to_string()),
+                StringSegment::Literal("_b".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_empty_string() {
+        let expr: Expr = "''".parse().unwrap();
+        assert_eq!(expr, Expr::String(vec![]));
+
+        let expr: Expr = r#""""#.parse().unwrap();
+        assert_eq!(expr, Expr::String(vec![]));
+    }
+
+    #[test]
+    fn parse_bad_string_variable() {
+        assert!(Expr::parse(r#""bad_var_${FOO""#).is_err());
+        assert!(Expr::parse(r#""bad_var_${FO-O}""#).is_err());
+        assert!(Expr::parse(r#""bad_var_${1X}""#).is_err());
     }
 
     #[test]
@@ -957,6 +1303,14 @@ mod tests {
 
         let expr: Expr = "-100".parse().unwrap();
         assert_eq!(expr, Expr::Integer(-100));
+    }
+
+    #[test]
+    fn parse_integer_range() {
+        assert_eq!(Expr::parse("9223372036854775807").unwrap(), Expr::Integer(i64::MAX),);
+        assert_eq!(Expr::parse("-9223372036854775808").unwrap(), Expr::Integer(i64::MIN),);
+        let err = Expr::parse("9223372036854775808").unwrap_err();
+        assert!(err.to_string().contains("out of range"));
     }
 
     #[test]
@@ -972,12 +1326,28 @@ mod tests {
     fn parse_none_literal() {
         let expr: Expr = "None".parse().unwrap();
         assert_eq!(expr, Expr::None);
+
+        let expr: Expr = "none".parse().unwrap();
+        assert_eq!(expr, Expr::None);
+    }
+
+    #[test]
+    fn parse_keyword_prefix_rejected() {
+        for src in ["Truee", "truee", "TRUE", "Falsee", "falsee", "Nonee", "nonee"] {
+            assert!(Expr::parse(src).is_err(), "{src} must not parse");
+        }
     }
 
     #[test]
     fn parse_variable() {
         let expr: Expr = "${ASSET_PATH}".parse().unwrap();
         assert_eq!(expr, Expr::Variable("ASSET_PATH".to_string()));
+    }
+
+    #[test]
+    fn parse_bad_variable() {
+        assert!(Expr::parse("`${FO-O}`").is_err());
+        assert!(Expr::parse("`${FOO`").is_err());
     }
 
     #[test]
@@ -989,14 +1359,7 @@ mod tests {
     #[test]
     fn parse_string_array() {
         let expr: Expr = r#"["a", "b", "c"]"#.parse().unwrap();
-        assert_eq!(
-            expr,
-            Expr::Array(vec![
-                Expr::String("a".to_string()),
-                Expr::String("b".to_string()),
-                Expr::String("c".to_string()),
-            ])
-        );
+        assert_eq!(expr, Expr::Array(vec![lit("a"), lit("b"), lit("c")]));
     }
 
     #[test]
@@ -1006,6 +1369,20 @@ mod tests {
             expr,
             Expr::Array(vec![Expr::Integer(1), Expr::Integer(2), Expr::Integer(3),])
         );
+    }
+
+    #[test]
+    fn parse_nested_list_rejected() {
+        assert!(Expr::parse("[[1, 2]]").is_err());
+        assert!(Expr::parse("`[`").is_err());
+    }
+
+    #[test]
+    fn parse_bare_identifier_rejected() {
+        let err = Expr::parse("foo").unwrap_err();
+        assert!(err.to_string().contains("Unexpected identifier"));
+        assert!(Expr::parse("[foo]").is_err());
+        assert!(Expr::parse("defined(RENDER_PASS)").is_err());
     }
 
     #[test]
@@ -1027,23 +1404,31 @@ mod tests {
             expr,
             Expr::Call {
                 func: Func::If,
-                args: vec![
-                    Expr::Variable("USE_HIGH_RES".to_string()),
-                    Expr::String("high".to_string()),
-                    Expr::String("low".to_string()),
-                ],
+                args: vec![Expr::Variable("USE_HIGH_RES".to_string()), lit("high"), lit("low")],
             }
         );
     }
 
     #[test]
     fn parse_defined_function() {
-        let expr: Expr = "defined(RENDER_PASS)".parse().unwrap();
+        let expr: Expr = r#"defined("RENDER_PASS")"#.parse().unwrap();
         assert_eq!(
             expr,
             Expr::Call {
                 func: Func::Defined,
-                args: vec![Expr::Variable("RENDER_PASS".to_string())],
+                args: vec![lit("RENDER_PASS")],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_matches_regex() {
+        let expr: Expr = r#"matches_regex(${S}, "a.*b")"#.parse().unwrap();
+        assert_eq!(
+            expr,
+            Expr::Call {
+                func: Func::MatchesRegex,
+                args: vec![Expr::Variable("S".to_string()), lit("a.*b")],
             }
         );
     }
@@ -1060,21 +1445,9 @@ mod tests {
                         func: Func::And,
                         args: vec![Expr::Variable("A".to_string()), Expr::Variable("B".to_string())],
                     },
-                    Expr::String("yes".to_string()),
-                    Expr::String("no".to_string()),
+                    lit("yes"),
+                    lit("no"),
                 ],
-            }
-        );
-    }
-
-    #[test]
-    fn parse_comparison_function() {
-        let expr: Expr = "lt(${VALUE}, 10)".parse().unwrap();
-        assert_eq!(
-            expr,
-            Expr::Call {
-                func: Func::Lt,
-                args: vec![Expr::Variable("VALUE".to_string()), Expr::Integer(10)],
             }
         );
     }
@@ -1082,7 +1455,13 @@ mod tests {
     #[test]
     fn parse_with_backticks() {
         let expr: Expr = r#"`"${ASSET_PATH}/model.usd"`"#.parse().unwrap();
-        assert_eq!(expr, Expr::String("${ASSET_PATH}/model.usd".to_string()));
+        assert_eq!(
+            expr,
+            Expr::String(vec![
+                StringSegment::Variable("ASSET_PATH".to_string()),
+                StringSegment::Literal("/model.usd".to_string()),
+            ])
+        );
     }
 
     #[test]
@@ -1092,38 +1471,7 @@ mod tests {
             expr,
             Expr::Call {
                 func: Func::Contains,
-                args: vec![
-                    Expr::Array(vec![Expr::String("a".to_string()), Expr::String("b".to_string())]),
-                    Expr::Variable("VAR".to_string()),
-                ],
-            }
-        );
-    }
-
-    #[test]
-    fn parse_complex_nested_expression() {
-        let expr: Expr = r#"if(or(eq(${MODE}, "debug"), defined(DEBUG)), "dbg", "rel")"#.parse().unwrap();
-        assert_eq!(
-            expr,
-            Expr::Call {
-                func: Func::If,
-                args: vec![
-                    Expr::Call {
-                        func: Func::Or,
-                        args: vec![
-                            Expr::Call {
-                                func: Func::Eq,
-                                args: vec![Expr::Variable("MODE".to_string()), Expr::String("debug".to_string())],
-                            },
-                            Expr::Call {
-                                func: Func::Defined,
-                                args: vec![Expr::Variable("DEBUG".to_string())],
-                            },
-                        ],
-                    },
-                    Expr::String("dbg".to_string()),
-                    Expr::String("rel".to_string()),
-                ],
+                args: vec![Expr::Array(vec![lit("a"), lit("b")]), Expr::Variable("VAR".to_string()),],
             }
         );
     }
@@ -1132,7 +1480,10 @@ mod tests {
     fn parse_unknown_function_fails() {
         let result: Result<Expr, _> = "unknown_func(1, 2)".parse();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Matching variant not found"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown function unknown_func"));
     }
 
     #[test]
@@ -1161,8 +1512,8 @@ mod tests {
                 func: Func::If,
                 args: vec![
                     Expr::Variable("COND".to_string()),
-                    Expr::String(r"C:\USD\test.usd".to_string()),
-                    Expr::String(r"D:\USD\test.usd".to_string()),
+                    lit(r"C:\USD\test.usd"),
+                    lit(r"D:\USD\test.usd"),
                 ],
             }
         );
@@ -1172,7 +1523,34 @@ mod tests {
     fn parse_escaped_dollar_sign() {
         // Escaped $ prevents variable substitution: \$ → $
         let expr: Expr = r#"`"escaped_var_\${X}"`"#.parse().unwrap();
-        assert_eq!(expr, Expr::String("escaped_var_${X}".to_string()));
+        assert_eq!(expr, lit("escaped_var_${X}"));
+    }
+
+    #[test]
+    fn parse_escaped_backtick() {
+        let expr: Expr = r#""a\`b""#.parse().unwrap();
+        assert_eq!(expr, lit("a`b"));
+    }
+
+    #[test]
+    fn parse_control_escapes() {
+        let expr: Expr = r#""a\nb\tc\rd""#.parse().unwrap();
+        assert_eq!(expr, lit("a\nb\tc\rd"));
+    }
+
+    #[test]
+    fn parse_unknown_escape() {
+        // An unrecognized escape keeps the character, dropping the backslash
+        // (C++ `TfEscapeString`).
+        let expr: Expr = r#""a\qb""#.parse().unwrap();
+        assert_eq!(expr, lit("aqb"));
+    }
+
+    #[test]
+    fn parse_bare_dollar_literal() {
+        // A '$' not starting a `${name}` reference is an ordinary character.
+        let expr: Expr = r#""cost_$5""#.parse().unwrap();
+        assert_eq!(expr, lit("cost_$5"));
     }
 
     #[test]
@@ -1183,240 +1561,783 @@ mod tests {
             expr,
             Expr::Call {
                 func: Func::If,
-                args: vec![Expr::Bool(true), Expr::String("yes".to_string())],
+                args: vec![Expr::Bool(true), lit("yes")],
             }
         );
     }
 
     #[test]
     fn parse_function_arg_count_validation() {
-        // not() requires exactly 1 argument
-        let result: Result<Expr, _> = "not()".parse();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exactly 1"));
-
-        let result: Result<Expr, _> = "not(True, False)".parse();
-        assert!(result.is_err());
-
-        // len() requires exactly 1 argument
-        let result: Result<Expr, _> = "len()".parse();
-        assert!(result.is_err());
-
-        // eq() requires exactly 2 arguments
-        let result: Result<Expr, _> = "eq(1)".parse();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exactly 2"));
-
-        let result: Result<Expr, _> = "eq(1, 2, 3)".parse();
-        assert!(result.is_err());
-
-        // if() requires 2 or 3 arguments
-        let result: Result<Expr, _> = "if(True)".parse();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("2 to 3"));
-
-        // and() requires at least 2 arguments
-        let result: Result<Expr, _> = "and(True)".parse();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("at least 2"));
-
-        // defined() requires at least 1 argument
-        let result: Result<Expr, _> = "defined()".parse();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("at least 1"));
+        let cases = [
+            ("not()", "Function 'not' does not take 0 arguments."),
+            ("not(True, False)", "Function 'not' does not take 2 arguments."),
+            ("len()", "Function 'len' does not take 0 arguments."),
+            ("eq(1)", "Function 'eq' does not take 1 arguments."),
+            ("eq(1, 2, 3)", "Function 'eq' does not take 3 arguments."),
+            ("if(True)", "Function 'if' does not take 1 arguments."),
+            ("and(True)", "Function 'and' requires at least 2 arguments."),
+            ("defined()", "Function 'defined' requires at least 1 arguments."),
+            (
+                "matches_regex('a')",
+                "Function 'matches_regex' does not take 1 arguments.",
+            ),
+        ];
+        for (src, expected) in cases {
+            let err = Expr::parse(src).unwrap_err();
+            assert_eq!(err.to_string(), expected, "parsing {src}");
+        }
     }
 
     // Eval tests
-
-    fn make_vars(pairs: &[(&str, sdf::Value)]) -> HashMap<String, sdf::Value> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
-    }
 
     #[test]
     fn eval_literals() {
         let vars = HashMap::new();
 
-        let expr: Expr = "42".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Int64(42));
-
-        let expr: Expr = "True".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
-
-        let expr: Expr = r#""hello""#.parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("hello".to_string()));
-
-        let expr: Expr = "None".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::None);
+        assert_eq!(eval_value("42", &vars), sdf::Value::Int64(42));
+        assert_eq!(eval_value("True", &vars), sdf::Value::Bool(true));
+        assert_eq!(eval_value(r#""hello""#, &vars), sdf::Value::String("hello".to_string()));
+        assert_eq!(eval("None", &vars), None);
+        assert_eq!(eval("none", &vars), None);
+        assert_eq!(eval_value(r#"''"#, &vars), sdf::Value::String(String::new()));
     }
 
     #[test]
-    fn eval_variable() {
-        let vars = make_vars(&[("X", sdf::Value::Int64(100))]);
+    fn eval_variable_passthrough() {
+        // A top-level substitution yields the exact value from the
+        // dictionary, for every supported type.
+        let cases = [
+            sdf::Value::String("string".to_string()),
+            sdf::Value::Int64(42),
+            sdf::Value::Bool(true),
+            sdf::Value::StringVec(vec!["foo".into(), "bar".into()]),
+            sdf::Value::Int64Vec(vec![1, 2, 3]),
+            sdf::Value::BoolVec(vec![true, false]),
+        ];
+        for value in cases {
+            let vars = make_vars(&[("FOO", value.clone())]);
+            assert_eq!(eval_value("${FOO}", &vars), value);
+        }
 
-        let expr: Expr = "${X}".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Int64(100));
+        let vars = make_vars(&[("FOO", sdf::Value::None)]);
+        assert_eq!(eval("${FOO}", &vars), None);
     }
 
     #[test]
-    fn eval_undefined_variable_error() {
+    fn int_var_coerced() {
+        let vars = make_vars(&[("FOO", sdf::Value::Int(7))]);
+        assert_eq!(eval_value("${FOO}", &vars), sdf::Value::Int64(7));
+
+        let vars = make_vars(&[("FOO", sdf::Value::IntVec(vec![1, 2]))]);
+        assert_eq!(eval_value("${FOO}", &vars), sdf::Value::Int64Vec(vec![1, 2]));
+    }
+
+    #[test]
+    fn eval_undefined_variable() {
         let vars = HashMap::new();
-        let expr: Expr = "${UNDEFINED}".parse().unwrap();
-        assert!(expr.eval(&vars).is_err());
+        assert_eq!(eval_errors("${FOO}", &vars), vec!["No value for variable 'FOO'"]);
+    }
+
+    #[test]
+    fn eval_unsupported_type() {
+        let vars = make_vars(&[("FOO", sdf::Value::Double(1.234))]);
+        assert_eq!(
+            eval_errors("${FOO}", &vars),
+            vec!["Variable 'FOO' has unsupported type double"]
+        );
+        assert_eq!(
+            eval_errors(r#"'test_${FOO}'"#, &vars),
+            vec!["Variable 'FOO' has unsupported type double"]
+        );
     }
 
     #[test]
     fn eval_string_interpolation() {
         let vars = make_vars(&[
-            ("PATH", sdf::Value::String("/assets".to_string())),
-            ("NAME", sdf::Value::String("model".to_string())),
+            ("A", sdf::Value::String("substitution".to_string())),
+            ("B", sdf::Value::String("works".to_string())),
         ]);
-
-        let expr: Expr = r#"`"${PATH}/${NAME}.usd"`"#.parse().unwrap();
         assert_eq!(
-            expr.eval(&vars).unwrap(),
-            sdf::Value::String("/assets/model.usd".to_string())
+            eval_value(r#""string_${A}_${B}""#, &vars),
+            sdf::Value::String("string_substitution_works".to_string())
+        );
+        assert_eq!(
+            eval_value(r#"'string_${A}_${B}'"#, &vars),
+            sdf::Value::String("string_substitution_works".to_string())
+        );
+    }
+
+    #[test]
+    fn eval_none_interpolates_empty() {
+        let vars = make_vars(&[("A", sdf::Value::None)]);
+        assert_eq!(
+            eval_value(r#"'none_sub_${A}'"#, &vars),
+            sdf::Value::String("none_sub_".to_string())
+        );
+    }
+
+    #[test]
+    fn interpolate_nonstring_rejected() {
+        let vars = make_vars(&[("A", sdf::Value::Int64(0))]);
+        assert_eq!(
+            eval_errors(r#"'bad_sub_${A}'"#, &vars),
+            vec!["String value required for substituting variable 'A', got int."]
+        );
+
+        let vars = make_vars(&[("A", sdf::Value::Bool(true))]);
+        assert_eq!(
+            eval_errors(r#"'bad_sub_${A}'"#, &vars),
+            vec!["String value required for substituting variable 'A', got bool."]
+        );
+    }
+
+    #[test]
+    fn interpolate_undefined_keeps_name() {
+        // An undefined variable in a string substitutes as its own name and
+        // is not an error (C++ leaves the substitution in place).
+        let vars = HashMap::new();
+        let expr = Expr::parse(r#"'x_${FOO}_y'"#).unwrap();
+        let result = expr.evaluate(&vars);
+        assert_eq!(result.errors, Vec::<String>::new());
+        assert_eq!(
+            result.value,
+            Some(EvaluationValue::Value(sdf::Value::String("x_FOO_y".to_string())))
+        );
+        assert!(result.used_variables.contains("FOO"));
+    }
+
+    #[test]
+    fn escaped_ref_survives_eval() {
+        let vars = make_vars(&[
+            ("A", sdf::Value::String("substitution".to_string())),
+            ("B", sdf::Value::String("works".to_string())),
+        ]);
+        let expr = Expr::parse(r#""nosubs_\${A}_\${B}""#).unwrap();
+        let result = expr.evaluate(&vars);
+        assert_eq!(result.errors, Vec::<String>::new());
+        assert_eq!(
+            result.value,
+            Some(EvaluationValue::Value(sdf::Value::String(
+                "nosubs_${A}_${B}".to_string()
+            )))
+        );
+        assert!(result.used_variables.is_empty());
+    }
+
+    #[test]
+    fn eval_lists() {
+        let vars = make_vars(&[("FOO", sdf::Value::Int64(2))]);
+        assert_eq!(eval("[]", &vars), Some(EvaluationValue::EmptyList));
+        assert_eq!(eval_value("[1, 2, 3]", &vars), sdf::Value::Int64Vec(vec![1, 2, 3]));
+        assert_eq!(eval_value("[1, ${FOO}, 3]", &vars), sdf::Value::Int64Vec(vec![1, 2, 3]));
+        assert_eq!(
+            eval_value(r#"['a', 'b']"#, &vars),
+            sdf::Value::StringVec(vec!["a".into(), "b".into()])
+        );
+        assert_eq!(
+            eval_value("[True, False]", &vars),
+            sdf::Value::BoolVec(vec![true, false])
+        );
+
+        let vars = make_vars(&[("FOO", sdf::Value::String("a".to_string()))]);
+        assert_eq!(
+            eval_value(r#"['${FOO}a', 'b']"#, &vars),
+            sdf::Value::StringVec(vec!["aa".into(), "b".into()])
+        );
+    }
+
+    #[test]
+    fn eval_list_type_errors() {
+        let vars = HashMap::new();
+        assert_eq!(
+            eval_errors("[None]", &vars),
+            vec!["Unexpected value of type None in list at element 0"]
+        );
+        assert_eq!(
+            eval_errors("[None, 2, 3]", &vars),
+            vec!["Unexpected value of type None in list at element 0"]
+        );
+
+        let vars = make_vars(&[("FOO", sdf::Value::None)]);
+        assert_eq!(
+            eval_errors("[1, ${FOO}, 3]", &vars),
+            vec!["Unexpected value of type None in list at element 1"]
+        );
+
+        // A list-valued variable cannot nest in a list.
+        let vars = make_vars(&[("L", sdf::Value::String("`[]`".to_string()))]);
+        assert_eq!(
+            eval_errors("[${L}]", &vars),
+            vec!["Unexpected value of type list in list at element 0"]
+        );
+        let vars = make_vars(&[("L", sdf::Value::IntVec(vec![1, 2]))]);
+        assert_eq!(
+            eval_errors("[${L}]", &vars),
+            vec!["Unexpected value of type list in list at element 0"]
+        );
+
+        // Mixed types report one error per offending element.
+        let vars = make_vars(&[("L", sdf::Value::String("`[]`".to_string()))]);
+        assert_eq!(
+            eval_errors(r#"[1, 'foo', False, ${L}]"#, &vars),
+            vec![
+                "Unexpected value of type string in list at element 1",
+                "Unexpected value of type bool in list at element 2",
+                "Unexpected value of type list in list at element 3",
+            ]
         );
     }
 
     #[test]
     fn eval_if_function() {
-        let vars = make_vars(&[("COND", sdf::Value::Bool(true))]);
-
-        let expr: Expr = r#"if(${COND}, "yes", "no")"#.parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("yes".to_string()));
-
-        let vars = make_vars(&[("COND", sdf::Value::Bool(false))]);
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("no".to_string()));
-    }
-
-    #[test]
-    fn eval_if_two_args_returns_none() {
-        let vars = make_vars(&[("COND", sdf::Value::Bool(false))]);
-
-        let expr: Expr = r#"if(${COND}, "yes")"#.parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::None);
-    }
-
-    #[test]
-    fn eval_defined() {
-        let vars = make_vars(&[("X", sdf::Value::Int64(1))]);
-
-        let expr: Expr = "defined(X)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
-
-        let expr: Expr = "defined(Y)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
-
-        let expr: Expr = "defined(X, Y)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
-    }
-
-    #[test]
-    fn eval_and_or_not() {
         let vars = HashMap::new();
+        assert_eq!(
+            eval_value(r#"if(True, 'true', 'false')"#, &vars),
+            sdf::Value::String("true".to_string())
+        );
+        assert_eq!(
+            eval_value(r#"if(False, 'true', 'false')"#, &vars),
+            sdf::Value::String("false".to_string())
+        );
+        assert_eq!(
+            eval_value(r#"if(True, 'true')"#, &vars),
+            sdf::Value::String("true".to_string())
+        );
+        assert_eq!(eval(r#"if(False, 'true')"#, &vars), None);
 
-        let expr: Expr = "and(True, True)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+        let vars = make_vars(&[
+            ("B", sdf::Value::Bool(true)),
+            ("X", sdf::Value::Bool(false)),
+            ("Y", sdf::Value::Bool(true)),
+        ]);
+        assert_eq!(
+            eval_value("if(${B}, if(${X}, 1, 2), if(${Y}, 3, 4))", &vars),
+            sdf::Value::Int64(2)
+        );
+    }
 
-        let expr: Expr = "and(True, False)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+    #[test]
+    fn eval_if_condition_errors() {
+        let vars = HashMap::new();
+        assert_eq!(
+            eval_errors(r#"if('non_bool', 1, 0)"#, &vars),
+            vec!["if: Condition must be a boolean value"]
+        );
+        // A subexpression error in the condition propagates as-is.
+        assert_eq!(
+            eval_errors(r#"if(eq(1, '1'), 1, 0)"#, &vars),
+            vec!["eq: Cannot compare values of type int and string"]
+        );
+    }
 
-        let expr: Expr = "or(False, True)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+    #[test]
+    fn if_unchosen_error_dropped() {
+        // The unchosen branch's errors are discarded (C++ returns the chosen
+        // branch's result as-is), but its lookups still count as used.
+        let vars = make_vars(&[("A", sdf::Value::String("ok".to_string()))]);
+        let expr = Expr::parse("if(True, ${A}, ${MISSING})").unwrap();
+        let result = expr.evaluate(&vars);
+        assert_eq!(result.errors, Vec::<String>::new());
+        assert_eq!(
+            result.value,
+            Some(EvaluationValue::Value(sdf::Value::String("ok".to_string())))
+        );
+        assert!(result.used_variables.contains("MISSING"));
 
-        let expr: Expr = "or(False, False)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+        // Choosing the failing branch surfaces its error.
+        let expr = Expr::parse("if(False, ${A}, ${MISSING})").unwrap();
+        let result = expr.evaluate(&vars);
+        assert_eq!(result.value, None);
+        assert_eq!(result.errors, vec!["No value for variable 'MISSING'"]);
+    }
 
-        let expr: Expr = "not(True)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+    #[test]
+    fn eval_if_branch_types() {
+        // Both branches are type-checked even when untaken; None is
+        // compatible with anything.
+        let vars = HashMap::new();
+        assert_eq!(eval("if(False, 1, None)", &vars), None);
+        assert_eq!(eval_value("if(False, None, 1)", &vars), sdf::Value::Int64(1));
+        assert_eq!(
+            eval_errors(r#"if(False, 1, 'foo')"#, &vars),
+            vec!["if: if-value and else-value must evaluate to the same type or None."]
+        );
+        assert_eq!(
+            eval_errors(r#"if(False, 'foo', 1)"#, &vars),
+            vec!["if: if-value and else-value must evaluate to the same type or None."]
+        );
     }
 
     #[test]
     fn eval_comparisons() {
         let vars = HashMap::new();
-
-        let expr: Expr = "eq(1, 1)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
-
-        let expr: Expr = "neq(1, 2)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
-
-        let expr: Expr = "lt(1, 2)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
-
-        let expr: Expr = "leq(2, 2)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
-
-        let expr: Expr = "gt(3, 2)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
-
-        let expr: Expr = "geq(2, 2)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+        let cases = [
+            ("eq(1, 1)", true),
+            ("eq(1, 2)", false),
+            ("neq(1, 2)", true),
+            ("neq(1, 1)", false),
+            ("lt(1, 2)", true),
+            ("lt(2, 2)", false),
+            ("leq(2, 2)", true),
+            ("leq(3, 2)", false),
+            ("gt(3, 2)", true),
+            ("gt(2, 2)", false),
+            ("geq(2, 2)", true),
+            ("geq(1, 2)", false),
+            (r#"eq('a', 'a')"#, true),
+            (r#"lt('a', 'b')"#, true),
+            (r#"lt('b', 'a')"#, false),
+            ("eq(True, True)", true),
+            ("neq(True, False)", true),
+            ("lt(False, True)", true),
+            ("eq(None, None)", true),
+            ("neq(None, None)", false),
+        ];
+        for (src, expected) in cases {
+            assert_eq!(eval_value(src, &vars), sdf::Value::Bool(expected), "evaluating {src}");
+        }
     }
 
     #[test]
-    fn eval_string_comparisons() {
+    fn eval_comparison_errors() {
         let vars = HashMap::new();
+        assert_eq!(
+            eval_errors(r#"eq(0, 'a')"#, &vars),
+            vec!["eq: Cannot compare values of type int and string"]
+        );
+        assert_eq!(
+            eval_errors("lt(0, False)", &vars),
+            vec!["lt: Cannot compare values of type int and bool"]
+        );
+        assert_eq!(
+            eval_errors("gt(0, None)", &vars),
+            vec!["gt: Cannot compare values of type int and None"]
+        );
+        assert_eq!(
+            eval_errors("lt(None, None)", &vars),
+            vec!["lt: Comparison operation not supported for None"]
+        );
+        assert_eq!(
+            eval_errors("eq([1], [1])", &vars),
+            vec!["eq: Unsupported type for comparison"]
+        );
+    }
 
-        let expr: Expr = r#"lt("apple", "banana")"#.parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+    #[test]
+    fn empty_list_comparisons() {
+        // A pair of untyped empty lists compares like `None` (C++'s
+        // `EmptyList` reaches the generic equality overloads).
+        let vars = HashMap::new();
+        assert_eq!(eval_value("eq([], [])", &vars), sdf::Value::Bool(true));
+        assert_eq!(eval_value("neq([], [])", &vars), sdf::Value::Bool(false));
+        assert_eq!(
+            eval_errors("lt([], [])", &vars),
+            vec!["lt: Comparison operation not supported for None"]
+        );
+        assert_eq!(
+            eval_errors("eq([], [1])", &vars),
+            vec!["eq: Cannot compare values of type list and list"]
+        );
+    }
 
-        let expr: Expr = r#"eq("test", "test")"#.parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+    #[test]
+    fn eval_and_or_not() {
+        let vars = HashMap::new();
+        let cases = [
+            ("and(True, True)", true),
+            ("and(True, False)", false),
+            ("and(True, True, False)", false),
+            ("or(False, True)", true),
+            ("or(False, False)", false),
+            ("or(False, False, True)", true),
+            ("not(True)", false),
+            ("not(False)", true),
+        ];
+        for (src, expected) in cases {
+            assert_eq!(eval_value(src, &vars), sdf::Value::Bool(expected), "evaluating {src}");
+        }
+    }
+
+    #[test]
+    fn eval_logical_type_errors() {
+        let vars = HashMap::new();
+        for func in ["and", "or"] {
+            assert_eq!(
+                eval_errors(&format!("{func}(1, 'foo', None)"), &vars),
+                vec![
+                    format!("{func}: Invalid type int for argument 0"),
+                    format!("{func}: Invalid type string for argument 1"),
+                    format!("{func}: Invalid type None for argument 2"),
+                ]
+            );
+        }
+        assert_eq!(eval_errors("not(1)", &vars), vec!["not: Invalid type int for argument"]);
+        assert_eq!(
+            eval_errors("not(None)", &vars),
+            vec!["not: Invalid type None for argument"]
+        );
+    }
+
+    #[test]
+    fn eval_short_circuit() {
+        // A decisive value stops evaluation before the invalid argument.
+        let vars = HashMap::new();
+        assert_eq!(eval_value("and(False, 1)", &vars), sdf::Value::Bool(false));
+        assert_eq!(eval_value("and(True, False, 1)", &vars), sdf::Value::Bool(false));
+        assert_eq!(eval_value("or(True, 1)", &vars), sdf::Value::Bool(true));
+        assert_eq!(eval_value("or(False, True, 1)", &vars), sdf::Value::Bool(true));
+    }
+
+    #[test]
+    fn matches_regex_string() {
+        let vars = make_vars(&[("S", sdf::Value::String("shot_10.usd".to_string()))]);
+        assert_eq!(
+            eval_value(r#"matches_regex(${S}, 'shot_[[:digit:]]{2}\.usd')"#, &vars),
+            sdf::Value::Bool(true)
+        );
+
+        let vars = make_vars(&[("S", sdf::Value::String("Shot_10.usd".to_string()))]);
+        assert_eq!(
+            eval_value(r#"matches_regex(${S}, 'shot_[[:digit:]]{2}\.usd')"#, &vars),
+            sdf::Value::Bool(false)
+        );
+
+        // Unanchored search; explicit anchors simulate starts/ends-with.
+        let vars = make_vars(&[("S", sdf::Value::String("shot_101_final.usd".to_string()))]);
+        assert_eq!(
+            eval_value(r#"matches_regex(${S}, '^shot.*')"#, &vars),
+            sdf::Value::Bool(true)
+        );
+        assert_eq!(
+            eval_value(r#"matches_regex(${S}, '.*final.usd$')"#, &vars),
+            sdf::Value::Bool(true)
+        );
+        assert_eq!(
+            eval_value(r#"matches_regex(${S}, '101')"#, &vars),
+            sdf::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn matches_regex_list_any() {
+        let vars = make_vars(&[
+            ("A", sdf::Value::String("shot1.usd".to_string())),
+            ("B", sdf::Value::String("layer1.usd".to_string())),
+        ]);
+        assert_eq!(
+            eval_value(r#"matches_regex([${A}, ${B}], 'layer.*')"#, &vars),
+            sdf::Value::Bool(true)
+        );
+        assert_eq!(
+            eval_value(r#"matches_regex([${A}, ${A}], 'layer.*')"#, &vars),
+            sdf::Value::Bool(false)
+        );
+        assert_eq!(
+            eval_value(r#"matches_regex([], 'layer.*')"#, &vars),
+            sdf::Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn matches_regex_invalid_pattern() {
+        let vars = make_vars(&[("S", sdf::Value::String("x".to_string()))]);
+        let errors = eval_errors(r#"matches_regex(${S}, '(unclosed')"#, &vars);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("matches_regex: Invalid match pattern: "));
+    }
+
+    #[test]
+    fn matches_regex_nonstring_pattern() {
+        let vars = HashMap::new();
+        assert_eq!(
+            eval_errors(r#"matches_regex('shot1', 7)"#, &vars),
+            vec!["matches_regex: Pattern to match must be a string"]
+        );
+        assert_eq!(
+            eval_errors(r#"matches_regex(['shot1'], 7)"#, &vars),
+            vec!["matches_regex: Pattern to match must be a string"]
+        );
+        assert_eq!(
+            eval_errors(r#"matches_regex(1, 'a')"#, &vars),
+            vec!["matches_regex: Value to search must be string[] or string"]
+        );
+    }
+
+    #[test]
+    fn empty_list_skips_checks() {
+        // An empty-list input answers `false` before the pattern or needle is
+        // examined (C++ returns ahead of its argument-validating visitor).
+        let vars = HashMap::new();
+        assert_eq!(
+            eval_value(r#"matches_regex([], '(unclosed')"#, &vars),
+            sdf::Value::Bool(false)
+        );
+        assert_eq!(eval_value("contains([], None)", &vars), sdf::Value::Bool(false));
     }
 
     #[test]
     fn eval_contains() {
-        let vars = make_vars(&[("ARR", sdf::Value::StringVec(vec!["a".into(), "b".into(), "c".into()]))]);
+        let vars = make_vars(&[("L", sdf::Value::IntVec(vec![]))]);
+        assert_eq!(eval_value("contains([], 1)", &vars), sdf::Value::Bool(false));
+        assert_eq!(eval_value("contains(${L}, 1)", &vars), sdf::Value::Bool(false));
 
-        let expr: Expr = r#"contains(${ARR}, "b")"#.parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+        let vars = make_vars(&[("A", sdf::Value::Int64(2))]);
+        assert_eq!(eval_value("contains([1, 2, 3], 1)", &vars), sdf::Value::Bool(true));
+        assert_eq!(eval_value("contains([1, 2, 3], 0)", &vars), sdf::Value::Bool(false));
+        assert_eq!(eval_value("contains([1, 2, 3], ${A})", &vars), sdf::Value::Bool(true));
 
-        let expr: Expr = r#"contains(${ARR}, "z")"#.parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+        let vars = HashMap::new();
+        assert_eq!(eval_value(r#"contains('abc', 'a')"#, &vars), sdf::Value::Bool(true));
+        assert_eq!(eval_value(r#"contains('abc', 'z')"#, &vars), sdf::Value::Bool(false));
+        assert_eq!(eval_value(r#"contains('', 'a')"#, &vars), sdf::Value::Bool(false));
+        assert_eq!(
+            eval_value("contains([True, False], False)", &vars),
+            sdf::Value::Bool(true)
+        );
+    }
 
-        // String contains substring
-        let vars = make_vars(&[("S", sdf::Value::String("hello world".to_string()))]);
-        let expr: Expr = r#"contains(${S}, "world")"#.parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+    #[test]
+    fn eval_contains_errors() {
+        let vars = HashMap::new();
+        assert_eq!(
+            eval_errors(r#"contains([1, 2, 3], 'a')"#, &vars),
+            vec!["contains: Invalid search value"]
+        );
+        assert_eq!(
+            eval_errors("contains([1, 2, 3], None)", &vars),
+            vec!["contains: Invalid search value"]
+        );
+        assert_eq!(
+            eval_errors(r#"contains('abcd', 1)"#, &vars),
+            vec!["contains: Invalid search value"]
+        );
+        assert_eq!(
+            eval_errors("contains(1, 1)", &vars),
+            vec!["contains: Value to search must be a list or string"]
+        );
+        assert_eq!(
+            eval_errors("contains(None, 1)", &vars),
+            vec!["contains: Value to search must be a list or string"]
+        );
     }
 
     #[test]
     fn eval_at() {
-        let vars = make_vars(&[("ARR", sdf::Value::StringVec(vec!["a".into(), "b".into(), "c".into()]))]);
+        let vars = HashMap::new();
+        assert_eq!(eval_value("at([1, 2, 3], 0)", &vars), sdf::Value::Int64(1));
+        assert_eq!(eval_value("at([1, 2, 3], 2)", &vars), sdf::Value::Int64(3));
+        assert_eq!(eval_value("at([1, 2, 3], -1)", &vars), sdf::Value::Int64(3));
+        assert_eq!(eval_value("at([1, 2, 3], -3)", &vars), sdf::Value::Int64(1));
+        assert_eq!(
+            eval_value(r#"at('abc', 1)"#, &vars),
+            sdf::Value::String("b".to_string())
+        );
+        assert_eq!(
+            eval_value(r#"at('abc', -1)"#, &vars),
+            sdf::Value::String("c".to_string())
+        );
+    }
 
-        let expr: Expr = "at(${ARR}, 0)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("a".to_string()));
-
-        let expr: Expr = "at(${ARR}, -1)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("c".to_string()));
-
-        // String indexing
-        let vars = make_vars(&[("S", sdf::Value::String("hello".to_string()))]);
-        let expr: Expr = "at(${S}, 1)".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("e".to_string()));
+    #[test]
+    fn eval_at_errors() {
+        let vars = HashMap::new();
+        assert_eq!(eval_errors("at([1, 2, 3], 3)", &vars), vec!["at: Index out of range"]);
+        assert_eq!(eval_errors("at([1, 2, 3], -4)", &vars), vec!["at: Index out of range"]);
+        assert_eq!(eval_errors("at([], 0)", &vars), vec!["at: Index out of range"]);
+        assert_eq!(eval_errors(r#"at('', 0)"#, &vars), vec!["at: Index out of range"]);
+        assert_eq!(
+            eval_errors(r#"at([1, 2, 3], 'foo')"#, &vars),
+            vec!["at: Index must be an integer"]
+        );
+        assert_eq!(
+            eval_errors("at([1, 2, 3], None)", &vars),
+            vec!["at: Index must be an integer"]
+        );
     }
 
     #[test]
     fn eval_len() {
-        let vars = make_vars(&[("ARR", sdf::Value::StringVec(vec!["a".into(), "b".into()]))]);
-
-        let expr: Expr = "len(${ARR})".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Int64(2));
-
-        let vars = make_vars(&[("S", sdf::Value::String("hello".to_string()))]);
-        let expr: Expr = "len(${S})".parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Int64(5));
+        let vars = HashMap::new();
+        assert_eq!(eval_value("len([])", &vars), sdf::Value::Int64(0));
+        assert_eq!(eval_value("len([1, 2, 3])", &vars), sdf::Value::Int64(3));
+        assert_eq!(eval_value(r#"len('')"#, &vars), sdf::Value::Int64(0));
+        assert_eq!(eval_value(r#"len('abc')"#, &vars), sdf::Value::Int64(3));
+        assert_eq!(eval_errors("len(1)", &vars), vec!["len: Unsupported type"]);
+        assert_eq!(eval_errors("len(None)", &vars), vec!["len: Unsupported type"]);
     }
 
     #[test]
-    fn eval_complex_expression() {
-        let vars = make_vars(&[
-            ("MODE", sdf::Value::String("debug".to_string())),
-            ("DEBUG", sdf::Value::Bool(true)),
-        ]);
+    fn defined_quoted_names() {
+        let vars = make_vars(&[("X", sdf::Value::Int64(0)), ("Y", sdf::Value::Int64(1))]);
+        assert_eq!(eval_value(r#"defined('X')"#, &vars), sdf::Value::Bool(true));
+        assert_eq!(eval_value(r#"defined('Z')"#, &vars), sdf::Value::Bool(false));
+        assert_eq!(eval_value(r#"defined('X', 'Y')"#, &vars), sdf::Value::Bool(true));
+        assert_eq!(eval_value(r#"defined('X', 'Z')"#, &vars), sdf::Value::Bool(false));
+    }
 
-        let expr: Expr = r#"if(or(eq(${MODE}, "debug"), ${DEBUG}), "dbg", "rel")"#.parse().unwrap();
-        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("dbg".to_string()));
+    #[test]
+    fn defined_nonstring_arg() {
+        let vars = HashMap::new();
+        assert_eq!(
+            eval_errors("defined(1)", &vars),
+            vec!["defined: Invalid type int for argument 0"]
+        );
+        assert_eq!(
+            eval_errors("defined(None)", &vars),
+            vec!["defined: Invalid type None for argument 0"]
+        );
+    }
+
+    #[test]
+    fn defined_records_names() {
+        let vars = make_vars(&[("X", sdf::Value::Int64(0))]);
+        let expr = Expr::parse(r#"defined('X', 'Y')"#).unwrap();
+        let result = expr.evaluate(&vars);
+        assert_eq!(result.value, Some(EvaluationValue::Value(sdf::Value::Bool(false))));
+        assert!(result.used_variables.contains("X"));
+        assert!(result.used_variables.contains("Y"));
+    }
+
+    #[test]
+    fn eval_recursive_variable() {
+        let vars = make_vars(&[
+            ("FOO", sdf::Value::String("`${BAR}`".to_string())),
+            ("BAR", sdf::Value::String("ok".to_string())),
+        ]);
+        assert_eq!(eval_value("${FOO}", &vars), sdf::Value::String("ok".to_string()));
+
+        let vars = make_vars(&[
+            ("FOO", sdf::Value::String("`'subexpression_${BAR}'`".to_string())),
+            ("BAR", sdf::Value::String("`'${BAZ}'`".to_string())),
+            ("BAZ", sdf::Value::String("`'works_ok'`".to_string())),
+        ]);
+        assert_eq!(
+            eval_value("${FOO}", &vars),
+            sdf::Value::String("subexpression_works_ok".to_string())
+        );
+
+        let vars = make_vars(&[
+            ("A", sdf::Value::String("`'subexpression_${FOO}'`".to_string())),
+            ("FOO", sdf::Value::String("`'${BAR}'`".to_string())),
+            ("BAR", sdf::Value::String("`'works_ok'`".to_string())),
+            ("B", sdf::Value::String("`${A}`".to_string())),
+        ]);
+        assert_eq!(
+            eval_value(r#"'${A}_${B}'"#, &vars),
+            sdf::Value::String("subexpression_works_ok_subexpression_works_ok".to_string())
+        );
+    }
+
+    #[test]
+    fn eval_circular_error() {
+        let vars = make_vars(&[
+            ("FOO", sdf::Value::String("`${BAR}`".to_string())),
+            ("BAR", sdf::Value::String("`${BAZ}`".to_string())),
+            ("BAZ", sdf::Value::String("`${FOO}`".to_string())),
+        ]);
+        assert_eq!(
+            eval_errors("${FOO}", &vars),
+            vec!["Encountered circular variable substitutions: ['FOO', 'BAR', 'BAZ', 'FOO']"]
+        );
+    }
+
+    #[test]
+    fn eval_nested_parse_error() {
+        // A parse error in a variable's expression value names the variable.
+        let vars = make_vars(&[
+            ("FOO", sdf::Value::String("`'${BAR}'`".to_string())),
+            ("BAR", sdf::Value::String("`${BAZ`".to_string())),
+        ]);
+        let errors = eval_errors("${FOO}", &vars);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].ends_with("(in variable 'BAR')"), "got {:?}", errors[0]);
+    }
+
+    #[test]
+    fn used_vars_reported() {
+        let vars = make_vars(&[
+            ("A", sdf::Value::String("`'${B}'`".to_string())),
+            ("B", sdf::Value::String("x".to_string())),
+        ]);
+        let expr = Expr::parse(r#"'${A}'"#).unwrap();
+        let result = expr.evaluate(&vars);
+        assert_eq!(result.errors, Vec::<String>::new());
+        assert_eq!(result.used_variables, HashSet::from(["A".to_string(), "B".to_string()]));
+    }
+
+    #[test]
+    fn used_vars_on_failure() {
+        // Invalidation depends on used variables being reported even when
+        // evaluation fails.
+        let vars = HashMap::new();
+        let expr = Expr::parse("eq(${A}, ${B})").unwrap();
+        let result = expr.evaluate(&vars);
+        assert!(result.value.is_none());
+        assert!(!result.errors.is_empty());
+        assert_eq!(result.used_variables, HashSet::from(["A".to_string(), "B".to_string()]));
+    }
+
+    #[test]
+    fn eval_error_aggregation() {
+        let vars = HashMap::new();
+        assert_eq!(
+            eval_errors("eq(${A}, ${B})", &vars),
+            vec!["No value for variable 'A'", "No value for variable 'B'"]
+        );
+    }
+
+    #[test]
+    fn evaluate_string_passthrough() {
+        let vars = HashMap::new();
+        let result = evaluate_string("plain/path.usd", &vars);
+        assert_eq!(result.value.as_deref(), Some("plain/path.usd"));
+        assert!(result.errors.is_empty());
+        assert!(result.used_variables.is_empty());
+    }
+
+    #[test]
+    fn evaluate_string_expression() {
+        let vars = make_vars(&[("PATH", sdf::Value::String("/assets".to_string()))]);
+        let result = evaluate_string(r#"`"${PATH}/model.usd"`"#, &vars);
+        assert_eq!(result.value.as_deref(), Some("/assets/model.usd"));
+        assert!(result.errors.is_empty());
+        assert_eq!(result.used_variables, HashSet::from(["PATH".to_string()]));
+    }
+
+    #[test]
+    fn evaluate_string_nonstring() {
+        let vars = HashMap::new();
+        let result = evaluate_string("`42`", &vars);
+        assert_eq!(result.value, None);
+        assert_eq!(
+            result.errors,
+            vec!["Expression evaluated to 'int' but expected 'string'"]
+        );
+    }
+
+    #[test]
+    fn evaluate_string_none_silent() {
+        // The expression-language None yields no value and no errors.
+        let vars = HashMap::new();
+        let result = evaluate_string(r#"`if(False, "x")`"#, &vars);
+        assert_eq!(result.value, None);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn evaluate_string_parse_error() {
+        let vars = HashMap::new();
+        let result = evaluate_string("`${FO-O}`", &vars);
+        assert_eq!(result.value, None);
+        assert!(!result.errors.is_empty());
+    }
+
+    #[test]
+    fn evaluate_string_reports_used_on_failure() {
+        let vars = HashMap::new();
+        let result = evaluate_string("`${MISSING}`", &vars);
+        assert_eq!(result.value, None);
+        assert_eq!(result.errors, vec!["No value for variable 'MISSING'"]);
+        assert_eq!(result.used_variables, HashSet::from(["MISSING".to_string()]));
     }
 }

@@ -385,23 +385,31 @@ impl LayerRegistry {
         // layer's `resolved` is already package-relative and its sublayer paths
         // anchor against it the same way any other layer's do.
         for sub_path in sub_paths {
-            // Evaluate the (possibly expression-valued) sublayer path. An
-            // unevaluable expression drops only this sublayer — like an unresolved
-            // or unreadable one — rather than failing the whole stack open. It has no
+            // Evaluate an expression-valued sublayer path. An unevaluable
+            // expression drops only this sublayer — like an unresolved or
+            // unreadable one — rather than failing the whole stack open. It has no
             // resolved identifier to key on, so it deduplicates per referrer by its
-            // authored path, keeping the three load-failure branches consistent.
-            let sub_asset = match expr::evaluate_asset_path(&sub_path, stack_vars) {
-                Ok(evaluated) => evaluated,
-                Err(reason) => {
-                    if failed.insert(sub_path.clone()) {
-                        on_error(Error::UnreadableAsset {
-                            asset_path: sub_path,
-                            referencing_layer: identifier.clone(),
-                            reason: format!("{reason:#}"),
-                        })?;
+            // authored path, keeping the three load-failure branches consistent. An
+            // expression evaluating to `None` contributes no sublayer and no error
+            // (C++ skips it silently).
+            let sub_asset = if expr::is_expression(&sub_path) {
+                let evaluated = expr::evaluate_string(&sub_path, stack_vars);
+                match evaluated.value {
+                    Some(evaluated) => evaluated,
+                    None if evaluated.errors.is_empty() => continue,
+                    None => {
+                        if failed.insert(sub_path.clone()) {
+                            on_error(Error::UnreadableAsset {
+                                asset_path: sub_path,
+                                referencing_layer: identifier.clone(),
+                                reason: evaluated.errors.join("; "),
+                            })?;
+                        }
+                        continue;
                     }
-                    continue;
                 }
+            } else {
+                sub_path
             };
 
             let sub_id = self.create_identifier(&sub_asset, Some(&resolved));
@@ -511,7 +519,11 @@ impl LayerRegistry {
         // reached here that no stack includes is simply an unused node.
         let stack_vars = expr::stack_expression_variables(data.as_ref(), ancestor_expr_vars)?;
         for dep in Self::arc_dependencies(data.as_ref())? {
-            let dep_asset = expr::evaluate_asset_path(&dep, &stack_vars)?;
+            // An unevaluable dependency loads nothing, mirroring the graph's
+            // drop-the-edge handling.
+            let Some(dep_asset) = expr::evaluate_string(&dep, &stack_vars).value else {
+                continue;
+            };
             self.collect_with_arcs_in(&dep_asset, Some(&resolved), &stack_vars, layers, visited)?;
         }
         layers.push(sdf::Layer::new_resolved(identifier, &resolved, data));

@@ -3437,10 +3437,9 @@ mod tests {
 
     /// Two distinct override sources (`s1`, `s2`) carrying equal composed maps
     /// into the same target share one `LayerStackId`, so the site-identity cycle
-    /// check closes the chain the second time `/T` is reached. Pins the accepted
-    /// divergence from C++: `PcpLayerStackIdentifier` keys by the override
-    /// *source*, so C++ would keep t-via-s1 and t-via-s2 as distinct sites and
-    /// not report a cycle here.
+    /// check closes the chain the second time `/T` is reached. C++ keys
+    /// `PcpLayerStackIdentifier` by the override *source*, keeping t-via-s1 and
+    /// t-via-s2 as distinct sites and reporting no cycle here.
     #[test]
     fn equal_context_cycle_coalesced() {
         let mut s = multi_stack(&[

@@ -236,12 +236,13 @@
 //!   (`LayerGraph::stack_expression_variables`), so equal composed maps share
 //!   one `LayerStackId` even when they arrive from distinct override sources.
 //!   C++ keys `PcpLayerStackIdentifier` by an override *source* (another layer
-//!   stack) instead, so it can keep distinct stacks — and distinct site
-//!   identities in duplicate and cycle detection — where this implementation
-//!   coalesces them, which can produce a different graph or composed result in
-//!   that corner. An accepted divergence: membership and expression evaluation
-//!   are unaffected, and source-chained identity would forfeit the registry's
-//!   value-keyed dedup.
+//!   stack) and follows it recursively, so it can keep distinct stacks — and
+//!   distinct site identities in duplicate and cycle detection — where this
+//!   implementation coalesces them, which can produce a different graph or
+//!   composed result in that corner. Membership and expression evaluation are
+//!   unaffected. Identity keying is separate from content storage: `expr_id`
+//!   interns each composed map's canonical form for comparison, while every
+//!   instance owns its map.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.

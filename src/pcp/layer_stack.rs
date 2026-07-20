@@ -128,11 +128,11 @@ enum LayerStackKey {
     /// reached through two contexts gets one instance each, so its `${VAR}`
     /// sublayers and asset paths resolve independently.
     ///
-    /// Keying by the composed context is a deliberate simplification of C++'s
-    /// `PcpLayerStackIdentifier`, which keys by an override *source* (another
-    /// layer stack) and follows it recursively: equal composed maps arriving from
-    /// distinct sources share one instance — and thus one site identity in
-    /// duplicate and cycle detection — where C++ keeps two.
+    /// Keying by the composed context coalesces override sources: equal composed
+    /// maps arriving from distinct sources share one instance — and thus one site
+    /// identity in duplicate and cycle detection — where C++'s
+    /// `PcpLayerStackIdentifier`, keyed by an override *source* (another layer
+    /// stack) followed recursively, keeps two.
     Target { root: LayerId, seed: ExprVarId },
 }
 

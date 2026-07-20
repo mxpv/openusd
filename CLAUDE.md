@@ -151,6 +151,7 @@ Key external dependencies:
 - `logos` - Lexer generator for USDA tokenization
 - `lz4_flex` - Compression for binary format
 - `num-traits` - Numeric traits
+- `regex-lite` - Lightweight regex engine for the `matches_regex` expression function
 - `strum` - Enum derive macros (Display, EnumIs, EnumTryAs, IntoStaticStr, etc.)
 - `thiserror` - Error type derive macros for typed errors such as `layer::Error` and `pcp::Error`
 - `zip` - USDZ archive reading

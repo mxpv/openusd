@@ -46,6 +46,7 @@ logos = "0.16.0"
 serde = { version = "1", features = ["derive"], optional = true }
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut", "add", "add_assign", "mul", "mul_assign", "not", "sum", "from"] }
+regex-lite = "0.1.9"
 
 [dev-dependencies]
 diff_json = "0.1"

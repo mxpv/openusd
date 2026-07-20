@@ -444,11 +444,12 @@ impl LayerGraph {
         let mut edges = Vec::with_capacity(sub_paths.len());
         for (i, sub_path) in sub_paths.into_iter().enumerate() {
             let sub_path = if expr::is_expression(&sub_path) {
-                match expr::evaluate_asset_path(&sub_path, context) {
-                    Ok(resolved) => resolved,
-                    // An unevaluable expression resolves to no edge; the layer it
-                    // would name is left out of the stack.
-                    Err(_) => continue,
+                match expr::evaluate_string(&sub_path, context).value {
+                    Some(resolved) => resolved,
+                    // An unevaluable expression (or one evaluating to `None`)
+                    // resolves to no edge; the layer it would name is left out
+                    // of the stack.
+                    None => continue,
                 }
             } else {
                 sub_path

@@ -35,7 +35,7 @@ pub use copy::{
     CopyChildrenArgs, CopyValue, CopyValueArgs,
 };
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
-pub use expr::Expr;
+pub use expr::{Evaluation, EvaluationValue, Expr, StringEvaluation, StringSegment};
 pub use file_format::{FileFormat, FileFormatCaps, WriteSeek};
 pub(crate) use layer::{dry_run_layers, edit_layers};
 pub use layer::{AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSinkId, PendingLayerChange};

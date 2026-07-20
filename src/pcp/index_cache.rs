@@ -1149,7 +1149,7 @@ impl IndexCache {
         // plain element in a mixed array must still skip evaluation.
         let identifier = if sdf::expr::is_expression(asset.as_str()) {
             let Some(vars) = expr_vars else { return asset };
-            let Ok(evaluated) = sdf::expr::evaluate_asset_path(asset.as_str(), vars) else {
+            let Some(evaluated) = sdf::expr::evaluate_string(asset.as_str(), vars).value else {
                 return asset;
             };
             let identifier = graph.layer_registry().create_identifier(&evaluated, anchor);
