@@ -16,8 +16,8 @@ use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
-use super::prim_graph::{ArcType, Node};
-use super::{Error, LayerGraph, LayerId};
+use super::prim_graph::Node;
+use super::{Error, ExpressionContext, LayerGraph, LayerId};
 
 /// Composes the `references` list-op, folding each authoring sublayer's offset
 /// into its references' layer offsets (C++ `PcpComposeSiteReferences`). A
@@ -51,7 +51,7 @@ pub(super) fn compose_references_in(
                 layer,
                 graph,
                 expr_vars,
-                ArcType::Reference,
+                ExpressionContext::Reference,
                 site,
                 errors,
             )
@@ -109,7 +109,7 @@ pub(super) fn collect_payloads_in(
                 layer,
                 graph,
                 expr_vars,
-                ArcType::Payload,
+                ExpressionContext::Payload,
                 site,
                 errors,
             )
@@ -240,29 +240,99 @@ fn resolve_arc_asset_path(
     authoring_layer: LayerId,
     graph: &LayerGraph,
     expr_vars: &HashMap<String, Value>,
-    arc: ArcType,
+    context: ExpressionContext,
     site: &Path,
     errors: &mut Vec<Error>,
 ) -> Option<f64> {
     if expr::is_expression(asset_path) {
-        let evaluated = expr::evaluate_string(asset_path, expr_vars);
-        match evaluated.value {
-            Some(resolved) => *asset_path = resolved,
-            None => {
-                if !evaluated.errors.is_empty() {
-                    errors.push(Error::InvalidExpression {
-                        expression: asset_path.clone(),
-                        arc,
-                        site_path: site.clone(),
-                        message: evaluated.errors.join("; "),
-                    });
-                }
-                return None;
-            }
+        match evaluate_expression(
+            asset_path,
+            expr_vars,
+            context,
+            graph.layer(authoring_layer),
+            site,
+            Some(errors),
+        ) {
+            EvaluatedExpression::Value(resolved) => *asset_path = resolved,
+            // Both outcomes leave the raw expression in place for the caller
+            // to drop; only the failure carries a diagnostic.
+            EvaluatedExpression::None | EvaluatedExpression::Failed => return None,
         }
     }
     anchor_asset_path(asset_path, graph.layer(authoring_layer), graph.layer_registry());
     Some(arc_tcps_scale(graph.layer(authoring_layer), asset_path, graph))
+}
+
+/// The outcome of evaluating a possibly-expression-valued composition field:
+/// an evaluated (or passed-through) string, the expression-language `None`,
+/// or a recorded failure. What each outcome means — drop the arc, accept the
+/// empty selection, fall through to a weaker opinion — is the call site's
+/// decision, as in C++.
+pub(super) enum EvaluatedExpression {
+    /// The authored string passed through, or the expression's string result.
+    Value(String),
+    /// The expression evaluated to the expression-language `None`, with no
+    /// errors.
+    None,
+    /// Evaluation failed; the diagnostic was pushed into the sink when one
+    /// was given.
+    Failed,
+}
+
+impl EvaluatedExpression {
+    /// The variant selection this outcome yields: the evaluated (or
+    /// passed-through) string, the empty selection for the
+    /// expression-language `None` (accepted, deferring to the fallback), or
+    /// `None` for a failed evaluation, which skips to the next-weaker
+    /// opinion.
+    pub(super) fn into_selection(self) -> Option<String> {
+        match self {
+            Self::Value(selection) => Some(selection),
+            Self::None => Some(String::new()),
+            Self::Failed => None,
+        }
+    }
+}
+
+/// Evaluates a possibly-expression-valued composition field against a stack's
+/// composed variables (C++ `Pcp_EvaluateVariableExpression`), recording a
+/// failure as [`Error::InvalidExpression`] when an error sink is given — the
+/// indexing-time pass emits diagnostics, re-resolution passes stay silent.
+pub(super) fn evaluate_expression(
+    expression: &str,
+    expr_vars: &HashMap<String, Value>,
+    context: ExpressionContext,
+    authoring_layer: &sdf::Layer,
+    site_path: &Path,
+    errors: Option<&mut Vec<Error>>,
+) -> EvaluatedExpression {
+    let evaluated = expr::evaluate_string(expression, expr_vars);
+    // TODO: `evaluated.used_variables` is discarded here; fine-grained
+    // variable dependency tracking will record it per stack so a variable
+    // edit re-resolves only the prims that used it.
+    match evaluated.value {
+        Some(resolved) => EvaluatedExpression::Value(resolved),
+        None if evaluated.errors.is_empty() => EvaluatedExpression::None,
+        None => {
+            if let Some(errors) = errors {
+                let error = Error::InvalidExpression {
+                    expression: expression.to_string(),
+                    context,
+                    source_layer: authoring_layer.identifier().to_string(),
+                    site_path: site_path.clone(),
+                    message: evaluated.errors.join("; "),
+                };
+                // The same failing opinion can be evaluated more than once —
+                // the variant-selection search re-runs per declaring node and
+                // on task retry — so an identical, already-recorded
+                // diagnostic is not repeated.
+                if !errors.contains(&error) {
+                    errors.push(error);
+                }
+            }
+            EvaluatedExpression::Failed
+        }
+    }
 }
 
 /// Anchors a non-empty, non-absolute asset path to the layer that authored it,

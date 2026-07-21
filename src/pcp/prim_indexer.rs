@@ -97,13 +97,13 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path, Value};
 use crate::tf::Token;
 
-use super::compose_site::{collect_payloads_in, compose_arc_list_in, compose_references_in};
+use super::compose_site::{collect_payloads_in, compose_arc_list_in, compose_references_in, evaluate_expression};
 use super::layer_graph::ExternalStack;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
 use super::prim_index::{stack_has_spec, CompositionContext, Demand, PrimEntry};
-use super::{CycleChain, CycleHop, Error, LayerGraph, LayerId};
+use super::{CycleChain, CycleHop, Error, ExpressionContext, LayerGraph, LayerId};
 
 /// Maximum composition-arc nesting before the prim is abandoned as a cycle,
 /// composing to an empty prim index. Matches C++ `MAX_COMPOSITION_DEPTH`.
@@ -1748,8 +1748,19 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// sites that namespace-map to `vset_path` — for an ancestral variant set, the
     /// search is rooted at the strongest node the set path maps to, so an arc
     /// boundary that blocks the mapping also blocks stronger frames' selections
-    /// from leaking in. Returns the selection, or `None` when none is authored.
-    fn compose_variant_selection(&self, origin: NodeId, vset_path: &Path, vset: &str) -> BuildResult<Option<String>> {
+    /// from leaking in. An expression-valued opinion evaluates against the
+    /// reading node's own stack variables; a failed one records
+    /// [`Error::InvalidExpression`] and falls through to the next-weaker
+    /// opinion (C++ skip semantics), while one evaluating to the
+    /// expression-language `None` is the accepted empty selection, deferring
+    /// to the fallback like an authored empty selection. Returns the
+    /// selection, or `None` when none is authored.
+    fn compose_variant_selection(
+        &mut self,
+        origin: NodeId,
+        vset_path: &Path,
+        vset: &str,
+    ) -> BuildResult<Option<String>> {
         // The strongest node the set path maps to, and the path in its namespace
         // (C++ `Pcp_TranslatePathFromNodeToRootOrClosestNode`).
         let (start, path_in_start) = self.translate_path_to_root_or_closest(origin, vset_path);
@@ -1790,10 +1801,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
             } else {
                 path_in_node
             };
-            for &(layer, _) in self.inputs.stack.layer_stack(node.layer_stack_id()).iter() {
-                let Some(value) = self
-                    .inputs
-                    .stack
+            let node_stack = node.layer_stack_id();
+            let stack = self.inputs.stack;
+            for &(layer, _) in stack.layer_stack(node_stack).iter() {
+                let Some(value) = stack
                     .layer(layer)
                     .data()
                     .try_field(&site, FieldKey::VariantSelection.as_str())?
@@ -1802,7 +1813,25 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 };
                 if let Value::VariantSelectionMap(map) = value.into_owned() {
                     if let Some(sel) = map.get(vset) {
-                        return Ok(Some(sel.clone()));
+                        // Evaluate against the reading node's own stack
+                        // variables (C++ `PcpComposeSiteVariantSelection`);
+                        // indexing time is the sole diagnostic emitter. An
+                        // accepted selection — including the empty one an
+                        // expression-language `None` yields, which defers to
+                        // the fallback — stops the search; only a failed
+                        // evaluation falls through to the next-weaker opinion.
+                        let selection = evaluate_expression(
+                            sel,
+                            stack.stack_expression_variables(node_stack),
+                            ExpressionContext::Variant,
+                            stack.layer(layer),
+                            &site,
+                            Some(&mut self.errors),
+                        )
+                        .into_selection();
+                        if let Some(selection) = selection {
+                            return Ok(Some(selection));
+                        }
                     }
                 }
             }
@@ -3109,7 +3138,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::prim_index::tests::build_with_fallbacks;
     use super::super::prim_index::PrimIndex;
+    use super::super::VariantFallbackMap;
     use super::*;
 
     fn stack(text: &str) -> LayerGraph {
@@ -3258,6 +3289,167 @@ mod tests {
             graph.iter().all(|n| n.arc != ArcType::Variant),
             "no variant arc is added without a selection, got {:?}",
             graph.iter().map(|n| n.path.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// An expression-valued variant selection evaluates against the stack's
+    /// composed variables and selects the resulting variant.
+    #[test]
+    fn variant_expr_selection() {
+        let mut s = stack(
+            "#usda 1.0\n(\n    expressionVariables = {\n        string SEL = \"hi\"\n    }\n)\ndef \"World\" (\n    variantSets = \"v\"\n    variants = { string v = \"`${SEL}`\" }\n) {\n  variantSet \"v\" = {\n    \"hi\" { custom double x = 1 }\n    \"lo\" { custom double x = 2 }\n  }\n}\n",
+        );
+        let graph = build(&mut s, "/World").expect("an expression-selected variant composes");
+        assert!(
+            graph
+                .iter()
+                .any(|n| n.arc == ArcType::Variant && n.path.as_str() == "/World{v=hi}" && n.has_specs()),
+            "the evaluated selection {{v=hi}} contributes a node, got {:?}",
+            graph.iter().map(|n| n.path.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A selection expression authored in a referenced layer evaluates against
+    /// the reading node's own stack variables — the referencing stack's
+    /// override, inherited into the target's composed set, wins over the
+    /// target layer's own value.
+    #[test]
+    fn variant_expr_across_reference() {
+        let mut s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string SEL = \"hi\"\n    }\n)\ndef \"Model\" (\n    references = @t.usd@</T>\n) {}\n",
+            ),
+            (
+                "t.usd",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string SEL = \"lo\"\n    }\n)\ndef \"T\" (\n    variantSets = \"v\"\n    variants = { string v = \"`${SEL}`\" }\n) {\n  variantSet \"v\" = {\n    \"hi\" { custom double x = 1 }\n    \"lo\" { custom double x = 2 }\n  }\n}\n",
+            ),
+        ]);
+        let graph = build(&mut s, "/Model").expect("the referenced variant composes");
+        assert!(
+            graph
+                .iter()
+                .any(|n| n.arc == ArcType::Variant && n.path.as_str().ends_with("{v=hi}")),
+            "the override's {{v=hi}} wins over the target's own SEL, got {:?}",
+            graph.iter().map(|n| n.path.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A root layer authoring a hi/lo variant set with a literal `lo`
+    /// selection, overlaid in tests by a session layer whose expression
+    /// selection varies.
+    const VARIANT_HI_LO_ROOT: &str = "#usda 1.0\ndef \"World\" (\n    variantSets = \"v\"\n    variants = { string v = \"lo\" }\n) {\n  variantSet \"v\" = {\n    \"hi\" { custom double x = 1 }\n    \"lo\" { custom double x = 2 }\n  }\n}\n";
+
+    /// A stronger opinion whose expression fails to evaluate records a
+    /// variant-context diagnostic and falls through to the next-weaker
+    /// authored opinion (C++ skip semantics).
+    #[test]
+    fn variant_expr_error_skips() {
+        let mut s = session_stack(
+            &[
+                (
+                    "session.usd",
+                    "#usda 1.0\nover \"World\" (\n    variants = { string v = \"`${UNDEF}`\" }\n) {\n}\n",
+                ),
+                ("root.usd", VARIANT_HI_LO_ROOT),
+            ],
+            1,
+        );
+        let out = build_full(&mut s, "/World");
+        let graph = out.graph.expect("the prim composes past the failed expression");
+        assert!(
+            graph
+                .iter()
+                .any(|n| n.arc == ArcType::Variant && n.path.as_str() == "/World{v=lo}"),
+            "the weaker literal opinion wins after the failed expression, got {:?}",
+            graph.iter().map(|n| n.path.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            out.errors.iter().any(|e| matches!(
+                e,
+                Error::InvalidExpression {
+                    context: ExpressionContext::Variant,
+                    ..
+                }
+            )),
+            "the failed selection records a variant-context error, got {:?}",
+            out.errors
+        );
+    }
+
+    /// A stronger opinion that successfully evaluates to `None` is the
+    /// accepted empty selection: it blocks weaker authored opinions and
+    /// defers to the fallback, with no diagnostic (C++
+    /// `PcpComposeSiteVariantSelection` accepts the empty result).
+    #[test]
+    fn variant_none_blocks_weaker() {
+        let mut s = session_stack(
+            &[
+                (
+                    "session.usd",
+                    "#usda 1.0\nover \"World\" (\n    variants = { string v = \"`None`\" }\n) {\n}\n",
+                ),
+                ("root.usd", VARIANT_HI_LO_ROOT),
+            ],
+            1,
+        );
+        let out = build_full(&mut s, "/World");
+        let graph = out.graph.expect("the prim composes");
+        assert!(
+            graph.iter().all(|n| n.arc != ArcType::Variant),
+            "the accepted empty selection blocks the weaker `lo` opinion, got {:?}",
+            graph.iter().map(|n| n.path.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            !out.errors.iter().any(|e| matches!(e, Error::InvalidExpression { .. })),
+            "a successful `None` records no diagnostic, got {:?}",
+            out.errors
+        );
+
+        // With a fallback configured, the empty selection defers to it.
+        let index = build_with_fallbacks(&mut s, "/World", VariantFallbackMap::new().add("v", ["hi"]));
+        assert!(
+            index
+                .nodes()
+                .any(|n| n.arc == ArcType::Variant && n.path.as_str() == "/World{v=hi}"),
+            "the fallback selects past the accepted empty selection, got {:?}",
+            index.nodes().map(|n| n.path.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// One failing expression records one diagnostic, even though the
+    /// selection search re-runs when a sibling set's arc promotes pending
+    /// variant tasks.
+    #[test]
+    fn variant_expr_error_once() {
+        let mut s = stack(
+            "#usda 1.0\ndef \"World\" (\n    variantSets = [\"a\", \"v\"]\n    variants = {\n        string a = \"x\"\n        string v = \"`${UNDEF}`\"\n    }\n) {\n  variantSet \"a\" = {\n    \"x\" { custom double y = 1 }\n  }\n  variantSet \"v\" = {\n    \"hi\" { custom double x = 1 }\n    \"lo\" { custom double x = 2 }\n  }\n}\n",
+        );
+        let out = build_full(&mut s, "/World");
+        assert_eq!(
+            out.errors
+                .iter()
+                .filter(|e| matches!(e, Error::InvalidExpression { .. }))
+                .count(),
+            1,
+            "the re-run selection search does not repeat the diagnostic, got {:?}",
+            out.errors
+        );
+    }
+
+    /// A configured fallback is matched literally against the set's options —
+    /// an expression-shaped fallback is never evaluated, so it selects
+    /// nothing.
+    #[test]
+    fn variant_fallback_not_evaluated() {
+        let mut s = stack(
+            "#usda 1.0\n(\n    expressionVariables = {\n        string SEL = \"hi\"\n    }\n)\ndef \"World\" (\n    variantSets = \"v\"\n) {\n  variantSet \"v\" = {\n    \"hi\" { custom double x = 1 }\n  }\n}\n",
+        );
+        let index = build_with_fallbacks(&mut s, "/World", VariantFallbackMap::new().add("v", ["`${SEL}`"]));
+        assert!(
+            index.nodes().all(|n| n.arc != ArcType::Variant),
+            "an expression-shaped fallback stays literal and matches no option, got {:?}",
+            index.nodes().map(|n| n.path.as_str()).collect::<Vec<_>>()
         );
     }
 

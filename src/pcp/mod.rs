@@ -421,6 +421,20 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
     }
 }
 
+/// The kind of authored field a composition-time variable expression came
+/// from (C++ `PcpErrorVariableExpressionError`'s context), carried by
+/// [`Error::InvalidExpression`] to name the failing site in diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "lowercase")]
+pub enum ExpressionContext {
+    /// A reference's asset path.
+    Reference,
+    /// A payload's asset path.
+    Payload,
+    /// A variant selection.
+    Variant,
+}
+
 /// An error encountered while building a [`PrimIndex`](prim_index::PrimIndex).
 ///
 /// These errors represent composition diagnostics. Recoverable failures skip
@@ -525,17 +539,20 @@ pub enum Error {
         site_path: Path,
     },
 
-    /// A reference/payload asset path is a variable expression that failed to
-    /// parse or did not evaluate to a string (C++ `PcpErrorVariableExpression`).
-    /// The arc is skipped and the rest of the prim still composes, so this is
-    /// recoverable.
-    #[error("invalid {arc:?} asset-path expression {expression} at {site_path}: {message}")]
+    /// A composition-time variable expression failed to parse or did not
+    /// evaluate to a string (C++ `PcpErrorVariableExpressionError`); the
+    /// [`context`](Self::InvalidExpression::context) field names the kind of
+    /// opinion that carried it. The opinion is skipped and the rest of the
+    /// prim still composes, so this is recoverable.
+    #[error("invalid {context} expression {expression} in {source_layer} at {site_path}: {message}")]
     InvalidExpression {
         /// The raw, unevaluated backtick expression.
         expression: String,
-        /// The composition arc type.
-        arc: ArcType,
-        /// The prim path where the arc was authored.
+        /// The kind of authored field the expression came from.
+        context: ExpressionContext,
+        /// Identifier of the layer that authored the expression.
+        source_layer: String,
+        /// The prim path where the expression was authored.
         site_path: Path,
         /// The parse or evaluation failure.
         message: String,

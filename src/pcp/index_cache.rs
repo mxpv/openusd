@@ -2211,6 +2211,7 @@ fn target_prim_inherits_class(
 
 #[cfg(test)]
 mod tests {
+    use super::super::ExpressionContext;
     use super::*;
 
     fn manifest_dir() -> String {
@@ -2596,6 +2597,88 @@ def "A" (
                 .iter()
                 .any(|e| matches!(e, Error::InvalidExpression { .. })),
             "the invalid asset-path expression is recorded as a recoverable error"
+        );
+        Ok(())
+    }
+
+    /// A variant selection whose expression does not evaluate to a string
+    /// records `InvalidExpression` with the variant context and falls through,
+    /// so the prim itself still composes.
+    #[test]
+    fn variant_expr_error_reported() -> Result<()> {
+        let text = r#"#usda 1.0
+def "A" (
+    variantSets = "v"
+    variants = { string v = "`42`" }
+)
+{
+    custom string marker = "ok"
+    variantSet "v" = {
+        "hi" { custom double y = 1 }
+    }
+}
+"#;
+        let (mut graph, mut cache) = in_memory_stack(text);
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/A.marker")?, 0.0)?,
+            Some(Value::String("ok".to_string())),
+            "the prim's local opinion survives the failed selection expression"
+        );
+        assert!(
+            cache.take_composition_errors().iter().any(|e| matches!(
+                e,
+                Error::InvalidExpression {
+                    context: ExpressionContext::Variant,
+                    ..
+                }
+            )),
+            "the failed selection is recorded with the variant context"
+        );
+        Ok(())
+    }
+
+    /// A selection expression authored on the referencing prim evaluates
+    /// against the referencing stack's variables and selects inside the
+    /// referenced target (spec 12.2 — the stronger site's opinion wins).
+    #[test]
+    fn variant_seed_across_reference() -> Result<()> {
+        let root_text = r#"#usda 1.0
+(
+    expressionVariables = {
+        string SEL = "hi"
+    }
+)
+def "Model" (
+    references = @t.usd@</T>
+    variants = { string v = "`${SEL}`" }
+)
+{
+}
+"#;
+        let target_text = r#"#usda 1.0
+def "T" (
+    variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "hi" { custom double x = 1 }
+        "lo" { custom double x = 2 }
+    }
+}
+"#;
+        let mut graph = LayerGraph::from_layers(
+            vec![
+                parse_named_layer("root.usd", root_text),
+                parse_named_layer("t.usd", target_text),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.x")?, 0.0)?,
+            Some(Value::Double(1.0)),
+            "the referencing site's evaluated selection picks {{v=hi}} in the target"
         );
         Ok(())
     }

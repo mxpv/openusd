@@ -449,6 +449,10 @@ impl LayerGraph {
                     // An unevaluable expression (or one evaluating to `None`)
                     // resolves to no edge; the layer it would name is left out
                     // of the stack.
+                    // TODO: a failed sublayer expression is dropped without a
+                    // diagnostic (a sublayer `ExpressionContext` for
+                    // `Error::InvalidExpression`); recording it needs an error
+                    // channel out of the contextual rebuild.
                     None => continue,
                 }
             } else {

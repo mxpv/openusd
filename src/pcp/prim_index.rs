@@ -7,14 +7,16 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
+use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, Path, Value};
 
+use super::compose_site::evaluate_expression;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, SpecSite};
 use super::prim_indexer::BuildResult;
-use super::{Error, LayerGraph, LayerId, VariantFallbackMap};
+use super::{Error, ExpressionContext, LayerGraph, LayerId, VariantFallbackMap};
 
 /// Composition index for a single prim.
 ///
@@ -909,7 +911,14 @@ fn resolve_variant_selections_in<'a>(
     ordered.sort_by_key(|n| n.arc);
 
     // Gather explicit selections for sets the seed did not already fix. Each
-    // node fans out into its layer stack, strongest sublayer first.
+    // node fans out into its layer stack, strongest sublayer first. An
+    // expression-valued opinion evaluates against the node's own stack
+    // variables; an unevaluable one is skipped so the next-weaker opinion can
+    // fill the set, while one evaluating to `None` records the empty
+    // selection, blocking weaker opinions like an authored empty selection
+    // (C++ `PcpComposeSiteVariantSelections` erases only errored entries).
+    // The indexing-time site (`Indexer::compose_variant_selection`) is the
+    // sole diagnostic emitter, so no error is recorded here.
     for node in &ordered {
         for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
             if let Ok(value) = graph
@@ -919,17 +928,43 @@ fn resolve_variant_selections_in<'a>(
             {
                 if let Value::VariantSelectionMap(map) = value.into_owned() {
                     for (set_name, selection) in map {
-                        selections.entry(set_name).or_insert(selection);
+                        // A set the seed or a stronger opinion already fixed
+                        // ignores this value; skip before paying for
+                        // evaluation.
+                        let Entry::Vacant(entry) = selections.entry(set_name) else {
+                            continue;
+                        };
+                        let selection = if expr::is_expression(&selection) {
+                            let vars = graph.stack_expression_variables(node.layer_stack_id());
+                            let evaluated = evaluate_expression(
+                                &selection,
+                                vars,
+                                ExpressionContext::Variant,
+                                graph.layer(layer),
+                                &node.path,
+                                None,
+                            );
+                            match evaluated.into_selection() {
+                                Some(selection) => selection,
+                                None => continue,
+                            }
+                        } else {
+                            selection
+                        };
+                        entry.insert(selection);
                     }
                 }
             }
         }
     }
 
-    // For variant sets without an explicit selection, apply a configured
-    // fallback if one names an existing variant. With no applicable fallback the
-    // set stays unselected (C++ `_EvalNodeFallbackVariant`); there is no implicit
-    // first-variant default, matching the indexer.
+    // For variant sets whose selection is absent or empty, apply a configured
+    // fallback if one names an existing variant — an empty selection, whether
+    // authored or the accepted expression-language `None`, defers to the
+    // fallback exactly as the indexer's authored-variant task does. With no
+    // applicable fallback the set stays unselected (C++
+    // `_EvalNodeFallbackVariant`); there is no implicit first-variant default,
+    // matching the indexer.
     for node in &ordered {
         for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
             let data = graph.layer(layer).data();
@@ -940,10 +975,11 @@ fn resolve_variant_selections_in<'a>(
                 continue;
             };
             for set_name in set_names {
-                let Entry::Vacant(entry) = selections.entry(set_name.into()) else {
+                let set_name = String::from(set_name);
+                if selections.get(&set_name).is_some_and(|sel| !sel.is_empty()) {
                     continue;
-                };
-                let set_path = node.path.append_variant_selection(entry.key(), "");
+                }
+                let set_path = node.path.append_variant_selection(&set_name, "");
                 let Ok(val) = data.get_field(&set_path, ChildrenKey::VariantChildren.as_str()) else {
                     continue;
                 };
@@ -951,9 +987,9 @@ fn resolve_variant_selections_in<'a>(
                     continue;
                 };
                 // Use the first configured fallback that exists in this set.
-                let fallbacks = variant_fallbacks.get(entry.key());
+                let fallbacks = variant_fallbacks.get(&set_name);
                 if let Some(fb) = fallbacks.iter().find(|fb| variants.iter().any(|v| v == fb.as_str())) {
-                    entry.insert(fb.clone());
+                    selections.insert(set_name, fb.clone());
                 }
             }
         }
@@ -1661,6 +1697,128 @@ pub(crate) mod tests {
     fn parse_usda(text: &str) -> Box<dyn sdf::AbstractData> {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         Box::new(sdf::Data::from_specs(data))
+    }
+
+    /// The child context evaluates an expression-valued selection opinion
+    /// against the node's stack variables, skips an unevaluable one so it
+    /// never seeds descendants raw, and records a successful `None` as the
+    /// empty (blocking) selection.
+    #[test]
+    fn child_ctx_expr_selection() {
+        let stack = one_layer_stack(parse_usda(
+            r#"#usda 1.0
+(
+    expressionVariables = {
+        string SEL = "hi"
+    }
+)
+def "World" (
+    variantSets = ["v", "w", "u"]
+    variants = {
+        string v = "`${SEL}`"
+        string w = "`${UNDEF}`"
+        string u = "`None`"
+    }
+)
+{
+    variantSet "v" = {
+        "hi" { custom double x = 1 }
+    }
+}
+"#,
+        ));
+        let index = PrimIndex::build_with_context(&Path::from("/World"), &stack, &CompositionContext::default())
+            .expect("index build");
+        let ctx = index.context_for_children(&stack, &CompositionContext::default());
+        assert_eq!(
+            ctx.selections.get("v").map(String::as_str),
+            Some("hi"),
+            "the evaluated selection seeds children"
+        );
+        assert!(
+            !ctx.selections.contains_key("w"),
+            "an unevaluable selection opinion is skipped, got {:?}",
+            ctx.selections
+        );
+        assert_eq!(
+            ctx.selections.get("u").map(String::as_str),
+            Some(""),
+            "a successful `None` records the empty, blocking selection"
+        );
+    }
+
+    /// An empty selection — here from an expression-language `None` — defers
+    /// to the configured fallback in the child context, matching the fallback
+    /// arc the composed index grafts for the same input.
+    #[test]
+    fn empty_selection_fallback() {
+        let stack = one_layer_stack(parse_usda(
+            r#"#usda 1.0
+def "World" (
+    variantSets = "v"
+    variants = { string v = "`None`" }
+)
+{
+    variantSet "v" = {
+        "hi" { custom double x = 1 }
+        "lo" { custom double x = 2 }
+    }
+}
+"#,
+        ));
+        let ctx = CompositionContext {
+            variant_fallbacks: VariantFallbackMap::new().add("v", ["hi"]),
+            ..CompositionContext::default()
+        };
+        let index = PrimIndex::build_with_context(&Path::from("/World"), &stack, &ctx).expect("index build");
+        assert!(
+            index.nodes().any(|n| n.path.as_str() == "/World{v=hi}"),
+            "the index composes the fallback, got {:?}",
+            index.nodes().map(|n| n.path.as_str()).collect::<Vec<_>>()
+        );
+        let child = index.context_for_children(&stack, &ctx);
+        assert_eq!(
+            child.selections.get("v").map(String::as_str),
+            Some("hi"),
+            "the child context matches the composed index"
+        );
+    }
+
+    /// A child prim defined inside a parent's expression-selected variant
+    /// branch composes through the cached parent's variant node.
+    #[test]
+    fn variant_child_expr() {
+        let mut stack = one_layer_stack(parse_usda(
+            r#"#usda 1.0
+(
+    expressionVariables = {
+        string SEL = "hi"
+    }
+)
+def "World" (
+    variantSets = "v"
+    variants = { string v = "`${SEL}`" }
+)
+{
+    variantSet "v" = {
+        "hi" {
+            def "Child"
+            {
+                custom double x = 1
+            }
+        }
+    }
+}
+"#,
+        ));
+        let index = build_with_fallbacks(&mut stack, "/World/Child", VariantFallbackMap::new());
+        assert!(
+            index
+                .nodes()
+                .any(|n| n.path.as_str() == "/World{v=hi}Child" && n.has_specs()),
+            "the child under the evaluated selection composes, got {:?}",
+            index.nodes().map(|n| n.path.as_str()).collect::<Vec<_>>()
+        );
     }
 
     /// A reference cycle is recorded as a recoverable `Error::ArcCycle` and the
