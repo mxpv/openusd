@@ -312,39 +312,20 @@ pub struct EditTarget {
     /// [`set_edit_target`](Stage::set_edit_target), so an arc target built
     /// against one stage's composition can't silently retarget another's.
     layer_stack: Option<pcp::LayerStackIdentifier>,
-    /// The layer stack this target authors into, captured from the target node
-    /// when known ([`edit_target_for_node`](Stage::edit_target_for_node)), or
-    /// `None` for a target whose stack the namespace editor infers from layer
-    /// membership ([`for_layer`](Self::for_layer) /
+    /// The value identity of the layer stack this target authors into, captured
+    /// from the target node when known
+    /// ([`edit_target_for_node`](Stage::edit_target_for_node); boxed to keep
+    /// the struct small), or `None` for a target whose stack the namespace
+    /// editor infers from layer membership ([`for_layer`](Self::for_layer) /
     /// [`for_local_direct_variant`](Self::for_local_direct_variant)). An arc
     /// target records it so a relocate synthesized for it lands in the right
     /// stack even when the referenced asset is also a root sublayer — a case
-    /// membership alone cannot disambiguate.
-    authoring_stack: Option<AuthoringStack>,
-}
-
-/// The layer stack an [`EditTarget`] authors into, captured at construction.
-/// Distinguishes the stage root stack from a referenced asset's sublayer stack
-/// so the namespace editor seeds and authors relocates in the correct stack
-/// rather than re-inferring it from which stacks a layer happens to belong to.
-#[derive(Debug, Clone, PartialEq)]
-enum AuthoringStack {
-    /// The stage root layer stack.
-    Root,
-    /// A referenced asset's sublayer stack (boxed to keep the enum small). The
-    /// context is kept so the namespace editor reconstructs the same
-    /// context-resolved stack rather than the plain one, whose members can differ.
-    Referenced(Box<ReferencedStack>),
-}
-
-/// A referenced asset's sublayer stack an [`EditTarget`] authors into, rooted at
-/// the layer with `root`'s canonical identifier and resolved under `expr_vars` —
-/// the expression variables inherited across the arc (empty for a plain stack, the
-/// `${VAR}` context for a contextual one).
-#[derive(Debug, Clone, PartialEq)]
-struct ReferencedStack {
-    root: String,
-    expr_vars: HashMap<String, sdf::Value>,
+    /// membership alone cannot disambiguate. Carried by value — not as a
+    /// graph-local `LayerStackId` — because an `EditTarget` transfers between
+    /// stages with equal composition inputs, whose graphs number their stacks
+    /// independently; the captured (possibly contextual) stack then resolves by
+    /// content wherever the target is installed.
+    authoring_stack: Option<Box<pcp::StackIdentity>>,
 }
 
 /// Composition arc kind selecting which arc on a prim an arc-based
@@ -604,6 +585,17 @@ pub enum StageAuthoringError {
     /// cannot be applied here.
     #[error("edit target belongs to a different stage")]
     EditTargetWrongStage,
+
+    /// An arc edit target's captured authoring stack cannot be resolved on this
+    /// stage: a layer in its source chain failed to load, so the (possibly
+    /// contextual) stack it authors into cannot be composed here. Authoring
+    /// into a substitute stack would land opinions in the wrong members, so the
+    /// call fails instead.
+    #[error("edit target authoring stack unavailable: layer {layer:?} cannot be loaded")]
+    EditTargetStackUnavailable {
+        /// Identifier of the source-chain layer that could not be loaded.
+        layer: String,
+    },
 
     /// The path being authored falls outside the current edit target's
     /// mapping co-domain, so it cannot be translated to a layer-local spec
@@ -968,10 +960,7 @@ impl Stage {
         let mut target = self.bound_target(layer_identifier, mapping);
         // Record the node's own layer stack so the namespace editor authors into
         // it exactly, rather than inferring it from layer membership.
-        target.authoring_stack = Some(match stack_info {
-            None => AuthoringStack::Root,
-            Some((root, expr_vars)) => AuthoringStack::Referenced(Box::new(ReferencedStack { root, expr_vars })),
-        });
+        target.authoring_stack = Some(Box::new(stack_info));
         Ok(target)
     }
 
@@ -1431,41 +1420,62 @@ impl Stage {
 
     /// The handle for the layer stack the mapped edit `target_layer` writes
     /// into — the stack a relocate synthesized for that target must land in. An
-    /// arc target carries its [`AuthoringStack`] from construction, so it resolves
-    /// exactly (the referenced asset's stack even when that asset is also a root
-    /// sublayer); a target without one (a local or variant target) is inferred
-    /// from layer membership — the root stack when `target_layer` belongs to it,
-    /// else the sublayer stack rooted at it. Per spec §10.3.2.6, relocates take
-    /// effect in the stack where the bringing-in arc is authored, so this is
-    /// where the editor seeds and authors the mapped relocate plan; resolve it to
-    /// member layer ids with
+    /// arc target carries its authoring stack's value identity from
+    /// construction, so it resolves exactly (the referenced asset's stack even
+    /// when that asset is also a root sublayer); a target without one (a local
+    /// or variant target) is inferred from layer membership — the root stack
+    /// when `target_layer` belongs to it, else the sublayer stack rooted at it.
+    /// Per spec §10.3.2.6, relocates take effect in the stack where the
+    /// bringing-in arc is authored, so this is where the editor seeds and
+    /// authors the mapped relocate plan; resolve it to member layer ids with
     /// [`LayerGraph::layer_stack`](crate::pcp::LayerGraph::layer_stack).
-    pub(super) fn mapped_target_stack_id(&self, target_layer: pcp::LayerId) -> pcp::LayerStackId {
-        // Determine the `(root, inherited context)` the target authors into: the
-        // captured stack for an arc target (its context preserved so a contextual
-        // stack reconstructs faithfully), or, for a target inferred from layer
-        // membership, the root stack when the layer belongs to it, else the plain
-        // stack rooted at the layer itself.
-        let (root, expr_vars) = match &self.edit_target.borrow().authoring_stack {
-            Some(AuthoringStack::Root) => return self.layers().root_layer_stack_id(),
-            Some(AuthoringStack::Referenced(stack)) => (
-                self.layers().id_of(&stack.root).unwrap_or(target_layer),
-                stack.expr_vars.clone(),
-            ),
-            None if self
-                .layers()
-                .root_layer_stack()
-                .iter()
-                .any(|&(id, _)| id == target_layer) =>
-            {
-                return self.layers().root_layer_stack_id()
+    ///
+    /// Fails with [`StageAuthoringError::EditTargetStackUnavailable`] when a
+    /// layer in the captured identity's source chain cannot be loaded here —
+    /// authoring into a substitute stack would seed the relocate plan from the
+    /// wrong members and expression variables.
+    pub(super) fn mapped_target_stack_id(
+        &self,
+        target_layer: pcp::LayerId,
+    ) -> Result<pcp::LayerStackId, StageAuthoringError> {
+        // An arc target carries the exact stack it authors into by value
+        // identity, resolved against this stage's graph. The walk is read-only
+        // and demand-driven: a chain layer not loaded here, or a contextual
+        // stack not yet composed, comes back as the demand the load barrier
+        // satisfies (opening any `${VAR}`-selected sublayers its context
+        // resolves before interning), and the walk re-runs. The loop ends when
+        // the identity resolves or a load stops progressing — a chain layer
+        // that cannot be opened.
+        let authoring = self.edit_target.borrow().authoring_stack.clone();
+        if let Some(identity) = authoring {
+            loop {
+                let demand = match self.layers.borrow().resolve_stack_identity(&identity) {
+                    Ok(id) => return Ok(id),
+                    Err(demand) => demand,
+                };
+                let layer = demand.asset_path.clone();
+                if !self.load_demanded(&[demand]) {
+                    return Err(StageAuthoringError::EditTargetStackUnavailable { layer });
+                }
             }
-            None => (target_layer, HashMap::new()),
-        };
-        // Resolve to the exact stack, minting it when the target was never composed
-        // in this session rather than falling back to an unrelated stack (which would
+        }
+        // A target without a captured authoring stack (a local or variant
+        // target) is inferred from layer membership: the root stack when
+        // `target_layer` belongs to it, else the root-sourced stack rooted at
+        // the layer itself — minted when the target was never composed in this
+        // session rather than falling back to an unrelated stack (which would
         // seed the relocate plan from the wrong layers).
-        self.layers.borrow_mut().ensure_external_stack(root, &expr_vars)
+        {
+            let layers = self.layers();
+            if layers.root_layer_stack().iter().any(|&(id, _)| id == target_layer) {
+                return Ok(layers.root_layer_stack_id());
+            }
+        }
+        Ok(self
+            .layers
+            .borrow_mut()
+            .intern_external(target_layer, pcp::LayerStackId::ROOT)
+            .0)
     }
 
     /// Run `f` as one committed atomic transaction on the single layer
@@ -3387,6 +3397,9 @@ impl Stage {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path as FsPath;
+
     use super::*;
 
     /// Author through a layer's `edit` API and commit, for building test fixtures
@@ -3431,6 +3444,145 @@ mod tests {
 
         let stage_c = open_with("/assets/a")?;
         assert!(stage_c.set_edit_target(stage_a.edit_target_root()).is_ok());
+        Ok(())
+    }
+
+    /// Writes the cross-stage fixture into `dir`, returning the root layer
+    /// path: /M1 and /M2 payload mid1/mid2 (authoring V=a / V=b), each
+    /// referencing t.usda, whose `${V}` sublayer selects a.usda / b.usda.
+    fn write_cross_stage_fixture(dir: &FsPath) -> Result<String> {
+        let write = |name: &str, text: &str| fs::write(dir.join(name), text);
+        write(
+            "root.usda",
+            "#usda 1.0\ndef \"M1\" (\n    payload = @mid1.usda@</P>\n) {}\ndef \"M2\" (\n    payload = @mid2.usda@</P>\n) {}\n",
+        )?;
+        for (name, sel) in [("mid1.usda", "a"), ("mid2.usda", "b")] {
+            write(
+                name,
+                &format!(
+                    "#usda 1.0\n(\n    expressionVariables = {{ string V = \"{sel}\" }}\n)\ndef \"P\" (\n    references = @t.usda@</P>\n) {{}}\n",
+                ),
+            )?;
+        }
+        write(
+            "t.usda",
+            "#usda 1.0\n(\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
+        )?;
+        write("a.usda", "#usda 1.0\nover \"P\" {\n    custom double x = 1\n}\n")?;
+        write("b.usda", "#usda 1.0\nover \"P\" {\n    custom double x = 2\n}\n")?;
+        Ok(dir.join("root.usda").to_str().expect("utf-8 path").to_string())
+    }
+
+    /// An arc edit target transfers between equal-input stages by stack value
+    /// identity, not by graph-local handle: the two stages warm their
+    /// composition in opposite orders, so the same contextual target stacks get
+    /// different numeric ids per stage, and the installed target must still
+    /// resolve the stack matching its captured source chain.
+    #[test]
+    fn cross_stage_arc_stack() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = write_cross_stage_fixture(dir.path())?;
+        let m1 = sdf::Path::new("/M1")?;
+        let m2 = sdf::Path::new("/M2")?;
+
+        // Stage A composes /M1 first; stage B composes /M2 first, so the two
+        // graphs mint the contextual `t.usda` stacks under opposite numbering.
+        let stage_a = Stage::open(&path)?;
+        let transferred = stage_a.edit_target_for_node(&m1, EditTargetArc::Reference)?;
+        let stage_b = Stage::open(&path)?;
+        let own_m2 = stage_b.edit_target_for_node(&m2, EditTargetArc::Reference)?;
+        let own_m1 = stage_b.edit_target_for_node(&m1, EditTargetArc::Reference)?;
+        let t_layer = stage_b
+            .layers()
+            .id_of(own_m1.layer_identifier())
+            .expect("t.usda is loaded on stage B");
+
+        // Stage B's own view of the two contextual stacks, as the reference.
+        stage_b.set_edit_target(own_m1)?;
+        let b_m1_stack = stage_b.mapped_target_stack_id(t_layer)?;
+        stage_b.set_edit_target(own_m2)?;
+        let b_m2_stack = stage_b.mapped_target_stack_id(t_layer)?;
+        assert_ne!(b_m1_stack, b_m2_stack, "the two variable contexts are distinct stacks");
+
+        stage_b.set_edit_target(transferred)?;
+        assert_eq!(
+            stage_b.mapped_target_stack_id(t_layer)?,
+            b_m1_stack,
+            "the transferred /M1 target resolves B's own /M1 contextual stack"
+        );
+        Ok(())
+    }
+
+    /// Resolving a transferred arc target drives the load barrier: the
+    /// installing stage never composed /M1, so mid1.usda (the captured source
+    /// chain) and a.usda (the sublayer its context selects) are both unloaded.
+    /// The resolution loads the chain, reopens the target under its context,
+    /// and interns the complete contextual stack instead of substituting
+    /// another stack.
+    #[test]
+    fn cross_stage_loads_chain() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = write_cross_stage_fixture(dir.path())?;
+
+        let stage_a = Stage::open(&path)?;
+        let transferred = stage_a.edit_target_for_node(&sdf::Path::new("/M1")?, EditTargetArc::Reference)?;
+        let stage_b = Stage::open(&path)?;
+        let _ = stage_b.edit_target_for_node(&sdf::Path::new("/M2")?, EditTargetArc::Reference)?;
+        let t_layer = stage_b
+            .layers()
+            .id_of(transferred.layer_identifier())
+            .expect("t.usda is loaded on stage B through /M2");
+        assert!(
+            stage_b.layers().find_by_leaf("mid1.usda").is_none(),
+            "premise: the source-chain layer is not loaded"
+        );
+
+        stage_b.set_edit_target(transferred)?;
+        let stack = stage_b.mapped_target_stack_id(t_layer)?;
+
+        let layers = stage_b.layers();
+        assert!(layers.find_by_leaf("mid1.usda").is_some(), "the chain layer loaded");
+        let has_leaf = |leaf: &str| {
+            layers
+                .layer_stack(stack)
+                .iter()
+                .any(|&(id, _)| FsPath::new(layers.identifier(id)).ends_with(leaf))
+        };
+        assert!(
+            has_leaf("a.usda") && !has_leaf("b.usda"),
+            "the resolved stack composes under mid1's V=a context"
+        );
+        Ok(())
+    }
+
+    /// A transferred arc target whose source-chain layer cannot be opened fails
+    /// the authoring-stack resolution with a typed error: authoring into a
+    /// substitute stack would land opinions in the wrong members.
+    #[test]
+    fn cross_stage_chain_unloadable() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = write_cross_stage_fixture(dir.path())?;
+
+        let stage_a = Stage::open(&path)?;
+        let transferred = stage_a.edit_target_for_node(&sdf::Path::new("/M1")?, EditTargetArc::Reference)?;
+        drop(stage_a);
+        fs::remove_file(dir.path().join("mid1.usda"))?;
+
+        let stage_b = Stage::open(&path)?;
+        let _ = stage_b.edit_target_for_node(&sdf::Path::new("/M2")?, EditTargetArc::Reference)?;
+        let t_layer = stage_b
+            .layers()
+            .id_of(transferred.layer_identifier())
+            .expect("t.usda is loaded on stage B through /M2");
+
+        stage_b.set_edit_target(transferred)?;
+        assert!(
+            matches!(
+                stage_b.mapped_target_stack_id(t_layer),
+                Err(StageAuthoringError::EditTargetStackUnavailable { layer }) if layer.ends_with("mid1.usda")
+            ),
+            "the unopenable chain layer fails the resolution"
+        );
         Ok(())
     }
 

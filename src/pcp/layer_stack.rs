@@ -4,12 +4,12 @@
 //! A [`LayerId`] names a physical loaded layer (owned by
 //! [`layer_graph`](super::layer_graph)); a [`LayerStackId`] names a composed view
 //! of layers — the stage root stack, or a reference/payload target's sublayer
-//! stack under a particular inherited expression-variable context. Every composed
+//! stack under a particular expression-variable override source. Every composed
 //! stack, root included, is a [`LayerStackInstance`] in the [`LayerStackRegistry`]
 //! addressed by an opaque [`LayerStackId`]; composition (`Node`, duplicate
 //! detection, edit-target info, invalidation, relocate queries) never branches on
-//! what kind of stack a handle names — the registry owns the kind, root, seed, and
-//! members.
+//! what kind of stack a handle names — the registry owns the kind, root, source,
+//! and members.
 //!
 //! This module is identity and storage only. Composing an instance's members
 //! needs the layers, which `layer_graph` owns, so it builds them and hands them
@@ -52,30 +52,47 @@ impl LayerStackId {
     }
 }
 
-/// Index of an interned expression-variable context (a canonicalized, name-sorted
-/// `(name, value)` list). [`Value`] is not `Eq`/`Hash`, so a context cannot key a
-/// hash map directly; interning it to this `Copy` handle lets a stack be keyed by
-/// `(root, seed)` and its composed context compared by id.
-///
-/// An `ExprVarId` is meaningful only within the [`ExprVarInterner`] that minted it.
-/// The registry holds one interner for both roles a context plays — the seed a
-/// target stack is keyed by and the composed set an instance stores — so an id is
-/// only ever produced by the registry, and a child stack's seed id is its parent
-/// instance's composed id.
+/// The layer stack whose composed expression variables seed another stack's own
+/// — the Rust analog of C++ `PcpExpressionVariablesSource`: the stage root
+/// stack (C++'s null source) or a contextual instance. A target stack's
+/// identity key carries one ([`LayerStackKey::Target`]), and every instance
+/// stores the source of its own composed variables
+/// ([`LayerStackRegistry::vars_source`]), so an arc keys its target by where the
+/// arc-carrying stack's variables actually come from rather than by their
+/// value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) struct ExprVarId(u32);
+pub(crate) enum VarsSource {
+    /// The stage root layer stack.
+    Root,
+    /// The contextual instance whose composed variables are the source.
+    Instance(LayerStackId),
+}
 
-impl ExprVarId {
-    fn idx(self) -> usize {
-        self.0 as usize
+impl VarsSource {
+    /// The instance this source names: the root stack, or the carried instance.
+    pub(crate) fn referent(self) -> LayerStackId {
+        match self {
+            VarsSource::Root => LayerStackId::ROOT,
+            VarsSource::Instance(id) => id,
+        }
     }
 }
+
+/// Index of an interned expression-variable context (a canonicalized, name-sorted
+/// `(name, value)` list). [`Value`] is not `Eq`/`Hash`, so a composed variable
+/// map cannot be compared cheaply; interning it to this `Copy` handle lets two
+/// composed sets be compared by id — the comparison behind rebuild change
+/// detection and the source-reuse rule in
+/// [`LayerStackRegistry::set_composed`].
+///
+/// An `ExprVarId` is meaningful only within the [`ExprVarInterner`] that minted it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ExprVarId(u32);
 
 /// Interns expression-variable contexts to [`ExprVarId`]s, deduplicating by
 /// structural equality so two equal contexts share one id. [`Value`] is not
 /// `Eq`/`Hash`, so the dedup is a linear scan comparing the canonicalized,
-/// name-sorted forms with [`value_eq`]. The registry holds one for stack seeds
-/// and composed instance contexts alike. The context count is tiny (bounded by
+/// name-sorted forms with [`value_eq`]. The context count is tiny (bounded by
 /// the variable-authoring layers), so the linear scan is not a concern.
 // TODO(perf): a hash-indexed table would drop the linear `value_eq` scan if a
 // pathological stack ever interns many distinct contexts.
@@ -97,11 +114,6 @@ impl ExprVarInterner {
         id
     }
 
-    /// Reconstructs an interned context as a variable map.
-    pub(crate) fn vars(&self, id: ExprVarId) -> HashMap<String, Value> {
-        self.contexts[id.idx()].iter().cloned().collect()
-    }
-
     fn find_canonical(&self, canon: &[(String, Value)]) -> Option<ExprVarId> {
         self.contexts
             .iter()
@@ -121,19 +133,17 @@ impl ExprVarInterner {
 enum LayerStackKey {
     /// The stage root layer stack (session layers, the root layer, its sublayers).
     Root,
-    /// A reference/payload target's sublayer stack rooted at `root`, resolved with
-    /// the full inherited expression-variable context `seed` — "seed" names the
-    /// role an interned context plays in the key: the arc-carrying stack's composed
-    /// set, which the target's own variables compose under. The same target
-    /// reached through two contexts gets one instance each, so its `${VAR}`
-    /// sublayers and asset paths resolve independently.
-    ///
-    /// Keying by the composed context coalesces override sources: equal composed
-    /// maps arriving from distinct sources share one instance — and thus one site
-    /// identity in duplicate and cycle detection — where C++'s
-    /// `PcpLayerStackIdentifier`, keyed by an override *source* (another layer
-    /// stack) followed recursively, keeps two.
-    Target { root: LayerId, seed: ExprVarId },
+    /// A reference/payload target's sublayer stack rooted at `root`, its
+    /// expression variables seeded by the composed set of `source`'s referent —
+    /// the Rust analog of C++ `PcpLayerStackIdentifier`'s
+    /// `expressionVariablesOverrideSource`. An arc keys its target by the source
+    /// of the arc-carrying stack's composed variables
+    /// ([`LayerStackRegistry::vars_source`], the C++ `primIndex.cpp` rule), so
+    /// the same target reached from stacks that author different variables gets
+    /// one instance each — its `${VAR}` sublayers and asset paths resolve
+    /// independently — while a chain of stacks that contribute no new variables
+    /// propagates one source and shares one instance.
+    Target { root: LayerId, source: VarsSource },
 }
 
 /// One composed layer stack: its identity ([`LayerStackKey`]), resolved members,
@@ -149,11 +159,18 @@ struct LayerStackInstance {
     /// `expressionVariables` overlaid by the seed (the seed winning) — the single
     /// set its `${VAR}` sublayers, reference/payload asset paths, and value-time
     /// asset attributes all resolve against.
+    // TODO(perf): every instance owns its map even though source-aware identity
+    // would let a non-authoring chain share one stored set (keyed by `expr_id`).
     expr_vars: HashMap<String, Value>,
-    /// [`expr_vars`](Self::expr_vars) interned, for id-keyed child-stack selection:
-    /// under full-context keying the seed of a stack minted across an arc from this
-    /// one is exactly this id.
+    /// [`expr_vars`](Self::expr_vars) interned, the cheap composed-content
+    /// comparison behind rebuild change detection and the source-reuse rule.
     expr_id: ExprVarId,
+    /// The source of this stack's composed variables, per the C++
+    /// `Pcp_ComposeExpressionVariables` reuse rule (see
+    /// [`LayerStackRegistry::set_composed`]): the key's source when the stack's
+    /// own authored variables changed nothing, else the stack itself. The value
+    /// an arc out of this stack keys its target by.
+    vars_source: VarsSource,
 }
 
 /// Every composed layer stack a [`LayerGraph`](super::layer_graph::LayerGraph) has
@@ -168,89 +185,67 @@ struct LayerStackInstance {
 /// instance; it participates through its root's members, so a deep sublayer chain
 /// stays O(n) rather than minting O(n) stacks of O(n) members each.
 ///
+/// Two invariants tie the source-keyed identities together:
+///
+/// - A stored [`VarsSource`] is canonical: its referent's own
+///   [`vars_source`](Self::vars_source) equals it at mint, so equal variable
+///   contexts derived through different arc chains key identically.
+/// - A key's source referent has a smaller index than its owner (keys are
+///   immutable and the registry append-only), so ascending index order is
+///   dependency order: a rebuild pass reads every seed after refreshing its
+///   referent.
+///
 /// Storage and interning only: the graph composes members (it owns the layers) and
 /// hands them to [`set_root`](Self::set_root) / [`intern_target`](Self::intern_target).
+#[derive(Default)]
 pub(crate) struct LayerStackRegistry {
     instances: Vec<LayerStackInstance>,
     by_key: HashMap<LayerStackKey, LayerStackId>,
-    /// The interned expression-variable contexts — stack seeds and composed
-    /// instance contexts — keyed by [`ExprVarId`].
+    /// The interned composed expression-variable sets, keyed by [`ExprVarId`].
     contexts: ExprVarInterner,
-    /// The interned empty context, the seed of every plain (no-inherited-context)
-    /// stack.
-    empty_context: ExprVarId,
-}
-
-impl Default for LayerStackRegistry {
-    fn default() -> Self {
-        // Intern the empty context as id 0 so plain stacks have a stable key before
-        // any variable context is seen.
-        let mut contexts = ExprVarInterner::default();
-        let empty_context = contexts.intern(&HashMap::new());
-        Self {
-            instances: Vec::new(),
-            by_key: HashMap::new(),
-            contexts,
-            empty_context,
-        }
-    }
 }
 
 impl LayerStackRegistry {
-    /// The interned empty context, the seed of a plain (no-inherited-context)
-    /// stack.
-    pub(crate) fn empty_context(&self) -> ExprVarId {
-        self.empty_context
-    }
-
-    /// Interns `vars` to its context [`ExprVarId`].
-    pub(crate) fn intern_context(&mut self, vars: &HashMap<String, Value>) -> ExprVarId {
-        self.contexts.intern(vars)
-    }
-
-    /// Reconstructs an interned context as a variable map, for re-resolving an
-    /// instance's members on a stack rebuild.
-    pub(crate) fn context_vars(&self, id: ExprVarId) -> HashMap<String, Value> {
-        self.contexts.vars(id)
-    }
-
-    /// The target stack for `(root, seed)`, if one has been interned.
-    pub(crate) fn lookup_target(&self, root: LayerId, seed: ExprVarId) -> Option<LayerStackId> {
-        self.by_key.get(&LayerStackKey::Target { root, seed }).copied()
+    /// The target stack for `(root, source)`, if one has been interned.
+    pub(crate) fn lookup_target(&self, root: LayerId, source: VarsSource) -> Option<LayerStackId> {
+        self.by_key.get(&LayerStackKey::Target { root, source }).copied()
     }
 
     /// Records (or, for the root, updates) the stage root stack as instance 0 with
     /// its resolved members and composed expression variables. The root is always
-    /// the first instance, so a rebuild updates it in place.
-    pub(crate) fn set_root(&mut self, members: Vec<(LayerId, LayerOffset)>, expr_vars: HashMap<String, Value>) {
+    /// the first instance, so a rebuild updates it in place. Returns whether the
+    /// composed variables changed, like [`set_composed`](Self::set_composed).
+    pub(crate) fn set_root(&mut self, members: Vec<(LayerId, LayerOffset)>, expr_vars: HashMap<String, Value>) -> bool {
         if self.instances.is_empty() {
             let id = self.insert(LayerStackKey::Root, members, expr_vars);
             debug_assert_eq!(id, LayerStackId::ROOT, "the root stack must be instance 0");
+            true
         } else {
             debug_assert!(
                 matches!(self.instances[LayerStackId::ROOT.idx()].key, LayerStackKey::Root),
                 "instance 0 must be the root stack",
             );
-            self.set_composed(LayerStackId::ROOT, members, expr_vars);
+            self.set_composed(LayerStackId::ROOT, members, expr_vars)
         }
     }
 
-    /// Records a freshly composed target stack for `(root, seed)` with its resolved
-    /// members and composed expression variables, returning its id. The caller
-    /// guarantees `(root, seed)` is not already present (via
+    /// Records a freshly composed target stack for `(root, source)` with its
+    /// resolved members and composed expression variables, returning its id. The
+    /// caller guarantees `(root, source)` is not already present (via
     /// [`lookup_target`](Self::lookup_target)).
     pub(crate) fn intern_target(
         &mut self,
         root: LayerId,
-        seed: ExprVarId,
+        source: VarsSource,
         members: Vec<(LayerId, LayerOffset)>,
         expr_vars: HashMap<String, Value>,
     ) -> LayerStackId {
-        self.insert(LayerStackKey::Target { root, seed }, members, expr_vars)
+        self.insert(LayerStackKey::Target { root, source }, members, expr_vars)
     }
 
-    /// Inserts a fresh instance for `key`, deriving its member set and interned
-    /// composed context, and records it in [`by_key`](Self::by_key).
+    /// Inserts a fresh instance for `key`, deriving its member set, interned
+    /// composed context, and variable source, and records it in
+    /// [`by_key`](Self::by_key).
     fn insert(
         &mut self,
         key: LayerStackKey,
@@ -260,15 +255,49 @@ impl LayerStackRegistry {
         let member_set = members.iter().map(|&(id, _)| id).collect();
         let expr_id = self.contexts.intern(&expr_vars);
         let id = LayerStackId(self.instances.len() as u32);
+        if let LayerStackKey::Target { source, .. } = key {
+            debug_assert!(
+                source.referent().idx() < id.idx(),
+                "a key's source referent must precede its owner",
+            );
+            debug_assert_eq!(
+                self.instances[source.referent().idx()].vars_source,
+                source,
+                "a minted key's source must be canonical",
+            );
+        }
+        let vars_source = self.derive_vars_source(id, key, expr_id);
         self.instances.push(LayerStackInstance {
             key,
             members,
             member_set,
             expr_vars,
             expr_id,
+            vars_source,
         });
         self.by_key.insert(key, id);
         id
+    }
+
+    /// The source of the composed variables `id` would store, per the C++
+    /// `Pcp_ComposeExpressionVariables` reuse rule: when the composed set equals
+    /// the seed — the stack's own authored variables changed nothing — the
+    /// (weaker) source is reused, read as the referent's current
+    /// [`vars_source`](Self::vars_source) so a chain of non-authoring stacks
+    /// propagates one canonical source; otherwise the stack becomes the source
+    /// itself. The root stack's source is always the root.
+    fn derive_vars_source(&self, id: LayerStackId, key: LayerStackKey, expr_id: ExprVarId) -> VarsSource {
+        match key {
+            LayerStackKey::Root => VarsSource::Root,
+            LayerStackKey::Target { source, .. } => {
+                let referent = &self.instances[source.referent().idx()];
+                if expr_id == referent.expr_id {
+                    referent.vars_source
+                } else {
+                    VarsSource::Instance(id)
+                }
+            }
+        }
     }
 
     /// The resolved members of a stack, or an empty slice for a handle the registry
@@ -296,79 +325,51 @@ impl LayerStackRegistry {
             .collect()
     }
 
-    /// Whether the stack is the stage root stack.
-    pub(crate) fn is_root(&self, id: LayerStackId) -> bool {
-        matches!(self.instances[id.idx()].key, LayerStackKey::Root)
-    }
-
-    /// The inherited expression-variable context a stack resolved against — empty
-    /// for the root stack and for a plain target. Captured into an edit target so a
-    /// later authoring query reconstructs the same contextual stack.
-    pub(crate) fn instance_seed_vars(&self, id: LayerStackId) -> HashMap<String, Value> {
+    /// The `(root, source)` key of a non-root target stack, or `None` for the
+    /// root stack.
+    pub(crate) fn target_key(&self, id: LayerStackId) -> Option<(LayerId, VarsSource)> {
         match self.instances[id.idx()].key {
-            LayerStackKey::Root => HashMap::new(),
-            LayerStackKey::Target { seed, .. } => self.context_vars(seed),
+            LayerStackKey::Root => None,
+            LayerStackKey::Target { root, source } => Some((root, source)),
         }
     }
 
-    /// The target root layer of a non-root stack — its representative member.
-    pub(crate) fn target_root(&self, id: LayerStackId) -> LayerId {
-        match self.instances[id.idx()].key {
-            LayerStackKey::Root => self.instances[id.idx()]
-                .members
-                .first()
-                .map(|&(l, _)| l)
-                .unwrap_or(LayerId::INVALID),
-            LayerStackKey::Target { root, .. } => root,
-        }
-    }
-
-    /// The `(id, root, seed-vars)` of every non-root target stack a rebuild must
-    /// re-resolve. With `affected` set, a stack is skipped only when the edited
-    /// layers neither include its target root nor intersect its members: such an
-    /// edit changed neither its sublayer edges, an authored `${VAR}` expression it
-    /// resolves, nor its composed expression variables. The explicit root check
-    /// matters for a muted target root, whose member set is empty (disjoint from
-    /// everything) while its layer data still feeds the stack's composed
-    /// expression variables. `None` returns every target, for a full rebuild (a
-    /// load can extend a stack with a newly opened member the changed-edge set
-    /// cannot name).
-    pub(crate) fn target_rebuild_specs(
-        &self,
-        affected: Option<&HashSet<LayerId>>,
-    ) -> Vec<(LayerStackId, LayerId, HashMap<String, Value>)> {
+    /// Every non-root target instance as `(id, root, key source)`, in ascending
+    /// index order — dependency order, since a key's source referent always
+    /// precedes its owner. A rebuild walks this after refreshing the root stack
+    /// so each instance's seed referent is already up to date when it is read.
+    pub(crate) fn targets(&self) -> impl Iterator<Item = (LayerStackId, LayerId, VarsSource)> + '_ {
         self.instances
             .iter()
             .enumerate()
             .filter_map(|(i, inst)| match inst.key {
                 LayerStackKey::Root => None,
-                LayerStackKey::Target { root, seed } => {
-                    if affected
-                        .is_some_and(|affected| !affected.contains(&root) && inst.member_set.is_disjoint(affected))
-                    {
-                        return None;
-                    }
-                    Some((LayerStackId(i as u32), root, self.context_vars(seed)))
-                }
+                LayerStackKey::Target { root, source } => Some((LayerStackId(i as u32), root, source)),
             })
-            .collect()
     }
 
     /// Replaces a stack's members and composed expression variables after a
     /// re-resolve, keeping the id stable so a handle held by a surviving prim index
-    /// stays valid.
+    /// stays valid, and re-deriving the stack's variable source
+    /// ([`derive_vars_source`](Self::derive_vars_source)). Returns whether the
+    /// composed variables or their source changed, so a rebuild pass can cascade
+    /// the re-seed to the stacks keyed by this one.
     pub(crate) fn set_composed(
         &mut self,
         id: LayerStackId,
         members: Vec<(LayerId, LayerOffset)>,
         expr_vars: HashMap<String, Value>,
-    ) {
+    ) -> bool {
         let expr_id = self.contexts.intern(&expr_vars);
+        let vars_source = self.derive_vars_source(id, self.instances[id.idx()].key, expr_id);
         let instance = &mut self.instances[id.idx()];
+        let changed = instance.expr_id != expr_id || instance.vars_source != vars_source;
         instance.member_set = members.iter().map(|&(id, _)| id).collect();
         instance.members = members;
         instance.expr_vars = expr_vars;
         instance.expr_id = expr_id;
+        instance.vars_source = vars_source;
+        changed
     }
 
     /// The composed expression variables of a stack. Unlike [`members`](Self::members)
@@ -379,11 +380,13 @@ impl LayerStackRegistry {
         &self.instances[id.idx()].expr_vars
     }
 
-    /// The interned id of a stack's composed expression variables — the seed of any
-    /// stack minted across a reference/payload arc from this one. Panics on an
-    /// unminted handle, like [`expression_variables`](Self::expression_variables).
-    pub(crate) fn expr_id(&self, id: LayerStackId) -> ExprVarId {
-        self.instances[id.idx()].expr_id
+    /// The source of a stack's composed expression variables — the value an arc
+    /// out of this stack keys its target stack by (C++ `primIndex.cpp` keys the
+    /// target identifier by the parent stack's composed-variables source, not by
+    /// the parent itself). Panics on an unminted handle, like
+    /// [`expression_variables`](Self::expression_variables).
+    pub(crate) fn vars_source(&self, id: LayerStackId) -> VarsSource {
+        self.instances[id.idx()].vars_source
     }
 }
 
@@ -401,14 +404,14 @@ fn canonical_context(vars: &HashMap<String, Value>) -> Vec<(String, Value)> {
 /// with the same bit pattern as equal so a context always matches its own
 /// re-derived clone.
 ///
-/// [`Value`] derives `PartialEq`, under which `NaN != NaN`, so a context carrying
-/// a float `NaN` — only reachable from non-conformant `expressionVariables`, which
-/// the spec restricts to string/bool/int — would otherwise never dedup, leaving
-/// [`external_stack_id`](super::layer_graph::LayerGraph::external_stack_id)
-/// returning `Demand` and the load barrier interning the same context forever. A
-/// scalar float compares by bit pattern, so a `NaN` equals its clone; a dictionary
-/// recurses, matching values by key (order-independently, reaching a `NaN` nested
-/// in a dictionary value); every other value uses `==`.
+/// [`Value`] derives `PartialEq`, under which `NaN != NaN`, so a composed set
+/// carrying a float `NaN` — only reachable from non-conformant
+/// `expressionVariables`, which the spec restricts to string/bool/int — would
+/// otherwise never compare equal to its own rebuild: every rebuild would report
+/// it changed and re-derive its stack as its own variable source. A scalar float
+/// compares by bit pattern, so a `NaN` equals its clone; a dictionary recurses,
+/// matching values by key (order-independently, reaching a `NaN` nested in a
+/// dictionary value); every other value uses `==`.
 fn value_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Half(a), Value::Half(b)) => a.to_bits() == b.to_bits(),
@@ -425,15 +428,16 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 mod tests {
     use super::*;
 
-    /// A context carrying a float `NaN` dedups to one id across re-interning, so
-    /// the load barrier converges instead of minting an identical context forever.
-    /// Under `Value`'s derived `PartialEq` (`NaN != NaN`) this would return two ids.
+    /// A context carrying a float `NaN` interns to one id across re-derivation,
+    /// so a rebuild recognizes an unchanged composed set instead of reporting a
+    /// change (and re-deriving the variable source) forever. Under `Value`'s
+    /// derived `PartialEq` (`NaN != NaN`) this would return two ids.
     #[test]
     fn nan_seed_dedups() {
-        let mut registry = LayerStackRegistry::default();
+        let mut interner = ExprVarInterner::default();
         let vars = || HashMap::from([("V".to_string(), Value::Double(f64::NAN))]);
-        let first = registry.intern_context(&vars());
-        let second = registry.intern_context(&vars());
+        let first = interner.intern(&vars());
+        let second = interner.intern(&vars());
         assert_eq!(first, second, "a NaN-valued context must intern to a single id");
     }
 }

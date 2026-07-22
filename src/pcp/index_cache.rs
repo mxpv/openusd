@@ -33,14 +33,13 @@ use super::prim_index::{
 };
 use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
-use super::{Error, LayerId, MapFunction, VariantFallbackMap};
+use super::{Error, LayerId, MapFunction, StackIdentity, VariantFallbackMap};
 
 /// What [`IndexCache::edit_target_node_info`] reports for an arc node: the target
-/// layer's identifier, the node's spec-to-scene mapping, and the layer stack it
-/// composes in — `None` for the stage root stack, else `(target root identifier,
-/// inherited expression-variable context)` so an edit target reconstructs the same
-/// (possibly contextual) stack.
-type EditTargetNodeInfo = (String, MapFunction, Option<(String, HashMap<String, Value>)>);
+/// layer's identifier, the node's spec-to-scene mapping, and the value identity
+/// of the layer stack it composes in, so an edit target resolves the same
+/// (possibly contextual) stack wherever it is installed.
+type EditTargetNodeInfo = (String, MapFunction, StackIdentity);
 
 /// Lazily-built composition graph.
 ///
@@ -1004,24 +1003,16 @@ impl IndexCache {
         };
         Ok(index.nodes().find_map(|node| {
             (matches(node.arc) && node.has_specs()).then(|| {
-                // The layer stack the node composes in, captured so the edit target
-                // authors into it exactly rather than re-inferring it from layer
-                // membership: `None` for the stage root stack, else the target root
-                // layer's identifier paired with the expression-variable context the
-                // stack resolved against (empty for a plain stack, the inherited
-                // `${VAR}` context for a contextual one — needed so a relocate plan
-                // seeds from the same context-resolved members).
-                let stack = node.layer_stack_id();
-                let stack_info = (!graph.is_root_stack(stack)).then(|| {
-                    (
-                        graph.identifier(graph.stack_target_root(stack)).to_string(),
-                        graph.stack_seed_vars(stack),
-                    )
-                });
+                // The layer stack the node composes in, captured by value identity
+                // so the edit target authors into it exactly rather than
+                // re-inferring it from layer membership — a contextual instance's
+                // `${VAR}`-resolved members reach a relocate plan unchanged. The
+                // value form resolves on any equal-input stage, where a graph-local
+                // handle would name an unrelated instance.
                 (
                     graph.identifier(node.layer_id()).to_string(),
                     index.map_to_root_for_targets(node),
-                    stack_info,
+                    graph.stack_identity(node.layer_stack_id()),
                 )
             })
         }))
@@ -2849,7 +2840,7 @@ def "Scope"
 
     /// An asset attribute's `${VAR}` inside a referenced target resolves against
     /// the variable authored on the referencing root. The target has no
-    /// expression sublayers, so only the context-keyed instance the arc minted
+    /// expression sublayers, so only the contextual instance the arc minted
     /// carries the variable to value-resolution time.
     #[test]
     fn expr_asset_inherited_context() -> Result<()> {

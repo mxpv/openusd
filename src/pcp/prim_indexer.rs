@@ -2559,8 +2559,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let is_internal = asset_path.is_empty();
         let parent_path = self.node(parent).path.clone();
         // The arc's full inherited expression-variable context is the parent
-        // node's own stack — target-stack selection compares its interned
-        // context id, and a demand carries the handle to the load barrier.
+        // node's own stack — target-stack selection keys by the source of its
+        // composed variables, and a demand carries the handle to the load
+        // barrier.
         let context = self.node(parent).layer_stack_id();
 
         // Resolve the target layer stack. An internal reference targets the
@@ -2642,12 +2643,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
             };
             external_target = Some(layer_index);
             // The layer graph resolves which stack this arc composes against —
-            // every target stack is keyed by its full inherited context, so the
-            // lookup compares the parent stack's interned context id. A stack not
-            // yet built is demanded: the load barrier mints it (opening any
-            // `${VAR}` sublayers the context resolves) and the query re-runs to
-            // find it (this build is discarded while a load is pending, so
-            // abandoning the arc here is harmless).
+            // every target stack is keyed by the source of the parent stack's
+            // composed expression variables. A stack not yet built is demanded:
+            // the load barrier mints it (opening any `${VAR}` sublayers the
+            // context resolves) and the query re-runs to find it (this build is
+            // discarded while a load is pending, so abandoning the arc here is
+            // harmless).
             match self.inputs.stack.external_stack_id(layer_index, context) {
                 ExternalStack::Ready(id) => id,
                 ExternalStack::Demand => {
@@ -3595,11 +3596,13 @@ mod tests {
         );
     }
 
-    /// A self-referencing arc carrying variables converges: the second hop's
-    /// seed is the stack's own composed set, which composes to itself
-    /// (own ⊕ (own ⊕ C) = own ⊕ C), so the interned context reaches a fixpoint
-    /// one instance deep and the site-identity cycle check fires instead of
-    /// unrolling further.
+    /// A self-referencing arc carrying variables converges as the C++ Tid1/Tid2
+    /// fixpoint: the first hop mints the target under the Root source and,
+    /// having authored variables, becomes its own variable source; the second
+    /// hop keys the target by that instance, and its no-op authoring (the same
+    /// dictionary it inherited) reuses the source — so the third arc resolves
+    /// the same site and the ancestor cycle check fires instead of unrolling
+    /// further.
     #[test]
     fn self_ref_vars_converges() {
         let mut s = multi_stack(&[
@@ -3627,13 +3630,14 @@ mod tests {
         );
     }
 
-    /// Two distinct override sources (`s1`, `s2`) carrying equal composed maps
-    /// into the same target share one `LayerStackId`, so the site-identity cycle
-    /// check closes the chain the second time `/T` is reached. C++ keys
-    /// `PcpLayerStackIdentifier` by the override *source*, keeping t-via-s1 and
-    /// t-via-s2 as distinct sites and reporting no cycle here.
+    /// Two intermediates (`s1`, `s2`) whose authoring is a no-op under the
+    /// variables already in force share the target site: `/T` via `s1` is keyed
+    /// by `s1`'s variable source, and `s2` — composing the same dictionary it
+    /// inherited — reuses that source rather than becoming one, so the second
+    /// `/T` arc resolves the same instance and the site-identity cycle check
+    /// closes the chain (C++'s source-reuse rule cycles here identically).
     #[test]
-    fn equal_context_cycle_coalesced() {
+    fn noop_source_cycle() {
         let mut s = multi_stack(&[
             (
                 "root.usd",

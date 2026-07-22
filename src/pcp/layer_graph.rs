@@ -36,9 +36,8 @@ use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
-use super::layer_stack::{ExprVarId, LayerStackId, LayerStackRegistry};
+use super::layer_stack::{LayerStackId, LayerStackRegistry, VarsSource};
 use super::mapping::MapFunction;
-#[cfg(test)]
 use super::prim_index::Demand;
 use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
 use super::{effective_time_codes_per_second, Error};
@@ -85,6 +84,33 @@ pub struct LayerStackIdentifier {
     /// The resolver's [`identity`](crate::ar::Resolver::identity) token — the
     /// configuration the stack's asset paths resolve under.
     pub resolver: String,
+}
+
+/// A composed layer stack by value — the transferable counterpart of the
+/// graph-local [`LayerStackId`], the value form of C++
+/// `PcpLayerStackIdentifier` with its recursive
+/// `expressionVariablesOverrideSource`. An arc-based edit target carries one so
+/// the stack resolves by content on whichever equal-input stage installs it,
+/// where the numeric handles differ. Total over every stack, the root included,
+/// so capture and resolve sites need no root special case. Captured by
+/// [`stack_identity`](LayerGraph::stack_identity) and resolved by
+/// [`resolve_stack_identity`](LayerGraph::resolve_stack_identity).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StackIdentity {
+    /// The stage root layer stack.
+    Root,
+    /// A reference/payload target stack: the target root layer's canonical
+    /// identifier plus its variable source chain — each element the canonical
+    /// identifier of a source stack's target root, ordered outermost (seeded by
+    /// the stage root stack) first, with an empty chain meaning the root
+    /// source.
+    Target {
+        /// Canonical identifier of the target root layer.
+        root: String,
+        /// Canonical identifiers of the variable source chain's target roots,
+        /// outermost first.
+        source_chain: Vec<String>,
+    },
 }
 
 /// A layer's resolved sublayer edges in declared order: each child paired with
@@ -210,7 +236,7 @@ pub(crate) struct LayerGraph {
     /// cleared when an edit changes the layers so a now-readable asset is retried.
     failed_loads: HashMap<String, String>,
     /// Every composed layer stack against this graph — the stage root stack, plus
-    /// each reference/payload target's stack under whatever inherited contexts have
+    /// each reference/payload target's stack under whatever variable sources have
     /// reached it (see [`LayerStackRegistry`]). The graph composes a stack's members
     /// (it owns the layers) through [`build_stack_members`](Self::build_stack_members)
     /// and hands them to the registry, which owns the storage and interning. A
@@ -250,7 +276,7 @@ pub(crate) struct MuteChange {
 pub(crate) enum ExternalStack {
     /// The stack is composed and ready; compose the arc against this handle.
     Ready(LayerStackId),
-    /// No instance exists yet for this `(target, context)`; the arc must record a
+    /// No instance exists yet for this `(target, source)`; the arc must record a
     /// [`Demand`](super::Demand) so the load barrier mints it (and opens any
     /// `${VAR}` sublayers the context resolves), after which the query re-runs.
     Demand,
@@ -577,6 +603,14 @@ impl LayerGraph {
         // rebuilds the stacks.
         self.resolve_muted_ids();
 
+        // Stacks whose composed expression variables (or their source) changed
+        // this pass. A stack seeds from its key source's referent, so a change
+        // there must cascade even when the edit touched none of the stack's own
+        // layers; a source referent always precedes the stacks keyed by it, so
+        // the single ascending-index pass below reads every seed after its
+        // referent was refreshed.
+        let mut changed: HashSet<LayerStackId> = HashSet::new();
+
         // The stage root stack (session layers at identity offset minus a muted
         // session subtree, then the root layer and its sublayers) is rebuilt on a
         // full pass, or when an edited layer is one of its members — an edit
@@ -611,27 +645,58 @@ impl LayerGraph {
                 None => (Vec::new(), session_vars),
             };
             root_members.extend(members);
-            self.stacks.set_root(root_members, expr_vars);
+            if self.stacks.set_root(root_members, expr_vars) {
+                changed.insert(LayerStackId::ROOT);
+            }
         }
 
-        // Re-resolve each already-interned target stack (plain and contextual)
-        // whose members or composed variables an edited layer contributes to; a
-        // full pass (`None`) re-resolves them all.
-        for (id, root, vars) in self.stacks.target_rebuild_specs(affected) {
-            let (members, expr_vars) = self.build_stack_members(root, &vars);
-            self.stacks.set_composed(id, members, expr_vars);
+        // Re-resolve each already-interned target stack whose composition an
+        // edited layer can reach; a full pass (`None`) re-resolves them all. A
+        // target rebuilds when an edited layer is its target root (checked
+        // explicitly because a muted root's member set is empty — disjoint from
+        // everything — while its layer data still feeds the stack's composed
+        // variables), a member, or when its seed shifted: its key source's
+        // referent changed this pass. The seed is read live from that referent,
+        // already refreshed by this pass's ascending order.
+        // TODO(perf): this materializes every target instance per rebuild (the
+        // registry borrow must end before `build_stack_members` takes `&mut
+        // self`); an index-walk accessor on the registry would drop the
+        // allocation.
+        for (id, root, source) in self.stacks.targets().collect::<Vec<_>>() {
+            let rebuild = match affected {
+                None => true,
+                Some(affected) => {
+                    affected.contains(&root)
+                        || self
+                            .stacks
+                            .member_set(id)
+                            .is_some_and(|members| !members.is_disjoint(affected))
+                        || changed.contains(&source.referent())
+                }
+            };
+            if !rebuild {
+                continue;
+            }
+            let seed_vars = self.stacks.expression_variables(source.referent()).clone();
+            let (members, expr_vars) = self.build_stack_members(root, &seed_vars);
+            if self.stacks.set_composed(id, members, expr_vars) {
+                changed.insert(id);
+            }
         }
     }
 
-    /// Mints a plain stack instance for every sublayer-DAG root that lacks one — a
-    /// reference/payload target interned eagerly by `from_layers` rather than through
-    /// the demand path. Run once at [`finalize`](Self::finalize): a production target
-    /// loads after finalize and is minted by
-    /// [`intern_external`](Self::intern_external) under its own context, so it never
-    /// reaches here, and an edit-time recompose never re-mints a never-queried plain
-    /// instance for a contextual-only target.
+    /// Mints a root-sourced stack instance for every sublayer-DAG root that lacks
+    /// one — a reference/payload target interned eagerly by `from_layers` rather
+    /// than through the demand path. The stacks are keyed `{root, Root}` and
+    /// seeded by the root stack's composed variables: a stack whose variable
+    /// source is the root composes under the root stack's set (C++
+    /// `PcpLayerStackIdentifier` with no explicit override source), so a
+    /// var-authoring stage root reaches into every such target. Run once at
+    /// [`finalize`](Self::finalize): a production target loads after finalize and
+    /// is minted by [`intern_external`](Self::intern_external) under its own
+    /// context, so it never reaches here, and an edit-time recompose never
+    /// re-mints a never-queried instance for a contextual-only target.
     fn mint_eager_target_stacks(&mut self) {
-        let empty = self.stacks.empty_context();
         let sublayered: HashSet<LayerId> = self
             .order
             .iter()
@@ -641,13 +706,10 @@ impl LayerGraph {
             .order
             .iter()
             .copied()
-            .filter(|&id| {
-                !sublayered.contains(&id) && Some(id) != self.root && self.stacks.lookup_target(id, empty).is_none()
-            })
+            .filter(|&id| !sublayered.contains(&id) && Some(id) != self.root)
             .collect();
         for root in dag_roots {
-            let (members, expr_vars) = self.build_stack_members(root, &HashMap::new());
-            self.stacks.intern_target(root, empty, members, expr_vars);
+            self.intern_target_stack(root, VarsSource::Root);
         }
     }
 
@@ -824,48 +886,44 @@ impl LayerGraph {
     }
 
     /// The layer stack a reference/payload arc to external `root` should compose
-    /// against, given the arc-carrying stack `context` — whose composed
-    /// expression variables are the arc's full inherited context. Every target
-    /// stack is keyed by that context, so this is a plain `(root, seed)` lookup
-    /// on its interned id. Read-only: the indexer runs against `&LayerGraph`
-    /// and cannot mint, so a not-yet-built stack returns
+    /// against, given the arc-carrying stack `context`. Every target stack is
+    /// keyed by the source of the arc-carrying stack's composed expression
+    /// variables (C++ `primIndex.cpp` builds the target identifier from
+    /// `GetExpressionVariables().GetSource()`), so this is a plain
+    /// `(root, source)` lookup on its interned id. Read-only: the indexer runs
+    /// against `&LayerGraph` and cannot mint, so a not-yet-built stack returns
     /// [`ExternalStack::Demand`] for the load barrier to resolve through
     /// [`intern_external`](Self::intern_external).
     pub(crate) fn external_stack_id(&self, root: LayerId, context: LayerStackId) -> ExternalStack {
-        self.resolve_target_stack(root, self.stacks.expr_id(context))
+        self.resolve_target_stack(root, self.stacks.vars_source(context))
     }
 
-    /// The `(root, seed)` resolve policy shared by the read path
+    /// The `(root, source)` resolve policy shared by the read path
     /// ([`external_stack_id`](Self::external_stack_id)) and the mint path
     /// ([`intern_target_stack`](Self::intern_target_stack)): collapse to the
-    /// root stack when the context is the root stack's own
+    /// root stack when the identity is the root stack's own
     /// ([`collapses_to_root`](Self::collapses_to_root)), else the interned
-    /// `(root, seed)` instance, else [`ExternalStack::Demand`].
-    fn resolve_target_stack(&self, root: LayerId, seed: ExprVarId) -> ExternalStack {
-        if self.collapses_to_root(root, seed) {
+    /// `(root, source)` instance, else [`ExternalStack::Demand`].
+    fn resolve_target_stack(&self, root: LayerId, source: VarsSource) -> ExternalStack {
+        if self.collapses_to_root(root, source) {
             return ExternalStack::Ready(LayerStackId::ROOT);
         }
-        match self.stacks.lookup_target(root, seed) {
+        match self.stacks.lookup_target(root, source) {
             Some(id) => ExternalStack::Ready(id),
             None => ExternalStack::Demand,
         }
     }
 
-    /// Whether an arc to `root` under the context `seed` composes against the stage
-    /// root stack itself: the target is the stage root layer, no session layers
-    /// separate the two identities (C++ `PcpLayerStackIdentifier` equality), and
-    /// the arriving context is exactly the root stack's own composed context (an
-    /// id comparison — an indexer-originated context is the arc-carrying stack's
-    /// composed set, so a back-reference from inside the root stack matches).
-    /// A differing context — a back-reference through a stack that authored its
-    /// own variables — instead mints a contextual instance rooted at the stage
-    /// root layer, keeping the outer variables in force. The id check is
-    /// sufficient, not necessary: an authoring query may supply a context that
-    /// composes to the root's set without being it, minting a duplicate-identity
-    /// instance whose members and variables equal the root stack's — harmless, and
-    /// rebuilt uniformly with every other target.
-    fn collapses_to_root(&self, root: LayerId, seed: ExprVarId) -> bool {
-        self.session_layer_count == 0 && self.root == Some(root) && seed == self.stacks.expr_id(LayerStackId::ROOT)
+    /// Whether an arc to `root` under the variable source `source` composes
+    /// against the stage root stack itself — pure key equality with the root
+    /// stack's identity (C++ `PcpLayerStackIdentifier` with the root's null
+    /// override source): the target is the stage root layer, no session layers
+    /// separate the two, and the variables' source is the root. A carried
+    /// [`VarsSource::Instance`] — a back-reference through a stack that authored
+    /// its own variables — instead mints a contextual instance rooted at the
+    /// stage root layer, keeping the outer variables in force.
+    fn collapses_to_root(&self, root: LayerId, source: VarsSource) -> bool {
+        self.session_layer_count == 0 && self.root == Some(root) && source == VarsSource::Root
     }
 
     /// Builds and interns the layer stack for a reference/payload arc to `root`
@@ -875,7 +933,7 @@ impl LayerGraph {
     /// drive a re-run. Idempotent. Called from the load barrier once the target
     /// and the sublayers its context resolves have been interned.
     pub(crate) fn intern_external(&mut self, root: LayerId, context: LayerStackId) -> (LayerStackId, bool) {
-        self.intern_target_stack(root, self.stacks.expr_id(context))
+        self.intern_target_stack(root, self.stacks.vars_source(context))
     }
 
     /// Whether the load barrier must (re)open `root`'s sublayers for a
@@ -898,35 +956,79 @@ impl LayerGraph {
             && matches!(self.external_stack_id(root, context), ExternalStack::Demand)
     }
 
-    /// The inherited expression-variable context the stack `id` resolved against —
-    /// empty for the root stack and for a context-free target. Captured into an
-    /// edit target so authoring reconstructs the same contextual stack later.
-    pub(crate) fn stack_seed_vars(&self, id: LayerStackId) -> HashMap<String, Value> {
-        self.stacks.instance_seed_vars(id)
+    /// The value identity of the stack `id`, for capture into an arc-based edit
+    /// target: the root stack as [`StackIdentity::Root`], a target stack as its
+    /// root's identifier plus its variable source chain's identifiers, walked
+    /// key source by key source down to the root stack and reversed to
+    /// outermost-first.
+    pub(crate) fn stack_identity(&self, id: LayerStackId) -> StackIdentity {
+        let Some((root, mut source)) = self.stacks.target_key(id) else {
+            return StackIdentity::Root;
+        };
+        let mut chain = Vec::new();
+        while let VarsSource::Instance(referent) = source {
+            let (referent_root, next) = self
+                .stacks
+                .target_key(referent)
+                .expect("a canonical source referent is a target stack");
+            chain.push(referent_root);
+            source = next;
+        }
+        chain.reverse();
+        StackIdentity::Target {
+            root: self.identifier(root).to_string(),
+            source_chain: self.identifiers_of(chain),
+        }
     }
 
-    /// The handle for the stack rooted at `root` under the explicit variable map
-    /// `vars`, interning it if it has not been composed yet — for an authoring
-    /// query (an edit target reconstructing a captured context) that must resolve
-    /// to the exact stack rather than a fallback.
-    pub(crate) fn ensure_external_stack(&mut self, root: LayerId, vars: &HashMap<String, Value>) -> LayerStackId {
-        let seed = self.stacks.intern_context(vars);
-        self.intern_target_stack(root, seed).0
+    /// Resolves a captured [`StackIdentity`] to a stack handle on this graph,
+    /// walking the source chain outside-in so the same content derives the same
+    /// source-keyed identities the capturing graph held — including on a
+    /// different stage with equal composition inputs, where the numeric handles
+    /// number differently.
+    ///
+    /// Read-only, like the arc path: the first chain element whose layer is not
+    /// loaded or whose stack is not yet composed comes back as `Err` with the
+    /// [`Demand`] the load barrier must satisfy, and the caller re-runs the
+    /// walk after each load until it resolves or loading stops progressing.
+    /// Minting is left to the barrier so a `${VAR}`-selected sublayer the
+    /// context resolves is opened before the stack is interned (the barrier's
+    /// contextual-open check), and a walk that ultimately fails interns
+    /// nothing.
+    pub(crate) fn resolve_stack_identity(&self, identity: &StackIdentity) -> Result<LayerStackId, Demand> {
+        let StackIdentity::Target { root, source_chain } = identity else {
+            return Ok(LayerStackId::ROOT);
+        };
+        let mut context = LayerStackId::ROOT;
+        for identifier in source_chain.iter().chain([root]) {
+            let stack = self
+                .id_of(identifier)
+                .map(|layer| self.external_stack_id(layer, context));
+            let Some(ExternalStack::Ready(id)) = stack else {
+                return Err(Demand {
+                    asset_path: identifier.clone(),
+                    context,
+                });
+            };
+            context = id;
+        }
+        Ok(context)
     }
 
     /// The single mint policy for an external target stack: resolve through the
     /// shared policy ([`resolve_target_stack`](Self::resolve_target_stack)) and,
     /// on [`ExternalStack::Demand`], compose the members and variables under the
-    /// seed and intern a fresh instance. Distinct contexts to the same target
-    /// intern distinct instances even when their members are identical — the
-    /// instance carries the context, so sharing would drop it.
-    fn intern_target_stack(&mut self, root: LayerId, seed: ExprVarId) -> (LayerStackId, bool) {
-        if let ExternalStack::Ready(id) = self.resolve_target_stack(root, seed) {
+    /// source referent's composed set and intern a fresh instance. Distinct
+    /// sources to the same target intern distinct instances even when their
+    /// composed maps and members are equal — the source is the identity, so
+    /// sharing would collapse sites C++ keeps apart.
+    fn intern_target_stack(&mut self, root: LayerId, source: VarsSource) -> (LayerStackId, bool) {
+        if let ExternalStack::Ready(id) = self.resolve_target_stack(root, source) {
             return (id, false);
         }
-        let seed_vars = self.stacks.context_vars(seed);
+        let seed_vars = self.stacks.expression_variables(source.referent()).clone();
         let (members, expr_vars) = self.build_stack_members(root, &seed_vars);
-        (self.stacks.intern_target(root, seed, members, expr_vars), true)
+        (self.stacks.intern_target(root, source, members, expr_vars), true)
     }
 
     /// Whether any layer in `root`'s plain sublayer subtree authors an
@@ -1263,33 +1365,37 @@ impl LayerGraph {
         self.identifiers_of(self.root_layer_stack().iter().map(|&(id, _)| id))
     }
 
-    /// The layer ids + effective offsets of the plain sublayer stack rooted at
-    /// `root_layer` (spec 10.3.1.1) — its sublayer edges resolved with no inherited
-    /// expression-variable context (the layer's own `expressionVariables` still
-    /// apply), the depth-first pre-order walk with offsets composed through nested
-    /// sublayers. A layer that sublayers itself transitively is a cycle and is
-    /// skipped; an off-path duplicate is expanded again. Empty for an unknown layer.
+    /// The layer ids + effective offsets of the root-sourced sublayer stack rooted
+    /// at `root_layer` (spec 10.3.1.1) — its sublayer edges resolved under the
+    /// layer's own `expressionVariables` overlaid by the stage root stack's
+    /// composed set (a stack with no explicit override source composes under the
+    /// root's, C++ `PcpExpressionVariables`), the depth-first pre-order walk with
+    /// offsets composed through nested sublayers. A layer that sublayers itself
+    /// transitively is a cycle and is skipped; an off-path duplicate is expanded
+    /// again. Empty for an unknown layer.
     ///
-    /// The empty-seed query goes through the same expansion policy as a rebuilt
-    /// stack ([`stack_members_uncached`](Self::stack_members_uncached)): it reads the
-    /// registry's interned plain instance when one exists, and otherwise composes on
-    /// demand with a scratch resolution cache — so a sublayer diamond whose shared
-    /// layer resolves `${VAR}` differently per arm expands per ancestry here exactly
-    /// as it does in the interned members. Because the seed is empty, a variable a
-    /// layer inherits only from a parent that sublayers it is not in scope — those
-    /// members appear in the parent's stack, not in the layer's own.
+    /// The query goes through the same expansion policy as a rebuilt stack
+    /// ([`stack_members_uncached`](Self::stack_members_uncached)): it reads the
+    /// registry's interned `{root_layer, Root}` instance when one exists, and
+    /// otherwise composes on demand with a scratch resolution cache — so a
+    /// sublayer diamond whose shared layer resolves `${VAR}` differently per arm
+    /// expands per ancestry here exactly as it does in the interned members. A
+    /// variable a layer inherits only from a parent that sublayers it is not in
+    /// scope — those members appear in the parent's stack, not in the layer's own.
     pub(crate) fn sublayer_stack(&self, root_layer: LayerId) -> Cow<'_, [(LayerId, LayerOffset)]> {
-        if let Some(id) = self.stacks.lookup_target(root_layer, self.stacks.empty_context()) {
+        if let Some(id) = self.stacks.lookup_target(root_layer, VarsSource::Root) {
             return Cow::Borrowed(self.stacks.members(id));
         }
         if !self.nodes.contains_key(&root_layer) {
             return Cow::Borrowed(&[]);
         }
-        // Only a `${VAR}` sublayer reads the stack's variables — with no
-        // inherited context they are the root layer's own; the plain fast path
-        // never touches them.
+        // Only a `${VAR}` sublayer reads the stack's variables — the layer's own
+        // seeded by the root stack's composed set; the plain fast path never
+        // touches them. A true `has_expr_sublayer` implies an edge build ran,
+        // which minted the root stack first, so its composed set is present.
         let stack_vars = if self.has_expr_sublayer(root_layer) {
-            self.composed_stack_vars(root_layer, &HashMap::new())
+            let seed = self.stacks.expression_variables(LayerStackId::ROOT);
+            self.composed_stack_vars(root_layer, seed)
         } else {
             HashMap::new()
         };
@@ -1327,17 +1433,6 @@ impl LayerGraph {
             .first()
             .map(|&(li, _)| li)
             .unwrap_or(LayerId::INVALID)
-    }
-
-    /// Whether the stack `id` is the stage root layer stack.
-    pub(crate) fn is_root_stack(&self, id: LayerStackId) -> bool {
-        self.stacks.is_root(id)
-    }
-
-    /// The reference/payload target a non-root stack `id` is rooted at, used to name
-    /// the authoring stack for an edit target.
-    pub(crate) fn stack_target_root(&self, id: LayerStackId) -> LayerId {
-        self.stacks.target_root(id)
     }
 
     /// The layer ids of the stage's root layer stack, as a set (C++ "local"
@@ -1744,34 +1839,31 @@ impl LayerGraph {
         if !self.any_expr_sublayer {
             return edges;
         }
-        // The (root, composed variables) of every stack whose subtree can hold an
-        // expression edge: the stage root stack — both its root region and its
-        // session region, each resolved against the structural root-stack
-        // variables so a session sublayer sees the stage root's variables too —
-        // and every interned target stack under its composed set (the target
-        // root's own variables overlaid by its seed,
-        // [`composed_stack_vars`](Self::composed_stack_vars), the same set its
-        // `${VAR}` sublayer edges resolve against).
-        let mut specs: Vec<(LayerId, HashMap<String, Value>)> = Vec::new();
+        // The roots of every stack whose subtree can hold an expression edge: the
+        // stage root stack — both its root region and its session region, each
+        // resolved against the structural root-stack variables so a session
+        // sublayer sees the stage root's variables too — and every interned
+        // target stack, resolved against its stored composed set (the same set
+        // its `${VAR}` sublayer edges resolved against on the last rebuild).
         let structural = self.root_stack_structural_vars();
+        let mut specs: Vec<(LayerId, &HashMap<String, Value>)> = Vec::new();
         if let Some(root) = self.root {
-            specs.push((root, structural.clone()));
+            specs.push((root, &structural));
         }
         if let Some(&session_root) = self.session_layers().first() {
-            specs.push((session_root, structural.clone()));
+            specs.push((session_root, &structural));
         }
         specs.extend(
             self.stacks
-                .target_rebuild_specs(None)
-                .into_iter()
-                .map(|(_, root, seed)| (root, self.composed_stack_vars(root, &seed))),
+                .targets()
+                .map(|(id, root, _)| (root, self.stacks.expression_variables(id))),
         );
         let mut resolution = HashMap::new();
         for (root, vars) in specs {
             if !self.has_expr_sublayer(root) {
                 continue;
             }
-            for (parent, resolved) in self.compose_stack_edges(root, &vars, &mut resolution) {
+            for (parent, resolved) in self.compose_stack_edges(root, vars, &mut resolution) {
                 edges
                     .entry(parent)
                     .or_default()
@@ -2430,30 +2522,31 @@ mod tests {
 
     /// A `${VAR}` sublayer on a reference/payload target resolves against the
     /// expression variables inherited across the arc, held on the target's
-    /// context-keyed stack instance. The plain
-    /// [`sublayer_stack`](LayerGraph::sublayer_stack) (no inherited context) cannot
-    /// resolve it; the instance interned for the arc's context can.
+    /// source-keyed stack instance. The root-sourced
+    /// [`sublayer_stack`](LayerGraph::sublayer_stack) (no variables anywhere in
+    /// the root stack) cannot resolve it; the instance interned for an arc from a
+    /// var-authoring source can.
     #[test]
     fn contextual_var_sublayer() {
         let root = sdf::Layer::new_in_memory("root.usda");
+        let mut src = sdf::Layer::new_in_memory("src.usda");
+        set_expr_var(&mut src, "V", "over");
         let mut target = sdf::Layer::new_in_memory("target.usda");
         edit_layer(&mut target, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
         });
         let over = sdf::Layer::new_in_memory("over.usda");
 
-        let mut graph = LayerGraph::from_layers(vec![root, target, over], 0, sdf::LayerRegistry::default());
+        let mut graph = LayerGraph::from_layers(vec![root, src, target, over], 0, sdf::LayerRegistry::default());
+        let src = graph.id_of("src.usda").unwrap();
         let target = graph.id_of("target.usda").unwrap();
         let over = graph.id_of("over.usda").unwrap();
 
         let ids: Vec<LayerId> = graph.sublayer_stack(target).iter().map(|&(id, _)| id).collect();
-        assert!(
-            !ids.contains(&over),
-            "the plain (no-context) stack cannot resolve `${{V}}`"
-        );
+        assert!(!ids.contains(&over), "the root-sourced stack cannot resolve `${{V}}`");
 
-        let vars = HashMap::from([("V".to_string(), Value::String("over".to_string()))]);
-        let id = graph.ensure_external_stack(target, &vars);
+        let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
+        let id = graph.intern_external(target, src_stack).0;
         let ids: Vec<LayerId> = graph.layer_stack(id).iter().map(|&(id, _)| id).collect();
         assert!(
             ids.contains(&over),
@@ -2461,12 +2554,16 @@ mod tests {
         );
     }
 
-    /// The same `${VAR}`-sublayer target reached through two different inherited
-    /// contexts resolves its sublayer independently: each context gets its own stack
-    /// instance with its own resolved member.
+    /// The same `${VAR}`-sublayer target reached from two sources authoring
+    /// different variables resolves its sublayer independently: each source gets
+    /// its own stack instance with its own resolved member.
     #[test]
     fn contextual_var_sublayer_per_context() {
         let root = sdf::Layer::new_in_memory("root.usda");
+        let mut sa = sdf::Layer::new_in_memory("sa.usda");
+        set_expr_var(&mut sa, "V", "a");
+        let mut sb = sdf::Layer::new_in_memory("sb.usda");
+        set_expr_var(&mut sb, "V", "b");
         let mut target = sdf::Layer::new_in_memory("target.usda");
         edit_layer(&mut target, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
@@ -2474,16 +2571,18 @@ mod tests {
         let a = sdf::Layer::new_in_memory("a.usda");
         let b = sdf::Layer::new_in_memory("b.usda");
 
-        let mut graph = LayerGraph::from_layers(vec![root, target, a, b], 0, sdf::LayerRegistry::default());
+        let mut graph = LayerGraph::from_layers(vec![root, sa, sb, target, a, b], 0, sdf::LayerRegistry::default());
+        let sa = graph.id_of("sa.usda").unwrap();
+        let sb = graph.id_of("sb.usda").unwrap();
         let target = graph.id_of("target.usda").unwrap();
         let a = graph.id_of("a.usda").unwrap();
         let b = graph.id_of("b.usda").unwrap();
 
-        let va = HashMap::from([("V".to_string(), Value::String("a".to_string()))]);
-        let vb = HashMap::from([("V".to_string(), Value::String("b".to_string()))]);
-        let ia = graph.ensure_external_stack(target, &va);
-        let ib = graph.ensure_external_stack(target, &vb);
-        assert_ne!(ia, ib, "different contexts get distinct instances");
+        let sa_stack = graph.intern_external(sa, LayerStackId::ROOT).0;
+        let sb_stack = graph.intern_external(sb, LayerStackId::ROOT).0;
+        let ia = graph.intern_external(target, sa_stack).0;
+        let ib = graph.intern_external(target, sb_stack).0;
+        assert_ne!(ia, ib, "different sources get distinct instances");
 
         let members = |id| {
             graph
@@ -2502,14 +2601,18 @@ mod tests {
         );
     }
 
-    /// Every target stack is keyed by its full inherited context, even when the
-    /// context cannot change its members — here the target's only expression
-    /// sublayer is muted. The two contexts intern distinct instances with equal
+    /// Every target stack is keyed by its variable source, even when the carried
+    /// variables cannot change its members — here the target's only expression
+    /// sublayer is muted. The two sources intern distinct instances with equal
     /// members, and each instance carries its own composed expression variables
     /// (the context an asset attribute inside the target evaluates against).
     #[test]
     fn muted_expr_sublayer_per_context() {
         let root = sdf::Layer::new_in_memory("root.usda");
+        let mut sa = sdf::Layer::new_in_memory("sa.usda");
+        set_expr_var(&mut sa, "V", "a");
+        let mut sb = sdf::Layer::new_in_memory("sb.usda");
+        set_expr_var(&mut sb, "V", "b");
         let mut target = sdf::Layer::new_in_memory("target.usda");
         edit_layer(&mut target, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["muted_expr.usda"]);
@@ -2519,29 +2622,32 @@ mod tests {
             e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
         });
 
-        let mut graph = LayerGraph::from_layers(vec![root, target, muted_expr], 0, sdf::LayerRegistry::default());
+        let mut graph =
+            LayerGraph::from_layers(vec![root, sa, sb, target, muted_expr], 0, sdf::LayerRegistry::default());
         graph.mute_layer("muted_expr.usda".to_string());
+        let sa = graph.id_of("sa.usda").unwrap();
+        let sb = graph.id_of("sb.usda").unwrap();
         let target = graph.id_of("target.usda").unwrap();
 
-        let va = HashMap::from([("V".to_string(), Value::String("a".to_string()))]);
-        let vb = HashMap::from([("V".to_string(), Value::String("b".to_string()))]);
-        let ia = graph.ensure_external_stack(target, &va);
-        let ib = graph.ensure_external_stack(target, &vb);
-        assert_ne!(ia, ib, "each context gets its own instance");
+        let sa_stack = graph.intern_external(sa, LayerStackId::ROOT).0;
+        let sb_stack = graph.intern_external(sb, LayerStackId::ROOT).0;
+        let ia = graph.intern_external(target, sa_stack).0;
+        let ib = graph.intern_external(target, sb_stack).0;
+        assert_ne!(ia, ib, "each source gets its own instance");
         assert_eq!(
             graph.layer_stack(ia),
             graph.layer_stack(ib),
-            "the muted expression sublayer leaves both contexts' members equal"
+            "the muted expression sublayer leaves both sources' members equal"
         );
         assert_eq!(
             graph.stack_expression_variables(ia),
-            &va,
-            "the instance carries its context"
+            &HashMap::from([("V".to_string(), Value::String("a".to_string()))]),
+            "the instance carries its source's variables"
         );
         assert_eq!(
             graph.stack_expression_variables(ib),
-            &vb,
-            "the instance carries its context"
+            &HashMap::from([("V".to_string(), Value::String("b".to_string()))]),
+            "the instance carries its source's variables"
         );
     }
 
@@ -2551,20 +2657,23 @@ mod tests {
     #[test]
     fn stored_composed_refreshed() {
         let root = sdf::Layer::new_in_memory("root.usda");
+        let mut src = sdf::Layer::new_in_memory("src.usda");
+        set_expr_var(&mut src, "W", "x");
         let mut target = sdf::Layer::new_in_memory("target.usda");
         set_expr_var(&mut target, "V", "a");
-        let mut graph = LayerGraph::from_layers(vec![root, target], 0, sdf::LayerRegistry::default());
+        let mut graph = LayerGraph::from_layers(vec![root, src, target], 0, sdf::LayerRegistry::default());
+        let src = graph.id_of("src.usda").unwrap();
         let target = graph.id_of("target.usda").unwrap();
 
-        let seed = HashMap::from([("W".to_string(), Value::String("x".to_string()))]);
-        let id = graph.ensure_external_stack(target, &seed);
+        let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
+        let id = graph.intern_external(target, src_stack).0;
         assert_eq!(
             graph.stack_expression_variables(id),
             &HashMap::from([
                 ("V".to_string(), Value::String("a".to_string())),
                 ("W".to_string(), Value::String("x".to_string())),
             ]),
-            "the stored set is the target's own V overlaid by the seed's W"
+            "the stored set is the target's own V overlaid by the source's W"
         );
 
         set_expr_var(&mut graph.nodes.get_mut(&target).unwrap().layer, "V", "b");
@@ -2592,7 +2701,7 @@ mod tests {
         graph.mute_layer("target.usda".to_string());
         let target = graph.id_of("target.usda").unwrap();
 
-        let id = graph.ensure_external_stack(target, &HashMap::new());
+        let id = graph.intern_external(target, LayerStackId::ROOT).0;
         assert!(graph.layer_stack(id).is_empty(), "the muted root empties the stack");
         assert_eq!(
             graph.stack_expression_variables(id),
@@ -2610,43 +2719,52 @@ mod tests {
     }
 
     /// A back-reference to a sessionless stage root collapses to the ROOT
-    /// instance only when the arriving context is the root stack's own composed
-    /// context; a differing context mints a contextual instance rooted at the
-    /// stage root layer that keeps the extra variables in force.
+    /// instance exactly when the identity keys agree: the arc carries the Root
+    /// variable source (a non-authoring chain, or an arc from inside the root
+    /// stack itself). A carried `Instance` source — the arc runs through a
+    /// var-authoring stack — mints a contextual instance rooted at the stage
+    /// root layer that keeps the outer variables in force.
     #[test]
     fn root_backref_identity() {
         let mut root = sdf::Layer::new_in_memory("root.usda");
         set_expr_var(&mut root, "V", "r");
-        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
+        let mut src = sdf::Layer::new_in_memory("src.usda");
+        set_expr_var(&mut src, "EXTRA", "e");
+        let mut graph = LayerGraph::from_layers(vec![root, src], 0, sdf::LayerRegistry::default());
         let root = graph.root_id().unwrap();
+        let src = graph.id_of("src.usda").unwrap();
 
-        let own = HashMap::from([("V".to_string(), Value::String("r".to_string()))]);
-        let id = graph.ensure_external_stack(root, &own);
-        assert_eq!(id, LayerStackId::ROOT, "the root stack's own context collapses to ROOT");
+        let id = graph.intern_external(root, LayerStackId::ROOT).0;
+        assert_eq!(
+            id,
+            LayerStackId::ROOT,
+            "the Root source collapses to ROOT by key equality"
+        );
 
-        let carried = HashMap::from([
-            ("V".to_string(), Value::String("r".to_string())),
-            ("EXTRA".to_string(), Value::String("e".to_string())),
-        ]);
-        let id = graph.ensure_external_stack(root, &carried);
+        let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
+        let id = graph.intern_external(root, src_stack).0;
         assert_ne!(
             id,
             LayerStackId::ROOT,
-            "a context-bearing back-reference stays contextual"
+            "a back-reference through a var-authoring source stays contextual"
         );
         assert_eq!(
             graph.stack_expression_variables(id),
-            &carried,
-            "the contextual instance keeps the carried variables"
+            &HashMap::from([
+                ("V".to_string(), Value::String("r".to_string())),
+                ("EXTRA".to_string(), Value::String("e".to_string())),
+            ]),
+            "the contextual instance keeps the carried variables over the root's own"
         );
     }
 
-    /// Two distinct source stacks carrying equal composed maps into the same
-    /// target share one instance: the registry keys by the composed context's
-    /// value, so the interned seed ids coincide. (C++ keys by the override
-    /// source instead and may keep two stacks; see the module's parity notes.)
+    /// Two source stacks each authoring the same variables into the same target
+    /// keep distinct target instances: identity keys by the variables' source,
+    /// not their value (C++ `PcpLayerStackIdentifier` with
+    /// `expressionVariablesOverrideSource`), and each source changed the
+    /// dictionary, so each is its own source.
     #[test]
-    fn equal_context_shared_target() {
+    fn equal_map_distinct_source() {
         let root = sdf::Layer::new_in_memory("root.usda");
         let mut s1 = sdf::Layer::new_in_memory("s1.usda");
         set_expr_var(&mut s1, "V", "x");
@@ -2658,18 +2776,221 @@ mod tests {
         let s2 = graph.id_of("s2.usda").unwrap();
         let target = graph.id_of("target.usda").unwrap();
 
-        let s1_stack = graph.ensure_external_stack(s1, &HashMap::new());
-        let s2_stack = graph.ensure_external_stack(s2, &HashMap::new());
+        let s1_stack = graph.intern_external(s1, LayerStackId::ROOT).0;
+        let s2_stack = graph.intern_external(s2, LayerStackId::ROOT).0;
         assert_ne!(s1_stack, s2_stack, "the sources are distinct stacks");
 
         let (t1, fresh1) = graph.intern_external(target, s1_stack);
         let (t2, fresh2) = graph.intern_external(target, s2_stack);
-        assert!(fresh1 && !fresh2, "the second equal context reuses the first instance");
-        assert_eq!(t1, t2, "equal composed maps share one target instance");
+        assert!(fresh1 && fresh2, "each authoring source mints its own instance");
+        assert_ne!(t1, t2, "equal composed maps do not coalesce distinct sources");
         assert_eq!(
             graph.stack_expression_variables(t1),
-            &HashMap::from([("V".to_string(), Value::String("x".to_string()))]),
+            graph.stack_expression_variables(t2),
+            "both instances compose the same variables"
         );
+    }
+
+    /// Non-authoring stacks propagate their source: a stack whose own variables
+    /// change nothing reuses its seed's source (the C++
+    /// `Pcp_ComposeExpressionVariables` rule), so arcs into the same target
+    /// through a parallel intermediate and through a chained one all carry the
+    /// Root source and share the Root-sourced instance.
+    #[test]
+    fn source_propagates_noop() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let m1 = sdf::Layer::new_in_memory("m1.usda");
+        let m2 = sdf::Layer::new_in_memory("m2.usda");
+        let target = sdf::Layer::new_in_memory("target.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, m1, m2, target], 0, sdf::LayerRegistry::default());
+        let m1 = graph.id_of("m1.usda").unwrap();
+        let m2 = graph.id_of("m2.usda").unwrap();
+        let target = graph.id_of("target.usda").unwrap();
+
+        let m1_stack = graph.intern_external(m1, LayerStackId::ROOT).0;
+        let m2_stack = graph.intern_external(m2, m1_stack).0;
+        assert_ne!(m1_stack, m2_stack, "the intermediates are distinct stacks");
+
+        let t1 = graph.intern_external(target, m1_stack).0;
+        let t2 = graph.intern_external(target, m2_stack).0;
+        assert_eq!(t1, t2, "the parallel and chained routes key the same instance");
+        assert_eq!(
+            t1,
+            graph.intern_external(target, LayerStackId::ROOT).0,
+            "the shared instance is the Root-sourced one"
+        );
+    }
+
+    /// A stack's value identity round-trips: the captured source chain resolves
+    /// back to the same instance on the same graph, re-deriving each hop from
+    /// live content rather than trusting the numeric handle; the root stack's
+    /// identity is total and maps to ROOT.
+    #[test]
+    fn stack_identity_roundtrip() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut src = sdf::Layer::new_in_memory("src.usda");
+        set_expr_var(&mut src, "V", "x");
+        let target = sdf::Layer::new_in_memory("target.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, src, target], 0, sdf::LayerRegistry::default());
+        let src = graph.id_of("src.usda").unwrap();
+        let target = graph.id_of("target.usda").unwrap();
+
+        let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
+        let t = graph.intern_external(target, src_stack).0;
+        let identity = graph.stack_identity(t);
+        assert_eq!(
+            identity,
+            StackIdentity::Target {
+                root: "target.usda".to_string(),
+                source_chain: vec!["src.usda".to_string()],
+            }
+        );
+        assert_eq!(graph.resolve_stack_identity(&identity).ok(), Some(t));
+
+        let root_identity = graph.stack_identity(LayerStackId::ROOT);
+        assert_eq!(root_identity, StackIdentity::Root);
+        assert_eq!(
+            graph.resolve_stack_identity(&root_identity).ok(),
+            Some(LayerStackId::ROOT)
+        );
+    }
+
+    /// An `expressionVariables` edit on a source stack's root refreshes every
+    /// stack keyed by it in place: the seed is read live from the source
+    /// instance during the rebuild, so the dependent's stored composed set and
+    /// members follow the edit while its id — and thus its arc keying — stays
+    /// stable.
+    #[test]
+    fn source_chain_rebuild() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut src = sdf::Layer::new_in_memory("src.usda");
+        set_expr_var(&mut src, "V", "a");
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        edit_layer(&mut target, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
+        });
+        let a = sdf::Layer::new_in_memory("a.usda");
+        let b = sdf::Layer::new_in_memory("b.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, src, target, a, b], 0, sdf::LayerRegistry::default());
+        let src = graph.id_of("src.usda").unwrap();
+        let target = graph.id_of("target.usda").unwrap();
+        let a = graph.id_of("a.usda").unwrap();
+        let b = graph.id_of("b.usda").unwrap();
+
+        let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
+        let t_stack = graph.intern_external(target, src_stack).0;
+        let members = |graph: &LayerGraph, id: LayerStackId| -> Vec<LayerId> {
+            graph.layer_stack(id).iter().map(|&(l, _)| l).collect()
+        };
+        assert!(members(&graph, t_stack).contains(&a), "V=a selects a.usda");
+
+        set_expr_var(&mut graph.nodes.get_mut(&src).unwrap().layer, "V", "b");
+        graph.recompute_sublayers(Some(&HashSet::from([src])));
+
+        let (resolved, fresh) = graph.intern_external(target, src_stack);
+        assert!(!fresh, "the edit re-keys nothing; the instance is reused");
+        assert_eq!(resolved, t_stack, "the arc still resolves the same instance");
+        assert_eq!(
+            graph.stack_expression_variables(t_stack),
+            &HashMap::from([("V".to_string(), Value::String("b".to_string()))]),
+            "the stored composed set follows the source edit"
+        );
+        let m = members(&graph, t_stack);
+        assert!(
+            m.contains(&b) && !m.contains(&a),
+            "the members re-resolve under the new seed: {m:?}"
+        );
+    }
+
+    /// Removing a source's authored variables flips its variable source back to
+    /// its seed's, re-keying future arcs: the previously minted contextual
+    /// target instance is stranded — still interned and rebuilt in place — while
+    /// new arcs resolve the Root-sourced instance.
+    #[test]
+    fn vars_source_flip() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut src = sdf::Layer::new_in_memory("src.usda");
+        set_expr_var(&mut src, "V", "a");
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        edit_layer(&mut target, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
+        });
+        let a = sdf::Layer::new_in_memory("a.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, src, target, a], 0, sdf::LayerRegistry::default());
+        let src = graph.id_of("src.usda").unwrap();
+        let target = graph.id_of("target.usda").unwrap();
+        let a = graph.id_of("a.usda").unwrap();
+
+        let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
+        let (old_t, fresh) = graph.intern_external(target, src_stack);
+        assert!(fresh, "the authoring source mints a contextual instance");
+
+        edit_layer(&mut graph.nodes.get_mut(&src).unwrap().layer, |e| {
+            e.pseudo_root_mut().unwrap().set(
+                FieldKey::ExpressionVariables.as_str(),
+                Value::Dictionary(HashMap::new()),
+            );
+        });
+        graph.recompute_sublayers(Some(&HashSet::from([src])));
+
+        let new_t = graph.intern_external(target, src_stack).0;
+        assert_ne!(
+            new_t, old_t,
+            "the flipped source re-keys the arc to the Root-sourced instance"
+        );
+        assert!(
+            !graph.layer_stack(old_t).iter().any(|&(l, _)| l == a),
+            "the stranded instance was still rebuilt: its seed no longer selects a.usda"
+        );
+    }
+
+    /// A back-reference to the stage root layer does not collapse to ROOT when
+    /// session layers are present: the identities differ (the ROOT instance
+    /// carries the session region), so a `{root layer, Root}` instance is minted
+    /// without the session layers.
+    #[test]
+    fn backref_no_session_collapse() {
+        let session = sdf::Layer::new_in_memory("session.usda");
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut graph = LayerGraph::from_layers(vec![session, root], 1, sdf::LayerRegistry::default());
+        let session = graph.id_of("session.usda").unwrap();
+        let root = graph.root_id().unwrap();
+
+        let id = graph.intern_external(root, LayerStackId::ROOT).0;
+        assert_ne!(id, LayerStackId::ROOT, "session layers keep the identities apart");
+        let members: Vec<LayerId> = graph.layer_stack(id).iter().map(|&(l, _)| l).collect();
+        assert!(
+            members.contains(&root) && !members.contains(&session),
+            "the back-reference stack is the root region without the session: {members:?}"
+        );
+    }
+
+    /// A sublayer-DAG root's eagerly minted stack composes under the stage root
+    /// stack's variables: its identity's variable source is the root (C++: an
+    /// identifier with no explicit override source), so a var-authoring stage
+    /// root selects `${V}` sublayers inside plain targets too, and an arc from
+    /// the root stack shares the eager instance instead of minting a duplicate.
+    #[test]
+    fn eager_mint_root_vars() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        set_expr_var(&mut root, "V", "leaf");
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        edit_layer(&mut target, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
+        });
+        let leaf = sdf::Layer::new_in_memory("leaf.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, target, leaf], 0, sdf::LayerRegistry::default());
+        let target = graph.id_of("target.usda").unwrap();
+        let leaf = graph.id_of("leaf.usda").unwrap();
+
+        let ids: Vec<LayerId> = graph.sublayer_stack(target).iter().map(|&(id, _)| id).collect();
+        assert!(
+            ids.contains(&leaf),
+            "the root's V seeds the eager target stack, selecting leaf.usda: {ids:?}"
+        );
+        let (id, fresh) = graph.intern_external(target, LayerStackId::ROOT);
+        assert!(!fresh, "an arc from the root stack resolves the eager instance");
+        assert_eq!(graph.layer_stack(id), &*graph.sublayer_stack(target));
     }
 
     /// A `${VAR}` sublayer selected by a reference target's own variable appears
@@ -2685,10 +3006,9 @@ mod tests {
             e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
         });
         let sub = sdf::Layer::new_in_memory("sub.usda");
-        let mut graph = LayerGraph::from_layers(vec![root, target, sub], 0, sdf::LayerRegistry::default());
+        let graph = LayerGraph::from_layers(vec![root, target, sub], 0, sdf::LayerRegistry::default());
         let target = graph.id_of("target.usda").unwrap();
         let sub = graph.id_of("sub.usda").unwrap();
-        graph.ensure_external_stack(target, &HashMap::new());
 
         let edges = graph.expression_ancestry_edges();
         assert!(
@@ -2713,7 +3033,7 @@ mod tests {
         let root = graph.root_id().unwrap();
         let src = graph.id_of("src.usda").unwrap();
 
-        let ctx = graph.ensure_external_stack(src, &HashMap::new());
+        let ctx = graph.intern_external(src, LayerStackId::ROOT).0;
         assert!(
             !graph.needs_contextual_open(root, ctx),
             "a context-bearing back-reference to the stage root must not trigger a reopen"
@@ -2776,10 +3096,15 @@ mod tests {
     /// Overrides win over the stack root's own variables, but an unrelated override
     /// leaves the root's variable in place (C++ `PcpExpressionVariables`). A
     /// reference target authoring `V=a` and a `${V}` sublayer resolves to `b` under
-    /// an arc override `V=b`, and back to `a` under an unrelated override.
+    /// a source authoring `V=b`, and back to `a` under a source authoring an
+    /// unrelated variable.
     #[test]
     fn override_precedence() {
         let root = sdf::Layer::new_in_memory("root.usda");
+        let mut over = sdf::Layer::new_in_memory("over.usda");
+        set_expr_var(&mut over, "V", "b");
+        let mut unrelated = sdf::Layer::new_in_memory("unrelated.usda");
+        set_expr_var(&mut unrelated, "OTHER", "z");
         let mut target = sdf::Layer::new_in_memory("target.usda");
         set_expr_var(&mut target, "V", "a");
         edit_layer(&mut target, |e| {
@@ -2787,7 +3112,13 @@ mod tests {
         });
         let a = sdf::Layer::new_in_memory("a.usda");
         let b = sdf::Layer::new_in_memory("b.usda");
-        let mut graph = LayerGraph::from_layers(vec![root, target, a, b], 0, sdf::LayerRegistry::default());
+        let mut graph = LayerGraph::from_layers(
+            vec![root, over, unrelated, target, a, b],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let over = graph.id_of("over.usda").unwrap();
+        let unrelated = graph.id_of("unrelated.usda").unwrap();
         let target = graph.id_of("target.usda").unwrap();
         let a_id = graph.id_of("a.usda").unwrap();
         let b_id = graph.id_of("b.usda").unwrap();
@@ -2796,16 +3127,16 @@ mod tests {
             graph.layer_stack(id).iter().map(|&(l, _)| l).collect()
         };
 
-        let over = HashMap::from([("V".to_string(), Value::String("b".to_string()))]);
-        let id = graph.ensure_external_stack(target, &over);
+        let over_stack = graph.intern_external(over, LayerStackId::ROOT).0;
+        let id = graph.intern_external(target, over_stack).0;
         let m = members(&graph, id);
         assert!(
             m.contains(&b_id) && !m.contains(&a_id),
-            "override V=b wins over the root's V=a: {m:?}"
+            "the source's V=b wins over the root's V=a: {m:?}"
         );
 
-        let unrelated = HashMap::from([("OTHER".to_string(), Value::String("z".to_string()))]);
-        let id = graph.ensure_external_stack(target, &unrelated);
+        let unrelated_stack = graph.intern_external(unrelated, LayerStackId::ROOT).0;
+        let id = graph.intern_external(target, unrelated_stack).0;
         let m = members(&graph, id);
         assert!(
             m.contains(&a_id) && !m.contains(&b_id),
@@ -2988,12 +3319,12 @@ mod tests {
         let s1_id = graph.id_of("s1.usda").unwrap();
         let s2_id = graph.id_of("s2.usda").unwrap();
         // The sub-stack handles are minted on demand at the load barrier in
-        // production; these direct relocate queries compose nothing, so mint them via
-        // `ensure_external_stack`. The handles stay valid across the mute below (the
-        // registry refreshes instances in place).
-        let combo_stack = graph.ensure_external_stack(combo_id, &HashMap::new());
-        let s1_stack = graph.ensure_external_stack(s1_id, &HashMap::new());
-        let s2_stack = graph.ensure_external_stack(s2_id, &HashMap::new());
+        // production; these direct relocate queries compose nothing, so mint them
+        // via `intern_external` under the root context. The handles stay valid
+        // across the mute below (the registry refreshes instances in place).
+        let combo_stack = graph.intern_external(combo_id, LayerStackId::ROOT).0;
+        let s1_stack = graph.intern_external(s1_id, LayerStackId::ROOT).0;
+        let s2_stack = graph.intern_external(s2_id, LayerStackId::ROOT).0;
 
         assert_eq!(
             graph.relocation_source(combo_stack, &Path::new("/W/C").unwrap()),

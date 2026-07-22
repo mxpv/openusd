@@ -137,7 +137,7 @@ pub(crate) struct SpecRefresh {
 /// right sublayer loads (a `${VAR}` inherited across the arc resolves against
 /// the referrer's value, not only the target's local one). The demanding node's
 /// stack handle carries that context completely — the barrier reads the
-/// composed map and its interned id off the instance.
+/// composed map and its variable source off the instance.
 #[derive(Debug, Clone)]
 pub(crate) struct Demand {
     /// Anchored asset path of the demanded reference/payload target.

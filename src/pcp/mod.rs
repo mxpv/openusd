@@ -46,7 +46,7 @@
 //! | Item | C++ equivalent | Description |
 //! |------|---------------|-------------|
 //! | `layer_graph` | `PcpLayerStack` | The loaded layers and their sublayer DAG, keyed by the graph-minted [`LayerId`] handle (physical layer storage). Owns the composed-stack registry (`layer_stack`). Owned by [`Stage`](crate::usd::Stage), passed to each build by shared reference. Sublayer edges are always derived from `subLayers` metadata, the single source of truth. |
-//! | `layer_stack` | `PcpLayerStack` identity | Composed-stack identity ([`LayerStackId`]) and the registry of context-keyed instances (`LayerStackRegistry`): a [`LayerId`] names a physical layer, a [`LayerStackId`] a composed view under a context, so a `${VAR}` sublayer reached through two contexts resolves independently. |
+//! | `layer_stack` | `PcpLayerStack` identity | Composed-stack identity ([`LayerStackId`]) and the registry of source-keyed instances (`LayerStackRegistry`): a [`LayerId`] names a physical layer, a [`LayerStackId`] a composed view under an expression-variable override source (`VarsSource`, the C++ `PcpExpressionVariablesSource`), so a `${VAR}` sublayer reached from two var-authoring sources resolves independently. |
 //! | `index_cache` | `PcpCache` | Lazily-built composition cache (`IndexCache`). Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
 //! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that maps an instance proxy's subtree onto the shared `/__Prototype_N` namespace) as a second `IndexCache` impl. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
@@ -231,18 +231,6 @@
 //!   (`IndexCache::resolve_asset_path` returns it unevaluated), unlike a
 //!   reference/payload arc, which records [`Error::InvalidExpression`]. Value
 //!   resolution needs an error channel to report it.
-//! - Expression-variable context identity: every layer stack is keyed by its
-//!   fully composed inherited context and stores the composed set
-//!   (`LayerGraph::stack_expression_variables`), so equal composed maps share
-//!   one `LayerStackId` even when they arrive from distinct override sources.
-//!   C++ keys `PcpLayerStackIdentifier` by an override *source* (another layer
-//!   stack) and follows it recursively, so it can keep distinct stacks — and
-//!   distinct site identities in duplicate and cycle detection — where this
-//!   implementation coalesces them, which can produce a different graph or
-//!   composed result in that corner. Membership and expression evaluation are
-//!   unaffected. Identity keying is separate from content storage: `expr_id`
-//!   interns each composed map's canonical form for comparison, while every
-//!   instance owns its map.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -295,14 +283,15 @@
 //!   sublayer newly selected by a back-reference's carried context stays
 //!   unloaded too.
 //! - Reclaiming stale contextual stack instances: the registry is append-only,
-//!   and full-context keying strands a `(target, context)` instance whenever an
-//!   upstream `expressionVariables` edit re-keys the contexts downstream arcs
-//!   carry — the old-seed instance is never matched again, yet
-//!   `LayerStackRegistry::target_rebuild_specs` keeps re-resolving it on every
-//!   rebuild, so a long editing session accretes registry memory and rebuild
-//!   cost. Reclamation needs liveness tracking: cached prim-index nodes hold
-//!   stable `LayerStackId`s, so an instance cannot be dropped while any index
-//!   references it.
+//!   and a variable-source flip — a source stack's authored variables becoming
+//!   a no-op under its seed, or ceasing to be one — re-keys the sources
+//!   downstream arcs carry, so the old-keyed instance is never matched again,
+//!   yet the rebuild keeps re-resolving it; a long editing session accretes
+//!   registry memory and rebuild cost. A plain variable value edit strands
+//!   nothing (the seed is read live from the source instance, so the keyed
+//!   instance refreshes in place). Reclamation needs liveness tracking: cached
+//!   prim-index nodes hold stable `LayerStackId`s, so an instance cannot be
+//!   dropped while any index references it.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
@@ -330,7 +319,7 @@ use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::{Changes, LayerStackChanges};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
-pub(crate) use layer_graph::{LayerGraph, MuteChange};
+pub(crate) use layer_graph::{LayerGraph, MuteChange, StackIdentity};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::LayerStackId;
 pub use load_rules::{LoadRules, Rule};
@@ -992,8 +981,8 @@ mod tests {
         let sub = graph.id_of("sub.usda").expect("sub layer");
         // The sub-stack handle is minted on demand at the load barrier in
         // production; this direct relocate query composes nothing, so mint it via
-        // `ensure_external_stack`.
-        let sub_stack = graph.ensure_external_stack(sub, &HashMap::new());
+        // `intern_external` under the root context.
+        let sub_stack = graph.intern_external(sub, LayerStackId::ROOT).0;
         assert_eq!(
             graph.relocation_source(sub_stack, &Path::new("/World/U").unwrap()),
             Some(Path::new("/World/A").unwrap()),
