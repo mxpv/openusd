@@ -6,6 +6,9 @@ ignore = []
 [bans]
 # Lint level for when multiple versions of the same crate are detected
 multiple-versions = "deny"
+# The proc-macro ecosystem is mid-migration to syn 3, so a fresh resolve
+# carries both majors. Drop once the remaining syn 2 consumers migrate.
+skip = [{ name = "syn" }]
 
 [licenses]
 confidence-threshold = 0.8
