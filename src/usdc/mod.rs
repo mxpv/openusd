@@ -773,6 +773,24 @@ mod tests {
     }
 
     #[test]
+    fn test_read_integer_compressed_float_array() -> Result<()> {
+        // OpenUSD serialises an all-integral float array with the `i` code:
+        // its LZ4 payload still needs Usd_IntegerCompression decoding.
+        let data = read_file("fixtures/integer_compressed_floats.usdc")?;
+        let weights = data
+            .get_field(&sdf::path("/IntegerCompressedFloats.weights")?, "default")?
+            .into_owned()
+            .try_as_float_vec()
+            .unwrap();
+
+        assert_eq!(
+            weights,
+            vec![1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0,]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_read_halfs() -> Result<()> {
         let data = read_file("fixtures/floats.usdc")?;
 

@@ -662,9 +662,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             let code = self.reader.read_pod::<u8>()?;
 
             match code {
-                // Compressed integers
+                // Compressed integers. Pixar's `_ReadCompressedInts` runs the
+                // LZ4 block through `Usd_IntegerCompression` decoding after
+                // decompression, so the payload must be integer-decoded
+                // (`read_encoded_ints`), not reinterpreted as raw `i32`s
+                // straight out of LZ4.
                 b'i' => {
-                    let ints: Vec<i32> = self.read_compressed(count)?;
+                    let ints: Vec<i32> = self.read_encoded_ints(count)?;
                     ints.into_iter().map(|i| cast(i).unwrap()).collect()
                 }
                 // Lookup table and indexes
@@ -1545,6 +1549,30 @@ impl<R: io::Read> ReadExt for R {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn integer_compressed_float_fixture_uses_i_encoding() -> Result<()> {
+        let mut file = CrateFile::open(fs::File::open("fixtures/integer_compressed_floats.usdc")?)?;
+        let value = file
+            .fields
+            .iter()
+            .find_map(|field| {
+                let ty = field.value_rep.ty().ok()?;
+                (file.tokens[field.token_index] == "default"
+                    && ty == Type::Float
+                    && field.value_rep.is_array()
+                    && field.value_rep.is_compressed())
+                .then_some(field.value_rep)
+            })
+            .expect("fixture must contain one compressed float default value");
+
+        file.set_position(value.payload())?;
+        let (count, compressed) = file.unpack_array_len(value, ArrayKind::Floats)?;
+        assert_eq!(count, 16);
+        assert!(compressed);
+        assert_eq!(file.reader.read_pod::<u8>()?, b'i');
+        Ok(())
+    }
 
     #[test]
     fn test_read_crate_struct() {
