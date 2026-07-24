@@ -270,24 +270,14 @@ impl IndexCache {
             .collect()
     }
 
-    /// Records one-shot collection errors raised while opening a layer on demand
-    /// — a missing sublayer of a reference/payload target the stage's load
-    /// barrier reached. Joins the errors from root-stack collection so
-    /// [`composition_errors`](Self::composition_errors) reports a lazily-loaded
-    /// stack's diagnostics too.
-    ///
-    /// A target shared by several arcs can open more than once — a later
-    /// variable-carrying arc re-opens an already-interned target under its
-    /// expression-variable context to reach the `${VAR}` sublayers the first,
-    /// variable-free open left unresolved — and that re-walk re-surfaces the
-    /// target's genuinely-missing sublayers. An error already recorded is dropped
-    /// so each diagnostic appears once.
-    pub(crate) fn record_collection_errors(&mut self, errors: impl IntoIterator<Item = Error>) {
-        for error in errors {
-            if !self.collection_errors.contains(&error) {
-                self.collection_errors.push(error);
-            }
-        }
+    /// Drops the one-shot collection errors that also appear in `superseded` —
+    /// open-time loader copies of diagnostics the layer graph has taken
+    /// ownership of as per-stack regenerable errors, which would otherwise
+    /// double-report and outlive a later fix. Collection keeps what the loader
+    /// alone knows, e.g. a failure in the session region or under a branch
+    /// muted at open.
+    pub(crate) fn discard_collection_errors(&mut self, superseded: &[Error]) {
+        self.collection_errors.retain(|error| !superseded.contains(error));
     }
 
     #[cfg(test)]

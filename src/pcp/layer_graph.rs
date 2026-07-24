@@ -26,7 +26,7 @@
 //! save.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem;
 use std::path;
@@ -36,11 +36,12 @@ use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
+use super::compose_site::{evaluate_expression, EvaluatedExpression};
 use super::layer_stack::{LayerStackId, LayerStackRegistry, VarsSource};
 use super::mapping::MapFunction;
 use super::prim_index::Demand;
 use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
-use super::{effective_time_codes_per_second, Error};
+use super::{effective_time_codes_per_second, Error, ExpressionContext};
 
 /// A cheap, `Copy` handle identifying a layer within a `LayerGraph`.
 ///
@@ -204,13 +205,6 @@ pub(crate) struct LayerGraph {
     /// Whether any node keeps structurally valid authored relocates. The indexer
     /// reads this to gate its relocate passes without rescanning.
     has_relocates: bool,
-    /// Whether any node authors an expression-valued (`${VAR}`) `subLayers` entry.
-    /// A false value lets [`has_expr_sublayer`](Self::has_expr_sublayer) short-circuit
-    /// to `false` for the overwhelmingly common stage with no expression sublayers,
-    /// so [`build_stack_members`](Self::build_stack_members) never scans a stack for
-    /// them. Recomputed with the per-node flags by
-    /// [`build_sublayer_edges`](Self::build_sublayer_edges).
-    any_expr_sublayer: bool,
     /// Sublayer-cycle diagnostics reachable from the root layer, replaced wholesale
     /// by [`build_sublayer_edges`](Self::build_sublayer_edges) on every edge
     /// rebuild so a fixed cycle stops being reported and a recompute never
@@ -226,15 +220,19 @@ pub(crate) struct LayerGraph {
     /// [`layer_stack_id`](Self::layer_stack_id)) and the format registry.
     /// Composition opens a reference/payload target on demand through it.
     registry: sdf::LayerRegistry,
-    /// Anchored asset paths whose target layer resolved but failed to read or
-    /// parse, each mapped to the underlying error. Consulted at the
-    /// reference/payload demand point so a target that cannot be opened is
-    /// reported [`MalformedLayer`](Error::MalformedLayer) once (with the arc's
-    /// site context and this reason) rather than re-demanded every pass — without
-    /// it the demanding prim's index would never cache. Written only at the
-    /// stage's load barrier through `&mut self`; read during composition, and
-    /// cleared when an edit changes the layers so a now-readable asset is retried.
-    failed_loads: HashMap<String, String>,
+    /// Anchored asset paths whose on-demand open failed, each mapped to what
+    /// went wrong ([`LoadFailure`]). Consulted at the reference/payload demand
+    /// point so a target that cannot be opened is reported
+    /// [`MalformedLayer`](Error::MalformedLayer) once (with the arc's site
+    /// context and the failure's reason) rather than re-demanded every pass —
+    /// without it the demanding prim's index would never cache — and at
+    /// sublayer-demand derivation
+    /// ([`file_stack_discoveries`](Self::file_stack_discoveries)), which
+    /// regenerates a failed entry's per-referrer diagnostic instead of a
+    /// demand. Written only at the stage's load barrier through `&mut self`;
+    /// read during composition, and cleared when an edit changes the layers so
+    /// a now-readable asset is retried.
+    failed_loads: HashMap<String, LoadFailure>,
     /// Every composed layer stack against this graph — the stage root stack, plus
     /// each reference/payload target's stack under whatever variable sources have
     /// reached it (see [`LayerStackRegistry`]). The graph composes a stack's members
@@ -242,17 +240,114 @@ pub(crate) struct LayerGraph {
     /// and hands them to the registry, which owns the storage and interning. A
     /// [`LayerStackId`] is an index into it.
     stacks: LayerStackRegistry,
+    /// The sublayer-resolution subsystem: what the `subLayers` walks derive and
+    /// carry beyond the composed edges themselves (see [`SublayerState`]).
+    sublayers: SublayerState,
+}
+
+/// The [`LayerGraph`]'s sublayer-resolution subsystem: everything the
+/// `subLayers` walks derive beyond the composed edges themselves — the shared
+/// path-resolution memo, the context-free misses, the pending load demands,
+/// and the per-stack diagnostics. One invariant ties the mutable pieces
+/// together: a stack's re-resolution supersedes its earlier discoveries
+/// ([`replace_stack`](Self::replace_stack)), so demands and diagnostics always
+/// reflect each stack's latest rebuild.
+#[derive(Default)]
+struct SublayerState {
+    /// Whether any node authors an expression-valued (`${VAR}`) `subLayers` entry.
+    /// A false value lets [`LayerGraph::has_expr_sublayer`] short-circuit to
+    /// `false` for the overwhelmingly common stage with no expression sublayers,
+    /// so `LayerGraph::build_stack_members` never scans a stack for them.
+    /// Recomputed with the per-node flags by
+    /// `LayerGraph::recompute_expr_sublayer_flags`.
+    any_expr: bool,
     /// Memoized sublayer-path resolution, `parent layer → (authored sub-path →
-    /// resolved identifier)`. [`resolve_edges`](Self::resolve_edges) anchors each
-    /// relative `subLayers` entry against its parent through the resolver — a
-    /// filesystem canonicalize — and re-runs the whole walk on every
-    /// [`build_sublayer_edges`](Self::build_sublayer_edges), i.e. every `subLayers`
-    /// edit. The `(parent, sub-path) → identifier` mapping is a pure function of
-    /// the asset paths, so it is computed once and reused; the identifier is then
-    /// looked up live with [`id_of`](Self::id_of), so the cache survives a layer
-    /// being removed and re-added, and a target that interns on a later rebuild is
-    /// picked up without re-resolving the path.
-    sublayer_resolution: HashMap<LayerId, HashMap<String, String>>,
+    /// resolved identifier)`. `LayerGraph::resolve_edges` anchors each relative
+    /// `subLayers` entry against its parent through the resolver — a filesystem
+    /// canonicalize — and re-runs the whole walk on every
+    /// `LayerGraph::build_sublayer_edges`, i.e. every `subLayers` edit. The
+    /// `(parent, sub-path) → identifier` mapping is a pure function of the
+    /// asset paths, so it is computed once and reused; the identifier is then
+    /// looked up live with [`LayerGraph::id_of`], so the cache survives a layer
+    /// being removed and re-added, and a target that interns on a later rebuild
+    /// is picked up without re-resolving the path.
+    resolution: HashMap<LayerId, HashMap<String, String>>,
+    /// Sublayer entries that resolved to no loaded layer under the empty
+    /// context, keyed by the authoring parent — the table a stack on the
+    /// context-free `collect_plain` fast path consults to record load demands
+    /// without re-decoding `subLayers` (its edges are exactly the context-free
+    /// ones). Rebuilt wholesale by [`set_plain_misses`](Self::set_plain_misses)
+    /// per edge build; a stack with an expression sublayer records its
+    /// unresolved entries directly from its contextual re-resolution instead.
+    // TODO(perf): a permanently missing literal keeps this table non-empty, so
+    // every plain-stack rebuild re-scans its members to regenerate the
+    // diagnostic; a per-parent presence flag on `LayerNode` would shortcut
+    // stacks with no unresolved entries.
+    unresolved_plain: HashMap<LayerId, Vec<String>>,
+    /// The [`SublayerDemand`]s the last stack recompose or mint discovered,
+    /// awaiting the stage's load barrier
+    /// ([`LayerGraph::take_sublayer_demands`]). A plain `Vec` mutated through
+    /// `&mut self`, like the cache's pending arc demands; each stack's entries
+    /// reflect its latest rebuild ([`replace_stack`](Self::replace_stack)).
+    pending_demands: Vec<SublayerDemand>,
+    /// Per-stack sublayer diagnostics: `${VAR}` expression failures
+    /// ([`Error::InvalidExpression`] with the sublayer context) and the
+    /// per-referrer load failures of unresolved entries
+    /// ([`Error::UnresolvedSublayer`] / [`Error::MalformedSublayer`]). Each
+    /// stack's bucket is replaced on its contextual re-resolution — load
+    /// failures re-derived from `LayerGraph::failed_loads` — so a fixed
+    /// expression or a removed entry stops being reported; the load barrier
+    /// appends a freshly discovered failure between rebuilds
+    /// ([`record_error`](Self::record_error)). Keyed by stack in mint order, so
+    /// the [`diagnostics`](Self::diagnostics) listing is deterministic.
+    errors: BTreeMap<LayerStackId, Vec<Error>>,
+}
+
+impl SublayerState {
+    /// Replaces `stack`'s discoveries — its pending demands and its error
+    /// bucket — with a fresh re-resolution's. The supersession invariant: a
+    /// stale demand or diagnostic could name an entry a mute or edit just
+    /// removed, so both always reflect the stack's latest rebuild.
+    fn replace_stack(&mut self, stack: LayerStackId, demands: Vec<SublayerDemand>, errors: Vec<Error>) {
+        self.pending_demands.retain(|demand| demand.stack != stack);
+        self.pending_demands.extend(demands);
+        if errors.is_empty() {
+            self.errors.remove(&stack);
+        } else {
+            self.errors.insert(stack, errors);
+        }
+    }
+
+    /// Appends a diagnostic to `stack`'s bucket — the load barrier's channel
+    /// for a failure discovered between rebuilds; the stack's next
+    /// re-resolution re-derives or drops it
+    /// ([`replace_stack`](Self::replace_stack)). An identical already-recorded
+    /// diagnostic is not repeated.
+    fn record_error(&mut self, stack: LayerStackId, error: Error) {
+        let bucket = self.errors.entry(stack).or_default();
+        if !bucket.contains(&error) {
+            bucket.push(error);
+        }
+    }
+
+    /// Drains the pending demands for the stage's load barrier.
+    fn take_demands(&mut self) -> Vec<SublayerDemand> {
+        mem::take(&mut self.pending_demands)
+    }
+
+    /// Replaces the per-parent table of context-free unresolved entries from
+    /// one edge build's misses.
+    fn set_plain_misses(&mut self, misses: Vec<(LayerId, String)>) {
+        self.unresolved_plain.clear();
+        for (parent, evaluated) in misses {
+            self.unresolved_plain.entry(parent).or_default().push(evaluated);
+        }
+    }
+
+    /// Every per-stack diagnostic, in stack mint order.
+    fn diagnostics(&self) -> impl Iterator<Item = &Error> {
+        self.errors.values().flatten()
+    }
 }
 
 /// What a [`mute_layer`](LayerGraph::mute_layer) or
@@ -282,6 +377,106 @@ pub(crate) enum ExternalStack {
     Demand,
 }
 
+/// A composed stack's unresolved `subLayers` entry — `${VAR}`-selected or
+/// literal — naming a layer not yet in the graph. Recorded while a stack's
+/// members are composed (a [`rebuild_sublayer_stacks`](LayerGraph::rebuild_sublayer_stacks)
+/// pass or a mint) and drained by the stage's load barrier
+/// ([`take_sublayer_demands`](LayerGraph::take_sublayer_demands)), which opens
+/// the layer under the demanding stack's composed expression variables and
+/// recomposes — the sublayer analog of a reference/payload [`Demand`].
+#[derive(Debug, Clone)]
+pub(crate) struct SublayerDemand {
+    /// The layer whose `subLayers` entry did not resolve: the anchor for the
+    /// entry's relative path, and the referrer diagnostics name.
+    pub(crate) parent: LayerId,
+    /// The stack the entry composes into. Its composed expression variables are
+    /// the context the demanded layer's own sublayers resolve under, and the
+    /// barrier dedups open attempts per `(identifier, stack)`.
+    pub(crate) stack: LayerStackId,
+    /// The entry's evaluated asset path (the authored path for a literal).
+    pub(crate) evaluated: String,
+}
+
+/// Why a prior on-demand open of an asset failed, memoized in
+/// [`failed_loads`](LayerGraph::failed_loads) so composition stops retrying
+/// the asset and every referrer's diagnostic can be re-derived from it. An
+/// [`Unreadable`](Self::Unreadable) failure is terminal until an edit clears
+/// the memo; an [`Unresolved`](Self::Unresolved) one blocks nothing once the
+/// asset resolves again (the file has since appeared).
+#[derive(Debug, Clone)]
+pub(crate) enum LoadFailure {
+    /// The asset path did not resolve to a physical location.
+    Unresolved,
+    /// It resolved but could not be read or parsed.
+    Unreadable(String),
+}
+
+impl LoadFailure {
+    /// The per-referrer sublayer diagnostic for this failure: the entry
+    /// `asset_path`, authored by `introduced_by`, names an asset that did not
+    /// resolve or could not be read.
+    pub(crate) fn sublayer_error(&self, asset_path: &str, introduced_by: &str) -> Error {
+        match self {
+            LoadFailure::Unresolved => Error::UnresolvedSublayer {
+                asset_path: asset_path.to_string(),
+                introduced_by: introduced_by.to_string(),
+            },
+            LoadFailure::Unreadable(reason) => Error::MalformedSublayer {
+                asset_path: asset_path.to_string(),
+                introduced_by: introduced_by.to_string(),
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
+/// What a sublayer-edge resolution pass discovers beyond the edges themselves,
+/// tagged by the authoring parent so the consumer can drop what a muted branch
+/// keeps out of the composed stack: entries that resolved to no loaded layer
+/// (load-demand candidates) and `${VAR}` evaluation diagnostics. The default
+/// sink records demands only — the shape the context-free pass wants, whose
+/// empty context legitimately fails every expression.
+#[derive(Default)]
+struct EdgeSink {
+    /// Unresolved entries as `(parent, evaluated path)`.
+    demands: Vec<(LayerId, String)>,
+    /// Expression diagnostics, or `None` to skip recording them.
+    errors: Option<Vec<(LayerId, Error)>>,
+}
+
+impl EdgeSink {
+    /// A sink for a stack's contextual re-resolution: demands and diagnostics.
+    fn contextual() -> Self {
+        Self {
+            demands: Vec::new(),
+            errors: Some(Vec::new()),
+        }
+    }
+
+    /// Splits the sink into stack-stamped demands and bare diagnostics, keeping
+    /// only entries whose parent composes into `members`.
+    fn drain(self, stack: LayerStackId, members: &HashSet<LayerId>) -> (Vec<SublayerDemand>, Vec<Error>) {
+        let demands = self
+            .demands
+            .into_iter()
+            .filter(|(parent, _)| members.contains(parent))
+            .map(|(parent, evaluated)| SublayerDemand {
+                parent,
+                stack,
+                evaluated,
+            })
+            .collect();
+        let errors = self
+            .errors
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(parent, _)| members.contains(parent))
+            .map(|(_, error)| error)
+            .collect();
+        (demands, errors)
+    }
+}
+
 impl LayerGraph {
     /// Builds the graph from collected layers in strength order (session layers
     /// first, then the root layer and the rest). The recoverable layer-stack
@@ -303,13 +498,12 @@ impl LayerGraph {
             muted_identifiers: HashSet::new(),
             muted: HashSet::new(),
             has_relocates: false,
-            any_expr_sublayer: false,
             cycle_errors: Vec::new(),
             relocate_errors: Vec::new(),
             registry,
             failed_loads: HashMap::new(),
             stacks: LayerStackRegistry::default(),
-            sublayer_resolution: HashMap::new(),
+            sublayers: SublayerState::default(),
         }
     }
 
@@ -386,17 +580,21 @@ impl LayerGraph {
         // Take the resolution cache out so `resolve_edges` (which borrows `self`
         // immutably) can fill it; it carries forward across rebuilds, so a
         // `subLayers` edit only resolves paths it has not seen before.
-        let mut resolution = mem::take(&mut self.sublayer_resolution);
+        let mut resolution = mem::take(&mut self.sublayers.resolution);
 
         // Each layer's context-free edges depend only on its own `subLayers`
         // resolved against the empty variable set, so one per-layer pass builds them
-        // all.
+        // all. The demand-only sink collects the entries that resolved to no loaded
+        // layer; they become the per-parent table plain stacks consult for load
+        // demands ([`SublayerState::unresolved_plain`]).
         let empty = HashMap::new();
+        let mut plain_sink = EdgeSink::default();
         for &id in &self.order {
-            let edges = self.resolve_edges(id, &empty, &mut resolution);
+            let edges = self.resolve_edges(id, &empty, &mut resolution, Some(&mut plain_sink));
             all_edges.push((id, edges));
         }
-        self.sublayer_resolution = resolution;
+        self.sublayers.resolution = resolution;
+        self.sublayers.set_plain_misses(plain_sink.demands);
 
         // Apply the composed edges. A full pass (`None`, at finalize or after a load
         // that can extend a stack with a newly opened member) re-resolves every
@@ -438,12 +636,15 @@ impl LayerGraph {
     /// [`LayerNode::children`]. Reads only `id`'s own `subLayers`/`subLayerOffsets`;
     /// `id`'s own `expressionVariables` do not contribute — only the stack root's do
     /// (C++ `PcpExpressionVariables`), and the caller has already folded them into
-    /// `context`.
+    /// `context`. `sink`, when given, receives what the resolution drops: entries
+    /// that resolved to no loaded layer (load-demand candidates), and — when it
+    /// carries an error bucket — `${VAR}` evaluation diagnostics.
     fn resolve_edges(
         &self,
         id: LayerId,
         context: &HashMap<String, Value>,
         resolution: &mut HashMap<LayerId, HashMap<String, String>>,
+        mut sink: Option<&mut EdgeSink>,
     ) -> SublayerEdges {
         let root_path = Path::abs_root();
         let node = &self.nodes[&id];
@@ -470,21 +671,42 @@ impl LayerGraph {
         let mut edges = Vec::with_capacity(sub_paths.len());
         for (i, sub_path) in sub_paths.into_iter().enumerate() {
             let sub_path = if expr::is_expression(&sub_path) {
-                match expr::evaluate_string(&sub_path, context).value {
-                    Some(resolved) => resolved,
-                    // An unevaluable expression (or one evaluating to `None`)
-                    // resolves to no edge; the layer it would name is left out
-                    // of the stack.
-                    // TODO: a failed sublayer expression is dropped without a
-                    // diagnostic (a sublayer `ExpressionContext` for
-                    // `Error::InvalidExpression`); recording it needs an error
-                    // channel out of the contextual rebuild.
-                    None => continue,
+                // Evaluate through the shared expression seam, recording a
+                // failure as an `InvalidExpression` diagnostic with the
+                // sublayer context (C++ `_BuildLayerStack`) when the sink
+                // carries an error bucket. A successful expression-language
+                // `None` selects no sublayer and stays silent; either outcome
+                // resolves to no edge.
+                let mut expr_errors = Vec::new();
+                let record = sink.as_deref_mut().is_some_and(|s| s.errors.is_some());
+                let outcome = evaluate_expression(
+                    &sub_path,
+                    context,
+                    ExpressionContext::Sublayer,
+                    &node.layer,
+                    &root_path,
+                    record.then_some(&mut expr_errors),
+                );
+                if let Some(errors) = sink.as_deref_mut().and_then(|s| s.errors.as_mut()) {
+                    errors.extend(expr_errors.into_iter().map(|error| (id, error)));
+                }
+                match outcome {
+                    EvaluatedExpression::Value(resolved) => resolved,
+                    EvaluatedExpression::None | EvaluatedExpression::Failed => continue,
                 }
             } else {
                 sub_path
             };
             let Some(sub_id) = self.resolve_sublayer(id, &sub_path, resolution) else {
+                // No loaded layer at the entry's anchored (or bare) identifier:
+                // record a load-demand candidate for the stacks whose members
+                // include `id`, so the stage's load barrier can open it. An
+                // empty entry names nothing to open and stays skipped.
+                if !sub_path.is_empty() {
+                    if let Some(sink) = sink.as_deref_mut() {
+                        sink.demands.push((id, sub_path));
+                    }
+                }
                 continue;
             };
             let ratio = parent_tcps / effective_time_codes_per_second(&self.nodes[&sub_id].layer);
@@ -514,7 +736,7 @@ impl LayerGraph {
     /// the resolver's filesystem canonicalize then runs once per `(parent,
     /// sub_path)`, while the live [`id_of`](Self::id_of) below still tracks
     /// interning, so a target that interns on a later rebuild is picked up without
-    /// re-resolving the path (see [`sublayer_resolution`](Self::sublayer_resolution)).
+    /// re-resolving the path (see [`SublayerState::resolution`]).
     fn resolve_sublayer(
         &self,
         parent: LayerId,
@@ -553,10 +775,10 @@ impl LayerGraph {
             // for the members; threading the edge map through both would remove the
             // duplication.
             if self.has_expr_sublayer(root) {
-                let mut resolution = mem::take(&mut self.sublayer_resolution);
+                let mut resolution = mem::take(&mut self.sublayers.resolution);
                 let stack_vars = self.stacks.expression_variables(LayerStackId::ROOT);
-                let edges = self.compose_stack_edges(root, stack_vars, &mut resolution);
-                self.sublayer_resolution = resolution;
+                let edges = self.compose_stack_edges(root, stack_vars, &mut resolution, None);
+                self.sublayers.resolution = resolution;
                 self.detect_cycles(
                     root,
                     |id| edges.get(&id).map_or(&[][..], |e| e.as_slice()),
@@ -640,14 +862,16 @@ impl LayerGraph {
             // from those variables, matching the members filter above. With no
             // root layer, the stack's composed variables are the session's own.
             let session_vars = self.session_expression_variables();
+            let mut sink = EdgeSink::contextual();
             let (members, expr_vars) = match self.root {
-                Some(root) => self.build_stack_members(root, &session_vars),
+                Some(root) => self.build_stack_members(root, &session_vars, Some(&mut sink)),
                 None => (Vec::new(), session_vars),
             };
             root_members.extend(members);
             if self.stacks.set_root(root_members, expr_vars) {
                 changed.insert(LayerStackId::ROOT);
             }
+            self.file_stack_discoveries(LayerStackId::ROOT, sink);
         }
 
         // Re-resolve each already-interned target stack whose composition an
@@ -678,11 +902,134 @@ impl LayerGraph {
                 continue;
             }
             let seed_vars = self.stacks.expression_variables(source.referent()).clone();
-            let (members, expr_vars) = self.build_stack_members(root, &seed_vars);
+            let mut sink = EdgeSink::contextual();
+            let (members, expr_vars) = self.build_stack_members(root, &seed_vars, Some(&mut sink));
             if self.stacks.set_composed(id, members, expr_vars) {
                 changed.insert(id);
             }
+            self.file_stack_discoveries(id, sink);
         }
+    }
+
+    /// Classifies one stack composition's [`EdgeSink`] discoveries and files
+    /// them into the sublayer subsystem
+    /// ([`SublayerState::replace_stack`], which supersedes the stack's earlier
+    /// demands and diagnostics). Each unresolved entry becomes one of three
+    /// things: nothing when its parent is anonymous (nothing anchors the
+    /// entry, so there is no asset to open) or its target muted (membership
+    /// pruning would drop the opened layer right back out — the sublayer
+    /// analog of the indexer's muted-arc-target check; an unmute rebuilds the
+    /// stack, which re-derives the entry), a regenerated per-referrer
+    /// diagnostic when its identifier already failed to open (the barrier
+    /// would refuse it; an edit clears the failure and the next rebuild
+    /// demands again), or a demand. A resolve failure holds only while the
+    /// asset stays unresolvable: once the resolver finds it again, the entry
+    /// demands rather than reporting — the sublayer analog of the arc demand
+    /// gate's retry.
+    fn file_stack_discoveries(&mut self, stack: LayerStackId, sink: EdgeSink) {
+        let members = self.stacks.member_set(stack).expect("a filed stack is minted");
+        let (demands, mut errors) = sink.drain(stack, members);
+        let muted = self.has_muted_layers();
+        let mut pending = Vec::new();
+        // Canonical identifiers already reported for a parent this pass, so a
+        // second authored spelling of one entry reports once, like open-time
+        // collection.
+        let mut seen: HashSet<(LayerId, String)> = HashSet::new();
+        for demand in demands {
+            // An anonymous parent has no location to resolve the entry
+            // against; the entry stays a graph-only lookup, satisfied when a
+            // matching in-memory layer joins.
+            if self.nodes[&demand.parent].layer.is_anonymous() {
+                continue;
+            }
+            if muted
+                && self
+                    .muted_asset_id(&demand.evaluated, self.anchor_location(Some(demand.parent)).as_ref())
+                    .is_some()
+            {
+                continue;
+            }
+            if !self.failed_loads.is_empty() {
+                // The entry's anchored identifier is in the resolution cache —
+                // `resolve_sublayer` filed it before reporting the entry
+                // unresolved. A miss falls through to a demand, whose barrier
+                // attempt records the same diagnostic.
+                let normalized = without_dot_segments(&demand.evaluated);
+                let anchored = self
+                    .sublayers
+                    .resolution
+                    .get(&demand.parent)
+                    .and_then(|paths| paths.get(normalized.as_ref()));
+                if let Some(anchored) = anchored {
+                    let retry = matches!(self.failed_loads.get(anchored), Some(LoadFailure::Unresolved))
+                        && self.registry.resolve(anchored).is_some();
+                    if retry {
+                        self.failed_loads.remove(anchored.as_str());
+                    } else if let Some(failure) = self.failed_loads.get(anchored) {
+                        if seen.insert((demand.parent, anchored.clone())) {
+                            let error = failure.sublayer_error(&demand.evaluated, self.identifier(demand.parent));
+                            if !errors.contains(&error) {
+                                errors.push(error);
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+            pending.push(demand);
+        }
+        self.sublayers.replace_stack(stack, pending, errors);
+    }
+
+    /// Appends a sublayer diagnostic to `stack`'s bucket
+    /// ([`SublayerState::record_error`]) — the load barrier's channel for a
+    /// failure discovered between rebuilds.
+    pub(crate) fn record_sublayer_error(&mut self, stack: LayerStackId, error: Error) {
+        self.sublayers.record_error(stack, error);
+    }
+
+    /// Drains the pending [`SublayerDemand`]s the last recompose or mint
+    /// discovered. The stage's load barrier resolves them
+    /// (`Stage::resolve_sublayer_demands`), opening each demanded layer under
+    /// its stack's composed variables and recomposing.
+    pub(crate) fn take_sublayer_demands(&mut self) -> Vec<SublayerDemand> {
+        self.sublayers.take_demands()
+    }
+
+    /// The sublayer load-failure diagnostics re-derived as fresh
+    /// [`SublayerDemand`]s, for the stage's load barrier after an edit clears
+    /// the failure memo ([`clear_failed_loads`](Self::clear_failed_loads)): a
+    /// bucket's unresolved or malformed sublayer entry carries exactly its
+    /// demand's ingredients, so a repaired asset reloads even when the edit
+    /// itself rebuilds no stack. A retry that fails re-records the identical
+    /// diagnostic, so requeueing is idempotent.
+    pub(crate) fn requeue_failed_sublayers(&self) -> Vec<SublayerDemand> {
+        let mut demands = Vec::new();
+        for (&stack, bucket) in &self.sublayers.errors {
+            for error in bucket {
+                let (asset_path, introduced_by) = match error {
+                    Error::UnresolvedSublayer {
+                        asset_path,
+                        introduced_by,
+                    }
+                    | Error::MalformedSublayer {
+                        asset_path,
+                        introduced_by,
+                        ..
+                    } => (asset_path, introduced_by),
+                    _ => continue,
+                };
+                let Some(parent) = self.id_of(introduced_by) else {
+                    continue;
+                };
+                demands.push(SublayerDemand {
+                    parent,
+                    stack,
+                    evaluated: asset_path.clone(),
+                });
+            }
+        }
+        demands
     }
 
     /// Mints a root-sourced stack instance for every sublayer-DAG root that lacks
@@ -736,7 +1083,7 @@ impl LayerGraph {
         let session_vars = self.root_stack_structural_vars();
         // TODO(perf): this uses a scratch resolution map and resolves every session
         // layer, where the walk only needs those reachable from a muted root. Passing
-        // the shared `sublayer_resolution` cache (this method's only caller,
+        // the shared `SublayerState::resolution` cache (this method's only caller,
         // `rebuild_sublayer_stacks`, holds `&mut self`) would skip re-canonicalizing
         // paths already resolved, and resolving lazily from the muted roots would skip
         // the unreachable layers. It runs only on an edit while a layer is muted, over
@@ -746,7 +1093,7 @@ impl LayerGraph {
             .iter()
             .map(|&id| {
                 let children = self
-                    .resolve_edges(id, &session_vars, &mut resolution)
+                    .resolve_edges(id, &session_vars, &mut resolution, None)
                     .into_iter()
                     .map(|(child, _)| child)
                     .collect();
@@ -877,12 +1224,12 @@ impl LayerGraph {
         (!layer.is_anonymous()).then(|| ResolvedPath::new(layer.real_path()))
     }
 
-    /// Records that the layer at `asset_path` resolved but could not be read or
-    /// parsed (`reason`), so composition stops demanding it and reports it
-    /// [`MalformedLayer`](Error::MalformedLayer). Called from the stage's load
-    /// barrier when an on-demand open fails.
-    pub(crate) fn mark_load_failed(&mut self, asset_path: &str, reason: String) {
-        self.failed_loads.insert(asset_path.to_string(), reason);
+    /// Records that an on-demand open of `asset_path` failed, so composition
+    /// stops demanding it and reports it — [`MalformedLayer`](Error::MalformedLayer)
+    /// at a reference/payload arc, a per-referrer sublayer diagnostic at each
+    /// stack rebuild. Called from the stage's load barriers.
+    pub(crate) fn mark_load_failed(&mut self, asset_path: &str, failure: LoadFailure) {
+        self.failed_loads.insert(asset_path.to_string(), failure);
     }
 
     /// The layer stack a reference/payload arc to external `root` should compose
@@ -946,9 +1293,14 @@ impl LayerGraph {
     ///
     /// The stage's own root layer is never reopened: its stack is already loaded,
     /// and the layer may be in-memory or carry unsaved edits a disk re-read would
-    /// discard. A back-reference to it interns from the loaded graph; a `${VAR}`
-    /// sublayer its carried context newly selects stays subject to the runtime
-    /// variable-selected sublayer limitation (see the module docs).
+    /// discard. A back-reference to it interns from the loaded graph, and any
+    /// `${VAR}` sublayer its carried context newly selects loads through the
+    /// mint's [`SublayerDemand`]s instead.
+    //
+    // TODO: retire this whole-tree reopen in favor of `SublayerDemand` coverage —
+    // the demand-driven loader opens a context's unresolved selections
+    // individually (nested-below-literal ones converge across recompose rounds),
+    // which should make the reload redundant once that coverage is proven.
     pub(crate) fn needs_contextual_open(&self, root: LayerId, context: LayerStackId) -> bool {
         self.root != Some(root)
             && !self.stacks.expression_variables(context).is_empty()
@@ -1027,8 +1379,14 @@ impl LayerGraph {
             return (id, false);
         }
         let seed_vars = self.stacks.expression_variables(source.referent()).clone();
-        let (members, expr_vars) = self.build_stack_members(root, &seed_vars);
-        (self.stacks.intern_target(root, source, members, expr_vars), true)
+        // A mint can itself discover unloaded selections — a `${VAR}` sublayer
+        // the fresh context resolves to a layer nothing else has opened — so it
+        // files demands like a rebuild does.
+        let mut sink = EdgeSink::contextual();
+        let (members, expr_vars) = self.build_stack_members(root, &seed_vars, Some(&mut sink));
+        let id = self.stacks.intern_target(root, source, members, expr_vars);
+        self.file_stack_discoveries(id, sink);
+        (id, true)
     }
 
     /// Whether any layer in `root`'s plain sublayer subtree authors an
@@ -1051,16 +1409,15 @@ impl LayerGraph {
     /// rebuild reads this. Muted layers (and any subtree reached only through them)
     /// are skipped, matching the composed members: an expression sublayer that
     /// mutes out contributes nothing, so a demand for a target that only reaches
-    /// one skips the reopen. [`any_expr_sublayer`](Self::any_expr_sublayer)
-    /// short-circuits the common stage with no expression sublayer at all to
-    /// `O(1)`.
+    /// one skips the reopen. [`SublayerState::any_expr`] short-circuits the
+    /// common stage with no expression sublayer at all to `O(1)`.
     //
     // TODO(perf): this runs a fresh subtree walk (allocating a work stack + visited
     // set) per empty-seed stack rebuilt in `rebuild_sublayer_stacks` once any layer
     // authors an expression sublayer. A transitive per-node "subtree authors one"
     // flag computed with the local flags would make it an `O(1)` field read.
     pub(crate) fn has_expr_sublayer(&self, root: LayerId) -> bool {
-        if !self.any_expr_sublayer {
+        if !self.sublayers.any_expr {
             return false;
         }
         let mut work = vec![root];
@@ -1079,7 +1436,7 @@ impl LayerGraph {
     }
 
     /// Recomputes the exact [`LayerNode::has_expr_sublayer`] flags and their
-    /// graph-level union [`any_expr_sublayer`](Self::any_expr_sublayer) from each
+    /// graph-level union [`SublayerState::any_expr`] from each
     /// layer's own `subLayers`. Run on every edge rebuild so an edit that adds or
     /// removes the last expression `subLayers` entry is reflected exactly.
     //
@@ -1098,7 +1455,7 @@ impl LayerGraph {
             node.has_expr_sublayer = has;
             any |= has;
         }
-        self.any_expr_sublayer = any;
+        self.sublayers.any_expr = any;
     }
 
     /// The cached composer for a rebuild: composes the stack's expression
@@ -1116,11 +1473,12 @@ impl LayerGraph {
         &mut self,
         root: LayerId,
         seed_vars: &HashMap<String, Value>,
+        sink: Option<&mut EdgeSink>,
     ) -> (Vec<(LayerId, LayerOffset)>, HashMap<String, Value>) {
         let stack_vars = self.composed_stack_vars(root, seed_vars);
-        let mut resolution = mem::take(&mut self.sublayer_resolution);
-        let members = self.stack_members_uncached(root, &stack_vars, &mut resolution);
-        self.sublayer_resolution = resolution;
+        let mut resolution = mem::take(&mut self.sublayers.resolution);
+        let members = self.stack_members_uncached(root, &stack_vars, &mut resolution, sink);
+        self.sublayers.resolution = resolution;
         (members, stack_vars)
     }
 
@@ -1153,11 +1511,25 @@ impl LayerGraph {
         root: LayerId,
         stack_vars: &HashMap<String, Value>,
         resolution: &mut HashMap<LayerId, HashMap<String, String>>,
+        sink: Option<&mut EdgeSink>,
     ) -> Vec<(LayerId, LayerOffset)> {
         if !self.has_expr_sublayer(root) {
-            return self.collect_plain(root);
+            let members = self.collect_plain(root);
+            // A plain stack's edges are the context-free ones, so its
+            // unresolved entries are exactly the recorded per-parent table;
+            // scanning the members costs nothing on the common fully-resolved
+            // stage, where the table is empty.
+            if let Some(sink) = sink.filter(|_| !self.sublayers.unresolved_plain.is_empty()) {
+                for &(member, _) in &members {
+                    if let Some(entries) = self.sublayers.unresolved_plain.get(&member) {
+                        sink.demands
+                            .extend(entries.iter().map(|evaluated| (member, evaluated.clone())));
+                    }
+                }
+            }
+            return members;
         }
-        let edges = self.compose_stack_edges(root, stack_vars, resolution);
+        let edges = self.compose_stack_edges(root, stack_vars, resolution, sink);
         let muted = &self.muted;
         let mut members = Vec::new();
         let mut ancestors = HashSet::new();
@@ -1184,6 +1556,7 @@ impl LayerGraph {
         root: LayerId,
         stack_vars: &HashMap<String, Value>,
         resolution: &mut HashMap<LayerId, HashMap<String, String>>,
+        mut sink: Option<&mut EdgeSink>,
     ) -> HashMap<LayerId, SublayerEdges> {
         let mut edges: HashMap<LayerId, SublayerEdges> = HashMap::new();
         let mut visited: HashSet<LayerId> = HashSet::new();
@@ -1192,7 +1565,7 @@ impl LayerGraph {
             if !visited.insert(id) {
                 continue;
             }
-            let resolved = self.resolve_edges(id, stack_vars, resolution);
+            let resolved = self.resolve_edges(id, stack_vars, resolution, sink.as_deref_mut());
             for &(child, _) in resolved.iter().rev() {
                 work.push(child);
             }
@@ -1283,16 +1656,15 @@ impl LayerGraph {
         members
     }
 
-    /// Whether a prior on-demand open of `asset_path` failed to read or parse the
-    /// target layer.
+    /// Whether a prior on-demand open of `asset_path` failed.
     pub(crate) fn load_failed(&self, asset_path: &str) -> bool {
         self.failed_loads.contains_key(asset_path)
     }
 
-    /// The read/parse error from a prior failed on-demand open of `asset_path`,
-    /// or `None` if it never failed.
-    pub(crate) fn load_failure_reason(&self, asset_path: &str) -> Option<&str> {
-        self.failed_loads.get(asset_path).map(String::as_str)
+    /// What a prior on-demand open of `asset_path` recorded as its failure, or
+    /// `None` if it never failed.
+    pub(crate) fn load_failure(&self, asset_path: &str) -> Option<&LoadFailure> {
+        self.failed_loads.get(asset_path)
     }
 
     /// Forgets every recorded load failure so a now-readable asset is demanded
@@ -1400,7 +1772,7 @@ impl LayerGraph {
             HashMap::new()
         };
         let mut resolution = HashMap::new();
-        Cow::Owned(self.stack_members_uncached(root_layer, &stack_vars, &mut resolution))
+        Cow::Owned(self.stack_members_uncached(root_layer, &stack_vars, &mut resolution, None))
     }
 
     /// The stage's root layer stack (registry instance 0): session layers (identity
@@ -1494,12 +1866,23 @@ impl LayerGraph {
     }
 
     /// The current layer-graph diagnostics — sublayer cycles
-    /// ([`cycle_errors`](Self::cycle_errors)) followed by relocate errors
-    /// ([`relocate_errors`](Self::relocate_errors)). Always reflects the present
-    /// graph state: a fixed cycle or relocate stops appearing and a recompute
-    /// never duplicates one, since each bucket is replaced wholesale on rebuild.
+    /// ([`cycle_errors`](Self::cycle_errors)), relocate errors
+    /// ([`relocate_errors`](Self::relocate_errors)), then per-stack sublayer
+    /// errors ([`SublayerState::errors`]). Always reflects the
+    /// present graph state: a fixed cycle, relocate, expression, or removed
+    /// entry stops appearing and a recompute never duplicates one, since each
+    /// bucket is replaced on rebuild.
     pub(crate) fn errors(&self) -> Vec<Error> {
-        self.cycle_errors.iter().chain(&self.relocate_errors).cloned().collect()
+        let mut errors: Vec<Error> = self.cycle_errors.iter().chain(&self.relocate_errors).cloned().collect();
+        // A parent composing into several stacks derives the same per-referrer
+        // diagnostic into each stack's bucket; report each distinct diagnostic
+        // once.
+        for error in self.sublayers.diagnostics() {
+            if !errors.contains(error) {
+                errors.push(error.clone());
+            }
+        }
+        errors
     }
 
     /// The ordered layer-id stacks, one per sublayer stack (one rooted at each
@@ -1701,11 +2084,40 @@ impl LayerGraph {
     /// never resolves to an unrelated layer that merely happens to be interned
     /// under the bare string.
     pub(crate) fn find_relative(&self, asset_path: &str, anchor: LayerId) -> Option<LayerId> {
+        self.resolve_relative(asset_path, anchor).ok()
+    }
+
+    /// The resolution behind [`find_relative`](Self::find_relative), keeping
+    /// the miss: returns the interned layer, or `Err` with the anchored
+    /// canonical identifier the asset would intern under — the form the
+    /// on-demand loader opens a sublayer demand at, and the key load failures
+    /// and open attempts are recorded by.
+    pub(crate) fn resolve_relative(&self, asset_path: &str, anchor: LayerId) -> Result<LayerId, String> {
         let asset_path = without_dot_segments(asset_path);
         let anchored = self
             .registry
             .create_identifier_anchored(&asset_path, self.real_path(anchor));
-        self.anchored_or_bare(&anchored, &asset_path)
+        self.anchored_or_bare(&anchored, &asset_path).ok_or(anchored)
+    }
+
+    /// [`resolve_relative`](Self::resolve_relative) for a demanded sublayer
+    /// entry, replacing the entry's memoized anchoring
+    /// ([`SublayerState::resolution`]) with the fresh one: anchoring
+    /// canonicalizes through the filesystem, so an asset that appeared since
+    /// the memo was filed can shift the entry's canonical form, and the memo
+    /// must follow for the next rebuild to resolve the entry the same way the
+    /// barrier just did.
+    pub(crate) fn refresh_demanded_sublayer(&mut self, parent: LayerId, sub_path: &str) -> Result<LayerId, String> {
+        let normalized = without_dot_segments(sub_path);
+        let anchored = self
+            .registry
+            .create_identifier_anchored(&normalized, self.real_path(parent));
+        self.sublayers
+            .resolution
+            .entry(parent)
+            .or_default()
+            .insert(normalized.clone().into_owned(), anchored.clone());
+        self.anchored_or_bare(&anchored, &normalized).ok_or(anchored)
     }
 
     /// Mutes the layer with the given identifier so it contributes no opinions to
@@ -1836,7 +2248,7 @@ impl LayerGraph {
     /// unmute.
     fn expression_ancestry_edges(&self) -> HashMap<LayerId, Vec<LayerId>> {
         let mut edges: HashMap<LayerId, Vec<LayerId>> = HashMap::new();
-        if !self.any_expr_sublayer {
+        if !self.sublayers.any_expr {
             return edges;
         }
         // The roots of every stack whose subtree can hold an expression edge: the
@@ -1863,7 +2275,7 @@ impl LayerGraph {
             if !self.has_expr_sublayer(root) {
                 continue;
             }
-            for (parent, resolved) in self.compose_stack_edges(root, vars, &mut resolution) {
+            for (parent, resolved) in self.compose_stack_edges(root, vars, &mut resolution, None) {
                 edges
                     .entry(parent)
                     .or_default()
@@ -2365,6 +2777,76 @@ mod tests {
             "the session-resolved self-sublayer is reported as a cycle: {:?}",
             graph.errors()
         );
+    }
+
+    /// A failing `${VAR}` sublayer expression — a bare reference to an
+    /// undefined variable errors, where a quoted string substitutes the name in
+    /// place — records one `InvalidExpression` diagnostic with the sublayer
+    /// context from the stack's contextual re-resolution (C++
+    /// `_BuildLayerStack`); the context-free edge pass stays silent. Authoring
+    /// the variable clears it on the next rebuild.
+    #[test]
+    fn sublayer_expr_error_reported() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["`${WHICH}`"]);
+        });
+        let sub = sdf::Layer::new_in_memory("sub.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, sub], 0, sdf::LayerRegistry::default());
+        let errors = graph.errors();
+        let expression_errors = errors
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Error::InvalidExpression {
+                        context: ExpressionContext::Sublayer,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            expression_errors, 1,
+            "one failing evaluation, one diagnostic: {errors:?}"
+        );
+
+        let root_id = graph.root_id().unwrap();
+        set_expr_var(&mut graph.nodes.get_mut(&root_id).unwrap().layer, "WHICH", "sub.usda");
+        graph.recompute_sublayers(Some(&HashSet::from([root_id])));
+        assert!(
+            graph.errors().is_empty(),
+            "authoring WHICH resolves the expression and clears the diagnostic"
+        );
+        let sub_id = graph.id_of("sub.usda").unwrap();
+        assert!(
+            graph.root_layer_stack().iter().any(|&(id, _)| id == sub_id),
+            "the resolved selection joins the root stack"
+        );
+    }
+
+    /// A degenerate empty `subLayers` entry names nothing to open: it resolves
+    /// to no edge and records no load demand.
+    #[test]
+    fn empty_entry_no_demand() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([""]);
+        });
+        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
+        assert!(graph.take_sublayer_demands().is_empty());
+    }
+
+    /// An anonymous parent anchors nothing, so its unresolved entries are
+    /// graph-only lookups: no load demand is recorded for them.
+    #[test]
+    fn anon_parent_no_demand() {
+        let mut root = sdf::Layer::new_anonymous("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["ghost.usda"]);
+        });
+        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
+        assert!(graph.take_sublayer_demands().is_empty());
     }
 
     /// Muting a session layer that supplies a root `${VAR}` sublayer's variable

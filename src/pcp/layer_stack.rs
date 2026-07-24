@@ -31,8 +31,9 @@ use super::layer_graph::LayerId;
 /// handle is stable for the life of the graph even as a mute or `subLayers`
 /// rebuild changes the resolved members. It is not a cross-stage identity key
 /// (contrast `LayerStackIdentifier`); it is meaningful only within the graph that
-/// minted it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// minted it. Handles order by mint order — for a target stack this is
+/// dependency order, since a key's source referent always precedes its owner.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) struct LayerStackId(u32);
 
 impl LayerStackId {

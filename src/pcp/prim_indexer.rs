@@ -98,7 +98,7 @@ use crate::sdf::{self, LayerOffset, Path, Value};
 use crate::tf::Token;
 
 use super::compose_site::{collect_payloads_in, compose_arc_list_in, compose_references_in, evaluate_expression};
-use super::layer_graph::ExternalStack;
+use super::layer_graph::{ExternalStack, LoadFailure};
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
@@ -2599,12 +2599,17 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     // uncomposed this pass. The stage's query loop opens the layer
                     // and recomposes, so composition drives layer loading and an
                     // un-visited subtree never loads. A target a prior load attempt
-                    // failed to read is not re-demanded — it falls through to the
+                    // could not read is not re-demanded — it falls through to the
                     // malformed-layer error below so the prim's index can finally
-                    // cache.
-                    if self.inputs.stack.layer_registry().resolve(asset_path).is_some()
-                        && !self.inputs.stack.load_failed(asset_path)
-                    {
+                    // cache; a prior resolve failure gates nothing once the asset
+                    // resolves (the file has since appeared), and while it stays
+                    // unresolvable the arc reports it unresolved below.
+                    let failure = self.inputs.stack.load_failure(asset_path);
+                    let unreadable = match failure {
+                        Some(LoadFailure::Unreadable(reason)) => Some(reason.clone()),
+                        _ => None,
+                    };
+                    if self.inputs.stack.layer_registry().resolve(asset_path).is_some() && unreadable.is_none() {
                         self.pending_loads.push(Demand {
                             asset_path: asset_path.to_string(),
                             context,
@@ -2613,18 +2618,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     }
                     // A target the load barrier resolved but could not read or
                     // parse: report it with the underlying reason and skip the arc.
-                    if self.inputs.stack.load_failed(asset_path) {
+                    if let Some(reason) = unreadable {
                         self.errors.push(Error::MalformedLayer {
                             asset_path: asset_path.to_string(),
                             arc,
                             introduced_by: self.introducing_layer(parent),
                             site_path: parent_path,
-                            reason: self
-                                .inputs
-                                .stack
-                                .load_failure_reason(asset_path)
-                                .unwrap_or_default()
-                                .to_string(),
+                            reason,
                         });
                         return Ok(());
                     }

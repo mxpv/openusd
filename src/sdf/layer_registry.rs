@@ -66,6 +66,20 @@ pub(crate) enum Error {
         /// The underlying read or parse error.
         reason: String,
     },
+
+    /// An expression-valued (`${VAR}`) sublayer path failed to evaluate, so the
+    /// entry selects nothing and only this sublayer is dropped. Converts to the
+    /// same composition diagnostic the layer graph regenerates for the entry on
+    /// each stack rebuild, so the two report one failure identically.
+    #[error("invalid sublayer expression {expression} in {referencing_layer}: {reason}")]
+    InvalidExpression {
+        /// The raw, unevaluated backtick expression.
+        expression: String,
+        /// The layer that declared the sublayer.
+        referencing_layer: String,
+        /// The evaluator's errors, joined.
+        reason: String,
+    },
 }
 
 /// Owns layer loading for a stage: the [`ar::Resolver`] that finds and opens
@@ -195,38 +209,6 @@ impl LayerRegistry {
         }
     }
 
-    /// Opens `asset_path` (anchored against `anchor`) together with its sublayer
-    /// stack, root (strongest) layer first.
-    ///
-    /// Following stops at references and payloads: composition opens those target
-    /// layers on demand when it reaches the arc, so an un-visited subtree never
-    /// loads them. Only `subLayers` edges are walked, since a layer's sublayer
-    /// stack contributes opinions to its own namespace and so must be present
-    /// whenever the layer is (spec 10.3.1.1). `already_present` reports whether a
-    /// layer (by canonical identifier) is already loaded, so a sublayer shared
-    /// with the graph is neither re-read nor re-emitted.
-    ///
-    /// The root must resolve and read — its failure propagates as `Err`. A
-    /// sublayer that fails to resolve, or that resolves but cannot be read, is
-    /// routed to `on_error` and skipped, so one bad sublayer never fails the
-    /// whole stack (C++ `SdfLayer` opens the root and reports the bad sublayer).
-    ///
-    /// `ancestor_expr_vars` are the overrides the stack that brought `asset_path`
-    /// in supplies (the session root's own variables for the stage root stack, a
-    /// reference/payload arc's composed set for a target). They overlay the root
-    /// layer's own `expressionVariables` — the overrides win — to form the one
-    /// context the whole stack resolves its expression-valued `subLayers` paths
-    /// against (C++ `PcpExpressionVariables`). Sublayers of the root contribute no
-    /// variables, so the context is fixed for the whole walk.
-    ///
-    /// This is a pure loader: it reports every load failure raw (a missing or
-    /// unreadable sublayer, at whatever site reaches it) and knows nothing of
-    /// muting. Whether such a failure is a stage diagnostic depends on composition
-    /// reachability — a failure under a muted branch contributes nothing — which the
-    /// composition layer decides once the muted-aware graph exists (see
-    /// [`StageBuilder::make_stage`](crate::usd::Stage)). Keeping the muted policy out
-    /// of the load walk avoids attributing a diagnostic to whichever branch happened
-    /// to reach a shared layer first.
     /// The `expressionVariables` authored on the single layer at `asset_path`
     /// (anchored against `anchor`), read without opening its sublayers — the shallow
     /// read the stage root stack needs to compose its root and session layers' own
@@ -253,6 +235,40 @@ impl LayerRegistry {
         Ok(expr::read_expression_variables(data.as_ref())?.into_owned())
     }
 
+    /// Opens `asset_path` (anchored against `anchor`) together with its sublayer
+    /// stack, root (strongest) layer first.
+    ///
+    /// Following stops at references and payloads: composition opens those target
+    /// layers on demand when it reaches the arc, so an un-visited subtree never
+    /// loads them. Only `subLayers` edges are walked, since a layer's sublayer
+    /// stack contributes opinions to its own namespace and so must be present
+    /// whenever the layer is (spec 10.3.1.1). `already_present` reports whether a
+    /// layer (by canonical identifier) is already loaded, so a sublayer shared
+    /// with the graph is neither re-read nor re-emitted.
+    ///
+    /// A root that does not resolve returns `Ok(None)`; one that resolves but
+    /// cannot be read propagates as `Err` — the caller decides how to frame
+    /// each. A sublayer that fails to resolve, or that resolves but cannot be
+    /// read, is routed to `on_error` and skipped, so one bad sublayer never
+    /// fails the whole stack (C++ `SdfLayer` opens the root and reports the bad
+    /// sublayer).
+    ///
+    /// `ancestor_expr_vars` are the overrides the stack that brought `asset_path`
+    /// in supplies (the session root's own variables for the stage root stack, a
+    /// reference/payload arc's composed set for a target). They overlay the root
+    /// layer's own `expressionVariables` — the overrides win — to form the one
+    /// context the whole stack resolves its expression-valued `subLayers` paths
+    /// against (C++ `PcpExpressionVariables`). Sublayers of the root contribute no
+    /// variables, so the context is fixed for the whole walk.
+    ///
+    /// This is a pure loader: it reports every load failure raw (a missing or
+    /// unreadable sublayer, at whatever site reaches it) and knows nothing of
+    /// muting. Whether such a failure is a stage diagnostic depends on composition
+    /// reachability — a failure under a muted branch contributes nothing — which the
+    /// composition layer decides once the muted-aware graph exists (see
+    /// [`StageBuilder::make_stage`](crate::usd::Stage)). Keeping the muted policy out
+    /// of the load walk avoids attributing a diagnostic to whichever branch happened
+    /// to reach a shared layer first.
     pub(crate) fn open_stack(
         &self,
         asset_path: &str,
@@ -261,24 +277,22 @@ impl LayerRegistry {
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<()>,
         already_present: &dyn Fn(&str) -> bool,
-    ) -> Result<Vec<sdf::Layer>> {
+    ) -> Result<Option<Vec<sdf::Layer>>> {
         let mut layers = Vec::new();
         let mut visited = HashSet::new();
 
         let identifier = self.create_identifier(asset_path, anchor);
         if identifier.is_empty() {
-            return Ok(layers);
+            return Ok(None);
         }
         // With `reload`, an already-interned root and its already-present sublayers
         // are re-read and re-walked (but not re-emitted) so a re-open under a new
         // expression-variable context loads the `${VAR}` sublayers the context now
         // resolves — including ones nested below a literal sublayer — that a first,
         // variable-free open left unresolved. The caller only reloads for that case.
-        //
-        // The root must resolve and read; both failures propagate.
-        let resolved = self
-            .resolve_layer(&identifier)
-            .with_context(|| format!("failed to resolve asset path: {asset_path}"))?;
+        let Some(resolved) = self.resolve_layer(&identifier) else {
+            return Ok(None);
+        };
         let data = self.read(&resolved)?;
         visited.insert(identifier.clone());
 
@@ -299,7 +313,52 @@ impl LayerRegistry {
             &mut visited,
             &mut layers,
         )?;
-        Ok(layers)
+        Ok(Some(layers))
+    }
+
+    /// Opens the layer at `identifier` — the canonical identifier a composed
+    /// stack's `subLayers` entry resolved to — together with its own sublayer
+    /// subtree, strongest first, for a layer joining an already-composed stack
+    /// on demand (a `SublayerDemand` in [`crate::pcp`]).
+    ///
+    /// Unlike [`open_stack`](Self::open_stack), which treats its asset as a new
+    /// stack root and composes that layer's own `expressionVariables` into the
+    /// context, the subtree opened here joins the enclosing stack, so
+    /// `stack_vars` — that stack's composed variables — resolve the whole walk
+    /// unchanged: a sublayer contributes no variables (C++
+    /// `PcpExpressionVariables`).
+    ///
+    /// Like [`open_stack`](Self::open_stack), this is a pure loader that knows
+    /// nothing of who demanded the layer: a root that does not resolve returns
+    /// `Ok(None)` and one that resolves but cannot be read propagates as
+    /// `Err`, leaving the caller — who knows the referring layer and authored
+    /// entry — to frame the diagnostic. A failure nested inside the subtree is
+    /// skipped; it surfaces once the tree is wired into its stack, whose
+    /// recompose re-derives the failing entry as its own demand.
+    pub(crate) fn open_sublayer_tree(
+        &self,
+        identifier: &str,
+        stack_vars: &HashMap<String, sdf::Value>,
+        already_present: &dyn Fn(&str) -> bool,
+    ) -> Result<Option<Vec<sdf::Layer>>> {
+        let Some(resolved) = self.resolve_layer(identifier) else {
+            return Ok(None);
+        };
+        let data = self.read(&resolved)?;
+        let mut layers = Vec::new();
+        let mut visited = HashSet::from([identifier.to_string()]);
+        self.open_sublayers(
+            identifier.to_string(),
+            resolved,
+            data,
+            stack_vars,
+            false,
+            &|_| Ok(()),
+            already_present,
+            &mut visited,
+            &mut layers,
+        )?;
+        Ok(Some(layers))
     }
 
     /// Opens the layer at `resolved`, dispatching to the registered format for
@@ -399,8 +458,8 @@ impl LayerRegistry {
                     None if evaluated.errors.is_empty() => continue,
                     None => {
                         if failed.insert(sub_path.clone()) {
-                            on_error(Error::UnreadableAsset {
-                                asset_path: sub_path,
+                            on_error(Error::InvalidExpression {
+                                expression: sub_path,
                                 referencing_layer: identifier.clone(),
                                 reason: evaluated.errors.join("; "),
                             })?;
@@ -614,9 +673,12 @@ mod tests {
         LayerRegistry::default()
     }
 
-    /// Opens a root layer and its sublayer stack, erroring on a missing sublayer.
+    /// Opens a root layer and its sublayer stack, erroring on a missing sublayer
+    /// or an unresolvable root.
     fn open_stack(path: &str) -> Result<Vec<sdf::Layer>> {
-        registry().open_stack(path, None, &HashMap::new(), false, &|e| Err(e.into()), &|_| false)
+        registry()
+            .open_stack(path, None, &HashMap::new(), false, &|e| Err(e.into()), &|_| false)?
+            .context("root did not resolve")
     }
 
     #[test]
@@ -729,17 +791,19 @@ mod tests {
     #[test]
     fn handler_receives_sublayer_error() -> Result<()> {
         let errors = std::cell::RefCell::new(Vec::new());
-        let layers = registry().open_stack(
-            &composition_path("subLayer/sublayer_invalid.usda"),
-            None,
-            &HashMap::new(),
-            false,
-            &|e| {
-                errors.borrow_mut().push(e);
-                Ok(())
-            },
-            &|_| false,
-        )?;
+        let layers = registry()
+            .open_stack(
+                &composition_path("subLayer/sublayer_invalid.usda"),
+                None,
+                &HashMap::new(),
+                false,
+                &|e| {
+                    errors.borrow_mut().push(e);
+                    Ok(())
+                },
+                &|_| false,
+            )?
+            .context("root resolves")?;
 
         // The root still loads despite the missing sublayer.
         assert_eq!(layers.len(), 1);

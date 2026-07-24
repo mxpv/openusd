@@ -263,25 +263,14 @@
 //!   through an instance (`Prim::prototype`, or any instance-proxy query) first
 //!   registers it, after which masked prototype-content queries (including those
 //!   behind a lazily-loaded payload) resolve correctly.
-//! - Runtime variable-selected sublayers: an `expressionVariables` edit (or a
-//!   mute that exposes a different variable) on an already-composed stack's
-//!   root — the session/stage root, or an interned reference/payload target —
-//!   can newly select a `${VAR}` sublayer that was never opened. Recomposition
-//!   re-resolves the stack's stored context and membership, but membership can
-//!   only include layers already present in the graph, so the newly-selected
-//!   layer stays out until something else loads it. The open-time paths load
-//!   the initial selection (`StageBuilder::session_expression_variables` for
-//!   the root stack, the load barrier's contextual open for a target), and a
-//!   change that *removes* a variable drops the sublayer it selected; loading
-//!   a newly-selected one at runtime needs an on-demand sublayer-load output
-//!   from graph recomposition. The same gap covers two open-time shapes: a
-//!   target that joined the graph through another stack (e.g. as a root-stack
-//!   sublayer) and is then demanded under an empty context is not reopened
-//!   (`LayerGraph::needs_contextual_open`), so a sublayer selected by its own
-//!   variables stays unloaded; and the stage's own root layer is deliberately
-//!   never reopened (it may be in-memory or carry unsaved edits), so a
-//!   sublayer newly selected by a back-reference's carried context stays
-//!   unloaded too.
+//! - Runtime session-region membership: the stage root stack's session region
+//!   is the flat layer list collected at open, so a runtime `subLayers` edit on
+//!   a session layer (or a session `${VAR}` selection change) rebuilds the
+//!   edges but never re-expands that prefix — a newly named session sublayer
+//!   does not join the stack. The root region and every target stack re-resolve
+//!   per rebuild, and an unresolved entry there — `${VAR}`-selected or literal
+//!   — loads on demand (`SublayerDemand`, resolved by the stage's load
+//!   barrier).
 //! - Reclaiming stale contextual stack instances: the registry is append-only,
 //!   and a variable-source flip — a source stack's authored variables becoming
 //!   a no-op under its seed, or ceasing to be one — re-keys the sources
@@ -319,7 +308,7 @@ use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::{Changes, LayerStackChanges};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
-pub(crate) use layer_graph::{LayerGraph, MuteChange, StackIdentity};
+pub(crate) use layer_graph::{LayerGraph, LoadFailure, MuteChange, StackIdentity, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::LayerStackId;
 pub use load_rules::{LoadRules, Rule};
@@ -420,6 +409,8 @@ pub enum ExpressionContext {
     Reference,
     /// A payload's asset path.
     Payload,
+    /// A `subLayers` entry's asset path.
+    Sublayer,
     /// A variant selection.
     Variant,
 }
@@ -747,7 +738,12 @@ impl From<sdf::layer_registry::Error> for Error {
     /// that failed to resolve while opening a layer stack (the root stack or a
     /// reference/payload target reached on demand) is an
     /// [`UnresolvedSublayer`](Error::UnresolvedSublayer); a sublayer that
-    /// resolved but could not be read is a [`MalformedSublayer`](Error::MalformedSublayer).
+    /// resolved but could not be read is a
+    /// [`MalformedSublayer`](Error::MalformedSublayer); a sublayer expression
+    /// that failed to evaluate is an
+    /// [`InvalidExpression`](Error::InvalidExpression) with the sublayer
+    /// context — field for field the diagnostic the layer graph regenerates
+    /// for the same entry, so the two copies compare equal and report once.
     fn from(error: sdf::layer_registry::Error) -> Self {
         match error {
             sdf::layer_registry::Error::UnresolvedAsset {
@@ -765,6 +761,17 @@ impl From<sdf::layer_registry::Error> for Error {
                 asset_path,
                 introduced_by: referencing_layer,
                 reason,
+            },
+            sdf::layer_registry::Error::InvalidExpression {
+                expression,
+                referencing_layer,
+                reason,
+            } => Error::InvalidExpression {
+                expression,
+                context: ExpressionContext::Sublayer,
+                source_layer: referencing_layer,
+                site_path: Path::abs_root(),
+                message: reason,
             },
         }
     }

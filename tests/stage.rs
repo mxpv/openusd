@@ -4,6 +4,9 @@
 //! clips, and stage-tier authoring.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path as FsPath;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -135,7 +138,7 @@ fn reports_unresolved_sublayer(stage: &Stage, asset_path: &str) -> bool {
 fn missing_sublayer_retained() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\ndef \"Root\" {}\n",
     )?;
@@ -162,8 +165,8 @@ fn muted_branch_suppresses_missing() -> Result<()> {
     let root = dir.path().join("root.usda");
     let muted = dir.path().join("muted.usda");
     // `root` sublayers `muted`, which in turn sublayers a file that does not exist.
-    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@muted.usda@]\n)\n")?;
-    std::fs::write(&muted, "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\n")?;
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@muted.usda@]\n)\n")?;
+    fs::write(&muted, "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\n")?;
     let root_path = root.to_str().unwrap();
 
     // Without muting, the missing sublayer under `muted` is reported.
@@ -191,7 +194,7 @@ fn muted_branch_suppresses_missing() -> Result<()> {
 fn muted_missing_sublayer_suppressed() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
-    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@gone.usda@]\n)\n")?;
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@gone.usda@]\n)\n")?;
     let root_path = root.to_str().unwrap();
 
     let plain = Stage::open(root_path)?;
@@ -219,15 +222,15 @@ fn muted_diamond_keeps_active() -> Result<()> {
     let dir = tempfile::tempdir()?;
     // `root` sublayers `muted` (declared first, so walked first) then `active`;
     // both sublayer the same missing layer.
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         "#usda 1.0\n(\n    subLayers = [@muted.usda@, @active.usda@]\n)\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("muted.usda"),
         "#usda 1.0\n(\n    subLayers = [@shared_missing.usda@]\n)\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("active.usda"),
         "#usda 1.0\n(\n    subLayers = [@shared_missing.usda@]\n)\n",
     )?;
@@ -256,19 +259,19 @@ fn muted_diamond_keeps_descendant() -> Result<()> {
     let dir = tempfile::tempdir()?;
     // Both `muted` (walked first) and `active` sublayer the same readable `shared`
     // layer, which in turn sublayers a missing one.
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         "#usda 1.0\n(\n    subLayers = [@muted.usda@, @active.usda@]\n)\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("muted.usda"),
         "#usda 1.0\n(\n    subLayers = [@shared.usda@]\n)\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("active.usda"),
         "#usda 1.0\n(\n    subLayers = [@shared.usda@]\n)\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("shared.usda"),
         "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\n",
     )?;
@@ -291,11 +294,11 @@ fn muted_diamond_keeps_descendant() -> Result<()> {
 #[test]
 fn unmute_restores_diagnostic() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         "#usda 1.0\n(\n    subLayers = [@muted.usda@]\n)\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("muted.usda"),
         "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\n",
     )?;
@@ -331,15 +334,15 @@ fn muted_diagnostic_survives_eviction() -> Result<()> {
     // `/A` references `target` (which has a missing sublayer); the unrelated
     // sublayer `s` also contributes an opinion to `/A`, so muting `s` evicts `/A`'s
     // index without touching the `/A -> target` arc authored in the root.
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         "#usda 1.0\n(\n    subLayers = [@s.usda@]\n)\ndef \"A\" (\n    references = @target.usda@\n) {}\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("s.usda"),
         "#usda 1.0\nover \"A\" {\n    custom int x = 1\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("target.usda"),
         "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n    defaultPrim = \"T\"\n)\ndef \"T\" {}\n",
     )?;
@@ -371,11 +374,11 @@ fn muted_diagnostic_survives_eviction() -> Result<()> {
 #[test]
 fn mute_loaded_target_suppresses() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         "#usda 1.0\ndef \"A\" (\n    references = @target.usda@\n) {}\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("target.usda"),
         "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n    defaultPrim = \"T\"\n)\ndef \"T\" {}\n",
     )?;
@@ -408,7 +411,7 @@ fn mute_loaded_target_suppresses() -> Result<()> {
 #[test]
 fn duplicate_missing_reported_once() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         "#usda 1.0\n(\n    subLayers = [@missing.usda@, @missing.usda@]\n)\n",
     )?;
@@ -431,8 +434,8 @@ fn lazy_ref_missing_sublayer() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let target = dir.path().join("target.usda");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
-    std::fs::write(
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    fs::write(
         &target,
         "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
     )?;
@@ -464,9 +467,9 @@ fn lazy_ref_unreadable_target() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let target = dir.path().join("broken.usda");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @broken.usda@\n) {}\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @broken.usda@\n) {}\n")?;
     // Resolves (the file exists) but the parser rejects the body.
-    std::fs::write(&target, "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    fs::write(&target, "#usda 1.0\ndef Broken {{{ not valid\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert!(stage.prim("/P").is_valid()?, "/P still composes without the arc");
@@ -489,8 +492,8 @@ fn failed_load_retried_after_edit() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let target = dir.path().join("target.usda");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
-    std::fs::write(&target, "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    fs::write(&target, "#usda 1.0\ndef Broken {{{ not valid\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert!(stage.prim("/P").is_valid()?);
@@ -504,7 +507,7 @@ fn failed_load_retried_after_edit() -> Result<()> {
 
     // Repair the file, then author an unrelated prim: the edit clears the recorded
     // failure so the next query re-demands the now-readable target.
-    std::fs::write(
+    fs::write(
         &target,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 7\n}\n",
     )?;
@@ -527,11 +530,11 @@ fn instance_proxy_cold_query() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let proto = dir.path().join("proto.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\ndef \"World\" {\n    def \"Inst\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &proto,
         "#usda 1.0\n(\n    defaultPrim = \"Proto\"\n)\ndef \"Proto\" {\n    def \"Child\" {\n        custom double x = 3\n    }\n}\n",
     )?;
@@ -557,19 +560,19 @@ fn instance_proxy_cold_query() -> Result<()> {
 #[test]
 fn lazy_ref_inherited_expr_var() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::create_dir(dir.path().join("prod"))?;
+    fs::create_dir(dir.path().join("prod"))?;
     let root = dir.path().join("root.usda");
     let target = dir.path().join("target.usda");
     let over = dir.path().join("prod").join("over.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\n(\n    expressionVariables = { string V = \"prod\" }\n)\ndef \"P\" (\n    references = @target.usda@\n) {}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &target,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@`\"${V}/over.usda\"`@]\n)\ndef \"P\" {}\n",
     )?;
-    std::fs::write(&over, "#usda 1.0\ndef \"P\" {\n    custom double x = 9\n}\n")?;
+    fs::write(&over, "#usda 1.0\ndef \"P\" {\n    custom double x = 9\n}\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
@@ -608,13 +611,13 @@ fn sublayer_expr_var_ignored() -> Result<()> {
     let a = dir.path().join("a.usda");
     let b = dir.path().join("b.usda");
     let leaf = dir.path().join("leaf.usda");
-    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@a.usda@]\n)\n")?;
-    std::fs::write(
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@a.usda@]\n)\n")?;
+    fs::write(
         &a,
         "#usda 1.0\n(\n    expressionVariables = { string V = \"leaf\" }\n    subLayers = [@b.usda@]\n)\n",
     )?;
-    std::fs::write(&b, "#usda 1.0\n(\n    subLayers = [@`\"${V}.usda\"`@]\n)\n")?;
-    std::fs::write(&leaf, "#usda 1.0\ndef \"P\" {\n    custom double x = 7\n}\n")?;
+    fs::write(&b, "#usda 1.0\n(\n    subLayers = [@`\"${V}.usda\"`@]\n)\n")?;
+    fs::write(&leaf, "#usda 1.0\ndef \"P\" {\n    custom double x = 7\n}\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
@@ -637,16 +640,16 @@ fn cross_ref_expr_sublayer() -> Result<()> {
     let mid = dir.path().join("mid.usda");
     let target = dir.path().join("target.usda");
     let over = dir.path().join("over.usda");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @mid.usda@\n) {}\n")?;
-    std::fs::write(
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @mid.usda@\n) {}\n")?;
+    fs::write(
         &mid,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n    expressionVariables = { string V = \"over\" }\n)\ndef \"P\" (\n    references = @target.usda@\n) {}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &target,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
     )?;
-    std::fs::write(&over, "#usda 1.0\ndef \"P\" {\n    custom double x = 9\n}\n")?;
+    fs::write(&over, "#usda 1.0\ndef \"P\" {\n    custom double x = 9\n}\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
@@ -667,27 +670,27 @@ fn cross_ref_expr_sublayer() -> Result<()> {
 fn dual_context_same_pass() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\ndef \"M\" (\n    references = [@s1.usda@, @s2.usda@]\n) {}\n",
     )?;
     for (name, sel) in [("s1.usda", "x"), ("s2.usda", "y")] {
-        std::fs::write(
+        fs::write(
             dir.path().join(name),
             format!(
                 "#usda 1.0\n(\n    defaultPrim = \"P\"\n    expressionVariables = {{ string V = \"{sel}\" }}\n)\ndef \"P\" (\n    references = @t.usda@\n) {{}}\n",
             ),
         )?;
     }
-    std::fs::write(
+    fs::write(
         dir.path().join("t.usda"),
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("x.usda"),
         "#usda 1.0\ndef \"P\" {\n    custom double vx = 1\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("y.usda"),
         "#usda 1.0\ndef \"P\" {\n    custom double vy = 2\n}\n",
     )?;
@@ -706,6 +709,560 @@ fn dual_context_same_pass() -> Result<()> {
     Ok(())
 }
 
+/// A runtime `expressionVariables` edit on the session layer newly selects a
+/// root `${VAR}` sublayer that was never opened: the recompose records a
+/// sublayer demand and the load barrier opens `b.usda` from disk, so the edit
+/// alone swaps the composed selection.
+#[test]
+fn session_var_edit_loads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\n")?;
+    fs::write(
+        &session,
+        "#usda 1.0\n(\n    expressionVariables = { string WHICH = \"a\" }\n)\n",
+    )?;
+    fs::write(
+        dir.path().join("a.usda"),
+        "#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("b.usda"),
+        "#usda 1.0\ndef \"B\" {\n    custom double y = 2\n}\n",
+    )?;
+
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/A.x").get::<f64>()?, Some(1.0), "WHICH=a at open");
+    assert_eq!(stage.attribute("/B.y").get::<f64>()?, None, "b.usda is not loaded");
+
+    let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+    stage.layer_mut(&session_id).expect("session layer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([(
+            "WHICH".to_string(),
+            sdf::Value::String("b".to_string()),
+        )]))
+    })?;
+    assert_eq!(
+        stage.attribute("/B.y").get::<f64>()?,
+        Some(2.0),
+        "the edit loads the newly selected b.usda"
+    );
+    assert_eq!(
+        stage.attribute("/A.x").get::<f64>()?,
+        None,
+        "a.usda's selection dropped"
+    );
+    Ok(())
+}
+
+/// A runtime `expressionVariables` edit on a reference target's root layer
+/// re-selects its `${V}` sublayer: the target stack's recompose demands the
+/// newly named layer and the load barrier opens it from disk.
+#[test]
+fn target_var_edit_loads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @t.usda@\n) {}\n")?;
+    fs::write(
+        dir.path().join("t.usda"),
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n    expressionVariables = { string V = \"a\" }\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
+    )?;
+    fs::write(
+        dir.path().join("a.usda"),
+        "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("b.usda"),
+        "#usda 1.0\ndef \"P\" {\n    custom double y = 2\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/P.x").get::<f64>()?, Some(1.0), "V=a selects a.usda");
+
+    let target_id = stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| FsPath::new(id).ends_with("t.usda"))
+        .expect("t.usda is loaded");
+    stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("b".to_string()))]))
+    })?;
+    assert_eq!(
+        stage.attribute("/P.y").get::<f64>()?,
+        Some(2.0),
+        "the edit loads the newly selected b.usda into the target stack"
+    );
+    Ok(())
+}
+
+/// Muting the session layer exposes the stage root's own `${VAR}` value, whose
+/// selection was never opened: the mute's recompose demands it and the load
+/// barrier brings it in.
+#[test]
+fn mute_exposes_selection_loads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    expressionVariables = { string WHICH = \"b\" }\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\n",
+    )?;
+    fs::write(
+        &session,
+        "#usda 1.0\n(\n    expressionVariables = { string WHICH = \"a\" }\n)\n",
+    )?;
+    fs::write(
+        dir.path().join("a.usda"),
+        "#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("b.usda"),
+        "#usda 1.0\ndef \"B\" {\n    custom double y = 2\n}\n",
+    )?;
+
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/A.x").get::<f64>()?,
+        Some(1.0),
+        "the session's WHICH=a wins"
+    );
+    assert_eq!(stage.attribute("/B.y").get::<f64>()?, None, "b.usda is not loaded");
+
+    let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+    stage.mute_layer(session_id);
+    assert_eq!(
+        stage.attribute("/B.y").get::<f64>()?,
+        Some(2.0),
+        "muting the session exposes the root's WHICH=b and loads its selection"
+    );
+    Ok(())
+}
+
+/// A reference target that already joined the graph as a root-stack sublayer is
+/// demanded under the empty root context: no contextual reopen runs, but the
+/// mint's own recompose demands the `${V}` sublayer the target's own variables
+/// select, and the load barrier opens it.
+#[test]
+fn self_selected_sublayer_loads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@t.usda@]\n)\ndef \"R\" (\n    references = @t.usda@</P>\n) {}\n",
+    )?;
+    fs::write(
+        dir.path().join("t.usda"),
+        "#usda 1.0\n(\n    expressionVariables = { string V = \"a\" }\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
+    )?;
+    fs::write(
+        dir.path().join("a.usda"),
+        "#usda 1.0\nover \"P\" {\n    custom double x = 3\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/R.x").get::<f64>()?,
+        Some(3.0),
+        "the target's own V selects a.usda for its reference stack"
+    );
+    Ok(())
+}
+
+/// A runtime `subLayers` edit naming a not-yet-loaded literal layer loads it —
+/// and its own nested sublayer — through the same demand path as a `${VAR}`
+/// selection: the recompose demands `extra.usda` and the load barrier opens its
+/// whole subtree.
+#[test]
+fn literal_sublayer_edit_loads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\ndef \"W\" {}\n")?;
+    fs::write(
+        dir.path().join("extra.usda"),
+        "#usda 1.0\n(\n    subLayers = [@nested.usda@]\n)\ndef \"E\" {\n    custom double x = 1\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("nested.usda"),
+        "#usda 1.0\ndef \"N\" {\n    custom double y = 2\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let root_id = stage.root_layer().identifier().to_string();
+    stage.layer_mut(&root_id).expect("root layer is live").edit(|e| {
+        e.pseudo_root_mut()
+            .expect("pseudo-root")
+            .insert_sublayer(0, "extra.usda", sdf::LayerOffset::IDENTITY);
+        Ok(())
+    })?;
+    assert_eq!(
+        stage.attribute("/E.x").get::<f64>()?,
+        Some(1.0),
+        "the authored literal sublayer loads"
+    );
+    assert_eq!(
+        stage.attribute("/N.y").get::<f64>()?,
+        Some(2.0),
+        "its nested sublayer loads with it"
+    );
+    Ok(())
+}
+
+/// A `${VAR}` selection naming a file that does not exist fails gracefully: the
+/// stage composes without it, the failure is reported once as an
+/// `UnresolvedSublayer` diagnostic, repeated queries stay stable, and a later
+/// edit retries the (now-present) selection, loads it, and drops the obsolete
+/// diagnostic.
+#[test]
+fn failed_selection_terminates() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\ndef \"W\" {\n    custom double w = 0\n}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+
+    stage.set_expression_variables(HashMap::from([(
+        "WHICH".to_string(),
+        sdf::Value::String("missing".to_string()),
+    )]))?;
+    assert_eq!(
+        stage.attribute("/W.w").get::<f64>()?,
+        Some(0.0),
+        "the stage composes without the missing selection"
+    );
+    let errors = stage.composition_errors();
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, pcp::Error::UnresolvedSublayer { asset_path, .. } if asset_path == "missing.usda")),
+        "the failed open is reported: {errors:?}"
+    );
+    assert_eq!(
+        stage.attribute("/W.w").get::<f64>()?,
+        Some(0.0),
+        "the failure is terminal, not re-demanded per query"
+    );
+
+    fs::write(
+        dir.path().join("late.usda"),
+        "#usda 1.0\ndef \"L\" {\n    custom double z = 5\n}\n",
+    )?;
+    stage.set_expression_variables(HashMap::from([(
+        "WHICH".to_string(),
+        sdf::Value::String("late".to_string()),
+    )]))?;
+    assert_eq!(
+        stage.attribute("/L.z").get::<f64>()?,
+        Some(5.0),
+        "the retried selection loads once the edit re-demands it"
+    );
+    // The failure diagnostic is regenerated per rebuild, so once the stack no
+    // longer selects the missing layer it stops being reported.
+    let errors = stage.composition_errors();
+    assert!(
+        !errors
+            .iter()
+            .any(|e| matches!(e, pcp::Error::UnresolvedSublayer { asset_path, .. } if asset_path == "missing.usda")),
+        "the obsolete failure is dropped once the selection changes: {errors:?}"
+    );
+    Ok(())
+}
+
+/// Two loaded layers each author a `subLayers` entry naming the same missing
+/// asset: the open is attempted once, but each referrer gets its own
+/// diagnostic, and muting one referrer drops only its own.
+#[test]
+fn shared_missing_per_referrer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@p1.usda@, @p2.usda@]\n)\n")?;
+    fs::write(dir.path().join("p1.usda"), "#usda 1.0\ndef \"A\" {}\n")?;
+    fs::write(dir.path().join("p2.usda"), "#usda 1.0\ndef \"B\" {}\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+
+    let layer_named = |name: &str| {
+        stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|id| FsPath::new(id).ends_with(name))
+            .expect("sublayer is loaded")
+    };
+    for name in ["p1.usda", "p2.usda"] {
+        stage.layer_mut(&layer_named(name)).expect("layer is live").edit(|e| {
+            e.pseudo_root_mut().expect("pseudo-root").insert_sublayer(
+                0,
+                "shared_missing.usda",
+                sdf::LayerOffset::IDENTITY,
+            );
+            Ok(())
+        })?;
+    }
+    let referrers = |stage: &Stage| -> Vec<String> {
+        stage
+            .composition_errors()
+            .into_iter()
+            .filter_map(|e| match e {
+                pcp::Error::UnresolvedSublayer {
+                    asset_path,
+                    introduced_by,
+                } if asset_path == "shared_missing.usda" => Some(introduced_by),
+                _ => None,
+            })
+            .collect()
+    };
+    let both = referrers(&stage);
+    assert_eq!(both.len(), 2, "one diagnostic per referrer: {both:?}");
+
+    stage.mute_layer(layer_named("p1.usda"));
+    let remaining = referrers(&stage);
+    assert_eq!(
+        remaining.len(),
+        1,
+        "the unmuted referrer keeps its diagnostic: {remaining:?}"
+    );
+    assert!(
+        FsPath::new(&remaining[0]).ends_with("p2.usda"),
+        "the surviving diagnostic names the unmuted referrer: {remaining:?}"
+    );
+    Ok(())
+}
+
+/// One edit re-seeds two reference target stacks to the same `${V}` selection,
+/// so both demand `shared.usda` in a single load-barrier round: the first
+/// demand opens it and the second finds it interned — and its stack must still
+/// recompose to pick the member up.
+#[test]
+fn same_round_shared_selection() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    expressionVariables = { string V = \"a\" }\n)\ndef \"P1\" (\n    references = @t1.usda@</P>\n) {}\ndef \"P2\" (\n    references = @t2.usda@</P>\n) {}\n",
+    )?;
+    for name in ["t1.usda", "t2.usda"] {
+        fs::write(
+            dir.path().join(name),
+            "#usda 1.0\n(\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
+        )?;
+    }
+    fs::write(
+        dir.path().join("a.usda"),
+        "#usda 1.0\nover \"P\" {\n    custom double x = 1\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("shared.usda"),
+        "#usda 1.0\nover \"P\" {\n    custom double y = 7\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/P1.x").get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/P2.x").get::<f64>()?, Some(1.0));
+
+    stage.set_expression_variables(HashMap::from([(
+        "V".to_string(),
+        sdf::Value::String("shared".to_string()),
+    )]))?;
+    assert_eq!(
+        stage.attribute("/P1.y").get::<f64>()?,
+        Some(7.0),
+        "the stack whose demand opened the layer recomposes"
+    );
+    assert_eq!(
+        stage.attribute("/P2.y").get::<f64>()?,
+        Some(7.0),
+        "the stack whose demand found the layer interned recomposes too"
+    );
+    Ok(())
+}
+
+/// A recorded sublayer resolve-failure does not block the same asset's later
+/// arc load: once the file appears, a reference to it composes on the next
+/// query with no edit in between, and the healed sublayer diagnostic drops.
+#[test]
+fn sublayer_failure_keeps_arc_loadable() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@late.usda@]\n)\ndef \"P\" (\n    references = @late.usda@</L>\n) {}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let errors = stage.composition_errors();
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, pcp::Error::UnresolvedSublayer { asset_path, .. } if asset_path == "late.usda")),
+        "the missing sublayer is reported at open: {errors:?}"
+    );
+
+    fs::write(
+        dir.path().join("late.usda"),
+        "#usda 1.0\ndef \"L\" {\n    custom double z = 5\n}\n",
+    )?;
+    assert_eq!(
+        stage.attribute("/P.z").get::<f64>()?,
+        Some(5.0),
+        "the appeared file loads through the reference with no edit"
+    );
+    let errors = stage.composition_errors();
+    assert!(
+        !errors
+            .iter()
+            .any(|e| matches!(e, pcp::Error::UnresolvedSublayer { .. })),
+        "the healed sublayer diagnostic drops: {errors:?}"
+    );
+    Ok(())
+}
+
+/// Repairing a missing sublayer on disk and then making an unrelated edit —
+/// one that rebuilds no layer stack — still loads it: clearing the failure
+/// memo requeues the failure diagnostics as demands, so the repaired layer
+/// joins and its obsolete diagnostic drops.
+#[test]
+fn repaired_sublayer_reloads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@late.usda@]\n)\ndef \"W\" {}\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let errors = stage.composition_errors();
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, pcp::Error::UnresolvedSublayer { asset_path, .. } if asset_path == "late.usda")),
+        "the missing sublayer is reported at open: {errors:?}"
+    );
+
+    fs::write(
+        dir.path().join("late.usda"),
+        "#usda 1.0\ndef \"L\" {\n    custom double z = 5\n}\n",
+    )?;
+    // A prim edit touches no layer stack, so only the requeue can retry.
+    stage.define_prim("/X")?;
+    assert_eq!(
+        stage.attribute("/L.z").get::<f64>()?,
+        Some(5.0),
+        "the repaired sublayer loads on the next edit"
+    );
+    let errors = stage.composition_errors();
+    assert!(
+        !errors
+            .iter()
+            .any(|e| matches!(e, pcp::Error::UnresolvedSublayer { .. })),
+        "the healed diagnostic drops: {errors:?}"
+    );
+    Ok(())
+}
+
+/// A stack rebuild that does not clear the failure memo — muting an unrelated
+/// layer — still retries a resolve failure once the asset has appeared: the
+/// rebuild probes resolvability instead of treating the failure as terminal.
+#[test]
+fn mute_retries_resolvable() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@other.usda@, @late.usda@]\n)\ndef \"W\" {}\n",
+    )?;
+    fs::write(dir.path().join("other.usda"), "#usda 1.0\ndef \"O\" {}\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(
+        stage
+            .composition_errors()
+            .iter()
+            .any(|e| matches!(e, pcp::Error::UnresolvedSublayer { asset_path, .. } if asset_path == "late.usda")),
+        "the missing sublayer is reported at open"
+    );
+
+    fs::write(
+        dir.path().join("late.usda"),
+        "#usda 1.0\ndef \"L\" {\n    custom double z = 5\n}\n",
+    )?;
+    let other = stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| FsPath::new(id).ends_with("other.usda"))
+        .expect("other.usda is loaded");
+    stage.mute_layer(other);
+    assert_eq!(
+        stage.attribute("/L.z").get::<f64>()?,
+        Some(5.0),
+        "the mute's rebuild retries the now-resolvable sublayer"
+    );
+    Ok(())
+}
+
+/// Two authored spellings of one missing sublayer — `missing.usda` and
+/// `./missing.usda` — resolve to the same canonical identifier and report one
+/// diagnostic, at open and across a runtime retry, matching open-time
+/// collection's per-canonical dedup.
+#[test]
+fn dual_spelling_reports_once() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@missing.usda@, @./missing.usda@]\n)\ndef \"W\" {}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let count = |stage: &Stage| {
+        stage
+            .composition_errors()
+            .into_iter()
+            .filter(
+                |e| matches!(e, pcp::Error::UnresolvedSublayer { asset_path, .. } if asset_path.contains("missing.usda")),
+            )
+            .count()
+    };
+    assert_eq!(count(&stage), 1, "one canonical failure, one diagnostic at open");
+
+    // An edit clears and requeues the failure; the retry still fails and must
+    // still report once.
+    stage.define_prim("/X")?;
+    assert_eq!(count(&stage), 1, "one diagnostic after the runtime retry");
+    Ok(())
+}
+
+/// A failing bare `${VAR}` sublayer expression is one failure and reports one
+/// diagnostic — the loader's open-time copy and the graph's regenerable copy
+/// are the same error — and authoring the variable clears it.
+#[test]
+fn expr_failure_reported_once() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@`${WHICH}`@]\n)\ndef \"W\" {}\n")?;
+    fs::write(
+        dir.path().join("fix.usda"),
+        "#usda 1.0\ndef \"F\" {\n    custom double q = 3\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let errors = stage.composition_errors();
+    assert_eq!(errors.len(), 1, "one failing expression, one diagnostic: {errors:?}");
+    assert!(matches!(&errors[0], pcp::Error::InvalidExpression { .. }));
+
+    stage.set_expression_variables(HashMap::from([(
+        "WHICH".to_string(),
+        sdf::Value::String("fix.usda".to_string()),
+    )]))?;
+    assert_eq!(
+        stage.attribute("/F.q").get::<f64>()?,
+        Some(3.0),
+        "the fixed expression selects and loads"
+    );
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the healed expression stops reporting"
+    );
+    Ok(())
+}
+
 /// A reference authored inside a `.usdz` package targets a sibling layer in the
 /// same archive: it resolves package-relative (not against the host
 /// filesystem), so the sibling's opinion composes onto the prim and no
@@ -715,7 +1272,7 @@ fn lazy_ref_inside_usdz_resolves() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let package = dir.path().join("package.usdz");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
     // The package's first (root) layer references a sibling layer inside the
     // same archive, which authors an opinion on the prim.
     {
@@ -758,7 +1315,7 @@ fn lazy_ref_inside_usdz_missing() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let package = dir.path().join("package.usdz");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
     // The package's first layer references a sibling that is never added.
     {
         let mut writer = ArchiveWriter::create(&package)?;
@@ -791,7 +1348,7 @@ fn lazy_ref_empty_usdz_malformed() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let package = dir.path().join("empty.usdz");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @empty.usdz@\n) {}\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @empty.usdz@\n) {}\n")?;
     // A valid ZIP archive with no packaged USD layer.
     ArchiveWriter::create(&package)?.finish()?;
 
@@ -820,7 +1377,7 @@ fn usdz_subdir_first_layer_anchors() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let package = dir.path().join("package.usdz");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
     // Both packaged layers live under `Scenes/`; the first is the default layer.
     {
         let mut writer = ArchiveWriter::create(&package)?;
@@ -859,7 +1416,7 @@ fn asset_value_usdz_is_package_path() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let package = dir.path().join("model.usdz");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" {\n    custom asset a = @model.usdz@\n}\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"P\" {\n    custom asset a = @model.usdz@\n}\n")?;
     {
         let mut writer = ArchiveWriter::create(&package)?;
         writer.add_layer("root.usda", b"#usda 1.0\ndef \"M\" {}\n")?;
@@ -894,13 +1451,13 @@ fn lazy_ref_corrupt_sublayer() -> Result<()> {
     let root = dir.path().join("root.usda");
     let target = dir.path().join("target.usda");
     let broken = dir.path().join("broken.usda");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
-    std::fs::write(
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    fs::write(
         &target,
         "#usda 1.0\n(\n    subLayers = [@broken.usda@]\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
     )?;
     // Resolves (the file exists) but the parser rejects the body.
-    std::fs::write(&broken, "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    fs::write(&broken, "#usda 1.0\ndef Broken {{{ not valid\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
@@ -927,16 +1484,16 @@ fn lazy_ref_corrupt_sublayer() -> Result<()> {
 #[test]
 fn mute_nested_reference_target() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::create_dir(dir.path().join("sub"))?;
+    fs::create_dir(dir.path().join("sub"))?;
     let root = dir.path().join("root.usda");
     let mid = dir.path().join("sub").join("mid.usda");
     let model = dir.path().join("sub").join("model.usda");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @sub/mid.usda@\n) {}\n")?;
-    std::fs::write(
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @sub/mid.usda@\n) {}\n")?;
+    fs::write(
         &mid,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" (\n    references = @model.usda@\n) {}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &model,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
     )?;
@@ -968,20 +1525,20 @@ fn mute_nested_reference_target() -> Result<()> {
 #[test]
 fn mute_target_under_nested_sublayer() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::create_dir(dir.path().join("detail"))?;
+    fs::create_dir(dir.path().join("detail"))?;
     let root = dir.path().join("root.usda");
     let target = dir.path().join("target.usda");
     let extra = dir.path().join("detail").join("extra.usda");
     let model = dir.path().join("detail").join("model.usda");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
     // target.usda sublayers a layer in detail/, which authors the relative model
     // reference — so the arc's authoring layer is not the stack's root layer.
-    std::fs::write(
+    fs::write(
         &target,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@detail/extra.usda@]\n)\ndef \"P\" {}\n",
     )?;
-    std::fs::write(&extra, "#usda 1.0\ndef \"P\" (\n    references = @model.usda@\n) {}\n")?;
-    std::fs::write(
+    fs::write(&extra, "#usda 1.0\ndef \"P\" (\n    references = @model.usda@\n) {}\n")?;
+    fs::write(
         &model,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
     )?;
@@ -1013,8 +1570,8 @@ fn mute_alternate_spelling() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let weak = dir.path().join("weak.usda");
-    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\ndef \"P\" {}\n")?;
-    std::fs::write(&weak, "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n")?;
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\ndef \"P\" {}\n")?;
+    fs::write(&weak, "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     let abs = weak.to_str().unwrap();
@@ -1087,8 +1644,8 @@ fn mute_open_dedup() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let weak = dir.path().join("weak.usda");
-    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\ndef \"P\" {}\n")?;
-    std::fs::write(&weak, "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n")?;
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\ndef \"P\" {}\n")?;
+    fs::write(&weak, "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n")?;
     let abs = weak.to_str().unwrap();
 
     let stage = Stage::builder().mute(["weak.usda", abs]).open(root.to_str().unwrap())?;
@@ -1113,16 +1670,16 @@ fn mute_open_dedup() -> Result<()> {
 #[test]
 fn mute_nested_sublayer() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::create_dir(dir.path().join("sub"))?;
+    fs::create_dir(dir.path().join("sub"))?;
     let root = dir.path().join("root.usda");
     let mid = dir.path().join("sub").join("mid.usda");
     let weak = dir.path().join("sub").join("weak.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\n(\n    subLayers = [@sub/mid.usda@]\n)\ndef \"P\" {}\n",
     )?;
-    std::fs::write(&mid, "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\n")?;
-    std::fs::write(&weak, "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n")?;
+    fs::write(&mid, "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\n")?;
+    fs::write(&weak, "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     let abs = weak.to_str().unwrap();
@@ -1163,13 +1720,13 @@ fn bad_expr_sublayer_dropped() -> Result<()> {
     let root = dir.path().join("root.usda");
     let target = dir.path().join("target.usda");
     let over = dir.path().join("over.usda");
-    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
     // The second sublayer uses an undefined expression variable; the first is valid.
-    std::fs::write(
+    fs::write(
         &target,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@over.usda@, @`\"${UNDEFINED}.usda\"`@]\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
     )?;
-    std::fs::write(&over, "#usda 1.0\ndef \"P\" {\n    custom double y = 2\n}\n")?;
+    fs::write(&over, "#usda 1.0\ndef \"P\" {\n    custom double y = 2\n}\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
@@ -1379,13 +1936,13 @@ fn session_sublayer_var_ignored() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path().join("root.usda");
         let session = dir.path().join("session.usda");
-        std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\n")?;
-        std::fs::write(&session, session_body)?;
-        std::fs::write(
+        fs::write(&root, "#usda 1.0\n(\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\n")?;
+        fs::write(&session, session_body)?;
+        fs::write(
             dir.path().join("sub.usda"),
             "#usda 1.0\n(\n    expressionVariables = { string WHICH = \"a\" }\n)\n",
         )?;
-        std::fs::write(
+        fs::write(
             dir.path().join("a.usda"),
             "#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n",
         )?;
@@ -1419,12 +1976,12 @@ fn session_sublayer_root_var() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let session = dir.path().join("session.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\n(\n    expressionVariables = { string CHILD = \"strong\" }\n)\n",
     )?;
-    std::fs::write(&session, "#usda 1.0\n(\n    subLayers = [@`\"${CHILD}.usda\"`@]\n)\n")?;
-    std::fs::write(
+    fs::write(&session, "#usda 1.0\n(\n    subLayers = [@`\"${CHILD}.usda\"`@]\n)\n")?;
+    fs::write(
         dir.path().join("strong.usda"),
         "#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n",
     )?;
@@ -1449,12 +2006,12 @@ fn unmute_session_root_subtree() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let session = dir.path().join("session.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\n(\n    expressionVariables = { string CHILD = \"strong\" }\n)\ndef \"A\" {\n    custom double z = 0\n}\n",
     )?;
-    std::fs::write(&session, "#usda 1.0\n(\n    subLayers = [@`\"${CHILD}.usda\"`@]\n)\n")?;
-    std::fs::write(
+    fs::write(&session, "#usda 1.0\n(\n    subLayers = [@`\"${CHILD}.usda\"`@]\n)\n")?;
+    fs::write(
         dir.path().join("strong.usda"),
         "#usda 1.0\ndef \"A\" {\n    def \"Child\" {\n        custom double y = 5\n    }\n}\n",
     )?;
@@ -1567,7 +2124,7 @@ fn api_schemas_returns_applied_schemas() -> Result<()> {
 #[test]
 fn api_schemas_compose_list_ops() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("weak.usda"),
         r#"#usda 1.0
 
@@ -1581,7 +2138,7 @@ def Xform "World"
 }
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("middle.usda"),
         r#"#usda 1.0
 (
@@ -1601,7 +2158,7 @@ over "World"
 "#,
     )?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 (
@@ -1630,7 +2187,7 @@ over "World"
 #[test]
 fn api_schemas_compose_reorder_list_op() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("weak.usda"),
         r#"#usda 1.0
 
@@ -1645,7 +2202,7 @@ def Xform "World"
 "#,
     )?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 (
@@ -1682,7 +2239,7 @@ over "World"
 fn api_schemas_via_inherit() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 
@@ -1719,7 +2276,7 @@ def Xform "World"
 #[test]
 fn api_schemas_via_reference() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("asset.usda"),
         r#"#usda 1.0
 (
@@ -1734,7 +2291,7 @@ def Mesh "Source" (
 "#,
     )?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 
@@ -1764,7 +2321,7 @@ def Xform "World"
 fn api_schemas_via_variant() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 
@@ -1821,7 +2378,7 @@ fn connection_paths_compose_list_ops() -> Result<()> {
     // `prepend`. `connection_paths` must fold edits across both
     // layers, not return only the strongest layer's list op.
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("weak.usda"),
         r#"#usda 1.0
 
@@ -1833,7 +2390,7 @@ def Shader "Mat"
 "#,
     )?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 (
@@ -1866,7 +2423,7 @@ fn relationship_targets_compose_list_ops() -> Result<()> {
     // Weak sublayer appends a target; root prepends one. Raw targets must
     // fold list-op edits across both layers (spec 12.2.6, 12.4).
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("weak.usda"),
         r#"#usda 1.0
 
@@ -1879,7 +2436,7 @@ def "Set"
 "#,
     )?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 (
@@ -1906,7 +2463,7 @@ fn relationship_targets_remap_reference() -> Result<()> {
     // Targets authored in a referenced asset's namespace resolve into the
     // referencing prim's namespace (spec 12.4 raw targets across arcs).
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("asset.usda"),
         r#"#usda 1.0
 (
@@ -1921,7 +2478,7 @@ def "Source"
 "#,
     )?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 
@@ -1946,7 +2503,7 @@ fn forwarded_targets_honor_mask() -> Result<()> {
     // to the masked prim is still returned (raw target value, not a query).
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 
@@ -1981,7 +2538,7 @@ def "Hidden"
 #[test]
 fn connection_paths_remap_reference() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("asset.usda"),
         r#"#usda 1.0
 (
@@ -1996,7 +2553,7 @@ def Shader "Source"
 "#,
     )?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 
@@ -2311,15 +2868,15 @@ fn write_nested_payload_scene(dir: &std::path::Path) -> Result<std::path::PathBu
     let root = dir.join("root.usda");
     let a = dir.join("a.usda");
     let deep = dir.join("deep.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\ndef \"World\" {\n    def \"A\" (\n        payload = @a.usda@\n    ) {}\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &a,
         "#usda 1.0\n(\n    defaultPrim = \"A\"\n)\ndef \"A\" {\n    def \"Deep\" (\n        payload = @deep.usda@\n    ) {}\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &deep,
         "#usda 1.0\n(\n    defaultPrim = \"Deep\"\n)\ndef \"Deep\" {\n    custom double x = 42\n}\n",
     )?;
@@ -2405,15 +2962,15 @@ fn instance_descendant_load_rule_splits_prototype() -> Result<()> {
     let root = dir.path().join("root.usda");
     let proto = dir.path().join("proto.usda");
     let heavy = dir.path().join("heavy.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\ndef \"World\" {\n    def \"InstA\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n    def \"InstB\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &proto,
         "#usda 1.0\n(\n    defaultPrim = \"Proto\"\n)\ndef \"Proto\" {\n    def \"Heavy\" (\n        payload = @heavy.usda@\n    ) {}\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &heavy,
         "#usda 1.0\n(\n    defaultPrim = \"Heavy\"\n)\ndef \"Heavy\" {\n    custom double x = 1\n}\n",
     )?;
@@ -2447,11 +3004,11 @@ fn set_load_rules_strips_prototype_path() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let proto = dir.path().join("proto.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\ndef \"World\" {\n    def \"Inst\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &proto,
         "#usda 1.0\n(\n    defaultPrim = \"Proto\"\n)\ndef \"Proto\" {}\n",
     )?;
@@ -2480,15 +3037,15 @@ fn is_loaded_through_prototype_path() -> Result<()> {
     let root = dir.path().join("root.usda");
     let proto = dir.path().join("proto.usda");
     let heavy = dir.path().join("heavy.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\ndef \"World\" {\n    def \"Inst\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &proto,
         "#usda 1.0\n(\n    defaultPrim = \"Proto\"\n)\ndef \"Proto\" {\n    def \"Heavy\" (\n        payload = @heavy.usda@\n    ) {}\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &heavy,
         "#usda 1.0\n(\n    defaultPrim = \"Heavy\"\n)\ndef \"Heavy\" {\n    custom double x = 1\n}\n",
     )?;
@@ -2744,7 +3301,7 @@ fn prototype_descendant_target_remap() -> Result<()> {
 #[test]
 fn forwarded_targets_through_instance() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("asset.usda"),
         r#"#usda 1.0
 (
@@ -2760,7 +3317,7 @@ def "Proto"
 "#,
     )?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         r#"#usda 1.0
 
@@ -3783,9 +4340,9 @@ fn value_f64(stage: &Stage, attr: &str, time: f64) -> Option<f64> {
 }
 
 fn write_clip_scene(dir: &std::path::Path, root_body: &str, manifest_body: &str, clip_body: &str) -> Result<String> {
-    std::fs::write(dir.join("root.usda"), root_body)?;
-    std::fs::write(dir.join("manifest.usda"), manifest_body)?;
-    std::fs::write(dir.join("clip.usda"), clip_body)?;
+    fs::write(dir.join("root.usda"), root_body)?;
+    fs::write(dir.join("manifest.usda"), manifest_body)?;
+    fs::write(dir.join("clip.usda"), clip_body)?;
     Ok(dir.join("root.usda").to_string_lossy().into_owned())
 }
 
@@ -3995,11 +4552,11 @@ def "Model" (
 #[test]
 fn clip_manifestless_unauthored_no_times() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("clip.usda"),
         "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 10, 4: 20 }\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         r#"#usda 1.0
 def "Model" (
@@ -4035,16 +4592,16 @@ def "Model" (
 #[test]
 fn clip_manifestless_unscheduled_clip() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("sampled.usda"),
         "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 1, 4: 2 }\n}\n",
     )?;
-    std::fs::write(dir.path().join("empty.usda"), "#usda 1.0\ndef \"Model\"\n{\n}\n")?;
-    std::fs::write(
+    fs::write(dir.path().join("empty.usda"), "#usda 1.0\ndef \"Model\"\n{\n}\n")?;
+    fs::write(
         dir.path().join("ref.usda"),
         "#usda 1.0\n(\n    defaultPrim = \"Model\"\n)\ndef \"Model\"\n{\n    float size.timeSamples = { 5: 50, 8: 80 }\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         r#"#usda 1.0
 (
@@ -4106,16 +4663,16 @@ fn clip_manifestless_held_boundary() -> Result<()> {
 #[test]
 fn clip_manifestless_interior_empty() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("clip0.usda"),
         "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 0, 2: 2 }\n}\n",
     )?;
-    std::fs::write(dir.path().join("clip1.usda"), "#usda 1.0\ndef \"Model\"\n{\n}\n")?;
-    std::fs::write(
+    fs::write(dir.path().join("clip1.usda"), "#usda 1.0\ndef \"Model\"\n{\n}\n")?;
+    fs::write(
         dir.path().join("clip2.usda"),
         "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 20: 20, 22: 22 }\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         r#"#usda 1.0
 (
@@ -4195,8 +4752,8 @@ def "Model" (
 #[test]
 fn clip_anchor_sublayer() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::create_dir(dir.path().join("sub"))?;
-    std::fs::write(
+    fs::create_dir(dir.path().join("sub"))?;
+    fs::write(
         dir.path().join("root.usda"),
         r#"#usda 1.0
 (
@@ -4214,7 +4771,7 @@ over "Model" (
 }
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("sub").join("weak.usda"),
         r#"#usda 1.0
 def "Model" (
@@ -4232,7 +4789,7 @@ def "Model" (
 }
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("sub").join("manifest.usda"),
         r#"#usda 1.0
 def "Model"
@@ -4241,7 +4798,7 @@ def "Model"
 }
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("sub").join("clip.usda"),
         r#"#usda 1.0
 def "Model"
@@ -4261,8 +4818,8 @@ def "Model"
 #[test]
 fn clip_anchor_reference() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::create_dir(dir.path().join("asset"))?;
-    std::fs::write(
+    fs::create_dir(dir.path().join("asset"))?;
+    fs::write(
         dir.path().join("root.usda"),
         r#"#usda 1.0
 def "ShotModel" (
@@ -4272,7 +4829,7 @@ def "ShotModel" (
 }
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("asset").join("model.usda"),
         r#"#usda 1.0
 def "Model" (
@@ -4290,7 +4847,7 @@ def "Model" (
 }
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("asset").join("manifest.usda"),
         r#"#usda 1.0
 def "Model"
@@ -4299,7 +4856,7 @@ def "Model"
 }
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("asset").join("clip.usda"),
         r#"#usda 1.0
 def "Model"
@@ -4319,7 +4876,7 @@ def "Model"
 #[test]
 fn clip_metadata_retimed() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(
+    fs::write(
         dir.path().join("root.usda"),
         r#"#usda 1.0
 (
@@ -4327,7 +4884,7 @@ fn clip_metadata_retimed() -> Result<()> {
 )
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("weak.usda"),
         r#"#usda 1.0
 def "Model" (
@@ -4346,7 +4903,7 @@ def "Model" (
 }
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("manifest.usda"),
         r#"#usda 1.0
 def "Model"
@@ -4355,7 +4912,7 @@ def "Model"
 }
 "#,
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("clip.usda"),
         r#"#usda 1.0
 def "Model"
@@ -4526,7 +5083,7 @@ fn remove_layer_clears_metadata() -> Result<()> {
 fn insert_layer_into_file_loaded_parent() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
-    std::fs::write(&root, "#usda 1.0\n")?;
+    fs::write(&root, "#usda 1.0\n")?;
     let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
     let root_id = stage.root_layer().identifier().to_string();
     let before = stage.layer_count();
@@ -4573,13 +5130,13 @@ fn insert_layer_missing_parent() -> Result<()> {
 #[test]
 fn from_layers_dedups_order() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(dir.path().join("shared.usda"), "#usda 1.0\n")?;
-    std::fs::write(
+    fs::write(dir.path().join("shared.usda"), "#usda 1.0\n")?;
+    fs::write(
         dir.path().join("session.usda"),
         "#usda 1.0\n(\n    subLayers = [@shared.usda@]\n)\n",
     )?;
     let root = dir.path().join("root.usda");
-    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@shared.usda@]\n)\n")?;
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@shared.usda@]\n)\n")?;
 
     let stage = Stage::builder()
         .session_layer(dir.path().join("session.usda").to_string_lossy().into_owned())
@@ -4606,12 +5163,12 @@ fn from_layers_dedups_order() -> Result<()> {
 #[test]
 fn from_layers_root_shared_with_session() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    std::fs::write(dir.path().join("dep.usda"), "#usda 1.0\n")?;
-    std::fs::write(
+    fs::write(dir.path().join("dep.usda"), "#usda 1.0\n")?;
+    fs::write(
         dir.path().join("shared.usda"),
         "#usda 1.0\n(\n    subLayers = [@dep.usda@]\n)\n",
     )?;
-    std::fs::write(
+    fs::write(
         dir.path().join("session.usda"),
         "#usda 1.0\n(\n    subLayers = [@shared.usda@]\n)\n",
     )?;
@@ -4677,7 +5234,7 @@ fn override_prim() -> Result<()> {
 fn permission_edit_does_not_inert_opinion() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\n\ndef \"Class\"\n{\n    custom double attr = 5\n}\n\ndef \"Inst\" (\n    inherits = </Class>\n)\n{\n}\n",
     )?;
@@ -4712,16 +5269,16 @@ fn clips_edit_resolves_live() -> Result<()> {
     let clip = dir.path().join("clip.usda");
     let manifest = dir.path().join("manifest.usda");
     let referenced = dir.path().join("ref.usda");
-    std::fs::write(
+    fs::write(
         &clip,
         "#usda 1.0\n\ndef \"Model\"\n{\n    double size.timeSamples = {\n        0: 0,\n        10: 10,\n    }\n}\n",
     )?;
-    std::fs::write(&manifest, "#usda 1.0\n\ndef \"Model\"\n{\n    double size\n}\n")?;
-    std::fs::write(
+    fs::write(&manifest, "#usda 1.0\n\ndef \"Model\"\n{\n    double size\n}\n")?;
+    fs::write(
         &referenced,
         "#usda 1.0\n\ndef \"Model\"\n{\n    double size.timeSamples = {\n        0: -1,\n        10: -10,\n    }\n}\n",
     )?;
-    std::fs::write(
+    fs::write(
         &root,
         format!(
             "#usda 1.0\n\ndef \"Model\" (\n    references = @{}@</Model>\n)\n{{\n}}\n",
@@ -4941,7 +5498,7 @@ fn rel_removal_not_info_only() -> Result<()> {
 fn instance_target_memo_not_stale() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
-    std::fs::write(
+    fs::write(
         &root,
         "#usda 1.0\n\nclass \"Class\"\n{\n    double x\n    add double x.connect = [</Target.y>]\n    double y\n}\n\n\
          def \"Owner\" (\n    inherits = </Class>\n)\n{\n}\n\ndef \"Target\" (\n    inherits = </Class>\n)\n{\n}\n",

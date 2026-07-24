@@ -42,7 +42,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::rc::{Rc, Weak};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bitflags::bitflags;
 
 use crate::tf::Token;
@@ -850,7 +850,12 @@ impl Stage {
         self.process_pending();
         let graph = self.layers.borrow();
         let mut errors = graph.errors();
-        let cache_errors = self.cache.borrow().composition_errors();
+        let mut cache_errors = self.cache.borrow().composition_errors();
+        // A diagnostic the graph regenerates per stack can coexist with an
+        // identical one-shot loader copy kept at open — a referrer the session
+        // prefix reaches, or a branch muted at open and unmuted later; the
+        // regenerable copy wins so one failure reads once.
+        cache_errors.retain(|error| !errors.contains(error));
         // Only a muted stage suppresses anything, and only sublayer diagnostics; skip
         // building the effective-layer set when there is nothing to filter.
         if !graph.has_muted_layers() || !cache_errors.iter().any(is_sublayer_error) {
@@ -1471,11 +1476,13 @@ impl Stage {
                 return Ok(layers.root_layer_stack_id());
             }
         }
-        Ok(self
-            .layers
-            .borrow_mut()
-            .intern_external(target_layer, pcp::LayerStackId::ROOT)
-            .0)
+        let (id, demands) = {
+            let mut graph = self.layers.borrow_mut();
+            let id = graph.intern_external(target_layer, pcp::LayerStackId::ROOT).0;
+            (id, graph.take_sublayer_demands())
+        };
+        self.resolve_sublayer_demands(demands);
+        Ok(id)
     }
 
     /// Run `f` as one committed atomic transaction on the single layer
@@ -1626,7 +1633,8 @@ impl Stage {
         // An edit changes the layers, so a target that previously failed to read
         // may now be readable: forget recorded load failures and drop the indices
         // that recorded one, so the next query re-demands and recomposes them.
-        if self.layers.borrow_mut().clear_failed_loads() {
+        let failures_cleared = self.layers.borrow_mut().clear_failed_loads();
+        if failures_cleared {
             self.cache.borrow_mut().drop_load_failed_indices();
         }
         // Entries committed under one transaction id are contiguous — a
@@ -1641,6 +1649,14 @@ impl Stage {
             let edits: Vec<(pcp::LayerId, &sdf::ChangeList)> =
                 group.iter().map(|(_, id, changes, _)| (*id, changes)).collect();
             self.apply_change_sets(generation, &edits, &provenance);
+        }
+        // A cleared sublayer failure retries even when this round's edits
+        // rebuilt no stack: the failure diagnostics requeue as demands, so a
+        // repaired asset loads and a still-broken one re-records the same
+        // diagnostic.
+        if failures_cleared {
+            let requeued = self.layers.borrow().requeue_failed_sublayers();
+            self.resolve_sublayer_demands(requeued);
         }
     }
 
@@ -1710,6 +1726,11 @@ impl Stage {
             let mut cache = self.cache.borrow_mut();
             pcp_changes.apply(&mut cache, &mut graph);
         }
+        // The recompose may have demanded sublayers — a `${VAR}` entry the
+        // edited variables newly select, or a just-authored literal naming an
+        // unloaded layer; open them before observers read the settled stage.
+        let demands = self.layers.borrow_mut().take_sublayer_demands();
+        self.resolve_sublayer_demands(demands);
 
         if let Some(payload) = payload {
             let layer_identifier = edits
@@ -2166,27 +2187,25 @@ impl Stage {
         // Drain pending edits first so the mute recomposes against a current
         // graph and cache rather than stranding queued changes.
         self.process_pending();
-        let mut graph = self.layers.borrow_mut();
-        let mut cache = self.cache.borrow_mut();
-        let change = mutate(&mut graph)?;
-        // The mutation already rebuilt the graph's sublayer stacks, relocates, and
-        // cycle diagnostics; only the cache needs work. Removing a session variable
-        // drops the root `${VAR}` sublayer it selected — the graph re-resolves the
-        // already-interned layer out of the stack. Dropping the affected indices by
-        // both the toggled layer's fanout and its canonical identifier reaches a
-        // referrer that skipped this target while it was muted-and-never-loaded, so
-        // unmuting recomposes it and the load barrier finally opens the target.
-        //
-        // Runtime session-variable changes that newly *select* an unopened root
-        // `${VAR}` sublayer — a mute exposing the root's own variable, or a session
-        // `expressionVariables` edit (which reaches the cache through the change
-        // pipeline, not here) — do not load it: they resolve root sublayers only
-        // against already-interned layers. The open-time builder path loads the
-        // initial selection (see `StageBuilder::root_stack_expression_variables`);
-        // reloading a newly-selected root sublayer at runtime would need an on-demand
-        // sublayer open through the graph, left as remaining work.
-        cache.invalidate_muting(&change.affected, &change.changed);
-        Some(change.changed)
+        let (changed, demands) = {
+            let mut graph = self.layers.borrow_mut();
+            let mut cache = self.cache.borrow_mut();
+            let change = mutate(&mut graph)?;
+            // The mutation already rebuilt the graph's sublayer stacks, relocates, and
+            // cycle diagnostics; only the cache needs work. Removing a session variable
+            // drops the root `${VAR}` sublayer it selected — the graph re-resolves the
+            // already-interned layer out of the stack. Dropping the affected indices by
+            // both the toggled layer's fanout and its canonical identifier reaches a
+            // referrer that skipped this target while it was muted-and-never-loaded, so
+            // unmuting recomposes it and the load barrier finally opens the target.
+            cache.invalidate_muting(&change.affected, &change.changed);
+            (change.changed, graph.take_sublayer_demands())
+        };
+        // A mute or unmute can newly select a `${VAR}` sublayer that was never
+        // opened — the recompose recorded it as a demand; load it now, after
+        // the graph and cache borrows are released.
+        self.resolve_sublayer_demands(demands);
+        Some(changed)
     }
 
     /// Fires [`StageSink::layer_muting_changed`] for the toggled identifier, after
@@ -2660,15 +2679,11 @@ impl Stage {
     /// both cases the graph is left untouched — `layer` only joins it once the
     /// parent edit succeeds, so a failed insert never leaves an orphan node.
     ///
-    /// Only `layer` itself is added. If `layer` authors its own `subLayers`
-    /// naming layers not already loaded in the stage, those nested sublayers are
-    /// not auto-opened from disk — their edges resolve to nothing and contribute
-    /// no opinions. Insert an already-opened sublayer stack when nested sublayers
-    /// must load.
-    //
-    // TODO: open `layer`'s sublayer stack so its nested sublayers load (and
-    // unresolved ones surface as `UnresolvedSublayer`), matching what
-    // `StageBuilder::open` does for the root layer.
+    /// If `layer` authors its own `subLayers` naming layers not yet loaded,
+    /// the recompose records them as sublayer demands and the load barrier
+    /// opens them from disk, with one that fails to resolve surfacing as an
+    /// [`UnresolvedSublayer`](pcp::Error::UnresolvedSublayer) diagnostic — the
+    /// same treatment the root layer's sublayers get at open.
     pub fn insert_layer(
         &self,
         parent: &str,
@@ -2822,22 +2837,22 @@ impl Stage {
     ///
     /// Each demanded asset path is opened together with its sublayer stack and
     /// interned through [`add_layer`](Self::add_layer), so the new layers join
-    /// the graph with a change sink; the sublayer DAG is then rewired. A missing
-    /// sublayer of an on-demand target is recorded as an
-    /// [`UnresolvedSublayer`](pcp::Error::UnresolvedSublayer) collection error,
-    /// matching root-stack collection so a lazily-reached stack reports the same
-    /// diagnostics. A target that resolves but cannot be read or parsed is marked
-    /// failed on the graph, so the next composition pass reports it
-    /// [`UnresolvedLayer`](pcp::Error::UnresolvedLayer) (with the arc's site
-    /// context) rather than demanding it again — otherwise the demanding prim's
-    /// index would never cache.
+    /// the graph with a change sink; the sublayer DAG is then rewired. A
+    /// missing or unreadable sublayer of an on-demand target surfaces through
+    /// the sublayer-demand pass below: the rewired stack demands the entry,
+    /// whose failed open records the per-referrer, per-stack diagnostic the
+    /// graph regenerates on each rebuild. A target that cannot be opened is
+    /// marked failed with what went wrong, so the next composition pass
+    /// reports it — [`MalformedLayer`](pcp::Error::MalformedLayer) for a
+    /// read/parse failure, [`UnresolvedLayer`](pcp::Error::UnresolvedLayer)
+    /// for a resolve failure — rather than demanding it again; otherwise the
+    /// demanding prim's index would never cache.
     ///
     /// Returns whether the pass made progress — a layer joined or a target was
     /// newly marked failed — so the caller recomposes once more; a demanded path
-    /// already loaded or already known failed is skipped.
+    /// already loaded or already known unreadable is skipped.
     fn load_demanded(&self, pending: &[pcp::Demand]) -> bool {
         let before = self.layers.borrow().len();
-        let sublayer_errors: RefCell<Vec<pcp::Error>> = RefCell::new(Vec::new());
         let mut newly_failed = false;
         let mut newly_interned = false;
         // Whether an open ran for each demand this pass: the mint loop below
@@ -2852,10 +2867,17 @@ impl Stage {
             // context with no contextual instance yet. A re-open (re)loads the
             // `${VAR}` sublayers the new context resolves — including ones nested
             // below a literal sublayer — that an earlier context's open left
-            // unloaded. A target a prior open failed is not retried.
+            // unloaded. A target a prior open could not read is not retried, and
+            // one that failed to resolve is retried only once the resolver can
+            // find it — the asset has since appeared.
             let open = {
                 let graph = self.layers.borrow();
-                if graph.load_failed(asset_path) {
+                let retry_blocked = match graph.load_failure(asset_path) {
+                    Some(pcp::LoadFailure::Unreadable(_)) => true,
+                    Some(pcp::LoadFailure::Unresolved) => graph.layer_registry().resolve(asset_path).is_none(),
+                    None => false,
+                };
+                if retry_blocked {
                     None
                 } else {
                     match graph.id_of(asset_path) {
@@ -2869,7 +2891,9 @@ impl Stage {
                 *opened_flag = true;
                 // The shared graph borrow is dropped before `add_layer` /
                 // `mark_load_failed` take a mutable one. The arc anchored `asset_path`
-                // to an absolute identifier, so no anchor is needed.
+                // to an absolute identifier, so no anchor is needed. Nested sublayer
+                // failures surface through the sublayer-demand pass below, which
+                // regenerates each one's diagnostic per stack.
                 let opened = {
                     let graph = self.layers.borrow();
                     graph.layer_registry().open_stack(
@@ -2877,30 +2901,43 @@ impl Stage {
                         None,
                         graph.stack_expression_variables(demand.context),
                         reload,
-                        &|error| {
-                            sublayer_errors.borrow_mut().push(error.into());
-                            Ok(())
-                        },
+                        &|_| Ok(()),
                         &|id| graph.id_of(id).is_some(),
                     )
                 };
-                match opened {
-                    Ok(layers) => {
+                let failure = match opened {
+                    Ok(Some(layers)) => {
                         for layer in layers {
                             self.add_layer(layer);
                         }
+                        None
                     }
-                    Err(err) => {
-                        self.layers.borrow_mut().mark_load_failed(asset_path, err.to_string());
-                        newly_failed = true;
-                        continue;
+                    // No layer resolved. When the raw asset still resolves —
+                    // the layer-level resolution (a package's default layer,
+                    // say) is what failed — the failure is recorded as
+                    // unreadable: it is terminal, where the arc demand gate
+                    // retries a resolvable asset whose failure was
+                    // `Unresolved` and would re-run this open every pass.
+                    Ok(None) => {
+                        let graph = self.layers.borrow();
+                        Some(match graph.layer_registry().resolve(asset_path) {
+                            None => pcp::LoadFailure::Unresolved,
+                            Some(_) => {
+                                pcp::LoadFailure::Unreadable(format!("failed to resolve asset path: {asset_path}"))
+                            }
+                        })
                     }
+                    Err(err) => Some(pcp::LoadFailure::Unreadable(format!("{err:#}"))),
+                };
+                if let Some(failure) = failure {
+                    let mut graph = self.layers.borrow_mut();
+                    // Only a first failure counts as progress: re-marking an
+                    // asset that failed the same way on an earlier pass must
+                    // not keep the caller recomposing forever.
+                    newly_failed |= graph.load_failure(asset_path).is_none();
+                    graph.mark_load_failed(asset_path, failure);
                 }
             }
-        }
-        let errors = sublayer_errors.into_inner();
-        if !errors.is_empty() {
-            self.cache.borrow_mut().record_collection_errors(errors);
         }
         let grew = self.layers.borrow().len() != before;
         // Newly joined layers need their plain sublayer edges (and relocates) wired
@@ -2943,7 +2980,138 @@ impl Stage {
                 }
             }
         }
-        grew || newly_failed || newly_interned
+        // The recompute above and any fresh mint can demand sublayers — a
+        // `${VAR}` entry whose selected layer nothing has loaded, including a
+        // target's own self-selected sublayer under an empty inherited context;
+        // open them under each demanding stack's composed variables.
+        let demands = self.layers.borrow_mut().take_sublayer_demands();
+        let sublayers_loaded = self.resolve_sublayer_demands(demands);
+        grew || newly_failed || newly_interned || sublayers_loaded
+    }
+
+    /// Opens the sublayers a graph recompose or stack mint demanded — a
+    /// `${VAR}`-selected (or newly authored literal) `subLayers` entry naming a
+    /// layer not yet in the graph — to a fixed point, the sublayer counterpart
+    /// of [`load_demanded`](Self::load_demanded).
+    ///
+    /// Each demand opens the entry's layer, with its own sublayer subtree,
+    /// under the demanding stack's composed expression variables unchanged — a
+    /// sublayer contributes no variables (C++ `PcpExpressionVariables`,
+    /// `LayerRegistry::open_sublayer_tree`). The sublayer DAG is then rewired,
+    /// the indices reading the affected stacks are dropped, and the loop
+    /// continues on the demands the recompose re-derives — a nested `${VAR}`
+    /// below a just-opened literal converges across rounds — until a round
+    /// opens nothing. A demand whose layer another stack's demand interned
+    /// this round schedules its own stack's recompose instead of an open; one
+    /// whose `(identifier, stack)` pair was already attempted this call is
+    /// skipped, and the attempted set grows monotonically while a failure is
+    /// terminal until an edit clears the recorded load failures, so the loop
+    /// terminates.
+    ///
+    /// A failed open is framed as this referrer's diagnostic and recorded in
+    /// the demanding stack's regenerable bucket
+    /// (`LayerGraph::record_sublayer_error`) — a known-failed identifier is
+    /// not retried, but every referrer that demands it still gets its own
+    /// diagnostic, matching open-time collection — and marked failed so later
+    /// rebuilds regenerate the diagnostic instead of retrying. A failure
+    /// nested inside an opened subtree surfaces next round, when the rewired
+    /// stack re-derives the failing entry as its own demand.
+    ///
+    /// Returns whether any layer joined the graph.
+    fn resolve_sublayer_demands(&self, mut demands: Vec<pcp::SublayerDemand>) -> bool {
+        let mut attempted: HashSet<(String, pcp::LayerStackId)> = HashSet::new();
+        let mut recomposed: HashSet<(pcp::LayerId, String)> = HashSet::new();
+        let mut reported: HashSet<(String, pcp::LayerStackId, pcp::LayerId)> = HashSet::new();
+        let mut loaded_any = false;
+        while !demands.is_empty() {
+            let mut opened_parents: HashSet<pcp::LayerId> = HashSet::new();
+            for demand in demands.drain(..) {
+                // Re-anchoring also refreshes the graph's resolution memo, so
+                // the round's recompose resolves the entry the same way this
+                // check just did.
+                let open = {
+                    let mut graph = self.layers.borrow_mut();
+                    graph
+                        .refresh_demanded_sublayer(demand.parent, &demand.evaluated)
+                        .err()
+                        .map(|identifier| (identifier, graph.identifier(demand.parent).to_string()))
+                };
+                let Some((identifier, parent_identifier)) = open else {
+                    // The layer is interned — another demand this round loaded
+                    // it — so the demanding stack needs the round's recompose
+                    // to pick the member up. One recompose credit per entry:
+                    // a recompose that could not resolve the member settles it
+                    // for this call.
+                    if recomposed.insert((demand.parent, demand.evaluated.clone())) {
+                        opened_parents.insert(demand.parent);
+                    }
+                    continue;
+                };
+                {
+                    // One diagnostic per (referrer, stack, canonical id): a
+                    // second authored spelling of the same entry reports
+                    // nothing more, matching open-time collection.
+                    let mut graph = self.layers.borrow_mut();
+                    if let Some(failure) = graph.load_failure(&identifier) {
+                        if reported.insert((identifier.clone(), demand.stack, demand.parent)) {
+                            let error = failure.sublayer_error(&demand.evaluated, &parent_identifier);
+                            graph.record_sublayer_error(demand.stack, error);
+                        }
+                        continue;
+                    }
+                }
+                if !attempted.insert((identifier.clone(), demand.stack)) {
+                    continue;
+                }
+                // The shared graph borrow is dropped before `add_layer` /
+                // `mark_load_failed` take a mutable one, as in `load_demanded`.
+                let opened = {
+                    let graph = self.layers.borrow();
+                    graph.layer_registry().open_sublayer_tree(
+                        &identifier,
+                        graph.stack_expression_variables(demand.stack),
+                        &|id| graph.id_of(id).is_some(),
+                    )
+                };
+                let failure = match opened {
+                    Ok(Some(layers)) => {
+                        for layer in layers {
+                            self.add_layer(layer);
+                        }
+                        opened_parents.insert(demand.parent);
+                        None
+                    }
+                    Ok(None) => Some(pcp::LoadFailure::Unresolved),
+                    Err(err) => Some(pcp::LoadFailure::Unreadable(format!("{err:#}"))),
+                };
+                if let Some(load_failure) = failure {
+                    let mut graph = self.layers.borrow_mut();
+                    reported.insert((identifier.clone(), demand.stack, demand.parent));
+                    let error = load_failure.sublayer_error(&demand.evaluated, &parent_identifier);
+                    graph.record_sublayer_error(demand.stack, error);
+                    graph.mark_load_failed(&identifier, load_failure);
+                }
+            }
+            if opened_parents.is_empty() {
+                break;
+            }
+            loaded_any = true;
+            // Rewire the DAG scoped to the parents whose subtrees grew — their
+            // changed edges name every stack the new layers join — and drop the
+            // indices reading an affected stack so they recompose against the
+            // extended members. The recompose re-derives the pending demand set
+            // for the next round.
+            let (affected, next) = {
+                let mut graph = self.layers.borrow_mut();
+                let affected = graph.recompute_sublayers(Some(&opened_parents));
+                (affected, graph.take_sublayer_demands())
+            };
+            if !affected.is_empty() {
+                self.cache.borrow_mut().invalidate_layers(&affected);
+            }
+            demands = next;
+        }
+        loaded_any
     }
 
     /// Traverses composed prims depth-first, visiting prims that match `predicate`.
@@ -3228,17 +3396,20 @@ impl StageBuilder {
         // `ancestor_expr_vars` are the expression variables the enclosing context
         // contributes: the session layers' composed set for the root stack, empty
         // for the session stack itself (nothing sublayers it).
-        let layers = self.registry.open_stack(
-            path,
-            None,
-            ancestor_expr_vars,
-            false,
-            &|error| {
-                errors.borrow_mut().push(error.into());
-                Ok(())
-            },
-            &|_| false,
-        )?;
+        let layers = self
+            .registry
+            .open_stack(
+                path,
+                None,
+                ancestor_expr_vars,
+                false,
+                &|error| {
+                    errors.borrow_mut().push(error.into());
+                    Ok(())
+                },
+                &|_| false,
+            )?
+            .with_context(|| format!("failed to resolve asset path: {path}"))?;
         Ok(CollectedLayers {
             layers,
             errors: errors.into_inner(),
@@ -3334,6 +3505,29 @@ impl StageBuilder {
             layer_stack: Some(layer_stack_id.clone()),
             ..EditTarget::for_layer(layer_stack_id.root_layer.clone())
         };
+        // Every sublayer load failure the collect pass reported, keyed for the
+        // graph's failure memo below: the finalize drain then regenerates each
+        // broken entry's per-stack diagnostic without re-attempting an open the
+        // loader already ran.
+        let failure_seeds: Vec<(String, String, pcp::LoadFailure)> = collection_errors
+            .iter()
+            .filter_map(|error| match error {
+                pcp::Error::UnresolvedSublayer {
+                    asset_path,
+                    introduced_by,
+                } => Some((asset_path.clone(), introduced_by.clone(), pcp::LoadFailure::Unresolved)),
+                pcp::Error::MalformedSublayer {
+                    asset_path,
+                    introduced_by,
+                    reason,
+                } => Some((
+                    asset_path.clone(),
+                    introduced_by.clone(),
+                    pcp::LoadFailure::Unreadable(reason.clone()),
+                )),
+                _ => None,
+            })
+            .collect();
         // The graph keeps its own regenerable diagnostics (sublayer cycles,
         // invalid relocates); the cache holds only the one-shot collection errors.
         // `Stage::composition_errors` concatenates the two.
@@ -3381,6 +3575,46 @@ impl StageBuilder {
             // against the current composed state, so an unmute restores a diagnostic
             // a muted branch had hidden.
             stage.layers.borrow_mut().set_muted_identifiers(self.muted);
+        }
+        {
+            let mut graph = stage.layers.borrow_mut();
+            for (asset_path, introduced_by, failure) in failure_seeds {
+                if let Some(parent) = graph.id_of(&introduced_by) {
+                    if let Err(identifier) = graph.resolve_relative(&asset_path, parent) {
+                        graph.mark_load_failed(&identifier, failure);
+                    }
+                }
+            }
+        }
+        // Loading collected the initial `${VAR}` selections, but a composed
+        // stack can still name an unloaded layer — an eager target's sublayer
+        // selected by its own variables, or a selection open-time muting
+        // exposed; drain the demands the finalize recompose recorded so the
+        // opened stage starts settled.
+        let demands = stage.layers.borrow_mut().take_sublayer_demands();
+        stage.resolve_sublayer_demands(demands);
+        // The drain re-derived the sublayer failures of every re-resolvable
+        // region — the root region and each target stack — as per-stack
+        // regenerable diagnostics; the loader's one-shot copies of those would
+        // double-report and outlive a later fix, so they are dropped. A copy
+        // whose referrer sits in the session prefix stays: that region is
+        // never re-resolved, so the loader's record is its only diagnostic.
+        let superseded: Vec<pcp::Error> = {
+            let graph = stage.layers.borrow();
+            let session: HashSet<&str> = graph.session_layers().iter().map(|&id| graph.identifier(id)).collect();
+            graph
+                .errors()
+                .into_iter()
+                .filter(|error| match error {
+                    pcp::Error::UnresolvedSublayer { introduced_by, .. }
+                    | pcp::Error::MalformedSublayer { introduced_by, .. } => !session.contains(introduced_by.as_str()),
+                    pcp::Error::InvalidExpression { source_layer, .. } => !session.contains(source_layer.as_str()),
+                    _ => false,
+                })
+                .collect()
+        };
+        if !superseded.is_empty() {
+            stage.cache.borrow_mut().discard_collection_errors(&superseded);
         }
         stage
     }
