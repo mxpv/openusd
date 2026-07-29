@@ -1,0 +1,41 @@
+#usda 1.0
+(
+    doc = """An instanceable opinion carried into the prototype (spec 11.3.3).
+
+    /Asset authors `instanceable = true` on itself, and /World/Place references
+    it, which is how a published asset usually declares that it wants to be
+    instanced. The opinion therefore arrives at /World/Place on the instanceable
+    arc itself rather than at the instance's own namespace, so it is shared
+    content the prototype keeps: /__Prototype_0 composes with
+    `instanceable = true` resolving true.
+
+    A prototype root is still not an instance — the opinion describes the prims
+    that share the prototype, not the prototype — so it must not mint a prototype
+    of its own, and its plain content must compose in place instead of redirecting
+    back through it."""
+)
+
+def Scope "Asset" (
+    instanceable = true
+    references = </Body>
+)
+{
+}
+
+def Scope "Body"
+{
+    double bodyAttr = 4.0
+
+    def Scope "BodyChild"
+    {
+    }
+}
+
+def Scope "World"
+{
+    def Scope "Place" (
+        references = </Asset>
+    )
+    {
+    }
+}
