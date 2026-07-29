@@ -1934,7 +1934,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
         // Re-apply a variant selection the resting node carries at introduction,
         // so the storage site lookup hits the right `{set=sel}` namespace.
-        let intro = self.node(cur_node).path_at_introduction();
+        let intro = self.output.path_at_introduction(cur_node);
         let stripped = intro.strip_all_variant_selections();
         if intro != stripped {
             if let Some(p) = cur_path.replace_prefix(&stripped, &intro) {
@@ -2078,7 +2078,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let mut cur = node;
         loop {
             let n = self.node(cur);
-            if is_class_based_arc(n.arc) && n.depth_below_introduction() == 0 && !n.is_inert() {
+            if is_class_based_arc(n.arc) && !self.output.is_due_to_ancestor(cur) && !n.is_inert() {
                 return true;
             }
             match n.parent() {
@@ -2335,7 +2335,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
 
         let src_is_class = is_class_based_arc(self.node(src).arc);
-        let src_depth = self.node(src).depth_below_introduction();
+        let src_depth = self.output.depth_below_introduction(src);
         // Crossing a sub-root arc (a reference/payload to a non-root prim)
         // collapses depth: the transfer maps the deep target (`/Set/Model`) to
         // the referencing prim, but a class the seed deepened keeps its map at the
@@ -2363,7 +2363,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
             // Skip the arc that continues an ancestral class chain rather than a
             // true namespace child: it must not be implied directly to dest.
-            if start_of_tree && src_is_class && src_depth == c.depth_below_introduction() {
+            if start_of_tree && src_is_class && src_depth == self.output.depth_below_introduction(child) {
                 continue;
             }
 
@@ -2431,7 +2431,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let (instance, class) = self.output.starting_node_of_class_hierarchy(start);
             start = instance;
             if is_class_based_arc(self.node(instance).arc) {
-                let ancestral = self.node(instance).path_at_introduction();
+                let ancestral = self.output.path_at_introduction(instance);
                 if self.node(class).path.has_prefix(&ancestral) {
                     break;
                 }
@@ -2463,13 +2463,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
     ) -> Option<NodeId> {
         let parent_is_relocate = self.node(parent).arc == ArcType::Relocate
             || (!self.root_contributes && parent == self.output.local_root());
-        let origin_depth = self.node(origin).depth_below_introduction();
+        let origin_depth = self.output.depth_below_introduction(origin);
         self.node(parent).children().iter().copied().find(|&c| {
             let cn = self.node(c);
             if parent_is_relocate {
                 cn.arc == arc
                     && cn.map_to_parent == *map
-                    && cn.origin().map(|o| self.node(o).depth_below_introduction()) == Some(origin_depth)
+                    && cn.origin().map(|o| self.output.depth_below_introduction(o)) == Some(origin_depth)
             } else {
                 cn.layer_id() == rep_layer && &cn.path == path
             }

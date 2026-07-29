@@ -1416,11 +1416,11 @@ impl IndexCache {
         let mut seen: HashSet<(Path, Path)> = HashSet::new();
         {
             let index = self.cached(resolved_prim);
-            for node in index.nodes() {
+            for (id, node) in index.nodes_with_ids() {
                 if node.arc != ArcType::Inherit || !node.has_specs() {
                     continue;
                 }
-                let class_path = node.path_at_introduction();
+                let class_path = index.graph().path_at_introduction(id);
                 let members = graph.layer_stack(node.layer_stack_id());
                 let class_layers: Vec<LayerId> = members.iter().map(|(l, _)| *l).collect();
                 let map = index.map_to_root_for_targets(node);
@@ -1601,7 +1601,8 @@ impl IndexCache {
         // The instance-local partition is keyed by the prim's own namespace depth
         // ([`PrimIndex::instance_local_nodes`]); empty when not dropping locals.
         let local = if drop_local {
-            index.instance_local_nodes(path.prim_element_count() as u16)
+            let depth = path.prim_element_count() as u16;
+            index.instance_local_nodes(depth, depth)
         } else {
             Vec::new()
         };
@@ -2057,7 +2058,7 @@ impl IndexCache {
         // implied classes. Runs before deriving instance state below so the
         // suppressed opinions are already inert.
         if let Some(depth) = parent_ctx.instance_depth {
-            index.mark_instance_local_inert(depth);
+            index.mark_instance_local_inert(path.prim_element_count() as u16, depth);
         }
 
         // This prim is an instance when its composition declares
@@ -3240,11 +3241,9 @@ def "Scope"
     /// A reference nested inside the prototype (below the instanceable arc) is
     /// shared (spec 11.3.3): its opinions reach the instance through the direct
     /// instanceable arc, so they survive in the instance's child names and
-    /// descendants. The nested arc is authored in the referenced namespace, so
-    /// its namespace depth is shallow — a flat `namespace_depth < instance_depth`
-    /// test would wrongly drop it as an outer reference; the structural trunk
-    /// partition keeps it because its parent (the prototype root) is not on the
-    /// instance trunk.
+    /// descendants. The structural trunk partition keeps it shared on two counts:
+    /// the arc is authored on the prim it targets rather than above the instance,
+    /// and its parent (the prototype root) is not on the instance trunk.
     #[test]
     fn nested_reference_in_prototype_shared() -> Result<()> {
         let root = format!("{}/fixtures/instancing_nested_reference.usda", manifest_dir());
@@ -3278,6 +3277,94 @@ def "Scope"
             cache.value_at(&graph, &sdf::path("/World/Inst.otherAttr")?, 0.0, &interp)?,
             Some(Value::Double(5.0)),
             "nested-reference attribute survives on the instance root"
+        );
+        Ok(())
+    }
+
+    /// An instanceable prim reached through a reference on a non-root prim
+    /// materializes the same prototype as one reached through a reference on a
+    /// root prim (spec 11.3.3): the depth of the prim carrying the outer
+    /// reference does not change what composes. The instanceable arc is authored
+    /// in the referenced namespace, so its namespace depth is shallower than the
+    /// nested instance's stage depth and must be told apart from the outer
+    /// reference by where its arc was introduced relative to the instance.
+    #[test]
+    fn ancestral_reference_prototype() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_ancestral_reference.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        // The instance one level below the root and the instance at the root are
+        // the same shared composition, so they share a single prototype.
+        let shallow = cache.prototype_of(&graph, &sdf::path("/Shallow/A")?)?;
+        let deep = cache.prototype_of(&graph, &sdf::path("/Deep/G/A")?)?;
+        assert_eq!(shallow, deep, "nesting the referencing prim must not change the key");
+        let proto = deep.expect("nested instance resolves a prototype");
+        assert_eq!(cache.prototypes(), vec![proto.clone()]);
+
+        // The prototype materializes: the instanceable arc stayed shared, so the
+        // referenced subtree is there rather than an empty root.
+        assert_eq!(cache.prim_children(&graph, &proto)?, vec![Token::from("ProtoChild")]);
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/__Prototype_0.protoAttr")?, 0.0, &interp)?,
+            Some(Value::Double(3.0)),
+        );
+
+        // And the nested instance's own namespace serves that shared content.
+        assert_eq!(
+            cache.prim_children(&graph, &sdf::path("/Deep/G/A")?)?,
+            vec![Token::from("ProtoChild")]
+        );
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/Deep/G/A/ProtoChild.size")?, 0.0, &interp)?,
+            Some(Value::Double(7.0)),
+        );
+        Ok(())
+    }
+
+    /// A prototype root whose shared content carries `instanceable = true` — the
+    /// opinion an asset authors on the prim its referencing layer targets — is
+    /// still not an instance (spec 11.3.3). The opinion describes the prims that
+    /// share the prototype, so the prototype keeps it as content but mints no
+    /// prototype of its own and composes its plain content in place.
+    #[test]
+    fn prototype_root_instanceable() -> Result<()> {
+        let root = format!(
+            "{}/fixtures/instancing_prototype_root_instanceable.usda",
+            manifest_dir()
+        );
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        let proto = cache
+            .prototype_of(&graph, &sdf::path("/World/Place")?)?
+            .expect("the referencing prim is an instance");
+
+        // The opinion resolves true on the prototype root, yet the root is not an
+        // instance and so mints nothing further.
+        assert_eq!(
+            cache
+                .cached(&proto)
+                .resolve_field(FieldKey::Instanceable.as_str(), &graph, None)?,
+            Some(Value::Bool(true)),
+            "the instanceable opinion is shared content of the prototype"
+        );
+        assert!(
+            !cache.is_instance(&graph, &proto)?,
+            "a prototype root is never an instance"
+        );
+        assert_eq!(cache.prototype_of(&graph, &proto)?, None);
+        assert_eq!(cache.prototypes(), vec![proto.clone()]);
+
+        // Its content composes in place rather than redirecting back through it.
+        assert_eq!(cache.prim_children(&graph, &proto)?, vec![Token::from("BodyChild")]);
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/__Prototype_0.bodyAttr")?, 0.0, &interp)?,
+            Some(Value::Double(4.0)),
+        );
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/World/Place.bodyAttr")?, 0.0, &interp)?,
+            Some(Value::Double(4.0)),
         );
         Ok(())
     }

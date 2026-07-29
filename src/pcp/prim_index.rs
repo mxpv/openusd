@@ -429,6 +429,12 @@ impl PrimIndex {
     /// namespace, which an instance's child names, descendants, and instance key
     /// must drop.
     ///
+    /// `prim_depth` is the namespace depth of the prim this index composes, which
+    /// is `instance_depth` for the instance prim's own index and deeper for a
+    /// descendant composed inside the instance. Both are needed because a node
+    /// records how far below its arc's introduction its site sits, not the
+    /// absolute level the arc was introduced at; the level follows from the two.
+    ///
     /// This is the C++ `!PcpNodeRef::HasTransitiveDirectDependency` partition.
     /// Instance-local = the local root plus the contiguous *trunk* of ancestral
     /// references/payloads the instance prim is nested under — the outer arcs
@@ -437,17 +443,19 @@ impl PrimIndex {
     /// own depth) and everything below it stay shared, as do the implied classes
     /// (class-based arcs).
     ///
-    /// Trunk membership is structural, not a flat depth test: a node is on the
-    /// trunk only if it is a reference/payload introduced above the instance
-    /// (`namespace_depth < instance_depth`) *and* its parent is also on the
-    /// trunk. The parent check is what keeps a reference or payload nested
-    /// *inside* the prototype (below the instanceable arc) shared — such an arc
-    /// is authored in the referenced layer's namespace, so its `namespace_depth`
-    /// is shallow and would otherwise be misread as an outer arc.
+    /// Trunk membership is structural: a node is on the trunk only if its arc was
+    /// introduced strictly above the instance *and* its parent is also on the
+    /// trunk. The parent check makes the trunk contiguous, which is what keeps a
+    /// reference or payload nested inside the prototype shared along with the
+    /// implied classes an outer arc helped derive.
     ///
     /// The arena is append-only with each node's parent preceding it, so one
     /// forward pass propagates trunk-ness parent→child.
-    pub(crate) fn instance_local_nodes(&self, instance_depth: u16) -> Vec<bool> {
+    pub(crate) fn instance_local_nodes(&self, prim_depth: u16, instance_depth: u16) -> Vec<bool> {
+        // An arc introduced at the instance or below leaves this many namespace
+        // levels between its introduction and the prim being composed; anything
+        // deeper below its introduction was introduced above the instance.
+        let below_instance = prim_depth.saturating_sub(instance_depth);
         let nodes = &self.graph.nodes;
         let mut local = vec![false; nodes.len()];
         for (i, node) in nodes.iter().enumerate() {
@@ -462,7 +470,8 @@ impl PrimIndex {
                 // The local site (and the synthetic root) is always instance-local.
                 ArcType::Root => true,
                 ArcType::Reference | ArcType::Payload => {
-                    node.namespace_depth < instance_depth && node.parent.is_some_and(|p| local[p.idx()])
+                    self.graph.depth_below_introduction(NodeId(i as u32)) > below_instance
+                        && node.parent.is_some_and(|p| local[p.idx()])
                 }
                 _ => false,
             };
@@ -472,16 +481,17 @@ impl PrimIndex {
 
     /// Inerts the instance-namespace opinions on a prim composed inside an
     /// instance (spec 11.3.3), so value resolution sees only the shared subtree
-    /// the instance brings in. `instance_depth` is the nearest enclosing
-    /// instance prim's namespace depth; the partition is
+    /// the instance brings in. `prim_depth` is the namespace depth of the prim
+    /// this index composes and `instance_depth` the nearest enclosing instance
+    /// prim's; the partition is
     /// [`instance_local_nodes`](Self::instance_local_nodes).
     ///
     /// Each node is inerted individually, not its subtree: the implied classes a
     /// dropped reference helped derive are children in the graph yet stay shared.
     /// (The local root is also inerted earlier by the indexer via
     /// [`CompositionContext::within_instance`](super::prim_index::CompositionContext::within_instance).)
-    pub(crate) fn mark_instance_local_inert(&mut self, instance_depth: u16) {
-        let local = self.instance_local_nodes(instance_depth);
+    pub(crate) fn mark_instance_local_inert(&mut self, prim_depth: u16, instance_depth: u16) {
+        let local = self.instance_local_nodes(prim_depth, instance_depth);
         for (node, &is_local) in self.graph.nodes.iter_mut().zip(local.iter()) {
             if is_local {
                 node.flags |= NodeFlags::INERT;

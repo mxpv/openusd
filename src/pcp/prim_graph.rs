@@ -159,7 +159,7 @@ pub struct Node {
     /// `PcpNode::GetNamespaceDepth`): the prim-element count of the parent
     /// site's path when this node was added. Used by implied inherits/specializes
     /// that propagate toward the root, and by
-    /// [`depth_below_introduction`](Self::depth_below_introduction).
+    /// [`PrimIndexGraph::depth_below_introduction`].
     pub(crate) namespace_depth: u16,
     /// This node's index among the same-arc-type siblings at its origin (C++
     /// `GetSiblingNumAtOrigin`): the arc number a class-based arc was authored
@@ -290,31 +290,6 @@ impl Node {
     /// Namespace depth at which the introducing arc was authored.
     pub fn namespace_depth(&self) -> u16 {
         self.namespace_depth
-    }
-
-    /// Number of namespace levels this node's site sits below the level at which
-    /// its arc was introduced (C++ `PcpNode::GetDepthBelowIntroduction`): the
-    /// node path's prim-element count minus its namespace depth. A direct arc
-    /// node has depth 0; a node reached by extending that arc to a child has 1,
-    /// and so on. Implied-class propagation uses this to tell a class's true
-    /// namespace descendants from the arc that continues an ancestral chain.
-    pub(crate) fn depth_below_introduction(&self) -> u16 {
-        (self.path.prim_element_count() as u16).saturating_sub(self.namespace_depth)
-    }
-
-    /// This node's path at the level where its arc was introduced (C++
-    /// `PcpNode::GetPathAtIntroduction`): the node path with its
-    /// [`depth_below_introduction`](Self::depth_below_introduction) trailing
-    /// elements stripped.
-    pub(crate) fn path_at_introduction(&self) -> Path {
-        let mut path = self.path.clone();
-        for _ in 0..self.depth_below_introduction() {
-            match path.parent() {
-                Some(parent) => path = parent,
-                None => break,
-            }
-        }
-        path
     }
 
     /// Whether any layer in this node's stack authors a spec at its path (C++
@@ -785,6 +760,55 @@ impl PrimIndexGraph {
         self.nodes[id.idx()].origin.unwrap_or(NodeId::INVALID)
     }
 
+    /// Number of namespace levels a node's site sits below the level at which its
+    /// arc was introduced (C++ `PcpNode::GetDepthBelowIntroduction`): the
+    /// prim-element count of the *parent* site's path minus this node's
+    /// [`namespace_depth`](Node::namespace_depth). A direct arc node has depth 0;
+    /// a node reached by extending that arc into a child has 1, and so on.
+    ///
+    /// The measurement is anchored on the parent because a node's namespace depth
+    /// records the parent site's depth at arc introduction, and deepening a graph
+    /// to a child appends the same name to every site
+    /// ([`append_child_name_to_all_sites`](Self::append_child_name_to_all_sites)).
+    /// The parent's path therefore grows by exactly the number of levels the graph
+    /// has been deepened since the arc was introduced, whatever namespace depth
+    /// the arc's own target happens to sit at. A reference or payload whose target
+    /// is shallower or deeper than the prim that authored it — `@ref@</Deep/Target>`
+    /// on a root prim, say — is the case that distinguishes this from measuring on
+    /// the node's own path.
+    ///
+    /// A root node has no parent and so is never below its introduction.
+    pub(crate) fn depth_below_introduction(&self, id: NodeId) -> u16 {
+        let parent = self.parent_of(id);
+        if !parent.is_valid() {
+            return 0;
+        }
+        (self.nodes[parent.idx()].path.prim_element_count() as u16).saturating_sub(self.nodes[id.idx()].namespace_depth)
+    }
+
+    /// Whether a node's arc was introduced above the prim this graph composes
+    /// (C++ `PcpNodeRef::IsDueToAncestor`), rather than authored on the prim
+    /// itself: its [`depth_below_introduction`](Self::depth_below_introduction) is
+    /// non-zero.
+    pub(crate) fn is_due_to_ancestor(&self, id: NodeId) -> bool {
+        self.depth_below_introduction(id) > 0
+    }
+
+    /// A node's path at the level where its arc was introduced (C++
+    /// `PcpNode::GetPathAtIntroduction`): the node path with its
+    /// [`depth_below_introduction`](Self::depth_below_introduction) trailing
+    /// elements stripped.
+    pub(crate) fn path_at_introduction(&self, id: NodeId) -> Path {
+        let mut path = self.nodes[id.idx()].path.clone();
+        for _ in 0..self.depth_below_introduction(id) {
+            match path.parent() {
+                Some(parent) => path = parent,
+                None => break,
+            }
+        }
+        path
+    }
+
     /// Whether two nodes carry the same site: same layer stack and path
     /// (C++ `GetSite() ==`).
     pub(crate) fn same_site(&self, a: NodeId, b: NodeId) -> bool {
@@ -874,10 +898,10 @@ impl PrimIndexGraph {
             instance = self.origin_of(instance);
         }
         let mut class_node = NodeId::INVALID;
-        let depth = self.nodes[instance.idx()].depth_below_introduction();
+        let depth = self.depth_below_introduction(instance);
         while instance.is_valid()
             && is_class_based_arc(self.arc_of(instance))
-            && self.nodes[instance.idx()].depth_below_introduction() == depth
+            && self.depth_below_introduction(instance) == depth
         {
             class_node = instance;
             let parent = self.parent_of(instance);
@@ -1007,31 +1031,73 @@ impl std::ops::Deref for PrimIndexGraph {
 mod tests {
     use super::*;
 
-    fn node(path: &str, namespace_depth: u16) -> Node {
-        let mut n = Node::new(
-            LayerStackId::from_raw(1),
-            LayerId::from_raw(0),
-            Path::from(path),
-            ArcType::Inherit,
-            MapFunction::identity(),
+    /// A graph rooted at `local` carrying a single `arc` node onto `target`, as
+    /// [`add_child`](PrimIndexGraph::add_child) would build it, then deepened by
+    /// each name in `deepen`.
+    fn arc_graph(local: &str, arc: ArcType, target: &str, deepen: &[&str]) -> (PrimIndexGraph, NodeId) {
+        let stack = LayerStackId::from_raw(1);
+        let layer = LayerId::from_raw(0);
+        let mut g = PrimIndexGraph::default();
+        g.init_root(stack, layer, Path::from(local));
+        let root = g.add_child(
+            NodeId::INVALID,
+            stack,
+            layer,
+            Path::from(local),
+            ArcType::Root,
             MapFunction::identity(),
             false,
         );
-        n.namespace_depth = namespace_depth;
-        n
+        let id = g.add_child(
+            root,
+            stack,
+            layer,
+            Path::from(target),
+            arc,
+            MapFunction::identity(),
+            false,
+        );
+        let mut prim = Path::from(local);
+        for name in deepen {
+            prim = prim.append_path(*name).expect("child path");
+            g.append_child_name_to_all_sites(&prim);
+        }
+        (g, id)
     }
 
     #[test]
     fn introduction_depth_and_path() {
         // An arc introduced at the prim's own level: depth 0, path unchanged.
-        let direct = node("/Model", 1);
-        assert_eq!(direct.depth_below_introduction(), 0);
-        assert_eq!(direct.path_at_introduction(), Path::from("/Model"));
+        let (g, id) = arc_graph("/Model", ArcType::Inherit, "/_class_Model", &[]);
+        assert_eq!(g.depth_below_introduction(id), 0);
+        assert!(!g.is_due_to_ancestor(id));
+        assert_eq!(g.path_at_introduction(id), Path::from("/_class_Model"));
 
-        // The same arc extended two levels into a child: depth 2, and the
+        // The same arc deepened two levels into a descendant: depth 2, and the
         // introduction path strips the two trailing elements.
-        let extended = node("/Model/Rig/Anim", 1);
-        assert_eq!(extended.depth_below_introduction(), 2);
-        assert_eq!(extended.path_at_introduction(), Path::from("/Model"));
+        let (g, id) = arc_graph("/Model", ArcType::Inherit, "/_class_Model", &["Rig", "Anim"]);
+        assert_eq!(g.depth_below_introduction(id), 2);
+        assert!(g.is_due_to_ancestor(id));
+        assert_eq!(g.path_at_introduction(id), Path::from("/_class_Model"));
+    }
+
+    /// The depth is measured on the introducing parent's site, so an arc whose
+    /// target sits at a different namespace depth than the prim that authored it
+    /// still reports the number of levels the graph has been deepened.
+    #[test]
+    fn introduction_depth_uneven_target() {
+        // A reference from a depth-2 prim onto a depth-1 target.
+        let (g, id) = arc_graph("/World/G", ArcType::Reference, "/Ref", &[]);
+        assert_eq!(g.depth_below_introduction(id), 0);
+        assert_eq!(g.path_at_introduction(id), Path::from("/Ref"));
+
+        let (g, id) = arc_graph("/World/G", ArcType::Reference, "/Ref", &["A"]);
+        assert_eq!(g.depth_below_introduction(id), 1);
+        assert_eq!(g.path_at_introduction(id), Path::from("/Ref"));
+
+        // And the reverse: a depth-1 prim referencing a depth-2 target.
+        let (g, id) = arc_graph("/World", ArcType::Reference, "/Ref/Inner", &["A"]);
+        assert_eq!(g.depth_below_introduction(id), 1);
+        assert_eq!(g.path_at_introduction(id), Path::from("/Ref/Inner"));
     }
 }

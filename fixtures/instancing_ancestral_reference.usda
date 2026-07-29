@@ -1,0 +1,52 @@
+#usda 1.0
+(
+    doc = """Instancing reached through a reference on a non-root prim (spec 11.3.3).
+
+    /Inner/A is instanceable and references /Proto. Two outer prims bring /Inner
+    onto the stage: /Shallow references it directly, putting the instance at
+    /Shallow/A (namespace depth 2), while /Deep/G references it one level lower,
+    putting the instance at /Deep/G/A (namespace depth 3).
+
+    Nesting the prim that carries the outer reference must not change what
+    composes. The instanceable arc onto /Proto is authored at /Inner/A, whose own
+    namespace depth (2) is shallower than /Deep/G/A's stage depth (3), so it must
+    be told apart from the outer reference by where its arc was introduced
+    relative to the instance rather than by comparing that depth against the
+    instance's. Both instances bring in the same shared subtree, so they share one
+    prototype."""
+)
+
+def Scope "Proto"
+{
+    double protoAttr = 3.0
+
+    def Scope "ProtoChild"
+    {
+        double size = 7.0
+    }
+}
+
+def Scope "Inner"
+{
+    def Scope "A" (
+        instanceable = true
+        references = </Proto>
+    )
+    {
+    }
+}
+
+def Scope "Shallow" (
+    references = </Inner>
+)
+{
+}
+
+def Scope "Deep"
+{
+    def Scope "G" (
+        references = </Inner>
+    )
+    {
+    }
+}

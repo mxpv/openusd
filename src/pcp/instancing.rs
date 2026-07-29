@@ -271,7 +271,7 @@ impl PrototypeRegistry {
 /// rules, already re-rooted onto its own path (`LoadRules::make_relative_to`),
 /// so two instances also only share a prototype when their load state agrees.
 fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules) -> InstanceKey {
-    let local = index.instance_local_nodes(instance_depth);
+    let local = index.instance_local_nodes(instance_depth, instance_depth);
     let mut arcs = Vec::new();
     let mut selections = Vec::new();
     for (id, node) in index.nodes_with_ids() {
@@ -333,6 +333,19 @@ impl IndexCache {
     /// the strongest `instanceable` opinion is `true` and the prim has at
     /// least one composition arc.
     ///
+    /// A `/__Prototype_N` root is never an instance, whatever its composed
+    /// `instanceable` opinion says. The opinion is routinely `true` there: an
+    /// asset commonly authors `instanceable = true` on the very prim its
+    /// referencing layer targets, so the opinion arrives on the instanceable arc
+    /// itself and is shared content the prototype must keep. It describes the
+    /// instances that share this prototype, not the prototype, which stands
+    /// outside the instance namespace as the single composition those instances
+    /// redirect onto. Exempting the root here is also what lets
+    /// [`Self::redirect_anchor`] compose plain prototype content in place: were
+    /// the root an instance, its own descendants would redirect back through it.
+    /// A *nested* instance inside a prototype namespace is not a prototype root,
+    /// so it still resolves as an instance and mints its own prototype.
+    ///
     /// Reads `instanceable` off the index that actually composes `path` — for an
     /// instance proxy that is the shared `/__Prototype_N` index, reached through
     /// [`Self::effective_path`], not a throwaway per-instance copy. So checking
@@ -343,7 +356,7 @@ impl IndexCache {
     /// to a shorter path and bottoms out at the root, so the recursion
     /// terminates.
     pub(crate) fn is_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
-        if path.is_abs_root() {
+        if path.is_abs_root() || self.is_prototype(path) {
             return Ok(false);
         }
         let composed = self.effective_path(graph, path)?;
@@ -403,12 +416,12 @@ impl IndexCache {
     /// — and its namespace is re-anchored onto the prototype root.
     ///
     /// The prototype root's child context is seeded as a namespace root with
-    /// `instance_depth` cleared (it is not itself an instance — its `instanceable`
-    /// opinion is inert), so a descendant built by deepening this graph composes
-    /// as prototype content rather than instance-suppressed. Every instance
-    /// proxy redirects onto this namespace through [`Self::redirect_anchor`], so
-    /// the prototype subtree is the one place a set of identical instances'
-    /// descendants compose.
+    /// `instance_depth` cleared — a prototype root is not an instance (see
+    /// [`Self::is_instance`]) — so a descendant built by deepening this graph
+    /// composes as prototype content rather than instance-suppressed. Every
+    /// instance proxy redirects onto this namespace through
+    /// [`Self::redirect_anchor`], so the prototype subtree is the one place a set
+    /// of identical instances' descendants compose.
     //
     // TODO(rayon): distinct prototypes (distinct instancing keys) compose
     // independent subtrees, so they can be materialized in parallel. The
@@ -417,7 +430,8 @@ impl IndexCache {
     // insert) and the shared `LayerGraph` handed to workers as `&`/`Arc`.
     fn materialize_prototype(&mut self, graph: &LayerGraph, canonical: &Path, prototype: &Path) {
         let mut index = self.cached(canonical).clone();
-        index.mark_instance_local_inert(canonical.prim_element_count() as u16);
+        let depth = canonical.prim_element_count() as u16;
+        index.mark_instance_local_inert(depth, depth);
         // Re-anchor the seeding instance's composed namespace onto the prototype
         // root so the root's own target translation lands in the prototype
         // namespace, not the canonical instance's.
@@ -426,20 +440,6 @@ impl IndexCache {
         let (mut context, _) = index.context_for_children(graph, &self.root_parent_context());
         context.instance_depth = None;
 
-        // `redirect_anchor` composes a prim in place when it has no enclosing
-        // instance, and relies on the prototype root never being one: its
-        // `instanceable` opinion must read inert here (the root node is
-        // instance-local, so `mark_instance_local_inert` above drops it).
-        // Otherwise plain prototype content would wrongly redirect and the root
-        // would self-redirect. Guard the invariant against a future change to the
-        // instance-local partition.
-        debug_assert!(
-            !matches!(
-                index.resolve_field(FieldKey::Instanceable.as_str(), graph, None),
-                Ok(Some(Value::Bool(true)))
-            ),
-            "materialized prototype root's instanceable must be inert",
-        );
         self.cache_index(graph, prototype, index, context, Vec::new(), ExprVarDeps::default());
     }
 
@@ -505,8 +505,8 @@ impl IndexCache {
     /// (`/A/child`) and inside a prototype namespace under a *nested* instance
     /// (`/__Prototype_N/.../NestedInstance/child`): each has an enclosing
     /// instance. Prototype content not under a nested instance has no enclosing
-    /// instance (the prototype root's `instanceable` opinion is inert), so it is
-    /// in a prototype, not a proxy.
+    /// instance (a prototype root is never one; see [`Self::is_instance`]), so it
+    /// is in a prototype, not a proxy.
     ///
     /// A proxy stands in for a real prim in the shared prototype, so a path under
     /// an instance that composes to no prim (e.g. a misspelled child) is not a
@@ -587,10 +587,9 @@ impl IndexCache {
     ///
     /// A prim with no enclosing instance composes in place: an instance *root*
     /// (spec 11.3.3 lets it override property values), the prototype root and its
-    /// plain content (the materialized prototype root's `instanceable` opinion is
-    /// inert, so it is never an enclosing instance — the shared subtree lives
-    /// there, composed by deepening the materialized index), and every
-    /// non-instanced prim.
+    /// plain content (a prototype root is never an instance, so never an enclosing
+    /// one; see [`Self::is_instance`] — the shared subtree lives there, composed by
+    /// deepening the materialized index), and every non-instanced prim.
     pub(super) fn redirect_anchor(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Option<(Path, Path)>> {
         if let Some(instance) = self.enclosing_instance(graph, prim)? {
             let (_canonical, prototype) = self.register_prototype(graph, &instance)?;

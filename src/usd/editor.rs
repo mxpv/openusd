@@ -970,7 +970,7 @@ fn classify_source_nodes(
         }
         let introduced_away = node
             .map_to_root()
-            .map_source_to_target(&node.path_at_introduction())
+            .map_source_to_target(&index.graph().path_at_introduction(id))
             .is_some_and(|intro| &intro != origin);
         if node.arc() != pcp::ArcType::Root && introduced_away {
             realized = true;
@@ -989,7 +989,7 @@ fn classify_source_nodes(
                     // from another layer stack or from an internal reference
                     // within N's own stack. A direct arc on the prim itself (an
                     // inherit, a same-prim reference) moves with the spec.
-                    below_target |= node.depth_below_introduction() > 0;
+                    below_target |= index.graph().is_due_to_ancestor(id);
                 } else {
                     outside = true;
                 }
