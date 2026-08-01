@@ -19,7 +19,8 @@ use crate::sdf::{self, Path};
 
 use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
-use super::{LayerGraph, LayerId};
+use super::prim_indexer::ExprVarDeps;
+use super::{LayerGraph, LayerId, LayerStackId};
 
 #[derive(Debug, Default)]
 pub(super) struct Dependencies {
@@ -64,18 +65,50 @@ pub(super) struct Dependencies {
     /// The canonical identifiers `prim_index_path` registered under in
     /// `by_muted_canonical`, for O(1) retraction on removal.
     by_prim_muted: HashMap<Path, HashSet<String>>,
+    /// Reverse `layer stack → prim-index-paths` map over the stacks each index's
+    /// dependency nodes compose against. An `expressionVariables` edit whose
+    /// stack delta demands a full resync — the variable source changed, or a
+    /// changed name is one of the stack's own sublayer dependencies — collects
+    /// its victims here (C++ resyncs every prim using the layer stack). The root
+    /// stack is never recorded: every prim composes in it, so its entry would
+    /// mirror every cached path; [`prims_for_stack`](Self::prims_for_stack)
+    /// answers for it with the pseudo-root instead.
+    by_stack: HashMap<LayerStackId, HashSet<Path>>,
+    /// The stacks `prim_index_path` registered under — in
+    /// [`by_stack`](Self::by_stack), [`by_stack_vars`](Self::by_stack_vars), or
+    /// both — for O(1) retraction on removal. Absent for a prim with neither
+    /// registration, the common arc-free, expression-free case.
+    by_prim_stacks: HashMap<Path, HashSet<LayerStackId>>,
+    /// Per-stack expression-variable dependencies: `by_stack_vars[stack][prim]` =
+    /// the variable names `prim`'s build read from `stack`'s composed set (C++
+    /// `PcpExpressionVariablesDependencyData`). A variable edit that changes
+    /// neither the stack's source nor its sublayer selection resyncs only the
+    /// prims whose recorded names intersect the changed set
+    /// ([`prims_using_vars`](Self::prims_using_vars)). Unlike
+    /// [`by_stack`](Self::by_stack), the root stack appears here — its per-prim
+    /// names are exactly what the targeted lookup needs.
+    by_stack_vars: HashMap<LayerStackId, HashMap<Path, HashSet<String>>>,
 }
 
 impl Dependencies {
     /// Register every `(layer_id, node.path)` site referenced by `index` as a
-    /// dependency of `prim_index_path`. Replaces any prior registration for the
-    /// same prim. A site whose node spans several sublayers registers each member
-    /// layer, so a change to any of them fans out to this prim.
+    /// dependency of `prim_index_path`, together with the per-stack
+    /// expression-variable names its build read (`expr_var_deps`, from
+    /// [`BuildOutput::expr_var_deps`](super::prim_indexer::BuildOutput::expr_var_deps)).
+    /// Replaces any prior registration for the same prim. A site whose node spans
+    /// several sublayers registers each member layer, so a change to any of them
+    /// fans out to this prim.
     ///
     /// The implicit "self" edge — a Root node whose path equals the prim's
     /// own path — is skipped to keep the map compact. C++
     /// `PcpDependencyTypeRoot` follows the same rule.
-    pub(super) fn add(&mut self, prim_index_path: &Path, index: &PrimIndex, graph: &LayerGraph) {
+    pub(super) fn add(
+        &mut self,
+        prim_index_path: &Path,
+        index: &PrimIndex,
+        graph: &LayerGraph,
+        expr_var_deps: ExprVarDeps,
+    ) {
         // Clear any previous registration before adding the new one.
         self.remove(prim_index_path);
 
@@ -87,12 +120,21 @@ impl Dependencies {
         // The layers this index touched, for the `by_layer` map. Includes the
         // self-Root edge the site map skips.
         let mut layers: HashSet<LayerId> = HashSet::new();
+        // The layer stacks this index composes against, for the two stack-keyed
+        // maps and their shared retraction. The root stack is left implicit:
+        // every prim composes in it, so recording it in `by_stack` would mirror
+        // the whole cache per prim; `prims_for_stack` answers for it with the
+        // pseudo-root instead.
+        let mut stacks: HashSet<LayerStackId> = HashSet::new();
         // Include culled arc nodes (empty targets) and inert relocation-source
         // nodes: authoring a spec at such a site must invalidate this prim so the
         // node un-culls / re-relocates on recomposition.
         for node in index.dependency_nodes() {
             let is_self_root = node.arc == ArcType::Root && node.path == *prim_index_path;
             layers.insert(node.layer_id());
+            if node.layer_stack_id() != LayerStackId::ROOT {
+                stacks.insert(node.layer_stack_id());
+            }
             for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 layers.insert(layer);
                 // The site map skips the self-Root edge to stay compact; the
@@ -114,6 +156,21 @@ impl Dependencies {
         }
         for &layer in &layers {
             self.by_layer.entry(layer).or_default().insert(prim_index_path.clone());
+        }
+        // Fold the variable-reading stacks into the same retraction set — the
+        // root stack included here, since its per-prim names are the step-4
+        // lookup even though `by_stack` leaves it implicit.
+        for (stack, names) in expr_var_deps {
+            stacks.insert(stack);
+            self.by_stack_vars
+                .entry(stack)
+                .or_default()
+                .insert(prim_index_path.clone(), names);
+        }
+        for &stack in &stacks {
+            if stack != LayerStackId::ROOT {
+                self.by_stack.entry(stack).or_default().insert(prim_index_path.clone());
+            }
         }
 
         // A reference/payload target this index depends on the mute state of but has
@@ -142,6 +199,11 @@ impl Dependencies {
 
         self.by_prim.insert(prim_index_path.clone(), registered);
         self.by_prim_layers.insert(prim_index_path.clone(), layers);
+        // The common arc-free, expression-free index registers under no stack
+        // (its only stack is the implicit root), so skip an empty entry.
+        if !stacks.is_empty() {
+            self.by_prim_stacks.insert(prim_index_path.clone(), stacks);
+        }
         // The common unmuted index depends on no muted target, so skip an empty entry.
         if !muted.is_empty() {
             self.by_prim_muted.insert(prim_index_path.clone(), muted);
@@ -180,6 +242,24 @@ impl Dependencies {
                     set.remove(prim_index_path);
                     if set.is_empty() {
                         self.by_muted_canonical.remove(&canonical);
+                    }
+                }
+            }
+        }
+        // Retract both stack-keyed registrations — the `by_stack` users and the
+        // per-stack variable names — through the one per-prim stack set.
+        if let Some(stacks) = self.by_prim_stacks.remove(prim_index_path) {
+            for stack in stacks {
+                if let Some(set) = self.by_stack.get_mut(&stack) {
+                    set.remove(prim_index_path);
+                    if set.is_empty() {
+                        self.by_stack.remove(&stack);
+                    }
+                }
+                if let Some(map) = self.by_stack_vars.get_mut(&stack) {
+                    map.remove(prim_index_path);
+                    if map.is_empty() {
+                        self.by_stack_vars.remove(&stack);
                     }
                 }
             }
@@ -266,6 +346,35 @@ impl Dependencies {
     /// [`indices_for_mute_toggle`](Self::indices_for_mute_toggle) instead.
     pub(super) fn indices_for_layers(&self, affected: &HashSet<LayerId>) -> Vec<Path> {
         Self::dedup_paths(affected.iter().filter_map(|layer| self.by_layer.get(layer)).flatten())
+    }
+
+    /// Prim indices whose composition uses the layer stack `stack`, as an
+    /// invalidation victim list. The victim set for an `expressionVariables`
+    /// delta that demands a full per-stack resync: the stack's variable source
+    /// changed, or a changed name is one of its own sublayer dependencies (C++
+    /// resyncs every prim using the layer stack in both cases). The root
+    /// stack's users are every cached prim — [`by_stack`](Self::by_stack)
+    /// leaves it unrecorded — named as the single pseudo-root entry, whose
+    /// subtree drop is the whole cache.
+    pub(super) fn prims_for_stack(&self, stack: LayerStackId) -> Vec<Path> {
+        if stack == LayerStackId::ROOT {
+            return vec![Path::abs_root()];
+        }
+        self.by_stack.get(&stack).into_iter().flatten().cloned().collect()
+    }
+
+    /// Prim indices that recorded reading one of `changed` from `stack`'s
+    /// composed expression variables — the targeted victim set for a variable
+    /// edit that changed neither the stack's source nor its sublayer selection
+    /// (C++ `PcpExpressionVariablesDependencyData` intersection).
+    pub(super) fn prims_using_vars(&self, stack: LayerStackId, changed: &HashSet<String>) -> Vec<Path> {
+        self.by_stack_vars
+            .get(&stack)
+            .into_iter()
+            .flatten()
+            .filter(|(_, names)| !names.is_disjoint(changed))
+            .map(|(prim, _)| prim.clone())
+            .collect()
     }
 
     /// Prim indices to invalidate when the layer with canonical identifier
@@ -357,7 +466,7 @@ mod tests {
         let mut deps = Dependencies::default();
         let foo = p("/Foo");
         let index = make_index(&g, &foo, vec![(ArcType::Root, l0, foo.clone())]);
-        deps.add(&foo, &index, &g);
+        deps.add(&foo, &index, &g, ExprVarDeps::default());
         assert_eq!(deps.lookup_with_ancestors(l0, &foo), vec![foo.clone()]);
         assert_eq!(deps.lookup_with_ancestors(l1, &foo), vec![foo.clone()]);
         assert_eq!(deps.exact_lookup(l1, &foo), vec![foo.clone()]);
@@ -378,7 +487,7 @@ mod tests {
                 (ArcType::Reference, l1, there.clone()),
             ],
         );
-        deps.add(&here, &index, &g);
+        deps.add(&here, &index, &g, ExprVarDeps::default());
         assert_eq!(deps.lookup_with_ancestors(l1, &there), vec![here.clone()]);
     }
 
@@ -397,6 +506,7 @@ mod tests {
             &local,
             &make_index(&g, &local, vec![(ArcType::Root, l0, local.clone())]),
             &g,
+            ExprVarDeps::default(),
         );
         let refp = p("/Ref");
         deps.add(
@@ -410,6 +520,7 @@ mod tests {
                 ],
             ),
             &g,
+            ExprVarDeps::default(),
         );
 
         // Both prims' Root edges live on l0; only /Ref reaches l1.
@@ -439,7 +550,7 @@ mod tests {
                 (ArcType::Inherit, l0, arc_site.clone()),
             ],
         );
-        deps.add(&here, &index, &g);
+        deps.add(&here, &index, &g, ExprVarDeps::default());
         // A change at /X/Y/Child should still invalidate /A/B (it depends
         // transitively on /X/Y).
         assert_eq!(deps.lookup_with_ancestors(l0, &p("/X/Y/Child")), vec![here.clone()]);
@@ -454,11 +565,17 @@ mod tests {
         let b = p("/B");
         let xy = p("/X/Y");
         let xy_child = p("/X/Y/Child");
-        deps.add(&a, &make_index(&g, &a, vec![(ArcType::Reference, l0, xy.clone())]), &g);
+        deps.add(
+            &a,
+            &make_index(&g, &a, vec![(ArcType::Reference, l0, xy.clone())]),
+            &g,
+            ExprVarDeps::default(),
+        );
         deps.add(
             &b,
             &make_index(&g, &b, vec![(ArcType::Reference, l0, xy_child.clone())]),
             &g,
+            ExprVarDeps::default(),
         );
         // Subtree at /X/Y catches both sites.
         let mut found = deps.subtree_lookup(l0, &p("/X"));
@@ -477,6 +594,7 @@ mod tests {
             &here,
             &make_index(&g, &here, vec![(ArcType::Reference, l0, there.clone())]),
             &g,
+            ExprVarDeps::default(),
         );
         assert!(!deps.lookup_with_ancestors(l0, &there).is_empty());
         deps.remove(&here);

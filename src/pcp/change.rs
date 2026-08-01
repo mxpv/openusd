@@ -48,8 +48,9 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{ChangeEntry, ChangeList, Path};
 
 use super::layer_graph::LayerGraph;
+use super::layer_stack::StackVarsDelta;
 use super::prim_index::{PropertyTargetKind, TargetMemoKey};
-use super::{IndexCache, LayerId};
+use super::{IndexCache, LayerId, LayerStackId};
 
 /// Plan + apply object for one author round.
 ///
@@ -155,9 +156,12 @@ bitflags! {
         /// must rebuild even though no sublayer was added or reordered.
         const TIME_CODES = 1 << 4;
         /// `expressionVariables` was edited. A `${VAR}` expression in any of the
-        /// stack's layers — a sublayer asset path or a reference/payload target —
-        /// may read the changed values, so the expanded sublayer edges rebuild and
-        /// every index touching the stack recomposes.
+        /// stack's layers — a sublayer asset path, a reference/payload target, or
+        /// a variant selection — may read the changed values, so the expanded
+        /// sublayer edges rebuild; [`Changes::apply`] then consumes the rebuild's
+        /// per-stack [`StackVarsDelta`]s to drop exactly the prims that recorded
+        /// a dependency on a changed name (the C++ five-step
+        /// `_DidChangeLayerStackExpressionVariables` diff).
         const EXPRESSION_VARS = 1 << 5;
 
         /// Any change that requires recomputing the sublayer ordering, layer
@@ -332,17 +336,16 @@ impl Changes {
                 touches_stack = true;
             } else if *key == FieldKey::ExpressionVariables.as_str() {
                 // An `expressionVariables` edit restales the graph's
-                // `${VAR}`-expanded sublayer edges and any reference/payload
-                // `${VAR}` expression a layer in the stack resolves against (C++
-                // `PcpChanges::_DidChangeLayerStackExpressionVariables`).
-                // `EXPRESSION_VARS` rebuilds the expanded edges; `SIGNIFICANT` then
-                // drops every index touching the stack. The edited layer joins
-                // `layer_stack_layers`, so `recompute_sublayers` returns it in the
-                // affected set and `invalidate_layers` reaches every dependent
-                // through the `layer → [index]` reverse map, which registers an
-                // index under every layer it reads — so a `${VAR}` reference edge is
-                // caught even when no sublayer edge shifted.
-                self.layer_stack |= LayerStackChanges::EXPRESSION_VARS | LayerStackChanges::SIGNIFICANT;
+                // `${VAR}`-expanded sublayer edges and any reference/payload/
+                // variant `${VAR}` expression a layer in the stack resolves
+                // against (C++ `PcpChanges::_DidChangeLayerStackExpressionVariables`).
+                // `EXPRESSION_VARS` rebuilds the expanded edges — the edited
+                // layer joins `layer_stack_layers` to scope that rebuild — and
+                // [`apply`](Changes::apply) consumes the rebuild's per-stack
+                // [`StackVarsDelta`]s to drop exactly the recorded dependents.
+                // A combined edit that also authors a `SIGNIFICANT`-tier field
+                // takes the blanket path through that field's own flag.
+                self.layer_stack |= LayerStackChanges::EXPRESSION_VARS;
                 touches_stack = true;
             } else if *key == FieldKey::DefaultPrim.as_str() {
                 self.cache.did_change_significantly.insert(Path::abs_root());
@@ -399,7 +402,20 @@ impl Changes {
     }
 
     /// Apply phase: commit the planned invalidations to `cache`.
-    pub fn apply(mut self, cache: &mut IndexCache, graph: &mut LayerGraph) {
+    ///
+    /// Returns whether observers must treat the whole stage as resynced (the
+    /// stage publishes it as a pseudo-root entry in the composed change
+    /// notice): a layer-stack [`SIGNIFICANT`](LayerStackChanges::SIGNIFICANT)
+    /// edit drops the affected indices wholesale, and an `expressionVariables`
+    /// edit that changed some stack's composed variables — the rebuild emitted
+    /// a delta — publishes the same broad notice even though it drops only the
+    /// recorded dependents: value-time asset-path expressions are re-resolved
+    /// on access and never tracked as dependencies, and C++ compensates for
+    /// those untracked reads with exactly this notification. A vars edit that
+    /// changed no composed set (an identical re-authoring, or variables on a
+    /// non-root member layer, which contribute to no stack) reports nothing,
+    /// matching the C++ five-step diff's step-1 no-op.
+    pub fn apply(mut self, cache: &mut IndexCache, graph: &mut LayerGraph) -> bool {
         // Advance the composition revision so cached value views rebuild. This
         // is the single funnel for every authoring and layer-stack edit, so a
         // value-only change that drops no index still invalidates them.
@@ -410,21 +426,23 @@ impl Changes {
         // against. A `subLayers`/`subLayerOffsets`/`timeCodesPerSecond`/`expressionVariables`
         // edit rebuilds the sublayer edges (which subsumes the relocate recompute and
         // re-expands `${VAR}` edges) and returns the layers whose composed edges
-        // shifted, the authored layers, and any whose relocates moved; a
+        // shifted, the authored layers, and any whose relocates moved — together
+        // with the per-stack composed-variable deltas the rebuild emitted; a
         // `layerRelocates`-only edit refreshes the cached relocates, with the edited
         // layer added to its relocate set. Each refreshes the graph's own diagnostic
         // buckets in place; the cache holds no copy.
-        let affected = if self
+        let (affected, vars_deltas) = if self
             .layer_stack
             .intersects(LayerStackChanges::NEEDS_LAYER_STACK_REBUILD)
         {
-            graph.recompute_sublayers(Some(&self.layer_stack_layers))
+            let recompute = graph.recompute_sublayers(Some(&self.layer_stack_layers));
+            (recompute.affected, recompute.vars_deltas)
         } else if self.layer_stack.intersects(LayerStackChanges::NEEDS_RELOCATES_REBUILD) {
             let mut relocated = graph.recompute_relocates();
             relocated.extend(self.layer_stack_layers.iter().copied());
-            relocated
+            (relocated, Vec::new())
         } else {
-            HashSet::new()
+            (HashSet::new(), Vec::new())
         };
 
         // Layer-stack-tier change: drop only the indices whose composition reads a
@@ -433,9 +451,14 @@ impl Changes {
         // diff adds a descendant whose inherited context shifted, and the relocate
         // set adds any whose effective relocates moved — so `invalidate_layers`
         // evicts those indices and the prototypes they touch and leaves the rest
-        // warm.
+        // warm. The blanket subsumes the vars deltas: a prim using a stack whose
+        // variables cascaded from an edited layer composes that layer's stack
+        // somewhere on its arc chain, so the layer fanout already reaches it.
+        let root_resync = self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) || !vars_deltas.is_empty();
         if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
             cache.invalidate_layers(&affected);
+        } else {
+            apply_vars_deltas(cache, graph, &vars_deltas);
         }
 
         // A prim-tier index invalidation can change which prims are instances or
@@ -493,6 +516,48 @@ impl Changes {
                 .filter(|(prim, _)| !self.cache.did_change_significantly.iter().any(|s| prim.has_prefix(s)));
             cache.clear_target_memos(stale);
         }
+
+        root_resync
+    }
+}
+
+/// Consumes an `expressionVariables` rebuild's per-stack deltas, dropping their
+/// recorded dependents — the C++ five-step
+/// `_DidChangeLayerStackExpressionVariables` diff. Step 1 (composed variables
+/// and source unchanged) emits no delta, so an identical re-authoring costs
+/// only the rebuild and the revision bump; step 5 — propagation to stacks
+/// whose override source resolves through a changed one — is the rebuild's
+/// seed cascade, which emits those stacks' own deltas. Victims accumulate
+/// across deltas and drop once, since a cascade's victim sets overlap and each
+/// drop pays a per-victim prototype scan.
+fn apply_vars_deltas(cache: &mut IndexCache, graph: &LayerGraph, deltas: &[StackVarsDelta]) {
+    let mut victims: BTreeSet<Path> = BTreeSet::new();
+    for delta in deltas {
+        if delta.old_source == delta.new_source {
+            let changed = graph.changed_var_names(delta.old_expr, delta.new_expr);
+            if graph.stack_sublayer_var_deps(delta.stack).is_disjoint(&changed) {
+                // Step 4: a value-only change; resync exactly the prims whose
+                // builds recorded reading a changed name from this stack.
+                victims.extend(cache.dependencies().prims_using_vars(delta.stack, &changed));
+                continue;
+            }
+            // Step 3: a changed name feeds one of the stack's own `${VAR}`
+            // sublayer entries, so its membership may have swapped — as
+            // significant as a source change.
+        }
+        // Step 2 (the variable source changed, so every arc out of the stack
+        // keys its target differently) or step 3: resync every prim using the
+        // stack. The root stack's users are the whole cache, subsuming every
+        // victim any delta could add, so drop it once and stop.
+        if delta.stack == LayerStackId::ROOT {
+            cache.drop_index_victims(&[Path::abs_root()]);
+            return;
+        }
+        victims.extend(cache.dependencies().prims_for_stack(delta.stack));
+    }
+    if !victims.is_empty() {
+        let victims: Vec<Path> = victims.into_iter().collect();
+        cache.drop_index_victims(&victims);
     }
 }
 
@@ -660,11 +725,12 @@ mod tests {
         }
     }
 
-    /// Editing the root layer's `expressionVariables` restales every `${VAR}`
-    /// expansion in the stack, so it flags the layer stack for an edge rebuild
-    /// (`EXPRESSION_VARS`) and a significant drop of the indices that read it.
+    /// Editing a layer's `expressionVariables` flags the layer stack for an
+    /// edge rebuild (`EXPRESSION_VARS`) without the `SIGNIFICANT` blanket — the
+    /// apply phase consumes the rebuild's per-stack deltas to drop only the
+    /// recorded dependents.
     #[test]
-    fn expression_variables_change_is_significant() {
+    fn expression_vars_not_significant() {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
@@ -673,7 +739,7 @@ mod tests {
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::EXPRESSION_VARS));
-        assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
+        assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
 
     #[test]

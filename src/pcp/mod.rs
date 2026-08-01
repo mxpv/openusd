@@ -231,6 +231,15 @@
 //!   (`IndexCache::resolve_asset_path` returns it unevaluated), unlike a
 //!   reference/payload arc, which records [`Error::InvalidExpression`]. Value
 //!   resolution needs an error channel to report it.
+//! - Value-time `asset` expressions are not tracked as expression-variable
+//!   dependencies (matching C++): fine-grained invalidation records only the
+//!   composition-time reads — reference/payload asset paths, variant
+//!   selections, `${VAR}` sublayer entries — while a value-time expression is
+//!   re-evaluated on every access. The compensating behavior is the stage-root
+//!   resync *notification* an `expressionVariables` edit publishes whenever
+//!   some stack's composed variables actually changed (the notice
+//!   `Changes::apply` returns), telling observers to re-read values even when
+//!   no prim index dropped.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -306,7 +315,7 @@ mod relocates;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, Path, Value};
 
-pub(crate) use change::{Changes, LayerStackChanges};
+pub(crate) use change::Changes;
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
 pub(crate) use layer_graph::{LayerGraph, LoadFailure, MuteChange, StackIdentity, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};

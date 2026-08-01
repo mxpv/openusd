@@ -31,6 +31,7 @@ use super::prim_graph::ArcType;
 use super::prim_index::{
     AncestorArc, CompositionContext, Demand, PrimIndex, PropertyTargetKind, TargetMemo, TargetMemoKey,
 };
+use super::prim_indexer::ExprVarDeps;
 use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::{Error, LayerId, MapFunction, StackIdentity, VariantFallbackMap};
@@ -713,10 +714,13 @@ impl IndexCache {
     }
 
     /// Caches a fully composed `index` at `path` with the `context` its children
-    /// inherit and its recoverable build `errors`, registering its dependencies
-    /// (see [`IndexStore::insert`]). Shared by the ordinary
+    /// inherit, its recoverable build `errors`, and the per-stack
+    /// expression-variable names its build read (`expr_var_deps`), registering
+    /// its dependencies (see [`IndexStore::insert`]). Shared by the ordinary
     /// [`build_index`](Self::build_index) path and the materialized-prototype path
-    /// (which has no spec to build from, so it passes no errors).
+    /// (which has no spec to build from, so it passes no errors and no variable
+    /// dependencies — a variable edit evicts a prototype through its instances'
+    /// registrations).
     pub(super) fn cache_index(
         &mut self,
         graph: &LayerGraph,
@@ -724,8 +728,9 @@ impl IndexCache {
         index: PrimIndex,
         context: CompositionContext,
         errors: Vec<Error>,
+        expr_var_deps: ExprVarDeps,
     ) {
-        self.store.insert(graph, path, index, context, errors);
+        self.store.insert(graph, path, index, context, errors, expr_var_deps);
     }
 
     /// The composition context for a namespace-root prim: empty except for the
@@ -861,8 +866,9 @@ impl IndexCache {
 
     /// Drops each victim prim index and the prototypes its drop touches — the tail
     /// shared by [`drop_indices_touching_layers`](Self::drop_indices_touching_layers),
-    /// [`invalidate_muting`](Self::invalidate_muting), and
-    /// [`set_load_rules`](Self::set_load_rules).
+    /// [`invalidate_muting`](Self::invalidate_muting),
+    /// [`set_load_rules`](Self::set_load_rules), and the `expressionVariables`
+    /// delta path (`change::apply_vars_deltas`).
     pub(super) fn drop_index_victims(&mut self, victims: &[Path]) {
         if victims.is_empty() {
             return;
@@ -1957,6 +1963,15 @@ impl IndexCache {
     /// Builds and caches the index for `path`, assuming `path` is already
     /// recorded in [`in_progress`](Self::in_progress) (see [`ensure_index`](Self::ensure_index)).
     fn build_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<()> {
+        // An already-cached path must not rebuild through here: the builder's
+        // cache-hit path reports empty expression-variable dependencies (the
+        // cached entry's registration is authoritative), so re-registering
+        // would wipe the prim's recorded `${VAR}` reads. `ensure_index`'s
+        // `is_indexed` check upholds this.
+        debug_assert!(
+            !self.is_indexed(path),
+            "build_index on a cached path would re-register empty expression-variable deps",
+        );
         // Snapshot the demand queue so a reference/payload arc to a not-yet-loaded
         // layer — demanded by this build or by a pre-cached ancestor below — is
         // detected after the build and keeps the incomplete index out of the cache.
@@ -1994,7 +2009,7 @@ impl IndexCache {
         // The blocker is the shared store the inherit/specialize targets read
         // mid-build — parallelizing the driver needs a concurrent map or a
         // topological (targets-first) build order.
-        let (mut index, mut build_errors, pending_loads) =
+        let (mut index, mut build_errors, pending_loads, mut expr_var_deps) =
             match PrimIndex::build_with_cache(path, graph, &parent_ctx, self.store.entries(), load_payloads) {
                 Ok(result) => result,
                 Err(e) => return Err(e.into()),
@@ -2057,7 +2072,12 @@ impl IndexCache {
                 Some(Value::Bool(true))
             );
 
-        let mut child_context = index.context_for_children(graph, &parent_ctx);
+        // The child-context selection resolution can evaluate a `${VAR}`
+        // selection no indexing-time task did — one authored here for a set
+        // declared only on a descendant — so its reads merge into this prim's
+        // dependency map before it registers.
+        let (mut child_context, context_deps) = index.context_for_children(graph, &parent_ctx);
+        expr_var_deps.merge(context_deps);
         // A nested instance re-arms the depth to its own (deeper) level, so an
         // inner instance's descendants drop opinions above its instanceable arc
         // rather than the outer instance's.
@@ -2066,7 +2086,7 @@ impl IndexCache {
         } else {
             parent_ctx.instance_depth
         };
-        self.cache_index(graph, path, index, child_context, build_errors);
+        self.cache_index(graph, path, index, child_context, build_errors, expr_var_deps);
         // Report inconsistent property types once per prim composition (C++
         // `PcpErrorInconsistentPropertyType`); a later property-stack query
         // reports the conflict again, matching C++'s per-pass reporting.

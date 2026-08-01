@@ -18,6 +18,7 @@ use crate::sdf::{self, Path};
 use super::dependencies::Dependencies;
 use super::layer_graph::LayerGraph;
 use super::prim_index::{CompositionContext, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
+use super::prim_indexer::ExprVarDeps;
 use super::{Error, LayerId};
 
 /// Per-prim composition index storage with dependency tracking. See the
@@ -91,8 +92,10 @@ impl IndexStore {
     }
 
     /// Caches `index` at `path` with the `context` its children inherit and its
-    /// build `errors`, registering its dependencies. The single insertion point:
-    /// entries and dependencies are written together.
+    /// build `errors`, registering its dependencies — the `(layer, site)` map
+    /// derived from the index plus the build's per-stack expression-variable
+    /// names (`expr_var_deps`). The single insertion point: entries and
+    /// dependencies are written together.
     pub(super) fn insert(
         &mut self,
         graph: &LayerGraph,
@@ -100,8 +103,9 @@ impl IndexStore {
         index: PrimIndex,
         context: CompositionContext,
         errors: Vec<Error>,
+        expr_var_deps: ExprVarDeps,
     ) {
-        self.deps.add(path, &index, graph);
+        self.deps.add(path, &index, graph, expr_var_deps);
         self.entries.insert(
             path.clone(),
             PrimEntry {

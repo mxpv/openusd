@@ -1710,7 +1710,7 @@ impl Stage {
         // ([`layer_changes`]), so a sink deriving a per-layer diff reads each
         // layer's own record rather than mis-reading a sublayer's change against
         // the strongest layer's data.
-        let payload = (!self.sinks.borrow().is_empty()).then(|| {
+        let mut payload = (!self.sinks.borrow().is_empty()).then(|| {
             let layer_changes: Vec<(String, sdf::ChangeList)> = edits
                 .iter()
                 .map(|(id, changes)| (self.layer_identifier(*id).unwrap_or_default(), (*changes).clone()))
@@ -1721,10 +1721,19 @@ impl Stage {
             }
             Payload::new(&pcp_changes, &merged, layer_changes, provenance)
         });
-        {
+        let root_resync = {
             let mut graph = self.layers.borrow_mut();
             let mut cache = self.cache.borrow_mut();
-            pcp_changes.apply(&mut cache, &mut graph);
+            pcp_changes.apply(&mut cache, &mut graph)
+        };
+        // The stage-wide resync entry is known only after `apply` ran — a
+        // vars-only edit publishes it exactly when the rebuild changed some
+        // stack's composed variables — so it lands on the payload here rather
+        // than at the snapshot above.
+        if root_resync {
+            if let Some(payload) = payload.as_mut() {
+                payload.record_root_resync();
+            }
         }
         // The recompose may have demanded sublayers — a `${VAR}` entry the
         // edited variables newly select, or a just-authored literal naming an
@@ -2944,7 +2953,7 @@ impl Stage {
         // before any stack is composed against them.
         if grew {
             // TODO(perf): rebuild only the new subtrees rather than the whole DAG.
-            let relocated = self.layers.borrow_mut().recompute_sublayers(None);
+            let relocated = self.layers.borrow_mut().recompute_sublayers(None).affected;
             // A demanded layer that introduces relocates restructures prims
             // composed against its stack; drop their cached indices so they
             // recompose with the relocates applied.
@@ -3103,7 +3112,7 @@ impl Stage {
             // for the next round.
             let (affected, next) = {
                 let mut graph = self.layers.borrow_mut();
-                let affected = graph.recompute_sublayers(Some(&opened_parents));
+                let affected = graph.recompute_sublayers(Some(&opened_parents)).affected;
                 (affected, graph.take_sublayer_demands())
             };
             if !affected.is_empty() {

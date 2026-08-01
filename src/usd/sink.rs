@@ -322,14 +322,6 @@ impl Payload {
                 None => p.clone(),
             })
             .collect();
-        // A layer-stack-significant edit (sublayers, layer offsets, relocates, the
-        // effective timeCodesPerSecond, or expressionVariables) drops the cached
-        // indices reading the edited layers, which the per-path tiers don't capture.
-        // Report it as a stage-wide resync at the pseudo-root, matching C++
-        // `ResyncedPaths`.
-        if changes.layer_stack.intersects(pcp::LayerStackChanges::SIGNIFICANT) {
-            resynced.push(sdf::Path::abs_root());
-        }
         resynced.sort();
         resynced.dedup();
         // The `ChangeList` records paths in the edited layer's namespace.
@@ -374,6 +366,21 @@ impl Payload {
             change_list: scratch.clone(),
             layer_changes,
         }
+    }
+
+    /// Marks the whole stage resynced with a pseudo-root entry, matching C++
+    /// `ResyncedPaths` for a layer-stack change. Called after the invalidation
+    /// applies, when [`pcp::Changes::apply`] reports the broad notice is due —
+    /// a decision only the apply phase can make, since a vars-only edit whose
+    /// rebuild changed no composed set publishes nothing (see that method).
+    /// The pseudo-root subsumes every per-path entry, so a matching
+    /// changed-info entry is dropped rather than reported twice.
+    pub(super) fn record_root_resync(&mut self) {
+        let root = sdf::Path::abs_root();
+        if let Err(at) = self.resynced.binary_search(&root) {
+            self.resynced.insert(at, root.clone());
+        }
+        self.changed_info_only.retain(|p| *p != root);
     }
 
     /// Borrow this payload as a [`CommittedChange`] for the `after_commit` call.

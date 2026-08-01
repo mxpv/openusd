@@ -28,6 +28,7 @@ use super::layer_graph::LayerGraph;
 use super::load_rules::LoadRules;
 use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
+use super::prim_indexer::ExprVarDeps;
 use super::LayerId;
 
 /// The shared-prototype registry (spec 11.3.3): maps each instancing key to its
@@ -422,7 +423,7 @@ impl IndexCache {
         // namespace, not the canonical instance's.
         index.rebase_root(canonical, prototype);
 
-        let mut context = index.context_for_children(graph, &self.root_parent_context());
+        let (mut context, _) = index.context_for_children(graph, &self.root_parent_context());
         context.instance_depth = None;
 
         // `redirect_anchor` composes a prim in place when it has no enclosing
@@ -439,7 +440,7 @@ impl IndexCache {
             ),
             "materialized prototype root's instanceable must be inert",
         );
-        self.cache_index(graph, prototype, index, context, Vec::new());
+        self.cache_index(graph, prototype, index, context, Vec::new(), ExprVarDeps::default());
     }
 
     /// Returns the synthetic prototype path (`/__Prototype_N`) shared by

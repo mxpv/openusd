@@ -798,6 +798,94 @@ fn target_var_edit_loads() -> Result<()> {
     Ok(())
 }
 
+/// An `expressionVariables` edit that changes a composed variable no prim
+/// depends on drops no index, yet still publishes the stage-root resync
+/// notice to observers — the broad notice covering untracked value-time
+/// expression reads (the resync `pcp::Changes::apply` reports).
+#[test]
+fn vars_edit_notifies_resync() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    expressionVariables = { string FREE = \"x\" }\n)\ndef \"Other\" {\n    custom double o = 1\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(1.0));
+    assert!(stage.is_indexed(&sdf::path("/Other")?));
+
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let resynced = resynced.clone();
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+        })
+    };
+    stage.set_expression_variables(HashMap::from([(
+        "FREE".to_string(),
+        sdf::Value::String("y".to_string()),
+    )]))?;
+
+    assert!(
+        resynced.borrow().contains(&sdf::Path::abs_root()),
+        "a vars-only edit publishes the stage-root resync notice, got {:?}",
+        resynced.borrow()
+    );
+    assert!(
+        stage.is_indexed(&sdf::path("/Other")?),
+        "no prim recorded the variable, so its index survives the edit"
+    );
+    Ok(())
+}
+
+/// Authoring `expressionVariables` on a sublayer changes no stack's composed
+/// set — only a stack root's variables contribute — so the edit publishes no
+/// stage-root resync notice and drops no index (the C++ five-step diff's
+/// step-1 no-op).
+#[test]
+fn sublayer_vars_no_resync() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@sub.usda@]\n)\n")?;
+    fs::write(
+        dir.path().join("sub.usda"),
+        "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/P.x").get::<f64>()?, Some(1.0));
+    assert!(stage.is_indexed(&sdf::path("/P")?));
+
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let resynced = resynced.clone();
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+        })
+    };
+    let sub_id = stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| FsPath::new(id).ends_with("sub.usda"))
+        .expect("sub.usda is loaded");
+    stage.layer_mut(&sub_id).expect("sublayer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("x".to_string()))]))
+    })?;
+
+    // Reading drains the pending edit, delivering the composed change notice.
+    assert!(
+        stage.is_indexed(&sdf::path("/P")?),
+        "no composed variable changed, so the index survives"
+    );
+    assert!(
+        !resynced.borrow().contains(&sdf::Path::abs_root()),
+        "a vars edit that changed no composed set publishes no resync, got {:?}",
+        resynced.borrow()
+    );
+    Ok(())
+}
+
 /// Muting the session layer exposes the stage root's own `${VAR}` value, whose
 /// selection was never opened: the mute's recompose demands it and the load
 /// barrier brings it in.

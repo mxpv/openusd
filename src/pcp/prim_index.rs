@@ -5,7 +5,7 @@
 //! [module-level docs](super) for the full composition overview.
 
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
@@ -15,7 +15,7 @@ use super::compose_site::evaluate_expression;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, SpecSite};
-use super::prim_indexer::BuildResult;
+use super::prim_indexer::{BuildResult, ExprVarDeps};
 use super::{Error, ExpressionContext, LayerGraph, LayerId, VariantFallbackMap};
 
 /// Composition index for a single prim.
@@ -619,7 +619,8 @@ impl PrimIndex {
     /// the indexer seeds a child from its cached parent.
     #[cfg(test)]
     pub(crate) fn build_with_context(path: &Path, stack: &LayerGraph, ctx: &CompositionContext) -> BuildResult<Self> {
-        Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new(), true).map(|(index, _errors, _pending)| index)
+        Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new(), true)
+            .map(|(index, _errors, _pending, _deps)| index)
     }
 
     /// Like [`build_with_context`](Self::build_with_context) but with access to
@@ -635,14 +636,17 @@ impl PrimIndex {
     /// The third tuple element is the [`Demand`]s a reference/payload arc raised
     /// for a target that is not yet loaded; non-empty means the returned index
     /// is incomplete and must not be cached, so the caller loads those layers
-    /// and recomposes.
+    /// and recomposes. The fourth is the per-stack expression-variable names the
+    /// build's `${VAR}` evaluations read
+    /// ([`BuildOutput::expr_var_deps`](super::prim_indexer::BuildOutput::expr_var_deps)),
+    /// which the caller registers with the cached prim's dependencies.
     pub(crate) fn build_with_cache(
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimEntry>,
         load_payloads: bool,
-    ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>)> {
+    ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>, ExprVarDeps)> {
         Self::build_with_cache_in(
             path,
             stack,
@@ -669,10 +673,16 @@ impl PrimIndex {
         cached_indices: &sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
         load_payloads: bool,
-    ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>)> {
+    ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>, ExprVarDeps)> {
         if ambient == LayerStackId::ROOT {
             if let Some(cached) = cached_indices.get(path) {
-                return Ok((cached.index.clone(), Vec::new(), Vec::new()));
+                // A cache hit reports no variable dependencies: the cached
+                // entry's own registration already carries them, and stays
+                // authoritative because `IndexCache::build_index` never reaches
+                // this hit (`ensure_index` checks `is_indexed` first, and
+                // `build_index` debug-asserts it), so the empty map is never
+                // re-registered over it.
+                return Ok((cached.index.clone(), Vec::new(), Vec::new(), ExprVarDeps::default()));
             }
         }
         // The task-queue indexer is the sole composition path. A genuine cycle
@@ -684,6 +694,7 @@ impl PrimIndex {
             graph,
             errors,
             pending_loads,
+            expr_var_deps,
         } = indexer.build(path)?;
         let mut index = PrimIndex {
             graph: graph.unwrap_or_default(),
@@ -699,10 +710,17 @@ impl PrimIndex {
         // materialized prototype clones an index that already carries them.
         index.finalize_spec_stack(stack);
         index.build_path_order();
-        Ok((index, errors, pending_loads))
+        Ok((index, errors, pending_loads, expr_var_deps))
     }
 
-    /// Returns the composition context derived from this prim's index.
+    /// Returns the composition context derived from this prim's index, together
+    /// with the per-stack variable names the selection resolution's `${VAR}`
+    /// expressions read — an expression selection authored here for a set
+    /// declared only on a descendant is evaluated solely by this pass, so the
+    /// caching caller merges the reads into this prim's registered
+    /// dependencies. A re-derivation pass (prototype materialization, the test
+    /// ancestor walk) drops them; its source prim's registration already
+    /// stands.
     ///
     /// Child prims use this context to inherit ancestor arc mappings and
     /// variant selections without recomputing them.
@@ -710,14 +728,16 @@ impl PrimIndex {
         &self,
         stack: &LayerGraph,
         parent_ctx: &CompositionContext,
-    ) -> CompositionContext {
+    ) -> (CompositionContext, ExprVarDeps) {
         // Gather variant selections from this prim's nodes; ancestor selections
         // outrank this prim's local fallbacks.
+        let mut expr_var_deps = ExprVarDeps::default();
         let selections = resolve_variant_selections_in(
             self.nodes(),
             stack,
             &parent_ctx.variant_fallbacks,
             &parent_ctx.selections,
+            &mut expr_var_deps,
         );
 
         // Build ancestor arcs: record every non-Root node so children can
@@ -746,14 +766,15 @@ impl PrimIndex {
             merged_selections.entry(k).or_insert(v);
         }
 
-        CompositionContext {
+        let context = CompositionContext {
             selections: merged_selections,
             ancestor_arcs,
             variant_fallbacks: parent_ctx.variant_fallbacks.clone(),
             // Inherited from the parent; the cache additionally sets this when
             // the current prim itself resolves as an instance.
             instance_depth: parent_ctx.instance_depth,
-        }
+        };
+        (context, expr_var_deps)
     }
 
     /// The variant selections composed onto this prim, as `(set, selection)`
@@ -888,6 +909,7 @@ fn resolve_variant_selections_in<'a>(
     graph: &LayerGraph,
     variant_fallbacks: &VariantFallbackMap,
     seed: &HashMap<String, String>,
+    expr_var_deps: &mut ExprVarDeps,
 ) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
 
@@ -936,6 +958,7 @@ fn resolve_variant_selections_in<'a>(
                         };
                         let selection = if expr::is_expression(&selection) {
                             let vars = graph.stack_expression_variables(node.layer_stack_id());
+                            let mut used_vars = HashSet::new();
                             let evaluated = evaluate_expression(
                                 &selection,
                                 vars,
@@ -943,7 +966,9 @@ fn resolve_variant_selections_in<'a>(
                                 graph.layer(layer),
                                 &node.path,
                                 None,
+                                Some(&mut used_vars),
                             );
+                            expr_var_deps.record(node.layer_stack_id(), used_vars);
                             match evaluated.into_selection() {
                                 Some(selection) => selection,
                                 None => continue,
@@ -1075,10 +1100,11 @@ pub(crate) mod tests {
             let mut last = None;
             let mut pending: Vec<Demand> = Vec::new();
             for ancestor in &chain {
-                let (index, _errors, demands) = PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache, true)
-                    .expect("index build failed");
+                let (index, _errors, demands, _deps) =
+                    PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache, true)
+                        .expect("index build failed");
                 pending.extend(demands);
-                parent_ctx = index.context_for_children(stack, &parent_ctx);
+                parent_ctx = index.context_for_children(stack, &parent_ctx).0;
                 cache.insert(
                     ancestor.clone(),
                     PrimEntry {
@@ -1729,7 +1755,7 @@ def "World" (
         ));
         let index = PrimIndex::build_with_context(&Path::from("/World"), &stack, &CompositionContext::default())
             .expect("index build");
-        let ctx = index.context_for_children(&stack, &CompositionContext::default());
+        let ctx = index.context_for_children(&stack, &CompositionContext::default()).0;
         assert_eq!(
             ctx.selections.get("v").map(String::as_str),
             Some("hi"),
@@ -1776,7 +1802,7 @@ def "World" (
             "the index composes the fallback, got {:?}",
             index.nodes().map(|n| n.path.as_str()).collect::<Vec<_>>()
         );
-        let child = index.context_for_children(&stack, &ctx);
+        let child = index.context_for_children(&stack, &ctx).0;
         assert_eq!(
             child.selections.get("v").map(String::as_str),
             Some("hi"),
@@ -1854,7 +1880,7 @@ def "Root" (
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (_index, errors, _pending) = PrimIndex::build_with_cache(
+        let (_index, errors, _pending, _deps) = PrimIndex::build_with_cache(
             &Path::from("/Root"),
             &stack,
             &CompositionContext::default(),
@@ -1902,7 +1928,7 @@ def "Outer"
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (_index, errors, _pending) = PrimIndex::build_with_cache(
+        let (_index, errors, _pending, _deps) = PrimIndex::build_with_cache(
             &Path::from("/Root"),
             &stack,
             &CompositionContext::default(),
@@ -1934,7 +1960,7 @@ def "Prim" (
         let layers = vec![sdf::Layer::new("test.usda", layer)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (index, errors, _pending) = PrimIndex::build_with_cache(
+        let (index, errors, _pending, _deps) = PrimIndex::build_with_cache(
             &Path::from("/Prim"),
             &stack,
             &CompositionContext::default(),
@@ -1973,7 +1999,7 @@ def "Prim" (
         ];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (index, errors, _pending) = PrimIndex::build_with_cache(
+        let (index, errors, _pending, _deps) = PrimIndex::build_with_cache(
             &Path::from("/Prim"),
             &stack,
             &CompositionContext::default(),

@@ -91,7 +91,8 @@
 //! relationship/connection target remapping through relocates.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{hash_map, HashMap, HashSet};
+use std::mem;
 
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path, Value};
@@ -110,6 +111,42 @@ use super::{CycleChain, CycleHop, Error, ExpressionContext, LayerGraph, LayerId}
 const MAX_DEPTH: usize = 100;
 
 pub(crate) type BuildResult<T> = std::result::Result<T, BuildError>;
+
+/// The expression-variable names a prim build's `${VAR}` evaluations read,
+/// keyed by the stack whose composed variables they resolved against — the
+/// payload of [`BuildOutput::expr_var_deps`], registered with the cached prim's
+/// dependencies at the [`IndexStore::insert`](super::index_store::IndexStore::insert)
+/// seam. Owns the recording mechanic so every collection site shares one
+/// shape: per-stack accumulation that never stores an empty name set.
+#[derive(Default)]
+pub(crate) struct ExprVarDeps(HashMap<LayerStackId, HashSet<String>>);
+
+impl ExprVarDeps {
+    /// Records that an evaluation against `stack`'s composed variables read
+    /// `used`. Skips an empty set (a literal value evaluated through the shared
+    /// seam) so the map holds only stacks with real dependencies.
+    pub(crate) fn record(&mut self, stack: LayerStackId, used: HashSet<String>) {
+        if !used.is_empty() {
+            self.0.entry(stack).or_default().extend(used);
+        }
+    }
+
+    /// Merges another collection's reads into this one, per stack.
+    pub(crate) fn merge(&mut self, other: ExprVarDeps) {
+        for (stack, used) in other.0 {
+            self.record(stack, used);
+        }
+    }
+}
+
+impl IntoIterator for ExprVarDeps {
+    type Item = (LayerStackId, HashSet<String>);
+    type IntoIter = hash_map::IntoIter<LayerStackId, HashSet<String>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
 
 /// Operational failure while building a prim index.
 ///
@@ -374,6 +411,14 @@ pub(crate) struct BuildOutput {
     /// yet loaded. Non-empty means the build is incomplete and its `graph` must
     /// not be cached; the cache loads these and recomposes.
     pub(crate) pending_loads: Vec<Demand>,
+    /// The expression-variable names this build's `${VAR}` evaluations read —
+    /// reference/payload asset paths and variant selections, successes and
+    /// failures alike — keyed by the stack whose composed variables they
+    /// resolved against. Registered with the cached prim's dependencies so a
+    /// variable edit resyncs exactly the prims that read it (C++
+    /// `PcpExpressionVariablesDependencyData`); merged up from nested
+    /// sub-builds like [`errors`](Self::errors).
+    pub(crate) expr_var_deps: ExprVarDeps,
 }
 
 /// The shared, read-only inputs to a prim build — the same across every nested
@@ -459,6 +504,11 @@ pub(crate) struct Indexer<'a, 'f> {
     /// cached; the cache loads these and recomposes. Nested sub-builds merge
     /// theirs up at their call sites.
     pending_loads: Vec<Demand>,
+    /// The expression-variable names this build's `${VAR}` evaluations read, per
+    /// resolving stack (see [`BuildOutput::expr_var_deps`]). Accumulated as an
+    /// owned field like [`errors`](Self::errors), so a build stays a pure
+    /// function of its `&`-inputs.
+    expr_var_deps: ExprVarDeps,
     /// Invalid-opinion-at-relocation-source errors deferred until the build
     /// finishes, paired with the relocate node they were detected on. A relocate
     /// composed under a culled branch (an empty ancestral reference at the
@@ -494,8 +544,28 @@ impl<'a, 'f> Indexer<'a, 'f> {
             root_contributes: true,
             errors: Vec::new(),
             pending_loads: Vec::new(),
+            expr_var_deps: ExprVarDeps::default(),
             pending_relocation_errors: Vec::new(),
         }
+    }
+
+    /// Packages the build's accumulated outputs around `graph` — the single
+    /// construction point for a [`BuildOutput`]. `None` is the abandoned build
+    /// (unestablished seed, runaway depth); a completed build goes through
+    /// [`finish_built`](Self::finish_built).
+    fn finish(self, graph: Option<PrimIndexGraph>) -> BuildOutput {
+        BuildOutput {
+            graph,
+            errors: self.errors,
+            pending_loads: self.pending_loads,
+            expr_var_deps: self.expr_var_deps,
+        }
+    }
+
+    /// Packages the build's accumulated outputs around its own composed graph.
+    fn finish_built(mut self) -> BuildOutput {
+        let graph = mem::take(&mut self.output);
+        self.finish(Some(graph))
     }
 
     /// Composes `path` into a prim index graph, returning the graph and the
@@ -511,22 +581,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // Backstop pathological growth that site-identity cycle detection cannot
         // catch — an unbounded chain of ever-deeper sites that never repeats.
         if self.frame_depth > MAX_DEPTH {
-            return Ok(BuildOutput {
-                graph: None,
-                errors: self.errors,
-                pending_loads: self.pending_loads,
-            });
+            return Ok(self.finish(None));
         }
         self.site.path = path.clone();
 
         // Seed the graph: a root prim starts empty (just its local site); a
         // child prim clones its parent's graph for ancestral opinions.
         if !self.seed(path)? {
-            return Ok(BuildOutput {
-                graph: None,
-                errors: self.errors,
-                pending_loads: self.pending_loads,
-            });
+            return Ok(self.finish(None));
         }
 
         // The local (root) site is made inert — neither contributing opinions
@@ -558,11 +620,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // prim is a prohibited namespace child and contributes nothing.
         if self.elide_if_prohibited() {
             self.output.finalize_strength_order();
-            return Ok(BuildOutput {
-                graph: Some(self.output),
-                errors: self.errors,
-                pending_loads: self.pending_loads,
-            });
+            return Ok(self.finish_built());
         }
 
         // Recompute `has_specs` at the seeded paths and enqueue the spec-bearing
@@ -613,7 +671,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // Keep only the relocation-source-opinion errors whose relocate node
         // survived composition; one composed under a culled branch (an empty
         // ancestral reference at the relocation target) reports nothing.
-        for (node, error) in std::mem::take(&mut self.pending_relocation_errors) {
+        for (node, error) in mem::take(&mut self.pending_relocation_errors) {
             if !self.output.nodes[node.idx()].is_culled() {
                 self.errors.push(error);
             }
@@ -623,11 +681,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `_PropagateNodeToRoot`), so the strength-order DFS places that
         // globally-weak band (spec 10.4.1) last.
         self.output.finalize_strength_order();
-        Ok(BuildOutput {
-            graph: Some(self.output),
-            errors: self.errors,
-            pending_loads: self.pending_loads,
-        })
+        Ok(self.finish_built())
     }
 
     /// Builds the initial graph for `path` (C++ `_BuildInitialPrimIndexFromAncestor`
@@ -803,6 +857,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // this prim, so carry the demand up even when the sub-build's graph is
         // `None` (the sub-build was itself left incomplete by the missing layer).
         self.pending_loads.extend(out.pending_loads);
+        // A variable read only inside the sub-build (an ancestral arc's `${VAR}`
+        // asset path, a nested variant selection) is still this prim's
+        // dependency: editing it must resync this prim, whose cached entry is
+        // where the merged map registers.
+        self.expr_var_deps.merge(out.expr_var_deps);
         // A muted target reached only inside the sub-build is still a dependency
         // of this prim, so carry its trace up before the graph is grafted — both
         // the loaded-but-empty targets (by `LayerId`) and the never-loaded ones (by
@@ -1498,15 +1557,15 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // The expression variables in scope for `${VAR}` asset paths authored at
         // `node` are its own stack's composed set (C++
         // `node.GetLayerStack()->GetExpressionVariables()`).
-        let expr_vars = self
-            .inputs
-            .stack
-            .stack_expression_variables(self.node(node).layer_stack_id());
+        let node_stack = self.node(node).layer_stack_id();
+        let expr_vars = self.inputs.stack.stack_expression_variables(node_stack);
         let site_path = self.node(node).path.clone();
-        // Recoverable arc errors (an invalid asset-path expression) are collected
-        // locally so the immutable borrow of `self` taken by the composers is
-        // released before they are appended to `self.errors` below.
+        // Recoverable arc errors (an invalid asset-path expression) and the
+        // variable names the `${VAR}` asset paths read are collected locally so
+        // the immutable borrow of `self` taken by the composers is released
+        // before they are recorded on `self` below.
         let mut arc_errors: Vec<Error> = Vec::new();
+        let mut used_vars: HashSet<String> = HashSet::new();
         let (arc, arcs) = match kind {
             TaskKind::EvalNodeReferences => {
                 let refs = compose_references_in(
@@ -1515,6 +1574,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     expr_vars,
                     &site_path,
                     &mut arc_errors,
+                    &mut used_vars,
                 )?;
                 let arcs = refs
                     .into_iter()
@@ -1529,6 +1589,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     expr_vars,
                     &site_path,
                     &mut arc_errors,
+                    &mut used_vars,
                 )?;
                 let arcs = payloads
                     .into_iter()
@@ -1546,6 +1607,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             _ => unreachable!("eval_arcs handles only reference and payload tasks"),
         };
         self.errors.append(&mut arc_errors);
+        self.expr_var_deps.record(node_stack, used_vars);
         for (asset_path, prim_path, offset) in &arcs {
             self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset)?;
         }
@@ -1819,7 +1881,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
                         // accepted selection — including the empty one an
                         // expression-language `None` yields, which defers to
                         // the fallback — stops the search; only a failed
-                        // evaluation falls through to the next-weaker opinion.
+                        // evaluation falls through to the next-weaker opinion,
+                        // its read names recorded all the same (a later edit to
+                        // one can flip the result).
+                        let mut used_vars = HashSet::new();
                         let selection = evaluate_expression(
                             sel,
                             stack.stack_expression_variables(node_stack),
@@ -1827,8 +1892,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
                             stack.layer(layer),
                             &site,
                             Some(&mut self.errors),
+                            Some(&mut used_vars),
                         )
                         .into_selection();
+                        self.expr_var_deps.record(node_stack, used_vars);
                         if let Some(selection) = selection {
                             return Ok(Some(selection));
                         }

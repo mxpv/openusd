@@ -15,6 +15,7 @@
 //! needs the layers, which `layer_graph` owns, so it builds them and hands them
 //! here (see `LayerGraph::build_stack_members`).
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use crate::sdf::{LayerOffset, Value};
@@ -90,6 +91,12 @@ impl VarsSource {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct ExprVarId(u32);
 
+impl ExprVarId {
+    fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Interns expression-variable contexts to [`ExprVarId`]s, deduplicating by
 /// structural equality so two equal contexts share one id. [`Value`] is not
 /// `Eq`/`Hash`, so the dedup is a linear scan comparing the canonicalized,
@@ -127,6 +134,68 @@ impl ExprVarInterner {
             })
             .map(|i| ExprVarId(i as u32))
     }
+
+    /// The canonical name-sorted `(name, value)` context interned at `id`. The
+    /// interner is append-only, so an id from an earlier rebuild still resolves —
+    /// a [`StackVarsDelta`]'s before/after pair reconstructs both contexts here.
+    fn vars(&self, id: ExprVarId) -> &[(String, Value)] {
+        &self.contexts[id.idx()]
+    }
+
+    /// The variable names whose value differs between the contexts `old` and
+    /// `new` — added, removed, or value-changed under [`value_eq`] (the C++
+    /// changed-name predicate in
+    /// `PcpChanges::_DidChangeLayerStackExpressionVariables`). A single merge
+    /// pass over the two name-sorted canonical forms.
+    fn changed_names(&self, old: ExprVarId, new: ExprVarId) -> HashSet<String> {
+        let old = self.vars(old);
+        let new = self.vars(new);
+        let mut changed = HashSet::new();
+        let (mut i, mut j) = (0, 0);
+        while i < old.len() && j < new.len() {
+            match old[i].0.cmp(&new[j].0) {
+                Ordering::Less => {
+                    changed.insert(old[i].0.clone());
+                    i += 1;
+                }
+                Ordering::Greater => {
+                    changed.insert(new[j].0.clone());
+                    j += 1;
+                }
+                Ordering::Equal => {
+                    if !value_eq(&old[i].1, &new[j].1) {
+                        changed.insert(old[i].0.clone());
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        changed.extend(old[i..].iter().map(|(name, _)| name.clone()));
+        changed.extend(new[j..].iter().map(|(name, _)| name.clone()));
+        changed
+    }
+}
+
+/// How one rebuild pass changed a stack's composed expression variables: the
+/// interned before/after contexts and the before/after variable sources.
+/// Emitted by [`LayerStackRegistry::set_root`] / [`set_composed`](LayerStackRegistry::set_composed)
+/// only when the composed variables or their source actually changed, and
+/// consumed by change processing (`pcp::Changes::apply`), which resolves the
+/// contexts back through [`LayerStackRegistry::changed_var_names`] — deferring
+/// the name diff to the one consumer that needs it, so rebuild paths that
+/// discard deltas (a mute, a load) never pay for it.
+pub(crate) struct StackVarsDelta {
+    /// The stack whose composed variables changed.
+    pub(crate) stack: LayerStackId,
+    /// The composed context before the rebuild.
+    pub(crate) old_expr: ExprVarId,
+    /// The composed context after the rebuild.
+    pub(crate) new_expr: ExprVarId,
+    /// The variable source before the rebuild.
+    pub(crate) old_source: VarsSource,
+    /// The variable source after the rebuild.
+    pub(crate) new_source: VarsSource,
 }
 
 /// What composition input a [`LayerStackInstance`] is keyed by.
@@ -172,6 +241,14 @@ struct LayerStackInstance {
     /// own authored variables changed nothing, else the stack itself. The value
     /// an arc out of this stack keys its target by.
     vars_source: VarsSource,
+    /// The variable names the stack's `${VAR}` `subLayers` entries read when its
+    /// members were last composed — successes and failures alike, since an
+    /// undefined name is a dependency too (the C++ per-stack
+    /// `GetExpressionVariableDependencies`). Replaced per rebuild through
+    /// [`LayerStackRegistry::set_sublayer_var_deps`]; a variable edit hitting one
+    /// of these names can swap the stack's membership, so change processing
+    /// treats it as significant for every prim using the stack.
+    sublayer_var_deps: HashSet<String>,
 }
 
 /// Every composed layer stack a [`LayerGraph`](super::layer_graph::LayerGraph) has
@@ -214,13 +291,18 @@ impl LayerStackRegistry {
 
     /// Records (or, for the root, updates) the stage root stack as instance 0 with
     /// its resolved members and composed expression variables. The root is always
-    /// the first instance, so a rebuild updates it in place. Returns whether the
-    /// composed variables changed, like [`set_composed`](Self::set_composed).
-    pub(crate) fn set_root(&mut self, members: Vec<(LayerId, LayerOffset)>, expr_vars: HashMap<String, Value>) -> bool {
+    /// the first instance, so a rebuild updates it in place. Returns the change
+    /// delta, like [`set_composed`](Self::set_composed); the first composition
+    /// emits none — there is no prior context to diff against.
+    pub(crate) fn set_root(
+        &mut self,
+        members: Vec<(LayerId, LayerOffset)>,
+        expr_vars: HashMap<String, Value>,
+    ) -> Option<StackVarsDelta> {
         if self.instances.is_empty() {
             let id = self.insert(LayerStackKey::Root, members, expr_vars);
             debug_assert_eq!(id, LayerStackId::ROOT, "the root stack must be instance 0");
-            true
+            None
         } else {
             debug_assert!(
                 matches!(self.instances[LayerStackId::ROOT.idx()].key, LayerStackKey::Root),
@@ -275,6 +357,7 @@ impl LayerStackRegistry {
             expr_vars,
             expr_id,
             vars_source,
+            sublayer_var_deps: HashSet::new(),
         });
         self.by_key.insert(key, id);
         id
@@ -352,25 +435,32 @@ impl LayerStackRegistry {
     /// Replaces a stack's members and composed expression variables after a
     /// re-resolve, keeping the id stable so a handle held by a surviving prim index
     /// stays valid, and re-deriving the stack's variable source
-    /// ([`derive_vars_source`](Self::derive_vars_source)). Returns whether the
-    /// composed variables or their source changed, so a rebuild pass can cascade
-    /// the re-seed to the stacks keyed by this one.
+    /// ([`derive_vars_source`](Self::derive_vars_source)). Returns a
+    /// [`StackVarsDelta`] when the composed variables or their source changed, so a
+    /// rebuild pass can cascade the re-seed to the stacks keyed by this one and
+    /// change processing can diff the before/after contexts.
     pub(crate) fn set_composed(
         &mut self,
         id: LayerStackId,
         members: Vec<(LayerId, LayerOffset)>,
         expr_vars: HashMap<String, Value>,
-    ) -> bool {
+    ) -> Option<StackVarsDelta> {
         let expr_id = self.contexts.intern(&expr_vars);
         let vars_source = self.derive_vars_source(id, self.instances[id.idx()].key, expr_id);
         let instance = &mut self.instances[id.idx()];
-        let changed = instance.expr_id != expr_id || instance.vars_source != vars_source;
+        let delta = (instance.expr_id != expr_id || instance.vars_source != vars_source).then_some(StackVarsDelta {
+            stack: id,
+            old_expr: instance.expr_id,
+            new_expr: expr_id,
+            old_source: instance.vars_source,
+            new_source: vars_source,
+        });
         instance.member_set = members.iter().map(|&(id, _)| id).collect();
         instance.members = members;
         instance.expr_vars = expr_vars;
         instance.expr_id = expr_id;
         instance.vars_source = vars_source;
-        changed
+        delta
     }
 
     /// The composed expression variables of a stack. Unlike [`members`](Self::members)
@@ -388,6 +478,28 @@ impl LayerStackRegistry {
     /// [`expression_variables`](Self::expression_variables).
     pub(crate) fn vars_source(&self, id: LayerStackId) -> VarsSource {
         self.instances[id.idx()].vars_source
+    }
+
+    /// The variable names a stack's `${VAR}` `subLayers` entries read when its
+    /// members were last composed (see
+    /// [`LayerStackInstance::sublayer_var_deps`]). Panics on an unminted handle,
+    /// like [`expression_variables`](Self::expression_variables).
+    pub(crate) fn sublayer_var_deps(&self, id: LayerStackId) -> &HashSet<String> {
+        &self.instances[id.idx()].sublayer_var_deps
+    }
+
+    /// Replaces a stack's recorded sublayer variable dependencies with the names
+    /// its latest member composition read — the supersession that keeps a fixed
+    /// or removed `${VAR}` entry from pinning a stale dependency.
+    pub(crate) fn set_sublayer_var_deps(&mut self, id: LayerStackId, deps: HashSet<String>) {
+        self.instances[id.idx()].sublayer_var_deps = deps;
+    }
+
+    /// The variable names whose value differs between the interned contexts `old`
+    /// and `new` ([`ExprVarInterner::changed_names`]) — the diff behind a
+    /// [`StackVarsDelta`]'s targeted invalidation.
+    pub(crate) fn changed_var_names(&self, old: ExprVarId, new: ExprVarId) -> HashSet<String> {
+        self.contexts.changed_names(old, new)
     }
 }
 

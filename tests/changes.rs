@@ -4,7 +4,12 @@
 //! layer-stack edits. The change-record derivation itself
 //! (`sdf::ChangeList::from_overlay`) is unit-tested in `src/sdf/change.rs`.
 
-use openusd::{sdf, tf, usd};
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path as FsPath;
+
+use anyhow::Result;
+use openusd::{pcp, sdf, tf, usd};
 
 #[test]
 fn change_list_entry_dedups() {
@@ -285,6 +290,358 @@ fn idempotent_default_prim_preserves_cache() {
         pre,
         "redundant set_default_prim must not clear cached indices"
     );
+}
+
+/// Writes a stage whose `/User` selects a variant through `${SEL}` while
+/// `/Other` reads no variable, and opens it — the fixture behind the
+/// fine-grained `expressionVariables` invalidation tests.
+fn open_variant_fixture(dir: &tempfile::TempDir) -> Result<usd::Stage> {
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+(
+    expressionVariables = { string SEL = "x" }
+)
+def "User" (
+    variantSets = "v"
+    variants = { string v = "`${SEL}`" }
+)
+{
+    variantSet "v" = {
+        "x" { custom double vx = 1 }
+        "y" { custom double vy = 2 }
+    }
+}
+def "Other" {
+    custom double o = 3
+}
+"#,
+    )?;
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/User.vx").get::<f64>()?, Some(1.0), "SEL=x at open");
+    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(3.0));
+    assert!(stage.is_indexed(&sdf::path("/User")?));
+    assert!(stage.is_indexed(&sdf::path("/Other")?));
+    Ok(stage)
+}
+
+/// Editing `expressionVariables` to add a name no prim reads keeps every
+/// cached index warm — the fine-grained diff finds no dependents (C++
+/// `_DidChangeLayerStackExpressionVariables` step 4, empty intersection).
+#[test]
+fn unused_var_keeps_index() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_variant_fixture(&dir)?;
+
+    stage.set_expression_variables(HashMap::from([
+        ("SEL".to_string(), sdf::Value::String("x".to_string())),
+        ("FREE".to_string(), sdf::Value::String("z".to_string())),
+    ]))?;
+
+    assert!(
+        stage.is_indexed(&sdf::path("/User")?),
+        "/User reads SEL, whose value is unchanged — its index survives"
+    );
+    assert!(
+        stage.is_indexed(&sdf::path("/Other")?),
+        "/Other reads no variable — its index survives"
+    );
+    Ok(())
+}
+
+/// Changing a variable's value drops exactly the prims whose builds recorded
+/// reading it: `/User`'s variant selection recomposes to the new branch while
+/// `/Other` stays indexed.
+#[test]
+fn used_var_drops_user() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_variant_fixture(&dir)?;
+
+    stage.set_expression_variables(HashMap::from([(
+        "SEL".to_string(),
+        sdf::Value::String("y".to_string()),
+    )]))?;
+
+    assert!(
+        !stage.is_indexed(&sdf::path("/User")?),
+        "/User recorded reading SEL, so its index drops"
+    );
+    assert!(
+        stage.is_indexed(&sdf::path("/Other")?),
+        "/Other reads no variable — its index survives"
+    );
+    assert_eq!(
+        stage.attribute("/User.vy").get::<f64>()?,
+        Some(2.0),
+        "/User recomposes with the new selection"
+    );
+    assert_eq!(stage.attribute("/User.vx").get::<f64>()?, None);
+    Ok(())
+}
+
+/// A changed name that feeds a stack's own `${VAR}` sublayer entry is
+/// significant for every prim using the stack — the membership swaps — so even
+/// a prim reading no variable drops (C++ step 3, the sublayer-dependency hit).
+#[test]
+fn sublayer_dep_drops_stack() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+(
+    expressionVariables = { string W = "a" }
+    subLayers = [@`"${W}.usda"`@]
+)
+def "Other" {
+    custom double o = 3
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("a.usda"),
+        r#"#usda 1.0
+def "A" {
+    custom double x = 1
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("b.usda"),
+        r#"#usda 1.0
+def "B" {
+    custom double y = 2
+}
+"#,
+    )?;
+
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/A.x").get::<f64>()?, Some(1.0), "W=a at open");
+    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(3.0));
+
+    stage.set_expression_variables(HashMap::from([("W".to_string(), sdf::Value::String("b".to_string()))]))?;
+
+    assert!(
+        !stage.is_indexed(&sdf::path("/Other")?),
+        "W selects a root-stack sublayer, so the change is stack-significant"
+    );
+    assert_eq!(
+        stage.attribute("/B.y").get::<f64>()?,
+        Some(2.0),
+        "the newly selected b.usda loads and composes"
+    );
+    assert_eq!(
+        stage.attribute("/A.x").get::<f64>()?,
+        None,
+        "a.usda's selection dropped"
+    );
+    Ok(())
+}
+
+/// Authoring a reference target's first `expressionVariables` flips the target
+/// stack's variable source (root → itself), which resyncs every prim using the
+/// stack even though no prim recorded reading a variable (C++ step 2).
+#[test]
+fn source_change_resyncs() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "P" (
+    references = @t.usda@
+) {}
+def "Other" {
+    custom double o = 3
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("t.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "P"
+)
+def "P" {
+    custom double x = 1
+}
+"#,
+    )?;
+
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/P.x").get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(3.0));
+
+    let target_id = stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| FsPath::new(id).ends_with("t.usda"))
+        .expect("t.usda is loaded");
+    stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("x".to_string()))]))
+    })?;
+
+    assert!(
+        !stage.is_indexed(&sdf::path("/P")?),
+        "the target stack's variable source flipped, so its user resyncs"
+    );
+    assert!(
+        stage.is_indexed(&sdf::path("/Other")?),
+        "/Other does not use the target stack — its index survives"
+    );
+    assert_eq!(stage.attribute("/P.x").get::<f64>()?, Some(1.0), "/P recomposes");
+    Ok(())
+}
+
+/// A root variable read inside a referenced stack: the root edit's delta
+/// cascades to the seeded target stack (C++ step 5), and the prim recorded its
+/// read through the ancestral sub-build merge, so exactly that prim resyncs
+/// and recomposes against the newly selected asset.
+#[test]
+fn chain_propagation() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+(
+    expressionVariables = { string V = "x" }
+)
+def "P" (
+    references = @a.usda@</Outer/Inner>
+) {}
+def "Other" {
+    custom double o = 3
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("a.usda"),
+        r#"#usda 1.0
+def "Outer" (
+    references = @`"${V}.usda"`@
+)
+{
+    def "Inner" {}
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("x.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "O"
+)
+def "O" {
+    def "Inner" {
+        custom double vx = 1
+    }
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("y.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "O"
+)
+def "O" {
+    def "Inner" {
+        custom double vy = 2
+    }
+}
+"#,
+    )?;
+
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P.vx").get::<f64>()?,
+        Some(1.0),
+        "V=x reaches the referenced stack's `${{V}}` reference"
+    );
+    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(3.0));
+
+    stage.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("y".to_string()))]))?;
+
+    assert!(
+        !stage.is_indexed(&sdf::path("/P")?),
+        "the delta cascades to the seeded target stack and finds /P's recorded read"
+    );
+    assert!(
+        stage.is_indexed(&sdf::path("/Other")?),
+        "/Other reads no variable — its index survives"
+    );
+    assert_eq!(
+        stage.attribute("/P.vy").get::<f64>()?,
+        Some(2.0),
+        "/P recomposes against the newly selected y.usda"
+    );
+    assert_eq!(stage.attribute("/P.vx").get::<f64>()?, None);
+    Ok(())
+}
+
+/// A failed `${VAR}` evaluation records the undefined name as a dependency, so
+/// later defining the variable resyncs the prim and the repaired arc composes
+/// — without the definition, the failure would pin forever.
+#[test]
+fn failure_records_dep() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "P" (
+    references = @`${TGT}`@
+)
+{
+    custom double local = 5
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("t.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "P"
+)
+def "P" {
+    custom double x = 1
+}
+"#,
+    )?;
+
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P.local").get::<f64>()?,
+        Some(5.0),
+        "the prim composes past the failed arc expression"
+    );
+    assert!(
+        stage
+            .composition_errors()
+            .iter()
+            .any(|e| matches!(e, pcp::Error::InvalidExpression { .. })),
+        "the undefined reference expression is diagnosed"
+    );
+    assert!(stage.is_indexed(&sdf::path("/P")?));
+
+    stage.set_expression_variables(HashMap::from([(
+        "TGT".to_string(),
+        sdf::Value::String("t.usda".to_string()),
+    )]))?;
+
+    assert_eq!(
+        stage.attribute("/P.x").get::<f64>()?,
+        Some(1.0),
+        "defining TGT resyncs /P and the repaired reference composes"
+    );
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the healed expression stops reporting, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
 }
 
 /// A reference fixture still composes correctly through the dependency-aware

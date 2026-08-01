@@ -37,7 +37,7 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
 use super::compose_site::{evaluate_expression, EvaluatedExpression};
-use super::layer_stack::{LayerStackId, LayerStackRegistry, VarsSource};
+use super::layer_stack::{ExprVarId, LayerStackId, LayerStackRegistry, StackVarsDelta, VarsSource};
 use super::mapping::MapFunction;
 use super::prim_index::Demand;
 use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
@@ -397,6 +397,22 @@ pub(crate) struct SublayerDemand {
     pub(crate) evaluated: String,
 }
 
+/// What [`LayerGraph::recompute_sublayers`] found: the layers whose composed
+/// state shifted (the cache-eviction scope) and the per-stack composed
+/// expression-variable changes the rebuild emitted. Change processing
+/// (`pcp::Changes::apply`) consumes both; the mute and load paths use only
+/// [`affected`](Self::affected) — a mute's blanket fanout already covers any
+/// variable shift, and a load never changes a stack's composed variables (they
+/// read only the root layer and seed, both already present).
+pub(crate) struct SublayerRecompute {
+    /// The layers whose composed edges or relocate pairs changed, unioned with
+    /// the edited set.
+    pub(crate) affected: HashSet<LayerId>,
+    /// The stacks whose composed expression variables (or their source)
+    /// changed, in dependency order.
+    pub(crate) vars_deltas: Vec<StackVarsDelta>,
+}
+
 /// Why a prior on-demand open of an asset failed, memoized in
 /// [`failed_loads`](LayerGraph::failed_loads) so composition stops retrying
 /// the asset and every referrer's diagnostic can be re-derived from it. An
@@ -432,30 +448,49 @@ impl LoadFailure {
 
 /// What a sublayer-edge resolution pass discovers beyond the edges themselves,
 /// tagged by the authoring parent so the consumer can drop what a muted branch
-/// keeps out of the composed stack: entries that resolved to no loaded layer
-/// (load-demand candidates) and `${VAR}` evaluation diagnostics. The default
-/// sink records demands only — the shape the context-free pass wants, whose
-/// empty context legitimately fails every expression.
+/// keeps out of the composed stack. The default sink records demands only —
+/// the shape the context-free pass wants, whose empty context legitimately
+/// fails every expression and must record neither the failures nor their names
+/// as dependencies.
 #[derive(Default)]
 struct EdgeSink {
     /// Unresolved entries as `(parent, evaluated path)`.
     demands: Vec<(LayerId, String)>,
-    /// Expression diagnostics, or `None` to skip recording them.
-    errors: Option<Vec<(LayerId, Error)>>,
+    /// The buckets only a stack's contextual re-resolution fills, or `None` to
+    /// skip recording them.
+    contextual: Option<ContextualSink>,
+}
+
+/// The [`EdgeSink`] buckets a stack's contextual re-resolution fills beyond
+/// the load demands: `${VAR}` evaluation diagnostics and the variable names
+/// those evaluations read — successes and failures alike, an undefined name
+/// being a dependency too.
+#[derive(Default)]
+struct ContextualSink {
+    /// Expression diagnostics as `(parent, error)`.
+    errors: Vec<(LayerId, Error)>,
+    /// Variable names the `${VAR}` evaluations requested, as `(parent, name)`.
+    used_vars: Vec<(LayerId, String)>,
 }
 
 impl EdgeSink {
-    /// A sink for a stack's contextual re-resolution: demands and diagnostics.
+    /// A sink for a stack's contextual re-resolution: demands, diagnostics, and
+    /// used variable names.
     fn contextual() -> Self {
         Self {
             demands: Vec::new(),
-            errors: Some(Vec::new()),
+            contextual: Some(ContextualSink::default()),
         }
     }
 
-    /// Splits the sink into stack-stamped demands and bare diagnostics, keeping
-    /// only entries whose parent composes into `members`.
-    fn drain(self, stack: LayerStackId, members: &HashSet<LayerId>) -> (Vec<SublayerDemand>, Vec<Error>) {
+    /// Splits the sink into stack-stamped demands, bare diagnostics, and the
+    /// deduplicated used-variable names, keeping only entries whose parent
+    /// composes into `members`.
+    fn drain(
+        self,
+        stack: LayerStackId,
+        members: &HashSet<LayerId>,
+    ) -> (Vec<SublayerDemand>, Vec<Error>, HashSet<String>) {
         let demands = self
             .demands
             .into_iter()
@@ -466,14 +501,18 @@ impl EdgeSink {
                 evaluated,
             })
             .collect();
-        let errors = self
-            .errors
-            .unwrap_or_default()
+        let ContextualSink { errors, used_vars } = self.contextual.unwrap_or_default();
+        let errors = errors
             .into_iter()
             .filter(|(parent, _)| members.contains(parent))
             .map(|(_, error)| error)
             .collect();
-        (demands, errors)
+        let used_vars = used_vars
+            .into_iter()
+            .filter(|(parent, _)| members.contains(parent))
+            .map(|(_, name)| name)
+            .collect();
+        (demands, errors, used_vars)
     }
 }
 
@@ -525,6 +564,8 @@ impl LayerGraph {
         self.session_layer_count = session_layer_count;
         self.root = root;
         // A full pass returns no scoped set; finalize re-resolves every stack.
+        // The first composition's vars deltas are discarded too — nothing is
+        // cached yet, so there is nothing to invalidate against them.
         let _ = self.build_sublayer_edges(None);
         self.mint_eager_target_stacks();
         self.recompute_relocates();
@@ -568,8 +609,12 @@ impl LayerGraph {
     ///
     /// Returns the affected layer set for a scoped edit (the layers whose composed
     /// edges changed, unioned with `edited`) so the caller can scope cache eviction
-    /// to the same stacks the re-resolution touched; `None` for a full pass.
-    fn build_sublayer_edges(&mut self, edited: Option<&HashSet<LayerId>>) -> Option<HashSet<LayerId>> {
+    /// to the same stacks the re-resolution touched — `None` for a full pass —
+    /// together with the [`StackVarsDelta`]s the stack rebuild emitted.
+    fn build_sublayer_edges(
+        &mut self,
+        edited: Option<&HashSet<LayerId>>,
+    ) -> (Option<HashSet<LayerId>>, Vec<StackVarsDelta>) {
         // Refresh the expression-sublayer flags first, so the stack rebuild below
         // reads them through `has_expr_sublayer` for its `collect_plain` fast-path
         // gate.
@@ -625,9 +670,9 @@ impl LayerGraph {
             }
         };
 
-        self.rebuild_sublayer_stacks(affected.as_ref());
+        let vars_deltas = self.rebuild_sublayer_stacks(affected.as_ref());
         self.recompute_cycle_errors();
-        affected
+        (affected, vars_deltas)
     }
 
     /// Resolves `id`'s `subLayers` into `(child, effective offset)` edges,
@@ -638,7 +683,8 @@ impl LayerGraph {
     /// (C++ `PcpExpressionVariables`), and the caller has already folded them into
     /// `context`. `sink`, when given, receives what the resolution drops: entries
     /// that resolved to no loaded layer (load-demand candidates), and — when it
-    /// carries an error bucket — `${VAR}` evaluation diagnostics.
+    /// carries the contextual buckets — `${VAR}` evaluation diagnostics and the
+    /// variable names those evaluations read.
     fn resolve_edges(
         &self,
         id: LayerId,
@@ -671,14 +717,15 @@ impl LayerGraph {
         let mut edges = Vec::with_capacity(sub_paths.len());
         for (i, sub_path) in sub_paths.into_iter().enumerate() {
             let sub_path = if expr::is_expression(&sub_path) {
-                // Evaluate through the shared expression seam, recording a
-                // failure as an `InvalidExpression` diagnostic with the
-                // sublayer context (C++ `_BuildLayerStack`) when the sink
-                // carries an error bucket. A successful expression-language
-                // `None` selects no sublayer and stays silent; either outcome
-                // resolves to no edge.
+                // Evaluate through the shared expression seam, recording — when
+                // the sink carries the contextual buckets — a failure as an
+                // `InvalidExpression` diagnostic with the sublayer context (C++
+                // `_BuildLayerStack`) and the variable names the evaluation
+                // read. A successful expression-language `None` selects no
+                // sublayer and stays silent; either outcome resolves to no edge.
                 let mut expr_errors = Vec::new();
-                let record = sink.as_deref_mut().is_some_and(|s| s.errors.is_some());
+                let mut expr_used = HashSet::new();
+                let record = sink.as_deref_mut().is_some_and(|s| s.contextual.is_some());
                 let outcome = evaluate_expression(
                     &sub_path,
                     context,
@@ -686,9 +733,15 @@ impl LayerGraph {
                     &node.layer,
                     &root_path,
                     record.then_some(&mut expr_errors),
+                    record.then_some(&mut expr_used),
                 );
-                if let Some(errors) = sink.as_deref_mut().and_then(|s| s.errors.as_mut()) {
-                    errors.extend(expr_errors.into_iter().map(|error| (id, error)));
+                if let Some(contextual) = sink.as_deref_mut().and_then(|s| s.contextual.as_mut()) {
+                    contextual
+                        .errors
+                        .extend(expr_errors.into_iter().map(|error| (id, error)));
+                    contextual
+                        .used_vars
+                        .extend(expr_used.into_iter().map(|name| (id, name)));
                 }
                 match outcome {
                     EvaluatedExpression::Value(resolved) => resolved,
@@ -819,19 +872,26 @@ impl LayerGraph {
     /// composed stacks rather than the sum over every layer (O(n²) for a deep
     /// chain): a sublayer-only layer participates through its root's stack, never its
     /// own.
-    fn rebuild_sublayer_stacks(&mut self, affected: Option<&HashSet<LayerId>>) {
+    ///
+    /// Returns one [`StackVarsDelta`] per stack whose composed expression
+    /// variables (or their source) changed, in ascending stack order — dependency
+    /// order, so a consumer processing them in sequence sees a source's delta
+    /// before the deltas it cascaded into (the C++ step-5 propagation to stacks
+    /// whose override source resolves here).
+    fn rebuild_sublayer_stacks(&mut self, affected: Option<&HashSet<LayerId>>) -> Vec<StackVarsDelta> {
         // Re-resolve the muted identifiers to ids first, so a layer muted before
         // it was loaded takes effect the moment a later edit interns it and
         // rebuilds the stacks.
         self.resolve_muted_ids();
 
-        // Stacks whose composed expression variables (or their source) changed
-        // this pass. A stack seeds from its key source's referent, so a change
-        // there must cascade even when the edit touched none of the stack's own
-        // layers; a source referent always precedes the stacks keyed by it, so
-        // the single ascending-index pass below reads every seed after its
-        // referent was refreshed.
-        let mut changed: HashSet<LayerStackId> = HashSet::new();
+        // One delta per stack whose composed expression variables (or their
+        // source) changed this pass — the return value, and the membership the
+        // targets loop consults to cascade: a stack seeds from its key source's
+        // referent, so a change there must rebuild it even when the edit touched
+        // none of its own layers. A source referent always precedes the stacks
+        // keyed by it, so the single ascending-index pass below reads every seed
+        // after its referent was refreshed.
+        let mut vars_deltas: Vec<StackVarsDelta> = Vec::new();
 
         // The stage root stack (session layers at identity offset minus a muted
         // session subtree, then the root layer and its sublayers) is rebuilt on a
@@ -868,8 +928,8 @@ impl LayerGraph {
                 None => (Vec::new(), session_vars),
             };
             root_members.extend(members);
-            if self.stacks.set_root(root_members, expr_vars) {
-                changed.insert(LayerStackId::ROOT);
+            if let Some(delta) = self.stacks.set_root(root_members, expr_vars) {
+                vars_deltas.push(delta);
             }
             self.file_stack_discoveries(LayerStackId::ROOT, sink);
         }
@@ -895,7 +955,7 @@ impl LayerGraph {
                             .stacks
                             .member_set(id)
                             .is_some_and(|members| !members.is_disjoint(affected))
-                        || changed.contains(&source.referent())
+                        || vars_deltas.iter().any(|delta| delta.stack == source.referent())
                 }
             };
             if !rebuild {
@@ -904,11 +964,12 @@ impl LayerGraph {
             let seed_vars = self.stacks.expression_variables(source.referent()).clone();
             let mut sink = EdgeSink::contextual();
             let (members, expr_vars) = self.build_stack_members(root, &seed_vars, Some(&mut sink));
-            if self.stacks.set_composed(id, members, expr_vars) {
-                changed.insert(id);
+            if let Some(delta) = self.stacks.set_composed(id, members, expr_vars) {
+                vars_deltas.push(delta);
             }
             self.file_stack_discoveries(id, sink);
         }
+        vars_deltas
     }
 
     /// Classifies one stack composition's [`EdgeSink`] discoveries and files
@@ -928,7 +989,10 @@ impl LayerGraph {
     /// gate's retry.
     fn file_stack_discoveries(&mut self, stack: LayerStackId, sink: EdgeSink) {
         let members = self.stacks.member_set(stack).expect("a filed stack is minted");
-        let (demands, mut errors) = sink.drain(stack, members);
+        let (demands, mut errors, used_vars) = sink.drain(stack, members);
+        // The names this composition's `${VAR}` entries read replace the stack's
+        // recorded sublayer dependencies, superseding a fixed or removed entry's.
+        self.stacks.set_sublayer_var_deps(stack, used_vars);
         let muted = self.has_muted_layers();
         let mut pending = Vec::new();
         // Canonical identifiers already reported for a parent this pass, so a
@@ -1824,15 +1888,35 @@ impl LayerGraph {
     /// newly opened layer can join a stack the changed-edge set cannot name, so
     /// every stack is re-resolved.
     ///
-    /// Returns the affected layer set the caller drops cached indices against: the
+    /// Returns the affected layer set the caller drops cached indices against — the
     /// layers whose composed edges shifted (unioned with `edited`) plus those whose
     /// relocate pairs changed, so eviction covers exactly the stacks the rebuild
-    /// re-resolved. Empty when `edited` is `None` apart from the relocate set (a
-    /// full pass scopes nothing).
-    pub(crate) fn recompute_sublayers(&mut self, edited: Option<&HashSet<LayerId>>) -> HashSet<LayerId> {
-        let mut affected = self.build_sublayer_edges(edited).unwrap_or_default();
+    /// re-resolved; empty when `edited` is `None` apart from the relocate set (a
+    /// full pass scopes nothing) — together with the [`StackVarsDelta`]s the stack
+    /// rebuild emitted, which only an `expressionVariables` edit's change
+    /// processing consumes.
+    pub(crate) fn recompute_sublayers(&mut self, edited: Option<&HashSet<LayerId>>) -> SublayerRecompute {
+        let (affected, vars_deltas) = self.build_sublayer_edges(edited);
+        let mut affected = affected.unwrap_or_default();
         affected.extend(self.recompute_relocates());
-        affected
+        SublayerRecompute { affected, vars_deltas }
+    }
+
+    /// The variable names whose value differs between the interned
+    /// expression-variable contexts `old` and `new` — how change processing
+    /// resolves a [`StackVarsDelta`]'s before/after pair into the C++
+    /// changed-name predicate
+    /// (`PcpChanges::_DidChangeLayerStackExpressionVariables`).
+    pub(crate) fn changed_var_names(&self, old: ExprVarId, new: ExprVarId) -> HashSet<String> {
+        self.stacks.changed_var_names(old, new)
+    }
+
+    /// The variable names the stack's `${VAR}` `subLayers` entries read when its
+    /// members were last composed. A variable edit hitting one of these can swap
+    /// the stack's membership, so change processing treats it as significant for
+    /// every prim using the stack (C++ `GetExpressionVariableDependencies`).
+    pub(crate) fn stack_sublayer_var_deps(&self, id: LayerStackId) -> &HashSet<String> {
+        self.stacks.sublayer_var_deps(id)
     }
 
     /// Re-derives every node's structurally valid relocate pairs from its
@@ -2404,8 +2488,11 @@ impl LayerGraph {
         // refreshes the muted set and recomputes the root's session-seeded members,
         // so muting a session layer that supplies a root `${VAR}` sublayer's variable
         // re-resolves that sublayer out of (or into, among interned layers) the root
-        // stack.
-        self.rebuild_sublayer_stacks(None);
+        // stack. The vars deltas a mute can emit (a muted session root drops its
+        // variables) are discarded: the mute fanout's affected set already drops
+        // every index reading a stack whose members shifted, which covers any
+        // stack whose variables the toggle changed.
+        let _ = self.rebuild_sublayer_stacks(None);
         self.recompute_cycle_errors();
         self.recompute_relocates()
     }

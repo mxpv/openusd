@@ -24,13 +24,15 @@ use super::{Error, ExpressionContext, LayerGraph, LayerId};
 /// reference brought in by a sublayer with a non-identity offset retimes its
 /// target by that offset, which the per-site node otherwise carries only per
 /// member. Each reference's asset path is anchored to its authoring layer so
-/// relative paths in distinct sublayers stay distinct.
+/// relative paths in distinct sublayers stay distinct; the variable names a
+/// `${VAR}` asset path reads land in `used_vars` (see [`evaluate_expression`]).
 pub(super) fn compose_references_in(
     nodes: &[Node],
     graph: &LayerGraph,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
     errors: &mut Vec<Error>,
+    used_vars: &mut HashSet<String>,
 ) -> Result<Vec<Reference>> {
     let mut refs = compose_list_op_in(
         nodes,
@@ -54,6 +56,7 @@ pub(super) fn compose_references_in(
                 ExpressionContext::Reference,
                 site,
                 errors,
+                used_vars,
             )
             .unwrap_or(1.0)
         },
@@ -68,13 +71,15 @@ pub(super) fn compose_references_in(
 /// Collects payloads from nodes, handling both single `Payload` and
 /// `PayloadListOp`. Each authoring sublayer's offset is folded into its
 /// payloads' layer offsets, mirroring [`compose_references_in`]; each payload's
-/// asset path is anchored to its authoring layer.
+/// asset path is anchored to its authoring layer, and the variable names a
+/// `${VAR}` asset path reads land in `used_vars`.
 pub(super) fn collect_payloads_in(
     nodes: &[Node],
     graph: &LayerGraph,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
     errors: &mut Vec<Error>,
+    used_vars: &mut HashSet<String>,
 ) -> Result<Vec<Payload>> {
     let mut payloads = compose_list_op_in(
         nodes,
@@ -112,6 +117,7 @@ pub(super) fn collect_payloads_in(
                 ExpressionContext::Payload,
                 site,
                 errors,
+                used_vars,
             )
             .unwrap_or(1.0)
         },
@@ -227,6 +233,8 @@ where
 /// layer, and returns the time-codes-per-second retiming scale to fold into the
 /// arc offset (spec 12.3.2). Shared by [`compose_references_in`] and
 /// [`collect_payloads_in`], which differ only in their offset field's shape.
+/// The variable names an expression reads land in `used_vars` (see
+/// [`evaluate_expression`]).
 ///
 /// A malformed or non-string expression is recoverable (C++
 /// `PcpErrorVariableExpression`): the failure is recorded in `errors`, the path
@@ -243,6 +251,7 @@ fn resolve_arc_asset_path(
     context: ExpressionContext,
     site: &Path,
     errors: &mut Vec<Error>,
+    used_vars: &mut HashSet<String>,
 ) -> Option<f64> {
     if expr::is_expression(asset_path) {
         match evaluate_expression(
@@ -252,6 +261,7 @@ fn resolve_arc_asset_path(
             graph.layer(authoring_layer),
             site,
             Some(errors),
+            Some(used_vars),
         ) {
             EvaluatedExpression::Value(resolved) => *asset_path = resolved,
             // Both outcomes leave the raw expression in place for the caller
@@ -298,6 +308,14 @@ impl EvaluatedExpression {
 /// composed variables (C++ `Pcp_EvaluateVariableExpression`), recording a
 /// failure as [`Error::InvalidExpression`] when an error sink is given — the
 /// indexing-time pass emits diagnostics, re-resolution passes stay silent.
+///
+/// `used_vars`, when given, collects every variable name the evaluation
+/// requested — on success and on failure alike, since an undefined name is a
+/// dependency whose later definition changes the result. Change processing maps
+/// a variable edit to the prims and stacks that recorded its name (C++
+/// `PcpExpressionVariablesDependencyData`); a pass that resolves against the
+/// deliberately empty context passes `None` so its universal failures record
+/// nothing.
 pub(super) fn evaluate_expression(
     expression: &str,
     expr_vars: &HashMap<String, Value>,
@@ -305,11 +323,12 @@ pub(super) fn evaluate_expression(
     authoring_layer: &sdf::Layer,
     site_path: &Path,
     errors: Option<&mut Vec<Error>>,
+    used_vars: Option<&mut HashSet<String>>,
 ) -> EvaluatedExpression {
     let evaluated = expr::evaluate_string(expression, expr_vars);
-    // TODO: `evaluated.used_variables` is discarded here; fine-grained
-    // variable dependency tracking will record it per stack so a variable
-    // edit re-resolves only the prims that used it.
+    if let Some(used_vars) = used_vars {
+        used_vars.extend(evaluated.used_variables);
+    }
     match evaluated.value {
         Some(resolved) => EvaluatedExpression::Value(resolved),
         None if evaluated.errors.is_empty() => EvaluatedExpression::None,
