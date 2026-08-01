@@ -2871,15 +2871,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
     ///
     /// `defaultPrim` is root-layer metadata (spec 12.2.7) and does not compose
     /// with sublayers or session layers. The stage root layer stack carries its
-    /// session layers ahead of the root layer, so the lookup uses the strongest
-    /// non-session member rather than `target_stack[0]` — which for an internal
-    /// reference on a stage with a session layer would be the session.
+    /// session region ahead of the root layer — which an internal reference's
+    /// `target_stack[0]` would wrongly name — so for that stack the lookup uses
+    /// the graph's root layer; any other stack's strongest member is its root.
     fn resolve_default_prim(&self, target_stack: LayerStackId) -> BuildResult<Option<Path>> {
         let members = self.inputs.stack.layer_stack(target_stack);
-        let root_layer = members
-            .iter()
-            .map(|&(li, _)| li)
-            .find(|li| !self.inputs.stack.session_layers().contains(li))
+        let root_layer = (target_stack == LayerStackId::ROOT)
+            .then(|| self.inputs.stack.root_id())
+            .flatten()
             .or_else(|| members.first().map(|&(li, _)| li))
             .unwrap_or(LayerId::INVALID);
         let Some(value) = self

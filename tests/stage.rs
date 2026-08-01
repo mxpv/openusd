@@ -886,6 +886,120 @@ fn sublayer_vars_no_resync() -> Result<()> {
     Ok(())
 }
 
+/// A runtime session `expressionVariables` edit re-selects the session
+/// region's own `${VAR}` sublayer: the session region re-resolves like any
+/// stack region, so the newly selected layer loads on demand and the old
+/// selection drops out of the membership.
+#[test]
+fn session_var_swap_loads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    fs::write(&root, "#usda 1.0\n")?;
+    fs::write(
+        &session,
+        "#usda 1.0\n(\n    expressionVariables = { string S = \"sa\" }\n    subLayers = [@`\"${S}.usda\"`@]\n)\n",
+    )?;
+    fs::write(
+        dir.path().join("sa.usda"),
+        "#usda 1.0\ndef \"SA\" {\n    custom double a = 1\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("sb.usda"),
+        "#usda 1.0\ndef \"SB\" {\n    custom double b = 2\n}\n",
+    )?;
+
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/SA.a").get::<f64>()?, Some(1.0), "S=sa at open");
+    assert_eq!(stage.attribute("/SB.b").get::<f64>()?, None, "sb.usda is not loaded");
+
+    let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+    stage.layer_mut(&session_id).expect("session layer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([("S".to_string(), sdf::Value::String("sb".to_string()))]))
+    })?;
+
+    assert_eq!(
+        stage.attribute("/SB.b").get::<f64>()?,
+        Some(2.0),
+        "the edit loads the newly selected session sublayer"
+    );
+    assert_eq!(
+        stage.attribute("/SA.a").get::<f64>()?,
+        None,
+        "the old selection drops out of the session region"
+    );
+    Ok(())
+}
+
+/// `insert_layer` under the session root joins the session region at the next
+/// rebuild — the region's membership is a sublayer walk, not the open-time
+/// layer list — so the inserted layer's opinion composes.
+#[test]
+fn session_insert_layer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    fs::write(&root, "#usda 1.0\n")?;
+    fs::write(&session, "#usda 1.0\n")?;
+
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+    let extra = opinion_layer("extra.usda", 7.0)?;
+    stage.insert_layer(&session_id, 0, extra, sdf::LayerOffset::IDENTITY)?;
+
+    assert_eq!(
+        stage.attribute("/A.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(7.0)),
+        "the inserted session sublayer's opinion composes"
+    );
+    Ok(())
+}
+
+/// A session sublayer missing at open reports once and heals: the session
+/// region re-derives the diagnostic per rebuild, so once the file appears and
+/// an edit clears the failure memo, the layer loads and the report stops.
+#[test]
+fn session_missing_heals() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    fs::write(&root, "#usda 1.0\n")?;
+    fs::write(&session, "#usda 1.0\n(\n    subLayers = [@late.usda@]\n)\n")?;
+
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    let errors = stage.composition_errors();
+    assert_eq!(
+        errors.len(),
+        1,
+        "one missing session sublayer, one diagnostic: {errors:?}"
+    );
+    assert!(matches!(&errors[0], pcp::Error::UnresolvedSublayer { .. }));
+
+    fs::write(
+        dir.path().join("late.usda"),
+        "#usda 1.0\ndef \"L\" {\n    custom double x = 4\n}\n",
+    )?;
+    // Any edit clears the failure memo, requeueing the entry for the barrier.
+    stage.define_prim("/Poke")?;
+    assert_eq!(
+        stage.attribute("/L.x").get::<f64>()?,
+        Some(4.0),
+        "the repaired session sublayer loads and composes"
+    );
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the healed entry stops reporting, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
 /// Muting the session layer exposes the stage root's own `${VAR}` value, whose
 /// selection was never opened: the mute's recompose demands it and the load
 /// barrier brings it in.

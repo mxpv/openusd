@@ -275,8 +275,8 @@ impl IndexCache {
     /// open-time loader copies of diagnostics the layer graph has taken
     /// ownership of as per-stack regenerable errors, which would otherwise
     /// double-report and outlive a later fix. Collection keeps what the loader
-    /// alone knows, e.g. a failure in the session region or under a branch
-    /// muted at open.
+    /// alone knows, e.g. a failure under a branch muted at open, which the
+    /// graph derives no diagnostic for.
     pub(crate) fn discard_collection_errors(&mut self, superseded: &[Error]) {
         self.collection_errors.retain(|error| !superseded.contains(error));
     }

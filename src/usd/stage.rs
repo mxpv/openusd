@@ -3602,23 +3602,23 @@ impl StageBuilder {
         // opened stage starts settled.
         let demands = stage.layers.borrow_mut().take_sublayer_demands();
         stage.resolve_sublayer_demands(demands);
-        // The drain re-derived the sublayer failures of every re-resolvable
-        // region — the root region and each target stack — as per-stack
-        // regenerable diagnostics; the loader's one-shot copies of those would
-        // double-report and outlive a later fix, so they are dropped. A copy
-        // whose referrer sits in the session prefix stays: that region is
-        // never re-resolved, so the loader's record is its only diagnostic.
+        // The drain re-derived the sublayer failures of every region — the
+        // session region, the root region, and each target stack all re-resolve
+        // per rebuild — as per-stack regenerable diagnostics; the loader's
+        // one-shot copies of those would double-report and outlive a later fix,
+        // so they are dropped.
         let superseded: Vec<pcp::Error> = {
             let graph = stage.layers.borrow();
-            let session: HashSet<&str> = graph.session_layers().iter().map(|&id| graph.identifier(id)).collect();
             graph
                 .errors()
                 .into_iter()
-                .filter(|error| match error {
-                    pcp::Error::UnresolvedSublayer { introduced_by, .. }
-                    | pcp::Error::MalformedSublayer { introduced_by, .. } => !session.contains(introduced_by.as_str()),
-                    pcp::Error::InvalidExpression { source_layer, .. } => !session.contains(source_layer.as_str()),
-                    _ => false,
+                .filter(|error| {
+                    matches!(
+                        error,
+                        pcp::Error::UnresolvedSublayer { .. }
+                            | pcp::Error::MalformedSublayer { .. }
+                            | pcp::Error::InvalidExpression { .. }
+                    )
                 })
                 .collect()
         };

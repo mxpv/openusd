@@ -272,14 +272,6 @@
 //!   through an instance (`Prim::prototype`, or any instance-proxy query) first
 //!   registers it, after which masked prototype-content queries (including those
 //!   behind a lazily-loaded payload) resolve correctly.
-//! - Runtime session-region membership: the stage root stack's session region
-//!   is the flat layer list collected at open, so a runtime `subLayers` edit on
-//!   a session layer (or a session `${VAR}` selection change) rebuilds the
-//!   edges but never re-expands that prefix — a newly named session sublayer
-//!   does not join the stack. The root region and every target stack re-resolve
-//!   per rebuild, and an unresolved entry there — `${VAR}`-selected or literal
-//!   — loads on demand (`SublayerDemand`, resolved by the stage's load
-//!   barrier).
 //! - Reclaiming stale contextual stack instances: the registry is append-only,
 //!   and a variable-source flip — a source stack's authored variables becoming
 //!   a no-op under its seed, or ceasing to be one — re-keys the sources

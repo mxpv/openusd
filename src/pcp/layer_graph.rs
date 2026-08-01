@@ -178,9 +178,12 @@ pub(crate) struct LayerGraph {
     /// All layer ids in collection order. Iteration order is deterministic, so
     /// identifier listing and sublayer-stack composition are stable. The
     /// first [`session_layer_count`](Self::session_layer_count) entries are the
-    /// session layers, in strength order.
+    /// session layers collected at open, in strength order; the session root is
+    /// `order[0]`. Root-stack membership derives from a sublayer walk rooted
+    /// there, not from this prefix, so a session sublayer loaded at runtime
+    /// composes without joining it.
     order: Vec<LayerId>,
-    /// Number of session layers at the front of [`order`](Self::order).
+    /// Number of open-time session layers at the front of [`order`](Self::order).
     session_layer_count: usize,
     /// The root layer's id (the first non-session layer), if any.
     root: Option<LayerId>,
@@ -814,19 +817,27 @@ impl LayerGraph {
     /// running through it.
     fn recompute_cycle_errors(&mut self) {
         let mut errors = Vec::new();
-        if let Some(root) = self.root {
+        // Detect over the same edges the root stack's members are built from,
+        // one scan per region root — the session root's subtree and the root
+        // layer's: a region with an expression sublayer resolves against the
+        // stack's single variable set — the root instance's stored composed
+        // variables, which `rebuild_sublayer_stacks` refreshed just before this
+        // runs — so a `${VAR}` sublayer pointing back at an ancestor is caught;
+        // otherwise the context-free `children` are the region's edges.
+        //
+        // TODO(perf): a stage with an expression sublayer recomputes the stack
+        // edges here after `rebuild_sublayer_stacks` already resolved them for
+        // the members; threading the edge map through both would remove the
+        // duplication.
+        let region_roots: Vec<LayerId> = self
+            .session_layers()
+            .first()
+            .copied()
+            .into_iter()
+            .chain(self.root)
+            .collect();
+        for root in region_roots {
             let mut ancestors: HashSet<LayerId> = HashSet::new();
-            // Detect cycles over the same edges the root stack's members are built
-            // from: a stack with an expression sublayer resolves against its single
-            // variable set — the root instance's stored composed variables, which
-            // `rebuild_sublayer_stacks` refreshed just before this runs — so a
-            // `${VAR}` sublayer pointing back at the root or an ancestor is caught;
-            // otherwise the context-free `children` are the root's edges.
-            //
-            // TODO(perf): a stage with an expression sublayer recomputes the root's
-            // stack edges here after `rebuild_sublayer_stacks` already resolved them
-            // for the members; threading the edge map through both would remove the
-            // duplication.
             if self.has_expr_sublayer(root) {
                 let mut resolution = mem::take(&mut self.sublayers.resolution);
                 let stack_vars = self.stacks.expression_variables(LayerStackId::ROOT);
@@ -847,16 +858,15 @@ impl LayerGraph {
                     &mut errors,
                 );
             }
-            // A sublayer reached twice off-path (a diamond) can report the same cycle
-            // twice; report each physical `(root_layer, seen_layer)` pair once.
-            let mut seen = HashSet::new();
-            errors.retain(|error| match error {
-                Error::SublayerCycle { root_layer, seen_layer } => {
-                    seen.insert((root_layer.clone(), seen_layer.clone()))
-                }
-                _ => true,
-            });
         }
+        // A sublayer reached twice off-path (a diamond) — or from both region
+        // roots — can report the same cycle twice; report each physical
+        // `(root_layer, seen_layer)` pair once.
+        let mut seen = HashSet::new();
+        errors.retain(|error| match error {
+            Error::SublayerCycle { root_layer, seen_layer } => seen.insert((root_layer.clone(), seen_layer.clone())),
+            _ => true,
+        });
         self.cycle_errors = errors;
     }
 
@@ -906,29 +916,37 @@ impl LayerGraph {
                 .is_none_or(|members| !members.is_disjoint(affected)),
         };
         if rebuild_root {
-            let pruned = self.muted_session_subtree();
-            let mut root_members: Vec<(LayerId, LayerOffset)> = self
-                .session_layers()
-                .iter()
-                .filter(|id| !pruned.contains(id))
-                .map(|&id| (id, LayerOffset::IDENTITY))
-                .collect();
-            // The root layer is never muted (the Stage API rejects it). Its
-            // `${VAR}` sublayers resolve against the session's composed
-            // expression variables — the session is part of the root layer stack
-            // — so seed the member computation with them: the root stack is a
-            // contextual stack whose edges resolve fresh, not the context-free
-            // shared `children`. `pruned` (the muted session subtree) is excluded
-            // from those variables, matching the members filter above. With no
-            // root layer, the stack's composed variables are the session's own.
+            // Both regions of the stage root stack — the session root's sublayer
+            // subtree and the root layer's — expand against the stack's single
+            // composed expression-variable context (C++ `PcpExpressionVariables`):
+            // the root layer's own variables overlaid by the session root's own,
+            // the session winning, a muted session root contributing none. The
+            // root layer itself is never muted (the Stage API rejects it). Each
+            // region is a member walk from its region root, so a runtime
+            // `subLayers` edit or `${VAR}` re-selection re-resolves session
+            // membership exactly like root membership, and an unresolved entry
+            // in either region files a load demand through the sink.
             let session_vars = self.session_expression_variables();
-            let mut sink = EdgeSink::contextual();
-            let (members, expr_vars) = match self.root {
-                Some(root) => self.build_stack_members(root, &session_vars, Some(&mut sink)),
-                None => (Vec::new(), session_vars),
+            let stack_vars = match self.root {
+                Some(root) => self.composed_stack_vars(root, &session_vars),
+                None => session_vars,
             };
-            root_members.extend(members);
-            if let Some(delta) = self.stacks.set_root(root_members, expr_vars) {
+            let mut sink = EdgeSink::contextual();
+            let mut resolution = mem::take(&mut self.sublayers.resolution);
+            let mut root_members: Vec<(LayerId, LayerOffset)> = Vec::new();
+            if let Some(&session_root) = self.session_layers().first() {
+                root_members.extend(self.stack_members_uncached(
+                    session_root,
+                    &stack_vars,
+                    &mut resolution,
+                    Some(&mut sink),
+                ));
+            }
+            if let Some(root) = self.root {
+                root_members.extend(self.stack_members_uncached(root, &stack_vars, &mut resolution, Some(&mut sink)));
+            }
+            self.sublayers.resolution = resolution;
+            if let Some(delta) = self.stacks.set_root(root_members, stack_vars) {
                 vars_deltas.push(delta);
             }
             self.file_stack_discoveries(LayerStackId::ROOT, sink);
@@ -1122,51 +1140,6 @@ impl LayerGraph {
         for root in dag_roots {
             self.intern_target_stack(root, VarsSource::Root);
         }
-    }
-
-    /// The session-region ids muting removes from the root stack: every muted
-    /// session layer plus the sublayer descendants it would otherwise carry in.
-    /// The session prefix is a flat list, so unlike the root portion (built by
-    /// the subtree-pruning [`collect_sublayers`]) it needs the subtree computed
-    /// explicitly. Descendants are confined to the session region.
-    fn muted_session_subtree(&self) -> HashSet<LayerId> {
-        // The common no-mute case allocates nothing and walks nothing. This runs
-        // on every stack rebuild (every `subLayers` edit, not just mutes).
-        if self.muted.is_empty() {
-            return HashSet::new();
-        }
-        let session: HashSet<LayerId> = self.session_layers().iter().copied().collect();
-        let muted_roots = session.iter().copied().filter(|&id| self.is_muted(id));
-        // A muted session layer carries in the session descendants its `${VAR}`
-        // sublayers resolve to, so the subtree is walked over the session's real
-        // edges — the context-free `children` drop every expression sublayer. The
-        // session region resolves against the root stack's structural variables (the
-        // stage root layer's own overlaid by the session root's own, read regardless
-        // of muting), the same set the loader opened it with: muting removes a subtree
-        // without changing which layers compose it.
-        let session_vars = self.root_stack_structural_vars();
-        // TODO(perf): this uses a scratch resolution map and resolves every session
-        // layer, where the walk only needs those reachable from a muted root. Passing
-        // the shared `SublayerState::resolution` cache (this method's only caller,
-        // `rebuild_sublayer_stacks`, holds `&mut self`) would skip re-canonicalizing
-        // paths already resolved, and resolving lazily from the muted roots would skip
-        // the unreachable layers. It runs only on an edit while a layer is muted, over
-        // the small session region, so neither is pressing.
-        let mut resolution = HashMap::new();
-        let session_edges: HashMap<LayerId, Vec<LayerId>> = session
-            .iter()
-            .map(|&id| {
-                let children = self
-                    .resolve_edges(id, &session_vars, &mut resolution, None)
-                    .into_iter()
-                    .map(|(child, _)| child)
-                    .collect();
-                (id, children)
-            })
-            .collect();
-        muted_subtree(&session, muted_roots, |id| {
-            session_edges.get(id).cloned().unwrap_or_default()
-        })
     }
 
     /// Depth-first cycle scan recording [`Error::SublayerCycle`] for any edge
@@ -1663,13 +1636,12 @@ impl LayerGraph {
 
     /// The stage root stack's expression variables read regardless of muting: the
     /// stage root layer's own overlaid by the session root's own (session wins). The
-    /// structural walks — [`muted_session_subtree`](Self::muted_session_subtree) and
-    /// [`expression_ancestry_edges`](Self::expression_ancestry_edges) — resolve the
-    /// root stage stack's `${VAR}` sublayers against this one set (both regions of a
-    /// single stack, C++ `PcpExpressionVariables`), so muting a layer leaves the walk's
-    /// edges unchanged: the ancestor/subtree set is identical before a mute and after
-    /// the matching unmute. The composition context a muted session root drops out of
-    /// is [`stack_expression_variables`](Self::stack_expression_variables).
+    /// structural walk [`expression_ancestry_edges`](Self::expression_ancestry_edges)
+    /// resolves the root stage stack's `${VAR}` sublayers against this one set (both
+    /// regions of a single stack, C++ `PcpExpressionVariables`), so muting a layer
+    /// leaves the walk's edges unchanged: the ancestor set is identical before a mute
+    /// and after the matching unmute. The composition context a muted session root
+    /// drops out of is [`stack_expression_variables`](Self::stack_expression_variables).
     fn root_stack_structural_vars(&self) -> HashMap<String, Value> {
         let session = match self.session_layers().first() {
             Some(&session_root) => expr::read_expression_variables(self.nodes[&session_root].layer.data())
@@ -1763,7 +1735,10 @@ impl LayerGraph {
         self.session_layer_count
     }
 
-    /// The session-layer ids in strength order.
+    /// The open-time session-layer ids in strength order; the session root is
+    /// first. The session region's composed membership is a sublayer walk from
+    /// that root (see `rebuild_sublayer_stacks`), so a session sublayer loaded
+    /// at runtime is a root-stack member without appearing here.
     pub(crate) fn session_layers(&self) -> &[LayerId] {
         &self.order[..self.session_layer_count]
     }
@@ -2545,33 +2520,6 @@ impl LayerGraph {
         }
         self.registry.create_identifier(path, anchor)
     }
-}
-
-/// The elements pruned by muting: each muted root and everything reachable from
-/// it through `children_of`, restricted to `scope`. The single rule for the
-/// effective session stack — a muted session layer and the whole subtree it
-/// sublayers contribute nothing — shared by graph composition (walking a stack's
-/// resolved sublayer edges over [`LayerId`]s) and open-time collection (walking
-/// the collected layers' authored sublayer paths over identifiers), so the two
-/// cannot disagree on which session layers are effective.
-pub(crate) fn muted_subtree<T: Clone + Eq + Hash>(
-    scope: &HashSet<T>,
-    muted_roots: impl IntoIterator<Item = T>,
-    children_of: impl Fn(&T) -> Vec<T>,
-) -> HashSet<T> {
-    let mut pruned = HashSet::new();
-    let mut pending: Vec<T> = muted_roots.into_iter().filter(|id| scope.contains(id)).collect();
-    while let Some(id) = pending.pop() {
-        if !pruned.insert(id.clone()) {
-            continue;
-        }
-        for child in children_of(&id) {
-            if scope.contains(&child) {
-                pending.push(child);
-            }
-        }
-    }
-    pruned
 }
 
 /// Depth-first pre-order walk of a sublayer subtree, composing each hop's offset
