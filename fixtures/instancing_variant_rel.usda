@@ -1,0 +1,39 @@
+#usda 1.0
+(
+    doc = """A relationship authored inside an instance's variant translates
+    into the shared prototype (spec 11.3.3).
+
+    /A is instanceable, references /Proto, and selects variant `v=x`. The
+    variant authors /A{v=x}Rig with a relationship whose relative target
+    `<../Geom>` anchors at the variant-qualified site, so it resolves to
+    /A{v=x}Geom before translation. Composed on the prototype, the target
+    must land in the /__Prototype_N namespace alongside the referenced
+    Geom."""
+)
+
+def Scope "Proto"
+{
+    def Scope "Geom"
+    {
+        double size = 2.0
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Proto>
+    variants = {
+        string v = "x"
+    }
+    prepend variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "x" {
+            def Scope "Rig"
+            {
+                rel wires = <../Geom>
+            }
+        }
+    }
+}

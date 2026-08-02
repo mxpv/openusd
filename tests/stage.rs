@@ -3823,6 +3823,139 @@ fn variant_selection_keys_prototype() -> Result<()> {
     Ok(())
 }
 
+/// A relationship authored inside an instance's variant translates into the
+/// shared prototype namespace (spec 11.3.3): the relative target anchors at
+/// the variant-qualified site (`/A{v=x}Geom`), and translation strips the
+/// selection and re-anchors onto `/__Prototype_N`.
+#[test]
+fn variant_rel_in_prototype() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_variant_rel.usda"))?;
+    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+
+    let rig = proto.append_path("Rig")?;
+    assert_eq!(
+        stage.relationship(rig.append_property("wires")?).targets()?,
+        vec![proto.append_path("Geom")?],
+        "the variant-authored target lands in the prototype namespace"
+    );
+    assert!(
+        stage.composition_errors().is_empty(),
+        "no target drops: {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// The #129 matrix: a `prototypes` relationship inside content reached
+/// through a payload keeps its target when a variant selection wraps that
+/// payload — with and without instancing.
+#[test]
+fn rel_through_variant_payload() -> Result<()> {
+    for variant in [false, true] {
+        for instanceable in [false, true] {
+            let dir = tempfile::tempdir()?;
+            fs::write(
+                dir.path().join("bundle.usda"),
+                r#"#usda 1.0
+( defaultPrim = "bundle" )
+def Xform "bundle"
+{
+    def PointInstancer "instancer"
+    {
+        rel prototypes = [ </bundle/instancer/Proto1> ]
+
+        def Xform "Proto1"
+        {
+        }
+    }
+}
+"#,
+            )?;
+            let geometry = r#"def Xform "geometry" (
+                prepend payload = @./bundle.usda@</bundle>
+            )
+            {
+            }"#;
+            let content = if variant {
+                format!(
+                    r#"#usda 1.0
+( defaultPrim = "C" )
+def Xform "C" (
+    variants = {{
+        string element = "v1"
+    }}
+    prepend variantSets = "element"
+)
+{{
+    variantSet "element" = {{
+        "v1" {{
+            {geometry}
+        }}
+    }}
+}}
+"#
+                )
+            } else {
+                format!(
+                    r#"#usda 1.0
+( defaultPrim = "C" )
+def Xform "C"
+{{
+    {geometry}
+}}
+"#
+                )
+            };
+            fs::write(dir.path().join("content.usda"), content)?;
+            let inst = if instanceable {
+                "instanceable = true\n        "
+            } else {
+                ""
+            };
+            fs::write(
+                dir.path().join("outer.usda"),
+                format!(
+                    r#"#usda 1.0
+( defaultPrim = "Root" )
+def Xform "Root"
+{{
+    def Xform "Inst" (
+        {inst}payload = @./content.usda@</C>
+    )
+    {{
+    }}
+}}
+"#
+                ),
+            )?;
+
+            let stage = Stage::builder()
+                .load(InitialLoadSet::LoadAll)
+                .open(dir.path().join("outer.usda").to_str().unwrap())?;
+            let base = if instanceable {
+                stage
+                    .prim("/Root/Inst")
+                    .prototype()?
+                    .expect("instance resolves a prototype")
+            } else {
+                sdf::path("/Root/Inst")?
+            };
+            let instancer = base.append_path("geometry")?.append_path("instancer")?;
+            assert_eq!(
+                stage.relationship(instancer.append_property("prototypes")?).targets()?,
+                vec![instancer.append_path("Proto1")?],
+                "variant={variant} instanceable={instanceable}"
+            );
+            assert!(
+                stage.composition_errors().is_empty(),
+                "variant={variant} instanceable={instanceable}: {:?}",
+                stage.composition_errors()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// A prototype is populated when at least one of its instances is in the
 /// population mask (spec 11.3.3): the synthetic `/__Prototype_N` namespace is
 /// never named in a user mask, yet its shared content stays readable through
@@ -4218,6 +4351,162 @@ fn edit_target_no_matching_arc() -> Result<()> {
         stage.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference),
         Err(StageAuthoringError::NoArcNode { .. })
     ));
+    Ok(())
+}
+
+/// An arc target for a node whose site sits inside a variant maps composed
+/// paths to the variant-qualified spec path (C++ `_ComposeMappingForNode`
+/// composes the node-path qualifier onto the arc mapping), so authoring lands
+/// where it composes.
+#[test]
+fn arc_target_in_variant() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def Scope "P" (
+    variants = {
+        string v = "x"
+    }
+    prepend variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "x" {
+            def Scope "_C"
+            {
+                double val = 1
+            }
+            def Scope "Child" (
+                inherits = </P/_C>
+            )
+            {
+            }
+        }
+    }
+}
+"#,
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P/Child.val").get::<f64>()?,
+        Some(1.0),
+        "the in-variant class composes onto the inheritor"
+    );
+
+    let target = stage.edit_target_for_node(&sdf::path("/P/Child")?, EditTargetArc::Inherit)?;
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/P/Child")?),
+        Some(sdf::path("/P{v=x}_C")?),
+        "the class spec lives inside the variant, so the target maps there"
+    );
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/Unrelated")?),
+        Some(sdf::path("/Unrelated")?),
+        "the class map's root identity survives the qualifier composition"
+    );
+    {
+        let _ctx = stage.edit_context(target)?;
+        stage
+            .create_attribute("/P/Child.extra", "double")?
+            .set(sdf::Value::Double(4.0))?;
+    }
+    assert_eq!(
+        stage.attribute("/P/Child.extra").get::<f64>()?,
+        Some(4.0),
+        "the opinion authored at the variant-qualified class path composes back"
+    );
+    Ok(())
+}
+
+/// A class defined inside a variant and inherited through a RELATIVE path
+/// behaves exactly like the absolute form: the class-arc map is selection-free
+/// (both endpoints stripped), so a within-class relationship target translates
+/// to the inheritor's image and the arc edit target maps to the qualified
+/// class spec.
+#[test]
+fn variant_class_rel() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def Scope "P" (
+    variants = {
+        string v = "x"
+    }
+    prepend variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "x" {
+            def Scope "_C"
+            {
+                double val = 1
+                rel self_rel = </P/_C>
+            }
+            def Scope "Child" (
+                inherits = <../_C>
+            )
+            {
+            }
+        }
+    }
+}
+"#,
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P/Child.val").get::<f64>()?,
+        Some(1.0),
+        "the relatively-inherited in-variant class composes"
+    );
+    assert_eq!(
+        stage.relationship("/P/Child.self_rel").targets()?,
+        vec![sdf::path("/P/Child")?],
+        "the within-class target translates to the inheritor's image"
+    );
+    assert!(
+        stage.composition_errors().is_empty(),
+        "no spurious target diagnostics: {:?}",
+        stage.composition_errors()
+    );
+
+    let target = stage.edit_target_for_node(&sdf::path("/P/Child")?, EditTargetArc::Inherit)?;
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/P/Child")?),
+        Some(sdf::path("/P{v=x}_C")?),
+        "the relative form maps like the absolute one"
+    );
+    Ok(())
+}
+
+/// A reference prim path carrying a variant selection is invalid (C++
+/// `PcpErrorInvalidPrimPath`): the text parser rejects it at read time, but
+/// binary input reaches composition unchecked, so composition drops the arc
+/// and reports it.
+#[test]
+fn variant_ref_path_error() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/Target")?;
+    stage.define_prim("/P")?.set_metadata(
+        sdf::FieldKey::References.as_str(),
+        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            asset_path: String::new(),
+            prim_path: sdf::path("/Target{v=a}")?,
+            ..Default::default()
+        }])),
+    )?;
+    assert!(stage.prim("/P").is_valid()?);
+    assert!(
+        stage
+            .composition_errors()
+            .iter()
+            .any(|e| matches!(e, pcp::Error::InvalidPrimPath { .. })),
+        "the selection-bearing prim path is rejected, got {:?}",
+        stage.composition_errors()
+    );
     Ok(())
 }
 

@@ -172,18 +172,31 @@ impl Path {
             .last()
     }
 
-    /// Returns `true` if any component of this path is a variant selection,
-    /// e.g. both `/Prim{set=sel}` and `/Prim{set=sel}/Child`.
+    /// Returns `true` if any component of this path's own prim chain is a
+    /// variant selection, e.g. both `/Prim{set=sel}` and `/Prim{set=sel}/Child`
+    /// — including on a relative path (`../A{v=x}`).
     ///
     /// Mirrors C++ `SdfPath::ContainsPrimVariantSelection`. Unlike
     /// [`is_prim_variant_selection_path`](Self::is_prim_variant_selection_path),
     /// which only inspects the final component, this finds a selection embedded
-    /// anywhere in the prim namespace.
+    /// anywhere in the prim chain. A `{` inside a bracketed target component
+    /// (`/A.rel[/T{v=x}]`) belongs to the embedded target path and does not
+    /// count, matching
+    /// [`strip_all_variant_selections`](Self::strip_all_variant_selections).
     pub fn contains_prim_variant_selection(&self) -> bool {
-        // A `{` outside the prim namespace (e.g. inside a relationship-target
-        // bracket) is not a prim variant selection, so confirm it via the
-        // structured components after the cheap reject.
-        self.path.contains('{') && self.components().any(|c| matches!(c, PathComponent::Variant { .. }))
+        // In a well-formed path a `{` outside a target bracket can only open a
+        // `{set=sel}` segment, so a depth-0 scan decides without parsing
+        // components (which relative `..` prefixes would stop short).
+        let mut depth = 0usize;
+        for byte in self.path.bytes() {
+            match byte {
+                b'[' => depth += 1,
+                b']' => depth = depth.saturating_sub(1),
+                b'{' if depth == 0 => return true,
+                _ => {}
+            }
+        }
+        false
     }
 
     pub fn prim_path(&self) -> Path {
@@ -499,22 +512,39 @@ impl Path {
         self.components().count()
     }
 
-    /// Returns this path with every `{set=sel}` variant segment removed.
+    /// Returns this path with every `{set=sel}` variant segment removed from
+    /// its own prim chain.
     ///
     /// Equivalent to C++ `SdfPath::StripAllVariantSelections`. Both trailing
     /// and interior variant segments are stripped, so
-    /// `/A{x=y}B{p=q}C` becomes `/A/B/C`.
+    /// `/A{x=y}B{p=q}C` becomes `/A/B/C`. A selection inside a bracketed
+    /// target component (`/A.rel[/T{v=x}]`) belongs to the embedded target
+    /// path and is left in place, as in C++, where target components are data
+    /// on a path node rather than part of the outer prim chain.
     pub fn strip_all_variant_selections(&self) -> Path {
-        if !self.path.contains('{') {
+        if !self.contains_prim_variant_selection() {
             return self.clone();
         }
         let mut out = String::with_capacity(self.path.len());
         let mut rest = self.path.as_str();
-        while let Some(open) = rest.find('{') {
-            out.push_str(&rest[..open]);
-            match rest[open..].find('}') {
-                Some(close) => {
-                    rest = &rest[open + close + 1..];
+        let mut depth = 0usize;
+        let mut chars = rest.char_indices();
+        // Splice out each depth-0 `{…}` span; bracketed spans pass through.
+        loop {
+            let Some((at, c)) = chars.next() else {
+                out.push_str(rest);
+                break;
+            };
+            match c {
+                '[' => depth += 1,
+                ']' => depth = depth.saturating_sub(1),
+                '{' if depth == 0 => {
+                    out.push_str(&rest[..at]);
+                    let Some(close) = rest[at..].find('}') else {
+                        out.push_str(&rest[at..]);
+                        break;
+                    };
+                    rest = &rest[at + close + 1..];
                     // In canonical form a prim child attaches directly to the
                     // variant (`/A{v=s}B`); reintroduce the `/` separator when
                     // the stripped variant is followed by a prim name. A `{`
@@ -522,15 +552,11 @@ impl Path {
                     if rest.starts_with(is_prim_name_char) {
                         out.push('/');
                     }
+                    chars = rest.char_indices();
                 }
-                None => {
-                    out.push_str(&rest[open..]);
-                    rest = "";
-                    break;
-                }
+                _ => {}
             }
         }
-        out.push_str(rest);
         Path::from_str_unchecked(&out)
     }
 
@@ -1069,16 +1095,36 @@ mod tests {
         }
     }
 
+    /// A selection inside a bracketed target component belongs to the embedded
+    /// target path, so the strip removes only the outer prim chain's segments —
+    /// on relative paths too.
+    #[test]
+    fn strip_skips_bracket_targets() {
+        let cases: &[(&str, &str)] = &[
+            ("/A.rel[/T{v=x}B]", "/A.rel[/T{v=x}B]"),
+            ("/A{v=x}B.rel[/T{w=y}]", "/A/B.rel[/T{w=y}]"),
+            ("/A{v=x}.rel[/T{w=y}].attr", "/A.rel[/T{w=y}].attr"),
+            ("../A{v=x}", "../A"),
+        ];
+        for (input, expected) in cases {
+            let p = Path::from_str_unchecked(input);
+            assert_eq!(p.strip_all_variant_selections().as_str(), *expected, "input {input}");
+        }
+    }
+
     #[test]
     fn contains_prim_variant_selection() {
-        // A selection anywhere in the prim namespace counts; a `{` that is not a
-        // prim-namespace variant (a relationship-target bracket) does not.
+        // A selection anywhere in the prim chain counts — on relative paths
+        // too; a `{` that is not a prim-namespace variant (a
+        // relationship-target bracket) does not.
         let cases: &[(&str, bool)] = &[
             ("/A/B", false),
             ("/A{set=sel}", true),
             ("/A{set=sel}/Child", true),
             ("/A{x=y}B{p=q}C", true),
             ("/A.rel[/B{x=y}]", false),
+            ("../A{v=x}", true),
+            ("..", false),
         ];
         for (input, expected) in cases {
             assert_eq!(

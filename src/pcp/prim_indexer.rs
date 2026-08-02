@@ -1656,12 +1656,17 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
             // The class-arc map sends the class to the instance; every other
             // path (notably root classes) maps through the added root identity.
-            // The target strips variant selections (C++
-            // `_CreateMapExpressionForArc`) so they never enter mapping
-            // functions; the node's site path keeps them for opinion storage.
+            // Both endpoints strip variant selections — a relative inherit
+            // authored inside a variant resolves to a qualified class path —
+            // since selections never enter mapping functions (C++
+            // `_CreateMapExpressionForArc`); the class node's qualified storage
+            // site is re-derived from the map by `determine_inherit_path`.
             let class_map = self
                 .fold_relocates_into(
-                    MapFunction::from_pair(resolved, node_path.strip_all_variant_selections()),
+                    MapFunction::from_pair(
+                        resolved.strip_all_variant_selections(),
+                        node_path.strip_all_variant_selections(),
+                    ),
                     node,
                 )
                 .with_root_identity();
@@ -2003,14 +2008,17 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return self.add_ancestral_variant_arc(node, vt, vsel);
         }
         let n = self.node(node);
-        let base = n.path.clone();
         let stack_id = n.layer_stack_id();
         let rep = n.layer_id();
-        let var_path = base.append_variant_selection(&vt.vset_name, vsel);
+        let var_path = n.path.append_variant_selection(&vt.vset_name, vsel);
         let has_specs = self.stack_has_spec(stack_id, &var_path);
-        // A variant does not remap the scenegraph namespace; the map only strips
-        // the `{vset=vsel}` storage segment off the composed path.
-        let map = MapFunction::from_pair_identity(var_path.clone(), base);
+        // A variant does not remap the scenegraph namespace — it branches into
+        // a different section of layer storage — so its map is the
+        // whole-namespace identity (C++ `_AddVariantArc`). The `{vset=vsel}`
+        // segment lives only in the node's site path; path translation strips
+        // it before mapping and re-derives it from the node path where the
+        // storage site is needed.
+        let map = MapFunction::identity();
         let new_node = self
             .output
             .add_child(node, stack_id, rep, var_path, ArcType::Variant, map, false);
@@ -2039,9 +2047,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let Some(var_path) = node_path.replace_prefix(&vt.vset_path, &selected) else {
             return Ok(());
         };
-        // The variant only strips its `{vset=vsel}` storage segment off the
-        // composed path; the rest of the namespace is identity.
-        let map = MapFunction::from_pair_identity(var_path.clone(), node_path);
+        // A variant arc's map is the whole-namespace identity (C++
+        // `_AddAncestralVariantArc`); the `{vset=vsel}` segment lives only in
+        // the node's site path.
+        let map = MapFunction::identity();
         // Skip duplicate nodes when the variant descends from a class-based arc
         // introduced at this namespace level, matching the skip the class arc set.
         let skip = self.variant_arc_skips_duplicates(node);
@@ -2441,13 +2450,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
     }
 
     /// Returns an existing child of `parent` that already represents the arc
-    /// being added (C++ `_FindMatchingChild`).
+    /// being added. Reached only from the class-based arc adds, so a variant
+    /// arc — whose map is the shared identity — never dedups through here.
     ///
-    /// Normally a child matches by site `(rep_layer, path)`. Under a relocate
-    /// parent the site is not meaningful (implied classes beneath a relocate
-    /// source map identically), so a child matches by arc type, map-to-parent,
-    /// and its origin's depth below introduction instead — keeping two classes
-    /// inherited by the same relocated prim from collapsing into one.
+    /// Normally a child matches by site `(rep_layer, path)` (C++
+    /// `_FindMatchingChild`). Under a relocate parent the site is not
+    /// meaningful (implied classes beneath a relocate source map identically),
+    /// so a child matches by arc type, map-to-parent, and its origin's depth
+    /// below introduction instead (C++ `_AddClassBasedArc`'s
+    /// `findMatchingChild` relocate branch) — keeping two classes inherited by
+    /// the same relocated prim from collapsing into one.
     ///
     /// A relocate-source sub-index's own local root counts as a relocate parent:
     /// once grafted it becomes the relocate node, and the relocation folded into
@@ -2625,6 +2637,20 @@ impl<'a, 'f> Indexer<'a, 'f> {
     ) -> BuildResult<()> {
         let is_internal = asset_path.is_empty();
         let parent_path = self.node(parent).path.clone();
+        // A reference/payload prim path must be a plain prim path — one carrying
+        // a variant selection is invalid (C++ `_EvalRefOrPayloadArcs`'s
+        // `PcpErrorInvalidPrimPath` validation). The text parser rejects it at
+        // read time; binary input reaches composition unchecked, and an
+        // unchecked selection would land on the arc map's source side, which
+        // map functions never carry.
+        if prim_path.contains_prim_variant_selection() {
+            self.errors.push(Error::InvalidPrimPath {
+                arc,
+                prim_path: prim_path.clone(),
+                site_path: parent_path,
+            });
+            return Ok(());
+        }
         // The arc's full inherited expression-variable context is the parent
         // node's own stack — target-stack selection keys by the source of its
         // composed variables, and a demand carries the handle to the load
@@ -2798,9 +2824,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
         // Variant selections address opinion storage but are not part of
         // composed namespace, so the arc map's target strips them (C++
-        // `_CreateMapExpressionForArc`). The variant node's own map already
-        // folds the strip into `map_to_root`; keeping it out of `map_to_parent`
-        // stops it leaking into implied-class transfer functions.
+        // `_CreateMapExpressionForArc`) — map functions never carry
+        // selections, and a variant node between here and the root maps as
+        // the identity, so the stripped target composes through unchanged.
         let mut map = MapFunction::from_pair(source.clone(), parent_path.strip_all_variant_selections())
             .with_time_offset(arc_offset);
         // Opinions reached across this arc land at their post-relocation paths

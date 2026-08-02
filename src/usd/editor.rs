@@ -968,9 +968,17 @@ fn classify_source_nodes(
         if !node.has_specs() {
             continue;
         }
+        // The introduction path of a node inside a variant carries `{set=sel}`,
+        // which map functions never do; strip before mapping (C++
+        // `PcpTranslatePathFromNodeToRoot`), so the comparison against the
+        // selection-free `origin` stays like-for-like.
+        let mut intro_path = index.graph().path_at_introduction(id);
+        if intro_path.contains_prim_variant_selection() {
+            intro_path = intro_path.strip_all_variant_selections();
+        }
         let introduced_away = node
             .map_to_root()
-            .map_source_to_target(&index.graph().path_at_introduction(id))
+            .map_source_to_target(&intro_path)
             .is_some_and(|intro| &intro != origin);
         if node.arc() != pcp::ArcType::Root && introduced_away {
             realized = true;

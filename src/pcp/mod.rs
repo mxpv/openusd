@@ -479,6 +479,21 @@ pub enum Error {
         site_path: Path,
     },
 
+    /// A reference/payload names a prim path that is not a plain absolute prim
+    /// path — e.g. one carrying a variant selection (C++
+    /// `PcpErrorInvalidPrimPath`). The text parser rejects such paths at read
+    /// time; binary input reaches composition unchecked, so the arc is dropped
+    /// here while the rest of the prim still composes.
+    #[error("invalid {arc:?} prim path <{prim_path}> at {site_path}")]
+    InvalidPrimPath {
+        /// The composition arc type.
+        arc: ArcType,
+        /// The invalid prim path as authored.
+        prim_path: Path,
+        /// The prim path where the arc was authored.
+        site_path: Path,
+    },
+
     /// A reference/payload resolved its target layer, but the named prim path
     /// authors no spec there (C++ `PcpErrorUnresolvedPrimPath`). The arc is
     /// dropped while the rest of the prim still composes.

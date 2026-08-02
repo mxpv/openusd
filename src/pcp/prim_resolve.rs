@@ -218,7 +218,8 @@ impl PrimIndex {
                 _ => continue,
             };
             let is_explicit = list_op.explicit;
-            let map = self.map_to_root_for_targets(node);
+            // The node's map to the root namespace (C++ `PcpNodeRef::GetMapToRoot`).
+            let map = &node.map_to_root;
             let arc = node.arc;
             let arc_root = node.parent.map_or_else(Path::abs_root, |p| self.node(p).path.clone());
             let report = !seen_explicit;
@@ -309,26 +310,9 @@ impl PrimIndex {
                 Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
                 _ => continue,
             };
-            let map = self.map_to_root_for_targets(node);
-            ops.push(Self::map_path_list_op_to_root(list_op, &query_path, &map));
+            ops.push(Self::map_path_list_op_to_root(list_op, &query_path, &node.map_to_root));
         }
         Ok(ops)
-    }
-
-    /// A node's map to the root namespace, used when mapping the authored
-    /// target/connection paths of a property (C++ `PcpNodeRef::GetMapToRoot`).
-    ///
-    /// This is the node's stored `map_to_root` — the composition of each arc's
-    /// `map_to_parent` from the node up to the tree root. [`compose`](MapFunction::compose)
-    /// already carries every relocate the node crosses and enforces invertibility,
-    /// so target translation reads it directly.
-    pub(crate) fn map_to_root_for_targets(&self, node: &Node) -> MapFunction {
-        // Strip variant selections so the map matches C++ (whose maps never carry
-        // selections — a variant arc's map is identity). This collapses a variant
-        // node's strip pair to the identity, so a sibling connection target
-        // authored in a variant is not shadowed by the strip pair in the
-        // invertibility check.
-        node.map_to_root.without_variant_selections()
     }
 
     /// Resolves the deleted target/connection paths of a path-list-op field:
@@ -376,8 +360,14 @@ impl PrimIndex {
                     // List-op targets are authored in the contributing node's
                     // namespace; compose them only after translating to the
                     // stage root namespace so deletes and reorders compare
-                    // like-for-like across layers and arcs.
-                    let absolute = anchor.make_absolute(&path);
+                    // like-for-like across layers and arcs. A variant-qualified
+                    // anchor makes the absolute form carry a selection, which
+                    // map functions never do, so it is stripped before mapping
+                    // (as `translate_to_target` does internally).
+                    let mut absolute = anchor.make_absolute(&path);
+                    if absolute.contains_prim_variant_selection() {
+                        absolute = absolute.strip_all_variant_selections();
+                    }
                     map.map_source_to_target(&absolute)
                 })
                 .collect()

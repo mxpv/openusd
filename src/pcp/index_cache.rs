@@ -977,9 +977,12 @@ impl IndexCache {
     ///
     /// Considers only nodes that author a spec and are not permission-denied, in
     /// strength order. Returns `None` when none match. The mapping is the node's
-    /// `map_to_root` with variant selections stripped (the
-    /// [`map_to_root_for_targets`](PrimIndex::map_to_root_for_targets) form), so
-    /// it is oriented spec → scene and ready to query in reverse for authoring.
+    /// `map_to_root`, and for a node whose site sits inside a variant it is
+    /// composed over the node-path qualifier pair `{site → stripped site}` (C++
+    /// `_ComposeMappingForNode`) — map functions never carry variant selections,
+    /// so the qualifier must be re-attached for the edit target to author at the
+    /// variant-qualified spec path. Oriented spec → scene, queried in reverse for
+    /// authoring.
     ///
     /// An instance-proxy path redirects to its shared prototype (the same
     /// [`effective_path`](Self::effective_path) redirection value resolution
@@ -999,6 +1002,27 @@ impl IndexCache {
         };
         Ok(index.nodes().find_map(|node| {
             (matches(node.arc) && node.has_specs()).then(|| {
+                // A node inside a variant stores its specs at the qualified site
+                // path; compose the qualifier onto the map so the edit target
+                // reaches it (C++ `_ComposeMappingForNode`). The qualifier pair
+                // adapts the storage location only, so the arc map's root
+                // identity survives the composition — composing would otherwise
+                // drop it, since the pair itself carries none — keeping paths
+                // outside the arc's explicit domain visible to the target, as
+                // they are for every other arc whose map has the root identity.
+                let mapping = if node.path.contains_prim_variant_selection() {
+                    let composed = node.map_to_root.compose(&MapFunction::from_pair(
+                        node.path.clone(),
+                        node.path.strip_all_variant_selections(),
+                    ));
+                    if node.map_to_root.has_root_identity() {
+                        composed.with_root_identity()
+                    } else {
+                        composed
+                    }
+                } else {
+                    node.map_to_root.clone()
+                };
                 // The layer stack the node composes in, captured by value identity
                 // so the edit target authors into it exactly rather than
                 // re-inferring it from layer membership — a contextual instance's
@@ -1007,7 +1031,7 @@ impl IndexCache {
                 // handle would name an unrelated instance.
                 (
                     graph.identifier(node.layer_id()).to_string(),
-                    index.map_to_root_for_targets(node),
+                    mapping,
                     graph.stack_identity(node.layer_stack_id()),
                 )
             })
@@ -1421,9 +1445,14 @@ impl IndexCache {
                     continue;
                 }
                 let class_path = index.graph().path_at_introduction(id);
+                // The selection-free form for the within-class test below: a
+                // class defined inside a variant has a qualified introduction
+                // path, while target paths compare selection-free.
+                let class_prefix = class_path.strip_all_variant_selections();
                 let members = graph.layer_stack(node.layer_stack_id());
                 let class_layers: Vec<LayerId> = members.iter().map(|(l, _)| *l).collect();
-                let map = index.map_to_root_for_targets(node);
+                // The node's map to the root namespace (C++ `PcpNodeRef::GetMapToRoot`).
+                let map = &node.map_to_root;
                 let property = Path::new(&format!("{}{prop_suffix}", node.path))?;
                 for &(layer, _) in members.iter() {
                     let Some(value) = graph.layer(layer).data().try_field(&property, field.as_str())? else {
@@ -1438,8 +1467,14 @@ impl IndexCache {
                         let target = property.make_absolute(path);
                         // A target inside the class itself is a normal within-class
                         // target (C++ `connectionPathInsideInheritedClass`); only a
-                        // target that translates can name an instance.
-                        if target.prim_path().has_prefix(&class_path) {
+                        // target that translates can name an instance. A relative
+                        // target anchors at the class node's qualified site, so
+                        // both sides compare selection-free.
+                        if target
+                            .prim_path()
+                            .strip_all_variant_selections()
+                            .has_prefix(&class_prefix)
+                        {
                             continue;
                         }
                         if !seen.insert((target.clone(), property.clone())) {

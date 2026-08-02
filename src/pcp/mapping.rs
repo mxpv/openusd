@@ -258,7 +258,17 @@ impl MapFunction {
     /// the rule that makes a class target naming the class's own instance image
     /// fail to translate, and keeps a relocated class target at its pre-relocation
     /// path.
+    ///
+    /// Map functions never carry variant selections, so a selection-bearing
+    /// path — a relative target anchored at a variant-qualified site —
+    /// translates as its stripped form, matching the strip C++
+    /// `PcpTranslatePathFromNodeToRoot` applies before mapping. A selection
+    /// inside a bracketed target component belongs to the embedded target path
+    /// and is preserved.
     pub fn translate_to_target(&self, path: &Path) -> Option<Path> {
+        if path.contains_prim_variant_selection() {
+            return self.map_impl(&path.strip_all_variant_selections(), false, true);
+        }
         self.map_impl(path, false, true)
     }
 
@@ -433,10 +443,21 @@ impl MapFunction {
     /// Used when a composed prototype graph is re-rooted from the canonical
     /// instance's namespace onto its `/__Prototype_N` root (spec 11.3.3), so a
     /// node's namespace map translates targets into the prototype namespace.
+    ///
+    /// A pure-identity map — an instance-local node such as a variant on the
+    /// instance prim itself, whose whole chain to the root is identity — sits
+    /// entirely in the instance's namespace, so it rebases to the explicit pair
+    /// `from → to`: a target authored at such a node then translates into the
+    /// prototype namespace rather than the instance's. A map with explicit
+    /// pairs never gains that pair — a second pair targeting `to` would shadow
+    /// the first in the invertibility check.
     pub(crate) fn rebase_target(&self, from: &Path, to: &Path) -> MapFunction {
         let pairs = self.path_map.as_slice();
-        // The common case has no target under `from` (an identity or unrelated
-        // map); skip the rebuild and clone then.
+        if pairs.is_empty() && self.has_root_identity {
+            return Self::from_pair_identity(from.clone(), to.clone()).with_time_offset(self.time_offset);
+        }
+        // The common case has no target under `from` (an unrelated map); skip
+        // the rebuild and clone then.
         if !pairs.iter().any(|(_, t)| t.has_prefix(from)) {
             return self.clone();
         }
@@ -477,34 +498,6 @@ impl MapFunction {
             })
             .collect();
         Self::from_parts(deepened, self.has_root_identity, self.time_offset)
-    }
-
-    /// Returns this mapping with variant selections stripped from every pair
-    /// endpoint, collapsing a variant arc's strip pair `(/X{set=sel} → /X)` to
-    /// the identity (which canonicalization then drops).
-    ///
-    /// C++ map functions never contain variant selections — a variant arc's map
-    /// is the identity and the selection lives only in the node path, stripped by
-    /// `StripAllVariantSelections` before translation (C++ `_AddVariantArc`,
-    /// `Pcp_TranslatePath`). This engine instead bakes the strip into the variant
-    /// node's `map_to_parent`; applying this before target translation recovers
-    /// the C++ behavior so a sibling target is not shadowed by the strip pair's
-    /// target in the invertibility check.
-    pub fn without_variant_selections(&self) -> MapFunction {
-        let pairs = self.path_map.as_slice();
-        // The common case has no variant selections anywhere (`{` only appears in
-        // a selection segment); skip the per-endpoint strip and clone then.
-        if !pairs
-            .iter()
-            .any(|(s, t)| s.as_str().contains('{') || t.as_str().contains('{'))
-        {
-            return self.clone();
-        }
-        let stripped: Vec<(Path, Path)> = pairs
-            .iter()
-            .map(|(s, t)| (s.strip_all_variant_selections(), t.strip_all_variant_selections()))
-            .collect();
-        Self::from_parts(stripped, self.has_root_identity, self.time_offset)
     }
 
     /// Builds the implied-class map for propagating a class arc across this
@@ -707,6 +700,19 @@ mod tests {
         assert_eq!(m.translate_to_target(&p("/_class_Model")), Some(p("/Model")));
         // The bare prefix map keeps the root-identity result.
         assert_eq!(m.map_source_to_target(&p("/Model")), Some(p("/Model")));
+    }
+
+    /// Target translation strips variant selections from the input path before
+    /// mapping (C++ `PcpTranslatePathFromNodeToRoot`): a variant-qualified
+    /// anchor translates as its stripped form, since map functions never carry
+    /// selections.
+    #[test]
+    fn translate_strips_variant_selections() {
+        let m = MapFunction::from_pair(p("/C"), p("/Root/Inst"));
+        assert_eq!(
+            m.translate_to_target(&p("/C{v=x}geometry/Proto")),
+            Some(p("/Root/Inst/geometry/Proto"))
+        );
     }
 
     #[test]
