@@ -174,7 +174,7 @@ impl ResolvedBase {
 /// available; only plain authored namespaced attributes are gathered here.
 pub fn compute_namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&str]) -> Result<Vec<(String, Value)>> {
     let mut out = Vec::new();
-    for name in stage.prim(prim.clone()).property_names()? {
+    for name in stage.prim(prim.clone()).authored_property_names()? {
         // TODO(shade): `outputs:`-connected settings are driven by a node
         // graph; resolving their value producer needs UsdShade.
         if name.starts_with("outputs:") {

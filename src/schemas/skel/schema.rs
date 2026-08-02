@@ -404,7 +404,7 @@ impl BlendShape {
     /// `offsets`, and optional `inbetweens:<name>:normalOffsets`.
     pub fn inbetweens(&self) -> Result<Vec<Inbetween>> {
         let mut out = Vec::new();
-        let props = self.stage().prim(self.path().clone()).property_names()?;
+        let props = self.stage().prim(self.path().clone()).authored_property_names()?;
         for name in &props {
             let Some(rest) = name.strip_prefix(tok::NS_INBETWEENS) else {
                 continue;

@@ -135,7 +135,10 @@ fn assert_prims_exist(name: &str, format: Format, baseline: &pcp_json::Baseline,
         }
 
         // Check property names.
-        let props = stage.prim(prim_path.as_str()).property_names().unwrap_or_default();
+        let props = stage
+            .prim(prim_path.as_str())
+            .authored_property_names()
+            .unwrap_or_default();
         for prop in &expected.property_names {
             if !props.iter().any(|p| p.as_str() == prop.as_str()) {
                 failures.push(format!("missing property: {prim_path}.{prop}"));
@@ -403,7 +406,10 @@ mod pcp_txt {
                 out.push('\n');
             }
 
-            let properties = prim.property_names().unwrap();
+            // The dump mirrors the pcp tier, which composes `propertyChildren`
+            // without applying `propertyOrder`; the usd tier's
+            // `property_names` does apply it.
+            let properties = prim.authored_property_names().unwrap();
             if !properties.is_empty() {
                 let _ = writeln!(out, "Property names:");
                 let _ = writeln!(out, "     {}", name_list(&properties));
@@ -1106,13 +1112,28 @@ mod reorder {
     }
 
     #[test]
-    fn property_order_ignored_in_usd_mode() {
-        // USD value resolution ignores `reorder properties`, so the composed
-        // order follows authoring order despite the `reorder properties = [y, x]`
-        // opinion in the fixture.
+    fn property_order_ignored_when_composing_names() {
+        // Composing `propertyChildren` across layers ignores `reorder
+        // properties` (C++ `_ComposePrimPropertyNames` passes no order field in
+        // USD mode), so the authored set comes back in authoring order.
+        let stage = open_fixture();
+        let props = stage
+            .prim(sdf::path("/Props").unwrap())
+            .authored_property_names()
+            .unwrap();
+        assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["x", "y", "z"]);
+    }
+
+    #[test]
+    fn property_order_applied_when_reporting_names() {
+        // Reporting a prim's properties does apply the composed `propertyOrder`
+        // (C++ `UsdPrim::GetPropertyNames` sorts the union, then calls
+        // `ApplyPropertyOrder`), so the fixture's `reorder properties = [y, x]`
+        // puts `y` first and `x` last, with unlisted `z` trailing the entry it
+        // followed.
         let stage = open_fixture();
         let props = stage.prim(sdf::path("/Props").unwrap()).property_names().unwrap();
-        assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["x", "y", "z"]);
+        assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["y", "z", "x"]);
     }
 }
 

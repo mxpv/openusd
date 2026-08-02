@@ -5,13 +5,13 @@
 //! friends). They `Deref` to their prim, so the prim/attribute accessors and
 //! the inherited `Imageable → Xformable → Boundable → Gprim` methods are
 //! available directly on the handle. Attribute getters return a handle whose
-//! `get()` yields the authored value (or `None`); unauthored fallbacks come
-//! from the schema registry, which is not yet implemented.
+//! `get()` yields the authored value, falling back to what the schema
+//! declares (see [`crate::usd::SchemaRegistry`]).
 
 use anyhow::Result;
 
 use crate::sdf;
-use crate::usd::{Attribute, Prim, SchemaBase, SchemaKind, Stage};
+use crate::usd::{Attribute, Prim, SchemaBase, Stage};
 
 use super::tokens as tok;
 use super::{impl_geom_schema, Boundable, Gprim, Imageable, Xformable};
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(sphere.radius_attr().get()?, Some(sdf::Value::Double(2.5)));
         assert_eq!(sphere.compute_purpose()?, Purpose::Render);
         assert_eq!(sphere.double_sided_attr().get()?, Some(sdf::Value::Bool(true)));
-        assert_eq!(Sphere::KIND, SchemaKind::ConcreteTyped);
+        assert_eq!(Sphere::KIND, crate::usd::SchemaKind::ConcreteTyped);
         Ok(())
     }
 

@@ -31,7 +31,12 @@
 //! routes invalidation through [`crate::pcp::Changes`], so only the prim
 //! indices observably affected by the write are dropped.
 
-use super::{Attribute, EditTarget, EditTargetArc, Relationship, Stage, StageAuthoringError};
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use super::{
+    Attribute, EditTarget, EditTargetArc, PrimDefinition, PrimTypeInfo, Relationship, Stage, StageAuthoringError,
+};
 use crate::tf::Token;
 use crate::{pcp, sdf};
 
@@ -303,10 +308,39 @@ impl Prim {
         self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::CustomData)
     }
 
-    /// The prim's composed applied `apiSchemas`, flattened across all
-    /// contributing opinions. Mirrors C++ `UsdPrim::GetAppliedSchemas`.
-    /// Multi-apply instances appear as-is (e.g. `PhysicsLimitAPI:rotZ`).
+    /// The API schemas that apply to this prim, strongest first. Mirrors C++
+    /// `UsdPrim::GetAppliedSchemas`.
+    ///
+    /// This is the prim definition's list, so it includes the schemas a typed
+    /// schema or an applied schema builds in, not only the ones authored in
+    /// `apiSchemas`. Multi-apply instances appear as-is (e.g.
+    /// `PhysicsLimitAPI:rotZ`). Use
+    /// [`authored_api_schemas`](Self::authored_api_schemas) for the authored
+    /// list alone.
     pub fn api_schemas(&self) -> anyhow::Result<Vec<Token>> {
+        let info = self.prim_type_info()?;
+        let mut names = info.prim_definition().applied_api_schemas().to_vec();
+
+        // An authored name the registry does not know composes into no
+        // definition, but it is still what the prim asks for. Reporting it
+        // keeps the answer from depending on how much of the scene's schema
+        // data this build happens to have: C++ drops such a name, which it can
+        // afford because its registry is always fully populated.
+        let composed: HashSet<&Token> = names.iter().collect();
+        let unknown: Vec<Token> = self
+            .authored_api_schemas()?
+            .into_iter()
+            .filter(|name| !composed.contains(name))
+            .collect();
+
+        names.extend(unknown);
+        Ok(names)
+    }
+
+    /// The prim's composed `apiSchemas` list op, flattened across all
+    /// contributing opinions. Mirrors C++ `UsdPrim::GetAppliedSchemas` before
+    /// the prim definition folds in built-ins.
+    pub fn authored_api_schemas(&self) -> anyhow::Result<Vec<Token>> {
         self.stage
             .masked(&self.path, |g, cache| cache.api_schemas(g, &self.path))
     }
@@ -316,6 +350,22 @@ impl Prim {
     pub fn has_api_schema(&self, name: impl Into<Token>) -> anyhow::Result<bool> {
         let name = name.into();
         Ok(self.api_schemas()?.iter().any(|s| s.as_str() == name.as_str()))
+    }
+
+    /// The prim's schema type — its composed `typeName` and `apiSchemas`, and
+    /// the definition they compose to. Mirrors C++ `UsdPrim::GetPrimTypeInfo`.
+    ///
+    /// Shared with every prim of the same type, and valid for as long as the
+    /// stage's [`SchemaRegistry`](super::SchemaRegistry) lives.
+    pub fn prim_type_info(&self) -> anyhow::Result<Arc<PrimTypeInfo>> {
+        self.stage.prim_type_info(&self.path)
+    }
+
+    /// What this prim's schemas declare: their properties, and the fallback
+    /// values those properties take when nothing is authored. Mirrors C++
+    /// `UsdPrim::GetPrimDefinition`.
+    pub fn prim_definition(&self) -> anyhow::Result<Arc<PrimDefinition>> {
+        Ok(self.prim_type_info()?.prim_definition().clone())
     }
 
     /// `true` if the prim and all ancestors are active. Missing `active`
@@ -587,9 +637,43 @@ impl Prim {
             .collect())
     }
 
-    /// Returns the composed property names of this prim. Mirrors C++
-    /// `UsdPrim::GetPropertyNames`.
+    /// Returns every property name of this prim — the ones layers author and
+    /// the ones its schemas declare. Mirrors C++ `UsdPrim::GetPropertyNames`.
+    ///
+    /// The union is sorted into element order and then reordered by the prim's
+    /// composed `propertyOrder`, so the result does not depend on which half a
+    /// name came from. Use [`authored_property_names`](Self::authored_property_names)
+    /// to scan only what layers actually author.
     pub fn property_names(&self) -> anyhow::Result<Vec<Token>> {
+        let mut names = self.authored_property_names()?;
+
+        // A schema-declared property is part of the prim's surface whether or
+        // not a layer authors a spec for it, since it still resolves a type and
+        // a fallback value.
+        let info = self.prim_type_info()?;
+        let declared = info.prim_definition().property_names();
+        if !declared.is_empty() {
+            let authored: HashSet<Token> = names.iter().cloned().collect();
+            names.extend(declared.iter().filter(|name| !authored.contains(*name)).cloned());
+            names.sort_by(|a, b| sdf::element_cmp(a, b));
+        }
+
+        if let Some(order) = self
+            .stage
+            .field::<sdf::Value>(&self.path, sdf::FieldKey::PropertyOrder)?
+            .and_then(sdf::Value::try_as_token_vec)
+        {
+            sdf::apply_ordering(&mut names, &order);
+        }
+        Ok(names)
+    }
+
+    /// Returns the property names layers author on this prim, in composed
+    /// order. Mirrors C++ `UsdPrim::GetAuthoredPropertyNames`.
+    ///
+    /// This is the set to scan when the question is "what did someone write?" —
+    /// enumerating a schema's declarations would answer a different one.
+    pub fn authored_property_names(&self) -> anyhow::Result<Vec<Token>> {
         self.stage
             .masked(&self.path, |g, cache| cache.prim_properties(g, &self.path))
     }
@@ -625,10 +709,19 @@ impl Prim {
     /// Property paths under this prim whose composed spec type matches `ty`,
     /// preserving the composed property order.
     fn properties_of_type(&self, ty: sdf::SpecType) -> anyhow::Result<Vec<sdf::Path>> {
+        let info = self.prim_type_info()?;
+        let definition = info.prim_definition();
+
         let mut paths = Vec::new();
         for name in self.property_names()? {
             let path = self.property_path(&name);
-            if self.stage.spec_type(&path)? == Some(ty) {
+            // A property the prim only inherits from its schema has no composed
+            // spec, so its kind comes from the declaration instead.
+            let spec_type = self
+                .stage
+                .spec_type(&path)?
+                .or_else(|| definition.property(&name).map(|property| property.spec_type()));
+            if spec_type == Some(ty) {
                 paths.push(path);
             }
         }
@@ -758,12 +851,267 @@ impl VariantSets {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use crate::sdf;
     use crate::tf::Token;
+    use crate::usd::SchemaRegistry;
     use crate::usd::Stage;
 
     fn stage() -> anyhow::Result<Stage> {
         Stage::builder().in_memory("anon.usda")
+    }
+
+    /// A stage over the shared test schema family, so prim definitions have
+    /// something to resolve against.
+    fn schema_stage() -> anyhow::Result<Stage> {
+        Stage::builder()
+            .schema_registry(SchemaRegistry::test_registry())
+            .in_memory("anon.usda")
+    }
+
+    #[test]
+    fn prim_type_info_is_shared() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/A")?.set_type_name("DistantLight")?;
+        stage.define_prim("/B")?.set_type_name("DistantLight")?;
+        stage.define_prim("/C")?.set_type_name("DomeLight_1")?;
+
+        // Two prims of the same type share one composed definition; a different
+        // type gets its own.
+        let a = stage.prim("/A").prim_type_info()?;
+        let b = stage.prim("/B").prim_type_info()?;
+        let c = stage.prim("/C").prim_type_info()?;
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(!Arc::ptr_eq(&a, &c));
+
+        assert_eq!(
+            a.prim_definition().attribute_fallback(&Token::new("inputs:intensity")),
+            Some(sdf::Value::Float(50000.0))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prim_type_info_follows_edits() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        let prim = stage.define_prim("/Light")?;
+        assert!(prim.prim_definition()?.is_empty());
+
+        let prim = prim.set_type_name("DistantLight")?;
+        assert!(prim.prim_definition()?.has_property(&Token::new("inputs:angle")));
+
+        // Applying a schema recomposes the definition on the next read.
+        let prim = prim.add_applied_schema("CollectionAPI:render")?;
+        let definition = prim.prim_definition()?;
+        assert_eq!(
+            definition.attribute_fallback(&Token::new("collection:render:expansionRule")),
+            Some(sdf::Value::token("expandPrims"))
+        );
+        assert_eq!(
+            prim.prim_type_info()?.id().applied_api_schemas(),
+            [Token::new("CollectionAPI:render")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_properties_are_enumerated() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        let prim = stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        prim.create_attribute("authored", "double")?;
+
+        // Authored names keep their composed order; the schema's declarations
+        // follow, and a property appears once whether or not it is authored.
+        let names = stage.prim("/Sun").property_names()?;
+        assert_eq!(
+            names,
+            [
+                Token::new("authored"),
+                Token::new("collection:lightLink:expansionRule"),
+                Token::new("collection:lightLink:includeRoot"),
+                Token::new("collection:lightLink:includes"),
+                Token::new("inputs:angle"),
+                Token::new("inputs:intensity"),
+                Token::new("light:shaderId"),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_properties_split_by_kind() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // A property with no authored spec still sorts into attributes or
+        // relationships by what the schema declares it to be.
+        let attributes = stage.prim("/Sun").attributes()?;
+        let names: Vec<&str> = attributes.iter().map(|attr| attr.path().as_str()).collect();
+        assert!(names.contains(&"/Sun.inputs:intensity"), "{names:?}");
+        assert!(!names.iter().any(|name| name.ends_with("includes")), "{names:?}");
+
+        let relationships = stage.prim("/Sun").relationships()?;
+        assert_eq!(relationships.len(), 1);
+        assert!(relationships[0]
+            .path()
+            .as_str()
+            .ends_with("collection:lightLink:includes"));
+        Ok(())
+    }
+
+    #[test]
+    fn enumeration_ignores_unknown_schemas() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        prim.create_attribute("authored", "double")?;
+
+        // The default registry knows no schemas, so only authored properties
+        // are enumerated.
+        assert_eq!(stage.prim("/Sun").property_names()?, [Token::new("authored")]);
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_prim_type_resolves_definition() -> anyhow::Result<()> {
+        let stage = Stage::builder()
+            .schema_registry(SchemaRegistry::test_registry())
+            .in_memory("anon.usda")?;
+        stage.define_prim("/Sun")?.set_type_name("MyStudioLight")?;
+
+        // No registry knows `MyStudioLight`, so it resolves nothing on its own.
+        assert!(stage.prim("/Sun").prim_definition()?.is_empty());
+
+        let root_id = stage.root_layer().identifier.clone();
+        {
+            let mut root = stage.layer_mut(&root_id).expect("root layer");
+            root.edit(|e| {
+                e.pseudo_root_mut().unwrap().set(
+                    "fallbackPrimTypes",
+                    sdf::Value::Dictionary(HashMap::from([(
+                        "MyStudioLight".to_owned(),
+                        sdf::Value::token_vec(["Unregistered", "DistantLight"]),
+                    )])),
+                );
+                Ok(())
+            })?;
+        }
+
+        // The first registered fallback supplies the definition, while the
+        // prim's own `typeName` still reads back as authored.
+        let prim = stage.prim("/Sun");
+        assert_eq!(prim.type_name()?, Some(Token::new("MyStudioLight")));
+        assert_eq!(
+            prim.prim_definition()?
+                .attribute_fallback(&Token::new("inputs:intensity")),
+            Some(sdf::Value::Float(50000.0))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typeless_prim_has_empty_definition() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Plain")?;
+
+        let info = stage.prim("/Plain").prim_type_info()?;
+        assert!(info.id().is_empty());
+        assert!(Arc::ptr_eq(&info, stage.schema_registry().empty_prim_type_info()));
+        Ok(())
+    }
+
+    #[test]
+    fn type_identity_survives_an_empty_registry() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage
+            .define_prim("/Sun")?
+            .set_type_name("DistantLight")?
+            .add_applied_schema("CollectionAPI:render")?;
+
+        // The registry knowing nothing means an empty *definition*, not an
+        // empty identity — two unrelated types must not share one.
+        let sun = stage.prim("/Sun").prim_type_info()?;
+        assert_eq!(sun.id().type_name(), &Token::new("DistantLight"));
+        assert_eq!(sun.id().applied_api_schemas(), [Token::new("CollectionAPI:render")]);
+        assert!(sun.prim_definition().is_empty());
+
+        stage.define_prim("/Ball")?.set_type_name("Sphere")?;
+        assert!(!Arc::ptr_eq(&sun, &stage.prim("/Ball").prim_type_info()?));
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_api_schemas_survive_a_known_one() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage
+            .define_prim("/Sun")?
+            .set_type_name("DistantLight")?
+            .add_applied_schema("Unregistered")?;
+
+        // Adding a schema the registry knows must not make an unknown one
+        // disappear: the built-ins come first, then what is authored on top.
+        let names = stage.prim("/Sun").api_schemas()?;
+        assert_eq!(
+            names,
+            [
+                Token::new("LightAPI"),
+                Token::new("CollectionAPI:lightLink"),
+                Token::new("Unregistered"),
+            ]
+        );
+        assert!(stage.prim("/Sun").has_api_schema("Unregistered")?);
+        assert!(stage.prim("/Sun").has_api_schema("LightAPI")?);
+        Ok(())
+    }
+
+    #[test]
+    fn schema_relationship_is_uniform_and_not_custom() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // `rel collection:lightLink:includes` declares no variability, and a
+        // relationship is uniform.
+        let includes = stage.prim("/Sun").relationship("collection:lightLink:includes");
+        let definition = stage.prim("/Sun").prim_definition()?;
+        let declared = definition
+            .property(&Token::new("collection:lightLink:includes"))
+            .expect("includes");
+        assert_eq!(declared.variability(), sdf::Variability::Uniform);
+
+        // A schema declares it, so an authored `custom` is ignored.
+        includes.clone().set_custom(true)?;
+        assert!(!stage
+            .prim("/Sun")
+            .relationship("collection:lightLink:includes")
+            .is_custom()?);
+        Ok(())
+    }
+
+    #[test]
+    fn schema_relationship_is_writable() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // `collection:lightLink:includes` is declared by the schema alone, so
+        // authoring targets on it has to stamp the spec first.
+        let includes = stage
+            .prim("/Sun")
+            .relationship("collection:lightLink:includes")
+            .set_targets([sdf::path("/Sun")?])?;
+        assert_eq!(includes.targets()?, vec![sdf::path("/Sun")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn default_registry_knows_nothing() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Light")?.set_type_name("DistantLight")?;
+
+        // The process registry ships without schema data, so a real USD type
+        // resolves to an empty definition.
+        assert!(stage.prim("/Light").prim_definition()?.is_empty());
+        Ok(())
     }
 
     /// Handles own a refcounted [`Stage`], so they can be collected and

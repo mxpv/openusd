@@ -63,6 +63,12 @@ impl Relationship {
     /// `UsdProperty::IsCustom`; an unauthored `custom` field resolves to
     /// `false`.
     pub fn is_custom(&self) -> anyhow::Result<bool> {
+        // A property a schema declares is never custom — that is what `custom`
+        // means — so an authored opinion on one is ignored, exactly as for an
+        // attribute (C++ `UsdStage::_GetPropCustomImpl` covers both).
+        if self.declared_variability()?.is_some() {
+            return Ok(false);
+        }
         Ok(self
             .stage
             .field::<bool>(&self.path, sdf::FieldKey::Custom)?
@@ -93,19 +99,7 @@ impl Relationship {
     /// [`Attribute::set_metadata`]: crate::usd::Attribute::set_metadata
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            super::edit_spec(
-                layer.data_mut(),
-                path,
-                "no relationship spec at path on the edit target layer",
-                sdf::RelationshipSpecMut::get,
-                |spec| {
-                    spec.set(key, value);
-                    Ok(())
-                },
-            )
-        })?;
-        Ok(self)
+        self.edit(|spec| spec.set(key, value))
     }
 
     /// Remove a target path. Returns `Ok(true)` if it was present. Takes
@@ -115,18 +109,7 @@ impl Relationship {
     pub fn remove_target(&self, target: &sdf::Path) -> Result<bool, StageAuthoringError> {
         let target = target.clone();
         let mut removed = false;
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            super::edit_spec(
-                layer.data_mut(),
-                path,
-                "no relationship spec at path on the edit target layer",
-                sdf::RelationshipSpecMut::get,
-                |spec| {
-                    removed = spec.remove_target(&target);
-                    Ok(())
-                },
-            )
-        })?;
+        self.edit_spec(|spec| removed = spec.remove_target(&target))?;
         Ok(removed)
     }
 
@@ -197,7 +180,27 @@ impl Relationship {
     where
         F: FnOnce(&mut sdf::RelationshipSpecMut<'_>),
     {
+        self.edit_spec(f)?;
+        Ok(self)
+    }
+
+    /// Runs `f` on this relationship's spec at the edit target's layer,
+    /// stamping one from the schema declaration first when the target has none
+    /// (C++ `UsdStage::_CreateNewSpecFromSchemaRelationship`).
+    ///
+    /// Every mutation goes through here, so a relationship a schema declares is
+    /// authorable on the handle `Prim::relationships` hands back.
+    fn edit_spec<F>(&self, f: F) -> Result<(), StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>),
+    {
+        let declared = self.declared_variability().map_err(StageAuthoringError::Composition)?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
+            if let Some(variability) = declared {
+                if sdf::RelationshipSpecMut::get(layer.data_mut(), path.clone()).is_none() {
+                    sdf::RelationshipSpec::new(layer.data_mut(), path.clone(), variability, false)?;
+                }
+            }
             super::edit_spec(
                 layer.data_mut(),
                 path,
@@ -209,7 +212,22 @@ impl Relationship {
                 },
             )
         })?;
-        Ok(self)
+        Ok(())
+    }
+
+    /// The variability a schema declares for this relationship, if a schema
+    /// declares it at all — which is also the test for whether a spec may be
+    /// stamped for it.
+    fn declared_variability(&self) -> anyhow::Result<Option<sdf::Variability>> {
+        let Some((prim, name)) = self.path.split_property() else {
+            return Ok(None);
+        };
+        let info = self.stage.prim_type_info(prim)?;
+        let definition = info.prim_definition();
+        let Some(property) = definition.property(&crate::tf::Token::from(name)) else {
+            return Ok(None);
+        };
+        Ok((property.spec_type() == sdf::SpecType::Relationship).then(|| property.variability()))
     }
 }
 

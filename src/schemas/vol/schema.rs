@@ -60,7 +60,7 @@ impl Volume {
     /// name (C++ `UsdVolVolume::GetFieldPaths`).
     pub fn field_paths(&self) -> Result<Vec<(String, sdf::Path)>> {
         let mut fields = Vec::new();
-        for name in self.stage().prim(self.path().clone()).property_names()? {
+        for name in self.stage().prim(self.path().clone()).authored_property_names()? {
             let Some(field_name) = name.strip_prefix(tok::NS_FIELD) else {
                 continue;
             };

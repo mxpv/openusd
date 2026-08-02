@@ -255,7 +255,7 @@ fn winning_binding_at(
 fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<(Path, Path, BindingStrength)>> {
     let prefix = format!("{REL_MATERIAL_BINDING_COLLECTION}:");
     let mut out = Vec::new();
-    for name in stage.prim(p.clone()).property_names()? {
+    for name in stage.prim(p.clone()).authored_property_names()? {
         let Some(rest) = name.strip_prefix(&prefix) else {
             continue;
         };

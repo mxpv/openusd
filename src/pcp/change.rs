@@ -26,8 +26,8 @@
 //!   composition-arc, instancing, or permission opinion that can add or drop a
 //!   subtree (C++ `Pcp_EntryRequiresPrimIndexChange`). `specifier`, `active`,
 //!   `apiSchemas`, and `relocates` are significant here too, slightly broader
-//!   than C++ (which routes `active` / `specifier` through separate mechanisms
-//!   and does not yet compose `apiSchemas` from a schema registry).
+//!   than C++ (which routes `active` / `specifier` through separate
+//!   mechanisms).
 //! - an inert `over` add or remove carrying no significant field → spec tier.
 //! - `subLayers`, `subLayerOffsets`, `layerRelocates`, `timeCodesPerSecond` /
 //!   `framesPerSecond`, `expressionVariables` on the root → layer-stack tier;

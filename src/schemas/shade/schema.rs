@@ -228,7 +228,7 @@ impl Material {
             let mut contexts: Vec<String> = self
                 .stage()
                 .prim(self.path().clone())
-                .property_names()?
+                .authored_property_names()?
                 .into_iter()
                 .filter(|prop| {
                     prop.strip_prefix(tok::NS_OUTPUTS)

@@ -47,8 +47,8 @@ fn distant_light_inputs_and_angle() -> Result<()> {
 
 #[test]
 fn distant_light_unauthored_intensity_is_none() -> Result<()> {
-    // No schema registry yet, so DistantLight's documented 50000 fallback is
-    // not synthesized — an unauthored input reads back `None`.
+    // The process registry ships without schema data, so an unauthored input
+    // reads back `None` rather than DistantLight's documented 50000 fallback.
     let stage = from_usda("#usda 1.0\ndef DistantLight \"Bare\" {}\n")?;
     let bare = DistantLight::get(&stage, sdf::path("/Bare")?)?.expect("DistantLight");
     assert_eq!(bare.intensity_attr().get::<sdf::Value>()?, None);

@@ -9,7 +9,7 @@
 use anyhow::Result;
 
 use crate::sdf;
-use crate::usd::{Attribute, Prim, Relationship, SchemaBase, SchemaKind, Stage};
+use crate::usd::{Attribute, Prim, Relationship, SchemaBase, Stage};
 
 use super::tokens as tok;
 use super::{impl_geom_schema, Boundable, Imageable, Xformable};

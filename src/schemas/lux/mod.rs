@@ -29,12 +29,12 @@
 //!
 //! Property accessors mirror the C++ `Get*Attr` / `Create*Attr` pair: a
 //! `foo_attr()` returns an [`crate::usd::Attribute`] handle whose `get()`
-//! yields the authored value (or `None` — there is no schema registry yet to
-//! supply fallbacks, so e.g. `DistantLight`'s documented 50000 intensity is
-//! not synthesized), and `create_foo_attr()` authors the attribute with its
-//! schema-declared type / variability. Applied-API views (`LightAPI`,
-//! `ShapingAPI`, …) gate their `get` on the prim's composed `apiSchemas` and
-//! `apply` it through [`crate::usd::Prim::add_applied_schema`].
+//! yields the authored value, or the fallback the schema declares when
+//! nothing is authored (see [`crate::usd::SchemaRegistry`]), and `create_foo_attr()` authors
+//! the attribute with its schema-declared type / variability. Applied-API
+//! views (`LightAPI`, `ShapingAPI`, …) gate their `get` on the prim's composed
+//! `apiSchemas` and `apply` it through
+//! [`crate::usd::Prim::add_applied_schema`].
 //!
 //! Token-valued attributes (`texture:format`, `poleAxis`,
 //! `lightList:cacheBehavior`) decode through the enums at the end of this

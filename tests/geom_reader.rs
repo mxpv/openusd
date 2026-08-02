@@ -272,8 +272,8 @@ fn cube_authored_size() -> Result<()> {
 
 #[test]
 fn unauthored_cube_size_is_none() -> Result<()> {
-    // No schema registry yet, so an unauthored attribute reads back as `None`
-    // rather than the spec fallback.
+    // The process registry ships without schema data, so an unauthored
+    // attribute reads back as `None` rather than the spec fallback.
     let stage = open()?;
     let cube = Cube::get(&stage, sdf::path("/World/Shapes/DefaultCube")?)?.expect("Cube");
     assert_eq!(cube.size_attr().get::<sdf::Value>()?, None);
@@ -363,8 +363,8 @@ fn camera_authored_attrs() -> Result<()> {
 #[test]
 fn camera_unauthored_attrs_are_none() -> Result<()> {
     let stage = open()?;
-    // /World/Cam authors only focalLength; the rest read back as `None`
-    // (no schema registry to supply fallbacks).
+    // /World/Cam authors only focalLength; the rest read back as `None`,
+    // since the process registry ships without schema data.
     let c = Camera::get(&stage, sdf::path("/World/Cam")?)?.expect("Camera");
     assert_eq!(c.focal_length_attr().get()?, Some(sdf::Value::Float(50.0)));
     assert_eq!(c.horizontal_aperture_attr().get::<sdf::Value>()?, None);

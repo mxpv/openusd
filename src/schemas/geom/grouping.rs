@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::sdf;
-use crate::usd::{Prim, SchemaBase, SchemaKind, Stage};
+use crate::usd::{Prim, SchemaBase, Stage};
 
 use super::tokens as tok;
 use super::{impl_geom_schema, Imageable, Xformable};

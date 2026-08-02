@@ -24,8 +24,8 @@
 //! | `media`   | `media`   | `UsdMedia` trait-views (`SpatialAudio` + `AssetPreviewsAPI`); builds on the `geom` trait chain. |
 //! | `proc`    | `proc`    | `UsdProc` trait-view (`GenerativeProcedural`, a `geom::Boundable`); builds on the `geom` trait chain. |
 //!
-//! See [`registry`] for the eventual schema-registry surface
-//! (currently a stub).
+//! These views read and author opinions; the property fallbacks a schema
+//! declares come from [`crate::usd::SchemaRegistry`].
 
 #[cfg(any(
     feature = "geom",
@@ -61,5 +61,3 @@ pub mod skel;
 pub mod ui;
 #[cfg(feature = "vol")]
 pub mod vol;
-
-pub mod registry;

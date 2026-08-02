@@ -824,8 +824,9 @@ mod tests {
         let d = DistantLight::define(&stage, "/Sun")?;
         d.create_angle_attr()?.set(0.53_f32)?;
         assert_eq!(d.angle_attr().get()?, Some(sdf::Value::Float(0.53)));
-        // No schema registry yet, so DistantLight's documented 50000 fallback
-        // is not synthesized.
+        // The process registry ships without schema data, so DistantLight's
+        // documented 50000 fallback has nothing to come from. Registering a
+        // family through `StageBuilder::schema_registry` supplies it.
         assert_eq!(d.intensity_attr().get::<sdf::Value>()?, None);
         Ok(())
     }

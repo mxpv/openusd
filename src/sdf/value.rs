@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use crate::gf::f16;
@@ -902,6 +903,30 @@ impl FromValueCast for Vec<gf::Vec3f> {
                 .map(|h| gf::vec3f(f32::from(h.x), f32::from(h.y), f32::from(h.z)))
                 .collect()),
             other => Err(CastError::mismatch::<Vec<gf::Vec3f>>((&other).into())),
+        }
+    }
+}
+
+/// Applies `stronger over weaker` dictionary composition in place
+/// (C++ `VtDictionaryOverRecursive`).
+///
+/// Keys authored in the stronger dictionary win. If both dictionaries hold a
+/// dictionary at the same key, those nested dictionaries are composed
+/// recursively; otherwise the stronger value is kept. This is the dictionary
+/// combining rule of core spec §12.2.5, shared by value resolution and by
+/// schema prim-definition composition.
+pub fn dictionary_over(stronger: &mut super::Dictionary, weaker: super::Dictionary) {
+    for (key, weaker_value) in weaker {
+        match stronger.entry(key) {
+            Entry::Occupied(mut entry) => {
+                if let (Value::Dictionary(strong_dict), Value::Dictionary(weak_dict)) = (entry.get_mut(), weaker_value)
+                {
+                    dictionary_over(strong_dict, weak_dict);
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(weaker_value);
+            }
         }
     }
 }

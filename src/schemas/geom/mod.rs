@@ -51,10 +51,10 @@
 //!
 //! Property accessors mirror the C++ `Get*Attr` / `Create*Attr` pair: a
 //! `foo_attr()` returns an [`crate::usd::Attribute`] handle whose `get()`
-//! yields the authored value (or `None` — there is no schema registry yet to
-//! supply fallbacks), and `create_foo_attr()` authors the attribute with its
-//! schema-declared type / variability and returns the handle. `GeomSubset`
-//! is the lone typed-but-not-imageable schema.
+//! yields the authored value, or the fallback the schema declares when
+//! nothing is authored (see [`crate::usd::SchemaRegistry`]), and `create_foo_attr()` authors
+//! the attribute with its schema-declared type / variability and returns the
+//! handle. `GeomSubset` is the lone typed-but-not-imageable schema.
 //!
 //! Token-valued attributes (`visibility`, `purpose`, `projection`, `axis`,
 //! `subdivisionScheme`, …) decode through the token enums defined at the end
@@ -111,8 +111,8 @@ pub use xformable::Xformable;
 /// declares its chain through this macro; the single hand-written `SchemaBase`
 /// method is `prim`, and the intermediate traits are empty memberships. Each
 /// arm extends the next-weaker one, so the chain order lives in one place; the
-/// traits it pulls in — plus `SchemaBase`, `SchemaKind`, and `Prim` — must be
-/// in scope at the call site.
+/// traits it pulls in — plus `SchemaBase` and `Prim` — must be in scope at the
+/// call site.
 ///
 /// - `typed` stops at [`SchemaBase`] (a typed prim that is not `Imageable`,
 ///   e.g. `GeomSubset`).
@@ -126,7 +126,7 @@ pub use xformable::Xformable;
 macro_rules! impl_geom_schema {
     (typed $ty:ident) => {
         impl SchemaBase for $ty {
-            const KIND: SchemaKind = SchemaKind::ConcreteTyped;
+            const KIND: $crate::usd::SchemaKind = $crate::usd::SchemaKind::ConcreteTyped;
 
             fn prim(&self) -> &Prim {
                 &self.0

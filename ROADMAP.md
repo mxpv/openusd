@@ -103,6 +103,7 @@ that broader spec behavior can be considered fully covered.
 | Ordered prim children (`primOrder` reordering) | `11.3.1` | :white_check_mark: | `0.5.0` | `Prim::children`; weak-to-strong fold reapplying `primOrder` and relocates per layer |
 | Ordered property children | `11.3.2` | :white_check_mark: | `0.2.0` | Merged `propertyChildren` |
 | Ordered property children (`propertyOrder` reordering) | `11.3.2` | :white_check_mark: | `0.5.0` | Property names fold weakest-to-strongest, reapplying each layer's `propertyOrder` as it merges (shares the `primChildren` fold) |
+| Property children include schema declarations | `11.3.2` | :white_check_mark: | `main` | `usd::Prim::property_names` unions authored names with the prim definition's, sorts the result and applies the composed `propertyOrder` (C++ `UsdPrim::GetPropertyNames`); `authored_property_names` keeps the layer-authored set alone |
 | [Scene graph instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) | `11.3.3` | :white_check_mark: | `0.5.0` | Instances share one composed prototype; descendants take only the shared subtree. The `/__Prototype_N` namespace composes independently (proxies redirect onto it), so nested instances and target remapping (§12.4) work; variant selections key the prototype, content honors the population mask, invalidation is change-targeted |
 | Model hierarchy (kind) | `11.4` | :white_check_mark: | `0.4.0` | Model/group/component/subcomponent queries validate the contiguous kind hierarchy |
 | [Stage queries](https://openusd.org/release/api/prim_flags_8h.html) (Active, Loaded, Defined, Abstract, Instance, InPrototype) | `11.5` | :white_check_mark: | `0.4.0` | Per-prim status flags and `PrimPredicate` traversal filtering<br>`0.5.0` — `IN_PROTOTYPE` and the instance-proxy traversal toggle (see Scene graph instancing, §11.3.3) |
@@ -114,13 +115,13 @@ that broader spec behavior can be considered fully covered.
 |---|---|---|---|---|
 | Metadata resolution (strongest opinion wins) | `12.2` | :white_check_mark: | `0.2.0` | Strongest authored opinion wins, with `ValueBlock` support for scalar fields<br>Special field classes are tracked separately below |
 | Specifier resolution | `12.2.1` | :white_check_mark: | `0.4.0` | `def`/`class`/`over` precedence with direct-inherit awareness |
-| typeName resolution (from prim definition) | `12.2.2` | :construction: | | Uses strongest opinion, not prim definition |
+| typeName resolution (from prim definition) | `12.2.2` | :white_check_mark: | `main` | `Attribute::type_name` takes the type its schema declares, consulting composition only for a property no schema declares (C++ `_GetAttrTypeImpl`); `variability` and `custom` resolve declaration-first the same way, and `get_metadata` routes those three fields through the same rules |
 | variability resolution (weakest opinion) | `12.2.3` | :white_check_mark: | `0.4.0` | Weakest authored opinion wins |
 | custom field resolution (any-true) | `12.2.4` | :white_check_mark: | `0.4.0` | Logical OR across opinions |
 | Dictionary combining | `12.2.5` | :white_check_mark: | `0.4.0` | Recursive merge across dictionary-valued opinions |
 | List op resolution | `12.2.6` | :construction: | | Composition-arc list ops, composed `apiSchemas`, `connectionPaths`/`targetPaths`, and `clipSets` order folded across layers<br>Remaining — schema-registry-driven generic list-op field resolution so any field declared list-op composes without a hand-wired call site |
 | Layer metadata (root layer only) | `12.2.7` | :white_check_mark: | `0.2.0` | `defaultPrim`, timing fields, etc. |
-| Fallback values | `12.2.8` | :construction: | | Requires schema registry |
+| Fallback values | `12.2.8` | :construction: | | `Attribute::get` / `get_at` fall through to the prim definition's fallback when composition resolves no value, including for a blocked attribute (§12.3.6); `Attribute::value_source` reports which tier answered<br>Remaining — import the OpenUSD schema data so the process registry has fallbacks to supply |
 | Basic attribute resolution | `12.3` | :white_check_mark: | `0.5.0` | `0.2.0` — resolves authored `default`, `timeSamples`, and `ValueBlock`<br>`0.5.0` — layer-offset retiming applied<br>Value clips and splines are tracked separately |
 | Time-sample lookup and interpolation | `12.3, 12.5.1-2` | :white_check_mark: | `0.5.0` | `0.1.2` — time-sample parsing<br>`0.4.0` — `Stage::value_at` performs held/linear interpolation over composed samples<br>`0.5.0` — per-node retiming and value clips |
 | Layer-offset retiming during value resolution | `12.3.2.1` | :white_check_mark: | `0.5.0` | Each node's sample times mapped to stage time through its composed offset (`stage_t = scale*layer_t + offset`; sublayer/reference/payload)<br>Strongest `timeSamples` node wins, `ValueBlock` blocks weaker layers |
@@ -135,14 +136,14 @@ that broader spec behavior can be considered fully covered.
 
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
-| [Schema registry](https://openusd.org/release/api/class_usd_schema_registry.html) | `13.3` | :construction: | | Type hierarchy, prim definitions |
-| [Typed schemas](https://openusd.org/release/api/class_usd_typed.html) (IsA) | `13.3.1` | :construction: | | `typeName` readable; registry not implemented |
-| [Applied schemas](https://openusd.org/release/api/class_usd_a_p_i_schema_base.html) (HasA) | `13.3.2` | :construction: | | `apiSchemas` list-ops compose across layers, with registry-free authoring of applied schema tokens<br>Remaining — schema registry, application validation, built-in/auto-apply inclusions, composed prim definitions, fallback values |
-| Schema inclusions (built-ins, auto-applies) | `13.3.2.1` | :construction: | | |
-| Prim definitions (property fallbacks) | `13.3` | :construction: | | |
+| [Schema registry](https://openusd.org/release/api/class_usd_schema_registry.html) | `13.3` | :construction: | | `usd::SchemaRegistry` built from `usd::FamilySource` pairs (flattened schematics + manifest), with `usd::SchemaInfo`, `usd::PrimDefinition`, and a `usd::PrimTypeInfo` interner; per-stage via `usd::StageBuilder::schema_registry`<br>Remaining — import the OpenUSD schema data; auto-apply expansion; IsA queries over `SchemaInfo::bases` |
+| [Typed schemas](https://openusd.org/release/api/class_usd_typed.html) (IsA) | `13.3.1` | :construction: | | A concrete type's registered definition backs `usd::Prim::prim_definition`, so its properties, fallbacks and built-in API schemas resolve<br>Remaining — `IsA` queries walking `SchemaInfo::bases`; `schemas::common::get_typed` still matches `typeName` by string |
+| [Applied schemas](https://openusd.org/release/api/class_usd_a_p_i_schema_base.html) (HasA) | `13.3.2` | :construction: | | `apiSchemas` list-ops compose across layers, with registry-free authoring of applied schema tokens; a prim's composed list drives `SchemaRegistry::build_composed_prim_definition` through `usd::Prim::prim_definition`<br>Remaining — application validation (`SchemaInfo::can_only_apply_to` / `allowed_instance_names` are parsed but unenforced); auto-apply inclusions |
+| Schema inclusions (built-ins, auto-applies) | `13.3.2.1` | :construction: | | A class prim's `apiSchemas` expand recursively into its definition, cycle-guarded, with multiple-apply templates instantiated per instance name and one version per (family, instance)<br>Remaining — `apiSchemaAutoApplyTo` expansion |
+| Prim definitions (property fallbacks) | `13.3` | :white_check_mark: | `main` | `usd::PrimDefinition` composes typed and applied tiers per §13.3.2.3 — first-writer-wins, weaker fill-in, `propertyOrder` append and recursive dictionary merge, `apiSchemaOverridePropertyNames` composed over the property they override |
 | Core schema types | `13.4` | :construction: | | |
 | [Value type names](https://openusd.org/release/api/class_sdf_value_type_name.html) | `13.3` | :construction: | | Attribute type validation |
-| Extension metadata fields (fallbackPrimTypes, apiSchemas, clips, clipSets) | `13.2` | :construction: | | Fields readable; `apiSchemas` list-op composition + value-clip semantics for `clips`/`clipSets` resolved (§12.3.4)<br>Remaining — composed-prim `fallbackPrimTypes` |
+| Extension metadata fields (fallbackPrimTypes, apiSchemas, clips, clipSets) | `13.2` | :white_check_mark: | `main` | Fields readable; `apiSchemas` list-op composition + value-clip semantics for `clips`/`clipSets` resolved (§12.3.4)<br>A `typeName` the registry does not know resolves through the root layer's `fallbackPrimTypes` to the first substitute it does know (C++ `ComputeInvalidPrimTypeToFallbackMap`) |
 | [Schema codegen](https://openusd.org/release/tut_generating_new_schema.html) | `13.3` | :construction: | | Generate typed APIs from schema definitions |
 
 ## Color (Spec 14)

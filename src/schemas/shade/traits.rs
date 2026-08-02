@@ -62,7 +62,7 @@ pub trait Connectable: SchemaBase {
     fn input_names(&self) -> Result<Vec<String>> {
         Ok(self
             .prim()
-            .property_names()?
+            .authored_property_names()?
             .into_iter()
             .filter_map(|p| p.strip_prefix(NS_INPUTS).map(str::to_string))
             .collect())
@@ -73,7 +73,7 @@ pub trait Connectable: SchemaBase {
     fn output_names(&self) -> Result<Vec<String>> {
         Ok(self
             .prim()
-            .property_names()?
+            .authored_property_names()?
             .into_iter()
             .filter_map(|p| p.strip_prefix(NS_OUTPUTS).map(str::to_string))
             .collect())

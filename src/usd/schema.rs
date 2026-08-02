@@ -13,8 +13,10 @@ use super::{Prim, Stage};
 
 /// How a schema relates to its prim (C++ `UsdSchemaKind`).
 ///
-/// Each concrete schema declares its kind as [`SchemaBase::KIND`]; the
-/// classification queries on [`SchemaBase`] derive from it.
+/// Each concrete schema view declares its kind as
+/// [`SchemaBase::KIND`]; the classification queries on that trait derive
+/// from it. [`SchemaRegistry`](super::SchemaRegistry) reads the same
+/// classification out of a family manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SchemaKind {
     /// Abstract base that is never instantiated and is not `UsdTyped`
@@ -48,8 +50,8 @@ pub enum SchemaKind {
 /// C++ `UsdSchema::Get`) belongs on each concrete schema.
 ///
 /// The registry-backed members of C++ `UsdSchemaBase`
-/// (`GetSchemaClassPrimDefinition`, `GetSchemaAttributeNames`) are omitted
-/// until the schema registry ([`crate::schemas::registry`]) exists.
+/// (`GetSchemaClassPrimDefinition`, `GetSchemaAttributeNames`) are reached
+/// through the prim instead, against [`SchemaRegistry`](super::SchemaRegistry).
 pub trait SchemaBase {
     /// This schema's kind (C++ `UsdSchemaBase::schemaKind` /
     /// `GetSchemaKind`). Read it at the type level (`Sphere::KIND`) or
@@ -99,6 +101,34 @@ pub trait SchemaBase {
     /// (C++ `IsMultipleApplyAPISchema`).
     fn is_multiple_apply_api_schema(&self) -> bool {
         matches!(Self::KIND, SchemaKind::MultipleApplyApi)
+    }
+}
+
+impl SchemaKind {
+    /// The token a manifest's `schemaKind` attribute uses, matching the
+    /// spellings C++ writes into `plugInfo.json`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SchemaKind::AbstractBase => "abstractBase",
+            SchemaKind::AbstractTyped => "abstractTyped",
+            SchemaKind::ConcreteTyped => "concreteTyped",
+            SchemaKind::NonAppliedApi => "nonAppliedAPI",
+            SchemaKind::SingleApplyApi => "singleApplyAPI",
+            SchemaKind::MultipleApplyApi => "multipleApplyAPI",
+        }
+    }
+
+    /// Parses the token spelling produced by [`as_str`](Self::as_str).
+    pub fn from_token(text: &str) -> Option<SchemaKind> {
+        Some(match text {
+            "abstractBase" => SchemaKind::AbstractBase,
+            "abstractTyped" => SchemaKind::AbstractTyped,
+            "concreteTyped" => SchemaKind::ConcreteTyped,
+            "nonAppliedAPI" => SchemaKind::NonAppliedApi,
+            "singleApplyAPI" => SchemaKind::SingleApplyApi,
+            "multipleApplyAPI" => SchemaKind::MultipleApplyApi,
+            _ => return None,
+        })
     }
 }
 

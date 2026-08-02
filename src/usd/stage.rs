@@ -41,6 +41,7 @@ use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bitflags::bitflags;
@@ -50,6 +51,7 @@ use crate::{ar, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
 use super::sink::{Payload, PendingChange, Provenance, StageSink, StageSinkId};
+use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry};
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -725,6 +727,48 @@ pub struct StageInner {
     /// stage-authored batch and a direct [`layer_mut`](Stage::layer_mut) edit are
     /// each one transaction without the stage tracking any boundary of its own.
     current_generation: Cell<u64>,
+    /// The schemas this stage resolves fallback values against. Pinned at open,
+    /// so the definitions a prim reads never shift under it.
+    schema_registry: Arc<SchemaRegistry>,
+    /// Which prim is of which schema type, so a fallback read does not recompose
+    /// `typeName` and `apiSchemas` every time. The registry holds the composed
+    /// definitions themselves; this only remembers which one each path resolved
+    /// to, and is dropped wholesale when composition moves on.
+    prim_types: RefCell<PrimTypeMemo>,
+}
+
+/// Per-prim schema type handles, valid as of one composition revision.
+///
+/// This is the stage-local half of prim type resolution: the registry caches
+/// definitions by type identity, and this remembers which identity each prim
+/// currently has. An edit that changes any prim's type advances the revision,
+/// which drops the whole memo — cheap, since re-deriving one prim's identity is
+/// two composed reads.
+#[derive(Default)]
+struct PrimTypeMemo {
+    revision: u64,
+    types: HashMap<sdf::Path, Arc<PrimTypeInfo>>,
+}
+
+impl PrimTypeMemo {
+    /// The remembered type of a prim, if it was resolved under the revision
+    /// still in effect.
+    fn lookup(&self, revision: u64, path: &sdf::Path) -> Option<Arc<PrimTypeInfo>> {
+        if self.revision != revision {
+            return None;
+        }
+        self.types.get(path).cloned()
+    }
+
+    /// Remembers a prim's type, discarding everything resolved under an
+    /// earlier revision.
+    fn remember(&mut self, revision: u64, path: sdf::Path, info: Arc<PrimTypeInfo>) {
+        if self.revision != revision {
+            self.types.clear();
+            self.revision = revision;
+        }
+        self.types.insert(path, info);
+    }
 }
 
 /// A composed USD stage.
@@ -2423,6 +2467,74 @@ impl Stage {
         self.cache.borrow().revision()
     }
 
+    /// The schemas this stage resolves against (C++
+    /// `UsdStage::GetSchemaRegistry` is a global; here it is per stage).
+    pub fn schema_registry(&self) -> &Arc<SchemaRegistry> {
+        &self.schema_registry
+    }
+
+    /// The schema type of the prim at `path` (C++ `UsdPrim::GetPrimTypeInfo`).
+    ///
+    /// Derived from the prim's composed `typeName` and `apiSchemas`, and shared
+    /// with every other prim resolving to the same pair. A prim with neither —
+    /// including one the population mask excludes — gets the registry's empty
+    /// type.
+    pub fn prim_type_info(&self, path: impl Into<sdf::Path>) -> Result<Arc<PrimTypeInfo>> {
+        let path = path.into();
+        let revision = self.cache_revision();
+        if let Some(info) = self.prim_types.borrow().lookup(revision, &path) {
+            return Ok(info);
+        }
+
+        // Keyed on the authored list, not the composed one: the composed list
+        // is what the definition this identity selects reports back
+        // (C++ `_ComposeAuthoredAppliedSchemas`).
+        let prim = self.prim(&path);
+        let mut id = PrimTypeId::new(prim.type_name()?, prim.authored_api_schemas()?);
+        if let Some(mapped) = self.fallback_prim_type(id.type_name())? {
+            id = id.with_mapped_type_name(mapped);
+        }
+        // A prototype can be materialized lazily, gaining a type without an
+        // edit to notice, so an empty identity is re-derived every time rather
+        // than remembered.
+        let empty = id.is_empty();
+        let info = self.schema_registry.prim_type_info(id);
+        if !empty {
+            self.prim_types.borrow_mut().remember(revision, path, info.clone());
+        }
+        Ok(info)
+    }
+
+    /// The registered type to use in place of `type_name`, when the stage's
+    /// root layer names one and the registry does not know the authored type
+    /// (C++ `Usd_PrimTypeInfoCache::ComputeInvalidPrimTypeToFallbackMap`).
+    ///
+    /// `fallbackPrimTypes` maps each such type to an ordered list of
+    /// substitutes; the first the registry knows wins, so an asset written
+    /// against a newer schema still resolves against what this build has.
+    fn fallback_prim_type(&self, type_name: &Token) -> Result<Option<Token>> {
+        const FALLBACK_PRIM_TYPES: &str = "fallbackPrimTypes";
+
+        if type_name.as_str().is_empty() || self.schema_registry.is_concrete_type(type_name) {
+            return Ok(None);
+        }
+        let Some(sdf::Value::Dictionary(fallbacks)) =
+            self.field::<sdf::Value>(sdf::Path::abs_root(), FALLBACK_PRIM_TYPES)?
+        else {
+            return Ok(None);
+        };
+        let Some(candidates) = fallbacks
+            .get(type_name.as_str())
+            .cloned()
+            .and_then(sdf::Value::try_as_token_vec)
+        else {
+            return Ok(None);
+        };
+        Ok(candidates
+            .into_iter()
+            .find(|candidate| self.schema_registry.is_concrete_type(candidate)))
+    }
+
     /// Returns a [`Prim`](super::Prim) handle anchored to `path`. Mirrors C++
     /// `UsdStage::GetPrimAtPath`. The handle is a value-type `(stage, path)`
     /// wrapper; it is returned unconditionally and does not assert that a prim
@@ -3198,6 +3310,7 @@ pub struct StageBuilder {
     population_mask: StagePopulationMask,
     interpolation_type: InterpolationType,
     muted: HashSet<String>,
+    schema_registry: Option<Arc<SchemaRegistry>>,
 }
 
 #[derive(Default)]
@@ -3225,6 +3338,7 @@ impl StageBuilder {
             population_mask: StagePopulationMask::all(),
             interpolation_type: InterpolationType::default(),
             muted: HashSet::new(),
+            schema_registry: None,
         }
     }
 
@@ -3247,6 +3361,18 @@ impl StageBuilder {
     /// Default per AOUSD §12.5 is [`InterpolationType::Linear`].
     pub fn interpolation_type(mut self, mode: InterpolationType) -> Self {
         self.interpolation_type = mode;
+        self
+    }
+
+    /// Sets the schemas the stage resolves fallback values against.
+    ///
+    /// Defaults to [`SchemaRegistry::global`](SchemaRegistry::global),
+    /// the process-wide registry. Supply one built through
+    /// [`SchemaRegistry::builder`](SchemaRegistry::builder) to give a
+    /// stage schemas the process does not have, or to give it none. The
+    /// registry is pinned for the stage's life.
+    pub fn schema_registry(mut self, registry: Arc<SchemaRegistry>) -> Self {
+        self.schema_registry = Some(registry);
         self
     }
 
@@ -3556,6 +3682,8 @@ impl StageBuilder {
             pending: RefCell::new(Vec::new()),
             edit_provenance: RefCell::new(None),
             current_generation: Cell::new(0),
+            schema_registry: self.schema_registry.unwrap_or_else(|| SchemaRegistry::global().clone()),
+            prim_types: RefCell::default(),
         }));
         // Add every collected layer through the one join seam, so each gets its
         // change aggregator as it joins; then wire the sublayer DAG from the

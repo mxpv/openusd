@@ -6,7 +6,6 @@
 //! [`graph`](super::graph) for the underlying node arena.
 
 use std::borrow::Cow;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
@@ -484,7 +483,7 @@ impl PrimIndex {
                 (None, Value::Dictionary(dict)) => merged = Some(dict),
                 (None, other) => return Ok(Some(other)),
                 (Some(_), Value::ValueBlock) => break,
-                (Some(strong), Value::Dictionary(weaker)) => dictionary_over(strong, weaker),
+                (Some(strong), Value::Dictionary(weaker)) => sdf::dictionary_over(strong, weaker),
                 (Some(_), _) => {}
             }
         }
@@ -906,27 +905,6 @@ fn retime_clip_stage_times(value: Value, offset: LayerOffset) -> Value {
             Value::Vec2dVec(pairs.into_iter().map(|p| gf::vec2d(offset.apply(p.x), p.y)).collect())
         }
         other => other,
-    }
-}
-
-/// Applies `strong over weak` dictionary composition in place.
-///
-/// Keys authored in the stronger dictionary win. If both dictionaries hold a
-/// dictionary at the same key, those nested dictionaries are composed
-/// recursively; otherwise the stronger value is kept.
-fn dictionary_over(stronger: &mut HashMap<String, Value>, weaker: HashMap<String, Value>) {
-    for (key, weaker_value) in weaker {
-        match stronger.entry(key) {
-            Entry::Occupied(mut entry) => {
-                if let (Value::Dictionary(strong_dict), Value::Dictionary(weak_dict)) = (entry.get_mut(), weaker_value)
-                {
-                    dictionary_over(strong_dict, weak_dict);
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(weaker_value);
-            }
-        }
     }
 }
 

@@ -13,13 +13,16 @@ mod diff;
 mod editor;
 mod interp;
 mod prim;
+mod prim_definition;
+mod prim_type_info;
 mod relationship;
 mod schema;
+mod schema_registry;
 mod sink;
 mod stage;
 mod timecode;
 
-pub use attribute::{Attribute, AttributeQuery};
+pub use attribute::{Attribute, AttributeQuery, ValueSource};
 pub use capture::{ReplayStage, UndoStage};
 pub use clips::ClipsAPI;
 pub use collection::{
@@ -31,8 +34,11 @@ pub use diff::{ApplyMode, Diff, Edit, FieldValue};
 pub use editor::{NamespaceEditError, NamespaceEditor};
 pub use interp::InterpolationType;
 pub use prim::{Prim, PrimIndexRef, VariantSets};
+pub use prim_definition::{DefProperty, PrimDefinition};
+pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
+pub use schema_registry::{FamilySource, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, Schematics};
 pub use sink::{CommittedChange, PendingChange, Provenance, StageSink, StageSinkId};
 pub use stage::{
     EditContext, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus, Stage,

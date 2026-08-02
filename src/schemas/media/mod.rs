@@ -16,10 +16,11 @@
 //!
 //! Property accessors mirror the C++ `Get*Attr` / `Create*Attr` pair: a
 //! `foo_attr()` returns an [`crate::usd::Attribute`] handle whose `get()`
-//! yields the authored value (or `None` — there is no schema registry yet to
-//! supply fallbacks), and `create_foo_attr()` authors the attribute with its
-//! schema-declared type / variability. The `startTime` / `endTime` attributes
-//! are `timecode`, so they read / write as [`sdf::TimeCode`].
+//! yields the authored value, or the fallback the schema declares when
+//! nothing is authored (see [`crate::usd::SchemaRegistry`]), and `create_foo_attr()` authors
+//! the attribute with its schema-declared type / variability. The `startTime`
+//! / `endTime` attributes are `timecode`, so they read / write as
+//! [`sdf::TimeCode`].
 //!
 //! `auralMode` / `playbackMode` decode through the [`AuralMode`] /
 //! [`PlaybackMode`] enums via `from_token` / `as_token`.
