@@ -35,7 +35,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
-    Attribute, EditTarget, EditTargetArc, PrimDefinition, PrimTypeInfo, Relationship, Stage, StageAuthoringError,
+    ApplyApiError, Attribute, EditTarget, EditTargetArc, PrimDefinition, PrimTypeInfo, Relationship, Stage,
+    StageAuthoringError,
 };
 use crate::tf::Token;
 use crate::{pcp, sdf};
@@ -104,8 +105,8 @@ impl Prim {
     /// This is the registry-free authoring operation behind C++
     /// `UsdPrim::AddAppliedSchema`: it edits the current edit target's
     /// `apiSchemas` list op in place rather than replacing existing list-op
-    /// opinions. It does not validate that `name` is a registered API schema;
-    /// schema-registry-backed `ApplyAPI` behavior is still future work.
+    /// opinions, and authors `name` whatever it is. Reach for
+    /// [`apply_api`](Self::apply_api) to have the registry check it first.
     ///
     /// The prim spec must already exist on the active edit target — chain
     /// after [`Stage::define_prim`] or [`Stage::override_prim`]; otherwise
@@ -128,6 +129,81 @@ impl Prim {
             )
         })?;
         Ok(self)
+    }
+
+    /// Apply an API schema to this prim, checking it against the registry
+    /// first. Mirrors C++ `UsdPrim::ApplyAPI`.
+    ///
+    /// `name` carries the instance for a multiple-apply schema, as it does
+    /// everywhere else applied names appear (`CollectionAPI:render`). The check
+    /// is the one C++ makes here: the schema must be an applied API schema, and
+    /// must be given an instance name exactly when it is multiple-apply. The
+    /// restrictions a schema places on *where* it may be applied are advisory
+    /// and are not enforced — ask [`can_apply_api`](Self::can_apply_api) for
+    /// those.
+    ///
+    /// A name the registry does not know carries no rules to break, so it is
+    /// authored as-is; that is what keeps applying schemas working while no
+    /// schema data is registered.
+    ///
+    /// Authoring carries [`add_applied_schema`](Self::add_applied_schema)'s
+    /// precondition: the prim spec must already exist on the active edit
+    /// target, so chain after [`Stage::define_prim`] or
+    /// [`Stage::override_prim`].
+    ///
+    /// [`Stage::define_prim`]: crate::usd::Stage::define_prim
+    /// [`Stage::override_prim`]: crate::usd::Stage::override_prim
+    // TODO: author the spec instead of requiring one, as C++ `ApplyAPI` does
+    // through `_CreatePrimSpecForEditing`.
+    pub fn apply_api(self, name: impl Into<Token>) -> Result<Self, StageAuthoringError> {
+        let name = name.into();
+        self.stage.schema_registry().check_applied_name(&name)?;
+        self.add_applied_schema(name)
+    }
+
+    /// Whether [`apply_api`](Self::apply_api) would be accepted, and the whole
+    /// of what the schema demands besides. Mirrors C++ `UsdPrim::CanApplyAPI`,
+    /// whose `whyNot` this returns as the error.
+    ///
+    /// Beyond the shape `apply_api` enforces, this honours the prim itself and
+    /// the restrictions a schema declares: the instance names a multiple-apply
+    /// schema allows, and the prim types `apiSchemaCanOnlyApplyTo` limits it
+    /// to — the latter satisfied by a type that derives from one of them,
+    /// through [`is_a`](Self::is_a).
+    pub fn can_apply_api(&self, name: impl Into<Token>) -> Result<(), ApplyApiError> {
+        let name = name.into();
+        if !self.is_valid()? {
+            return Err(ApplyApiError::PrimNotValid {
+                path: self.path.clone(),
+            });
+        }
+
+        let registry = self.stage.schema_registry();
+        let Some((info, instance)) = registry.check_applied_name(&name)? else {
+            return Ok(());
+        };
+        let schema = info.identifier();
+
+        if let Some(instance) = instance {
+            if !registry.is_allowed_instance_name(schema, &instance) {
+                let schema = schema.clone();
+                return Err(ApplyApiError::InstanceNameNotAllowed { schema, instance });
+            }
+        }
+
+        let allowed = info.can_only_apply_to();
+        if !allowed.is_empty() {
+            // The prim's type answers for every candidate, so it is resolved
+            // before the scan.
+            let type_info = self.prim_type_info()?;
+            if !allowed.iter().any(|t| registry.is_a(type_info.schema_type_name(), t)) {
+                return Err(ApplyApiError::PrimTypeNotAllowed {
+                    schema: schema.clone(),
+                    allowed: allowed.to_vec(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Author a prim-level metadata field (e.g. `assetInfo`, `customData`,
@@ -876,8 +952,7 @@ mod tests {
 
     use crate::sdf;
     use crate::tf::Token;
-    use crate::usd::SchemaRegistry;
-    use crate::usd::Stage;
+    use crate::usd::{ApplyApiError, SchemaRegistry, Stage, StageAuthoringError};
 
     fn stage() -> anyhow::Result<Stage> {
         Stage::builder().in_memory("anon.usda")
@@ -1091,6 +1166,116 @@ mod tests {
         let sun = stage.prim("/Sun");
         assert!(!sun.is_a("DistantLight")?);
         assert!(!sun.is_a("Typed")?);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_api_checks_kind() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // A multiple-apply schema applies per instance; a single-apply one
+        // applies whole. Getting that wrong is refused before anything is
+        // authored.
+        let missing = stage.prim("/Sun").apply_api("CollectionAPI").err().expect("rejected");
+        assert!(matches!(
+            missing,
+            StageAuthoringError::Schema(ApplyApiError::MissingInstanceName { .. })
+        ));
+        let unexpected = stage.prim("/Sun").apply_api("LightAPI:extra").err().expect("rejected");
+        assert!(matches!(
+            unexpected,
+            StageAuthoringError::Schema(ApplyApiError::UnexpectedInstanceName { .. })
+        ));
+        let typed = stage.prim("/Sun").apply_api("DistantLight").err().expect("rejected");
+        assert!(matches!(
+            typed,
+            StageAuthoringError::Schema(ApplyApiError::NotAppliedApi { .. })
+        ));
+        assert!(stage.prim("/Sun").authored_api_schemas()?.is_empty());
+
+        // The well-formed spellings author.
+        stage.prim("/Sun").apply_api("LightAPI")?;
+        stage.prim("/Sun").apply_api("CollectionAPI:render")?;
+        assert_eq!(
+            stage.prim("/Sun").authored_api_schemas()?,
+            [Token::new("LightAPI"), Token::new("CollectionAPI:render")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_api_unknown_schema() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // A name the registry does not know carries no rules to break.
+        stage.prim("/Sun").apply_api("SomeUnregisteredAPI")?;
+        stage.prim("/Sun").can_apply_api("SomeUnregisteredAPI")?;
+        assert!(stage.prim("/Sun").has_api_schema("SomeUnregisteredAPI")?);
+        Ok(())
+    }
+
+    #[test]
+    fn can_apply_api_restrictions() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        stage.define_prim("/Plain")?.set_type_name("DomeLight_1")?;
+
+        // `LightAPI` declares `apiSchemaCanOnlyApplyTo = ["DistantLight"]`.
+        stage.prim("/Sun").can_apply_api("LightAPI")?;
+        let wrong_type = stage.prim("/Plain").can_apply_api("LightAPI").unwrap_err();
+        assert!(matches!(wrong_type, ApplyApiError::PrimTypeNotAllowed { .. }));
+
+        // `SlotAPI` restricts itself to `NonboundableLightBase`, which `/Sun`
+        // is not by name — it is a `DistantLight` deriving from it, so the
+        // check runs through `is_a` rather than comparing type names. It also
+        // restricts its instance names.
+        stage.prim("/Sun").can_apply_api("SlotAPI:left")?;
+        let wrong_instance = stage.prim("/Sun").can_apply_api("SlotAPI:middle").unwrap_err();
+        assert!(matches!(wrong_instance, ApplyApiError::InstanceNameNotAllowed { .. }));
+
+        // The restrictions are advisory: `apply_api` authors regardless, as
+        // C++ `ApplyAPI` does.
+        stage.prim("/Plain").apply_api("LightAPI")?;
+        assert!(stage.prim("/Plain").has_api_schema("LightAPI")?);
+        Ok(())
+    }
+
+    #[test]
+    fn can_apply_api_invalid_prim() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+
+        // Nothing composes at the path, so there is nothing to apply to —
+        // answered before any schema question, as C++ `CanApplyAPI` does.
+        let missing = stage.prim("/Typo").can_apply_api("CollectionAPI:render").unwrap_err();
+        assert!(matches!(missing, ApplyApiError::PrimNotValid { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn can_apply_api_malformed_instance() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // An instance name becomes a namespace component of every property the
+        // schema instantiates, so one that cannot be spelled there is refused.
+        for name in [
+            "CollectionAPI:my instance",
+            "CollectionAPI:render:",
+            "CollectionAPI:1st",
+        ] {
+            let rejected = stage.prim("/Sun").can_apply_api(name).unwrap_err();
+            assert!(
+                matches!(rejected, ApplyApiError::InstanceNameNotAllowed { .. }),
+                "{name} rejected as {rejected:?}"
+            );
+        }
+
+        // A trailing delimiter names no instance at all, so a multiple-apply
+        // schema is left without the instance it requires.
+        let empty = stage.prim("/Sun").can_apply_api("CollectionAPI:").unwrap_err();
+        assert!(matches!(empty, ApplyApiError::MissingInstanceName { .. }));
         Ok(())
     }
 

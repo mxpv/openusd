@@ -557,6 +557,10 @@ pub enum StageAuthoringError {
     #[error(transparent)]
     Composition(#[from] anyhow::Error),
 
+    /// The prim's schemas reject the API schema being applied.
+    #[error(transparent)]
+    Schema(#[from] super::ApplyApiError),
+
     /// The named layer is not present in this stage's layer graph.
     #[error("layer {layer:?} is not in the stage")]
     LayerNotFound {
