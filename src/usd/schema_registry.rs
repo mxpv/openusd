@@ -207,6 +207,48 @@ impl SchemaRegistry {
         self.concrete_defs.contains_key(type_name)
     }
 
+    /// Whether `schema` is `base`, or derives from it through the base chain
+    /// the family manifests declare (C++ `UsdPrim::IsA`, which walks the
+    /// `TfType` hierarchy the same information builds).
+    ///
+    /// The walk covers every base transitively, so a query against an abstract
+    /// ancestor (`Boundable`, `Imageable`) answers for the concrete types under
+    /// it.
+    ///
+    /// Both sides have to name a registered schema, as they do in C++, where an
+    /// identifier with no `TfType` resolves to nothing. An unregistered name is
+    /// therefore not a schema: nothing derives from it, and it derives from
+    /// nothing — not even itself. Registering a family whose bases live in a
+    /// family that was left out gets the same answer as registering nothing,
+    /// which is the only answer that does not vary with how far up the chain
+    /// the loaded set happens to reach.
+    // TODO(perf): the base graph is fixed once `build` returns, so this could
+    // resolve against a transitive closure computed there instead of walking
+    // per query. Worth doing when the schema data lands and chains get deep.
+    pub fn is_a(&self, schema: &tf::Token, base: &tf::Token) -> bool {
+        if !self.infos.contains_key(base) {
+            return false;
+        }
+
+        // Manifests are data, so a malformed one can name a base cycle; the
+        // visited set makes the walk terminate on it rather than the caller.
+        let mut visited = HashSet::new();
+        let mut pending = vec![schema];
+        while let Some(next) = pending.pop() {
+            if next == base {
+                return true;
+            }
+            if !visited.insert(next) {
+                continue;
+            }
+            let Some(info) = self.infos.get(next) else {
+                continue;
+            };
+            pending.extend(&info.bases);
+        }
+        false
+    }
+
     /// Whether a field is meaningless as a schema fallback
     /// (C++ `UsdSchemaRegistry::IsDisallowedField`).
     ///
@@ -312,8 +354,16 @@ impl SchemaRegistry {
         // Composed outside the lock, so a slow composition never blocks
         // lookups. A concurrent caller may finish first, in which case its
         // entry is the one everyone uses and this one is dropped.
-        let definition = self.build_composed_prim_definition(id.lookup_name(), id.applied_api_schemas());
-        let info = Arc::new(PrimTypeInfo::new(id.clone(), definition));
+        // Resolve the type first, then compose from it, so the definition is by
+        // construction the one belonging to the reported schema type. An
+        // unregistered name resolves to the empty token, whose definition is
+        // the empty one.
+        let schema_type_name = match self.is_concrete_type(id.lookup_name()) {
+            true => id.lookup_name().clone(),
+            false => tf::Token::default(),
+        };
+        let definition = self.build_composed_prim_definition(&schema_type_name, id.applied_api_schemas());
+        let info = Arc::new(PrimTypeInfo::new(id.clone(), schema_type_name, definition));
         self.type_infos
             .write()
             .unwrap_or_else(PoisonError::into_inner)
@@ -400,7 +450,9 @@ impl SchemaInfo {
         self.kind
     }
 
-    /// The schemas this one derives from, nearest first.
+    /// The schemas this one directly derives from, nearest first, as the
+    /// family manifest declares them. [`SchemaRegistry::is_a`] walks them
+    /// transitively.
     pub fn bases(&self) -> &[tf::Token] {
         &self.bases
     }
@@ -480,11 +532,14 @@ impl SchemaRegistryBuilder {
     /// ```
     ///
     /// `schemaKind` is required and must be one of the spellings
-    /// [`SchemaKind::as_str`] produces. `bases` lists base schema identifiers,
-    /// nearest first. The optional `propertyNamespacePrefix`,
-    /// `apiSchemaAutoApplyTo`, `apiSchemaCanOnlyApplyTo` and
-    /// `allowedInstanceNames` attributes map onto the matching
-    /// [`SchemaInfo`] accessors.
+    /// [`SchemaKind::as_str`] produces. `bases` lists the schema's *direct*
+    /// bases, nearest first, by schema identifier rather than by the C++ type
+    /// name `plugInfo.json` records, and may name a schema registered by
+    /// another family; [`SchemaRegistry::is_a`] walks them transitively.
+    ///
+    /// The optional `propertyNamespacePrefix`, `apiSchemaAutoApplyTo`,
+    /// `apiSchemaCanOnlyApplyTo` and `allowedInstanceNames` attributes map onto
+    /// the matching [`SchemaInfo`] accessors.
     // TODO: take the schematics through `sdf::FileFormat` so a family can ship
     // a binary `generatedSchema.usdc`, as C++ does by opening it as a layer.
     pub fn family(mut self, source: FamilySource<'_>) -> Result<Self> {
@@ -562,7 +617,11 @@ impl SchemaRegistryBuilder {
             concrete_defs,
             api_defs,
             empty_def: empty_def.clone(),
-            empty_type_info: Arc::new(PrimTypeInfo::new(PrimTypeId::default(), empty_def)),
+            empty_type_info: Arc::new(PrimTypeInfo::new(
+                PrimTypeId::default(),
+                tf::Token::default(),
+                empty_def,
+            )),
             type_infos: RwLock::default(),
         }))
     }
@@ -965,13 +1024,13 @@ def "NonboundableLightBase"
 def "DistantLight"
 {
     uniform token schemaKind = "concreteTyped"
-    uniform token[] bases = ["NonboundableLightBase", "Typed"]
+    uniform token[] bases = ["NonboundableLightBase"]
 }
 
 def "DomeLight_1"
 {
     uniform token schemaKind = "concreteTyped"
-    uniform token[] bases = ["NonboundableLightBase", "Typed"]
+    uniform token[] bases = ["NonboundableLightBase"]
 }
 "#;
 
@@ -1063,6 +1122,86 @@ mod tests {
         assert!(collection.auto_apply_to().is_empty());
 
         assert!(registry.schema_info(&tf::Token::new("Nonexistent")).is_none());
+    }
+
+    #[test]
+    fn is_a_walks_bases() {
+        let registry = SchemaRegistry::test_registry();
+        let distant = tf::Token::new("DistantLight");
+
+        // A type is itself, its direct base, and every base above that.
+        assert!(registry.is_a(&distant, &distant));
+        assert!(registry.is_a(&distant, &tf::Token::new("NonboundableLightBase")));
+        assert!(registry.is_a(&distant, &tf::Token::new("Typed")));
+
+        // Siblings and unrelated hierarchies do not match.
+        assert!(!registry.is_a(&distant, &tf::Token::new("DomeLight_1")));
+        assert!(!registry.is_a(&distant, &tf::Token::new("APISchemaBase")));
+        // An unregistered name is not a schema, so it derives from nothing and
+        // nothing derives from it — not even itself.
+        assert!(!registry.is_a(&tf::Token::new("Bogus"), &tf::Token::new("Typed")));
+        assert!(!registry.is_a(&tf::Token::new("Bogus"), &tf::Token::new("Bogus")));
+        assert!(!registry.is_a(&distant, &tf::Token::default()));
+    }
+
+    #[test]
+    fn is_a_unregistered_base() {
+        // A family whose bases live in a family that was left out answers the
+        // same as registering nothing: the walk could only reach one link of a
+        // chain it cannot see, so it reports none of it.
+        let manifest = r#"#usda 1.0
+
+def "LightFilter"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Xformable"]
+}
+"#;
+        let registry = SchemaRegistry::builder()
+            .family(FamilySource {
+                name: "lux",
+                manifest,
+                schematics: "#usda 1.0\n\nclass LightFilter \"LightFilter\"\n{\n}\n",
+            })
+            .expect("family registers")
+            .build()
+            .expect("registry builds");
+
+        let filter = tf::Token::new("LightFilter");
+        assert!(registry.is_a(&filter, &filter));
+        assert!(!registry.is_a(&filter, &tf::Token::new("Xformable")));
+        assert!(!registry.is_a(&filter, &tf::Token::new("Imageable")));
+    }
+
+    #[test]
+    fn is_a_cycle_terminates() {
+        let manifest = r#"#usda 1.0
+
+def "Loop"
+{
+    uniform token schemaKind = "abstractTyped"
+    uniform token[] bases = ["Knot"]
+}
+
+def "Knot"
+{
+    uniform token schemaKind = "abstractTyped"
+    uniform token[] bases = ["Loop"]
+}
+"#;
+        let registry = SchemaRegistry::builder()
+            .family(FamilySource {
+                name: "test",
+                manifest,
+                schematics: "#usda 1.0\n\nclass \"Loop\"\n{\n}\n\nclass \"Knot\"\n{\n}\n",
+            })
+            .expect("family registers")
+            .build()
+            .expect("registry builds");
+
+        // A manifest is data, so a base cycle must not hang the query.
+        assert!(registry.is_a(&tf::Token::new("Loop"), &tf::Token::new("Knot")));
+        assert!(!registry.is_a(&tf::Token::new("Loop"), &tf::Token::new("Elsewhere")));
     }
 
     #[test]

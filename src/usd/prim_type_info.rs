@@ -16,6 +16,9 @@ use super::PrimDefinition;
 #[derive(Debug)]
 pub struct PrimTypeInfo {
     id: PrimTypeId,
+    /// The registered type the definition came from, empty when no registered
+    /// type backs it.
+    schema_type_name: tf::Token,
     definition: Arc<PrimDefinition>,
 }
 
@@ -46,9 +49,26 @@ impl PrimTypeInfo {
         &self.definition
     }
 
+    /// The registered type whose definition backs this one (C++
+    /// `UsdPrimTypeInfo::GetSchemaTypeName`).
+    ///
+    /// This is the authored `typeName`, or the `fallbackPrimTypes` substitute
+    /// when one applied, and it is what an `IsA` query walks from. It is empty
+    /// unless the registry knows that name as an instantiable type, so a
+    /// typeless prim, one whose type the registry does not know, and one
+    /// authored as a registered *abstract* type all report nothing — matching
+    /// C++, whose `GetConcreteTypeFromSchemaTypeName` is concrete-only.
+    pub fn schema_type_name(&self) -> &tf::Token {
+        &self.schema_type_name
+    }
+
     /// Builds the information for one type identity.
-    pub(super) fn new(id: PrimTypeId, definition: Arc<PrimDefinition>) -> PrimTypeInfo {
-        PrimTypeInfo { id, definition }
+    pub(super) fn new(id: PrimTypeId, schema_type_name: tf::Token, definition: Arc<PrimDefinition>) -> PrimTypeInfo {
+        PrimTypeInfo {
+            id,
+            schema_type_name,
+            definition,
+        }
     }
 }
 

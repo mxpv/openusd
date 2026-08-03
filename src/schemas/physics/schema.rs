@@ -1116,7 +1116,9 @@ mod tests {
         assert_eq!(hinge.axis_attr().get::<JointAxis>()?, Some(JointAxis::Z));
         assert_eq!(hinge.break_force_attr().get::<f32>()?, Some(500.0));
 
-        // A RevoluteJoint is not a Joint, Scene, or other typed prim.
+        // `RevoluteJoint` derives from `Joint`, so the base view resolves once a
+        // registry knows the physics family. This stage has none, leaving the
+        // gate on the authored name alone.
         assert!(Joint::get(&stage, "/World/Hinge")?.is_none());
         Ok(())
     }

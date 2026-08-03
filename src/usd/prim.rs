@@ -345,6 +345,26 @@ impl Prim {
             .masked(&self.path, |g, cache| cache.api_schemas(g, &self.path))
     }
 
+    /// `true` when this prim's type is `schema`, or derives from it. Mirrors
+    /// C++ `UsdPrim::IsA`.
+    ///
+    /// Derivation is read from the stage's
+    /// [`SchemaRegistry`](super::SchemaRegistry), so a query against an
+    /// abstract ancestor (`Boundable`, `Imageable`) answers for the concrete
+    /// types under it, and a type resolved through `fallbackPrimTypes` answers
+    /// for the type it resolved to.
+    ///
+    /// The question is asked of the prim's schema type, which is empty unless a
+    /// registered type backs it. So a prim whose `typeName` this registry does
+    /// not know is nothing — including the very name it authors.
+    pub fn is_a(&self, schema: impl Into<Token>) -> anyhow::Result<bool> {
+        let info = self.prim_type_info()?;
+        Ok(self
+            .stage
+            .schema_registry()
+            .is_a(info.schema_type_name(), &schema.into()))
+    }
+
     /// `true` when `name` is in the prim's composed `apiSchemas` (pass the full
     /// instance name for multi-apply schemas). Mirrors C++ `UsdPrim::HasAPI`.
     pub fn has_api_schema(&self, name: impl Into<Token>) -> anyhow::Result<bool> {
@@ -974,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_prim_type_resolves_definition() -> anyhow::Result<()> {
+    fn fallback_prim_type() -> anyhow::Result<()> {
         let stage = Stage::builder()
             .schema_registry(SchemaRegistry::test_registry())
             .in_memory("anon.usda")?;
@@ -1007,6 +1027,12 @@ mod tests {
                 .attribute_fallback(&Token::new("inputs:intensity")),
             Some(sdf::Value::Float(50000.0))
         );
+
+        // An `IsA` query answers for the type it resolved to. The authored name
+        // is not a schema, so nothing is it.
+        assert!(prim.is_a("DistantLight")?);
+        assert!(prim.is_a("Typed")?);
+        assert!(!prim.is_a("MyStudioLight")?);
         Ok(())
     }
 
@@ -1038,6 +1064,33 @@ mod tests {
 
         stage.define_prim("/Ball")?.set_type_name("Sphere")?;
         assert!(!Arc::ptr_eq(&sun, &stage.prim("/Ball").prim_type_info()?));
+        Ok(())
+    }
+
+    #[test]
+    fn is_a_base_chain() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        let sun = stage.prim("/Sun");
+        assert!(sun.is_a("DistantLight")?);
+        assert!(sun.is_a("NonboundableLightBase")?);
+        assert!(sun.is_a("Typed")?);
+        assert!(!sun.is_a("DomeLight_1")?);
+        Ok(())
+    }
+
+    #[test]
+    fn is_a_needs_schema_data() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // Nothing is registered, so `DistantLight` names no schema and the prim
+        // is not it. The typed views keep resolving because their gate checks
+        // the authored name before asking this question.
+        let sun = stage.prim("/Sun");
+        assert!(!sun.is_a("DistantLight")?);
+        assert!(!sun.is_a("Typed")?);
         Ok(())
     }
 
