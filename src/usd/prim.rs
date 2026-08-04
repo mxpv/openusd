@@ -35,8 +35,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
-    ApplyApiError, Attribute, EditTarget, EditTargetArc, PrimDefinition, PrimTypeInfo, Relationship, Stage,
-    StageAuthoringError,
+    schema_registry, ApplyApiError, Attribute, EditTarget, EditTargetArc, PrimDefinition, PrimTypeInfo, Relationship,
+    SchemaRegistry, Stage, StageAuthoringError, VersionFilter,
 };
 use crate::tf::Token;
 use crate::{pcp, sdf};
@@ -446,6 +446,129 @@ impl Prim {
     pub fn has_api_schema(&self, name: impl Into<Token>) -> anyhow::Result<bool> {
         let name = name.into();
         Ok(self.api_schemas()?.iter().any(|s| s.as_str() == name.as_str()))
+    }
+
+    /// The registered concrete schema backing this prim's type, or `None` when
+    /// none does.
+    ///
+    /// `None` covers every prim while the stage's registry carries no schema
+    /// data, a `typeName` that registry has never heard of, and a `typeName`
+    /// naming an abstract schema — only a concrete type backs a prim, so only
+    /// one is reported here.
+    ///
+    /// Deriving the type costs composed reads, so a registry with nothing in it
+    /// answers `None` without paying them.
+    pub fn schema_type(&self) -> anyhow::Result<Option<Token>> {
+        if self.stage.schema_registry().is_empty() {
+            return Ok(None);
+        }
+        let schema_type = self.prim_type_info()?.schema_type_name().clone();
+        Ok(Some(schema_type).filter(|name| !name.as_str().is_empty()))
+    }
+
+    /// Whether this prim is any version of `family` that `filter` accepts.
+    /// Mirrors C++ `UsdPrim::IsInFamily`.
+    ///
+    /// This is [`is_a`](Self::is_a) asked of a whole family rather than one
+    /// identifier, so a caller does not have to name every version a schema has
+    /// shipped under (`DomeLight`, `DomeLight_1`, …).
+    pub fn is_in_family(&self, family: impl Into<Token>, filter: VersionFilter) -> anyhow::Result<bool> {
+        Ok(self.version_in_family(family, filter)?.is_some())
+    }
+
+    /// The version of `family` this prim is, or `None` when it is none of them.
+    /// Mirrors C++ `UsdPrim::GetVersionIfIsInFamily`.
+    ///
+    /// `family` names a family, not a schema: `DomeLight_1` is an identifier
+    /// within the `DomeLight` family and places a prim in no family of its own,
+    /// exactly as C++'s family-taking overload treats it.
+    ///
+    /// The newest accepted version the prim satisfies wins, which is the order
+    /// [`SchemaRegistry::schema_infos_in_family`](super::SchemaRegistry::schema_infos_in_family)
+    /// answers in.
+    pub fn version_in_family(&self, family: impl Into<Token>, filter: VersionFilter) -> anyhow::Result<Option<u32>> {
+        let family = family.into();
+        let registry = self.stage.schema_registry();
+        if let Some(schema_type) = self.schema_type()? {
+            return Ok(registry.version_in_family(&schema_type, &family, filter));
+        }
+
+        // No registered schema backs the type, so the name it authors is all
+        // there is to place it by — the arm that resolves a versioned family
+        // while no schema data is registered.
+        let Some((authored_family, version)) = self
+            .type_name()?
+            .as_ref()
+            .and_then(SchemaRegistry::parse_allowed_identifier)
+        else {
+            return Ok(None);
+        };
+        Ok((authored_family == family && filter.accepts(version)).then_some(version))
+    }
+
+    /// Whether this prim has any version of the applied API schema `family`
+    /// that `filter` accepts. Mirrors C++ `UsdPrim::HasAPIInFamily`.
+    ///
+    /// `instance` narrows a multiple-apply schema to one instance; without it
+    /// any instance counts, as C++ matching on the `Schema:` prefix does.
+    pub fn has_api_in_family(
+        &self,
+        family: impl Into<Token>,
+        filter: VersionFilter,
+        instance: Option<&Token>,
+    ) -> anyhow::Result<bool> {
+        Ok(self.api_version_in_family(family, filter, instance)?.is_some())
+    }
+
+    /// The version of the applied API schema `family` this prim has, or `None`.
+    /// Mirrors C++ `UsdPrim::GetVersionIfHasAPIInFamily`.
+    ///
+    /// A registered schema answers from the composed prim definition, so the
+    /// version reported is the one that actually contributes properties rather
+    /// than every version the prim names. A name no registered schema backs was
+    /// never composed at all, so it answers from what the prim authors, under
+    /// the family its own name gives it.
+    ///
+    /// `family` names a family, not a schema, as it does for
+    /// [`version_in_family`](Self::version_in_family).
+    pub fn api_version_in_family(
+        &self,
+        family: impl Into<Token>,
+        filter: VersionFilter,
+        instance: Option<&Token>,
+    ) -> anyhow::Result<Option<u32>> {
+        let family = family.into();
+        let registry = self.stage.schema_registry();
+        let definition = self.prim_definition()?;
+
+        // A version composition rejected — one conflicting with a stronger
+        // built-in of the same family — is absent from the definition's list
+        // (C++ `GetAppliedSchemas`).
+        let composed = definition.applied_api_schemas().iter().filter_map(|name| {
+            let (info, applied_instance) = registry.check_applied_name(name).ok().flatten()?;
+            Some((info.family().clone(), info.version(), applied_instance))
+        });
+
+        let authored = self.authored_api_schemas()?;
+        let unregistered = authored.iter().filter_map(|name| {
+            let (schema, applied_instance) = schema_registry::split_instance_name(name);
+            if registry.schema_info(&schema).is_some() {
+                return None;
+            }
+            let (schema_family, version) = SchemaRegistry::parse_allowed_identifier(&schema)?;
+            Some((schema_family, version, applied_instance))
+        });
+
+        // The newest accepted version among the matches answers.
+        Ok(composed
+            .chain(unregistered)
+            .filter(|(schema_family, version, applied_instance)| {
+                schema_family == &family
+                    && filter.accepts(*version)
+                    && instance.is_none_or(|wanted| applied_instance.as_ref() == Some(wanted))
+            })
+            .map(|(_, version, _)| version)
+            .max())
     }
 
     /// The prim's schema type — its composed `typeName` and `apiSchemas`, and
@@ -952,7 +1075,7 @@ mod tests {
 
     use crate::sdf;
     use crate::tf::Token;
-    use crate::usd::{ApplyApiError, SchemaRegistry, Stage, StageAuthoringError};
+    use crate::usd::{ApplyApiError, SchemaRegistry, Stage, StageAuthoringError, VersionFilter};
 
     fn stage() -> anyhow::Result<Stage> {
         Stage::builder().in_memory("anon.usda")
@@ -1239,6 +1362,146 @@ mod tests {
         // C++ `ApplyAPI` does.
         stage.prim("/Plain").apply_api("LightAPI")?;
         assert!(stage.prim("/Plain").has_api_schema("LightAPI")?);
+        Ok(())
+    }
+
+    #[test]
+    fn is_in_family_versions() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Old")?.set_type_name("DomeLight")?;
+        stage.define_prim("/New")?.set_type_name("DomeLight_1")?;
+
+        // Either version answers for the family, which is the point of asking
+        // by family rather than by identifier.
+        let family = Token::new("DomeLight");
+        assert!(stage.prim("/Old").is_in_family(&family, VersionFilter::All)?);
+        assert!(stage.prim("/New").is_in_family(&family, VersionFilter::All)?);
+        assert_eq!(
+            stage.prim("/Old").version_in_family(&family, VersionFilter::All)?,
+            Some(0)
+        );
+        assert_eq!(
+            stage.prim("/New").version_in_family(&family, VersionFilter::All)?,
+            Some(1)
+        );
+
+        // The filter narrows which versions count.
+        assert!(!stage
+            .prim("/Old")
+            .is_in_family(&family, VersionFilter::GreaterThan(0))?);
+        assert!(stage
+            .prim("/New")
+            .is_in_family(&family, VersionFilter::GreaterThan(0))?);
+
+        // A prim of another family is in none of it.
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        assert!(!stage.prim("/Sun").is_in_family(&family, VersionFilter::All)?);
+        Ok(())
+    }
+
+    #[test]
+    fn has_api_in_family_instance() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage
+            .define_prim("/Sun")?
+            .set_type_name("DistantLight")?
+            .apply_api("CollectionAPI:render")?;
+
+        // Any instance answers for the family; a named one has to match. Both
+        // the instance the prim applies and the `lightLink` one it inherits
+        // through `LightAPI` count, and nothing else does.
+        let family = Token::new("CollectionAPI");
+        let render = Token::new("render");
+        assert!(stage
+            .prim("/Sun")
+            .has_api_in_family(&family, VersionFilter::All, None)?);
+        assert!(stage
+            .prim("/Sun")
+            .has_api_in_family(&family, VersionFilter::All, Some(&render))?);
+        assert!(stage
+            .prim("/Sun")
+            .has_api_in_family(&family, VersionFilter::All, Some(&Token::new("lightLink")))?);
+        assert!(!stage
+            .prim("/Sun")
+            .has_api_in_family(&family, VersionFilter::All, Some(&Token::new("other")))?);
+
+        // A single-apply schema is applied whole, so it has no instance to ask
+        // after. `LightAPI` is built in to `DistantLight`.
+        let light = Token::new("LightAPI");
+        assert_eq!(
+            stage
+                .prim("/Sun")
+                .api_version_in_family(&light, VersionFilter::All, None)?,
+            Some(0)
+        );
+        assert!(!stage
+            .prim("/Sun")
+            .has_api_in_family(&light, VersionFilter::All, Some(&render))?);
+
+        // Only an applied API schema is applied at all, so the prim's own typed
+        // family answers nothing here.
+        let typed = Token::new("DistantLight");
+        assert!(!stage.prim("/Sun").has_api_in_family(&typed, VersionFilter::All, None)?);
+        Ok(())
+    }
+
+    #[test]
+    fn family_queries_without_registry() -> anyhow::Result<()> {
+        // A plain stage registers no schema data, which is the state every
+        // stage is in until it is vendored.
+        let stage = stage()?;
+        stage
+            .define_prim("/New")?
+            .set_type_name("DomeLight_1")?
+            .add_applied_schema("CollectionAPI:render")?;
+
+        // The prim query and the views' gate place a prim the same way, so
+        // filtering a traversal cannot drop what a view would accept.
+        assert!(stage.prim("/New").is_in_family("DomeLight", VersionFilter::All)?);
+        assert_eq!(
+            stage.prim("/New").version_in_family("DomeLight", VersionFilter::All)?,
+            Some(1)
+        );
+        assert!(!stage.prim("/New").is_in_family("DistantLight", VersionFilter::All)?);
+
+        // An applied schema no registry knows was never composed, so it answers
+        // from what the prim authors — as `has_api_schema` does beside it.
+        let collection = Token::new("CollectionAPI");
+        let render = Token::new("render");
+        assert!(stage.prim("/New").has_api_schema("CollectionAPI:render")?);
+        assert!(stage
+            .prim("/New")
+            .has_api_in_family(&collection, VersionFilter::All, None)?);
+        assert!(stage
+            .prim("/New")
+            .has_api_in_family(&collection, VersionFilter::All, Some(&render))?);
+        assert!(!stage
+            .prim("/New")
+            .has_api_in_family(&collection, VersionFilter::All, Some(&Token::new("other")))?);
+        Ok(())
+    }
+
+    #[test]
+    fn api_family_rejected_version() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        // `DistantLight` builds in `LightAPI`, so authoring a second version of
+        // that family conflicts and composition keeps the built-in.
+        stage
+            .define_prim("/Sun")?
+            .set_type_name("DistantLight")?
+            .add_applied_schema("LightAPI_2")?;
+
+        let family = Token::new("LightAPI");
+        assert_eq!(
+            stage
+                .prim("/Sun")
+                .api_version_in_family(&family, VersionFilter::All, None)?,
+            Some(0)
+        );
+        // The rejected version contributes nothing, so it answers for nothing.
+        assert!(!stage
+            .prim("/Sun")
+            .has_api_in_family(&family, VersionFilter::GreaterThan(0), None)?);
         Ok(())
     }
 

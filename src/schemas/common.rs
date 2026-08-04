@@ -1,6 +1,7 @@
 //! Low-level building blocks shared across the schema families.
 //!
-//! The view-gate helpers ([`get_typed`], [`get_typed_any`], [`get_with_api`])
+//! The view-gate helpers ([`get_typed`], [`get_typed_in_family`],
+//! [`get_with_api`])
 //! back the type-gated `get` lookups every trait-view family shares, and the
 //! small value reader ([`read_token`]) plus the
 //! [`impl_token_value!`] macro cover the decoding that would otherwise be
@@ -12,13 +13,11 @@
 // all — silence the dead-code warning on per-feature builds.
 #![allow(dead_code)]
 
-use std::slice;
-
 use anyhow::Result;
 
 use crate::sdf::{FieldKey, Path};
 use crate::tf;
-use crate::usd::{Prim, Stage};
+use crate::usd::{Prim, Stage, VersionFilter};
 
 /// Read a `token`-valued attribute. A non-token value reads as absent
 /// (`token` attributes never resolve to a `Value::String`).
@@ -29,12 +28,6 @@ pub(crate) fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Optio
 /// Wrap `path` as a concrete view's `Prim` if the prim is `type_name` or
 /// derives from it — the type-gate every typed view's `get` performs, matching
 /// how a C++ schema's `Get` validates through [`Prim::is_a`].
-pub(crate) fn get_typed(stage: &Stage, path: impl Into<Path>, type_name: impl Into<tf::Token>) -> Result<Option<Prim>> {
-    get_typed_any(stage, path, slice::from_ref(&type_name.into()))
-}
-
-/// Like [`get_typed`], but matches any of `type_names` — for views that share
-/// one Rust type across several concrete schemas.
 ///
 /// A prim backed by a registered schema is gated on derivation, so a base
 /// view matches a derived prim. A prim the registry has no schema for is gated
@@ -44,35 +37,32 @@ pub(crate) fn get_typed(stage: &Stage, path: impl Into<Path>, type_name: impl In
 // TODO: drop the authored-name arm once every stage's registry carries the
 // schema data — it answers for prims whose type the *stage's* registry does not
 // know, so a partially registered custom registry still needs it.
-// TODO: express a versioned family (`DomeLight` / `DomeLight_1`) as one query
-// over `SchemaInfo::family`, the way C++ `UsdPrim::IsInFamily` does, rather
-// than as a hand-maintained list at the call site.
-pub(crate) fn get_typed_any(
-    stage: &Stage,
-    path: impl Into<Path>,
-    type_names: &[impl AsRef<str>],
-) -> Result<Option<Prim>> {
+pub(crate) fn get_typed(stage: &Stage, path: impl Into<Path>, type_name: impl Into<tf::Token>) -> Result<Option<Prim>> {
     let prim = stage.prim(path);
-    let registry = stage.schema_registry();
+    let type_name = type_name.into();
 
-    // Derivation is a question about the prim's schema type, which is empty
-    // unless a registered type backs it. Deriving it is only worth the composed
-    // reads when there are schemas for it to resolve against.
-    let schema_type = match registry.is_empty() {
-        true => None,
-        false => Some(prim.prim_type_info()?.schema_type_name().clone()).filter(|name| !name.as_str().is_empty()),
-    };
-
-    let matched = match &schema_type {
-        Some(schema_type) => type_names
-            .iter()
-            .any(|name| registry.is_a(schema_type, &tf::Token::from(name.as_ref()))),
-        None => {
-            let authored = prim.type_name()?;
-            type_names.iter().any(|name| authored.as_deref() == Some(name.as_ref()))
-        }
+    let matched = match prim.schema_type()? {
+        Some(schema_type) => stage.schema_registry().is_a(&schema_type, &type_name),
+        None => prim.type_name()?.as_deref() == Some(type_name.as_str()),
     };
     Ok(matched.then_some(prim))
+}
+
+/// Like [`get_typed`], but matches any version of the schema family `family` —
+/// the gate for a view whose schema has shipped under more than one version
+/// (`DomeLight`, `DomeLight_1`).
+///
+/// The version a prim carries is its own business, so the gate asks
+/// [`Prim::is_in_family`], which places a prim by its registered schema or, for
+/// a type no registered schema backs, by the family its authored `typeName`
+/// names.
+pub(crate) fn get_typed_in_family(
+    stage: &Stage,
+    path: impl Into<Path>,
+    family: impl Into<tf::Token>,
+) -> Result<Option<Prim>> {
+    let prim = stage.prim(path);
+    Ok(prim.is_in_family(family, VersionFilter::All)?.then_some(prim))
 }
 
 /// Wrap `path` as an applied-API view's `Prim` if any of `apis` appears in the
@@ -126,11 +116,16 @@ mod tests {
     use super::*;
     use crate::usd::SchemaRegistry;
 
+    /// A stage resolving against the miniature test family.
+    fn schema_stage() -> Result<Stage> {
+        Stage::builder()
+            .schema_registry(SchemaRegistry::test_registry())
+            .in_memory("anon.usda")
+    }
+
     #[test]
     fn typed_gate_subtype() -> Result<()> {
-        let stage = Stage::builder()
-            .schema_registry(SchemaRegistry::test_registry())
-            .in_memory("anon.usda")?;
+        let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
         // A base view is valid for a derived prim, as the C++ schema's `Get`
@@ -143,6 +138,38 @@ mod tests {
         // base is not any of the concrete types under it.
         stage.define_prim("/Base")?.set_type_name("NonboundableLightBase")?;
         assert!(get_typed(&stage, "/Base", "DistantLight")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn family_gate_versions() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Old")?.set_type_name("DomeLight")?;
+        stage.define_prim("/New")?.set_type_name("DomeLight_1")?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // One gate covers every version the family has shipped under.
+        assert!(get_typed_in_family(&stage, "/Old", "DomeLight")?.is_some());
+        assert!(get_typed_in_family(&stage, "/New", "DomeLight")?.is_some());
+        assert!(get_typed_in_family(&stage, "/Sun", "DomeLight")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn family_gate_no_schema_data() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        stage.define_prim("/New")?.set_type_name("DomeLight_1")?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // With nothing registered the authored name carries its own version
+        // suffix, so the family still resolves without listing the versions.
+        assert!(get_typed_in_family(&stage, "/New", "DomeLight")?.is_some());
+        assert!(get_typed_in_family(&stage, "/Sun", "DomeLight")?.is_none());
+
+        // Only a spelling that could name a schema is placed in the family, so
+        // a non-canonical version suffix is not a `DomeLight`.
+        stage.define_prim("/Odd")?.set_type_name("DomeLight_01")?;
+        assert!(get_typed_in_family(&stage, "/Odd", "DomeLight")?.is_none());
         Ok(())
     }
 

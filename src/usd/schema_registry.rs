@@ -23,6 +23,7 @@
 //! [`StageBuilder::schema_registry`](super::StageBuilder::schema_registry)
 //! works today.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
@@ -47,9 +48,10 @@ use super::{PrimDefinition, PrimTypeId, PrimTypeInfo, SchemaKind};
 #[derive(Debug)]
 pub struct SchemaRegistry {
     infos: HashMap<tf::Token, SchemaInfo>,
-    /// Reverse index over [`SchemaInfo::family`] and [`SchemaInfo::version`],
-    /// so a versioned family can be queried without scanning `infos`.
-    by_family: HashMap<(tf::Token, u32), tf::Token>,
+    /// Reverse index over [`SchemaInfo::family`], so a versioned family can be
+    /// queried without scanning `infos`. Ordered as
+    /// [`schema_infos_in_family`](Self::schema_infos_in_family) answers.
+    families: HashMap<tf::Token, Vec<tf::Token>>,
     /// Definitions of the instantiable types, keyed by `typeName`.
     concrete_defs: HashMap<tf::Token, Arc<PrimDefinition>>,
     /// Definitions of the applied API schemas. A multiple-apply schema is
@@ -128,9 +130,28 @@ pub struct FamilySource<'a> {
 #[derive(Debug, Default)]
 pub struct SchemaRegistryBuilder {
     infos: HashMap<tf::Token, SchemaInfo>,
-    by_family: HashMap<(tf::Token, u32), tf::Token>,
     /// Which family's schematics holds each identifier's class prim.
     source_of: HashMap<tf::Token, Arc<Schematics>>,
+}
+
+/// Which versions of a schema family a query accepts (C++
+/// `UsdSchemaRegistry::VersionPolicy`).
+///
+/// C++ passes the policy and the version it compares against separately; here
+/// the version rides on the variant that uses it, so [`All`](Self::All) cannot
+/// be paired with a version that means nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionFilter {
+    /// Every version in the family.
+    All,
+    /// Versions strictly newer than this one.
+    GreaterThan(u32),
+    /// This version and anything newer.
+    GreaterThanOrEqual(u32),
+    /// Versions strictly older than this one.
+    LessThan(u32),
+    /// This version and anything older.
+    LessThanOrEqual(u32),
 }
 
 /// Why an API schema cannot be applied to a prim — the reason C++
@@ -227,9 +248,58 @@ impl SchemaRegistry {
 
     /// Looks up a specific version within a schema family
     /// (C++ `FindSchemaInfo(family, version)`).
+    ///
+    /// A family may not itself carry a version suffix, so `("Foo_1", 0)` names
+    /// no schema even though `Foo_1` may well be registered.
     pub fn schema_info_in_family(&self, family: &tf::Token, version: u32) -> Option<&SchemaInfo> {
-        let identifier = self.by_family.get(&(family.clone(), version))?;
-        self.infos.get(identifier)
+        Self::is_allowed_family(family)
+            .then(|| self.infos.get(&Self::make_identifier(family, version)))
+            .flatten()
+    }
+
+    /// Every registered schema in `family` that `filter` accepts, newest
+    /// version first (C++ `FindSchemaInfosInFamily`).
+    ///
+    /// The order is what makes a family query answer with the newest version a
+    /// prim satisfies, so a caller that wants the best match takes the first
+    /// item.
+    pub fn schema_infos_in_family(
+        &self,
+        family: &tf::Token,
+        filter: VersionFilter,
+    ) -> impl Iterator<Item = &SchemaInfo> {
+        self.families
+            .get(family)
+            .into_iter()
+            .flatten()
+            .filter_map(|identifier| self.infos.get(identifier))
+            .filter(move |info| filter.accepts(info.version))
+    }
+
+    /// The version of `family` that `schema_type` is, or `None` when it is none
+    /// of them (C++ `UsdPrim::GetVersionIfIsInFamily`'s registry half).
+    ///
+    /// A type qualifies by deriving from a schema in the family, not by name,
+    /// so this runs through [`is_a`](Self::is_a).
+    pub fn version_in_family(&self, schema_type: &tf::Token, family: &tf::Token, filter: VersionFilter) -> Option<u32> {
+        self.schema_infos_in_family(family, filter)
+            .find(|info| self.is_a(schema_type, info.identifier()))
+            .map(SchemaInfo::version)
+    }
+
+    /// The family and version `identifier` names, or `None` when it does not
+    /// name one canonically.
+    ///
+    /// Registration is not consulted: an identifier carries its own family and
+    /// version, which is what lets an authored `typeName` be placed in a family
+    /// while no schema data is registered. Only a spelling
+    /// [`is_allowed_identifier`](Self::is_allowed_identifier) accepts is placed,
+    /// so `Foo_01` — which could never name a registered schema — belongs to no
+    /// family rather than to `Foo`. C++ `ParseSchemaFamilyAndVersionFromIdentifier`
+    /// parses the same suffix but places every spelling, because it reaches
+    /// this question only for names that already resolved through `TfType`.
+    pub fn parse_allowed_identifier(identifier: &tf::Token) -> Option<(tf::Token, u32)> {
+        Self::is_allowed_identifier(identifier).then(|| Self::parse_identifier(identifier))
     }
 
     /// Every registered schema, in unspecified order.
@@ -554,6 +624,19 @@ impl SchemaRegistry {
     }
 }
 
+impl VersionFilter {
+    /// Whether `version` passes this filter.
+    pub fn accepts(self, version: u32) -> bool {
+        match self {
+            Self::All => true,
+            Self::GreaterThan(other) => version > other,
+            Self::GreaterThanOrEqual(other) => version >= other,
+            Self::LessThan(other) => version < other,
+            Self::LessThanOrEqual(other) => version <= other,
+        }
+    }
+}
+
 impl SchemaInfo {
     /// The name this schema is registered and referenced under.
     pub fn identifier(&self) -> &tf::Token {
@@ -686,18 +769,11 @@ impl SchemaRegistryBuilder {
             if !SchemaRegistry::is_allowed_identifier(&identifier) {
                 bail!("Schema identifier {identifier} of family {family} is not a valid identifier");
             }
+            // An allowed identifier is exactly its family plus its version, so
+            // rejecting a repeat identifier also rejects a repeated
+            // (family, version).
             if self.infos.contains_key(&identifier) {
                 bail!("Duplicate schema identifier {identifier} registering family {family}");
-            }
-            if let Some(other) = self
-                .by_family
-                .insert((info.family.clone(), info.version), identifier.clone())
-            {
-                bail!(
-                    "Schemas {other} and {identifier} are both version {} of family {}",
-                    info.version,
-                    info.family
-                );
             }
             self.source_of.insert(identifier.clone(), schematics.clone());
             self.infos.insert(identifier, info);
@@ -735,10 +811,27 @@ impl SchemaRegistryBuilder {
             concrete_defs.insert(identifier, Arc::new(definition));
         }
 
+        // A family answers newest version first, so the index is ordered here,
+        // keyed on the version each identifier carries.
+        let mut grouped: HashMap<tf::Token, Vec<(u32, tf::Token)>> = HashMap::new();
+        for (identifier, info) in &self.infos {
+            grouped
+                .entry(info.family.clone())
+                .or_default()
+                .push((info.version, identifier.clone()));
+        }
+        let families = grouped
+            .into_iter()
+            .map(|(family, mut versions)| {
+                versions.sort_unstable_by_key(|(version, _)| Reverse(*version));
+                (family, versions.into_iter().map(|(_, identifier)| identifier).collect())
+            })
+            .collect();
+
         let empty_def = Arc::new(PrimDefinition::default());
         Ok(Arc::new(SchemaRegistry {
             infos: self.infos,
-            by_family: self.by_family,
+            families,
             concrete_defs,
             api_defs,
             empty_def: empty_def.clone(),
@@ -1191,6 +1284,12 @@ def "LightAPI"
     uniform token[] apiSchemaCanOnlyApplyTo = ["DistantLight"]
 }
 
+def "LightAPI_2"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] bases = ["APISchemaBase"]
+}
+
 def "NonboundableLightBase"
 {
     uniform token schemaKind = "abstractTyped"
@@ -1198,6 +1297,12 @@ def "NonboundableLightBase"
 }
 
 def "DistantLight"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["NonboundableLightBase"]
+}
+
+def "DomeLight"
 {
     uniform token schemaKind = "concreteTyped"
     uniform token[] bases = ["NonboundableLightBase"]
@@ -1246,6 +1351,11 @@ class "SlotAPI"
     float slot:__INSTANCE_NAME__:depth = 0
 }
 
+class "LightAPI_2"
+{
+    float inputs:intensity = 2
+}
+
 class "NonboundableLightBase"
 {
 }
@@ -1262,9 +1372,15 @@ class DistantLight "DistantLight" (
     uniform token light:shaderId = "DistantLight"
 }
 
+class DomeLight "DomeLight"
+{
+    float inputs:intensity = 1
+}
+
 class DomeLight_1 "DomeLight_1"
 {
     float inputs:intensity = 1
+    uniform token poleAxis = "scene"
 }
 "#;
 
@@ -1370,6 +1486,60 @@ def "LightFilter"
         // Only a registered multiple-apply schema has instances at all.
         assert!(!registry.is_allowed_instance_name(&tf::Token::new("LightAPI"), &tf::Token::new("x")));
         assert!(!registry.is_allowed_instance_name(&tf::Token::new("Bogus"), &tf::Token::new("x")));
+    }
+
+    #[test]
+    fn family_version_filters() {
+        let registry = SchemaRegistry::test_registry();
+        let dome = tf::Token::new("DomeLight");
+        let identifiers = |family, filter| {
+            registry
+                .schema_infos_in_family(family, filter)
+                .map(|info| info.identifier().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // A family answers newest version first, whatever order it registered
+        // in, so the first hit is the best match.
+        assert_eq!(identifiers(&dome, VersionFilter::All), ["DomeLight_1", "DomeLight"]);
+        assert_eq!(identifiers(&dome, VersionFilter::GreaterThan(0)), ["DomeLight_1"]);
+        assert_eq!(
+            identifiers(&dome, VersionFilter::GreaterThanOrEqual(1)),
+            ["DomeLight_1"]
+        );
+        assert_eq!(identifiers(&dome, VersionFilter::LessThan(1)), ["DomeLight"]);
+        assert_eq!(
+            identifiers(&dome, VersionFilter::LessThanOrEqual(1)),
+            ["DomeLight_1", "DomeLight"]
+        );
+        assert!(identifiers(&dome, VersionFilter::GreaterThan(1)).is_empty());
+
+        // An unregistered family has no schemas rather than being an error.
+        assert!(identifiers(&tf::Token::new("Bogus"), VersionFilter::All).is_empty());
+    }
+
+    #[test]
+    fn identifier_places_family() {
+        let placed = |name| SchemaRegistry::parse_allowed_identifier(&tf::Token::new(name));
+        let family = |name| placed(name).map(|(family, _)| family.to_string());
+
+        // An identifier carries its own family and version, registered or not.
+        assert_eq!(placed("DomeLight_1"), Some((tf::Token::new("DomeLight"), 1)));
+        assert_eq!(placed("DistantLight"), Some((tf::Token::new("DistantLight"), 0)));
+        assert_eq!(family("Bogus_2").as_deref(), Some("Bogus"));
+
+        // A spelling that could never name a registered schema is in no family:
+        // a non-canonical version suffix, or one on the family itself.
+        assert_eq!(placed("DomeLight_01"), None);
+        assert_eq!(placed("DomeLight_1_2"), None);
+        assert_eq!(placed("1Light"), None);
+
+        // A family never carries a version suffix, so it names no schema under
+        // one that does, even though `DomeLight_1` is registered.
+        let registry = SchemaRegistry::test_registry();
+        assert!(registry
+            .schema_info_in_family(&tf::Token::new("DomeLight_1"), 0)
+            .is_none());
     }
 
     #[test]
@@ -1518,13 +1688,14 @@ def "Knot"
         assert_eq!(dome.family().as_str(), "DomeLight");
         assert_eq!(dome.version(), 1);
 
-        let by_family = registry
-            .schema_info_in_family(&tf::Token::new("DomeLight"), 1)
-            .expect("DomeLight version 1");
-        assert_eq!(by_family.identifier().as_str(), "DomeLight_1");
-        assert!(registry
-            .schema_info_in_family(&tf::Token::new("DomeLight"), 0)
-            .is_none());
+        // A bare identifier is version 0 of its own family, so both versions
+        // are addressable through the family index.
+        let family = tf::Token::new("DomeLight");
+        let versioned = registry.schema_info_in_family(&family, 1).expect("DomeLight version 1");
+        assert_eq!(versioned.identifier().as_str(), "DomeLight_1");
+        let bare = registry.schema_info_in_family(&family, 0).expect("DomeLight version 0");
+        assert_eq!(bare.identifier().as_str(), "DomeLight");
+        assert!(registry.schema_info_in_family(&family, 2).is_none());
     }
 
     #[test]

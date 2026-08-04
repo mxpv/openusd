@@ -21,7 +21,7 @@ use crate::usd::{Attribute, Prim, Relationship, Stage};
 
 use super::tokens as tok;
 use super::{impl_lux_schema, Light};
-use crate::schemas::common::{get_typed, get_typed_any, get_with_api};
+use crate::schemas::common::{get_typed, get_typed_in_family, get_with_api};
 
 /// A spherical / point area light (C++ `UsdLuxSphereLight`).
 #[derive(Clone, derive_more::Deref)]
@@ -335,9 +335,11 @@ impl GeometryLight {
 
 impl_lux_schema!(nonboundable_light GeometryLight);
 
-/// An image-based environment light (C++ `UsdLuxDomeLight`). The view also
-/// covers the versioned `DomeLight_1` typeName (C++ `UsdLuxDomeLight_1`),
-/// whose only addition is `poleAxis`; [`DomeLight::get`] accepts either.
+/// An image-based environment light (C++ `UsdLuxDomeLight`). The view covers
+/// the whole `DomeLight` schema family, so it also reads a prim typed
+/// `DomeLight_1` (C++ `UsdLuxDomeLight_1`), whose only addition is `poleAxis`.
+/// Properties a given version does not define read as absent, so a view over a
+/// version this build predates still resolves what they share.
 #[derive(Clone, derive_more::Deref)]
 pub struct DomeLight(Prim);
 
@@ -353,10 +355,10 @@ impl DomeLight {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_DOME_LIGHT_1)?))
     }
 
-    /// Wrap `path` as a `DomeLight` if it is typed `DomeLight` or
-    /// `DomeLight_1` (C++ `UsdLuxDomeLight::Get`).
+    /// Wrap `path` as a `DomeLight` if its type is any version of the
+    /// `DomeLight` family (C++ `UsdLuxDomeLight::Get`).
     pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
-        get_typed_any(stage, path, &[tok::T_DOME_LIGHT, tok::T_DOME_LIGHT_1]).map(|o| o.map(Self))
+        get_typed_in_family(stage, path, tok::T_DOME_LIGHT).map(|o| o.map(Self))
     }
 
     /// The environment image lighting the scene from the surrounding sphere,

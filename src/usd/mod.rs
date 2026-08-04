@@ -38,7 +38,9 @@ pub use prim_definition::{DefProperty, PrimDefinition};
 pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
-pub use schema_registry::{ApplyApiError, FamilySource, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, Schematics};
+pub use schema_registry::{
+    ApplyApiError, FamilySource, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, Schematics, VersionFilter,
+};
 pub use sink::{CommittedChange, PendingChange, Provenance, StageSink, StageSinkId};
 pub use stage::{
     EditContext, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus, Stage,
