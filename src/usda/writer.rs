@@ -479,11 +479,13 @@ impl<W: Write> Emitter<'_, W> {
         ) {
             self.out.write_all(b"custom ")?;
         }
-        if matches!(
+        // A relationship is uniform unless it says otherwise, the reverse of an
+        // attribute, so `varying` is the keyword the text form spells out.
+        if !matches!(
             get_value(data, path, FieldKey::Variability.as_str()),
             Some(Value::Variability(Variability::Uniform))
         ) {
-            self.out.write_all(b"uniform ")?;
+            self.out.write_all(b"varying ")?;
         }
 
         write!(self.out, "rel {name}")?;
@@ -1418,6 +1420,39 @@ fn is_relationship_structural_field(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::sdf::{path, Data};
+
+    /// A relationship keeps its variability through emit → re-parse. The text
+    /// form spells only the `varying` case, so the uniform default has to
+    /// survive as the absence of a keyword.
+    #[test]
+    fn relationship_variability_roundtrip() {
+        let source = r#"#usda 1.0
+
+def "Mesh"
+{
+    rel plain
+    varying rel moving
+    custom rel owned
+}
+"#;
+        let data = crate::usda::parse(source).expect("parses");
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+
+        assert!(text.contains("rel plain"), "{text}");
+        assert!(!text.contains("uniform rel"), "uniform is never spelled: {text}");
+        assert!(text.contains("varying rel moving"), "{text}");
+        assert!(text.contains("custom rel owned"), "{text}");
+
+        let reparsed = crate::usda::parse(&text).expect("re-parses");
+        for name in ["plain", "moving", "owned"] {
+            let path = crate::sdf::Path::from(format!("/Mesh.{name}").as_str());
+            assert_eq!(
+                data.spec(&path).expect("spec").fields,
+                reparsed.spec(&path).expect("spec").fields,
+                "{name} round-trips"
+            );
+        }
+    }
 
     #[test]
     fn writes_empty_layer() {

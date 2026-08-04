@@ -1134,7 +1134,7 @@ impl Stage {
     pub fn create_relationship(&self, path: impl Into<sdf::Path>) -> Result<super::Relationship, StageAuthoringError> {
         let path = path.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
-            sdf::RelationshipSpec::new(layer.data_mut(), layer_path, sdf::Variability::Varying, true)?;
+            sdf::RelationshipSpec::new(layer.data_mut(), layer_path, sdf::Variability::Uniform, true)?;
             Ok(())
         })?;
         Ok(super::Relationship::new(self, path))

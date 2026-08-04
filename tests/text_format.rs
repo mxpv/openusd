@@ -35,6 +35,8 @@ fn assert_text_format(name: &str) {
             .expect("failed to parse baseline JSON");
     normalize_json(&mut actual_json);
     normalize_json(&mut expected_json);
+    drop_relationship_variability(&mut actual_json);
+    drop_relationship_variability(&mut expected_json);
 
     let diffs = diff_json::compare_values(&actual_json, &expected_json);
     assert!(
@@ -87,6 +89,23 @@ fn normalize_json(v: &mut serde_json::Value) {
             m.values_mut().for_each(normalize_json);
         }
         _ => {}
+    }
+}
+
+/// The two vendor compliance suites disagree on relationship variability. Real
+/// C++ stamps `uniform` on every relationship its text parser reads when the
+/// `varying` keyword is absent, and its text writer spells only the `varying`
+/// case, so the field has to be present for a relationship to round-trip. This
+/// Python `file_formats` baseline records no `variability` on a relationship at
+/// all. We follow C++ and drop the field here, where a relationship spec is the
+/// one carrying no `typeName`.
+fn drop_relationship_variability(v: &mut serde_json::Value) {
+    let Some(specs) = v.as_object_mut() else { return };
+    for spec in specs.values_mut() {
+        let Some(fields) = spec.as_object_mut() else { continue };
+        if !fields.contains_key("typeName") && fields.get("variability") == Some(&serde_json::json!("uniform")) {
+            fields.remove("variability");
+        }
     }
 }
 

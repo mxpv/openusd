@@ -410,7 +410,7 @@ impl<'a> Parser<'a> {
                 }
                 Token::Rel => {
                     this.fetch_next()?;
-                    this.read_relationship(path, false, &mut properties, data, None)?;
+                    this.read_relationship(path, false, sdf::Variability::Uniform, &mut properties, data, None)?;
                 }
                 Token::Reorder => {
                     this.read_reorder(owner_spec)?;
@@ -550,21 +550,23 @@ impl<'a> Parser<'a> {
         let list_op = self.try_list_op();
 
         if self.try_consume(Token::Custom) {
-            if self.try_consume(Token::Rel) {
-                return self.read_relationship(current_path, true, properties, data, list_op);
-            }
             custom = true;
         }
 
+        // `varying` precedes `rel` for a varying relationship, and precedes the
+        // type name for an attribute, so it is consumed before either.
+        let varying = self.try_consume(Token::Varying);
         if self.try_consume(Token::Rel) {
-            return self.read_relationship(current_path, false, properties, data, list_op);
+            let variability = match varying {
+                true => sdf::Variability::Varying,
+                false => sdf::Variability::Uniform,
+            };
+            return self.read_relationship(current_path, custom, variability, properties, data, list_op);
         }
 
         let mut spec = sdf::SpecData::new(sdf::SpecType::Attribute);
         let mut variability = sdf::Variability::Varying;
-        if self.try_consume(Token::Varying) {
-            // default
-        } else if self.try_consume(Token::Uniform) {
+        if !varying && self.try_consume(Token::Uniform) {
             variability = sdf::Variability::Uniform;
         }
 
@@ -846,6 +848,7 @@ impl<'a> Parser<'a> {
         &mut self,
         current_path: &sdf::Path,
         custom: bool,
+        variability: sdf::Variability,
         properties: &mut Vec<String>,
         data: &mut HashMap<sdf::Path, sdf::SpecData>,
         outer_list_op: Option<Token<'a>>,
@@ -855,6 +858,11 @@ impl<'a> Parser<'a> {
         let mut spec = sdf::SpecData::new(sdf::SpecType::Relationship);
         if custom {
             spec.add(FieldKey::Custom, sdf::Value::Bool(true));
+        }
+        // `variability` falls back to varying, so only a uniform relationship —
+        // the plain `rel` spelling — carries the field.
+        if variability == sdf::Variability::Uniform {
+            spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
         }
 
         // Check for metadata before or instead of assignment
@@ -1964,6 +1972,39 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn relationship_variability() {
+        let data = crate::usda::parse(
+            r#"#usda 1.0
+
+def "Mesh"
+{
+    rel plain
+    varying rel moving
+    custom varying rel both
+    custom rel owned
+}
+"#,
+        )
+        .expect("parses");
+        let variability = |path: &str| {
+            data.spec(&sdf::Path::from(path))
+                .expect("spec")
+                .fields
+                .iter()
+                .find(|(key, _)| key == FieldKey::Variability.as_str())
+                .map(|(_, value)| value.clone())
+        };
+
+        // A relationship is uniform unless it spells `varying`, the reverse of
+        // an attribute, and only the uniform case carries the field.
+        let uniform = Some(sdf::Value::Variability(sdf::Variability::Uniform));
+        assert_eq!(variability("/Mesh.plain"), uniform);
+        assert_eq!(variability("/Mesh.owned"), uniform);
+        assert_eq!(variability("/Mesh.moving"), None);
+        assert_eq!(variability("/Mesh.both"), None);
+    }
 
     #[test]
     fn parse_empty_array() {
