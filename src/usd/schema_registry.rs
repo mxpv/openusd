@@ -126,12 +126,17 @@ pub struct FamilySource<'a> {
 /// Each [`family`](Self::family) call parses one family's manifest and
 /// schematics; [`build`](Self::build) then composes the prim definitions that
 /// need every family present, such as a typed schema whose built-in API schema
-/// comes from another family.
+/// comes from another family, or one an API schema auto-applies to.
 #[derive(Debug, Default)]
 pub struct SchemaRegistryBuilder {
     infos: HashMap<tf::Token, SchemaInfo>,
     /// Which family's schematics holds each identifier's class prim.
     source_of: HashMap<tf::Token, Arc<Schematics>>,
+    /// The auto-apply declarations registered through
+    /// [`auto_apply`](Self::auto_apply), keyed by the API schema they apply.
+    /// [`build`](Self::build) merges each into its API schema's
+    /// [`SchemaInfo`].
+    extra_auto_apply: HashMap<tf::Token, Vec<tf::Token>>,
 }
 
 /// Which versions of a schema family a query accepts (C++
@@ -672,7 +677,8 @@ impl SchemaInfo {
     }
 
     /// Schema identifiers this API schema is automatically applied to
-    /// (C++ `apiSchemaAutoApplyTo`).
+    /// (C++ `apiSchemaAutoApplyTo`), from the family manifest and any
+    /// [`SchemaRegistryBuilder::auto_apply`] declaration.
     pub fn auto_apply_to(&self) -> &[tf::Token] {
         &self.auto_apply_to
     }
@@ -748,6 +754,10 @@ impl SchemaRegistryBuilder {
     /// The optional `propertyNamespacePrefix`, `apiSchemaAutoApplyTo`,
     /// `apiSchemaCanOnlyApplyTo` and `allowedInstanceNames` attributes map onto
     /// the matching [`SchemaInfo`] accessors.
+    ///
+    /// `apiSchemaAutoApplyTo` auto-applies the declaring API schema to the
+    /// named target schemas, under the same rules as a declaration registered
+    /// through [`auto_apply`](Self::auto_apply).
     // TODO: take the schematics through `sdf::FileFormat` so a family can ship
     // a binary `generatedSchema.usdc`, as C++ does by opening it as a layer.
     pub fn family(mut self, source: FamilySource<'_>) -> Result<Self> {
@@ -782,19 +792,60 @@ impl SchemaRegistryBuilder {
         Ok(self)
     }
 
+    /// Auto-applies an API schema to schemas whose families do not declare it
+    /// (C++ `CollectAddtlAutoApplyAPISchemasFromPlugins`).
+    ///
+    /// A family declares its own auto-applies through the manifest's
+    /// `apiSchemaAutoApplyTo`; this registers one that no manifest carries,
+    /// which is what lets an API schema reach a type owned by a family it
+    /// cannot edit. Both sources follow the same rules: `targets` name
+    /// schemas by identifier, each carrying everything derived from it, and
+    /// only a single-apply API schema is applied — applying a multiple-apply
+    /// one takes an instance name, which no declaration supplies.
+    ///
+    /// Neither side has to be registered yet: [`build`](Self::build) resolves
+    /// the declaration, and one that names no registered schema resolves to
+    /// nothing. A merged declaration reads back through
+    /// [`SchemaInfo::auto_apply_to`] beside what the manifest declares.
+    pub fn auto_apply(
+        mut self,
+        api: impl Into<tf::Token>,
+        targets: impl IntoIterator<Item = impl Into<tf::Token>>,
+    ) -> Self {
+        self.extra_auto_apply
+            .entry(api.into())
+            .or_default()
+            .extend(targets.into_iter().map(Into::into));
+        self
+    }
+
     /// Composes the registered families into a registry.
     ///
-    /// Applied API schemas are defined first and fully expanded, so a typed
-    /// schema that includes one picks up everything that schema itself
-    /// includes.
-    pub fn build(self) -> Result<Arc<SchemaRegistry>> {
+    /// Auto-apply declarations resolve first, since they decide which API
+    /// schemas a definition builds in. Applied API schemas are defined next
+    /// and fully expanded, so a typed schema that includes one picks up
+    /// everything that schema itself includes.
+    pub fn build(mut self) -> Result<Arc<SchemaRegistry>> {
+        // TODO: report an auto-apply declaration that resolves to nothing —
+        // an API schema name no family registered (dropped here) or one that
+        // is not single-apply (ignored by `compute_auto_applied`). C++ lets
+        // such a name flow into definition composition, which warns through
+        // `TF_WARN`; this crate has no diagnostic channel for a registry
+        // build to carry the report out through.
+        for (api, targets) in mem::take(&mut self.extra_auto_apply) {
+            if let Some(info) = self.infos.get_mut(&api) {
+                info.auto_apply_to.extend(targets);
+            }
+        }
+        let auto_applied = self.compute_auto_applied();
+
         let mut api_defs = HashMap::new();
         for identifier in self.sorted_identifiers(SchemaInfo::is_applied_api) {
             if api_defs.contains_key(&identifier) {
                 continue;
             }
             let mut expansion = Expansion::default();
-            self.expand_api_definition(&identifier, &mut api_defs, &mut expansion)?;
+            self.expand_api_definition(&identifier, &auto_applied, &mut api_defs, &mut expansion)?;
             // Whatever this root reached while a cycle was open saw only part of
             // its own built-ins. Drop those so each is rebuilt from its own
             // root, where the cycle truncates at the schema that closes it. The
@@ -807,7 +858,7 @@ impl SchemaRegistryBuilder {
 
         let mut concrete_defs = HashMap::new();
         for identifier in self.sorted_identifiers(|info| info.kind == SchemaKind::ConcreteTyped) {
-            let definition = self.typed_definition(&identifier, &api_defs)?;
+            let definition = self.typed_definition(&identifier, &auto_applied, &api_defs)?;
             concrete_defs.insert(identifier, Arc::new(definition));
         }
 
@@ -844,6 +895,58 @@ impl SchemaRegistryBuilder {
         }))
     }
 
+    /// Inverts every auto-apply declaration into the API schemas each schema
+    /// builds in (C++ `_GetTypeToAutoAppliedAPISchemaNames`), expanding each
+    /// target to the subtree derived from it and dropping what
+    /// [`auto_apply`](Self::auto_apply)'s rules exclude.
+    ///
+    /// Each schema's list is sorted in reverse dictionary order, which places
+    /// a later version of a family ahead of an earlier one. Composition takes
+    /// one version per family, so that ordering is what makes the newest
+    /// auto-applied version of a family the one that contributes.
+    fn compute_auto_applied(&self) -> AutoApplied {
+        // The base graph reversed, mapping each schema to the schemas
+        // directly derived from it.
+        let mut derived: HashMap<&tf::Token, Vec<&tf::Token>> = HashMap::new();
+        for (identifier, info) in &self.infos {
+            for base in &info.bases {
+                derived.entry(base).or_default().push(identifier);
+            }
+        }
+
+        let mut auto_applied = AutoApplied::new();
+        for (api, info) in &self.infos {
+            if info.kind != SchemaKind::SingleApplyApi {
+                continue;
+            }
+            let mut pending: Vec<&tf::Token> = info
+                .auto_apply_to
+                .iter()
+                .filter(|target| self.infos.contains_key(*target))
+                .collect();
+
+            // A manifest is data, so the bases it declares can cycle; the
+            // reached set makes the walk terminate on that, and keeps a schema
+            // reachable through two targets from building the API in twice.
+            let mut reached = HashSet::new();
+            while let Some(target) = pending.pop() {
+                if !reached.insert(target) {
+                    continue;
+                }
+                pending.extend(derived.get(target).into_iter().flatten().copied());
+            }
+
+            for target in reached {
+                auto_applied.entry(target.clone()).or_default().push(api.clone());
+            }
+        }
+
+        for names in auto_applied.values_mut() {
+            names.sort_unstable_by(|a, b| sdf::element_cmp(b, a));
+        }
+        auto_applied
+    }
+
     /// The registered identifiers matching `wanted`, in a stable order so a
     /// registry built twice from the same families is identical.
     fn sorted_identifiers(&self, wanted: impl Fn(&SchemaInfo) -> bool) -> Vec<tf::Token> {
@@ -865,6 +968,7 @@ impl SchemaRegistryBuilder {
     fn expand_api_definition(
         &self,
         identifier: &tf::Token,
+        auto_applied: &AutoApplied,
         api_defs: &mut HashMap<tf::Token, Arc<PrimDefinition>>,
         expansion: &mut Expansion,
     ) -> Result<()> {
@@ -879,7 +983,7 @@ impl SchemaRegistryBuilder {
             return Ok(());
         }
 
-        let mut pending = self.begin_definition(identifier)?;
+        let mut pending = self.begin_definition(identifier, auto_applied)?;
         for name in mem::take(&mut pending.built_ins) {
             let (built_in, instance) = split_instance_name(&name);
             // A built-in no family registered contributes nothing; the schema
@@ -887,7 +991,7 @@ impl SchemaRegistryBuilder {
             if !self.infos.contains_key(&built_in) {
                 continue;
             }
-            self.expand_api_definition(&built_in, api_defs, expansion)?;
+            self.expand_api_definition(&built_in, auto_applied, api_defs, expansion)?;
             pending.compose_built_in(&built_in, instance.as_ref(), api_defs, &self.infos);
         }
 
@@ -904,9 +1008,10 @@ impl SchemaRegistryBuilder {
     fn typed_definition(
         &self,
         identifier: &tf::Token,
+        auto_applied: &AutoApplied,
         api_defs: &HashMap<tf::Token, Arc<PrimDefinition>>,
     ) -> Result<PrimDefinition> {
-        let mut pending = self.begin_definition(identifier)?;
+        let mut pending = self.begin_definition(identifier, auto_applied)?;
         for name in mem::take(&mut pending.built_ins) {
             let (built_in, instance) = split_instance_name(&name);
             pending.compose_built_in(&built_in, instance.as_ref(), api_defs, &self.infos);
@@ -916,7 +1021,7 @@ impl SchemaRegistryBuilder {
 
     /// Starts one schema's definition from its own class prim, before any
     /// built-in API schema contributes.
-    fn begin_definition(&self, identifier: &tf::Token) -> Result<PendingDefinition> {
+    fn begin_definition(&self, identifier: &tf::Token, auto_applied: &AutoApplied) -> Result<PendingDefinition> {
         let info = self
             .infos
             .get(identifier)
@@ -956,7 +1061,7 @@ impl SchemaRegistryBuilder {
 
         Ok(PendingDefinition {
             definition: PrimDefinition::from_class_prim(&schematics, identifier, applied_name, &overrides)?,
-            built_ins: self.direct_built_ins(&schematics, &class_prim, info),
+            built_ins: self.direct_built_ins(&schematics, &class_prim, info, auto_applied),
             schematics,
             class_prim,
             overrides,
@@ -964,27 +1069,35 @@ impl SchemaRegistryBuilder {
         })
     }
 
-    /// The API schemas a class prim declares as built in (C++
-    /// `_GetDirectBuiltinAPISchemas`).
+    /// The API schemas a class prim declares as built in, followed by the ones
+    /// auto-applied to it (C++ `_GetDirectBuiltinAPISchemas`).
+    ///
+    /// An auto-applied schema comes last, so everything the class prim
+    /// declares is stronger than anything applied to it from outside.
     ///
     /// A multiple-apply schema may only include other templates, and any other
     /// schema may only include non-templates: a template's properties are only
     /// meaningful once an instance name replaces the placeholder, so mixing the
     /// two would leave a placeholder in a concrete prim's properties. Names on
-    /// the wrong side of that rule are dropped.
-    fn direct_built_ins(&self, schematics: &Schematics, class_prim: &sdf::Path, info: &SchemaInfo) -> Vec<tf::Token> {
-        // TODO: append the API schemas whose `apiSchemaAutoApplyTo` names this
-        // schema, which C++ treats as built-in after the declared ones.
-        let Some(list_op) = class_prim_field(schematics, class_prim, sdf::FieldKey::ApiSchemas)
+    /// the wrong side of that rule are dropped, which is also what keeps an
+    /// auto-applied schema — never a template — out of a multiple-apply one.
+    fn direct_built_ins(
+        &self,
+        schematics: &Schematics,
+        class_prim: &sdf::Path,
+        info: &SchemaInfo,
+        auto_applied: &AutoApplied,
+    ) -> Vec<tf::Token> {
+        let declared = class_prim_field(schematics, class_prim, sdf::FieldKey::ApiSchemas)
             .and_then(|value| value.clone().try_as_token_list_op())
-        else {
-            return Vec::new();
-        };
+            .map(|list_op| list_op.compose_over(&[]))
+            .unwrap_or_default();
+        let auto_applied = auto_applied.get(info.identifier()).into_iter().flatten().cloned();
 
         let wants_templates = info.kind == SchemaKind::MultipleApplyApi;
-        list_op
-            .compose_over(&[])
+        declared
             .into_iter()
+            .chain(auto_applied)
             .filter(|name| is_name_template(name) == wants_templates)
             .filter(|name| {
                 // The reference also has to agree with what it names: only a
@@ -997,6 +1110,10 @@ impl SchemaRegistryBuilder {
             .collect()
     }
 }
+
+/// Which API schemas are auto-applied to each schema identifier, strongest
+/// first (C++ `_typeToAutoAppliedAPISchemaNames`).
+type AutoApplied = HashMap<tf::Token, Vec<tf::Token>>;
 
 /// State threaded through one root's recursive built-in expansion.
 #[derive(Default)]
@@ -1386,11 +1503,16 @@ class DomeLight_1 "DomeLight_1"
 
     /// The miniature family, registered.
     pub(crate) fn test_registry() -> Arc<SchemaRegistry> {
+        Self::test_family(Self::TEST_MANIFEST, Self::TEST_SCHEMATICS)
+    }
+
+    /// A registry of one family built from the given manifest and schematics.
+    pub(crate) fn test_family(manifest: &str, schematics: &str) -> Arc<SchemaRegistry> {
         Self::builder()
             .family(FamilySource {
                 name: "test",
-                manifest: Self::TEST_MANIFEST,
-                schematics: Self::TEST_SCHEMATICS,
+                manifest,
+                schematics,
             })
             .expect("test family registers")
             .build()
@@ -1454,15 +1576,7 @@ def "LightFilter"
     uniform token[] bases = ["Xformable"]
 }
 "#;
-        let registry = SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "lux",
-                manifest,
-                schematics: "#usda 1.0\n\nclass LightFilter \"LightFilter\"\n{\n}\n",
-            })
-            .expect("family registers")
-            .build()
-            .expect("registry builds");
+        let registry = SchemaRegistry::test_family(manifest, "#usda 1.0\n\nclass LightFilter \"LightFilter\"\n{\n}\n");
 
         let filter = tf::Token::new("LightFilter");
         assert!(registry.is_a(&filter, &filter));
@@ -1601,15 +1715,7 @@ class "ConfusedAPI" (
 {
 }
 "#;
-        let registry = SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "test",
-                manifest,
-                schematics,
-            })
-            .expect("family registers")
-            .build()
-            .expect("registry builds");
+        let registry = SchemaRegistry::test_family(manifest, schematics);
 
         let confused = registry
             .api_prim_definition(&tf::Token::new("ConfusedAPI"))
@@ -1663,15 +1769,8 @@ def "Knot"
     uniform token[] bases = ["Loop"]
 }
 "#;
-        let registry = SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "test",
-                manifest,
-                schematics: "#usda 1.0\n\nclass \"Loop\"\n{\n}\n\nclass \"Knot\"\n{\n}\n",
-            })
-            .expect("family registers")
-            .build()
-            .expect("registry builds");
+        let registry =
+            SchemaRegistry::test_family(manifest, "#usda 1.0\n\nclass \"Loop\"\n{\n}\n\nclass \"Knot\"\n{\n}\n");
 
         // A manifest is data, so a base cycle must not hang the query.
         assert!(registry.is_a(&tf::Token::new("Loop"), &tf::Token::new("Knot")));
@@ -1820,15 +1919,7 @@ class "SingleAPI" (
 {
 }
 "#;
-        let registry = SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "test",
-                manifest,
-                schematics,
-            })
-            .expect("family registers")
-            .build()
-            .expect("registry builds");
+        let registry = SchemaRegistry::test_family(manifest, schematics);
 
         let single = registry
             .api_prim_definition(&tf::Token::new("SingleAPI"))
@@ -1865,15 +1956,7 @@ class "ThingAPI_2"
     float thing:__INSTANCE_NAME__:two = 2
 }
 "#;
-        let registry = SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "test",
-                manifest,
-                schematics,
-            })
-            .expect("family registers")
-            .build()
-            .expect("registry builds");
+        let registry = SchemaRegistry::test_family(manifest, schematics);
 
         // The conflict is caught while building, not left to poison every
         // application of the schema once an instance name is chosen.
@@ -1924,15 +2007,7 @@ class "MultiAPI" (
     float multi:__INSTANCE_NAME__:value = 2
 }
 "#;
-        let registry = SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "test",
-                manifest,
-                schematics,
-            })
-            .expect("family registers")
-            .build()
-            .expect("registry builds");
+        let registry = SchemaRegistry::test_family(manifest, schematics);
 
         let multi = registry
             .api_prim_definition(&tf::Token::new("MultiAPI"))
@@ -1974,15 +2049,7 @@ class "SecondAPI" (
     float second = 2
 }
 "#;
-        let registry = SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "test",
-                manifest,
-                schematics,
-            })
-            .expect("family registers")
-            .build()
-            .expect("registry builds");
+        let registry = SchemaRegistry::test_family(manifest, schematics);
 
         // The mutual inclusion stops where it repeats rather than expanding
         // forever, and each definition is built from its own root, so neither
@@ -2012,15 +2079,8 @@ class "ThingAPI" (
     float thing = 1
 }
 "#;
-        let registry = SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "test",
-                manifest,
-                schematics,
-            })
-            .expect("family registers")
-            .build()
-            .expect("an unregistered built-in does not fail the build");
+        // An unregistered built-in does not fail the build.
+        let registry = SchemaRegistry::test_family(manifest, schematics);
 
         let thing = registry
             .api_prim_definition(&tf::Token::new("ThingAPI"))
@@ -2057,7 +2117,559 @@ class "ThingAPI_2"
     float two = 2
 }
 "#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // A schema cannot build in a second version of its own family.
+        let thing = registry
+            .api_prim_definition(&tf::Token::new("ThingAPI"))
+            .expect("ThingAPI");
+        assert_eq!(thing.applied_api_schemas(), [tf::Token::new("ThingAPI")]);
+        assert!(!thing.has_property(&tf::Token::new("two")));
+    }
+
+    #[test]
+    fn auto_apply_to_typed() {
+        let manifest = r#"#usda 1.0
+
+def "MarkerAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Widget"]
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "MarkerAPI"
+{
+    float marker:size = 2
+}
+
+class Widget "Widget"
+{
+    float widget:width = 1
+}
+"#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // The type says nothing about the API schema; the API schema says it
+        // applies to the type, and that is enough to build it in.
+        let widget = registry
+            .concrete_prim_definition(&tf::Token::new("Widget"))
+            .expect("Widget");
+        assert_eq!(widget.applied_api_schemas(), [tf::Token::new("MarkerAPI")]);
+        assert_eq!(
+            widget.attribute_fallback(&tf::Token::new("marker:size")),
+            Some(sdf::Value::Float(2.0))
+        );
+    }
+
+    #[test]
+    fn auto_apply_reaches_derived() {
+        let manifest = r#"#usda 1.0
+
+def "MarkerAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Base"]
+}
+
+def "Base"
+{
+    uniform token schemaKind = "abstractTyped"
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Base"]
+}
+
+def "Gadget"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Widget"]
+}
+
+def "Other"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "MarkerAPI"
+{
+    float marker:size = 2
+}
+
+class "Base"
+{
+}
+
+class Widget "Widget"
+{
+}
+
+class Gadget "Gadget"
+{
+}
+
+class Other "Other"
+{
+}
+"#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // A target carries everything below it, however deep, and nothing else.
+        let marker = tf::Token::new("marker:size");
+        for derived in ["Widget", "Gadget"] {
+            let definition = registry
+                .concrete_prim_definition(&tf::Token::new(derived))
+                .expect("a derived type is defined");
+            assert!(definition.has_property(&marker), "{derived} missed the auto-apply");
+        }
+        let other = registry
+            .concrete_prim_definition(&tf::Token::new("Other"))
+            .expect("Other");
+        assert!(!other.has_property(&marker));
+        assert!(other.applied_api_schemas().is_empty());
+    }
+
+    #[test]
+    fn auto_apply_to_api_schema() {
+        let manifest = r#"#usda 1.0
+
+def "MarkerAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["HostAPI"]
+}
+
+def "HostAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "MarkerAPI"
+{
+    float marker:size = 2
+}
+
+class "HostAPI"
+{
+    float host:name = 1
+}
+
+class Widget "Widget" (
+    apiSchemas = ["HostAPI"]
+)
+{
+}
+"#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // The auto-apply lands on the API schema, so everything that builds
+        // that schema in picks it up too.
+        let widget = registry
+            .concrete_prim_definition(&tf::Token::new("Widget"))
+            .expect("Widget");
+        assert_eq!(
+            widget.applied_api_schemas(),
+            [tf::Token::new("HostAPI"), tf::Token::new("MarkerAPI")]
+        );
+        assert!(widget.has_property(&tf::Token::new("marker:size")));
+    }
+
+    #[test]
+    fn auto_apply_after_declared() {
+        let manifest = r#"#usda 1.0
+
+def "StrongAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+}
+
+def "WeakAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Widget"]
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "StrongAPI"
+{
+    float shared = 1
+}
+
+class "WeakAPI"
+{
+    float shared = 2
+}
+
+class Widget "Widget" (
+    apiSchemas = ["StrongAPI"]
+)
+{
+}
+"#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // What the class prim declares is stronger than what is applied to it
+        // from outside, so the declared schema's fallback wins.
+        let widget = registry
+            .concrete_prim_definition(&tf::Token::new("Widget"))
+            .expect("Widget");
+        assert_eq!(
+            widget.applied_api_schemas(),
+            [tf::Token::new("StrongAPI"), tf::Token::new("WeakAPI")]
+        );
+        assert_eq!(
+            widget.attribute_fallback(&tf::Token::new("shared")),
+            Some(sdf::Value::Float(1.0))
+        );
+    }
+
+    #[test]
+    fn auto_apply_newest_version_wins() {
+        let manifest = r#"#usda 1.0
+
+def "ThingAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Widget"]
+}
+
+def "ThingAPI_2"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Widget"]
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "ThingAPI"
+{
+    float version = 1
+}
+
+class "ThingAPI_2"
+{
+    float version = 2
+    float extra = 0
+}
+
+class Widget "Widget"
+{
+}
+"#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // Reverse dictionary order puts the later version first, and only one
+        // version of a family composes, so the earlier one contributes
+        // nothing.
+        let widget = registry
+            .concrete_prim_definition(&tf::Token::new("Widget"))
+            .expect("Widget");
+        assert_eq!(widget.applied_api_schemas(), [tf::Token::new("ThingAPI_2")]);
+        assert_eq!(
+            widget.attribute_fallback(&tf::Token::new("version")),
+            Some(sdf::Value::Float(2.0))
+        );
+        assert!(widget.has_property(&tf::Token::new("extra")));
+    }
+
+    #[test]
+    fn auto_apply_reverse_dict_order() {
+        let manifest = r#"#usda 1.0
+
+def "AlphaAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Widget"]
+}
+
+def "BetaAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Widget"]
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "AlphaAPI"
+{
+    float alpha = 1
+}
+
+class "BetaAPI"
+{
+    float beta = 2
+}
+
+class Widget "Widget"
+{
+}
+"#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // Unrelated schemas auto-applying to one target still compose in a
+        // fixed order, whatever order they registered in.
+        let widget = registry
+            .concrete_prim_definition(&tf::Token::new("Widget"))
+            .expect("Widget");
+        assert_eq!(
+            widget.applied_api_schemas(),
+            [tf::Token::new("BetaAPI"), tf::Token::new("AlphaAPI")]
+        );
+    }
+
+    #[test]
+    fn auto_apply_multi_target_skipped() {
+        let manifest = r#"#usda 1.0
+
+def "MarkerAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["MultiAPI"]
+}
+
+def "MultiAPI"
+{
+    uniform token schemaKind = "multipleApplyAPI"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "MarkerAPI"
+{
+    float marker:size = 2
+}
+
+class "MultiAPI"
+{
+    float multi:__INSTANCE_NAME__:value = 1
+}
+"#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // A multiple-apply schema takes only templates, and an auto-applied
+        // name never is one, so the declaration reaches nothing.
+        let multi = registry
+            .api_prim_definition(&tf::Token::new("MultiAPI"))
+            .expect("MultiAPI");
+        assert_eq!(
+            multi.applied_api_schemas(),
+            [tf::Token::new("MultiAPI:__INSTANCE_NAME__")]
+        );
+        assert!(!multi.has_property(&tf::Token::new("marker:size")));
+    }
+
+    #[test]
+    fn auto_apply_unregistered_target() {
+        let manifest = r#"#usda 1.0
+
+def "MarkerAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["FromAnotherFamily"]
+}
+"#;
+        // An unregistered target does not fail the build.
+        let registry = SchemaRegistry::test_family(
+            manifest,
+            "#usda 1.0\n\nclass \"MarkerAPI\"\n{\n    float marker:size = 2\n}\n",
+        );
+
+        let marker = registry
+            .api_prim_definition(&tf::Token::new("MarkerAPI"))
+            .expect("MarkerAPI");
+        assert!(marker.has_property(&tf::Token::new("marker:size")));
+    }
+
+    #[test]
+    fn auto_apply_non_single_ignored() {
+        let manifest = r#"#usda 1.0
+
+def "MultiAPI"
+{
+    uniform token schemaKind = "multipleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Widget"]
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "MultiAPI"
+{
+    float multi:__INSTANCE_NAME__:value = 1
+}
+
+class Widget "Widget"
+{
+}
+"#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // Applying a multiple-apply schema takes an instance name, which a
+        // declaration has no way to supply.
+        let widget = registry
+            .concrete_prim_definition(&tf::Token::new("Widget"))
+            .expect("Widget");
+        assert!(widget.applied_api_schemas().is_empty());
+        assert!(widget.property_names().is_empty());
+    }
+
+    #[test]
+    fn auto_apply_cycle_terminates() {
+        let manifest = r#"#usda 1.0
+
+def "FirstAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["SecondAPI"]
+}
+
+def "SecondAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "FirstAPI" (
+    apiSchemas = ["SecondAPI"]
+)
+{
+    float first = 1
+}
+
+class "SecondAPI"
+{
+    float second = 2
+}
+"#;
+        let registry = SchemaRegistry::test_family(manifest, schematics);
+
+        // One schema declares the other while the other is auto-applied back
+        // to it, so the expansion has to stop where it repeats.
+        let first = registry
+            .api_prim_definition(&tf::Token::new("FirstAPI"))
+            .expect("FirstAPI");
+        assert!(first.has_property(&tf::Token::new("first")));
+        assert!(first.has_property(&tf::Token::new("second")));
+
+        let second = registry
+            .api_prim_definition(&tf::Token::new("SecondAPI"))
+            .expect("SecondAPI");
+        assert!(second.has_property(&tf::Token::new("second")));
+        assert!(second.has_property(&tf::Token::new("first")));
+    }
+
+    #[test]
+    fn auto_apply_cross_family() {
+        let core_manifest = "#usda 1.0\n\ndef \"Widget\"\n{\n    uniform token schemaKind = \"concreteTyped\"\n}\n";
+        let ext_manifest = r#"#usda 1.0
+
+def "MarkerAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Widget"]
+}
+"#;
         let registry = SchemaRegistry::builder()
+            .family(FamilySource {
+                name: "core",
+                manifest: core_manifest,
+                schematics: "#usda 1.0\n\nclass Widget \"Widget\"\n{\n}\n",
+            })
+            .expect("core registers")
+            .family(FamilySource {
+                name: "ext",
+                manifest: ext_manifest,
+                schematics: "#usda 1.0\n\nclass \"MarkerAPI\"\n{\n    float marker:size = 2\n}\n",
+            })
+            .expect("ext registers")
+            .build()
+            .expect("registry builds");
+
+        // The target belongs to a family that knows nothing about the schema
+        // reaching into it.
+        let widget = registry
+            .concrete_prim_definition(&tf::Token::new("Widget"))
+            .expect("Widget");
+        assert_eq!(widget.applied_api_schemas(), [tf::Token::new("MarkerAPI")]);
+        assert!(widget.has_property(&tf::Token::new("marker:size")));
+    }
+
+    #[test]
+    fn auto_apply_builder_entries() {
+        let manifest = r#"#usda 1.0
+
+def "MarkerAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Widget"]
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+
+def "Gadget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        let schematics = r#"#usda 1.0
+
+class "MarkerAPI"
+{
+    float marker:size = 2
+}
+
+class Widget "Widget"
+{
+}
+
+class Gadget "Gadget"
+{
+}
+"#;
+        let registry = SchemaRegistry::builder()
+            .auto_apply("MarkerAPI", ["Gadget"])
             .family(FamilySource {
                 name: "test",
                 manifest,
@@ -2067,12 +2679,26 @@ class "ThingAPI_2"
             .build()
             .expect("registry builds");
 
-        // A schema cannot build in a second version of its own family.
-        let thing = registry
-            .api_prim_definition(&tf::Token::new("ThingAPI"))
-            .expect("ThingAPI");
-        assert_eq!(thing.applied_api_schemas(), [tf::Token::new("ThingAPI")]);
-        assert!(!thing.has_property(&tf::Token::new("two")));
+        // A registered declaration adds to what the manifest declares rather
+        // than replacing it, and neither side has to be registered when it is
+        // made.
+        for target in ["Widget", "Gadget"] {
+            let definition = registry
+                .concrete_prim_definition(&tf::Token::new(target))
+                .expect("a target is defined");
+            assert_eq!(
+                definition.applied_api_schemas(),
+                [tf::Token::new("MarkerAPI")],
+                "{target}"
+            );
+        }
+
+        // The merged declaration reads back beside the manifest's own.
+        let info = registry.schema_info(&tf::Token::new("MarkerAPI")).expect("MarkerAPI");
+        assert_eq!(
+            info.auto_apply_to(),
+            [tf::Token::new("Widget"), tf::Token::new("Gadget")]
+        );
     }
 
     #[test]
@@ -2217,15 +2843,7 @@ class Widget "Widget" (
 {
 }
 "#;
-        let registry = SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "test",
-                manifest,
-                schematics,
-            })
-            .expect("family registers")
-            .build()
-            .expect("registry builds");
+        let registry = SchemaRegistry::test_family(manifest, schematics);
 
         let definition =
             registry.build_composed_prim_definition(&tf::Token::new("Widget"), &[tf::Token::new("ThingAPI_2")]);

@@ -605,7 +605,7 @@ fn composed_path(name: &tf::Token) -> Option<sdf::Path> {
 mod tests {
     use std::sync::Arc;
 
-    use crate::usd::{FamilySource, SchemaRegistry};
+    use crate::usd::SchemaRegistry;
     use crate::{sdf, tf};
 
     /// A family whose concrete `Thing` includes `WeakAPI` and shares property
@@ -683,15 +683,7 @@ class Thing "Thing" (
 "#;
 
     fn merge_registry() -> Arc<SchemaRegistry> {
-        SchemaRegistry::builder()
-            .family(FamilySource {
-                name: "merge",
-                manifest: MERGE_MANIFEST,
-                schematics: MERGE_SCHEMATICS,
-            })
-            .expect("merge family registers")
-            .build()
-            .expect("merge registry builds")
+        SchemaRegistry::test_family(MERGE_MANIFEST, MERGE_SCHEMATICS)
     }
 
     #[test]
