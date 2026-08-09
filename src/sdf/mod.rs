@@ -21,6 +21,7 @@ mod layer;
 pub(crate) mod layer_registry;
 mod ordering;
 mod path;
+pub mod path_expr;
 mod path_table;
 pub mod schema;
 pub mod sink;
@@ -42,6 +43,7 @@ pub use layer::{AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSin
 pub use layer_registry::LayerRegistry;
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{path, Path, PathComponent, PathComponents, PathElement};
+pub use path_expr::{ExpressionReference, PathExpression, PathPattern, PredicateExpression};
 pub use path_table::PathTable;
 pub use schema::{folds_list_ops, ChildrenKey, FieldKey};
 pub use spec::{
