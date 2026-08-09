@@ -94,6 +94,13 @@ struct Segment {
     end: usize,
 }
 
+impl Segment {
+    /// The number of components the segment spans.
+    fn width(self) -> usize {
+        self.end - self.begin
+    }
+}
+
 /// The candidate end positions of one segment placement; `prior` consumes
 /// one element fewer than `full` by binding a leading bare predicate to the
 /// previous element.
@@ -544,7 +551,7 @@ impl<D> PatternImpl<D> {
                 return PredResult::varying(false);
             }
             let has_stretch = has_prev || self.stretch_begin;
-            let width = self.segment_width(segment);
+            let width = segment.width();
             if !has_stretch && available > width {
                 // The head-anchored segment needed to consume every element,
                 // and the walk has grown past it.
@@ -610,7 +617,7 @@ impl<D> PatternImpl<D> {
     /// when a leading bare predicate may bind the prior element instead
     /// (C++ `_SegmentMinMatchElts`).
     fn segment_min_match_elts(&self, segment: Segment) -> usize {
-        self.segment_width(segment) - usize::from(self.components[segment.begin].is_bare_predicate())
+        segment.width() - usize::from(self.components[segment.begin].is_bare_predicate())
     }
 
     /// Places every segment over `elements`: the first anchored at the head
@@ -665,10 +672,6 @@ impl<D> PatternImpl<D> {
         self.stretch_end || pos == elements.len()
     }
 
-    fn segment_width(&self, segment: Segment) -> usize {
-        segment.end - segment.begin
-    }
-
     /// The ways `segment` can match with its body starting at `elements[at]`,
     /// each as the element position after the match. `full` aligns the first
     /// component at `at`. `prior` — offered only when a stretch precedes the
@@ -686,7 +689,7 @@ impl<D> PatternImpl<D> {
     ) -> Placements {
         let full = self
             .try_alignment(segment, segment.begin, elements, at, domain)
-            .then(|| at + self.segment_width(segment));
+            .then(|| at + segment.width());
 
         let mut prior = None;
         if allow_prior && self.components[segment.begin].is_bare_predicate() {
@@ -704,7 +707,7 @@ impl<D> PatternImpl<D> {
                 false
             };
             if prior_matches && self.try_alignment(segment, segment.begin + 1, elements, at, domain) {
-                prior = Some(at + self.segment_width(segment) - 1);
+                prior = Some(at + segment.width() - 1);
             }
         }
         Placements { prior, full }

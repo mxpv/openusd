@@ -154,6 +154,10 @@ pub enum Value {
 
 #[cfg(feature = "serde")]
 impl serde::Serialize for Value {
+    // One arm per variant, grouped and ordered to mirror the `Value` declaration
+    // so a new variant has an obvious home. Folding the textually identical arms
+    // together would scatter that correspondence.
+    #[allow(clippy::match_same_arms)]
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
 

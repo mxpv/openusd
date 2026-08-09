@@ -185,7 +185,7 @@ impl Attribute {
 
     /// Add a single connection target to the prepended list op. No-op if
     /// already present. This is the explicit spelling of the default USD
-    /// AddConnection position.
+    /// `AddConnection` position.
     pub fn add_connection_prepended(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
         self.add_connection_at(target, true)
     }

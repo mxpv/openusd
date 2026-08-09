@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use logos::Logos;
 use std::iter::Peekable;
-use std::mem::MaybeUninit;
 use std::ops::Range;
 use std::{any::type_name, collections::HashMap, fmt::Debug, str::FromStr};
 
@@ -81,8 +80,7 @@ impl<'a> Parser<'a> {
         // Find the end of the current line
         let line_end = source[line_start..]
             .find('\n')
-            .map(|pos| line_start + pos)
-            .unwrap_or(source.len());
+            .map_or(source.len(), |pos| line_start + pos);
 
         let line_text = source[line_start..line_end].trim_end_matches(['\r', '\n']).to_string();
 
@@ -126,13 +124,13 @@ impl<'a> Parser<'a> {
     }
 
     #[inline]
-    fn is_next(&mut self, expected: Token) -> bool {
+    fn is_next(&mut self, expected: Token<'_>) -> bool {
         matches!(self.peek_next(), Some(Ok(t)) if *t == expected)
     }
 
     /// Consume the next token if it matches, returning whether it was consumed.
     #[inline]
-    fn try_consume(&mut self, expected: Token) -> bool {
+    fn try_consume(&mut self, expected: Token<'_>) -> bool {
         if self.is_next(expected) {
             let _ = self.fetch_next();
             true
@@ -141,7 +139,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn ensure_next(&mut self, expected_token: Token) -> Result<()> {
+    fn ensure_next(&mut self, expected_token: Token<'_>) -> Result<()> {
         let token = self.fetch_next()?;
         ensure!(
             token == expected_token,
@@ -261,7 +259,7 @@ impl<'a> Parser<'a> {
             return Ok(root);
         }
 
-        const KNOWN_PROPS: &[(&str, TypeInfo)] = &[
+        const KNOWN_PROPS: &[(&str, TypeInfo<'_>)] = &[
             (FieldKey::DefaultPrim.as_str(), TypeInfo::scalar(Type::Token)),
             (FieldKey::StartTimeCode.as_str(), TypeInfo::scalar(Type::Double)),
             (FieldKey::HasOwnedSubLayers.as_str(), TypeInfo::scalar(Type::Bool)),
@@ -526,7 +524,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Create an attribute spec with the standard type/custom/variability fields.
-    fn make_attribute_spec(type_info: &TypeInfo, custom: bool, variability: sdf::Variability) -> sdf::SpecData {
+    fn make_attribute_spec(type_info: &TypeInfo<'_>, custom: bool, variability: sdf::Variability) -> sdf::SpecData {
         let mut spec = sdf::SpecData::new(sdf::SpecType::Attribute);
         spec.add(FieldKey::TypeName, sdf::Value::token(type_info.to_string()));
         if custom {
@@ -606,9 +604,7 @@ impl<'a> Parser<'a> {
                     .entry(path)
                     .or_insert_with(|| Self::make_attribute_spec(&type_info, custom, variability));
 
-                let list_op = self
-                    .apply_list_op(list_op, targets)
-                    .context("Unable to build connection listOp")?;
+                let list_op = apply_list_op(list_op, targets).context("Unable to build connection listOp")?;
                 spec.add_list_op(FieldKey::ConnectionPaths, sdf::Value::PathListOp(list_op));
             }
             return Ok(());
@@ -890,9 +886,7 @@ impl<'a> Parser<'a> {
             .map(|p| path.make_absolute(&p))
             .collect();
 
-        let list_op = self
-            .apply_list_op(list_op, targets)
-            .context("Unable to build relationship targets listOp")?;
+        let list_op = apply_list_op(list_op, targets).context("Unable to build relationship targets listOp")?;
         spec.add_list_op(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
 
         if self.is_next(Token::Punctuation('(')) {
@@ -943,27 +937,21 @@ impl<'a> Parser<'a> {
                 let values = self
                     .one_or_list(|this| this.parse_token::<tf::Token>())
                     .context("Unable to parse apiSchemas list")?;
-                let list_op = self
-                    .apply_list_op(list_op, values)
-                    .context("Unable to build apiSchemas listOp")?;
+                let list_op = apply_list_op(list_op, values).context("Unable to build apiSchemas listOp")?;
                 spec.add_list_op("apiSchemas", sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::References.as_str() => {
                 let references = self
                     .one_or_list(Self::parse_reference)
                     .context("Unable to parse references")?;
-                let list_op = self
-                    .apply_list_op(list_op, references)
-                    .context("Unable to build references listOp")?;
+                let list_op = apply_list_op(list_op, references).context("Unable to build references listOp")?;
                 spec.add_list_op(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
             }
             n if n == FieldKey::Payload.as_str() => {
                 let payloads = self
                     .one_or_list(Self::parse_payload)
                     .context("Unable to parse payloads")?;
-                let list_op = self
-                    .apply_list_op(list_op, payloads)
-                    .context("Unable to build payload listOp")?;
+                let list_op = apply_list_op(list_op, payloads).context("Unable to build payload listOp")?;
                 spec.add_list_op(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
@@ -974,9 +962,7 @@ impl<'a> Parser<'a> {
                 for p in &paths {
                     reject_variant_selection_in_path(p, "Inherit")?;
                 }
-                let list_op = self
-                    .apply_list_op(list_op, paths)
-                    .context("Unable to build inherits listOp")?;
+                let list_op = apply_list_op(list_op, paths).context("Unable to build inherits listOp")?;
                 spec.add_list_op(FieldKey::InheritPaths, sdf::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Kind.as_str() => {
@@ -1007,7 +993,7 @@ impl<'a> Parser<'a> {
                 if let sdf::Value::Dictionary(map) = dict {
                     let selections: HashMap<String, String> = map
                         .into_iter()
-                        .filter_map(|(k, v)| v.try_as_string().map(|s| (k, s.to_owned())))
+                        .filter_map(|(k, v)| v.try_as_string().map(|s| (k, s.clone())))
                         .collect();
                     spec.add(FieldKey::VariantSelection, sdf::Value::VariantSelectionMap(selections));
                 }
@@ -1016,9 +1002,7 @@ impl<'a> Parser<'a> {
                 let values = self
                     .one_or_list(|this| this.parse_token::<tf::Token>())
                     .context("Unable to parse variantSets")?;
-                let list_op = self
-                    .apply_list_op(list_op, values)
-                    .context("Unable to build variantSets listOp")?;
+                let list_op = apply_list_op(list_op, values).context("Unable to build variantSets listOp")?;
                 spec.add_list_op(FieldKey::VariantSetNames, sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::Specializes.as_str() => {
@@ -1026,9 +1010,7 @@ impl<'a> Parser<'a> {
                 for p in &paths {
                     reject_variant_selection_in_path(p, "Specializes")?;
                 }
-                let list_op = self
-                    .apply_list_op(list_op, paths)
-                    .context("Unable to build specializes listOp")?;
+                let list_op = apply_list_op(list_op, paths).context("Unable to build specializes listOp")?;
                 spec.add_list_op(FieldKey::Specializes, sdf::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Instanceable.as_str() => {
@@ -1070,9 +1052,7 @@ impl<'a> Parser<'a> {
                 let values = self
                     .one_or_list(|this| Ok(this.fetch_str()?.to_owned()))
                     .context("Unable to parse clipSets list")?;
-                let list_op = self
-                    .apply_list_op(list_op, values)
-                    .context("Unable to build clipSets listOp")?;
+                let list_op = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
                 spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
             }
             // Unknown prim metadata - e.g. DCC / Omniverse hints like
@@ -1432,24 +1412,8 @@ impl<'a> Parser<'a> {
         Ok(payload)
     }
 
-    fn apply_list_op<T: Default + Clone + PartialEq>(
-        &mut self,
-        op: Option<Token<'a>>,
-        items: Vec<T>,
-    ) -> Result<sdf::ListOp<T>> {
-        match op {
-            None => Ok(sdf::ListOp::explicit(items)),
-            Some(Token::Prepend) => Ok(sdf::ListOp::prepended(items)),
-            Some(Token::Append) => Ok(sdf::ListOp::appended(items)),
-            Some(Token::Add) => Ok(sdf::ListOp::added(items)),
-            Some(Token::Delete) => Ok(sdf::ListOp::deleted(items)),
-            Some(Token::Reorder) => Ok(sdf::ListOp::ordered(items)),
-            other => bail!("Unsupported list op: {other:?}"),
-        }
-    }
-
     /// Decode a typed value based on USD's scalar/array/role type tables.
-    fn parse_value(&mut self, info: TypeInfo) -> Result<sdf::Value> {
+    fn parse_value(&mut self, info: TypeInfo<'_>) -> Result<sdf::Value> {
         // None means "value block" (explicitly unset) regardless of type.
         if self.try_consume(Token::None) {
             return Ok(sdf::Value::ValueBlock);
@@ -1797,16 +1761,15 @@ impl<'a> Parser<'a> {
         T: FromStr,
         <T as FromStr>::Err: Debug,
     {
-        let mut result: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-        let mut i = 0;
+        let mut values = Vec::with_capacity(N);
         self.parse_block('(', ')', |this| {
-            ensure!(i < N, "tuple has too many elements (expected {N})");
-            result[i] = MaybeUninit::new(this.parse_token::<T>()?);
-            i += 1;
+            ensure!(values.len() < N, "tuple has too many elements (expected {N})");
+            values.push(this.parse_token::<T>()?);
             Ok(())
         })?;
-        let result = unsafe { std::mem::transmute_copy::<_, [T; N]>(&result) };
-        Ok(result)
+        values
+            .try_into()
+            .map_err(|v: Vec<T>| anyhow!("tuple has too few elements (expected {N}, got {})", v.len()))
     }
 
     /// Parse a `[...]` array, using `parse_element` for each item.
@@ -1885,6 +1848,20 @@ impl<'a> Parser<'a> {
         T: From<[E; N]>,
     {
         Ok(self.parse_array_of_tuples::<E, N>()?.into_iter().map(T::from).collect())
+    }
+}
+
+/// Wrap `items` in the list op the `op` keyword names, or an explicit list when
+/// no keyword was authored.
+fn apply_list_op<T: Default + Clone + PartialEq>(op: Option<Token<'_>>, items: Vec<T>) -> Result<sdf::ListOp<T>> {
+    match op {
+        None => Ok(sdf::ListOp::explicit(items)),
+        Some(Token::Prepend) => Ok(sdf::ListOp::prepended(items)),
+        Some(Token::Append) => Ok(sdf::ListOp::appended(items)),
+        Some(Token::Add) => Ok(sdf::ListOp::added(items)),
+        Some(Token::Delete) => Ok(sdf::ListOp::deleted(items)),
+        Some(Token::Reorder) => Ok(sdf::ListOp::ordered(items)),
+        other => bail!("Unsupported list op: {other:?}"),
     }
 }
 
@@ -2727,7 +2704,7 @@ def Xform "World"
                 .map(String::from)
                 .collect::<Vec<_>>(),
             vec![String::from("xformOp:translate"), String::from("xformOp:rotateXYZ")]
-        )
+        );
     }
 
     #[test]

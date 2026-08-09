@@ -139,7 +139,7 @@ where
 ///
 /// Exposed so a wrapping policy can defer to it — e.g. drop one field, then call
 /// this for the rest.
-pub fn should_copy_value(args: CopyValueArgs, src_root: &sdf::Path, dst_root: &sdf::Path) -> CopyValue {
+pub fn should_copy_value(args: CopyValueArgs<'_>, src_root: &sdf::Path, dst_root: &sdf::Path) -> CopyValue {
     if args.value.has_embedded_paths() {
         CopyValue::Replace(
             args.value
@@ -153,7 +153,7 @@ pub fn should_copy_value(args: CopyValueArgs, src_root: &sdf::Path, dst_root: &s
 /// The default children policy, a direct callback: recurse into every child
 /// under its own name. A pure root remap re-roots child *paths* through the
 /// recursion, so the child *names* are unchanged.
-pub fn should_copy_children(_args: CopyChildrenArgs) -> CopyChildren {
+pub fn should_copy_children(_args: CopyChildrenArgs<'_>) -> CopyChildren {
     CopyChildren::All
 }
 
@@ -626,14 +626,14 @@ mod tests {
         let mut dst = Data::new();
         // Drop the relationship's targets; copy everything else through the
         // default remap. Prune the `Child` prim.
-        let value_policy = |args: CopyValueArgs| {
+        let value_policy = |args: CopyValueArgs<'_>| {
             if args.field == FieldKey::TargetPaths.as_str() {
                 CopyValue::Skip
             } else {
                 should_copy_value(args, &path("/A").unwrap(), &path("/B").unwrap())
             }
         };
-        let children_policy = |args: CopyChildrenArgs| {
+        let children_policy = |args: CopyChildrenArgs<'_>| {
             CopyChildren::Map(
                 args.children
                     .iter()
@@ -679,7 +679,7 @@ mod tests {
         // constructor's empty-string placeholder behind.
         let src = sample();
         let mut dst = Data::new();
-        let value_policy = |args: CopyValueArgs| {
+        let value_policy = |args: CopyValueArgs<'_>| {
             if args.field == FieldKey::TypeName.as_str() {
                 CopyValue::Skip
             } else {

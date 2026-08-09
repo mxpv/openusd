@@ -130,13 +130,19 @@ impl SpecData {
     /// (`prepend`/`append`/`add`/`delete`/`reorder`) for one field accumulate
     /// rather than overwrite (C++ Sdf stores one `SdfListOp` per field). A
     /// non-list-op `value`, or one of a different variant, replaces as usual.
+    // Each arm binds a different `ListOp<T>`, so the textually identical bodies
+    // are distinct `merge_op` instantiations and cannot share an arm.
+    #[allow(clippy::match_same_arms)]
     pub fn add_list_op(&mut self, key: impl AsRef<str>, value: sdf::Value) {
         let key = key.as_ref();
         let Some(slot) = self.get_mut(key) else {
             self.add(key, value);
             return;
         };
-        use sdf::Value::*;
+        use sdf::Value::{
+            Int64ListOp, IntListOp, PathListOp, PayloadListOp, ReferenceListOp, StringListOp, TokenListOp,
+            UInt64ListOp, UIntListOp, UnregisteredValueListOp,
+        };
         match (slot, value) {
             (TokenListOp(existing), TokenListOp(incoming)) => existing.merge_op(incoming),
             (StringListOp(existing), StringListOp(incoming)) => existing.merge_op(incoming),
@@ -1832,7 +1838,7 @@ mod tests {
     }
 
     /// Explicit op with the name lingering in (irrelevant) `added_items`:
-    /// already_applied stays false, so the schema lands in `explicit_items`.
+    /// `already_applied` stays false, so the schema lands in `explicit_items`.
     #[test]
     fn add_api_schema_stale_added() -> Result<(), SpecError> {
         let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);

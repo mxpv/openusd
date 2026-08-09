@@ -145,7 +145,7 @@ fn category_rank(c: char) -> u8 {
 }
 
 /// Consumes a leading run of `'0'` from a digit run, returning its length.
-fn consume_zeros(it: &mut Peekable<Chars>) -> usize {
+fn consume_zeros(it: &mut Peekable<Chars<'_>>) -> usize {
     let mut zeros = 0;
     while it.next_if_eq(&'0').is_some() {
         zeros += 1;
@@ -156,7 +156,7 @@ fn consume_zeros(it: &mut Peekable<Chars>) -> usize {
 /// Compares the significant (leading-zero-stripped) digits of the two digit runs
 /// at the front of `a` and `b`, consuming them. A longer run of significant
 /// digits is the larger number; equal lengths compare digit by digit.
-fn cmp_digit_runs(a: &mut Peekable<Chars>, b: &mut Peekable<Chars>) -> Ordering {
+fn cmp_digit_runs(a: &mut Peekable<Chars<'_>>, b: &mut Peekable<Chars<'_>>) -> Ordering {
     let mut result = Ordering::Equal;
     loop {
         let da = a.next_if(char::is_ascii_digit);

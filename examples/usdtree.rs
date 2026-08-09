@@ -92,10 +92,16 @@ impl Tracking {
     }
 }
 
+// A `GlobalAlloc` implementation cannot be written in safe Rust: the trait is
+// unsafe to implement and its methods take raw pointers. The crate denies
+// `unsafe_code` everywhere else, so the exemption stops at this impl.
+#[allow(unsafe_code)]
 // SAFETY: every method forwards to the system allocator with the same arguments,
 // only updating the byte counters around the real call.
 unsafe impl GlobalAlloc for Tracking {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: `layout` is passed through untouched, so it upholds whatever
+        // the caller already guaranteed for it.
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
             Tracking::add(layout.size());
@@ -104,11 +110,14 @@ unsafe impl GlobalAlloc for Tracking {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `ptr` is the caller's, allocated by this allocator — and so by
+        // `System` — with the same `layout`.
         unsafe { System.dealloc(ptr, layout) };
         LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: as for `dealloc`, plus `new_size` reaches `System` unchanged.
         let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
         if !new_ptr.is_null() {
             if new_size >= layout.size() {

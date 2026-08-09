@@ -282,19 +282,19 @@ impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
     }
 
     fn create_spec(&mut self, path: Path, ty: SpecType) {
-        (**self).create_spec(path, ty)
+        (**self).create_spec(path, ty);
     }
 
     fn erase_spec(&mut self, path: &Path) {
-        (**self).erase_spec(path)
+        (**self).erase_spec(path);
     }
 
     fn set_field(&mut self, path: &Path, field: &str, value: Value) {
-        (**self).set_field(path, field, value)
+        (**self).set_field(path, field, value);
     }
 
     fn erase_field(&mut self, path: &Path, field: &str) {
-        (**self).erase_field(path, field)
+        (**self).erase_field(path, field);
     }
 }
 

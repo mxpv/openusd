@@ -47,11 +47,11 @@ fn direct_purpose(view: &impl Imageable) -> Result<Purpose> {
 
 /// Length of an authored array attribute, or 0 when unauthored.
 fn array_len(attr: &Attribute, kind: impl Fn(sdf::Value) -> usize) -> Result<usize> {
-    Ok(attr.get()?.map(kind).unwrap_or(0))
+    Ok(attr.get()?.map_or(0, kind))
 }
 
 fn vec3f_len(v: sdf::Value) -> usize {
-    v.try_as_vec_3f_vec().map(|a| a.len()).unwrap_or(0)
+    v.try_as_vec_3f_vec().map_or(0, |a| a.len())
 }
 
 // ── Imageable: visibility / purpose / proxyPrim ───────────────────

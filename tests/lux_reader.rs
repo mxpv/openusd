@@ -20,12 +20,10 @@ fn open() -> Result<Stage> {
 
 /// Open an in-memory stage from `usda` source for the API / animation tests.
 fn from_usda(usda: &str) -> Result<Stage> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("scene.usda");
-    std::fs::write(&path, usda)?;
-    // Leak the tempdir so it outlives the stage; the process exits at test
+    // Persist the tempdir so it outlives the stage; the process exits at test
     // end, so the OS reclaims it.
-    std::mem::forget(dir);
+    let path = tempfile::tempdir()?.keep().join("scene.usda");
+    std::fs::write(&path, usda)?;
     Stage::open(path.to_str().unwrap())
 }
 

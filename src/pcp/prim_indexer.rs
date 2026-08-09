@@ -636,10 +636,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 TaskKind::EvalImpliedRelocations => self.eval_implied_relocations(task.node)?,
                 TaskKind::EvalNodeReferences | TaskKind::EvalNodePayloads => self.eval_arcs(task.node, task.kind)?,
                 TaskKind::EvalNodeInherits => {
-                    self.eval_class_arcs(task.node, FieldKey::InheritPaths, ArcType::Inherit)?
+                    self.eval_class_arcs(task.node, FieldKey::InheritPaths, ArcType::Inherit)?;
                 }
                 TaskKind::EvalNodeSpecializes => {
-                    self.eval_class_arcs(task.node, FieldKey::Specializes, ArcType::Specialize)?
+                    self.eval_class_arcs(task.node, FieldKey::Specializes, ArcType::Specialize)?;
                 }
                 TaskKind::EvalImpliedClasses => {
                     self.implied_seen.remove(&(task.node, TaskKind::EvalImpliedClasses));
@@ -652,16 +652,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 TaskKind::EvalNodeVariantSets => self.eval_node_variant_sets(task.node)?,
                 TaskKind::EvalNodeAncestralVariantSets => self.eval_node_ancestral_variant_sets(task.node)?,
                 TaskKind::EvalNodeVariantAuthored => {
-                    self.eval_node_authored_variant(task.node, &task.variant, false)?
+                    self.eval_node_authored_variant(task.node, &task.variant, false)?;
                 }
                 TaskKind::EvalNodeAncestralVariantAuthored => {
-                    self.eval_node_authored_variant(task.node, &task.variant, true)?
+                    self.eval_node_authored_variant(task.node, &task.variant, true)?;
                 }
                 TaskKind::EvalNodeVariantFallback => {
-                    self.eval_node_fallback_variant(task.node, &task.variant, false)?
+                    self.eval_node_fallback_variant(task.node, &task.variant, false)?;
                 }
                 TaskKind::EvalNodeAncestralVariantFallback => {
-                    self.eval_node_fallback_variant(task.node, &task.variant, true)?
+                    self.eval_node_fallback_variant(task.node, &task.variant, true)?;
                 }
                 // Placeholders kept only for `retry_variant_tasks`; nothing to do.
                 TaskKind::EvalNodeVariantNoneFound | TaskKind::EvalNodeAncestralVariantNoneFound => {}
@@ -1795,16 +1795,15 @@ impl<'a, 'f> Indexer<'a, 'f> {
             .iter()
             .find(|fb| options.iter().any(|o| o == *fb))
             .cloned();
-        match fallback {
-            Some(sel) => self.add_variant_arc(node, vt, &sel, is_ancestral)?,
-            None => {
-                let kind = if is_ancestral {
-                    TaskKind::EvalNodeAncestralVariantNoneFound
-                } else {
-                    TaskKind::EvalNodeVariantNoneFound
-                };
-                self.tasks.push(Task::variant(kind, node, vt.clone()));
-            }
+        if let Some(sel) = fallback {
+            self.add_variant_arc(node, vt, &sel, is_ancestral)?;
+        } else {
+            let kind = if is_ancestral {
+                TaskKind::EvalNodeAncestralVariantNoneFound
+            } else {
+                TaskKind::EvalNodeVariantNoneFound
+            };
+            self.tasks.push(Task::variant(kind, node, vt.clone()));
         }
         Ok(())
     }
@@ -2663,67 +2662,19 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let target_stack = if is_internal {
             context
         } else {
-            let layer_index = match self.inputs.stack.id_of(asset_path) {
-                Some(layer_index) => layer_index,
+            let Some(layer_index) = self.inputs.stack.id_of(asset_path) else {
                 // The target is not loaded.
-                None => {
-                    // A muted target contributes nothing and is never opened: drop
-                    // the arc (it then composes as if absent) and record both the
-                    // muted reference as a diagnostic and the matched canonical
-                    // identifier as the dependency trace an unmute fans out through
-                    // (the target never interns, so there is no `LayerId` to key on,
-                    // unlike a loaded target whose muted root empties its stack).
-                    // Checked before the load demand so a muted target's file is not
-                    // read.
-                    if let Some(canonical) = self.arc_target_muted(parent, asset_path) {
-                        self.output.muted_unloaded_targets.push(canonical);
-                        self.errors.push(Error::MutedAssetPath {
-                            asset_path: asset_path.to_string(),
-                            arc,
-                            introduced_by: self.introducing_layer(parent),
-                            site_path: parent_path,
-                        });
-                        return Ok(());
-                    }
-                    // A resolvable-but-not-yet-loaded target is demanded, not an
-                    // error: record it in `pending_loads` and leave the arc
-                    // uncomposed this pass. The stage's query loop opens the layer
-                    // and recomposes, so composition drives layer loading and an
-                    // un-visited subtree never loads. A target a prior load attempt
-                    // could not read is not re-demanded — it falls through to the
-                    // malformed-layer error below so the prim's index can finally
-                    // cache; a prior resolve failure gates nothing once the asset
-                    // resolves (the file has since appeared), and while it stays
-                    // unresolvable the arc reports it unresolved below.
-                    let failure = self.inputs.stack.load_failure(asset_path);
-                    let unreadable = match failure {
-                        Some(LoadFailure::Unreadable(reason)) => Some(reason.clone()),
-                        _ => None,
-                    };
-                    if self.inputs.stack.layer_registry().resolve(asset_path).is_some() && unreadable.is_none() {
-                        self.pending_loads.push(Demand {
-                            asset_path: asset_path.to_string(),
-                            context,
-                        });
-                        return Ok(());
-                    }
-                    // A target the load barrier resolved but could not read or
-                    // parse: report it with the underlying reason and skip the arc.
-                    if let Some(reason) = unreadable {
-                        self.errors.push(Error::MalformedLayer {
-                            asset_path: asset_path.to_string(),
-                            arc,
-                            introduced_by: self.introducing_layer(parent),
-                            site_path: parent_path,
-                            reason,
-                        });
-                        return Ok(());
-                    }
-                    // An unresolvable asset is a recoverable error (C++ "Could not
-                    // open asset … for {arc}"): record it and skip the arc so the
-                    // rest of the prim — including its own local opinions — still
-                    // composes.
-                    self.errors.push(Error::UnresolvedLayer {
+                // A muted target contributes nothing and is never opened: drop
+                // the arc (it then composes as if absent) and record both the
+                // muted reference as a diagnostic and the matched canonical
+                // identifier as the dependency trace an unmute fans out through
+                // (the target never interns, so there is no `LayerId` to key on,
+                // unlike a loaded target whose muted root empties its stack).
+                // Checked before the load demand so a muted target's file is not
+                // read.
+                if let Some(canonical) = self.arc_target_muted(parent, asset_path) {
+                    self.output.muted_unloaded_targets.push(canonical);
+                    self.errors.push(Error::MutedAssetPath {
                         asset_path: asset_path.to_string(),
                         arc,
                         introduced_by: self.introducing_layer(parent),
@@ -2731,6 +2682,51 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     });
                     return Ok(());
                 }
+                // A resolvable-but-not-yet-loaded target is demanded, not an
+                // error: record it in `pending_loads` and leave the arc
+                // uncomposed this pass. The stage's query loop opens the layer
+                // and recomposes, so composition drives layer loading and an
+                // un-visited subtree never loads. A target a prior load attempt
+                // could not read is not re-demanded — it falls through to the
+                // malformed-layer error below so the prim's index can finally
+                // cache; a prior resolve failure gates nothing once the asset
+                // resolves (the file has since appeared), and while it stays
+                // unresolvable the arc reports it unresolved below.
+                let failure = self.inputs.stack.load_failure(asset_path);
+                let unreadable = match failure {
+                    Some(LoadFailure::Unreadable(reason)) => Some(reason.clone()),
+                    _ => None,
+                };
+                if self.inputs.stack.layer_registry().resolve(asset_path).is_some() && unreadable.is_none() {
+                    self.pending_loads.push(Demand {
+                        asset_path: asset_path.to_string(),
+                        context,
+                    });
+                    return Ok(());
+                }
+                // A target the load barrier resolved but could not read or
+                // parse: report it with the underlying reason and skip the arc.
+                if let Some(reason) = unreadable {
+                    self.errors.push(Error::MalformedLayer {
+                        asset_path: asset_path.to_string(),
+                        arc,
+                        introduced_by: self.introducing_layer(parent),
+                        site_path: parent_path,
+                        reason,
+                    });
+                    return Ok(());
+                }
+                // An unresolvable asset is a recoverable error (C++ "Could not
+                // open asset … for {arc}"): record it and skip the arc so the
+                // rest of the prim — including its own local opinions — still
+                // composes.
+                self.errors.push(Error::UnresolvedLayer {
+                    asset_path: asset_path.to_string(),
+                    arc,
+                    introduced_by: self.introducing_layer(parent),
+                    site_path: parent_path,
+                });
+                return Ok(());
             };
             external_target = Some(layer_index);
             // The layer graph resolves which stack this arc composes against —
@@ -3252,7 +3248,7 @@ mod tests {
     fn build_full(stack: &mut LayerGraph, prim: &str) -> BuildOutput {
         let ctx = CompositionContext::default();
         loop {
-            let ambient = stack.root_layer_stack_id();
+            let ambient = LayerStackId::ROOT;
             let out = Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient, true)
                 .build(&Path::from(prim))
                 .expect("indexer build");
@@ -3841,7 +3837,7 @@ mod tests {
             ),
         ]);
         let ctx = CompositionContext::default();
-        let ambient = s.root_layer_stack_id();
+        let ambient = LayerStackId::ROOT;
         // Seed the child build with the parent's composed index, as the cache does.
         let root_index = PrimIndex::build_with_context(&Path::from("/Root"), &s, &ctx).expect("root index build");
         let mut cached = sdf::PathTable::new();

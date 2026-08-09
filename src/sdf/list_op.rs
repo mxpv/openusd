@@ -659,7 +659,7 @@ mod tests {
         assert_eq!(op.compose_over(&[]), vec![1, 2, 3]);
     }
 
-    /// A default (no-op) ListOp preserves the weaker list unchanged.
+    /// A default (no-op) `ListOp` preserves the weaker list unchanged.
     #[test]
     fn list_op_compose_noop() {
         let op: ListOp<i32> = ListOp::default();

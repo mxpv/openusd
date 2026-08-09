@@ -396,7 +396,7 @@ impl Expr {
     }
 
     /// Evaluate one node within a shared context.
-    fn eval_in(&self, ctx: &mut EvalContext) -> EvalResult {
+    fn eval_in(&self, ctx: &mut EvalContext<'_>) -> EvalResult {
         match self {
             Expr::String(segments) => eval_string(segments, ctx),
             Expr::Integer(n) => EvalResult::ok(sdf::Value::Int64(*n)),
@@ -557,8 +557,7 @@ fn result_type_name(value: &Option<EvaluationValue>) -> Cow<'static, str> {
 /// the empty list, and typed values their own variant.
 fn same_type(x: &Option<EvaluationValue>, y: &Option<EvaluationValue>) -> bool {
     match (x, y) {
-        (None, None) => true,
-        (Some(EvaluationValue::EmptyList), Some(EvaluationValue::EmptyList)) => true,
+        (None, None) | (Some(EvaluationValue::EmptyList), Some(EvaluationValue::EmptyList)) => true,
         (Some(EvaluationValue::Value(a)), Some(EvaluationValue::Value(b))) => {
             mem::discriminant(a) == mem::discriminant(b)
         }
@@ -571,7 +570,7 @@ fn same_type(x: &Option<EvaluationValue>, y: &Option<EvaluationValue>) -> bool {
 /// its own name (not an error — C++ leaves the substitution in place for
 /// downstream clients); a `None` value substitutes as the empty string; a
 /// non-string value is an error.
-fn eval_string(segments: &[StringSegment], ctx: &mut EvalContext) -> EvalResult {
+fn eval_string(segments: &[StringSegment], ctx: &mut EvalContext<'_>) -> EvalResult {
     let mut result = String::new();
     for segment in segments {
         match segment {
@@ -605,7 +604,7 @@ fn eval_string(segments: &[StringSegment], ctx: &mut EvalContext) -> EvalResult 
 /// and an element of any other type — including `None` and nested lists — is
 /// an error. An empty result is the untyped
 /// [`EmptyList`](EvaluationValue::EmptyList).
-fn eval_array(elements: &[Expr], ctx: &mut EvalContext) -> EvalResult {
+fn eval_array(elements: &[Expr], ctx: &mut EvalContext<'_>) -> EvalResult {
     let mut errors = Vec::new();
     let mut list: Option<sdf::Value> = None;
     for (i, element) in elements.iter().enumerate() {
@@ -643,7 +642,7 @@ fn eval_array(elements: &[Expr], ctx: &mut EvalContext) -> EvalResult {
 }
 
 /// Evaluate a function call.
-fn eval_func(func: Func, args: &[Expr], ctx: &mut EvalContext) -> EvalResult {
+fn eval_func(func: Func, args: &[Expr], ctx: &mut EvalContext<'_>) -> EvalResult {
     match func {
         Func::Defined => {
             let mut errors = Vec::new();
@@ -1119,7 +1118,7 @@ mod tests {
     }
 
     fn make_vars(pairs: &[(&str, sdf::Value)]) -> HashMap<String, sdf::Value> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+        pairs.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect()
     }
 
     /// Evaluates `src` expecting success, returning the value (`None` for the

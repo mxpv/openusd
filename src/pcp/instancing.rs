@@ -610,22 +610,21 @@ impl IndexCache {
     /// registry is invalidated.
     pub(super) fn effective_path(&mut self, graph: &LayerGraph, path: &Path) -> Result<Path> {
         let prim = path.prim_path();
-        let redirected = match self.redirected_prims.get(&prim) {
-            Some(hit) => hit.clone(),
-            None => {
-                let pending_before = self.pending_loads.len();
-                let redirected = self.redirect_prim(graph, &prim)?;
-                // Only memoize a redirect resolved against fully-loaded indices.
-                // If finding the enclosing instance demanded a not-yet-loaded
-                // layer, that ancestor read as a non-instance (its index is the
-                // empty-on-miss one), so this identity result is provisional;
-                // leave it unmemoized for the stage's load loop to recompute once
-                // the layer loads and the instance composes.
-                if self.pending_loads.len() == pending_before {
-                    self.redirected_prims.insert(prim.clone(), redirected.clone());
-                }
-                redirected
+        let redirected = if let Some(hit) = self.redirected_prims.get(&prim) {
+            hit.clone()
+        } else {
+            let pending_before = self.pending_loads.len();
+            let redirected = self.redirect_prim(graph, &prim)?;
+            // Only memoize a redirect resolved against fully-loaded indices.
+            // If finding the enclosing instance demanded a not-yet-loaded
+            // layer, that ancestor read as a non-instance (its index is the
+            // empty-on-miss one), so this identity result is provisional;
+            // leave it unmemoized for the stage's load loop to recompute once
+            // the layer loads and the instance composes.
+            if self.pending_loads.len() == pending_before {
+                self.redirected_prims.insert(prim.clone(), redirected.clone());
             }
+            redirected
         };
         if redirected == prim {
             return Ok(path.clone());

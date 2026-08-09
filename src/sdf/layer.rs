@@ -1698,7 +1698,7 @@ mod tests {
             .unwrap()
             .time_samples()
             .unwrap()
-            .to_vec();
+            .clone();
         let finite: Vec<f64> = samples.iter().map(|(t, _)| *t).filter(|t| t.is_finite()).collect();
         assert_eq!(finite, vec![1.0, 2.0]);
 

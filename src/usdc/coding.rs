@@ -84,6 +84,10 @@ where
 /// 1. Common value (i32 for 32-bit T, i64 for 64-bit T)
 /// 2. Code bytes: 2 bits per integer, packed 4 per byte, little-endian
 /// 3. Payload: variable-width deltas (COMMON omits, SMALL/MEDIUM/LARGE vary by bit-width)
+// One arm per (code, width) pair of the crate integer encoding, matching the
+// layout the reader expects. Merging the arms that happen to emit the same
+// width would break that row-per-case correspondence.
+#[allow(clippy::match_same_arms)]
 pub fn encode_ints<T>(values: &[T]) -> Vec<u8>
 where
     T: PrimInt + 'static + AsPrimitive<i64>,
@@ -181,17 +185,17 @@ fn most_common(deltas: &[i64]) -> i64 {
             _ => {}
         }
     }
-    best.map(|(v, _)| v).unwrap_or(0)
+    best.map_or(0, |(v, _)| v)
 }
 
 fn fits_in_i8(v: i64) -> bool {
-    v >= i8::MIN as i64 && v <= i8::MAX as i64
+    i8::try_from(v).is_ok()
 }
 fn fits_in_i16(v: i64) -> bool {
-    v >= i16::MIN as i64 && v <= i16::MAX as i64
+    i16::try_from(v).is_ok()
 }
 fn fits_in_i32(v: i64) -> bool {
-    v >= i32::MIN as i64 && v <= i32::MAX as i64
+    i32::try_from(v).is_ok()
 }
 
 #[cfg(test)]
@@ -308,6 +312,6 @@ mod tests {
 
         let input = decode_ints::<u32>(&output, 7).expect("Failed to decode integers");
 
-        assert_eq!(input.as_slice(), &[123_u32, 124, 125, 100125, 100125, 100126, 100126])
+        assert_eq!(input.as_slice(), &[123_u32, 124, 125, 100125, 100125, 100126, 100126]);
     }
 }

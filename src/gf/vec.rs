@@ -1,4 +1,4 @@
-//! GfVec — fixed-arity vector types.
+//! `GfVec` — fixed-arity vector types.
 //!
 //! All arithmetic derives (Add, Sub, Neg, Mul, Sum) work because the
 //! underlying scalar fields (f32, f64, f16, i32) all implement the

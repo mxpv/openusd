@@ -1093,7 +1093,7 @@ mod tests {
         Ok(())
     }
 
-    /// gf::Vec2h single value should read half-floats, not raw integers.
+    /// `gf::Vec2h` single value should read half-floats, not raw integers.
     #[test]
     fn test_read_vec2h_single() -> Result<()> {
         let data =

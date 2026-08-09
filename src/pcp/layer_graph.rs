@@ -35,6 +35,7 @@ use crate::ar::ResolvedPath;
 use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
+use crate::tf;
 
 use super::compose_site::{EvaluatedExpression, evaluate_expression};
 use super::layer_stack::{ExprVarId, LayerStackId, LayerStackRegistry, StackVarsDelta, VarsSource};
@@ -1759,6 +1760,68 @@ impl LayerGraph {
         &self.order
     }
 
+    /// Pseudo-root stage metadata, composing session-layer opinions over the
+    /// root layer (strongest first).
+    ///
+    /// Unlike [`root_layer_field`](Self::root_layer_field) — root-layer-only for
+    /// the spec 12.2.7 fields such as `defaultPrim` — general stage metadata
+    /// (e.g. `renderSettingsPrimPath`) honors a session-layer override, matching
+    /// C++ `UsdStage::GetMetadata`. A [`Value::ValueBlock`] in a stronger layer
+    /// blocks weaker opinions.
+    pub(crate) fn stage_metadata(&self, field: &str) -> anyhow::Result<Option<Value>> {
+        let root = Path::abs_root();
+        // Walk session layers then the root layer so the session opinion wins,
+        // skipping muted session layers (the root is never muted).
+        let layer_ids = self
+            .session_layers()
+            .iter()
+            .copied()
+            .chain(self.root_id())
+            .filter(|&id| !self.is_muted(id))
+            .collect::<Vec<_>>();
+        for id in layer_ids {
+            let layer = self.layer(id);
+            match layer.data().try_field(&root, field)? {
+                Some(value) if matches!(value.as_ref(), Value::ValueBlock) => return Ok(None),
+                Some(value) => return Ok(Some(value.into_owned())),
+                None => {}
+            }
+        }
+        Ok(None)
+    }
+
+    /// Pseudo-root layer metadata from the root layer only.
+    ///
+    /// Session-layer and sublayer opinions are intentionally ignored here,
+    /// matching spec 12.2.7.
+    pub(crate) fn root_layer_field(&self, field: &str) -> anyhow::Result<Option<Value>> {
+        let root = Path::abs_root();
+        let Some(root_layer) = self.root_layer() else {
+            return Ok(None);
+        };
+        let Some(value) = root_layer.data().try_field(&root, field)? else {
+            return Ok(None);
+        };
+        if matches!(value.as_ref(), Value::ValueBlock) {
+            return Ok(None);
+        }
+        Ok(Some(value.into_owned()))
+    }
+
+    /// The `defaultPrim` metadata from the root layer, if set.
+    ///
+    /// When session layers are present, `defaultPrim` is read from the first
+    /// non-session layer (the root layer), matching C++ behavior.
+    pub(crate) fn default_prim(&self) -> Option<tf::Token> {
+        let root = Path::abs_root();
+        let value = self
+            .root_layer()?
+            .data()
+            .get_field(&root, FieldKey::DefaultPrim.as_str())
+            .ok()?;
+        value.into_owned().try_as_token()
+    }
+
     /// Layer identifiers in collection order (root-stack first).
     pub(crate) fn identifiers(&self) -> Vec<String> {
         self.identifiers_of(self.order.iter().copied())
@@ -1822,12 +1885,6 @@ impl LayerGraph {
         self.stacks.members(LayerStackId::ROOT)
     }
 
-    /// The handle for the stage root layer stack, the ambient a top-level prim
-    /// composes against.
-    pub(crate) fn root_layer_stack_id(&self) -> LayerStackId {
-        LayerStackId::ROOT
-    }
-
     /// Resolves a [`LayerStackId`] back to its members (the `(layer id, effective
     /// offset)` pairs in strength order) from the registry. Empty for a stack whose
     /// root is unknown or muted.
@@ -1839,11 +1896,7 @@ impl LayerGraph {
     /// [`layer_stack`](Self::layer_stack)'s first member — or [`LayerId::INVALID`]
     /// when the stack is empty (an unknown or muted root).
     pub(crate) fn layer_stack_root(&self, id: LayerStackId) -> LayerId {
-        self.stacks
-            .members(id)
-            .first()
-            .map(|&(li, _)| li)
-            .unwrap_or(LayerId::INVALID)
+        self.stacks.members(id).first().map_or(LayerId::INVALID, |&(li, _)| li)
     }
 
     /// The layer ids of the stage's root layer stack, as a set (C++ "local"

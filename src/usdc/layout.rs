@@ -80,7 +80,7 @@ pub(crate) const SECTION_NAME_MAX_LENGTH: usize = 15;
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Section {
-    /// Section name bytes (e.g. "TOKENS"), use [Section::name] to retrieve as string.
+    /// Section name bytes (e.g. "TOKENS"), use [`Section::name`] to retrieve as string.
     name: [u8; SECTION_NAME_MAX_LENGTH + 1],
     /// Section start offset.
     pub start: u64,

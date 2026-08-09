@@ -1,4 +1,4 @@
-//! GfQuat — unit-quaternion rotation types.
+//! `GfQuat` — unit-quaternion rotation types.
 //!
 //! Quaternions are stored as `(w, x, y, z)` with `w` the real (scalar)
 //! part — matching `GfQuatf`'s constructor order and the layout USD uses

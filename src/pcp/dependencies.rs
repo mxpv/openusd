@@ -30,7 +30,7 @@ pub(super) struct Dependencies {
     /// [`subtree_lookup`](Self::subtree_lookup) is a subtree walk rather than a
     /// full scan.
     per_layer: HashMap<LayerId, sdf::PathTable<Vec<Path>>>,
-    /// Reverse map for cheap removal: prim_index_path → list of (layer, site)
+    /// Reverse map for cheap removal: `prim_index_path` → list of (layer, site)
     /// it registered. Avoids re-walking the index when invalidating.
     by_prim: HashMap<Path, Vec<(LayerId, Path)>>,
     /// Layer-agnostic set of prim-index paths, each observing exactly its own

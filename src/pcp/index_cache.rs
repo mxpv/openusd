@@ -1057,7 +1057,7 @@ impl IndexCache {
     pub fn resolve_field(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>> {
         let path = &self.effective_path(graph, path)?;
         if path.is_abs_root() && field != ChildrenKey::PrimChildren.as_str() {
-            return self.root_layer_field(graph, field);
+            return graph.root_layer_field(field);
         }
 
         if path.is_property_path() {
@@ -1563,54 +1563,6 @@ impl IndexCache {
         Ok((targets, deleted))
     }
 
-    /// Returns pseudo-root stage metadata, composing session-layer opinions
-    /// over the root layer (strongest first).
-    ///
-    /// Unlike [`Self::root_layer_field`] — which is root-layer-only for the
-    /// spec 12.2.7 fields such as `defaultPrim` — general stage metadata
-    /// (e.g. `renderSettingsPrimPath`) honors a session-layer override,
-    /// matching C++ `UsdStage::GetMetadata`. A [`Value::ValueBlock`] in a
-    /// stronger layer blocks weaker opinions.
-    pub fn stage_metadata(&self, graph: &LayerGraph, field: &str) -> Result<Option<Value>> {
-        let root = Path::abs_root();
-        // Walk session layers then the root layer so the session opinion wins,
-        // skipping muted session layers (the root is never muted).
-        let layer_ids = graph
-            .session_layers()
-            .iter()
-            .copied()
-            .chain(graph.root_id())
-            .filter(|&id| !graph.is_muted(id))
-            .collect::<Vec<_>>();
-        for id in layer_ids {
-            let layer = graph.layer(id);
-            match layer.data().try_field(&root, field)? {
-                Some(value) if matches!(value.as_ref(), Value::ValueBlock) => return Ok(None),
-                Some(value) => return Ok(Some(value.into_owned())),
-                None => {}
-            }
-        }
-        Ok(None)
-    }
-
-    /// Returns pseudo-root layer metadata from the root layer only.
-    ///
-    /// Session-layer and sublayer opinions are intentionally ignored here,
-    /// matching spec 12.2.7.
-    fn root_layer_field(&self, graph: &LayerGraph, field: &str) -> Result<Option<Value>> {
-        let root = Path::abs_root();
-        let Some(root_layer) = graph.root_layer() else {
-            return Ok(None);
-        };
-        let Some(value) = root_layer.data().try_field(&root, field)? else {
-            return Ok(None);
-        };
-        if matches!(value.as_ref(), Value::ValueBlock) {
-            return Ok(None);
-        }
-        Ok(Some(value.into_owned()))
-    }
-
     /// Returns the composed list of child names for a prim path (C++
     /// `PcpPrimIndex::ComputePrimChildNames`'s `nameOrder` out-param).
     pub fn prim_children(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
@@ -1758,7 +1710,7 @@ impl IndexCache {
             let Ok(prop_path) = prim_path.append_property(name) else {
                 continue;
             };
-            conflicts.extend(self.compose_property_specs(graph, index, prim_path, &prop_path).1);
+            conflicts.extend(Self::compose_property_specs(graph, index, prim_path, &prop_path).1);
         }
         self.query_errors.append(&mut conflicts);
     }
@@ -1775,7 +1727,6 @@ impl IndexCache {
     /// also authors the prim spec the stack records. Inert and culled nodes are
     /// skipped (matching the structural node walk); permission-denied sites stay.
     fn compose_property_specs(
-        &self,
         graph: &LayerGraph,
         index: &PrimIndex,
         prim_path: &Path,
@@ -1855,7 +1806,7 @@ impl IndexCache {
         let Some(index) = self.store.index_at(&prim_path) else {
             return Ok(Vec::new());
         };
-        let (stack, mut conflicts) = self.compose_property_specs(graph, index, &prim_path, &path);
+        let (stack, mut conflicts) = Self::compose_property_specs(graph, index, &prim_path, &path);
         // These transient conflicts are cleared on any index invalidation, so
         // they never go stale across an edit; repeated `property_stack` queries
         // on the same conflicting property without an intervening edit still
@@ -1874,20 +1825,6 @@ impl IndexCache {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
         Ok(self.cached(&path).variant_selections())
-    }
-
-    /// Returns the `defaultPrim` metadata from the root layer, if set.
-    ///
-    /// When session layers are present, `defaultPrim` is read from the
-    /// first non-session layer (the root layer), matching C++ behavior.
-    pub fn default_prim(&self, graph: &LayerGraph) -> Option<Token> {
-        let root = Path::abs_root();
-        let value = graph
-            .root_layer()?
-            .data()
-            .get_field(&root, FieldKey::DefaultPrim.as_str())
-            .ok()?;
-        value.into_owned().try_as_token()
     }
 
     /// Collects ancestor arcs from all cached ancestors of `path`.
@@ -2085,8 +2022,8 @@ impl IndexCache {
         // own site path differs.
         for error in &mut build_errors {
             match error {
-                Error::OpinionAtRelocationSource { composing, .. } => *composing = path.clone(),
-                Error::ProhibitedRelocationSource { composing, .. } => *composing = path.clone(),
+                Error::OpinionAtRelocationSource { composing, .. }
+                | Error::ProhibitedRelocationSource { composing, .. } => *composing = path.clone(),
                 Error::ArcCycle(info) => info.composing = path.clone(),
                 _ => {}
             }

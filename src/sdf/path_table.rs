@@ -224,19 +224,16 @@ impl<V> PathTable<V> {
     fn link_ancestors(&mut self, path: Path) {
         let mut child = path;
         while let Some(parent) = child.parent() {
-            match self.nodes.get_mut(&parent) {
-                Some(node) => {
-                    node.children.insert(child);
-                    // The parent already existed, so its own ancestor links are
-                    // already in place.
-                    return;
-                }
-                None => {
-                    let mut children = BTreeSet::new();
-                    children.insert(child);
-                    self.nodes.insert(parent.clone(), Node { value: None, children });
-                    child = parent;
-                }
+            if let Some(node) = self.nodes.get_mut(&parent) {
+                node.children.insert(child);
+                // The parent already existed, so its own ancestor links are
+                // already in place.
+                return;
+            } else {
+                let mut children = BTreeSet::new();
+                children.insert(child);
+                self.nodes.insert(parent.clone(), Node { value: None, children });
+                child = parent;
             }
         }
     }

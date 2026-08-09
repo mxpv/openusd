@@ -657,14 +657,7 @@ impl PrimIndex {
         cached_indices: &sdf::PathTable<PrimEntry>,
         load_payloads: bool,
     ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>, ExprVarDeps)> {
-        Self::build_with_cache_in(
-            path,
-            stack,
-            ctx,
-            cached_indices,
-            stack.root_layer_stack_id(),
-            load_payloads,
-        )
+        Self::build_with_cache_in(path, stack, ctx, cached_indices, LayerStackId::ROOT, load_payloads)
     }
 
     /// Builds a prim index whose root `L` site scans the given `ambient` layer
@@ -1061,7 +1054,7 @@ pub(crate) mod tests {
     }
 
     /// Loads a root layer and the full transitive closure of its sublayers,
-    /// references, and payloads into a `Vec<sdf::Layer>` for PrimIndex::build —
+    /// references, and payloads into a `Vec<sdf::Layer>` for `PrimIndex::build` —
     /// the layer set composition would have loaded on demand had it been driven
     /// through a stage.
     fn load_layers(path: &str) -> Result<Vec<sdf::Layer>> {
@@ -2175,7 +2168,7 @@ def "Prim" (
             .unwrap_or(identifier)
     }
 
-    /// Formats a prim stack as a vec of (layer_name, path) pairs for assertion.
+    /// Formats a prim stack as a vec of (`layer_name`, path) pairs for assertion.
     fn prim_stack(index: &PrimIndex, stack: &LayerGraph) -> Vec<(String, String)> {
         index
             .nodes()

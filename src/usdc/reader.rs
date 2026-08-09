@@ -1445,7 +1445,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::Relocates(pairs)
             }
 
-            _ => bail!("Unsupported value type: {ty}"),
+            Type::Invalid => bail!("Unsupported value type: {ty}"),
         };
 
         Ok(variant)

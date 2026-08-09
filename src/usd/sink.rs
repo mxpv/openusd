@@ -217,8 +217,7 @@ impl CommittedChange<'_> {
             .entries()
             .iter()
             .find(|(p, _)| p == &key)
-            .map(|(_, entry)| &entry.info_changed)
-            .unwrap_or(&EMPTY)
+            .map_or(&EMPTY, |(_, entry)| &entry.info_changed)
     }
 }
 

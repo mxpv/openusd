@@ -40,6 +40,11 @@ impl TimeCode {
     }
 
     /// Whether this is [`TimeCode::EARLIEST`].
+    // `f64::MIN` is a sentinel here, not a measured quantity: a time code either
+    // is the exact bit pattern `EARLIEST` carries or is an ordinary time. An
+    // epsilon window would fold genuine times near the bottom of the range into
+    // the sentinel.
+    #[allow(clippy::float_cmp_const)]
     pub fn is_earliest_time(self) -> bool {
         self.0 == f64::MIN
     }

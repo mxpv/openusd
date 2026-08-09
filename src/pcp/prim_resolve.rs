@@ -645,6 +645,10 @@ impl PrimIndex {
     /// (`Some`, so value resolution stops here) from no authored or blocked
     /// opinion (`None`, fall through to weaker sources); the inner `Option` is
     /// the interpolated value, `None` for an empty or blocked-bracket result.
+    // All three states of the nested `Option` are distinct results the callers
+    // act on, as the doc above spells out; flattening them would lose the
+    // matched-but-valueless case that stops fall-through.
+    #[allow(clippy::option_option)]
     pub(crate) fn resolve_value_at(
         &self,
         stack: &LayerGraph,
@@ -726,7 +730,7 @@ impl PrimIndex {
             match value.as_ref() {
                 Value::ValueBlock => return Ok(None),
                 Value::TimeSamples(map) => return Ok(Some(extract(map, offset))),
-                _ => continue,
+                _ => {}
             }
         }
         Ok(None)
@@ -793,7 +797,7 @@ impl PrimIndex {
                 Value::TokenVec(names) => ops.push(sdf::StringListOp::explicit(
                     names.into_iter().map(String::from).collect::<Vec<_>>(),
                 )),
-                _ => continue,
+                _ => {}
             }
         }
         Ok(ops)
@@ -865,7 +869,7 @@ impl PrimIndex {
                         }
                     }
                 }
-                _ => continue,
+                _ => {}
             }
         }
 

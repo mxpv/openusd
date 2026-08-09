@@ -95,6 +95,9 @@ impl MapFunction {
     /// Builds a mapping from raw pairs, an initial root-identity flag, and a time
     /// offset: extracts any explicit `(/, /)` pair into the flag, then drops
     /// redundant pairs (C++ `_Canonicalize`).
+    // The empty and single-pair arms sit either side of a guarded arm whose
+    // order decides the result, so they stay spelled out separately.
+    #[allow(clippy::match_same_arms)]
     fn from_parts(mut pairs: Vec<(Path, Path)>, mut has_root_identity: bool, time_offset: sdf::LayerOffset) -> Self {
         pairs.retain(|(s, t)| {
             if s.is_abs_root() && t.is_abs_root() {

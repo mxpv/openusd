@@ -501,7 +501,7 @@ fn kind_is_a(kind: &str, ancestor: &str) -> bool {
     }
     matches!(
         (kind, ancestor),
-        ("assembly", "group" | "model") | ("group", "model") | ("component", "model")
+        ("assembly", "group" | "model") | ("group" | "component", "model")
     )
 }
 

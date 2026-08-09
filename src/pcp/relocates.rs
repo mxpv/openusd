@@ -105,8 +105,7 @@ fn shift_through_nearest_ancestor(endpoint: &Path, renames: &[(Path, Path)]) -> 
         .filter(|(src, tgt)| !tgt.is_empty() && src != endpoint)
         .filter_map(|(src, tgt)| endpoint.replace_prefix(src, tgt).map(|p| (src.as_str().len(), p)))
         .max_by_key(|(len, _)| *len)
-        .map(|(_, p)| p)
-        .unwrap_or_else(|| endpoint.clone())
+        .map_or_else(|| endpoint.clone(), |(_, p)| p)
 }
 
 /// Applies one node's layer-stack relocates to a running child-name order, in
@@ -590,7 +589,7 @@ pub(crate) fn effective_relocates(
     result
 }
 
-/// Collects (layer-stack, map_to_root) pairs from ancestor prims and from
+/// Collects (layer-stack, `map_to_root`) pairs from ancestor prims and from
 /// other cached prims in the same root subtree that have layers with
 /// relocates.
 fn collect_stack_maps(

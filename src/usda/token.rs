@@ -223,7 +223,7 @@ mod tests {
     use super::*;
 
     // Helper function for asserting token sequences
-    fn assert_tokens(input: &str, expected_tokens: &[(Token, &str)]) {
+    fn assert_tokens(input: &str, expected_tokens: &[(Token<'_>, &str)]) {
         let mut lexer = Token::lexer(input);
 
         for (expected_token, expected_str) in expected_tokens {

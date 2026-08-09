@@ -715,7 +715,7 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
-    /// Returns `Ok(Some(true))` if this value was a ListOp and was fully emitted;
+    /// Returns `Ok(Some(true))` if this value was a `ListOp` and was fully emitted;
     /// `Ok(Some(false))` / `Ok(None)` if caller should emit as a normal field.
     fn try_emit_listop_metadata(&mut self, name: &str, value: &Value) -> Result<Option<bool>> {
         match value {

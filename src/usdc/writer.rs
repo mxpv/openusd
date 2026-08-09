@@ -93,9 +93,11 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.out
             .seek(SeekFrom::Start(std::mem::size_of::<Bootstrap>() as u64))?;
 
-        // Pre-intern the root path at index 0 (always `/`).
+        // Pre-intern the root path at index 0 (always `/`). Interning must run
+        // in every build, so the call sits outside the assert.
         let root = Path::abs_root();
-        debug_assert_eq!(self.intern_path(root.clone()), 0);
+        let root_index = self.intern_path(root.clone());
+        debug_assert_eq!(root_index, 0);
 
         // Intern every path referenced by the data in one sweep. This seeds
         // `paths` before any field that may reference paths is serialized.
@@ -685,7 +687,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.strings.intern(tok)
     }
 
-    /// Write a POD value at the current position and return a heap ValueRep.
+    /// Write a POD value at the current position and return a heap `ValueRep`.
     fn write_pod_out<T: Pod>(&mut self, ty: Type, v: &T) -> Result<ValueRep> {
         let off = self.pos()?;
         self.write_pod(v)?;

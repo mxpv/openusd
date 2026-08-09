@@ -2008,7 +2008,7 @@ fn sublayer_children_union() -> Result<()> {
     Ok(())
 }
 
-/// The sublayer_same_folder vendor test asset should open correctly with
+/// The `sublayer_same_folder` vendor test asset should open correctly with
 /// 2 layers and expose the sublayer's prims through composition.
 #[test]
 fn sublayer_prims_from_weaker_layer() -> Result<()> {
@@ -2026,7 +2026,7 @@ fn sublayer_prims_from_weaker_layer() -> Result<()> {
     Ok(())
 }
 
-/// Vendor test: reference_same_folder.usda references _stage.usda with
+/// Vendor test: `reference_same_folder.usda` references _stage.usda with
 /// defaultPrim. The referenced layer's /World/Cube should appear under the
 /// referencing prim.
 #[test]
@@ -2047,7 +2047,7 @@ fn reference_default_prim_from_external_layer() -> Result<()> {
 
 /// An external reference with an explicit prim path should remap the
 /// target prim into the referencing prim's namespace.
-/// ref_prim.usda: /World/RefPrim references @ref_target.usda@</Source>.
+/// `ref_prim.usda`: /World/RefPrim references @`ref_target.usda`@</Source>.
 #[test]
 fn reference_explicit_prim_path() -> Result<()> {
     let path = fixture_path("ref_prim.usda");
@@ -2065,7 +2065,7 @@ fn reference_explicit_prim_path() -> Result<()> {
 
 // --- Inherit composition ---
 
-/// class_inherit.usda: cubeWithoutSetColor inherits from /_myClass which
+/// `class_inherit.usda`: cubeWithoutSetColor inherits from /_myClass which
 /// defines displayColor = green. The prim should pick up the class property.
 #[test]
 fn inherit_from_class() -> Result<()> {
@@ -2084,7 +2084,7 @@ fn inherit_from_class() -> Result<()> {
 
 // --- Payload composition ---
 
-/// Vendor test: payload_same_folder.usda has a payload to _stage.usda.
+/// Vendor test: `payload_same_folder.usda` has a payload to _stage.usda.
 /// The payload's prim hierarchy should be composed into the stage.
 #[test]
 fn payload_pulls_children() -> Result<()> {
@@ -2104,7 +2104,7 @@ fn payload_pulls_children() -> Result<()> {
 
 // --- Session layer ---
 
-/// Opens a stage with session_layer.usda over session_root.usda.
+/// Opens a stage with `session_layer.usda` over `session_root.usda`.
 fn open_with_session() -> Result<Stage> {
     let root = fixture_path("session_root.usda");
     let session = fixture_path("session_layer.usda");
@@ -3583,7 +3583,7 @@ fn traversal_instance_proxies() -> Result<()> {
 
     let mut proxies = Vec::new();
     stage.traverse(PrimPredicate::DEFAULT.with_instance_proxies(true), |p| {
-        proxies.push(p.to_string())
+        proxies.push(p.to_string());
     })?;
     assert!(proxies.contains(&"/A/Child".to_string()));
     Ok(())
@@ -6070,7 +6070,7 @@ fn field_single_layer() -> Result<()> {
 
 // --- Sublayer composition ---
 
-/// sublayer_override.usda sublayers sublayer_base.usda. Both layers define
+/// `sublayer_override.usda` sublayers `sublayer_base.usda`. Both layers define
 /// /World/Cube but with different displayColor values. The stronger (override)
 /// layer's opinion should win (first-opinion-wins rule).
 #[test]
@@ -6112,8 +6112,8 @@ fn field_active_metadata() -> Result<()> {
 
 /// An external reference with defaultPrim should pull the referenced prim's
 /// children into the referencing prim's namespace.
-/// ref_external.usda: /World/MyPrim references ref_target.usda (defaultPrim="Source").
-/// ref_target.usda defines /Source/Child with displayColor.
+/// `ref_external.usda`: /World/MyPrim references `ref_target.usda` (defaultPrim="Source").
+/// `ref_target.usda` defines /Source/Child with displayColor.
 #[test]
 fn reference_external_default_prim() -> Result<()> {
     let path = fixture_path("ref_external.usda");
@@ -6132,7 +6132,7 @@ fn reference_external_default_prim() -> Result<()> {
     Ok(())
 }
 
-/// class_inherit.usda: cubeWithSetColor inherits from /_myClass but
+/// `class_inherit.usda`: cubeWithSetColor inherits from /_myClass but
 /// overrides displayColor locally. Local opinion (red) should win
 /// over the inherited opinion (green).
 #[test]
@@ -6323,7 +6323,7 @@ fn inherit_nested_child_propagation() -> Result<()> {
     Ok(())
 }
 
-/// Children should propagate through an inherit chain (Leaf → Middle → GrandBase).
+/// Children should propagate through an inherit chain (Leaf → Middle → `GrandBase`).
 #[test]
 fn inherit_chain_child_propagation() -> Result<()> {
     let path = fixture_path("inherit_chain_child.usda");

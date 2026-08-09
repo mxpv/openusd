@@ -211,8 +211,7 @@ mod pcp_txt {
         }
         Path::new(identifier)
             .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| identifier.to_string())
+            .map_or_else(|| identifier.to_string(), |s| s.to_string_lossy().into_owned())
     }
 
     /// A `Prim Stack` / `Property stacks` site line: four spaces, the layer

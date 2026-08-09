@@ -1212,7 +1212,7 @@ mod tests {
                 .collect();
             (items, it.remainder().to_owned())
         };
-        let case = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let case = |items: &[&str]| items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
 
         // Prim names and variant selections, in order, fully consumed. A prim
         // child attaches directly to a variant selection (canonical form).

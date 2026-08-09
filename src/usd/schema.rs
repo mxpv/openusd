@@ -1,7 +1,7 @@
 //! Schema view-type foundation.
 //!
 //! [`SchemaBase`] is the root of the schema-view hierarchy (C++
-//! `UsdSchemaBase`). Every schema — typed (IsA) or applied (API) — is a
+//! `UsdSchemaBase`). Every schema — typed (`IsA`) or applied (API) — is a
 //! lightweight value-type view over a single [`Prim`] and implements this
 //! trait, directly or through an intermediate schema trait (`Imageable`,
 //! `Xformable`, …). Domain schemas in [`crate::schemas`] build their typed

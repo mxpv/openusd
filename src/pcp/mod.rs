@@ -894,7 +894,7 @@ mod tests {
             "recompute picks up the newly authored layerRelocates"
         );
         assert_eq!(
-            graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/Grp/B").unwrap()),
+            graph.relocation_source(LayerStackId::ROOT, &Path::new("/Grp/B").unwrap()),
             Some(Path::new("/Grp/A").unwrap()),
             "recompute re-extracts the per-layer relocate pairs the indexer reads"
         );
@@ -929,7 +929,7 @@ mod tests {
             "relocates in one sublayer stack must conflict"
         );
         assert_eq!(
-            graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/World/C").unwrap()),
+            graph.relocation_source(LayerStackId::ROOT, &Path::new("/World/C").unwrap()),
             None,
             "every relocate sharing the target is dropped"
         );
@@ -963,7 +963,7 @@ mod tests {
             "a repeated sublayer has one authored relocate occurrence"
         );
         assert_eq!(
-            graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/Ref/Geom").unwrap()),
+            graph.relocation_source(LayerStackId::ROOT, &Path::new("/Ref/Geom").unwrap()),
             Some(Path::new("/Ref/Orig").unwrap())
         );
     }
@@ -993,7 +993,7 @@ mod tests {
         let mut graph = LayerGraph::from_layers(vec![root, sub], 0, sdf::LayerRegistry::default());
 
         assert_eq!(
-            graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/World/U").unwrap()),
+            graph.relocation_source(LayerStackId::ROOT, &Path::new("/World/U").unwrap()),
             None,
             "weaker duplicate source must stay dropped even when the stronger occurrence conflicts"
         );

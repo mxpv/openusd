@@ -1533,7 +1533,7 @@ impl Stage {
         {
             let layers = self.layers();
             if layers.root_layer_stack().iter().any(|&(id, _)| id == target_layer) {
-                return Ok(layers.root_layer_stack_id());
+                return Ok(pcp::LayerStackId::ROOT);
             }
         }
         let (id, demands) = {
@@ -2324,7 +2324,7 @@ impl Stage {
     /// When a session layer is present, `defaultPrim` is still read from
     /// the root layer (not the session layer), matching C++ behavior.
     pub fn default_prim(&self) -> Option<Token> {
-        self.with_cache(|g, c| Ok(c.default_prim(g))).unwrap_or_default()
+        self.with_cache(|g, _| Ok(g.default_prim())).unwrap_or_default()
     }
 
     /// Returns composed pseudo-root stage metadata, honoring a session-layer
@@ -2334,7 +2334,7 @@ impl Stage {
     /// root-layer-only metadata for the spec 12.2.7 fields like `defaultPrim`.
     /// Returns the raw [`sdf::Value`]; the caller coerces it.
     pub fn stage_metadata(&self, field: impl AsRef<str>) -> Result<Option<sdf::Value>> {
-        self.with_cache(|g, c| c.stage_metadata(g, field.as_ref()))
+        self.with_cache(|g, _| g.stage_metadata(field.as_ref()))
     }
 
     /// The stage's `startTimeCode`, or `0.0` when unauthored. The session
@@ -2883,7 +2883,7 @@ impl Stage {
             // interned the sublayer makes the entry's canonical id comparable to
             // `child_id` even when the entry string differs from the canonical id.
             let authored = layers.find_relative(child, parent_id).and_then(|child_id| {
-                let subs = layers.get(parent_id)?.layer.pseudo_root()?.sublayers()?.to_vec();
+                let subs = layers.get(parent_id)?.layer.pseudo_root()?.sublayers()?.clone();
                 subs.into_iter()
                     .find(|entry| layers.find_relative(entry, parent_id) == Some(child_id))
             });

@@ -234,7 +234,9 @@ fn assert_math(name: &str, dim: usize, integer: bool, places: i32) {
     let mut single_value: Vec<f64> = vec![3.14, 4.824, 1.225, 5.247][..dim].to_vec();
     let inline_value: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0][..dim].to_vec();
     if integer {
-        single_value.iter_mut().for_each(|x| *x = x.ceil());
+        for x in single_value.iter_mut() {
+            *x = x.ceil();
+        }
     }
 
     let single = comps(&value(&data, "/root.single", "default"));

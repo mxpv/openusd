@@ -1,4 +1,4 @@
-//! ListOp composition compliance tests.
+//! `ListOp` composition compliance tests.
 //!
 //! Validates `ListOp::combined_with` and `ListOp::reduced` against the vendor
 //! JSON baselines.
@@ -11,7 +11,7 @@ const COMBINE_CHAIN: &str = "vendor/core-spec-supplemental-release_dec2025/data_
 
 /// JSON schema for loading vendor test fixtures.
 mod schema {
-    /// A single test case from the combine_chain JSON files.
+    /// A single test case from the `combine_chain` JSON files.
     #[derive(serde::Deserialize)]
     pub struct Case {
         pub description: String,
@@ -19,7 +19,7 @@ mod schema {
         pub combined_reduced: Data,
     }
 
-    /// JSON representation of a ListOp.
+    /// JSON representation of a `ListOp`.
     #[derive(Debug, Default, serde::Deserialize)]
     #[serde(default)]
     pub struct Data {

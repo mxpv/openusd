@@ -244,7 +244,7 @@ impl LayerOffset {
 /// Represents a payload and all its meta data.
 ///
 /// A payload represents a prim reference to an external layer. A payload
-/// is similar to a prim reference (see SdfReference) with the major
+/// is similar to a prim reference (see `SdfReference`) with the major
 /// difference that payloads are explicitly loaded by the user.
 ///
 /// Unloaded payloads represent a boundary that lazy composition and

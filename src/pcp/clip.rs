@@ -98,13 +98,12 @@ impl ClipSet {
             return Vec::new();
         };
 
-        let ordered_names: Vec<&String> = match clip_sets_order {
-            Some(order) => order.iter().filter(|name| sets.contains_key(*name)).collect(),
-            None => {
-                let mut names: Vec<&String> = sets.keys().collect();
-                names.sort();
-                names
-            }
+        let ordered_names: Vec<&String> = if let Some(order) = clip_sets_order {
+            order.iter().filter(|name| sets.contains_key(*name)).collect()
+        } else {
+            let mut names: Vec<&String> = sets.keys().collect();
+            names.sort();
+            names
         };
 
         ordered_names
@@ -547,7 +546,7 @@ impl ClipCache {
         &mut self,
         graph: &LayerGraph,
         sets: &[ResolvedClipSet],
-        query: &ClipQuery,
+        query: &ClipQuery<'_>,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>> {
@@ -636,7 +635,7 @@ impl ClipCache {
         &mut self,
         graph: &LayerGraph,
         sets: &[ResolvedClipSet],
-        query: &ClipQuery,
+        query: &ClipQuery<'_>,
     ) -> Result<Option<(Vec<f64>, bool)>> {
         for resolved in sets {
             let base = resolved.set.prim_path.clone().unwrap_or_else(|| query.anchor.clone());
@@ -876,7 +875,7 @@ impl ClipCache {
 /// 12.3.4.1.1.1). `query.anchor` is an ancestor of `query.attr_prim`, so the
 /// replacement lands on a path boundary; the fallback keeps the path unchanged
 /// if it ever is not a prefix.
-fn clip_attr_path(query: &ClipQuery, base: &Path) -> Result<Path> {
+fn clip_attr_path(query: &ClipQuery<'_>, base: &Path) -> Result<Path> {
     let attr = Path::new(&format!("{}{}", query.attr_prim, query.suffix))?;
     Ok(attr.replace_prefix(query.anchor, base).unwrap_or(attr))
 }

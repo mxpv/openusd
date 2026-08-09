@@ -68,7 +68,7 @@ impl ResolvedPath {
             .then(|| split_package_relative_path_inner(&s))
             .flatten()
             .map(|(_, inner)| inner);
-        let path = inner.as_deref().map(Path::new).unwrap_or(self.0.as_path());
+        let path = inner.as_deref().map_or(self.0.as_path(), Path::new);
         path.extension()
             .and_then(|ext| ext.to_str())
             .map(str::to_ascii_lowercase)
@@ -319,7 +319,7 @@ impl Resolver for DefaultResolver {
             if is_package_relative_path(&anchor_str)
                 && let Some((package, inner)) = split_package_relative_path_inner(&anchor_str)
             {
-                let inner_dir = inner.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+                let inner_dir = inner.rsplit_once('/').map_or("", |(dir, _)| dir);
                 let joined = join_packaged_path(inner_dir, asset_path);
                 return nest_packaged_path(&package, &joined);
             }

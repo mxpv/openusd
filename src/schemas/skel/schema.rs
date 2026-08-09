@@ -161,7 +161,7 @@ impl Skeleton {
         Ok(self
             .joints()?
             .iter()
-            .map(|p| p.rsplit_once('/').map(|(_, n)| n).unwrap_or(p).to_string())
+            .map(|p| p.rsplit_once('/').map_or(p.as_str(), |(_, n)| n).to_string())
             .collect())
     }
 
