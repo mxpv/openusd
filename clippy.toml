@@ -1,1 +1,47 @@
 msrv = "1.89"
+
+# OpenUSD domain vocabulary — C++ schema families, prim/API schema type names,
+# and third-party formats and renderers. These appear in doc comments as prose
+# nouns rather than as links to items in this crate, so `clippy::doc_markdown`
+# should not ask for backticks around them. Rust identifiers stay off this list
+# so the lint keeps flagging unlinked references to our own API.
+doc-valid-idents = [
+    "AnimMapper",
+    "BlendShape",
+    "DenoisePass",
+    "Field3D",
+    "LightAPI",
+    "LightFilter",
+    "LightListAPI",
+    "MaterialBindingAPI",
+    "MaterialX",
+    "NodeDefAPI",
+    "NodeGraph",
+    "OmniPBR",
+    "OpenUSD",
+    "OpenVDB",
+    "RenderMan",
+    "RenderSettings",
+    "ShadowAPI",
+    "ShapingAPI",
+    "SkelAnimation",
+    "SkelBindingAPI",
+    "SkelRoot",
+    "SkeletonResolver",
+    "SkinningResolver",
+    "UsdGeom",
+    "UsdGeomPrimvar",
+    "UsdLux",
+    "UsdMedia",
+    "UsdPhysics",
+    "UsdPreviewSurface",
+    "UsdProc",
+    "UsdRender",
+    "UsdShade",
+    "UsdShadeInput",
+    "UsdShadeOutput",
+    "UsdSkel",
+    "UsdUI",
+    "UsdVol",
+    "..",
+]

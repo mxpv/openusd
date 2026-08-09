@@ -87,6 +87,11 @@ When implementing a new feature from the spec:
 - Project targets Rust version specified in `rust-toolchain.toml` with MSRV defined in `clippy.toml`
 - Maximum line width: 120 characters (rustfmt.toml)
 - All warnings treated as errors in CI
+- The `[lints]` section of `Cargo.toml` sets every lint to `deny`, so findings
+  block a plain `cargo build` and are never optional. Silence one only with a
+  narrowly scoped `#[allow(...)]` carrying a comment for why; do not downgrade
+  or delete the entry in `Cargo.toml` to make a finding go away. Words that
+  `clippy::doc_markdown` should ignore go in `clippy.toml`'s `doc-valid-idents`
 - Comprehensive test coverage (50% minimum) with grcov
 - Security auditing with cargo-deny
 - Pre-1.0: backward compatibility is not a constraint. Prefer the cleanest design and change or remove public APIs freely; don't keep deprecated shims, compatibility shims, or worse-but-compatible behavior. Update all call sites in the same change.

@@ -53,6 +53,96 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 
+# Adapted from the Embark Studios standard lints (v6, plus the v7 candidates
+# from EmbarkStudios/rust-ecosystem#75). Findings are mandatory: every lint is
+# `deny`, so a plain `cargo build` fails rather than accumulating warnings.
+# Lint groups carry `priority = -1` so an individual lint below can override
+# the group it belongs to.
+[lints.rust]
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+trivial_numeric_casts = "deny"
+unsafe_code = "deny"
+
+[lints.rustdoc]
+missing_crate_level_docs = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+await_holding_lock = "deny"
+char_lit_as_u8 = "deny"
+checked_conversions = "deny"
+dbg_macro = "deny"
+debug_assert_with_mut_call = "deny"
+disallowed_script_idents = "deny"
+doc_markdown = "deny"
+empty_enum = "deny"
+enum_glob_use = "deny"
+equatable_if_let = "deny"
+exit = "deny"
+expl_impl_clone_on_copy = "deny"
+explicit_deref_methods = "deny"
+explicit_into_iter_loop = "deny"
+fallible_impl_from = "deny"
+filter_map_next = "deny"
+flat_map_option = "deny"
+float_cmp_const = "deny"
+fn_params_excessive_bools = "deny"
+fn_to_numeric_cast_any = "deny"
+from_iter_instead_of_collect = "deny"
+if_let_mutex = "deny"
+implicit_clone = "deny"
+imprecise_flops = "deny"
+index_refutable_slice = "deny"
+inefficient_to_string = "deny"
+invalid_upcast_comparisons = "deny"
+iter_not_returning_iterator = "deny"
+large_digit_groups = "deny"
+large_stack_arrays = "deny"
+large_types_passed_by_value = "deny"
+let_unit_value = "deny"
+linkedlist = "deny"
+lossy_float_literal = "deny"
+macro_use_imports = "deny"
+manual_ok_or = "deny"
+map_flatten = "deny"
+map_unwrap_or = "deny"
+match_same_arms = "deny"
+match_wild_err_arm = "deny"
+match_wildcard_for_single_variants = "deny"
+mem_forget = "deny"
+missing_enforced_import_renames = "deny"
+mut_mut = "deny"
+mutex_integer = "deny"
+needless_borrow = "deny"
+needless_continue = "deny"
+needless_for_each = "deny"
+negative_feature_names = "deny"
+nonstandard_macro_braces = "deny"
+option_option = "deny"
+path_buf_push_overwrite = "deny"
+ptr_as_ptr = "deny"
+rc_mutex = "deny"
+ref_option_ref = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+same_functions_in_if_condition = "deny"
+semicolon_if_nothing_returned = "deny"
+single_match_else = "deny"
+string_add = "deny"
+string_add_assign = "deny"
+string_lit_as_bytes = "deny"
+string_to_string = "deny"
+trailing_empty_array = "deny"
+trait_duplication_in_bounds = "deny"
+undocumented_unsafe_blocks = "deny"
+unimplemented = "deny"
+unnested_or_patterns = "deny"
+unused_self = "deny"
+useless_transmute = "deny"
+verbose_file_reads = "deny"
+zero_sized_map_values = "deny"
+
 [[test]]
 name = "text_format"
 required-features = ["serde"]
