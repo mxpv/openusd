@@ -193,6 +193,32 @@ impl ChildrenKey {
     }
 }
 
+/// Whether generic field resolution folds list-op opinions authored for
+/// `field` (spec 12.2.6).
+///
+/// Composition arcs, relationship targets and attribute connections, clip-set
+/// ordering, and the value-resolution fields compose through dedicated
+/// machinery — arcs during prim indexing, targets with per-node namespace
+/// translation, `clipSets` with encoding coercion, values by
+/// strongest-opinion resolution — so generic resolution leaves their opinions
+/// untouched (C++ `UsdStage::_IsPrivateFieldKey` shields the same fields from
+/// its generic metadata path).
+pub fn folds_list_ops(field: &str) -> bool {
+    const DEDICATED: [FieldKey; 10] = [
+        FieldKey::References,
+        FieldKey::Payload,
+        FieldKey::InheritPaths,
+        FieldKey::Specializes,
+        FieldKey::VariantSetNames,
+        FieldKey::ConnectionPaths,
+        FieldKey::TargetPaths,
+        FieldKey::ClipSets,
+        FieldKey::Default,
+        FieldKey::TimeSamples,
+    ];
+    !DEDICATED.iter().any(|key| key.as_str() == field)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

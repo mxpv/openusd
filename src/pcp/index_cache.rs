@@ -1175,12 +1175,18 @@ impl IndexCache {
         asset
     }
 
-    /// Returns the composed `apiSchemas` list for a prim.
+    /// Returns the composed `apiSchemas` list for a prim: the items of the
+    /// generic list-op fold over the field.
     pub fn api_schemas(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
-        self.cached(&path)
-            .resolve_token_list_op(FieldKey::ApiSchemas, graph, None)
+        match self
+            .cached(&path)
+            .resolve_field(FieldKey::ApiSchemas.as_str(), graph, None)?
+        {
+            Some(Value::TokenListOp(op)) => Ok(op.explicit_items),
+            _ => Ok(Vec::new()),
+        }
     }
 
     /// Resolves the `clipSets` strength-ordering list-op on the prim at `path`,
@@ -3921,6 +3927,109 @@ def "Scope"
         );
         assert!(cache.has_spec(&graph, &world)?);
         assert!(has_child(&mut cache, &graph)?);
+        Ok(())
+    }
+
+    /// Builds a sublayer chain authoring `opinions[i]` (strongest first) as
+    /// `field` on `/World` of layer `i`, and resolves the field across the
+    /// stack.
+    fn resolve_stacked(field: &str, opinions: &[Value]) -> Result<Option<Value>> {
+        let world = sdf::path("/World")?;
+        let mut layers = Vec::new();
+        for (i, opinion) in opinions.iter().enumerate() {
+            let text = if i + 1 < opinions.len() {
+                format!(
+                    "#usda 1.0\n(\n    subLayers = [@layer{}.usda@]\n)\nover \"World\" {{}}\n",
+                    i + 1
+                )
+            } else {
+                "#usda 1.0\ndef \"World\" {}\n".to_string()
+            };
+            let mut layer = parse_named_layer(&format!("layer{i}.usda"), &text);
+            layer
+                .edit(|l| {
+                    l.data_mut().set_field(&world, field, opinion.clone());
+                    Ok(())
+                })
+                .expect("authored");
+            layers.push(layer);
+        }
+
+        let graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        cache.resolve_field(&graph, &world, field)
+    }
+
+    /// A custom metadata field authored as a list op composes by folding its
+    /// edits across layers (spec 12.2.6), resolving to a baked explicit list
+    /// op.
+    #[test]
+    fn custom_list_op_folds() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "order",
+                &[
+                    Value::IntListOp(sdf::ListOp::prepended(vec![1])),
+                    Value::IntListOp(sdf::ListOp::explicit(vec![2, 3])),
+                ]
+            )?,
+            Some(Value::IntListOp(sdf::ListOp::explicit(vec![1, 2, 3])))
+        );
+        Ok(())
+    }
+
+    /// A value block between list-op opinions stops the weaker edits while the
+    /// stronger ones still compose.
+    #[test]
+    fn list_op_block_stops_weaker() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "order",
+                &[
+                    Value::IntListOp(sdf::ListOp::prepended(vec![1])),
+                    Value::ValueBlock,
+                    Value::IntListOp(sdf::ListOp::explicit(vec![2])),
+                ]
+            )?,
+            Some(Value::IntListOp(sdf::ListOp::explicit(vec![1])))
+        );
+        Ok(())
+    }
+
+    /// A field composed by dedicated machinery keeps its raw strongest opinion
+    /// under generic resolution: the fold never reshapes `default`, whose
+    /// value resolution is strongest-wins.
+    #[test]
+    fn default_field_never_folds() -> Result<()> {
+        let strongest = Value::TokenListOp(sdf::ListOp::prepended(vec![Token::new("a")]));
+        assert_eq!(
+            resolve_stacked(
+                FieldKey::Default.as_str(),
+                &[
+                    strongest.clone(),
+                    Value::TokenListOp(sdf::ListOp::explicit(vec![Token::new("b")])),
+                ]
+            )?,
+            Some(strongest)
+        );
+        Ok(())
+    }
+
+    /// `apiSchemas` is declared token-list-op by the core schema, so an
+    /// ill-typed strongest opinion (a backend storing the field as a plain
+    /// vec) is skipped and the conformant weaker edits still compose.
+    #[test]
+    fn api_schemas_skips_ill_typed() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                FieldKey::ApiSchemas.as_str(),
+                &[
+                    Value::TokenVec(vec![Token::new("IllTypedAPI")]),
+                    Value::TokenListOp(sdf::ListOp::prepended(vec![Token::new("GoodAPI")])),
+                ]
+            )?,
+            Some(Value::TokenListOp(sdf::ListOp::explicit(vec![Token::new("GoodAPI")])))
+        );
         Ok(())
     }
 

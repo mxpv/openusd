@@ -13,7 +13,6 @@ use anyhow::Result;
 use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Specifier, Value};
-use crate::tf::Token;
 
 use super::clip;
 use super::mapping::MapFunction;
@@ -107,13 +106,17 @@ pub(crate) struct InvalidTarget {
 impl PrimIndex {
     /// Resolves a field across the composition graph.
     ///
-    /// Most fields use strongest-opinion-wins (spec 12.2). Four field classes
+    /// Most fields use strongest-opinion-wins (spec 12.2). Five field classes
     /// have special rules:
     ///
     /// - `specifier`: precedence by `def`/`class`/`over` with direct-inherit handling
     /// - `variability`: weakest authored opinion wins
     /// - `custom`: any-true (logical OR across all authored opinions)
     /// - dictionaries: recursive merge of stronger and weaker dictionary opinions
+    /// - list ops: list edits folded across all contributing opinions (12.2.6),
+    ///   for the fields [`sdf::folds_list_ops`] accepts — a field composed by
+    ///   dedicated machinery (arcs, targets, clips, values) keeps its raw
+    ///   strongest opinion here
     ///
     /// When `prop_suffix` is `None`, queries use the node's path directly (zero-copy).
     /// When `Some`, appends the suffix to form a property path for each node.
@@ -136,43 +139,81 @@ impl PrimIndex {
         if field == FieldKey::TimeSamples.as_str() {
             return Ok(self.resolve_time_samples(stack, prop_suffix)?.map(Value::TimeSamples));
         }
-        self.resolve_strongest(field, stack, prop_suffix)
+        match self.resolve_strongest(field, stack, prop_suffix)? {
+            Some(strongest) if sdf::folds_list_ops(field) => {
+                self.resolve_list_op(field, stack, prop_suffix, strongest).map(Some)
+            }
+            other => Ok(other),
+        }
     }
 
-    /// Resolves a token-list-op field by composing list edits from strongest
-    /// to weakest across all contributing nodes.
+    /// Folds a list-op-valued field across every contributing opinion into a
+    /// baked explicit list op, so any field authored as a list op composes by
+    /// list-edit folding (spec 12.2.6) — the dispatch C++
+    /// `UsdStage::_GetGeneralMetadataImpl` performs through `_IsListOpValue`
+    /// before `_GetListOpMetadataImpl` bakes the result.
     ///
-    /// This is used for metadata like `apiSchemas`, where the field value is a
-    /// list operation rather than a strongest-opinion scalar. A value block
-    /// stops weaker opinions while preserving any stronger composed edits.
-    pub(crate) fn resolve_token_list_op(
+    /// `strongest` is the field's already-resolved strongest opinion: its
+    /// variant decides the element type, and a non-list-op value passes
+    /// through unchanged. A value block stops weaker opinions while preserving
+    /// the stronger composed edits.
+    // TODO: a non-conformant backend may store a list-op field as a plain vec
+    // (`apiSchemas` as `Value::TokenVec`). Opinions whose variant differs from
+    // the strongest opinion's are skipped here; coercing them instead needs a
+    // schema-aware decode step in the USDC reader (and any other backend) so a
+    // list-op field is always produced as a list-op value.
+    //
+    // TODO(perf): the strongest opinion is materialized only for its variant
+    // here, and the fold walk re-reads the sites the strongest pass already
+    // visited. Peeking the borrowed discriminant before owning would resolve
+    // a list-op field in one walk.
+    fn resolve_list_op(
         &self,
-        field: FieldKey,
+        field: &str,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-    ) -> Result<Vec<Token>> {
-        let field = field.as_str();
-        let mut ops = Vec::new();
-
-        for opinion in self.opinions(field, stack, prop_suffix) {
-            let value = opinion?.value;
-            // TODO: a non-conformant backend may store `apiSchemas` as a plain
-            // `Value::TokenVec` even though the field is declared as a
-            // list-op. We currently skip those opinions (falling through to
-            // `_ => continue`). Tightening this further requires a
-            // schema-aware decode step in the USDC reader (and any other
-            // backend) so list-op fields are always produced as
-            // `Value::TokenListOp`; until that lands, ill-typed opinions for
-            // list-op fields are simply ignored rather than coerced.
-            let list_op = match value.into_owned() {
-                Value::ValueBlock => break,
-                Value::TokenListOp(op) => op,
-                _ => continue,
-            };
-            ops.push(list_op);
+        strongest: Value,
+    ) -> Result<Value> {
+        macro_rules! fold {
+            ($variant:ident) => {{
+                let mut ops = Vec::new();
+                for opinion in self.opinions(field, stack, prop_suffix) {
+                    match opinion?.value.into_owned() {
+                        Value::ValueBlock => break,
+                        Value::$variant(op) => {
+                            // An explicit opinion replaces everything weaker,
+                            // so the walk stops with it.
+                            let explicit = op.explicit;
+                            ops.push(op);
+                            if explicit {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Value::$variant(sdf::ListOp::explicit(compose_list_ops(&ops)))
+            }};
         }
 
-        Ok(compose_list_ops(&ops))
+        Ok(match strongest {
+            Value::TokenListOp(_) => fold!(TokenListOp),
+            Value::StringListOp(_) => fold!(StringListOp),
+            Value::PathListOp(_) => fold!(PathListOp),
+            Value::ReferenceListOp(_) => fold!(ReferenceListOp),
+            Value::PayloadListOp(_) => fold!(PayloadListOp),
+            Value::IntListOp(_) => fold!(IntListOp),
+            Value::Int64ListOp(_) => fold!(Int64ListOp),
+            Value::UIntListOp(_) => fold!(UIntListOp),
+            Value::UInt64ListOp(_) => fold!(UInt64ListOp),
+            Value::UnregisteredValueListOp(_) => fold!(UnregisteredValueListOp),
+            // `apiSchemas` is declared token-list-op by the core schema, so it
+            // folds even when a non-conformant backend stored the strongest
+            // opinion as a plain vec: the ill-typed opinion is skipped and the
+            // conformant edits still compose (see the TODO above).
+            _ if field == FieldKey::ApiSchemas.as_str() => fold!(TokenListOp),
+            other => other,
+        })
     }
 
     /// Resolves a path-list-op field (relationship targets / attribute

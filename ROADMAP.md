@@ -119,7 +119,7 @@ that broader spec behavior can be considered fully covered.
 | variability resolution (weakest opinion) | `12.2.3` | :white_check_mark: | `0.4.0` | Weakest authored opinion wins |
 | custom field resolution (any-true) | `12.2.4` | :white_check_mark: | `0.4.0` | Logical OR across opinions |
 | Dictionary combining | `12.2.5` | :white_check_mark: | `0.4.0` | Recursive merge across dictionary-valued opinions |
-| List op resolution | `12.2.6` | :construction: | | Composition-arc list ops, composed `apiSchemas`, `connectionPaths`/`targetPaths`, and `clipSets` order folded across layers<br>Remaining — schema-registry-driven generic list-op field resolution so any field declared list-op composes without a hand-wired call site |
+| List op resolution | `12.2.6` | :white_check_mark: | `main` | Composition-arc list ops, `connectionPaths`/`targetPaths` target folding, and `clipSets` order folded across layers; any other list-op-valued field (composed `apiSchemas` included) folds generically during field resolution |
 | Layer metadata (root layer only) | `12.2.7` | :white_check_mark: | `0.2.0` | `defaultPrim`, timing fields, etc. |
 | Fallback values | `12.2.8` | :construction: | | `Attribute::get` / `get_at` fall through to the prim definition's fallback when composition resolves no value, including for a blocked attribute (§12.3.6); `Attribute::value_source` reports which tier answered<br>Remaining — import the OpenUSD schema data so the process registry has fallbacks to supply |
 | Basic attribute resolution | `12.3` | :white_check_mark: | `0.5.0` | `0.2.0` — resolves authored `default`, `timeSamples`, and `ValueBlock`<br>`0.5.0` — layer-offset retiming applied<br>Value clips and splines are tracked separately |

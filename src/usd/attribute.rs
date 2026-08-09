@@ -1423,9 +1423,10 @@ mod tests {
             .add_connection(target.clone())?;
 
         let op = stage
-            .field::<sdf::Value>(attr.path(), sdf::FieldKey::ConnectionPaths)?
-            .unwrap()
-            .try_as_path_list_op()
+            .root_layer()
+            .attribute(attr.path().clone())
+            .expect("authored on the root layer")
+            .connection_path_list()
             .unwrap();
         assert!(!op.explicit, "first add_connection must not flip the op to explicit");
         assert!(op.explicit_items.is_empty());
@@ -1445,9 +1446,10 @@ mod tests {
             .add_connection_appended(target.clone())?;
 
         let op = stage
-            .field::<sdf::Value>(attr.path(), sdf::FieldKey::ConnectionPaths)?
-            .unwrap()
-            .try_as_path_list_op()
+            .root_layer()
+            .attribute(attr.path().clone())
+            .expect("authored on the root layer")
+            .connection_path_list()
             .unwrap();
         assert!(!op.explicit);
         assert_eq!(op.appended_items, vec![target]);
@@ -1472,9 +1474,10 @@ mod tests {
             .add_connection_prepended(b.clone())?;
 
         let op = stage
-            .field::<sdf::Value>(attr.path(), sdf::FieldKey::ConnectionPaths)?
-            .unwrap()
-            .try_as_path_list_op()
+            .root_layer()
+            .attribute(attr.path().clone())
+            .expect("authored on the root layer")
+            .connection_path_list()
             .unwrap();
         assert!(op.explicit);
         assert_eq!(op.explicit_items, vec![b, a]);

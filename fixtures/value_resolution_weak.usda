@@ -42,3 +42,9 @@ def "DictTest" (
 )
 {
 }
+
+def "ListOpTest" (
+    prepend apiSchemas = ["WeakAPI"]
+)
+{
+}

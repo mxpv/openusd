@@ -43,7 +43,7 @@ pub use layer_registry::LayerRegistry;
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{path, Path, PathComponent, PathComponents, PathElement};
 pub use path_table::PathTable;
-pub use schema::{ChildrenKey, FieldKey};
+pub use schema::{folds_list_ops, ChildrenKey, FieldKey};
 pub use spec::{
     AttributeSpec, AttributeSpecMut, AttributeSpecRef, PrimSpec, PrimSpecMut, PrimSpecRef, PropertySpec,
     PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,

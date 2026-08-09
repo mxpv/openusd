@@ -47,6 +47,15 @@ def "VarTest"
     int attr
 }
 
+# List-op resolution (12.2.6): a list-op-valued field folds list edits
+# across layers instead of the strongest opinion winning, so the strong
+# prepend lands ahead of the weak layer's item.
+def "ListOpTest" (
+    prepend apiSchemas = ["StrongAPI"]
+)
+{
+}
+
 # Dictionary resolution (12.2.5): strong and weak dictionary-valued
 # metadata compose recursively. Strong scalar values replace weak
 # dictionaries, and strong dictionaries replace weak scalar values.

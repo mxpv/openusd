@@ -1760,10 +1760,12 @@ mod tests {
             .add_applied_schema("ExistingAPI")?
             .add_applied_schema("NewAPI")?;
 
-        let local = stage.field::<sdf::Value>("/World", sdf::FieldKey::ApiSchemas)?;
-        let Some(sdf::Value::TokenListOp(op)) = local else {
-            panic!("expected apiSchemas TokenListOp");
-        };
+        let op = stage
+            .root_layer()
+            .prim("/World")
+            .expect("authored on the root layer")
+            .api_schemas()
+            .expect("apiSchemas authored");
         assert_eq!(op.appended_items, vec![Token::from("ExistingAPI")]);
         assert_eq!(op.prepended_items, vec![Token::from("NewAPI")]);
         Ok(())

@@ -2615,9 +2615,13 @@ impl Stage {
     /// a `.`), uses the owning prim's index to determine layer order, then queries
     /// the property spec directly in each layer.
     ///
-    /// Returns the first (strongest) opinion found, or `None` if no layer
-    /// provides a value. A [`sdf::Value::ValueBlock`] explicitly blocks opinions
-    /// from weaker layers and causes `None` to be returned.
+    /// Returns the composed value: strongest-opinion-wins for plain fields,
+    /// with spec 12.2's field-class rules — list-op folding, dictionary
+    /// merging, `specifier`/`variability`/`custom` — applied where they hold.
+    /// `None` if no layer provides a value. A [`sdf::Value::ValueBlock`]
+    /// blocks the opinions weaker than it: the composed result is whatever
+    /// the stronger opinions alone produce, or `None` when the block is the
+    /// strongest opinion.
     ///
     /// The return type is generic: use `sdf::Value` to get the raw enum, or a
     /// concrete type (e.g. `bool`, `f64`, `String`) to convert automatically
@@ -4013,9 +4017,10 @@ mod tests {
         assert!(attr.connections()?.is_empty());
 
         let op = stage
-            .field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
-            .unwrap()
-            .try_as_path_list_op()
+            .root_layer()
+            .attribute(input.clone())
+            .expect("delete authored on the root layer")
+            .connection_path_list()
             .unwrap();
         assert_eq!(op.deleted_items, vec![target]);
         Ok(())
@@ -4058,13 +4063,13 @@ mod tests {
         let attr = attr.add_connection(target.clone())?;
 
         assert_eq!(attr.connections()?, vec![target.clone()]);
-        let op = stage
-            .field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
-            .unwrap()
-            .try_as_path_list_op()
-            .unwrap();
-        assert!(op.explicit, "add_connection should not author a duplicate local op");
-        assert_eq!(op.explicit_items, vec![target]);
+        // The dedup leaves the root layer without any local connection
+        // opinion; the composed target keeps coming from the weak layer.
+        assert!(stage
+            .root_layer()
+            .attribute(input.clone())
+            .and_then(|attr| attr.connection_path_list())
+            .is_none());
         Ok(())
     }
 
@@ -4109,9 +4114,10 @@ mod tests {
 
         assert_eq!(attr.connections()?, vec![target.clone()]);
         let op = stage
-            .field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
-            .unwrap()
-            .try_as_path_list_op()
+            .root_layer()
+            .attribute(input.clone())
+            .expect("authored on the root layer")
+            .connection_path_list()
             .unwrap();
         assert!(op.deleted_items.is_empty());
         assert_eq!(op.prepended_items, vec![target]);

@@ -391,9 +391,9 @@ impl Changes {
             || field == FieldKey::Specifier.as_str()
             || field == FieldKey::Active.as_str()
             // `apiSchemas` is composed off the cached prim index
-            // (resolve_token_list_op in IndexCache::api_schemas), so any edit
-            // must drop the index. Once registry-driven applied schemas inject
-            // composition state, this becomes load-bearing for graph correctness.
+            // (`IndexCache::api_schemas`), so any edit must drop the index.
+            // Once registry-driven applied schemas inject composition state,
+            // this becomes load-bearing for graph correctness.
             || field == FieldKey::ApiSchemas.as_str()
             // Per-prim `relocates` reshape composition (see `pcp::relocates`). No
             // Stage-tier producer authors this yet, but it matches the C++

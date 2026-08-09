@@ -1214,6 +1214,19 @@ mod value_resolution {
     }
 
     #[test]
+    fn list_op_folds_across_layers() {
+        // List-op resolution (12.2.6): the strong and weak layers' `apiSchemas`
+        // edits fold rather than the strongest opinion winning.
+        let stage = open_fixture();
+        let composed = stage
+            .prim(sdf::path("/ListOpTest").unwrap())
+            .authored_api_schemas()
+            .unwrap();
+        let composed: Vec<&str> = composed.iter().map(|name| name.as_str()).collect();
+        assert_eq!(composed, ["StrongAPI", "WeakAPI"]);
+    }
+
+    #[test]
     fn dictionary_values_compose_recursively() {
         let stage = open_fixture();
         let value = stage.prim(sdf::path("/DictTest").unwrap()).custom_data().unwrap();
