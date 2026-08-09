@@ -4,8 +4,8 @@
 use anyhow::Result;
 
 use openusd::schemas::render::{
-    compute_render_spec, AspectRatioConformPolicy, ProductType, RenderProduct, RenderSettings, RenderSettingsBase,
-    RenderVar, SourceType,
+    AspectRatioConformPolicy, ProductType, RenderProduct, RenderSettings, RenderSettingsBase, RenderVar, SourceType,
+    compute_render_spec,
 };
 use openusd::sdf::{self, Value};
 use openusd::tf::Token;

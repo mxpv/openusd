@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use super::{interp, Prim, PrimTypeInfo, Stage, StageAuthoringError, TimeCode};
+use super::{Prim, PrimTypeInfo, Stage, StageAuthoringError, TimeCode, interp};
 use crate::pcp::AttributeValueSource;
 use crate::sdf;
 use crate::tf;
@@ -638,10 +638,10 @@ impl Attribute {
     {
         let declared = self.declared_spec().map_err(StageAuthoringError::Composition)?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            if let Some((type_name, variability)) = &declared {
-                if sdf::AttributeSpecMut::get(layer.data_mut(), path.clone()).is_none() {
-                    sdf::AttributeSpec::new(layer.data_mut(), path.clone(), type_name.as_str(), *variability, false)?;
-                }
+            if let Some((type_name, variability)) = &declared
+                && sdf::AttributeSpecMut::get(layer.data_mut(), path.clone()).is_none()
+            {
+                sdf::AttributeSpec::new(layer.data_mut(), path.clone(), type_name.as_str(), *variability, false)?;
             }
             super::edit_spec(
                 layer.data_mut(),
@@ -786,10 +786,10 @@ impl AttributeQuery {
         let revision = stage.cache_revision();
 
         // Reuse a cached source still valid at the current revision.
-        if let Some(cached) = self.cached.borrow().as_ref() {
-            if cached.revision == revision {
-                return self.evaluate(&cached.source, time);
-            }
+        if let Some(cached) = self.cached.borrow().as_ref()
+            && cached.revision == revision
+        {
+            return self.evaluate(&cached.source, time);
         }
 
         // Miss: resolve the source once and evaluate it. Snapshot the revision

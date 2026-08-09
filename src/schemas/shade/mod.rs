@@ -59,7 +59,7 @@ mod traits;
 
 pub use binding::MaterialBindingAPI;
 pub use connectable::base_name;
-pub use preview::{read_preview_surface, Channel, ReadPreviewSurface};
+pub use preview::{Channel, ReadPreviewSurface, read_preview_surface};
 pub use schema::{Material, NodeGraph, Shader};
 pub use traits::Connectable;
 

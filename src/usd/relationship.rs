@@ -196,10 +196,10 @@ impl Relationship {
     {
         let declared = self.declared_variability().map_err(StageAuthoringError::Composition)?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            if let Some(variability) = declared {
-                if sdf::RelationshipSpecMut::get(layer.data_mut(), path.clone()).is_none() {
-                    sdf::RelationshipSpec::new(layer.data_mut(), path.clone(), variability, false)?;
-                }
+            if let Some(variability) = declared
+                && sdf::RelationshipSpecMut::get(layer.data_mut(), path.clone()).is_none()
+            {
+                sdf::RelationshipSpec::new(layer.data_mut(), path.clone(), variability, false)?;
             }
             super::edit_spec(
                 layer.data_mut(),

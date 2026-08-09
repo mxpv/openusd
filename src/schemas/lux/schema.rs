@@ -20,7 +20,7 @@ use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, Stage};
 
 use super::tokens as tok;
-use super::{impl_lux_schema, Light};
+use super::{Light, impl_lux_schema};
 use crate::schemas::common::{get_typed, get_typed_in_family, get_with_api};
 
 /// A spherical / point area light (C++ `UsdLuxSphereLight`).
@@ -890,11 +890,13 @@ mod tests {
         let light = LightAPI::apply(&stage, "/Emitter")?;
         light.create_intensity_attr()?.set(1500.0_f32)?;
 
-        assert!(stage
-            .prim(sdf::path("/Emitter")?)
-            .api_schemas()?
-            .iter()
-            .any(|s| s == "LightAPI"));
+        assert!(
+            stage
+                .prim(sdf::path("/Emitter")?)
+                .api_schemas()?
+                .iter()
+                .any(|s| s == "LightAPI")
+        );
         let light = LightAPI::get(&stage, "/Emitter")?.expect("LightAPI");
         assert_eq!(light.intensity_attr().get()?, Some(sdf::Value::Float(1500.0)));
         assert!(light.is_applied_api_schema());

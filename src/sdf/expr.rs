@@ -30,7 +30,7 @@
 //! ```
 
 use crate::sdf;
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{Result, anyhow, bail, ensure};
 use logos::{Logos, SpannedIter};
 use regex_lite::Regex;
 use std::borrow::Cow;
@@ -128,7 +128,7 @@ pub fn evaluate_string(s: &str, vars: &HashMap<String, sdf::Value>) -> StringEva
                 value: None,
                 errors: vec![format!("{err:#}")],
                 used_variables: HashSet::new(),
-            }
+            };
         }
     };
     let Evaluation {
@@ -590,7 +590,7 @@ fn eval_string(segments: &[StringSegment], ctx: &mut EvalContext) -> EvalResult 
                             return EvalResult::error(format!(
                                 "String value required for substituting variable '{name}', got {}.",
                                 result_type_name(&other)
-                            ))
+                            ));
                         }
                     }
                 }
@@ -696,11 +696,7 @@ fn eval_func(func: Func, args: &[Expr], ctx: &mut EvalContext) -> EvalResult {
                     "{func}: if-value and else-value must evaluate to the same type or None."
                 ));
             }
-            if condition {
-                if_result
-            } else {
-                else_result
-            }
+            if condition { if_result } else { else_result }
         }
 
         Func::And | Func::Or => {
@@ -888,7 +884,7 @@ fn eval_comparison(func: Func, x: Option<EvaluationValue>, y: Option<EvaluationV
                 Func::Eq => EvalResult::ok(sdf::Value::Bool(true)),
                 Func::Neq => EvalResult::ok(sdf::Value::Bool(false)),
                 _ => EvalResult::error(format!("{func}: Comparison operation not supported for None")),
-            }
+            };
         }
         (Some(EvaluationValue::Value(a)), Some(EvaluationValue::Value(b))) => match (a, b) {
             (sdf::Value::String(a), sdf::Value::String(b)) => a.cmp(&b),
@@ -1480,10 +1476,12 @@ mod tests {
     fn parse_unknown_function_fails() {
         let result: Result<Expr, _> = "unknown_func(1, 2)".parse();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unknown function unknown_func"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown function unknown_func")
+        );
     }
 
     #[test]

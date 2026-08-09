@@ -35,8 +35,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
-    schema_registry, ApplyApiError, Attribute, EditTarget, EditTargetArc, PrimDefinition, PrimTypeInfo, Relationship,
-    SchemaRegistry, Stage, StageAuthoringError, VersionFilter,
+    ApplyApiError, Attribute, EditTarget, EditTargetArc, PrimDefinition, PrimTypeInfo, Relationship, SchemaRegistry,
+    Stage, StageAuthoringError, VersionFilter, schema_registry,
 };
 use crate::tf::Token;
 use crate::{pcp, sdf};
@@ -184,11 +184,11 @@ impl Prim {
         };
         let schema = info.identifier();
 
-        if let Some(instance) = instance {
-            if !registry.is_allowed_instance_name(schema, &instance) {
-                let schema = schema.clone();
-                return Err(ApplyApiError::InstanceNameNotAllowed { schema, instance });
-            }
+        if let Some(instance) = instance
+            && !registry.is_allowed_instance_name(schema, &instance)
+        {
+            let schema = schema.clone();
+            return Err(ApplyApiError::InstanceNameNotAllowed { schema, instance });
         }
 
         let allowed = info.can_only_apply_to();
@@ -1172,10 +1172,12 @@ mod tests {
 
         let relationships = stage.prim("/Sun").relationships()?;
         assert_eq!(relationships.len(), 1);
-        assert!(relationships[0]
-            .path()
-            .as_str()
-            .ends_with("collection:lightLink:includes"));
+        assert!(
+            relationships[0]
+                .path()
+                .as_str()
+                .ends_with("collection:lightLink:includes")
+        );
         Ok(())
     }
 
@@ -1386,12 +1388,16 @@ mod tests {
         );
 
         // The filter narrows which versions count.
-        assert!(!stage
-            .prim("/Old")
-            .is_in_family(&family, VersionFilter::GreaterThan(0))?);
-        assert!(stage
-            .prim("/New")
-            .is_in_family(&family, VersionFilter::GreaterThan(0))?);
+        assert!(
+            !stage
+                .prim("/Old")
+                .is_in_family(&family, VersionFilter::GreaterThan(0))?
+        );
+        assert!(
+            stage
+                .prim("/New")
+                .is_in_family(&family, VersionFilter::GreaterThan(0))?
+        );
 
         // A prim of another family is in none of it.
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
@@ -1412,18 +1418,26 @@ mod tests {
         // through `LightAPI` count, and nothing else does.
         let family = Token::new("CollectionAPI");
         let render = Token::new("render");
-        assert!(stage
-            .prim("/Sun")
-            .has_api_in_family(&family, VersionFilter::All, None)?);
-        assert!(stage
-            .prim("/Sun")
-            .has_api_in_family(&family, VersionFilter::All, Some(&render))?);
-        assert!(stage
-            .prim("/Sun")
-            .has_api_in_family(&family, VersionFilter::All, Some(&Token::new("lightLink")))?);
-        assert!(!stage
-            .prim("/Sun")
-            .has_api_in_family(&family, VersionFilter::All, Some(&Token::new("other")))?);
+        assert!(
+            stage
+                .prim("/Sun")
+                .has_api_in_family(&family, VersionFilter::All, None)?
+        );
+        assert!(
+            stage
+                .prim("/Sun")
+                .has_api_in_family(&family, VersionFilter::All, Some(&render))?
+        );
+        assert!(
+            stage
+                .prim("/Sun")
+                .has_api_in_family(&family, VersionFilter::All, Some(&Token::new("lightLink")))?
+        );
+        assert!(
+            !stage
+                .prim("/Sun")
+                .has_api_in_family(&family, VersionFilter::All, Some(&Token::new("other")))?
+        );
 
         // A single-apply schema is applied whole, so it has no instance to ask
         // after. `LightAPI` is built in to `DistantLight`.
@@ -1434,9 +1448,11 @@ mod tests {
                 .api_version_in_family(&light, VersionFilter::All, None)?,
             Some(0)
         );
-        assert!(!stage
-            .prim("/Sun")
-            .has_api_in_family(&light, VersionFilter::All, Some(&render))?);
+        assert!(
+            !stage
+                .prim("/Sun")
+                .has_api_in_family(&light, VersionFilter::All, Some(&render))?
+        );
 
         // Only an applied API schema is applied at all, so the prim's own typed
         // family answers nothing here.
@@ -1469,15 +1485,21 @@ mod tests {
         let collection = Token::new("CollectionAPI");
         let render = Token::new("render");
         assert!(stage.prim("/New").has_api_schema("CollectionAPI:render")?);
-        assert!(stage
-            .prim("/New")
-            .has_api_in_family(&collection, VersionFilter::All, None)?);
-        assert!(stage
-            .prim("/New")
-            .has_api_in_family(&collection, VersionFilter::All, Some(&render))?);
-        assert!(!stage
-            .prim("/New")
-            .has_api_in_family(&collection, VersionFilter::All, Some(&Token::new("other")))?);
+        assert!(
+            stage
+                .prim("/New")
+                .has_api_in_family(&collection, VersionFilter::All, None)?
+        );
+        assert!(
+            stage
+                .prim("/New")
+                .has_api_in_family(&collection, VersionFilter::All, Some(&render))?
+        );
+        assert!(
+            !stage
+                .prim("/New")
+                .has_api_in_family(&collection, VersionFilter::All, Some(&Token::new("other")))?
+        );
         Ok(())
     }
 
@@ -1499,9 +1521,11 @@ mod tests {
             Some(0)
         );
         // The rejected version contributes nothing, so it answers for nothing.
-        assert!(!stage
-            .prim("/Sun")
-            .has_api_in_family(&family, VersionFilter::GreaterThan(0), None)?);
+        assert!(
+            !stage
+                .prim("/Sun")
+                .has_api_in_family(&family, VersionFilter::GreaterThan(0), None)?
+        );
         Ok(())
     }
 
@@ -1582,10 +1606,12 @@ mod tests {
 
         // A schema declares it, so an authored `custom` is ignored.
         includes.clone().set_custom(true)?;
-        assert!(!stage
-            .prim("/Sun")
-            .relationship("collection:lightLink:includes")
-            .is_custom()?);
+        assert!(
+            !stage
+                .prim("/Sun")
+                .relationship("collection:lightLink:includes")
+                .is_custom()?
+        );
         Ok(())
     }
 

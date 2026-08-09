@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::{sdf, tf, usda};
 
@@ -268,11 +268,11 @@ impl SchemaRegistry {
     /// The order is what makes a family query answer with the newest version a
     /// prim satisfies, so a caller that wants the best match takes the first
     /// item.
-    pub fn schema_infos_in_family(
-        &self,
+    pub fn schema_infos_in_family<'a>(
+        &'a self,
         family: &tf::Token,
         filter: VersionFilter,
-    ) -> impl Iterator<Item = &SchemaInfo> {
+    ) -> impl Iterator<Item = &'a SchemaInfo> + use<'a> {
         self.families
             .get(family)
             .into_iter()
@@ -1630,9 +1630,11 @@ mod tests {
         // A family never carries a version suffix, so it names no schema under
         // one that does, even though `DomeLight_1` is registered.
         let registry = SchemaRegistry::test_registry();
-        assert!(registry
-            .schema_info_in_family(&tf::Token::new("DomeLight_1"), 0)
-            .is_none());
+        assert!(
+            registry
+                .schema_info_in_family(&tf::Token::new("DomeLight_1"), 0)
+                .is_none()
+        );
     }
 
     #[test]

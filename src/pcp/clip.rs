@@ -17,9 +17,9 @@ use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AssetPath, LayerOffset, Path, Value};
 
+use super::LayerId;
 use super::index_cache::block_to_none;
 use super::layer_graph::LayerGraph;
-use super::LayerId;
 
 /// Dictionary keys inside a single clip set's metadata (spec 12.3.4.1).
 pub(crate) mod keys {
@@ -604,18 +604,18 @@ impl ClipCache {
             // (a) Manifest default: synthesize a sample at the clip's active
             //     time (spec 12.3.4.6). Reached only when the manifest declared
             //     the attribute, so the manifest asset is authored.
-            if let Some((asset, layer)) = manifest {
-                if let Some(value) = self.manifest_default(graph, asset, layer, &clip_path)? {
-                    return Ok(Some(value));
-                }
+            if let Some((asset, layer)) = manifest
+                && let Some(value) = self.manifest_default(graph, asset, layer, &clip_path)?
+            {
+                return Ok(Some(value));
             }
 
             // (b) interpolateMissingClipValues: interpolate the gap across the
             //     nearest surrounding clips (spec 12.3.4.7).
-            if set.interpolate_missing {
-                if let Some(value) = self.interpolate_missing_value(graph, resolved, &clip_path, time, interp)? {
-                    return Ok(Some(value));
-                }
+            if set.interpolate_missing
+                && let Some(value) = self.interpolate_missing_value(graph, resolved, &clip_path, time, interp)?
+            {
+                return Ok(Some(value));
             }
 
             // (c) No default and nothing to interpolate: the manifest-declared
@@ -1133,9 +1133,11 @@ mod tests {
     #[test]
     fn stage_times_no_active() {
         // No active entries → no clip is scheduled → no sample times.
-        assert!(clip_set(vec![], vec![])
-            .stage_sample_times(&[vec![0.0, 1.0]])
-            .is_empty());
+        assert!(
+            clip_set(vec![], vec![])
+                .stage_sample_times(&[vec![0.0, 1.0]])
+                .is_empty()
+        );
     }
 
     #[test]

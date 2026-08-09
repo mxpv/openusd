@@ -31,7 +31,7 @@ use anyhow::Result;
 use crate::sdf::{self, FieldKey, Path, Value, Variability};
 use crate::usd::{Prim, PrimPredicate, Relationship, Stage};
 
-use super::collection_expr::{resolve_complete_membership_expression, CollectionEvaluator, CollectionSearcher};
+use super::collection_expr::{CollectionEvaluator, CollectionSearcher, resolve_complete_membership_expression};
 
 /// Multiple-apply API schema name; instances appear in `apiSchemas` as
 /// `CollectionAPI:<name>`.
@@ -521,10 +521,8 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
         if seen.insert(prim.clone()) {
             out.push(prim.clone());
         }
-        if collect_props {
-            if let Err(e) = push_member_properties(stage, prim, rule, query, &mut seen, &mut out) {
-                err = Err(e);
-            }
+        if collect_props && let Err(e) = push_member_properties(stage, prim, rule, query, &mut seen, &mut out) {
+            err = Err(e);
         }
     })?;
     err?;
@@ -1246,16 +1244,19 @@ mod tests {
         let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
         coll.set_include_root(&stage, true)?;
         coll.exclude_path(&stage, sdf::path("/W/A")?)?;
-        assert!(!coll
-            .compute_membership_query(&stage)?
-            .is_path_included(&sdf::path("/W/A")?));
+        assert!(
+            !coll
+                .compute_membership_query(&stage)?
+                .is_path_included(&sdf::path("/W/A")?)
+        );
 
         // Re-including drops the exclude rather than adding a redundant include.
         coll.include_path(&stage, sdf::path("/W/A")?)?;
         assert!(coll.excludes(&stage)?.is_empty());
-        assert!(coll
-            .compute_membership_query(&stage)?
-            .is_path_included(&sdf::path("/W/A")?));
+        assert!(
+            coll.compute_membership_query(&stage)?
+                .is_path_included(&sdf::path("/W/A")?)
+        );
         Ok(())
     }
 
@@ -1267,9 +1268,10 @@ mod tests {
         let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
         coll.include_path(&stage, sdf::path("/W/A")?)?;
         assert_eq!(collections_on(&stage, &sdf::path("/W")?)?.len(), 1);
-        assert!(coll
-            .compute_membership_query(&stage)?
-            .is_path_included(&sdf::path("/W/A")?));
+        assert!(
+            coll.compute_membership_query(&stage)?
+                .is_path_included(&sdf::path("/W/A")?)
+        );
         Ok(())
     }
 

@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::gf::f16;
-use anyhow::{bail, ensure, Context, Result};
-use bytemuck::{bytes_of, bytes_of_mut, cast_slice_mut, AnyBitPattern, NoUninit, Pod};
+use anyhow::{Context, Result, bail, ensure};
+use bytemuck::{AnyBitPattern, NoUninit, Pod, bytes_of, bytes_of_mut, cast_slice_mut};
 use num_traits::{AsPrimitive, Float, PrimInt};
 
 use crate::{

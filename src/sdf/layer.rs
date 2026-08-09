@@ -50,9 +50,9 @@ use crate::ar;
 
 use super::schema::FieldKey;
 use super::{
-    sink, AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, LayerData, Patch,
-    Path, PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef,
-    RelocateList, SpecError, SpecType, Value,
+    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, LayerData, Patch, Path,
+    PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef,
+    RelocateList, SpecError, SpecType, Value, sink,
 };
 
 /// A [`sink::Id`] for a [`LayerSink`] installed on a [`Layer`].
@@ -696,7 +696,7 @@ impl LayerEdit<'_> {
                 return Err(AuthoringError::InvalidPath {
                     path: root,
                     reason: "root spec exists with non-PseudoRoot SpecType",
-                })
+                });
             }
             None => self.data_mut().create_spec(root, SpecType::PseudoRoot),
         }
@@ -1076,7 +1076,7 @@ mod tests {
     #[test]
     fn edit_recovers_on_panic() {
         use crate::sdf::{PrimSpec, Specifier};
-        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
 
         let mut layer = Layer::new_anonymous("test.usda");
         let panicked = catch_unwind(AssertUnwindSafe(|| {
@@ -1106,7 +1106,7 @@ mod tests {
     #[test]
     fn group_commit_atomic_on_panic() {
         use crate::sdf::{PrimSpec, Specifier};
-        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
 
         let mut a = Layer::new_anonymous("a.usda");
         let mut b = Layer::new_anonymous("b.usda");
@@ -1666,11 +1666,13 @@ mod tests {
         ));
 
         assert!(!layer.data().has_spec(&sdf::path("/A").unwrap()));
-        assert!(layer
-            .data()
-            .try_field(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
-            .unwrap()
-            .is_none());
+        assert!(
+            layer
+                .data()
+                .try_field(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

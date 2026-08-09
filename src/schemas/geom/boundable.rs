@@ -4,8 +4,8 @@ use anyhow::Result;
 
 use crate::usd::Attribute;
 
-use super::tokens as tok;
 use super::Xformable;
+use super::tokens as tok;
 
 /// A prim with a bounding extent (C++ `UsdGeomBoundable`). Inherits
 /// [`Xformable`].

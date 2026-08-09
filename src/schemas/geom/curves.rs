@@ -13,7 +13,7 @@ use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, Stage};
 
 use super::tokens as tok;
-use super::{impl_geom_schema, Boundable, Gprim, Imageable, PointBased, Xformable};
+use super::{Boundable, Gprim, Imageable, PointBased, Xformable, impl_geom_schema};
 use crate::schemas::common::get_typed;
 
 /// A batch of curves sharing one prim (C++ `UsdGeomCurves`) — a

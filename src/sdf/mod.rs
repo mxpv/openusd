@@ -30,28 +30,28 @@ mod value;
 
 pub use asset_path::AssetPath;
 pub use change::{ChangeEntry, ChangeFlags, ChangeList};
-pub(crate) use copy::{author_spec, is_children_field};
 pub use copy::{
-    copy_spec, copy_spec_with, copy_spec_within, should_copy_children, should_copy_value, CopyChildren,
-    CopyChildrenArgs, CopyValue, CopyValueArgs,
+    CopyChildren, CopyChildrenArgs, CopyValue, CopyValueArgs, copy_spec, copy_spec_with, copy_spec_within,
+    should_copy_children, should_copy_value,
 };
+pub(crate) use copy::{author_spec, is_children_field};
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub use expr::{Evaluation, EvaluationValue, Expr, StringEvaluation, StringSegment};
 pub use file_format::{FileFormat, FileFormatCaps, WriteSeek};
-pub(crate) use layer::{dry_run_layers, edit_layers};
 pub use layer::{AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSinkId, PendingLayerChange};
+pub(crate) use layer::{dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
 pub use ordering::{apply_ordering, element_cmp};
-pub use path::{path, Path, PathComponent, PathComponents, PathElement};
+pub use path::{Path, PathComponent, PathComponents, PathElement, path};
 pub use path_expr::{ExpressionReference, PathExpression, PathPattern, PredicateExpression};
 pub use path_table::PathTable;
-pub use schema::{folds_list_ops, ChildrenKey, FieldKey};
+pub use schema::{ChildrenKey, FieldKey, folds_list_ops};
 pub use spec::{
     AttributeSpec, AttributeSpecMut, AttributeSpecRef, PrimSpec, PrimSpecMut, PrimSpecRef, PropertySpec,
     PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,
     RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
-pub use value::{dictionary_over, CastError, FromValueCast, Value, ValueConversionError};
+pub use value::{CastError, FromValueCast, Value, ValueConversionError, dictionary_over};
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]

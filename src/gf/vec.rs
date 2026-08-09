@@ -302,11 +302,7 @@ impl Vec3f {
     /// (matches `GfVec3f::GetNormalized`'s zero-length behaviour).
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > 0.0 {
-            self * (1.0 / len)
-        } else {
-            self
-        }
+        if len > 0.0 { self * (1.0 / len) } else { self }
     }
 
     pub fn lerp(self, other: Self, t: f32) -> Self {
@@ -377,11 +373,7 @@ impl Vec3d {
 
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > 0.0 {
-            self * (1.0 / len)
-        } else {
-            self
-        }
+        if len > 0.0 { self * (1.0 / len) } else { self }
     }
 
     pub fn lerp(self, other: Self, t: f64) -> Self {

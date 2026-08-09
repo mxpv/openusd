@@ -64,11 +64,11 @@ mod topology;
 
 pub use anim_mapper::{AnimMapper, MISSING};
 pub use anim_query::{JointTransformComponents, SkelAnimQuery};
-pub use binding::{discover_bindings, SkelBinding};
+pub use binding::{SkelBinding, discover_bindings};
 pub use schema::{BlendShape, Inbetween, SkelAnimation, SkelBindingAPI, SkelRoot, Skeleton};
 pub use skeleton_query::SkeletonResolver;
 pub use skinning_query::SkinningResolver;
-pub use topology::{Topology, TopologyError, NO_PARENT};
+pub use topology::{NO_PARENT, Topology, TopologyError};
 
 use crate::tf;
 use tokens::*;

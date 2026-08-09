@@ -2,7 +2,7 @@
 //! time-sample evaluator wired through stage composition.
 
 use anyhow::Result;
-use openusd::sdf::{path, Value};
+use openusd::sdf::{Value, path};
 use openusd::usd;
 
 const FIXTURE: &str = "fixtures/interp_scene.usda";
@@ -94,15 +94,19 @@ fn held_mode_returns_previous_sample() -> Result<()> {
 fn blocked_sample_returns_none() -> Result<()> {
     let stage = open()?;
     // Bracketing pair includes a ValueBlock — get_at returns None.
-    assert!(stage
-        .attribute(path("/Prim.blocked")?)
-        .get_at::<Value>(usd::TimeCode::new(5.0))?
-        .is_none());
+    assert!(
+        stage
+            .attribute(path("/Prim.blocked")?)
+            .get_at::<Value>(usd::TimeCode::new(5.0))?
+            .is_none()
+    );
     // At the blocked sample itself.
-    assert!(stage
-        .attribute(path("/Prim.blocked")?)
-        .get_at::<Value>(usd::TimeCode::new(10.0))?
-        .is_none());
+    assert!(
+        stage
+            .attribute(path("/Prim.blocked")?)
+            .get_at::<Value>(usd::TimeCode::new(10.0))?
+            .is_none()
+    );
     Ok(())
 }
 

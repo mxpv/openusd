@@ -6356,11 +6356,13 @@ fn session_layer_opinion_wins() -> Result<()> {
 
     assert!(stage.has_session_layer());
     assert_eq!(stage.layer_count(), 2);
-    assert!(stage
-        .session_layer()
-        .expect("configured session layer")
-        .identifier()
-        .ends_with("session_layer.usda"));
+    assert!(
+        stage
+            .session_layer()
+            .expect("configured session layer")
+            .identifier()
+            .ends_with("session_layer.usda")
+    );
 
     let prop = sdf::Path::new("/World")?.append_property("radius")?;
     let value = stage.attribute(&prop).get::<f64>()?;

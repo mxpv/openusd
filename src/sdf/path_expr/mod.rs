@@ -31,8 +31,8 @@ pub use eval::{IncrementalSearcher, PathExpressionEval};
 pub use glob::GlobPattern;
 pub use pattern::{Component, PathPattern};
 pub use predicate::{
-    link_predicate_expression, FnArg, FnCall, FnCallKind, PredResult, PredicateArg, PredicateBinder,
-    PredicateExpression, PredicateFn, PredicateLibrary, PredicateProgram,
+    FnArg, FnCall, FnCallKind, PredResult, PredicateArg, PredicateBinder, PredicateExpression, PredicateFn,
+    PredicateLibrary, PredicateProgram, link_predicate_expression,
 };
 
 /// A parsed path expression; see the [module docs](self) for the syntax.

@@ -36,12 +36,12 @@ use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
-use super::compose_site::{evaluate_expression, EvaluatedExpression};
+use super::compose_site::{EvaluatedExpression, evaluate_expression};
 use super::layer_stack::{ExprVarId, LayerStackId, LayerStackRegistry, StackVarsDelta, VarsSource};
 use super::mapping::MapFunction;
 use super::prim_index::Demand;
 use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
-use super::{effective_time_codes_per_second, Error, ExpressionContext};
+use super::{Error, ExpressionContext, effective_time_codes_per_second};
 
 /// A cheap, `Copy` handle identifying a layer within a `LayerGraph`.
 ///
@@ -758,10 +758,10 @@ impl LayerGraph {
                 // record a load-demand candidate for the stacks whose members
                 // include `id`, so the stage's load barrier can open it. An
                 // empty entry names nothing to open and stays skipped.
-                if !sub_path.is_empty() {
-                    if let Some(sink) = sink.as_deref_mut() {
-                        sink.demands.push((id, sub_path));
-                    }
+                if !sub_path.is_empty()
+                    && let Some(sink) = sink.as_deref_mut()
+                {
+                    sink.demands.push((id, sub_path));
                 }
                 continue;
             };
@@ -2256,10 +2256,10 @@ impl LayerGraph {
             return HashSet::new();
         };
         let mut affected = self.ancestors_including(id);
-        if let Some(root) = self.root {
-            if self.session_layers().iter().any(|s| affected.contains(s)) {
-                affected.insert(root);
-            }
+        if let Some(root) = self.root
+            && self.session_layers().iter().any(|s| affected.contains(s))
+        {
+            affected.insert(root);
         }
         affected
     }

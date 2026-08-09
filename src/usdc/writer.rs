@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::io::{Seek, SeekFrom, Write};
 
 use crate::gf::f16;
-use anyhow::{bail, Context, Result};
-use bytemuck::{bytes_of, Pod};
+use anyhow::{Context, Result, bail};
+use bytemuck::{Pod, bytes_of};
 use num_traits::{AsPrimitive, PrimInt};
 
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
 
 use super::coding;
 use super::layout::{
-    version, Bootstrap, ListOpHeader, Section, Spec as FileSpec, Type, ValueRep, Version, SECTION_NAME_MAX_LENGTH,
+    Bootstrap, ListOpHeader, SECTION_NAME_MAX_LENGTH, Section, Spec as FileSpec, Type, ValueRep, Version, version,
 };
 
 /// Crate format version this writer emits. Supports all features the reader
@@ -156,10 +156,10 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     /// Intern a path and all its ancestors so the path tree is complete by the
     /// time [`encode_paths`] DFSes from the root.
     fn intern_path(&mut self, path: Path) -> u32 {
-        if !self.paths.index.contains_key(&path) {
-            if let Some(parent) = path.parent() {
-                self.intern_path(parent);
-            }
+        if !self.paths.index.contains_key(&path)
+            && let Some(parent) = path.parent()
+        {
+            self.intern_path(parent);
         }
         self.paths.intern(path)
     }

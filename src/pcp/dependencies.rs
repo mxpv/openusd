@@ -268,12 +268,12 @@ impl Dependencies {
             return;
         };
         for (li, site) in sites {
-            if let Some(map) = self.per_layer.get_mut(&li) {
-                if let Some(deps) = map.get_mut(&site) {
-                    deps.retain(|p| p != prim_index_path);
-                    if deps.is_empty() {
-                        map.remove(&site);
-                    }
+            if let Some(map) = self.per_layer.get_mut(&li)
+                && let Some(deps) = map.get_mut(&site)
+            {
+                deps.retain(|p| p != prim_index_path);
+                if deps.is_empty() {
+                    map.remove(&site);
                 }
             }
         }
@@ -417,10 +417,10 @@ impl Dependencies {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pcp::LayerStackId;
     use crate::pcp::layer_graph::ExternalStack;
     use crate::pcp::mapping::MapFunction;
     use crate::pcp::prim_graph::Node;
-    use crate::pcp::LayerStackId;
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid path")

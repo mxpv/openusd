@@ -11,13 +11,13 @@
 //! prefix subtree is constant `false`, a match under a trailing stretch is
 //! constant `true`, and everything else may vary over descendants.
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 use crate::sdf::Path;
 
 use super::glob::GlobPattern;
 use super::pattern::PathPattern;
-use super::predicate::{link_predicate_expression, PredResult, PredicateLibrary, PredicateProgram};
+use super::predicate::{PredResult, PredicateLibrary, PredicateProgram, link_predicate_expression};
 use super::{ExprNode, PathExpression, SetOp};
 
 /// A compiled path expression over predicate domain `D` (C++

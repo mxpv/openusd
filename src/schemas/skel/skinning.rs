@@ -3,7 +3,7 @@
 
 use crate::gf;
 
-use super::topology::{Topology, NO_PARENT};
+use super::topology::{NO_PARENT, Topology};
 
 /// Compose joint-local transforms into skeleton-space transforms by
 /// concatenating each joint's local transform with its parent's

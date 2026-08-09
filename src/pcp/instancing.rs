@@ -23,13 +23,13 @@ use crate::sdf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{Path, PathElement, Value};
 
+use super::LayerId;
 use super::index_cache::IndexCache;
 use super::layer_graph::LayerGraph;
 use super::load_rules::LoadRules;
 use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
 use super::prim_indexer::ExprVarDeps;
-use super::LayerId;
 
 /// The shared-prototype registry (spec 11.3.3): maps each instancing key to its
 /// prototype and tracks the instances that share it. Owns no composition state
@@ -278,10 +278,10 @@ fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules) -
         if local[id.idx()] || node.is_culled() {
             continue;
         }
-        if node.arc == ArcType::Variant {
-            if let Some(PathElement::Variant { set, selection }) = node.path.last_element() {
-                selections.push((set.to_string(), selection.to_string()));
-            }
+        if node.arc == ArcType::Variant
+            && let Some(PathElement::Variant { set, selection }) = node.path.last_element()
+        {
+            selections.push((set.to_string(), selection.to_string()));
         }
         let offset = node.map_to_root.time_offset();
         arcs.push(InstanceArc {

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use logos::Logos;
 use std::iter::Peekable;
 use std::mem::MaybeUninit;
@@ -2064,11 +2064,13 @@ def "Mesh"
 
         let pseudo_root = parser.read_pseudo_root().unwrap();
 
-        assert!(pseudo_root
-            .get(FieldKey::Documentation.as_str())
-            .and_then(|v| v.try_as_string_ref())
-            .unwrap()
-            .eq("test string"));
+        assert!(
+            pseudo_root
+                .get(FieldKey::Documentation.as_str())
+                .and_then(|v| v.try_as_string_ref())
+                .unwrap()
+                .eq("test string")
+        );
 
         assert!(
             pseudo_root
@@ -2821,12 +2823,13 @@ def Mesh "Mesh_001" (
         let data = parser.parse().unwrap();
         let mesh = data.get(&sdf::path("/Mesh_001").unwrap()).unwrap();
 
-        assert!(mesh
-            .get(FieldKey::Active.as_str())
-            .unwrap()
-            .to_owned()
-            .try_as_bool()
-            .unwrap());
+        assert!(
+            mesh.get(FieldKey::Active.as_str())
+                .unwrap()
+                .to_owned()
+                .try_as_bool()
+                .unwrap()
+        );
 
         let api = mesh
             .get("apiSchemas")

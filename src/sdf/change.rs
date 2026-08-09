@@ -456,10 +456,12 @@ mod tests {
         assert!(entry.flags.contains(ChangeFlags::CHANGE_RELATIONSHIP_TARGETS));
         assert!(entry.flags.contains(ChangeFlags::ADD_PROPERTY));
         assert!(entry.info_changed.iter().any(|t| t == FieldKey::TargetPaths.as_str()));
-        assert!(entry
-            .info_changed
-            .iter()
-            .any(|t| t == FieldKey::ConnectionPaths.as_str()));
+        assert!(
+            entry
+                .info_changed
+                .iter()
+                .any(|t| t == FieldKey::ConnectionPaths.as_str())
+        );
     }
 
     #[test]

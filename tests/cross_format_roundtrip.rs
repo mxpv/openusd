@@ -42,10 +42,10 @@ fn normalize(v: &mut serde_json::Value) {
             } else {
                 let short = format!("{}", f as f32);
                 let long = format!("{f}");
-                if short.len() < long.len() {
-                    if let Ok(clean) = short.parse::<f64>() {
-                        *v = serde_json::json!(clean);
-                    }
+                if short.len() < long.len()
+                    && let Ok(clean) = short.parse::<f64>()
+                {
+                    *v = serde_json::json!(clean);
                 }
             }
         }
@@ -57,10 +57,10 @@ fn normalize(v: &mut serde_json::Value) {
             // A default layerOffset (offset=0, scale=1) is a no-op. The USDC
             // binary slot is mandatory for payloads (≥0.8.0) so we always emit
             // one; strip defaults on both sides to compare fairly.
-            if let Some(lo) = m.get("layerOffset") {
-                if is_default_layer_offset(lo) {
-                    m.remove("layerOffset");
-                }
+            if let Some(lo) = m.get("layerOffset")
+                && is_default_layer_offset(lo)
+            {
+                m.remove("layerOffset");
             }
             m.retain(|_, v| !matches!(v, serde_json::Value::Object(inner) if inner.is_empty()));
             m.values_mut().for_each(normalize);

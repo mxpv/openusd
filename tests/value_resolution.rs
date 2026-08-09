@@ -17,7 +17,7 @@
 //!   too and no fixture asserts spline values.
 
 use anyhow::Result;
-use openusd::sdf::{path, Value};
+use openusd::sdf::{Value, path};
 use openusd::usd;
 
 const ASSETS: &str = "vendor/core-spec-supplemental-release_dec2025/value_resolution/tests/assets";

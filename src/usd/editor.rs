@@ -1168,10 +1168,10 @@ impl RelocateStackPlan {
     // those helpers.
     fn record_move(&mut self, src: &sdf::Path, dst: &sdf::Path, cross_arc: bool) -> Result<(), NamespaceEditError> {
         let continues_source = self.continuation_source(src);
-        if let Some(source) = self.prohibiting_source(dst) {
-            if continues_source.as_ref() != Some(&source) || dst != &source {
-                return Err(NamespaceEditError::UnrepresentableRelocateBatch(source));
-            }
+        if let Some(source) = self.prohibiting_source(dst)
+            && (continues_source.as_ref() != Some(&source) || dst != &source)
+        {
+            return Err(NamespaceEditError::UnrepresentableRelocateBatch(source));
         }
         let continues = continues_source.is_some();
         self.reproject(src, dst);
@@ -1734,7 +1734,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::sdf::{self, path, FieldKey, LayerOffset, Specifier, Variability};
+    use crate::sdf::{self, FieldKey, LayerOffset, Specifier, Variability, path};
     use crate::usd::{EditTarget, EditTargetArc, Stage};
 
     /// Author into `layer` and commit, for building a test layer before it joins a
@@ -2071,9 +2071,11 @@ mod tests {
 
         // The relocate is authored on the local layer stack...
         let relocates = stage.root_layer().relocates();
-        assert!(relocates
-            .iter()
-            .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t == &path("/Ref/Renamed").unwrap()));
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t == &path("/Ref/Renamed").unwrap())
+        );
         // ...and the composed prim moves to the relocate target.
         assert!(valid(&stage, "/Ref/Renamed"));
         assert!(!valid(&stage, "/Ref/Geom"));
@@ -2088,9 +2090,11 @@ mod tests {
             .unwrap();
 
         let relocates = stage.root_layer().relocates();
-        assert!(relocates
-            .iter()
-            .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t.is_empty()));
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t.is_empty())
+        );
         assert!(!valid(&stage, "/Ref/Geom"));
     }
 
@@ -2612,10 +2616,12 @@ mod tests {
 
         // The relocate lands in the target's stack, in the target's namespace.
         let model = stage.layer("model.usda").expect("model layer");
-        assert!(model
-            .relocates()
-            .iter()
-            .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t == &path("/Model/Moved").unwrap()));
+        assert!(
+            model
+                .relocates()
+                .iter()
+                .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t == &path("/Model/Moved").unwrap())
+        );
         // Not in the consuming root stack — a relocate there would be dropped.
         assert!(stage.root_layer().relocates().is_empty());
         // The deeper-arc content composes back at the moved path.
@@ -2637,10 +2643,12 @@ mod tests {
             .unwrap();
 
         let model = stage.layer("model.usda").expect("model layer");
-        assert!(model
-            .relocates()
-            .iter()
-            .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t.is_empty()));
+        assert!(
+            model
+                .relocates()
+                .iter()
+                .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t.is_empty())
+        );
         assert!(stage.root_layer().relocates().is_empty());
         assert!(!valid(&stage, "/Ref/Inner"));
     }
@@ -2694,10 +2702,12 @@ mod tests {
             .unwrap();
 
         let model = stage.layer("model.usda").expect("model layer");
-        assert!(model
-            .relocates()
-            .iter()
-            .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t == &path("/Model/Moved").unwrap()));
+        assert!(
+            model
+                .relocates()
+                .iter()
+                .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t == &path("/Model/Moved").unwrap())
+        );
         assert!(valid(&stage, "/Ref/Moved"));
         assert!(!valid(&stage, "/Ref/Inner"));
     }
@@ -3036,11 +3046,13 @@ mod tests {
         assert!(valid(&stage, "/Ref/B"));
         // The target layer holds no `/Model/B` spec, so only the composed-stage
         // occupancy check catches the collision.
-        assert!(!stage
-            .layer("model.usda")
-            .unwrap()
-            .data()
-            .has_spec(&path("/Model/B").unwrap()));
+        assert!(
+            !stage
+                .layer("model.usda")
+                .unwrap()
+                .data()
+                .has_spec(&path("/Model/B").unwrap())
+        );
         let mut editor = NamespaceEditor::new(&stage);
         editor.move_prim(path("/Ref/A").unwrap(), path("/Ref/B").unwrap());
         assert!(matches!(

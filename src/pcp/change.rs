@@ -804,13 +804,17 @@ mod tests {
             kind,
             property_suffix: ".x".to_owned(),
         };
-        assert!(changes
-            .cache
-            .did_change_targets
-            .contains(&(p("/P"), key(PropertyTargetKind::Relationship))));
-        assert!(changes
-            .cache
-            .did_change_targets
-            .contains(&(p("/P"), key(PropertyTargetKind::Connection))));
+        assert!(
+            changes
+                .cache
+                .did_change_targets
+                .contains(&(p("/P"), key(PropertyTargetKind::Relationship)))
+        );
+        assert!(
+            changes
+                .cache
+                .did_change_targets
+                .contains(&(p("/P"), key(PropertyTargetKind::Connection)))
+        );
     }
 }

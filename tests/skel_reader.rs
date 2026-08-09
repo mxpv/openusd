@@ -7,8 +7,8 @@ use anyhow::Result;
 use openusd::gf::{Matrix4d, Quatf, Vec3f};
 use openusd::schemas::geom::Boundable;
 use openusd::schemas::skel::{
-    discover_bindings, AnimMapper, BlendShape, InfluenceInterpolation, SkelAnimQuery, SkelAnimation, SkelBindingAPI,
-    SkelRoot, Skeleton, SkeletonResolver, SkinningMethod, SkinningResolver, Topology, NO_PARENT,
+    AnimMapper, BlendShape, InfluenceInterpolation, NO_PARENT, SkelAnimQuery, SkelAnimation, SkelBindingAPI, SkelRoot,
+    Skeleton, SkeletonResolver, SkinningMethod, SkinningResolver, Topology, discover_bindings,
 };
 use openusd::sdf::{self, Value};
 use openusd::usd::{PrimPredicate, SchemaBase, Stage};

@@ -200,14 +200,14 @@ mod pcp_txt {
     /// C++ dump. Falls back to the basename when the identifier is not under
     /// `canonical_base` (the already-canonicalized entry directory).
     fn display_name(canonical_base: Option<&Path>, identifier: &str) -> String {
-        if let (Some(base), Ok(id)) = (canonical_base, std::fs::canonicalize(identifier)) {
-            if let Ok(rel) = id.strip_prefix(base) {
-                return rel
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
-            }
+        if let (Some(base), Ok(id)) = (canonical_base, std::fs::canonicalize(identifier))
+            && let Ok(rel) = id.strip_prefix(base)
+        {
+            return rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
         }
         Path::new(identifier)
             .file_name()

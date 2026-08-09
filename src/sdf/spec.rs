@@ -1316,13 +1316,13 @@ pub(crate) fn ensure_prim_chain(
     // `TokenVec` (or absent). Stamping `primChildren` onto an Attribute, or a
     // variant set onto a non-prim, would corrupt the layer.
     for (i, elem) in chain.iter().enumerate() {
-        if let Some(existing) = data.spec_type(&elem.path) {
-            if existing != elem.spec_type {
-                return Err(sdf::AuthoringError::InvalidPath {
-                    path: elem.path.clone(),
-                    reason: "spec exists with an incompatible SpecType",
-                });
-            }
+        if let Some(existing) = data.spec_type(&elem.path)
+            && existing != elem.spec_type
+        {
+            return Err(sdf::AuthoringError::InvalidPath {
+                path: elem.path.clone(),
+                reason: "spec exists with an incompatible SpecType",
+            });
         }
         validate_token_vec(data, parent_of(i), elem.child_key)?;
     }

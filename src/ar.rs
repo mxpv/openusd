@@ -316,12 +316,12 @@ impl Resolver for DefaultResolver {
             // Anchor lives inside a package (`pkg.usdz[inner/layer.usd]`): keep
             // the reference inside the package, relative to the inner layer's
             // directory → `pkg.usdz[inner/asset.usd]`.
-            if is_package_relative_path(&anchor_str) {
-                if let Some((package, inner)) = split_package_relative_path_inner(&anchor_str) {
-                    let inner_dir = inner.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-                    let joined = join_packaged_path(inner_dir, asset_path);
-                    return nest_packaged_path(&package, &joined);
-                }
+            if is_package_relative_path(&anchor_str)
+                && let Some((package, inner)) = split_package_relative_path_inner(&anchor_str)
+            {
+                let inner_dir = inner.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+                let joined = join_packaged_path(inner_dir, asset_path);
+                return nest_packaged_path(&package, &joined);
             }
             // Anchor IS a package file (`foo.usdz`): a relative reference from
             // the package's root layer is package-relative → `foo.usdz[asset]`.

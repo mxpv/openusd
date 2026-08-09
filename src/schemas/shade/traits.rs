@@ -16,9 +16,9 @@ use crate::sdf::Value;
 use crate::tf::Token;
 use crate::usd::{Attribute, SchemaBase};
 
+use super::Connectability;
 use super::connectable::{input_name, output_name};
 use super::tokens::{META_CONNECTABILITY, META_RENDER_TYPE, NS_INPUTS, NS_OUTPUTS};
-use super::Connectability;
 
 /// The connectable surface shared by shading prims (C++
 /// `UsdShadeConnectableAPI`): typed `inputs:` / `outputs:` attributes addressed

@@ -9,7 +9,7 @@ use std::fmt;
 use std::ops::Not;
 use std::rc::Rc;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 /// A logical expression of named predicate functions, as written between
 /// `{` and `}` in a path pattern (`{isa:Imageable and not abstract}`).

@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, io, mem};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use num_traits::{AsPrimitive, PrimInt};
 
 use super::reader::ReadExt;

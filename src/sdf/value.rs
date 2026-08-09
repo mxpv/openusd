@@ -1,5 +1,5 @@
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use crate::gf::f16;
 use strum::{EnumIs, EnumTryAs, IntoStaticStr};

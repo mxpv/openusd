@@ -884,10 +884,10 @@ impl PrimIndex {
                 // Explicit `active`/`times` were retimed as they composed. A
                 // template schedule is derived in clip time, so retime its
                 // stage times here by the authoring node's offset.
-                if !explicit_sets.contains(&set.name) {
-                    if let Some(&offset) = template_offsets.get(&set.name) {
-                        set.retime_stage_times(offset);
-                    }
+                if !explicit_sets.contains(&set.name)
+                    && let Some(&offset) = template_offsets.get(&set.name)
+                {
+                    set.retime_stage_times(offset);
                 }
                 Some(clip::ResolvedClipSet {
                     set,

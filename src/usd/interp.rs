@@ -117,11 +117,7 @@ fn is_blocked(v: &Value) -> bool {
 /// Filter out blocked sentinels at the read boundary so callers can
 /// treat the return shape as "Some(real value) or no value".
 fn clean(v: Value) -> Option<Value> {
-    if is_blocked(&v) {
-        None
-    } else {
-        Some(v)
-    }
+    if is_blocked(&v) { None } else { Some(v) }
 }
 
 /// Component-wise lerp between two authored samples. Returns `None`

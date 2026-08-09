@@ -11,9 +11,9 @@ use bitflags::bitflags;
 
 use crate::sdf::{LayerOffset, Path};
 
+use super::LayerId;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
-use super::LayerId;
 
 /// Whether an arc introduces a class hierarchy node — an inherit or a
 /// specializes (C++ `PcpIsClassBasedArc`).
@@ -711,10 +711,13 @@ impl PrimIndexGraph {
             }
             // An implied opinion local to the root layer stack beats a propagated
             // one (C++ `TrickySpecializesAndInherits3`).
-            if !a_authored && !b_authored && self.same_layer_stack_as_root(a) && self.same_layer_stack_as_root(b) {
-                if let Some(ord) = self.implied_beats_propagated(a, oa, b, ob) {
-                    return ord;
-                }
+            if !a_authored
+                && !b_authored
+                && self.same_layer_stack_as_root(a)
+                && self.same_layer_stack_as_root(b)
+                && let Some(ord) = self.implied_beats_propagated(a, oa, b, ob)
+            {
+                return ord;
             }
             // Finally, order by the strength of the two origins themselves.
             return self.compare_node_strength(oa, ob).then(a.0.cmp(&b.0));

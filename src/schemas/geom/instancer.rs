@@ -12,7 +12,7 @@ use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, SchemaBase, Stage};
 
 use super::tokens as tok;
-use super::{impl_geom_schema, Boundable, Imageable, Xformable};
+use super::{Boundable, Imageable, Xformable, impl_geom_schema};
 use crate::schemas::common::get_typed;
 
 /// A vectorized-instancing prim (C++ `UsdGeomPointInstancer`).

@@ -4,7 +4,7 @@
 //! carried across a reference arc.
 
 use openusd::sdf;
-use openusd::usd::{self, compute_included_paths, resolve_complete_membership_expression, Collection, PrimPredicate};
+use openusd::usd::{self, Collection, PrimPredicate, compute_included_paths, resolve_complete_membership_expression};
 
 fn open() -> usd::Stage {
     usd::Stage::open("fixtures/collections.usda").expect("open collections fixture")

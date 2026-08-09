@@ -10,7 +10,7 @@ mod layout;
 mod reader;
 mod writer;
 
-pub use layout::{version, Version};
+pub use layout::{Version, version};
 pub use reader::{CrateFile, ReadExt};
 pub use writer::CrateWriter;
 
@@ -227,7 +227,7 @@ where
 /// Walks a crate spec's fieldset from `start` to its terminator, yielding each
 /// field's resolved name and value representation. Names borrow the shared token
 /// table, so iterating makes no per-spec copy.
-fn crate_fields<R>(file: &CrateFile<R>, start: usize) -> impl Iterator<Item = (&str, ValueRep)> + '_ {
+fn crate_fields<R>(file: &CrateFile<R>, start: usize) -> impl Iterator<Item = (&str, ValueRep)> {
     file.fieldsets
         .get(start..)
         .unwrap_or(&[])
@@ -785,7 +785,9 @@ mod tests {
 
         assert_eq!(
             weights,
-            vec![1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0,]
+            vec![
+                1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0,
+            ]
         );
         Ok(())
     }

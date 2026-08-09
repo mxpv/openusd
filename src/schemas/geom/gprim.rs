@@ -5,8 +5,8 @@ use anyhow::Result;
 use crate::sdf;
 use crate::usd::Attribute;
 
-use super::tokens as tok;
 use super::Boundable;
+use super::tokens as tok;
 
 /// A geometric primitive — the base for the intrinsic shapes, meshes, and
 /// curves (C++ `UsdGeomGprim`). Inherits [`Boundable`] and adds the

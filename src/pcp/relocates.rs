@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::sdf::{self, element_cmp, Path, PathComponent, RelocateList};
+use crate::sdf::{self, Path, PathComponent, RelocateList, element_cmp};
 use crate::tf::Token;
 
 use super::layer_graph::LayerGraph;
@@ -131,20 +131,19 @@ pub(crate) fn apply_child_relocates(
     for (src, tgt) in pairs {
         let src_is_child = src.parent().as_ref() == Some(parent);
         let tgt_is_child = !tgt.is_empty() && tgt.parent().as_ref() == Some(parent);
-        if src_is_child {
-            if let Some(name) = src.name() {
-                prohibited.insert(name.into());
-                // A target sharing the parent renames in place; anything else
-                // (a move elsewhere or a deletion) removes the child.
-                let rename = tgt_is_child.then(|| tgt.name()).flatten();
-                relocations.insert(name.into(), rename.map(Token::from));
-            }
+        if src_is_child && let Some(name) = src.name() {
+            prohibited.insert(name.into());
+            // A target sharing the parent renames in place; anything else
+            // (a move elsewhere or a deletion) removes the child.
+            let rename = tgt_is_child.then(|| tgt.name()).flatten();
+            relocations.insert(name.into(), rename.map(Token::from));
         }
         // A child relocated in from a different parent is an addition.
-        if tgt_is_child && !src_is_child {
-            if let Some(tgt_name) = tgt.name() {
-                adds.push(tgt_name.into());
-            }
+        if tgt_is_child
+            && !src_is_child
+            && let Some(tgt_name) = tgt.name()
+        {
+            adds.push(tgt_name.into());
         }
     }
     // Relocated-in children are appended in the normative element order (spec

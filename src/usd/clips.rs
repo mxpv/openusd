@@ -387,9 +387,11 @@ mod tests {
         // Missing set, missing field, and a prim with no clips at all.
         assert!(clips.clip_asset_paths("nope")?.is_empty());
         assert!(clips.clip_prim_path("default")?.is_none());
-        assert!(ClipsAPI::new(&stage.prim(sdf::path("/Absent")?))
-            .clip_set_names()?
-            .is_empty());
+        assert!(
+            ClipsAPI::new(&stage.prim(sdf::path("/Absent")?))
+                .clip_set_names()?
+                .is_empty()
+        );
         Ok(())
     }
 

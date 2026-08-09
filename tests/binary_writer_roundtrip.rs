@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::Path;
 
-use openusd::sdf::{self, path, AbstractData, ChildrenKey, Data, FieldKey, SpecType, Specifier, Value};
+use openusd::sdf::{self, AbstractData, ChildrenKey, Data, FieldKey, SpecType, Specifier, Value, path};
 use openusd::usdc::{CrateData, CrateWriter};
 
 fn snapshot(data: &dyn AbstractData) -> serde_json::Value {

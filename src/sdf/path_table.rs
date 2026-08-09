@@ -159,7 +159,7 @@ impl<V> PathTable<V> {
     /// Intermediate ancestor-only nodes are skipped, so the walk yields just
     /// the entries an inserted value actually sits at. The companion of
     /// [`subtree`](Self::subtree), which fans out downward.
-    pub fn ancestors<'a>(&'a self, path: &Path) -> impl Iterator<Item = (&'a Path, &'a V)> {
+    pub fn ancestors<'a>(&'a self, path: &Path) -> impl Iterator<Item = (&'a Path, &'a V)> + use<'a, V> {
         path.ancestors().filter_map(move |p| {
             let (key, node) = self.nodes.get_key_value(&p)?;
             node.value.as_ref().map(|v| (key, v))
@@ -181,7 +181,7 @@ impl<V> PathTable<V> {
     /// descendants (C++ `FindSubtreeRange`), depth-first in deterministic order.
     ///
     /// Yields nothing if `prefix` names no node — value-bearing or intermediate.
-    pub fn subtree<'a>(&'a self, prefix: &Path) -> impl Iterator<Item = (&'a Path, &'a V)> {
+    pub fn subtree<'a>(&'a self, prefix: &Path) -> impl Iterator<Item = (&'a Path, &'a V)> + use<'a, V> {
         let mut out: Vec<(&'a Path, &'a V)> = Vec::new();
         self.collect_subtree(prefix, &mut out);
         out.into_iter()

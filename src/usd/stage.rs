@@ -1790,10 +1790,8 @@ impl Stage {
         // vars-only edit publishes it exactly when the rebuild changed some
         // stack's composed variables — so it lands on the payload here rather
         // than at the snapshot above.
-        if root_resync {
-            if let Some(payload) = payload.as_mut() {
-                payload.record_root_resync();
-            }
+        if root_resync && let Some(payload) = payload.as_mut() {
+            payload.record_root_resync();
         }
         // The recompose may have demanded sublayers — a `${VAR}` entry the
         // edited variables newly select, or a just-authored literal naming an
@@ -3742,10 +3740,10 @@ impl StageBuilder {
         {
             let mut graph = stage.layers.borrow_mut();
             for (asset_path, introduced_by, failure) in failure_seeds {
-                if let Some(parent) = graph.id_of(&introduced_by) {
-                    if let Err(identifier) = graph.resolve_relative(&asset_path, parent) {
-                        graph.mark_load_failed(&identifier, failure);
-                    }
+                if let Some(parent) = graph.id_of(&introduced_by)
+                    && let Err(identifier) = graph.resolve_relative(&asset_path, parent)
+                {
+                    graph.mark_load_failed(&identifier, failure);
                 }
             }
         }
@@ -4083,11 +4081,13 @@ mod tests {
         assert_eq!(attr.connections()?, vec![target.clone()]);
         // The dedup leaves the root layer without any local connection
         // opinion; the composed target keeps coming from the weak layer.
-        assert!(stage
-            .root_layer()
-            .attribute(input.clone())
-            .and_then(|attr| attr.connection_path_list())
-            .is_none());
+        assert!(
+            stage
+                .root_layer()
+                .attribute(input.clone())
+                .and_then(|attr| attr.connection_path_list())
+                .is_none()
+        );
         Ok(())
     }
 

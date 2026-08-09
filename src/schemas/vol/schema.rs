@@ -1,7 +1,7 @@
 //! The UsdVol prim views: [`Volume`] and the file-backed field assets
 //! [`OpenVDBAsset`] / [`Field3DAsset`].
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, Stage};

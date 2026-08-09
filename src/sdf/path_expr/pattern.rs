@@ -174,12 +174,14 @@ impl PathPattern {
             self.prefix = reflexive_relative();
         }
         let is_literal = Path::is_valid_namespace_identifier(&text);
-        if is_literal && predicate.is_none() && self.components.is_empty() {
-            if let Some(folded) = append_prefix_property(&self.prefix, &text) {
-                self.prefix = folded;
-                self.is_property = true;
-                return;
-            }
+        if is_literal
+            && predicate.is_none()
+            && self.components.is_empty()
+            && let Some(folded) = append_prefix_property(&self.prefix, &text)
+        {
+            self.prefix = folded;
+            self.is_property = true;
+            return;
         }
         let predicate_index = predicate.map(|expr| {
             self.pred_exprs.push(expr);

@@ -15,8 +15,8 @@ use crate::gf;
 use crate::sdf;
 use crate::usd::{Attribute, Prim, TimeCode};
 
-use super::tokens as tok;
 use super::Imageable;
+use super::tokens as tok;
 
 const TOKEN_INVERT_PREFIX: &str = "!invert!";
 const TOKEN_RESET_XFORM_STACK: &str = "!resetXformStack!";

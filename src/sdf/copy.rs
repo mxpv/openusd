@@ -498,7 +498,7 @@ pub(crate) fn is_children_field(field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdf::{path, AbstractData, Data, FieldKey, PathListOp, SpecType, Value};
+    use crate::sdf::{AbstractData, Data, FieldKey, PathListOp, SpecType, Value, path};
 
     /// Author a prim subtree with an attribute and a relationship into a fresh
     /// `Data`, returning it. Shape:
@@ -653,10 +653,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(dst.spec_type(&path("/B/Child").unwrap()), None);
-        assert!(dst
-            .try_field(&path("/B.rel").unwrap(), FieldKey::TargetPaths.as_str())
-            .unwrap()
-            .is_none());
+        assert!(
+            dst.try_field(&path("/B.rel").unwrap(), FieldKey::TargetPaths.as_str())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -696,10 +697,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(dst.spec_type(&path("/B.attr").unwrap()), Some(SpecType::Attribute));
-        assert!(dst
-            .try_field(&path("/B.attr").unwrap(), FieldKey::TypeName.as_str())
-            .unwrap()
-            .is_none());
+        assert!(
+            dst.try_field(&path("/B.attr").unwrap(), FieldKey::TypeName.as_str())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

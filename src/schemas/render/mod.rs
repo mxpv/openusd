@@ -55,7 +55,7 @@ mod schema;
 mod traits;
 
 pub use compute::{compute_namespaced_settings, compute_render_spec};
-pub use conform::{apply_aspect_ratio_policy, ConformedAperture};
+pub use conform::{ConformedAperture, apply_aspect_ratio_policy};
 pub use schema::{RenderDenoisePass, RenderPass, RenderProduct, RenderSettings, RenderVar};
 pub use traits::RenderSettingsBase;
 

@@ -14,7 +14,7 @@
 use std::io::{Seek, Write};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 

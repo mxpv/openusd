@@ -11,7 +11,7 @@ use std::{
     io::{self, Write},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::sdf::{
     self, AbstractData, AssetPath, ChildrenKey, FieldKey, LayerOffset, ListOp, Path, Payload, Reference, SpecType,
@@ -96,11 +96,9 @@ impl<W: Write> Emitter<'_, W> {
 
         // Layer-level `reorder rootPrims`, stored as `primOrder` on the
         // pseudo-root. Emitted between the metadata block and the root prims.
-        if has_root {
-            if let Some(Value::TokenVec(v)) = get_value(data, &root, FieldKey::PrimOrder.as_str()) {
-                writeln!(self.out)?;
-                self.emit_reorder("rootPrims", &v)?;
-            }
+        if has_root && let Some(Value::TokenVec(v)) = get_value(data, &root, FieldKey::PrimOrder.as_str()) {
+            writeln!(self.out)?;
+            self.emit_reorder("rootPrims", &v)?;
         }
 
         // Root prims
@@ -131,10 +129,10 @@ impl<W: Write> Emitter<'_, W> {
             .unwrap_or(Specifier::Def);
         self.out.write_all(specifier_keyword(specifier).as_bytes())?;
 
-        if let Some(Value::Token(type_name)) = get_value(data, path, FieldKey::TypeName.as_str()) {
-            if !type_name.is_empty() {
-                write!(self.out, " {type_name}")?;
-            }
+        if let Some(Value::Token(type_name)) = get_value(data, path, FieldKey::TypeName.as_str())
+            && !type_name.is_empty()
+        {
+            write!(self.out, " {type_name}")?;
         }
 
         let mut quoted = String::new();
@@ -498,28 +496,28 @@ impl<W: Write> Emitter<'_, W> {
             .filter(|n| !is_relationship_structural_field(n))
             .collect();
 
-        if let Some(Value::PathListOp(op)) = &targets {
-            if op.explicit {
-                match op.explicit_items.len() {
-                    0 => {
-                        self.out.write_all(b" = None")?;
-                    }
-                    1 => {
-                        write!(self.out, " = <{}>", op.explicit_items[0].as_str())?;
-                    }
-                    _ => {
-                        self.out.write_all(b" = [")?;
-                        for (i, p) in op.explicit_items.iter().enumerate() {
-                            if i > 0 {
-                                self.out.write_all(b", ")?;
-                            }
-                            write!(self.out, "<{}>", p.as_str())?;
+        // Non-explicit list ops for rel targets: emit on a separate line below.
+        if let Some(Value::PathListOp(op)) = &targets
+            && op.explicit
+        {
+            match op.explicit_items.len() {
+                0 => {
+                    self.out.write_all(b" = None")?;
+                }
+                1 => {
+                    write!(self.out, " = <{}>", op.explicit_items[0].as_str())?;
+                }
+                _ => {
+                    self.out.write_all(b" = [")?;
+                    for (i, p) in op.explicit_items.iter().enumerate() {
+                        if i > 0 {
+                            self.out.write_all(b", ")?;
                         }
-                        self.out.write_all(b"]")?;
+                        write!(self.out, "<{}>", p.as_str())?;
                     }
+                    self.out.write_all(b"]")?;
                 }
             }
-            // Non-explicit list ops for rel targets: emit on a separate line below.
         }
 
         if !meta_fields.is_empty() {
@@ -537,13 +535,13 @@ impl<W: Write> Emitter<'_, W> {
         writeln!(self.out)?;
 
         // Non-explicit list op target paths
-        if let Some(Value::PathListOp(op)) = &targets {
-            if !op.explicit {
-                self.emit_listop_statement(&format!("rel {name}"), op, |s, p| {
-                    write!(s, "<{}>", p.as_str())?;
-                    Ok(())
-                })?;
-            }
+        if let Some(Value::PathListOp(op)) = &targets
+            && !op.explicit
+        {
+            self.emit_listop_statement(&format!("rel {name}"), op, |s, p| {
+                write!(s, "<{}>", p.as_str())?;
+                Ok(())
+            })?;
         }
 
         Ok(())
@@ -643,16 +641,16 @@ impl<W: Write> Emitter<'_, W> {
             write_asset_path(&mut buf, path)?;
             self.out.write_all(buf.as_bytes())?;
 
-            if let Some(offset) = offsets.get(i) {
-                if *offset != LayerOffset::default() {
-                    let mut buf = String::new();
-                    buf.push_str(" (offset = ");
-                    format_double(&mut buf, offset.offset);
-                    buf.push_str("; scale = ");
-                    format_double(&mut buf, offset.scale);
-                    buf.push(')');
-                    self.out.write_all(buf.as_bytes())?;
-                }
+            if let Some(offset) = offsets.get(i)
+                && *offset != LayerOffset::default()
+            {
+                let mut buf = String::new();
+                buf.push_str(" (offset = ");
+                format_double(&mut buf, offset.offset);
+                buf.push_str("; scale = ");
+                format_double(&mut buf, offset.scale);
+                buf.push(')');
+                self.out.write_all(buf.as_bytes())?;
             }
         }
         self.out.write_all(b"]")?;
@@ -665,15 +663,15 @@ impl<W: Write> Emitter<'_, W> {
     fn emit_metadata_entry(&mut self, name: &str, value: &Value) -> Result<()> {
         // "comment" is authored as a bare string in the metadata block, with
         // no keyword. Parser recognises a lone string as the Sdf comment field.
-        if name == FieldKey::Comment.as_str() {
-            if let Value::String(text) = value {
-                self.write_indent()?;
-                let mut buf = String::new();
-                write_quoted(&mut buf, text)?;
-                self.out.write_all(buf.as_bytes())?;
-                writeln!(self.out)?;
-                return Ok(());
-            }
+        if name == FieldKey::Comment.as_str()
+            && let Value::String(text) = value
+        {
+            self.write_indent()?;
+            let mut buf = String::new();
+            write_quoted(&mut buf, text)?;
+            self.out.write_all(buf.as_bytes())?;
+            writeln!(self.out)?;
+            return Ok(());
         }
 
         // Several fields are stored under internal names that differ from the
@@ -689,10 +687,10 @@ impl<W: Write> Emitter<'_, W> {
         };
 
         // ListOps in metadata blocks render as multi-line prepend/append/... entries.
-        if let Some(emitted) = self.try_emit_listop_metadata(keyword, value)? {
-            if emitted {
-                return Ok(());
-            }
+        if let Some(emitted) = self.try_emit_listop_metadata(keyword, value)?
+            && emitted
+        {
+            return Ok(());
         }
 
         self.write_indent()?;
@@ -1269,14 +1267,14 @@ fn write_payload(s: &mut String, p: &Payload) -> Result<()> {
     if !p.prim_path.is_empty() {
         write!(s, "<{}>", p.prim_path.as_str())?;
     }
-    if let Some(offset) = &p.layer_offset {
-        if *offset != LayerOffset::default() {
-            s.push_str(" (offset = ");
-            format_double(s, offset.offset);
-            s.push_str("; scale = ");
-            format_double(s, offset.scale);
-            s.push(')');
-        }
+    if let Some(offset) = &p.layer_offset
+        && *offset != LayerOffset::default()
+    {
+        s.push_str(" (offset = ");
+        format_double(s, offset.offset);
+        s.push_str("; scale = ");
+        format_double(s, offset.scale);
+        s.push(')');
     }
     Ok(())
 }
@@ -1425,7 +1423,7 @@ fn is_relationship_structural_field(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdf::{path, Data};
+    use crate::sdf::{Data, path};
 
     /// A relationship keeps its variability through emit → re-parse. The text
     /// form spells only the `varying` case, so the uniform default has to

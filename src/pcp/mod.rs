@@ -317,7 +317,7 @@ pub use mapping::MapFunction;
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
 pub(crate) use prim_index::Demand;
 pub use prim_index::PrimIndex;
-pub(crate) use relocates::{analyze_relocate_occurrences, first_unrepresentable_relocate, BatchRelocate};
+pub(crate) use relocates::{BatchRelocate, analyze_relocate_occurrences, first_unrepresentable_relocate};
 
 /// Maps variant set names to ordered lists of fallback selections.
 ///
@@ -393,11 +393,7 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
     // offset path folds this scale into the composed offset without re-running
     // `LayerOffset::sanitized` (the scale > 0 guard), so an `inf`/`NaN`/negative
     // rate here would otherwise corrupt downstream value resolution.
-    if rate.is_finite() && rate > 0.0 {
-        rate
-    } else {
-        24.0
-    }
+    if rate.is_finite() && rate > 0.0 { rate } else { 24.0 }
 }
 
 /// The kind of authored field a composition-time variable expression came

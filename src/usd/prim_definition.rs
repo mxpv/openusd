@@ -4,11 +4,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::{sdf, tf};
 
-use super::{schema_registry, SchemaInfo, SchemaRegistry, Schematics};
+use super::{SchemaInfo, SchemaRegistry, Schematics, schema_registry};
 
 /// The properties and metadata a prim of some type has before anything is
 /// authored (C++ `UsdPrimDefinition`).
@@ -904,9 +904,11 @@ class Thing "Thing" (
 
         // Abstract types are not instantiable, so they have no concrete
         // definition; neither does a type the registry never heard of.
-        assert!(registry
-            .concrete_prim_definition(&tf::Token::new("NonboundableLightBase"))
-            .is_none());
+        assert!(
+            registry
+                .concrete_prim_definition(&tf::Token::new("NonboundableLightBase"))
+                .is_none()
+        );
         assert!(registry.concrete_prim_definition(&tf::Token::new("Bogus")).is_none());
         assert!(registry.empty_prim_definition().is_empty());
     }

@@ -894,9 +894,11 @@ mod tests {
         let doomed = sdf::path("/World/Doomed")?;
         assert!(edits.iter().any(|e| *e == Edit::RemoveSpec { path: doomed.clone() }));
         let size = sdf::path("/World.size")?;
-        assert!(edits
-            .iter()
-            .any(|e| matches!(e, Edit::EraseField { path, .. } if *path == size)));
+        assert!(
+            edits
+                .iter()
+                .any(|e| matches!(e, Edit::EraseField { path, .. } if *path == size))
+        );
 
         let b = in_memory_stage()?;
         for diff in diffs.borrow().iter() {

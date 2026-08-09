@@ -16,9 +16,9 @@ use std::ops::Bound;
 
 use crate::sdf::Path;
 
-use super::index_cache::IndexCache;
 #[cfg(test)]
 use super::VariantFallbackMap;
+use super::index_cache::IndexCache;
 
 /// A payload-inclusion policy authored at one path (C++
 /// `UsdStageLoadRules::Rule`).

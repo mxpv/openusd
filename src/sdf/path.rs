@@ -1,6 +1,6 @@
 use std::{fmt, result, str::FromStr};
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{Result, bail, ensure};
 
 use crate::tf;
 
@@ -206,15 +206,15 @@ impl Path {
             // Relative single segment (no slash): strip a trailing property or
             // variant selection. `is_property_path` separates `Foo.bar` from a
             // relative `..`, which has no property tail and is its own prim.
-            if self.is_property_path() {
-                if let Some(dot) = self.path.find('.') {
-                    return Path::from_str_unchecked(&self.path[..dot]);
-                }
+            if self.is_property_path()
+                && let Some(dot) = self.path.find('.')
+            {
+                return Path::from_str_unchecked(&self.path[..dot]);
             }
-            if self.path.ends_with('}') {
-                if let Some(open) = self.path.rfind('{') {
-                    return Path::from_str_unchecked(&self.path[..open]);
-                }
+            if self.path.ends_with('}')
+                && let Some(open) = self.path.rfind('{')
+            {
+                return Path::from_str_unchecked(&self.path[..open]);
             }
             return self.clone();
         };
@@ -227,11 +227,11 @@ impl Path {
         // Strip the trailing variant selection, keeping any earlier variants on
         // the same component: "/A/B/C{set=sel}" => "/A/B/C" and a nested
         // "/A{x=y}B{p=q}" => "/A{x=y}B" (the last `{` opens the trailing variant).
-        if after.ends_with('}') {
-            if let Some(pos) = after.rfind('{') {
-                let sz = before.len() + pos + 1;
-                return Path::from_str_unchecked(&self.path[..sz]);
-            }
+        if after.ends_with('}')
+            && let Some(pos) = after.rfind('{')
+        {
+            let sz = before.len() + pos + 1;
+            return Path::from_str_unchecked(&self.path[..sz]);
         }
 
         let first_dot = match after.find('.') {
@@ -383,10 +383,10 @@ impl Path {
             return None;
         }
         // Drop a trailing `{set=sel}` variant selection.
-        if self.is_prim_variant_selection_path() {
-            if let Some(open) = self.path.rfind('{') {
-                return Some(Path::from_str_unchecked(&self.path[..open]));
-            }
+        if self.is_prim_variant_selection_path()
+            && let Some(open) = self.path.rfind('{')
+        {
+            return Some(Path::from_str_unchecked(&self.path[..open]));
         }
         if self.is_property_path() {
             return Some(self.prim_path());
@@ -416,20 +416,20 @@ impl Path {
     /// "/A.attr" -> "/A.attr", "/A", "/"
     /// "/"       -> "/"
     /// ```
-    pub fn ancestors(&self) -> impl Iterator<Item = Path> {
+    pub fn ancestors(&self) -> impl Iterator<Item = Path> + use<> {
         std::iter::successors(Some(self.clone()), Path::parent)
     }
 
     /// Iterates the strict ancestors of `self` — [`ancestors`](Self::ancestors)
     /// without `self` itself — ending with the absolute root.
-    pub fn strict_ancestors(&self) -> impl Iterator<Item = Path> {
+    pub fn strict_ancestors(&self) -> impl Iterator<Item = Path> + use<> {
         self.ancestors().skip(1)
     }
 
     /// Iterates `self` and its ancestors from leaf upward, stopping before the
     /// absolute root — [`ancestors`](Self::ancestors) with the pseudo-root
     /// trimmed. Empty when `self` is the absolute root.
-    pub fn ancestors_below_root(&self) -> impl Iterator<Item = Path> {
+    pub fn ancestors_below_root(&self) -> impl Iterator<Item = Path> + use<> {
         self.ancestors().take_while(|p| !p.is_abs_root())
     }
 

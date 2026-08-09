@@ -72,10 +72,10 @@ fn normalize_json(v: &mut serde_json::Value) {
                 // shorter representation, use it (e.g. 0.4000000059604645 → 0.4).
                 let short = format!("{}", f as f32);
                 let long = format!("{f}");
-                if short.len() < long.len() {
-                    if let Ok(clean) = short.parse::<f64>() {
-                        *v = serde_json::json!(clean);
-                    }
+                if short.len() < long.len()
+                    && let Ok(clean) = short.parse::<f64>()
+                {
+                    *v = serde_json::json!(clean);
                 }
             }
         }

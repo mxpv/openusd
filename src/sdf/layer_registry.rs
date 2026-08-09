@@ -597,15 +597,15 @@ impl LayerRegistry {
             if !data.has_spec(&path) {
                 continue;
             }
-            if let Some(value) = data.try_field(&path, sdf::FieldKey::References.as_str())? {
-                if let sdf::Value::ReferenceListOp(list_op) = value.as_ref() {
-                    deps.extend(
-                        list_op
-                            .iter()
-                            .filter(|r| !r.asset_path.is_empty())
-                            .map(|r| r.asset_path.clone()),
-                    );
-                }
+            if let Some(value) = data.try_field(&path, sdf::FieldKey::References.as_str())?
+                && let sdf::Value::ReferenceListOp(list_op) = value.as_ref()
+            {
+                deps.extend(
+                    list_op
+                        .iter()
+                        .filter(|r| !r.asset_path.is_empty())
+                        .map(|r| r.asset_path.clone()),
+                );
             }
             if let Some(value) = data.try_field(&path, sdf::FieldKey::Payload.as_str())? {
                 match value.as_ref() {
@@ -621,25 +621,25 @@ impl LayerRegistry {
                     _ => {}
                 }
             }
-            if let Some(value) = data.try_field(&path, sdf::ChildrenKey::PrimChildren.as_str())? {
-                if let sdf::Value::TokenVec(children) = value.into_owned() {
-                    for name in children.iter().rev() {
-                        if let Ok(child) = path.append_path(name.as_str()) {
-                            queue.push(child);
-                        }
+            if let Some(value) = data.try_field(&path, sdf::ChildrenKey::PrimChildren.as_str())?
+                && let sdf::Value::TokenVec(children) = value.into_owned()
+            {
+                for name in children.iter().rev() {
+                    if let Ok(child) = path.append_path(name.as_str()) {
+                        queue.push(child);
                     }
                 }
             }
-            if let Some(value) = data.try_field(&path, sdf::ChildrenKey::VariantSetChildren.as_str())? {
-                if let sdf::Value::TokenVec(set_names) = value.into_owned() {
-                    for set_name in &set_names {
-                        let set_path = path.append_variant_selection(set_name, "");
-                        if let Some(value) = data.try_field(&set_path, sdf::ChildrenKey::VariantChildren.as_str())? {
-                            if let sdf::Value::TokenVec(variant_names) = value.into_owned() {
-                                for variant_name in &variant_names {
-                                    queue.push(path.append_variant_selection(set_name, variant_name));
-                                }
-                            }
+            if let Some(value) = data.try_field(&path, sdf::ChildrenKey::VariantSetChildren.as_str())?
+                && let sdf::Value::TokenVec(set_names) = value.into_owned()
+            {
+                for set_name in &set_names {
+                    let set_path = path.append_variant_selection(set_name, "");
+                    if let Some(value) = data.try_field(&set_path, sdf::ChildrenKey::VariantChildren.as_str())?
+                        && let sdf::Value::TokenVec(variant_names) = value.into_owned()
+                    {
+                        for variant_name in &variant_names {
+                            queue.push(path.append_variant_selection(set_name, variant_name));
                         }
                     }
                 }

@@ -91,7 +91,7 @@
 //! relationship/connection target remapping through relocates.
 
 use std::cmp::Ordering;
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map};
 use std::mem;
 
 use crate::sdf::schema::{ChildrenKey, FieldKey};
@@ -102,8 +102,8 @@ use super::compose_site::{collect_payloads_in, compose_arc_list_in, compose_refe
 use super::layer_graph::{ExternalStack, LoadFailure};
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
-use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
-use super::prim_index::{stack_has_spec, CompositionContext, Demand, PrimEntry};
+use super::prim_graph::{ArcType, NodeFlags, NodeId, PrimIndexGraph, is_class_based_arc};
+use super::prim_index::{CompositionContext, Demand, PrimEntry, stack_has_spec};
 use super::{CycleChain, CycleHop, Error, ExpressionContext, LayerGraph, LayerId};
 
 /// Maximum composition-arc nesting before the prim is abandoned as a cycle,
@@ -1878,32 +1878,32 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 else {
                     continue;
                 };
-                if let Value::VariantSelectionMap(map) = value.into_owned() {
-                    if let Some(sel) = map.get(vset) {
-                        // Evaluate against the reading node's own stack
-                        // variables (C++ `PcpComposeSiteVariantSelection`);
-                        // indexing time is the sole diagnostic emitter. An
-                        // accepted selection — including the empty one an
-                        // expression-language `None` yields, which defers to
-                        // the fallback — stops the search; only a failed
-                        // evaluation falls through to the next-weaker opinion,
-                        // its read names recorded all the same (a later edit to
-                        // one can flip the result).
-                        let mut used_vars = HashSet::new();
-                        let selection = evaluate_expression(
-                            sel,
-                            stack.stack_expression_variables(node_stack),
-                            ExpressionContext::Variant,
-                            stack.layer(layer),
-                            &site,
-                            Some(&mut self.errors),
-                            Some(&mut used_vars),
-                        )
-                        .into_selection();
-                        self.expr_var_deps.record(node_stack, used_vars);
-                        if let Some(selection) = selection {
-                            return Ok(Some(selection));
-                        }
+                if let Value::VariantSelectionMap(map) = value.into_owned()
+                    && let Some(sel) = map.get(vset)
+                {
+                    // Evaluate against the reading node's own stack
+                    // variables (C++ `PcpComposeSiteVariantSelection`);
+                    // indexing time is the sole diagnostic emitter. An
+                    // accepted selection — including the empty one an
+                    // expression-language `None` yields, which defers to
+                    // the fallback — stops the search; only a failed
+                    // evaluation falls through to the next-weaker opinion,
+                    // its read names recorded all the same (a later edit to
+                    // one can flip the result).
+                    let mut used_vars = HashSet::new();
+                    let selection = evaluate_expression(
+                        sel,
+                        stack.stack_expression_variables(node_stack),
+                        ExpressionContext::Variant,
+                        stack.layer(layer),
+                        &site,
+                        Some(&mut self.errors),
+                        Some(&mut used_vars),
+                    )
+                    .into_selection();
+                    self.expr_var_deps.record(node_stack, used_vars);
+                    if let Some(selection) = selection {
+                        return Ok(Some(selection));
                     }
                 }
             }
@@ -1941,10 +1941,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // so the storage site lookup hits the right `{set=sel}` namespace.
         let intro = self.output.path_at_introduction(cur_node);
         let stripped = intro.strip_all_variant_selections();
-        if intro != stripped {
-            if let Some(p) = cur_path.replace_prefix(&stripped, &intro) {
-                cur_path = p;
-            }
+        if intro != stripped
+            && let Some(p) = cur_path.replace_prefix(&stripped, &intro)
+        {
+            cur_path = p;
         }
         (cur_node, cur_path)
     }
@@ -2249,10 +2249,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 origin,
                 arc_num,
             )?;
-            if implied {
-                if let Some(g) = grafted {
-                    self.output.nodes[g.idx()].flags |= NodeFlags::IMPLIED_CLASS;
-                }
+            if implied && let Some(g) = grafted {
+                self.output.nodes[g.idx()].flags |= NodeFlags::IMPLIED_CLASS;
             }
             return Ok(grafted);
         }
@@ -2414,18 +2412,18 @@ impl<'a, 'f> Indexer<'a, 'f> {
             };
 
             // Recurse into nested classes under the child.
-            if let Some(dest_child) = dest_child {
-                if self.has_class_based_child(child) {
-                    let child_transfer = dest_class_func.inverse().compose(&transfer.compose(&child_map));
-                    // A specializes destination keeps its children on the copy
-                    // under the root, so recurse there (C++ invariant: only
-                    // propagated specializes nodes have children).
-                    let recurse_into = self
-                        .output
-                        .get_propagated_specializes_node(dest_child)
-                        .unwrap_or(dest_child);
-                    self.eval_implied_class_tree(recurse_into, child, &child_transfer, false)?;
-                }
+            if let Some(dest_child) = dest_child
+                && self.has_class_based_child(child)
+            {
+                let child_transfer = dest_class_func.inverse().compose(&transfer.compose(&child_map));
+                // A specializes destination keeps its children on the copy
+                // under the root, so recurse there (C++ invariant: only
+                // propagated specializes nodes have children).
+                let recurse_into = self
+                    .output
+                    .get_propagated_specializes_node(dest_child)
+                    .unwrap_or(dest_child);
+                self.eval_implied_class_tree(recurse_into, child, &child_transfer, false)?;
             }
         }
         Ok(())
@@ -3231,9 +3229,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::prim_index::tests::build_with_fallbacks;
-    use super::super::prim_index::PrimIndex;
     use super::super::VariantFallbackMap;
+    use super::super::prim_index::PrimIndex;
+    use super::super::prim_index::tests::build_with_fallbacks;
     use super::*;
 
     fn stack(text: &str) -> LayerGraph {

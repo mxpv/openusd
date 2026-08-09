@@ -392,10 +392,10 @@ impl MapFunction {
 
         // Half 2: self's input domain pulled back through inner.
         for (outer_src, outer_tgt) in self.path_map.as_slice() {
-            if let Some(source) = inner.map_target_to_source(outer_src) {
-                if !pairs.iter().any(|(s, _)| *s == source) {
-                    pairs.push((source, outer_tgt.clone()));
-                }
+            if let Some(source) = inner.map_target_to_source(outer_src)
+                && !pairs.iter().any(|(s, _)| *s == source)
+            {
+                pairs.push((source, outer_tgt.clone()));
             }
         }
 
@@ -719,9 +719,11 @@ mod tests {
     fn default_time_offset_is_identity() {
         assert!(MapFunction::identity().time_offset().is_identity());
         assert!(MapFunction::from_pair(p("/A"), p("/B")).time_offset().is_identity());
-        assert!(MapFunction::from_pair_identity(p("/A"), p("/B"))
-            .time_offset()
-            .is_identity());
+        assert!(
+            MapFunction::from_pair_identity(p("/A"), p("/B"))
+                .time_offset()
+                .is_identity()
+        );
     }
 
     #[test]

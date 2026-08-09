@@ -4,8 +4,8 @@ use anyhow::Result;
 
 use crate::usd::Attribute;
 
-use super::tokens as tok;
 use super::Gprim;
+use super::tokens as tok;
 
 /// A gprim whose geometry is expressed as an array of points (C++
 /// `UsdGeomPointBased`) — the base for meshes, curves, point clouds, and

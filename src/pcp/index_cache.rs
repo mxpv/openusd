@@ -1331,18 +1331,18 @@ impl IndexCache {
             },
             property_suffix: prop_suffix.clone(),
         });
-        if let Some(key) = &memo_key {
-            if let Some(hit) = self.store.target_memo(&resolved_prim, key) {
-                let TargetMemo { targets, errors } = hit.clone();
-                // Re-surface the cached errors: an unrelated index invalidation may
-                // have cleared `query_errors` since, so push any it now lacks.
-                for error in errors {
-                    if !self.query_errors.contains(&error) {
-                        self.query_errors.push(error);
-                    }
+        if let Some(key) = &memo_key
+            && let Some(hit) = self.store.target_memo(&resolved_prim, key)
+        {
+            let TargetMemo { targets, errors } = hit.clone();
+            // Re-surface the cached errors: an unrelated index invalidation may
+            // have cleared `query_errors` since, so push any it now lacks.
+            for error in errors {
+                if !self.query_errors.contains(&error) {
+                    self.query_errors.push(error);
                 }
-                return Ok(targets);
             }
+            return Ok(targets);
         }
 
         // A connection/relationship target authored in a class that translates but
@@ -1929,10 +1929,10 @@ impl IndexCache {
         for node in parent_index.nodes() {
             for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 nodes_to_scan.push((node.path.clone(), layer));
-                if let Some(name) = path.name() {
-                    if let Ok(child_in_node) = node.path.append_path(name) {
-                        nodes_to_scan.push((child_in_node, layer));
-                    }
+                if let Some(name) = path.name()
+                    && let Ok(child_in_node) = node.path.append_path(name)
+                {
+                    nodes_to_scan.push((child_in_node, layer));
                 }
             }
         }
@@ -1954,10 +1954,11 @@ impl IndexCache {
                     let raw = scan_path.make_absolute(target);
                     // Try composed-namespace versions via ancestor arcs.
                     for a in &ancestor_arcs {
-                        if let Some(composed) = a.map.map_source_to_target(&raw) {
-                            if composed != raw && !targets_to_cache.contains(&composed) {
-                                targets_to_cache.push(composed);
-                            }
+                        if let Some(composed) = a.map.map_source_to_target(&raw)
+                            && composed != raw
+                            && !targets_to_cache.contains(&composed)
+                        {
+                            targets_to_cache.push(composed);
                         }
                     }
                     if !targets_to_cache.contains(&raw) {
@@ -2033,10 +2034,11 @@ impl IndexCache {
         // is a pure function of the layer stack, path, and parent context, so
         // building ancestors eagerly only fixes the parent context — it does
         // not change any prim's resolved opinions.
-        if let Some(parent) = path.parent() {
-            if !parent.is_abs_root() && !self.is_indexed(&parent) {
-                self.precache_path(graph, &parent);
-            }
+        if let Some(parent) = path.parent()
+            && !parent.is_abs_root()
+            && !self.is_indexed(&parent)
+        {
+            self.precache_path(graph, &parent);
         }
 
         // Pre-cache inherit/specialize targets so the indexer can
@@ -3174,9 +3176,11 @@ def "Scope"
 
         let arc = format!("{}/fixtures/clip_undeclared_arc/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&arc);
-        assert!(cache
-            .clip_sample_times(&graph, &sdf::path("/Model")?, ".extra")?
-            .is_none());
+        assert!(
+            cache
+                .clip_sample_times(&graph, &sdf::path("/Model")?, ".extra")?
+                .is_none()
+        );
         Ok(())
     }
 
@@ -3701,10 +3705,12 @@ def "Scope"
         changes.did_change(&cache, &[(base_id, &cl)]);
         // The inert add routes through the spec tier (not a significant fanout),
         // so the rescan's un-cull path is what recomposes /A.
-        assert!(changes
-            .cache
-            .did_change_specs
-            .contains(&(base_id, sdf::path("/Empty")?)));
+        assert!(
+            changes
+                .cache
+                .did_change_specs
+                .contains(&(base_id, sdf::path("/Empty")?))
+        );
         changes.apply(&mut cache, &mut graph);
 
         // The reference un-culled: /A now composes the arc.
@@ -3737,10 +3743,12 @@ def "Scope"
         .unwrap();
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(&cache, &[(root_id, &cl)]);
-        assert!(changes
-            .cache
-            .did_change_specs
-            .contains(&(root_id, sdf::path("/_class_Foo")?)));
+        assert!(
+            changes
+                .cache
+                .did_change_specs
+                .contains(&(root_id, sdf::path("/_class_Foo")?))
+        );
         changes.apply(&mut cache, &mut graph);
 
         // The inherit un-culled: /A now composes the arc.
@@ -3768,10 +3776,12 @@ def "Scope"
         .unwrap();
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(&cache, &[(root_id, &cl)]);
-        assert!(changes
-            .cache
-            .did_change_specs
-            .contains(&(root_id, sdf::path("/_class_Foo")?)));
+        assert!(
+            changes
+                .cache
+                .did_change_specs
+                .contains(&(root_id, sdf::path("/_class_Foo")?))
+        );
         changes.apply(&mut cache, &mut graph);
 
         assert!(cache.has_composition_arc(&graph, &a)?);
@@ -3833,10 +3843,12 @@ def "Scope"
         .unwrap();
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(&cache, &[(root_id, &cl)]);
-        assert!(changes
-            .cache
-            .did_change_specs
-            .contains(&(root_id, sdf::path("/_class_Foo")?)));
+        assert!(
+            changes
+                .cache
+                .did_change_specs
+                .contains(&(root_id, sdf::path("/_class_Foo")?))
+        );
         changes.apply(&mut cache, &mut graph);
 
         // The emptied inherit composes as a culled node, just like an always-empty

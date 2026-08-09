@@ -6,7 +6,7 @@ use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, Stage};
 
 use super::tokens as tok;
-use super::{impl_geom_schema, Imageable, Xformable};
+use super::{Imageable, Xformable, impl_geom_schema};
 use crate::schemas::common::get_typed;
 
 /// A camera prim (C++ `UsdGeomCamera`) — an [`Xformable`] exposing the lens /

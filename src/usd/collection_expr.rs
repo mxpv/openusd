@@ -96,7 +96,7 @@ impl CollectionEvaluator {
 
     /// The domain closure mapping a path to the [`CollectionObject`] its
     /// predicates evaluate against.
-    fn domain(&self) -> impl Fn(&Path) -> CollectionObject + '_ {
+    fn domain(&self) -> impl Fn(&Path) -> CollectionObject {
         move |p: &Path| CollectionObject {
             stage: self.stage.clone(),
             path: p.clone(),

@@ -290,10 +290,12 @@ mod tests {
             shader.input("diffuseColor").get::<Value>()?,
             Some(Value::vec3f(0.8_f32, 0.2, 0.2))
         );
-        assert!(shader
-            .input_names()
-            .iter()
-            .any(|v| v.contains(&"diffuseColor".to_string())));
+        assert!(
+            shader
+                .input_names()
+                .iter()
+                .any(|v| v.contains(&"diffuseColor".to_string()))
+        );
         assert_eq!(
             stage.spec_type("/Mat/Surface.outputs:surface")?,
             Some(sdf::SpecType::Attribute)
@@ -371,7 +373,7 @@ mod tests {
 
     #[test]
     fn connect_connectability_render_type() -> Result<()> {
-        use crate::schemas::shade::{base_name, Connectability};
+        use crate::schemas::shade::{Connectability, base_name};
 
         let stage = Stage::builder().in_memory("anon.usda")?;
         let tex = NodeGraph::define(&stage, "/Mat/Tex")?;

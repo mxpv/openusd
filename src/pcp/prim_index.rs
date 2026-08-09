@@ -182,7 +182,7 @@ impl PrimIndex {
     /// they sit in the arena. Inert and culled nodes are skipped — they
     /// contribute no opinions. The iterator is cheap and re-creatable; call it
     /// again for another pass rather than collecting.
-    pub fn nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone + '_ {
+    pub fn nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone {
         self.all_nodes().filter(|node| !node.is_culled())
     }
 
@@ -192,7 +192,7 @@ impl PrimIndex {
     /// propagation adds. Used for composition introspection and change tracking,
     /// where the full arc structure matters even where it contributes no
     /// opinions; value resolution uses [`nodes`](Self::nodes) instead.
-    pub fn all_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone + '_ {
+    pub fn all_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone {
         self.ordered_nodes().filter(|node| !node.is_inert())
     }
 
@@ -201,7 +201,7 @@ impl PrimIndex {
     /// relocation-source nodes: their source site contributes no opinions yet an
     /// edit there must recompose the relocated prim, so change tracking needs the
     /// reverse-map entry.
-    pub(crate) fn dependency_nodes(&self) -> impl Iterator<Item = &Node> + '_ {
+    pub(crate) fn dependency_nodes(&self) -> impl Iterator<Item = &Node> {
         self.ordered_nodes()
             .filter(|node| !node.is_inert() || node.is_relocate_source())
     }
@@ -230,7 +230,7 @@ impl PrimIndex {
     /// neither inert nor culled, the same structural filter
     /// [`nodes`](Self::nodes) applies — each paired with its resolved node. The
     /// single home for that filter, shared by every spec-stack consumer.
-    pub(crate) fn live_spec_sites(&self) -> impl Iterator<Item = (&SpecSite, &Node)> + '_ {
+    pub(crate) fn live_spec_sites(&self) -> impl Iterator<Item = (&SpecSite, &Node)> {
         self.spec_stack.iter().filter_map(|site| {
             let node = self.node(site.node);
             (!node.is_inert() && !node.is_culled()).then_some((site, node))
@@ -239,7 +239,7 @@ impl PrimIndex {
 
     /// Iterates every node in strength order, unfiltered — the shared projection
     /// the filtered public node iterators build on.
-    fn ordered_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone + '_ {
+    fn ordered_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone {
         let nodes = &self.graph.nodes;
         self.graph.strength_order.iter().map(move |id| &nodes[id.idx()])
     }
@@ -248,7 +248,7 @@ impl PrimIndex {
     /// graft, which needs each node's [`NodeId`] to rebuild parent links. The
     /// inert synthetic root is skipped, so a grafted target's real roots become
     /// orphans that re-parent under the destination's own root.
-    pub(crate) fn nodes_with_ids(&self) -> impl DoubleEndedIterator<Item = (NodeId, &Node)> + '_ {
+    pub(crate) fn nodes_with_ids(&self) -> impl DoubleEndedIterator<Item = (NodeId, &Node)> {
         let nodes = &self.graph.nodes;
         self.graph
             .strength_order
@@ -585,10 +585,10 @@ impl PrimIndex {
             // Show origin only when it differs from the structural parent —
             // i.e. for implied classes and grafts. A direct arc always origins
             // on its parent, so printing it there is redundant noise.
-            if let Some(origin) = node.origin {
-                if Some(origin) != node.parent {
-                    let _ = write!(out, " origin={}", origin.0);
-                }
+            if let Some(origin) = node.origin
+                && Some(origin) != node.parent
+            {
+                let _ = write!(out, " origin={}", origin.0);
             }
             if !node.flags.is_empty() {
                 let _ = write!(out, " {:?}", node.flags);
@@ -684,16 +684,16 @@ impl PrimIndex {
         ambient: LayerStackId,
         load_payloads: bool,
     ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>, ExprVarDeps)> {
-        if ambient == LayerStackId::ROOT {
-            if let Some(cached) = cached_indices.get(path) {
-                // A cache hit reports no variable dependencies: the cached
-                // entry's own registration already carries them, and stays
-                // authoritative because `IndexCache::build_index` never reaches
-                // this hit (`ensure_index` checks `is_indexed` first, and
-                // `build_index` debug-asserts it), so the empty map is never
-                // re-registered over it.
-                return Ok((cached.index.clone(), Vec::new(), Vec::new(), ExprVarDeps::default()));
-            }
+        if ambient == LayerStackId::ROOT
+            && let Some(cached) = cached_indices.get(path)
+        {
+            // A cache hit reports no variable dependencies: the cached
+            // entry's own registration already carries them, and stays
+            // authoritative because `IndexCache::build_index` never reaches
+            // this hit (`ensure_index` checks `is_indexed` first, and
+            // `build_index` debug-asserts it), so the empty map is never
+            // re-registered over it.
+            return Ok((cached.index.clone(), Vec::new(), Vec::new(), ExprVarDeps::default()));
         }
         // The task-queue indexer is the sole composition path. A genuine cycle
         // surfaces as `Error::ArcCycle`; an unresolvable arc is recorded in the
@@ -957,37 +957,36 @@ fn resolve_variant_selections_in<'a>(
                 .layer(layer)
                 .data()
                 .get_field(&node.path, FieldKey::VariantSelection.as_str())
+                && let Value::VariantSelectionMap(map) = value.into_owned()
             {
-                if let Value::VariantSelectionMap(map) = value.into_owned() {
-                    for (set_name, selection) in map {
-                        // A set the seed or a stronger opinion already fixed
-                        // ignores this value; skip before paying for
-                        // evaluation.
-                        let Entry::Vacant(entry) = selections.entry(set_name) else {
-                            continue;
-                        };
-                        let selection = if expr::is_expression(&selection) {
-                            let vars = graph.stack_expression_variables(node.layer_stack_id());
-                            let mut used_vars = HashSet::new();
-                            let evaluated = evaluate_expression(
-                                &selection,
-                                vars,
-                                ExpressionContext::Variant,
-                                graph.layer(layer),
-                                &node.path,
-                                None,
-                                Some(&mut used_vars),
-                            );
-                            expr_var_deps.record(node.layer_stack_id(), used_vars);
-                            match evaluated.into_selection() {
-                                Some(selection) => selection,
-                                None => continue,
-                            }
-                        } else {
-                            selection
-                        };
-                        entry.insert(selection);
-                    }
+                for (set_name, selection) in map {
+                    // A set the seed or a stronger opinion already fixed
+                    // ignores this value; skip before paying for
+                    // evaluation.
+                    let Entry::Vacant(entry) = selections.entry(set_name) else {
+                        continue;
+                    };
+                    let selection = if expr::is_expression(&selection) {
+                        let vars = graph.stack_expression_variables(node.layer_stack_id());
+                        let mut used_vars = HashSet::new();
+                        let evaluated = evaluate_expression(
+                            &selection,
+                            vars,
+                            ExpressionContext::Variant,
+                            graph.layer(layer),
+                            &node.path,
+                            None,
+                            Some(&mut used_vars),
+                        );
+                        expr_var_deps.record(node.layer_stack_id(), used_vars);
+                        match evaluated.into_selection() {
+                            Some(selection) => selection,
+                            None => continue,
+                        }
+                    } else {
+                        selection
+                    };
+                    entry.insert(selection);
                 }
             }
         }

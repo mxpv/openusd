@@ -422,7 +422,7 @@ impl LayerStackRegistry {
     /// index order — dependency order, since a key's source referent always
     /// precedes its owner. A rebuild walks this after refreshing the root stack
     /// so each instance's seed referent is already up to date when it is read.
-    pub(crate) fn targets(&self) -> impl Iterator<Item = (LayerStackId, LayerId, VarsSource)> + '_ {
+    pub(crate) fn targets(&self) -> impl Iterator<Item = (LayerStackId, LayerId, VarsSource)> {
         self.instances
             .iter()
             .enumerate()

@@ -13,7 +13,7 @@ pub use writer::ArchiveWriter;
 
 use std::io::Cursor;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::{ar, sdf, tf, usdc};
 

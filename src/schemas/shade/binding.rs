@@ -13,19 +13,19 @@
 //! two (the collection path + the Material). The optional `bindMaterialAs`
 //! metadata on the rel records binding strength.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use anyhow::Result;
 
 use crate::sdf::{Path, Value};
-use crate::usd::{is_collection_api_path, Collection, MembershipQuery, Prim, Relationship, Stage};
+use crate::usd::{Collection, MembershipQuery, Prim, Relationship, Stage, is_collection_api_path};
 
+use super::BindingStrength;
 use super::impl_shade_schema;
 use super::tokens::{
     API_MATERIAL_BINDING, META_BIND_MATERIAL_AS, PURPOSE_ALL, REL_MATERIAL_BINDING, REL_MATERIAL_BINDING_COLLECTION,
 };
-use super::BindingStrength;
 use crate::schemas::common::get_with_api;
 
 /// Material bindings on a prim (C++ `UsdShadeMaterialBindingAPI`, single-apply):
@@ -216,12 +216,11 @@ fn bound_material_for_single_purpose(
     let mut winner: Option<Path> = None;
     let mut current = Some(prim.clone());
     while let Some(p) = current {
-        if !p.is_abs_root() {
-            if let Some((material, strength)) = winning_binding_at(stage, &p, prim, purpose, cache)? {
-                if winner.is_none() || strength == BindingStrength::StrongerThanDescendants {
-                    winner = Some(material);
-                }
-            }
+        if !p.is_abs_root()
+            && let Some((material, strength)) = winning_binding_at(stage, &p, prim, purpose, cache)?
+            && (winner.is_none() || strength == BindingStrength::StrongerThanDescendants)
+        {
+            winner = Some(material);
         }
         current = p.parent();
     }
