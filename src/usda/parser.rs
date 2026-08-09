@@ -1527,6 +1527,14 @@ impl<'a> Parser<'a> {
             (Type::Token, false) => sdf::Value::token(self.fetch_str()?),
             (Type::String | Type::Token, true) => sdf::Value::token_vec(self.parse_array::<String>()?),
 
+            (Type::PathExpression, false) => sdf::Value::PathExpression(sdf::PathExpression::parse(self.fetch_str()?)),
+            (Type::PathExpression, true) => sdf::Value::PathExpressionVec(
+                self.parse_array::<String>()?
+                    .iter()
+                    .map(|text| sdf::PathExpression::parse(text))
+                    .collect(),
+            ),
+
             (Type::Matrix2d, false) => sdf::Value::Matrix2d(gf::Mat2d(self.parse_matrix::<2, 4>()?)),
             (Type::Matrix3d, false) => sdf::Value::Matrix3d(gf::Mat3d(self.parse_matrix::<3, 9>()?)),
             (Type::Matrix4d, false) => sdf::Value::Matrix4d(gf::Matrix4d(self.parse_matrix::<4, 16>()?)),
@@ -1591,6 +1599,7 @@ impl<'a> Parser<'a> {
             "token" => Type::Token,
             "asset" => Type::Asset,
             "timecode" => Type::TimeCode,
+            "pathExpression" => Type::PathExpression,
             "dictionary" => Type::Dictionary,
             _ => bail!("Unsupported type: {name}"),
         };
@@ -1959,6 +1968,7 @@ enum Type {
     Token,
     Asset,
     TimeCode,
+    PathExpression,
     Matrix2d,
     Matrix3d,
     Matrix4d,

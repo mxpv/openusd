@@ -659,9 +659,13 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 let idx = self.tokens.intern(s.clone());
                 Ok(rep_inline(Type::UnregisteredValue, idx as u64))
             }
-            Value::PathExpression(s) => {
-                let idx = self.tokens.intern(s.clone());
+            Value::PathExpression(expr) => {
+                let idx = self.tokens.intern(expr.to_string());
                 Ok(rep_inline(Type::PathExpression, idx as u64))
+            }
+            Value::PathExpressionVec(v) => {
+                let texts: Vec<String> = v.iter().map(|expr| expr.to_string()).collect();
+                self.write_string_vec(Type::PathExpression, &texts)
             }
 
             // Heterogeneous arrays are produced only by the USDA spline parser;

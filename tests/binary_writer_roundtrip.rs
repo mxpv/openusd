@@ -223,6 +223,7 @@ vendor_tests! {
     vendor_gen_quatd,
     vendor_gen_quatf,
     vendor_gen_quath,
+    vendor_gen_pathexpression,
     vendor_gen_relocates,
     vendor_gen_timecodes,
     vendor_gen_timesamples,
@@ -355,8 +356,7 @@ fn quat_write_read_preserves_wxyz_convention() {
 // Skipped fixtures — these fail during the *read* step, not during writing,
 // and are therefore pre-existing reader-side limitations:
 //
-// - `gen_assetpath.usdc` / `gen_pathexpression.usdc`: reader has no branch for
-//   `AssetPath[]` / `PathExpression[]` array ValueReps (hits
-//   `Can't unpack array ... as inline value`).
+// - `gen_assetpath.usdc`: reader has no branch for `AssetPath[]` array
+//   ValueReps (hits `Can't unpack array ... as inline value`).
 // - `gen_splines.usdc`: splines materialise as `Value::ValueVec`, which has no
 //   USDC type code (the binary format lacks a heterogeneous-array type).

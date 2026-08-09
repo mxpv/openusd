@@ -168,7 +168,8 @@ fn assert_strings(data: &CrateData<File>) {
 
 fn scalar_str(v: &Value) -> String {
     match v {
-        Value::String(s) | Value::PathExpression(s) => s.clone(),
+        Value::String(s) => s.clone(),
+        Value::PathExpression(e) => e.to_string(),
         Value::Token(s) => s.as_str().to_string(),
         Value::AssetPath(s) => s.authored_path.clone(),
         other => panic!("not a string-like value: {other:?}"),
@@ -180,6 +181,7 @@ fn str_vec(v: &Value) -> Vec<String> {
         Value::StringVec(a) => a.clone(),
         Value::TokenVec(a) => a.iter().map(|t| t.as_str().to_string()).collect(),
         Value::AssetPathVec(a) => a.iter().map(|p| p.authored_path.clone()).collect(),
+        Value::PathExpressionVec(a) => a.iter().map(|e| e.to_string()).collect(),
         other => panic!("not a string-like array: {other:?}"),
     }
 }
@@ -376,7 +378,7 @@ fn path_expression_values() {
     let data = scene("pathexpression");
     assert_eq!(
         value(&data, "/root.single", "default"),
-        Value::PathExpression("/root/Foo".into())
+        Value::PathExpression(sdf::PathExpression::parse("/root/Foo"))
     );
     let array = str_vec(&value(&data, "/root.array", "default"));
     assert_eq!(array, vec!["/root/Spam", "/root/Eggs"]);

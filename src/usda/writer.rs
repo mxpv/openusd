@@ -1014,7 +1014,11 @@ fn format_value(s: &mut String, v: &Value) -> Result<()> {
             Ok(())
         })?,
 
-        Value::PathExpression(expr) => write_quoted(s, expr)?,
+        Value::PathExpression(expr) => write_quoted(s, &expr.to_string())?,
+        Value::PathExpressionVec(v) => format_vec(s, v, |s, expr| {
+            write_quoted(s, &expr.to_string())?;
+            Ok(())
+        })?,
     }
     Ok(())
 }
@@ -1351,6 +1355,8 @@ fn dict_value_type_name(v: &Value) -> Option<&'static str> {
         Value::Matrix4dVec(_) => "matrix4d[]",
         Value::TimeCode(_) => "timecode",
         Value::TimeCodeVec(_) => "timecode[]",
+        Value::PathExpression(_) => "pathExpression",
+        Value::PathExpressionVec(_) => "pathExpression[]",
         Value::Dictionary(_) => "dictionary",
         _ => return None,
     })

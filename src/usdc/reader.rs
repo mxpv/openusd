@@ -1406,14 +1406,18 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             Type::PathExpression if value.is_array() => {
                 // Path-expression arrays are stored like string arrays
-                // (string-table indices); surface them as a `StringVec`, as the
-                // `Value` enum has no dedicated path-expression array variant.
+                // (string-table indices), each entry parsed into an expression.
                 self.set_position(value.payload())?;
-                sdf::Value::StringVec(self.read_string_vec()?)
+                sdf::Value::PathExpressionVec(
+                    self.read_string_vec()?
+                        .iter()
+                        .map(|text| sdf::PathExpression::parse(text))
+                        .collect(),
+                )
             }
             Type::PathExpression => {
                 let expr = self.read_asset_path(value)?;
-                sdf::Value::PathExpression(expr)
+                sdf::Value::PathExpression(sdf::PathExpression::parse(&expr))
             }
 
             Type::UnregisteredValue => {

@@ -147,7 +147,9 @@ pub enum Value {
     TimeCode(TimeCode),
     TimeCodeVec(Vec<TimeCode>),
     #[from(skip)]
-    PathExpression(String),
+    PathExpression(super::PathExpression),
+    #[from(skip)]
+    PathExpressionVec(Vec<super::PathExpression>),
 }
 
 #[cfg(feature = "serde")]
@@ -179,7 +181,12 @@ impl serde::Serialize for Value {
             Value::TimeCode(v) => v.serialize(serializer),
             Value::TimeCodeVec(v) => v.serialize(serializer),
 
-            Value::String(v) | Value::PathExpression(v) => v.serialize(serializer),
+            Value::String(v) => v.serialize(serializer),
+            Value::PathExpression(v) => v.to_string().serialize(serializer),
+            Value::PathExpressionVec(v) => {
+                let texts: Vec<String> = v.iter().map(|e| e.to_string()).collect();
+                texts.serialize(serializer)
+            }
             Value::Token(v) => v.serialize(serializer),
             Value::AssetPath(v) => v.serialize(serializer),
             Value::StringVec(v) => v.serialize(serializer),
@@ -327,11 +334,12 @@ impl Value {
 
     /// Whether this value embeds namespace paths that [`remap_paths`](Self::remap_paths)
     /// rewrites — `PathVec`, `PathListOp` (relationship targets, attribute
-    /// connections, `inheritPaths`, `specializes`), `Relocates`, and
+    /// connections, `inheritPaths`, `specializes`), `Relocates`,
     /// `ReferenceListOp` / `PayloadListOp` (whose internal entries target this
-    /// layer's own namespace). The single source of truth a copy value policy
-    /// checks before remapping, so the set of path-bearing variants lives only
-    /// here.
+    /// layer's own namespace), and `PathExpression` / `PathExpressionVec`
+    /// (pattern prefixes and expression-reference paths). The single source of
+    /// truth a copy value policy checks before remapping, so the set of
+    /// path-bearing variants lives only here.
     pub fn has_embedded_paths(&self) -> bool {
         matches!(
             self,
@@ -340,6 +348,8 @@ impl Value {
                 | Value::Relocates(_)
                 | Value::ReferenceListOp(_)
                 | Value::PayloadListOp(_)
+                | Value::PathExpression(_)
+                | Value::PathExpressionVec(_)
         )
     }
 
@@ -369,7 +379,9 @@ impl Value {
     /// A `PathVec` element or list-op item that maps to `None` is removed. An
     /// external reference or payload (whose prim path lives in the referenced
     /// layer's namespace) is never offered to `remap` and is always kept; a
-    /// relocate pair is dropped when its source maps to `None`.
+    /// relocate pair is dropped when its source maps to `None`; a
+    /// `PathExpression` atom whose path maps to `None` collapses to the empty
+    /// expression.
     pub fn filter_map_paths(&self, remap: impl Fn(&Path) -> Option<Path>) -> Value {
         let remap = &remap;
         match self {
@@ -395,6 +407,10 @@ impl Value {
                 }
                 Some(payload)
             })),
+            Value::PathExpression(expr) => Value::PathExpression(expr.clone().map_paths(remap)),
+            Value::PathExpressionVec(exprs) => {
+                Value::PathExpressionVec(exprs.iter().map(|e| e.clone().map_paths(remap)).collect())
+            }
             other => other.clone(),
         }
     }
@@ -975,6 +991,36 @@ mod tests {
 
         // A value with no embedded paths is returned unchanged.
         assert_eq!(Value::Int(7).remap_paths(remap), Value::Int(7));
+    }
+
+    #[test]
+    fn remap_paths_expression() {
+        use crate::sdf;
+
+        let p = |s: &str| sdf::path(s).unwrap();
+        let remap = |path: &Path| path.replace_prefix(&p("/A"), &p("/B")).unwrap_or_else(|| path.clone());
+
+        // Pattern prefixes and reference paths re-root with the namespace.
+        let expr = Value::PathExpression(sdf::PathExpression::parse("/A/Kids// %/A/Sets:heroes"));
+        assert!(expr.has_embedded_paths());
+        assert_eq!(
+            expr.remap_paths(remap).try_as_path_expression().unwrap().to_string(),
+            "/B/Kids// %/B/Sets:heroes"
+        );
+
+        let vec = Value::PathExpressionVec(vec![sdf::PathExpression::parse("/A/X")]);
+        assert!(vec.has_embedded_paths());
+        assert_eq!(
+            vec.remap_paths(remap).try_as_path_expression_vec().unwrap()[0].to_string(),
+            "/B/X"
+        );
+
+        // A dropped path collapses the atom to the empty expression.
+        let dropped = Value::PathExpression(sdf::PathExpression::parse("/A/Kids//"))
+            .filter_map_paths(|_| None)
+            .try_as_path_expression()
+            .unwrap();
+        assert!(dropped.is_empty());
     }
 
     #[test]

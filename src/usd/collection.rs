@@ -18,15 +18,15 @@
 //! path-membership predicate built from those opinions.
 //!
 //! The newer pattern-based `membershipExpression` mode (an
-//! `SdfPathExpression` predicate) is read here as a raw string but is not
-//! yet *evaluated* — that engine is a separate effort. Relationship-mode
+//! `SdfPathExpression` predicate) is read here as a typed expression but is
+//! not yet *evaluated* — that engine is a separate effort. Relationship-mode
 //! collections are fully supported.
 
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::sdf::{FieldKey, Path, Value, Variability};
+use crate::sdf::{self, FieldKey, Path, Value, Variability};
 use crate::usd::{Prim, PrimPredicate, Relationship, Stage};
 
 /// Multiple-apply API schema name; instances appear in `apiSchemas` as
@@ -150,13 +150,15 @@ impl Collection {
         stage.relationship(self.prop(EXCLUDES)?).targets()
     }
 
-    /// The raw `membershipExpression` string, if authored. Read-only —
+    /// The composed `membershipExpression`, if authored. A string or token
+    /// opinion parses leniently into an expression. Read-only —
     /// expression-mode evaluation is not implemented yet.
-    pub fn membership_expression(&self, stage: &Stage) -> Result<Option<String>> {
+    pub fn membership_expression(&self, stage: &Stage) -> Result<Option<sdf::PathExpression>> {
         Ok(
             match stage.field::<Value>(self.prop(MEMBERSHIP_EXPRESSION)?, FieldKey::Default)? {
-                Some(Value::PathExpression(s) | Value::String(s)) => Some(s),
-                Some(Value::Token(s)) => Some(s.into()),
+                Some(Value::PathExpression(expr)) => Some(expr),
+                Some(Value::String(s)) => Some(sdf::PathExpression::parse(&s)),
+                Some(Value::Token(s)) => Some(sdf::PathExpression::parse(s.as_str())),
                 _ => None,
             },
         )
