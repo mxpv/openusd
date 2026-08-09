@@ -47,6 +47,8 @@ enum EvalOp {
 /// One compiled pattern (C++ `Sdf_PathExpressionEvalBase::_PatternImplBase`).
 struct PatternImpl<D> {
     prefix: Path,
+    /// The prefix's [`path_depth`].
+    prefix_depth: usize,
     /// The non-stretch components; stretches survive only as the segment
     /// boundaries and the two flags.
     components: Vec<CompiledComponent>,
@@ -54,6 +56,9 @@ struct PatternImpl<D> {
     programs: Vec<PredicateProgram<D>>,
     /// Half-open component ranges between stretches.
     segments: Vec<Segment>,
+    /// The widest segment's component count, bounding the element window an
+    /// incremental step needs.
+    widest_segment: usize,
     /// Whether a stretch opens the components, floating the first segment.
     stretch_begin: bool,
     /// Whether a stretch closes the components, extending a match to every
@@ -132,14 +137,37 @@ impl<D> PathExpressionEval<D> {
     /// the predicate domain object for a path; it runs only when a predicate
     /// actually needs it.
     pub fn match_path(&self, path: &Path, domain: &impl Fn(&Path) -> D) -> PredResult {
+        self.eval_expr(|pattern| self.patterns[pattern].match_path(path, domain))
+    }
+
+    /// A fresh [`IncrementalSearcher`] borrowing this evaluator; `domain`
+    /// supplies the predicate domain object for a path, as in
+    /// [`match_path`](Self::match_path).
+    pub fn incremental_searcher<F: Fn(&Path) -> D>(&self, domain: F) -> IncrementalSearcher<'_, D, F> {
+        IncrementalSearcher {
+            eval: self,
+            states: self.patterns.iter().map(|_| PatternSearchState::default()).collect(),
+            domain,
+            last_path_depth: 0,
+        }
+    }
+
+    /// Walks the bytecode, sourcing per-pattern answers from `eval_pattern`
+    /// (called with each pattern's index, in pattern order) and combining
+    /// them through the operators (C++ `_EvalExpr`). A short-circuited
+    /// right operand's patterns are passed over without being evaluated.
+    fn eval_expr(&self, mut eval_pattern: impl FnMut(usize) -> PredResult) -> PredResult {
         let mut result = PredResult::constant(false);
         let mut pattern = 0;
         let mut op = 0;
+        // TODO(perf): expressions nest shallowly, so an inline small-buffer
+        // stack would avoid this per-evaluation allocation on the searcher's
+        // per-visit path.
         let mut stack: Vec<(EvalOp, PredResult)> = Vec::new();
         while op < self.ops.len() {
             match self.ops[op] {
                 EvalOp::EvalPattern => {
-                    result = self.patterns[pattern].match_path(path, domain);
+                    result = eval_pattern(pattern);
                     pattern += 1;
                 }
                 EvalOp::Not => result = !result,
@@ -218,13 +246,112 @@ impl<D> PathExpressionEval<D> {
     }
 }
 
+/// A stateful depth-first searcher over one expression (C++
+/// `SdfPathExpressionEval::IncrementalSearcher`), created by
+/// [`PathExpressionEval::incremental_searcher`].
+///
+/// [`next`](Self::next) must be fed paths in depth-first order: each path a
+/// direct child of the previous one, a sibling, or the sibling of one of
+/// its ancestors. Never feeding any path under a visited one — skipping
+/// that whole subtree — is valid. Each answer's value equals one-shot
+/// [`match_path`](PathExpressionEval::match_path) on the same path, at a
+/// fraction of the per-visit cost: matched segments and subtree-constant
+/// answers are carried between visits, so a visit only tries to extend
+/// each pattern's match by the newly added path element. An answer may be
+/// subtree-constant where the one-shot answer varies; the values agree
+/// everywhere.
+// TODO(rayon): C++ supports copying a searcher so a fork can search a
+// sibling subtree in parallel; derive `Clone` when a traversal needs it.
+pub struct IncrementalSearcher<'a, D, F: Fn(&Path) -> D> {
+    eval: &'a PathExpressionEval<D>,
+    states: Vec<PatternSearchState>,
+    domain: F,
+    last_path_depth: usize,
+}
+
+impl<D, F: Fn(&Path) -> D> IncrementalSearcher<'_, D, F> {
+    /// Advances the search to `path` — the next step of a depth-first
+    /// traversal, per the ordering contract above — and answers whether it
+    /// is in the expression's set.
+    pub fn next(&mut self, path: &Path) -> PredResult {
+        let visit = Visit {
+            path,
+            depth: path_depth(path),
+            is_property: path.is_property_path(),
+            addressable: addressable(path),
+        };
+        // Ascending (or stepping to a sibling) invalidates state gathered at
+        // or below the new depth — for every pattern, evaluated or not.
+        if visit.depth <= self.last_path_depth {
+            for state in &mut self.states {
+                state.pop(visit.depth);
+            }
+        }
+        self.last_path_depth = visit.depth;
+        let (eval, states, domain) = (self.eval, &mut self.states, &self.domain);
+        eval.eval_expr(|pattern| eval.patterns[pattern].next(&mut states[pattern], &visit, domain))
+    }
+
+    /// Forgets all search state so a new traversal may begin.
+    pub fn reset(&mut self) {
+        for state in &mut self.states {
+            state.segment_match_depths.clear();
+            state.constant = None;
+        }
+        self.last_path_depth = 0;
+    }
+}
+
+/// Per-pattern incremental search state (C++ `_PatternIncrSearchState`).
+#[derive(Debug, Default)]
+struct PatternSearchState {
+    /// The absolute path depth at which each matched segment's match ended,
+    /// one entry per segment matched so far.
+    segment_match_depths: Vec<usize>,
+    /// The depth at which the answer became subtree-constant, with the
+    /// value.
+    constant: Option<(usize, bool)>,
+}
+
+impl PatternSearchState {
+    /// Discards state invalidated by stepping to a path of depth
+    /// `new_depth`: segment matches that ended at `new_depth` or deeper
+    /// (the element they matched has been replaced), and the constant memo
+    /// once the walk climbs back to where it was recorded.
+    fn pop(&mut self, new_depth: usize) {
+        while self
+            .segment_match_depths
+            .last()
+            .is_some_and(|&depth| depth >= new_depth)
+        {
+            self.segment_match_depths.pop();
+        }
+        if self.constant.is_some_and(|(depth, _)| new_depth <= depth) {
+            self.constant = None;
+        }
+    }
+}
+
+/// The per-visit facts every pattern's incremental step shares, computed
+/// once by [`IncrementalSearcher::next`].
+struct Visit<'a> {
+    path: &'a Path,
+    /// The path's [`path_depth`].
+    depth: usize,
+    is_property: bool,
+    /// Whether the pattern grammar can [address](addressable) the path.
+    addressable: bool,
+}
+
 impl<D> PatternImpl<D> {
     fn compile(pattern: &PathPattern, library: &PredicateLibrary<D>) -> Result<Self> {
         let mut compiled = PatternImpl {
             prefix: pattern.prefix().clone(),
+            prefix_depth: path_depth(pattern.prefix()),
             components: Vec::new(),
             programs: Vec::new(),
             segments: Vec::new(),
+            widest_segment: 0,
             stretch_begin: false,
             stretch_end: false,
             matches: ObjectKind::PrimOrProperty,
@@ -265,6 +392,7 @@ impl<D> PatternImpl<D> {
             compiled.components.push(CompiledComponent { kind, program_index });
         }
         close_segment(&mut compiled.segments, compiled.components.len(), &mut segment_start);
+        compiled.widest_segment = compiled.segments.iter().map(|s| s.end - s.begin).max().unwrap_or(0);
 
         // Which object kinds can match: a property pattern only properties; a
         // pattern whose tail is a named component only prims; a stretch or
@@ -328,6 +456,161 @@ impl<D> PatternImpl<D> {
         } else {
             PredResult::varying(false)
         }
+    }
+
+    /// One incremental search step (C++ `_PatternImplBase::_Next`): the
+    /// answer for `visit`'s path, resuming from the segment matches `state`
+    /// accumulated over the paths visited above it.
+    fn next(&self, state: &mut PatternSearchState, visit: &Visit<'_>, domain: &impl Fn(&Path) -> D) -> PredResult {
+        if let Some((_, value)) = state.constant {
+            return PredResult::constant(value);
+        }
+
+        let Visit { path, depth, .. } = *visit;
+
+        // The prefix needs checking only until the first segment lands;
+        // once segments have matched, the walk is inside the prefix subtree.
+        if state.segment_match_depths.is_empty() && !path.has_prefix(&self.prefix) {
+            return if self.prefix.has_prefix(path) {
+                PredResult::varying(false)
+            } else {
+                state.constant = Some((self.prefix_depth, false));
+                PredResult::constant(false)
+            };
+        }
+
+        // A prim pattern can never match a property or anything below it. A
+        // property pattern cannot match a prim, but the prim's elements
+        // still feed interior segments and its properties may match below,
+        // so the machinery runs and a would-be match is demoted.
+        if self.matches == ObjectKind::PrimOnly && visit.is_property {
+            return PredResult::constant(false);
+        }
+        let demote = self.matches == ObjectKind::PropertyOnly && !visit.is_property;
+
+        if self.components.is_empty() {
+            // Pure prefix: with a stretch the whole subtree matches; without
+            // one only the prefix itself does.
+            if self.stretch_begin || self.stretch_end {
+                if demote {
+                    return PredResult::varying(false);
+                }
+                state.constant = Some((self.prefix_depth, true));
+                return PredResult::constant(true);
+            }
+            return if depth != self.prefix_depth {
+                state.constant = Some((self.prefix_depth, false));
+                PredResult::constant(false)
+            } else if demote {
+                PredResult::varying(false)
+            } else {
+                PredResult::varying(true)
+            };
+        }
+
+        if !visit.addressable {
+            state.constant = Some((depth, false));
+            return PredResult::constant(false);
+        }
+
+        // With every segment already matched, the trailing segment gets to
+        // re-match deeper: `//Foo//foo/bar` against
+        // `/Foo/geom/foo/bar/foo/bar` re-lands `foo/bar` at each deeper
+        // occurrence.
+        if state.segment_match_depths.len() == self.segments.len() {
+            state.segment_match_depths.pop();
+        }
+
+        // The candidate elements: alignments only ever read a segment's
+        // width plus the prior element a leading bare predicate may bind
+        // to, so the widest segment bounds the extraction; each loop
+        // iteration works on a suffix of this one window.
+        let first_prev = state.segment_match_depths.last().copied().unwrap_or(self.prefix_depth);
+        let elements = last_elements(path, (depth - first_prev + 1).min(self.widest_segment + 1));
+
+        // Segments can overlap — a leading bare predicate may bind the
+        // element the previous segment ended on, consuming nothing — so one
+        // visit may complete several segments.
+        loop {
+            let index = state.segment_match_depths.len();
+            let segment = self.segments[index];
+            let has_prev = index > 0;
+            let is_final = index + 1 == self.segments.len();
+            let prev_end = state.segment_match_depths.last().copied().unwrap_or(self.prefix_depth);
+            // The elements grown since the previous segment's match (or the
+            // prefix) are all this segment may consume.
+            let available = depth - prev_end;
+            if available < self.segment_min_match_elts(segment) {
+                return PredResult::varying(false);
+            }
+            let has_stretch = has_prev || self.stretch_begin;
+            let width = self.segment_width(segment);
+            if !has_stretch && available > width {
+                // The head-anchored segment needed to consume every element,
+                // and the walk has grown past it.
+                state.constant = Some((depth, false));
+                return PredResult::constant(false);
+            }
+            // This segment's window: the deepest `available` elements, plus
+            // the prior element a leading bare predicate may bind to, capped
+            // to what an alignment can read.
+            let bare = self.components[segment.begin].is_bare_predicate();
+            let prior = has_stretch && bare && depth != 0;
+            let count = (available + usize::from(prior)).min(width + 1).min(elements.len());
+            let window = &elements[elements.len() - count..];
+            // The segment must land on the path's tail — the newly added
+            // element is the only new match opportunity. A non-final segment
+            // opening with a bare predicate may instead land one element
+            // short, binding that predicate to the prior element (tried
+            // first, mirroring `segment_placements`' preference for
+            // `prior`).
+            let end_depth = window.len().checked_sub(width).and_then(|exact| {
+                if !is_final
+                    && bare
+                    && exact > 0
+                    && self.try_alignment(segment, segment.begin, window, exact - 1, domain)
+                {
+                    Some(depth - 1)
+                } else if self.try_alignment(segment, segment.begin, window, exact, domain) {
+                    Some(depth)
+                } else {
+                    None
+                }
+            });
+            match end_depth {
+                Some(end) => {
+                    state.segment_match_depths.push(end);
+                    if is_final {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        if state.segment_match_depths.len() == self.segments.len() {
+            let last = *state.segment_match_depths.last().expect("all segments matched");
+            if demote {
+                // The prim itself cannot be the property match it spells
+                // out; its properties answer for themselves.
+                return PredResult::varying(false);
+            }
+            if self.stretch_end {
+                state.constant = Some((last, true));
+                return PredResult::constant(true);
+            }
+            // The final segment only ever lands exactly on the path's tail.
+            debug_assert_eq!(last, depth);
+            return PredResult::varying(true);
+        }
+        PredResult::varying(false)
+    }
+
+    /// The fewest path elements `segment` can consume: its width, less one
+    /// when a leading bare predicate may bind the prior element instead
+    /// (C++ `_SegmentMinMatchElts`).
+    fn segment_min_match_elts(&self, segment: Segment) -> usize {
+        self.segment_width(segment) - usize::from(self.components[segment.begin].is_bare_predicate())
     }
 
     /// Places every segment over `elements`: the first anchored at the head
@@ -473,34 +756,46 @@ struct Element<'a> {
     path: Path,
 }
 
-/// The elements of `path` below `prefix`, root-ward first, the property tail
-/// last. `None` for paths the pattern grammar cannot address (variant
-/// selections, relationship targets).
-fn tail_elements<'a>(path: &'a Path, prefix: &Path) -> Option<Vec<Element<'a>>> {
-    if path.contains_prim_variant_selection() || path.as_str().contains('[') {
-        return None;
-    }
+/// The depth the matchers measure paths by: the number of [`Element`]s the
+/// path yields — its prim names plus the property tail.
+fn path_depth(path: &Path) -> usize {
+    path.prim_element_count() + usize::from(path.is_property_path())
+}
 
+/// Whether the pattern grammar can address `path` at all; variant
+/// selections and relationship targets are outside it.
+fn addressable(path: &Path) -> bool {
+    !path.contains_prim_variant_selection() && !path.as_str().contains('[')
+}
+
+/// The elements of `path` below `prefix`, root-ward first, the property tail
+/// last. `None` for paths the pattern grammar cannot [address](addressable).
+/// The prefix itself may be a property path only when it equals `path`,
+/// which the callers' no-component branches already answered.
+fn tail_elements<'a>(path: &'a Path, prefix: &Path) -> Option<Vec<Element<'a>>> {
+    addressable(path).then(|| last_elements(path, path_depth(path) - path_depth(prefix)))
+}
+
+/// The deepest `count` elements of `path`, root-ward first, the property
+/// tail last; the whole path when it has fewer.
+// TODO(perf): an `Element` could be a byte-offset view into the path's
+// string, materializing the predicate's domain `Path` only when a component
+// actually carries a predicate; that would drop the per-element `Path`
+// allocations here for predicate-free patterns.
+fn last_elements(path: &Path, count: usize) -> Vec<Element<'_>> {
     let mut elements = Vec::new();
+    if count == 0 {
+        return elements;
+    }
     let (prim_path, property) = match path.split_property() {
         Some((prim, name)) => (prim, Some(name)),
         None => (path.clone(), None),
     };
 
-    // Walk prim ancestors down to the prefix. The prefix itself may be a
-    // property path only when it equals `path`, which the caller's
-    // no-component branch already answered.
-    let mut chain: Vec<Path> = Vec::new();
-    let mut cursor = prim_path.clone();
-    while cursor != *prefix && !cursor.is_empty() {
-        if !cursor.has_prefix(prefix) {
-            return None;
-        }
-        chain.push(cursor.clone());
-        cursor = cursor.parent()?;
-    }
+    let prim_count = count - usize::from(property.is_some());
+    let chain: Vec<Path> = prim_path.ancestors_below_root().take(prim_count).collect();
     for ancestor in chain.into_iter().rev() {
-        let name_len = ancestor.name().map(str::len)?;
+        let name_len = ancestor.name().expect("chain holds named ancestors").len();
         let start = ancestor.as_str().len() - name_len;
         elements.push(Element {
             // Borrow the name out of `path`, which shares the ancestor text.
@@ -515,7 +810,7 @@ fn tail_elements<'a>(path: &'a Path, prefix: &Path) -> Option<Vec<Element<'a>>> 
             path: path.clone(),
         });
     }
-    Some(elements)
+    elements
 }
 
 #[cfg(test)]
@@ -746,6 +1041,255 @@ mod tests {
                 "{text} should be rejected"
             );
         }
+    }
+
+    /// The expressions the searcher is checked against, spanning stretches,
+    /// bare predicates (including prefix binding), globs, predicate
+    /// arguments, property patterns, and set algebra.
+    const CORPUS: &[&str] = &[
+        "//",
+        "/World/chars//",
+        "/World/Robot",
+        "/World//Robot*",
+        "/a/x*",
+        "/a/x*//m/n//z",
+        "/r//a/b//c",
+        "/foo/{always}",
+        "/a/{always}/x",
+        "/r//{always}/a//a/b",
+        "/foo//{name:foo}",
+        "/foo//{name:other}",
+        "//*.attr",
+        "/a/b.attr:ns",
+        "//{name:tag}",
+        "//x{depth:2}/y",
+        "//{name:on}//",
+        "//{always}//{name:hit}",
+        "//{always}//{always}",
+        "//x//*.attr",
+        "/a//b//*.attr",
+        "//{always}//*.attr",
+        "//Foo//foo/bar",
+        "/a// - /a/b//",
+        "/a// /b//",
+        "//{name:tag} & /a//",
+        "~/a//",
+    ];
+
+    /// Expands `leaves` into the full tree visit: every ancestor included,
+    /// in depth-first pre-order. Lexicographic path order is such an order
+    /// here — every fixture name is alphanumeric, so `/` sorts before any
+    /// name byte and `.` just before `/`, putting each prim before its
+    /// properties and those before its children.
+    fn dfs_walk(leaves: &[&str]) -> Vec<Path> {
+        let mut all = vec![Path::abs_root()];
+        for leaf in leaves {
+            let mut cursor = path(leaf).unwrap();
+            while !cursor.is_abs_root() {
+                all.push(cursor.clone());
+                cursor = cursor.parent().expect("fixture paths are absolute");
+            }
+        }
+        all.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        all.dedup();
+        all
+    }
+
+    /// The synthetic tree the searcher tests walk.
+    fn fixture_walk() -> Vec<Path> {
+        dfs_walk(&[
+            "/Foo/geom/foo/bar/foo/bar/foo/bar",
+            "/World/Rob",
+            "/World/Robot/arm",
+            "/World/Robot1.attr",
+            "/World/anim/chars/RobotX",
+            "/World/chars/Bob",
+            "/World/chars/Mike/geo",
+            "/a/b.attr",
+            "/a/b.attr:ns",
+            "/a/b/c.attr",
+            "/a/n/b/c.attr",
+            "/a/off",
+            "/a/on/deep/below",
+            "/a/q/x1/m",
+            "/a/tag",
+            "/a/w/b.p",
+            "/a/w/b/c.attr",
+            "/a/x/y",
+            "/a/x1/m/n/z",
+            "/a/x1/q/m/n/r/z",
+            "/b/x",
+            "/c/x",
+            "/foo/child.attr",
+            "/foo/foo",
+            "/hit",
+            "/q/b/x/y",
+            "/r/a/a/b",
+            "/r/a/b/a/b/c",
+            "/r/x/a/b/x/c",
+            "/x/hit",
+            "/x/q.attr",
+            "/x/tag/y",
+        ])
+    }
+
+    /// A depth-first subsequence of `full`: some prims prune their whole
+    /// subtree (themselves included), decided by a seeded
+    /// linear-congruential counter. The absolute root always survives, so
+    /// every seed yields a non-empty walk.
+    fn pruned_walk(full: &[Path], seed: u64) -> Vec<Path> {
+        let mut state = seed;
+        let mut skip: Option<Path> = None;
+        let mut out = Vec::new();
+        for p in full {
+            if let Some(prefix) = &skip {
+                if p.has_prefix(prefix) {
+                    continue;
+                }
+                skip = None;
+            }
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            if state >> 62 == 0 && !p.is_abs_root() {
+                skip = Some(p.clone());
+            } else {
+                out.push(p.clone());
+            }
+        }
+        out
+    }
+
+    /// Feeds `walk` — a depth-first path sequence — to a fresh searcher,
+    /// checking every step against the one-shot matcher: the values must be
+    /// identical, and the searcher may add subtree constancy (C++ `_Next`
+    /// prunes harder than `_Match` in places) but never lose it.
+    fn check_walk(text: &str, walk: &[Path]) {
+        let e = eval(text);
+        let mut searcher = e.incremental_searcher(Path::clone);
+        for step in walk {
+            let one_shot = e.match_path(step, &Path::clone);
+            let incr = searcher.next(step);
+            assert_eq!(incr.value, one_shot.value, "<{text}> at <{step}>: value diverged");
+            assert!(
+                incr.constant || !one_shot.constant,
+                "<{text}> at <{step}>: constancy lost"
+            );
+        }
+    }
+
+    #[test]
+    fn state_pop() {
+        let mut state = PatternSearchState {
+            segment_match_depths: vec![1, 3, 5],
+            constant: Some((4, true)),
+        };
+        // Matches that ended at the new depth or deeper drop, and climbing
+        // to the memo's depth clears it.
+        state.pop(4);
+        assert_eq!(state.segment_match_depths, [1, 3]);
+        assert_eq!(state.constant, None);
+
+        // Descending below both leaves everything in place.
+        let mut keep = PatternSearchState {
+            segment_match_depths: vec![2],
+            constant: Some((2, false)),
+        };
+        keep.pop(3);
+        assert_eq!(keep.segment_match_depths, [2]);
+        assert_eq!(keep.constant, Some((2, false)));
+    }
+
+    #[test]
+    fn searcher_full_walks() {
+        let walk = fixture_walk();
+        for text in CORPUS {
+            check_walk(text, &walk);
+        }
+    }
+
+    #[test]
+    fn searcher_pruned_walks() {
+        let full = fixture_walk();
+        for seed in 0..8 {
+            let walk = pruned_walk(&full, seed);
+            for text in CORPUS {
+                check_walk(text, &walk);
+            }
+        }
+    }
+
+    #[test]
+    fn searcher_zigzag() {
+        // Deep chain, back to a shallow sibling, deep again: `pop` must
+        // discard exactly the state below each landing depth.
+        let walk = dfs_walk(&["/a/x1/q/m/n/r/z", "/b/a/x1/q/m/n/r/z", "/c/z"]);
+        for text in CORPUS {
+            check_walk(text, &walk);
+        }
+    }
+
+    #[test]
+    fn searcher_rematch_tail() {
+        // The trailing `foo/bar` re-lands at every deeper occurrence.
+        let walk = dfs_walk(&["/Foo/geom/foo/bar/foo/bar/foo/bar"]);
+        let e = eval("//Foo//foo/bar");
+        let mut searcher = e.incremental_searcher(Path::clone);
+        let values: Vec<bool> = walk.iter().map(|p| searcher.next(p).value).collect();
+        assert_eq!(
+            values,
+            [false, false, false, false, true, false, true, false, true],
+            "one hit per /foo/bar tail"
+        );
+        check_walk("//Foo//foo/bar", &walk);
+    }
+
+    #[test]
+    fn searcher_binds_prefix() {
+        // Under a leading stretch, a bare predicate may bind the prefix
+        // element itself — on the searcher's very first step.
+        let e = eval("/foo//{name:foo}");
+        let mut searcher = e.incremental_searcher(Path::clone);
+        assert_eq!(searcher.next(&path("/foo").unwrap()), PredResult::varying(true));
+
+        let miss = eval("/foo//{name:other}");
+        let mut searcher = miss.incremental_searcher(Path::clone);
+        assert_eq!(searcher.next(&path("/foo").unwrap()), PredResult::varying(false));
+    }
+
+    #[test]
+    fn searcher_property_segments() {
+        // Interior prim segments accumulate at prim visits even though a
+        // property pattern can never match the prims themselves.
+        let e = eval("//x//*.attr");
+        let mut searcher = e.incremental_searcher(Path::clone);
+        assert_eq!(searcher.next(&path("/x").unwrap()), PredResult::varying(false));
+        assert_eq!(searcher.next(&path("/x/q").unwrap()), PredResult::varying(false));
+        assert_eq!(searcher.next(&path("/x/q.attr").unwrap()), PredResult::varying(true));
+    }
+
+    #[test]
+    fn searcher_overshoot_constant() {
+        // Once a head-anchored segment can no longer consume every element,
+        // the searcher prunes with a constant answer where the one-shot
+        // matcher only reports varying false.
+        let e = eval("/a/x*");
+        let mut searcher = e.incremental_searcher(Path::clone);
+        assert_eq!(searcher.next(&path("/a").unwrap()), PredResult::varying(false));
+        assert_eq!(searcher.next(&path("/a/q").unwrap()), PredResult::varying(false));
+        assert_eq!(searcher.next(&path("/a/q/r").unwrap()), PredResult::constant(false));
+        assert_eq!(check(&e, "/a/q/r"), PredResult::varying(false));
+    }
+
+    #[test]
+    fn searcher_reset() {
+        let e = eval("/r//a/b//c");
+        let mut searcher = e.incremental_searcher(Path::clone);
+        let walk = dfs_walk(&["/r/a/b/a/b/c"]);
+        let first: Vec<PredResult> = walk.iter().map(|p| searcher.next(p)).collect();
+        searcher.reset();
+        let second: Vec<PredResult> = walk.iter().map(|p| searcher.next(p)).collect();
+        assert_eq!(first, second);
     }
 
     #[test]

@@ -151,13 +151,25 @@ impl PrimPredicate {
         bits
     }
 
+    /// This predicate restricted to its inherited bits. It descends and
+    /// prunes exactly like the original while also visiting the prims the
+    /// original declines for non-inherited bits (e.g. a `MODEL` rejection,
+    /// which excludes a model prim whose non-model descendants still
+    /// match), so a traversal under it visits a depth-first order with only
+    /// whole subtrees skipped, over a superset of the original's prims. A
+    /// projection equal to the original means the original's own traversal
+    /// already has that gap-free shape.
+    pub(crate) fn inherited_projection(self) -> Self {
+        Self {
+            required: self.required.intersection(Self::INHERITED_REQUIRED),
+            rejected: self.rejected.intersection(Self::INHERITED_REJECTED),
+            traverse_instance_proxies: self.traverse_instance_proxies,
+        }
+    }
+
     /// Returns `true` if no descendant can satisfy this predicate.
     fn prunes_descendants(self, status: PrimStatus) -> bool {
-        let required = self.required.intersection(Self::INHERITED_REQUIRED);
-        if !status.contains(required) {
-            return true;
-        }
-        status.intersects(self.rejected.intersection(Self::INHERITED_REJECTED))
+        !self.inherited_projection().matches(status)
     }
 }
 
@@ -3242,6 +3254,11 @@ impl Stage {
             demands = next;
         }
         loaded_any
+    }
+
+    /// Whether the composed prim at `path` satisfies `predicate`.
+    pub(crate) fn prim_matches(&self, path: &sdf::Path, predicate: PrimPredicate) -> Result<bool> {
+        Ok(predicate.matches(self.prim_status_masked(path, predicate.consulted_bits())?))
     }
 
     /// Traverses composed prims depth-first, visiting prims that match `predicate`.

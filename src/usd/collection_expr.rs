@@ -10,7 +10,9 @@ use std::rc::Rc;
 
 use anyhow::Result;
 
-use crate::sdf::path_expr::{FnArg, GlobPattern, PathExpressionEval, PredResult, PredicateArg, PredicateLibrary};
+use crate::sdf::path_expr::{
+    FnArg, GlobPattern, IncrementalSearcher, PathExpressionEval, PredResult, PredicateArg, PredicateLibrary,
+};
 use crate::sdf::{self, Path};
 use crate::usd::{Prim, Stage};
 
@@ -80,10 +82,52 @@ impl CollectionEvaluator {
         if !self.stage.has_spec(path).unwrap_or(false) {
             return PredResult::constant(false);
         }
-        self.eval.match_path(path, &|p: &Path| CollectionObject {
+        self.eval.match_path(path, &self.domain())
+    }
+
+    /// A fresh [`CollectionSearcher`] borrowing this evaluator, for
+    /// answering a whole depth-first stage traversal incrementally.
+    pub fn incremental_searcher(&self) -> CollectionSearcher<'_> {
+        CollectionSearcher {
+            evaluator: self,
+            searcher: self.eval.incremental_searcher(Box::new(self.domain())),
+        }
+    }
+
+    /// The domain closure mapping a path to the [`CollectionObject`] its
+    /// predicates evaluate against.
+    fn domain(&self) -> impl Fn(&Path) -> CollectionObject + '_ {
+        move |p: &Path| CollectionObject {
             stage: self.stage.clone(),
             path: p.clone(),
-        })
+        }
+    }
+}
+
+/// A stateful depth-first searcher over a collection expression, created by
+/// [`CollectionEvaluator::incremental_searcher`] — the incremental
+/// counterpart of [`CollectionEvaluator::match_path`] for stage traversals
+/// (C++ `UsdObjectCollectionExpressionEvaluator::IncrementalSearcher`).
+pub struct CollectionSearcher<'a> {
+    evaluator: &'a CollectionEvaluator,
+    searcher: IncrementalSearcher<'a, CollectionObject, CollectionDomain<'a>>,
+}
+
+/// The boxed domain closure a [`CollectionSearcher`] carries.
+type CollectionDomain<'a> = Box<dyn Fn(&Path) -> CollectionObject + 'a>;
+
+impl CollectionSearcher<'_> {
+    /// Advances the search to `path` — the next step of a depth-first
+    /// traversal, per [`IncrementalSearcher::next`]'s ordering contract —
+    /// and answers whether it is in the expression's set. A path with no
+    /// composed object on the stage is a constant non-member; it counts as
+    /// skipped rather than visited, so the traversal must not descend
+    /// below it.
+    pub fn next(&mut self, path: &Path) -> Result<PredResult> {
+        if !self.evaluator.stage.has_spec(path)? {
+            return Ok(PredResult::constant(false));
+        }
+        Ok(self.searcher.next(path))
     }
 }
 

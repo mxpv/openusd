@@ -28,11 +28,10 @@ use std::rc::Rc;
 
 use anyhow::Result;
 
-use crate::sdf::path_expr::PredResult;
 use crate::sdf::{self, FieldKey, Path, Value, Variability};
 use crate::usd::{Prim, PrimPredicate, Relationship, Stage};
 
-use super::collection_expr::{resolve_complete_membership_expression, CollectionEvaluator};
+use super::collection_expr::{resolve_complete_membership_expression, CollectionEvaluator, CollectionSearcher};
 
 /// Multiple-apply API schema name; instances appear in `apiSchemas` as
 /// `CollectionAPI:<name>`.
@@ -560,39 +559,63 @@ fn compute_included_by_expression(
         return Ok(Vec::new());
     };
     let search_properties = query.top_expansion_rule() == ExpansionRule::ExpandPrimsAndProperties;
+    // The searcher's depth-first ordering contract tolerates only
+    // whole-subtree skips, so the walk runs under the predicate's inherited
+    // projection; when the projection is the predicate itself the walk is
+    // unchanged, and otherwise the extra prims feed the searcher without
+    // becoming candidates.
+    //
+    // TODO: Stage::traverse can neither skip a declined prim's subtree (C++
+    // UsdPrimRange prunes non-matching prims wholesale) nor let the visitor
+    // prune a subtree it has answered (C++ UsdPrimRange::PruneChildren).
+    // Generalizing traverse that way would collapse the projected walk and
+    // the per-prim `prim_matches` re-test into the C++ loop shape and let
+    // constant-answered subtrees go unvisited; today the searcher's memo
+    // answers their visits in constant time instead.
+    let walk = predicate.inherited_projection();
+    let clean = walk == predicate;
+    let mut searcher = evaluator.incremental_searcher();
     let mut out = Vec::new();
     let mut err: Result<()> = Ok(());
-    // A constant result extends over the whole subtree; the parent's answer
-    // is inherited down the pre-order walk so descendants skip re-matching —
-    // the pruning C++ gets from `PruneChildren`.
-    let mut forced: HashMap<Path, Option<bool>> = HashMap::new();
-    stage.traverse(predicate, |prim| {
+    stage.traverse(walk, |prim| {
         if err.is_err() {
             return;
         }
-        let inherited = prim.parent().and_then(|parent| forced.get(&parent).copied().flatten());
-        if inherited == Some(false) {
-            // Under a constantly-excluded ancestor nothing below is tested,
-            // properties included — the subtree was pruned at its root.
-            forced.insert(prim.clone(), Some(false));
+        let result = match searcher.next(prim) {
+            Ok(result) => result,
+            Err(e) => {
+                err = Err(e);
+                return;
+            }
+        };
+        // A false answer leaves nothing to emit: a constant false covers
+        // the properties too, and a varying false leaves only the
+        // property-by-property search.
+        if !result.value && (!search_properties || result.constant) {
             return;
         }
-        let result = match inherited {
-            Some(value) => PredResult::constant(value),
-            None => evaluator.match_path(prim),
-        };
-        forced.insert(prim.clone(), result.constant.then_some(result.value));
+        let admitted = clean
+            || match stage.prim_matches(prim, predicate) {
+                Ok(admitted) => admitted,
+                Err(e) => {
+                    err = Err(e);
+                    return;
+                }
+            };
+        if !admitted {
+            return;
+        }
         if result.value {
             out.push(prim.clone());
         }
         if search_properties {
             // Mirroring C++: a constant-true prim bulk-includes its
             // properties, a varying-true prim's properties are not searched,
-            // and a non-member prim's properties are tested one by one.
+            // and a varying-false prim's properties are tested one by one.
             let push = if result.value && result.constant {
                 Some(push_all_properties(stage, prim, &mut out))
             } else if !result.value {
-                Some(push_matching_properties(stage, evaluator, prim, &mut out))
+                Some(push_matching_properties(stage, &mut searcher, prim, &mut out))
             } else {
                 None
             };
@@ -612,15 +635,17 @@ fn push_all_properties(stage: &Stage, prim: &Path, out: &mut Vec<Path>) -> Resul
     Ok(())
 }
 
+/// Tests each of `prim`'s properties one by one through the searcher —
+/// property paths are valid depth-first successors of their prim.
 fn push_matching_properties(
     stage: &Stage,
-    evaluator: &CollectionEvaluator,
+    searcher: &mut CollectionSearcher<'_>,
     prim: &Path,
     out: &mut Vec<Path>,
 ) -> Result<()> {
     for name in stage.prim(prim.clone()).property_names()? {
         let prop = prim.append_property(&name)?;
-        if evaluator.match_path(&prop).value {
+        if searcher.next(&prop)?.value {
             out.push(prop);
         }
     }

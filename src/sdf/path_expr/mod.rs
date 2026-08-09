@@ -27,7 +27,7 @@ use std::str::FromStr;
 
 use crate::sdf::Path;
 
-pub use eval::PathExpressionEval;
+pub use eval::{IncrementalSearcher, PathExpressionEval};
 pub use glob::GlobPattern;
 pub use pattern::{Component, PathPattern};
 pub use predicate::{
