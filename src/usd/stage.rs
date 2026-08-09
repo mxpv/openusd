@@ -2617,7 +2617,8 @@ impl Stage {
     ///
     /// Returns the composed value: strongest-opinion-wins for plain fields,
     /// with spec 12.2's field-class rules — list-op folding, dictionary
-    /// merging, `specifier`/`variability`/`custom` — applied where they hold.
+    /// merging, path-expression `%_` composition,
+    /// `specifier`/`variability`/`custom` — applied where they hold.
     /// `None` if no layer provides a value. A [`sdf::Value::ValueBlock`]
     /// blocks the opinions weaker than it: the composed result is whatever
     /// the stronger opinions alone produce, or `None` when the block is the

@@ -677,6 +677,16 @@ impl IndexCache {
                 let Some(value) = graph.layer(layer).data().try_field(&query_path, field)? else {
                     continue;
                 };
+                // A dictionary or path-expression opinion composes with the
+                // weaker opinions beneath it rather than winning outright;
+                // once one anchors the field locally, hand the query to full
+                // composition so every contributing opinion participates.
+                if matches!(
+                    value.as_ref(),
+                    Value::Dictionary(_) | Value::PathExpression(_) | Value::PathExpressionVec(_)
+                ) {
+                    return Ok(FieldValue::Authored(index.resolve_field(field, graph, Some(suffix))?));
+                }
                 return Ok(FieldValue::Authored(block_to_none(value.into_owned())));
             }
         }
@@ -3974,6 +3984,162 @@ def "Scope"
                 ]
             )?,
             Some(Value::IntListOp(sdf::ListOp::explicit(vec![1, 2, 3])))
+        );
+        Ok(())
+    }
+
+    /// A path expression's `%_` composes the next-weaker opinion in, and the
+    /// walk stops once no weaker reference remains.
+    #[test]
+    fn path_expr_composes_weaker() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "expr",
+                &[
+                    Value::PathExpression(sdf::PathExpression::parse("/add// %_")),
+                    Value::PathExpression(sdf::PathExpression::parse("/base//")),
+                ]
+            )?,
+            Some(Value::PathExpression(sdf::PathExpression::parse("/add// /base//")))
+        );
+
+        // Without a weaker reference the strongest opinion stands alone.
+        assert_eq!(
+            resolve_stacked(
+                "expr",
+                &[
+                    Value::PathExpression(sdf::PathExpression::parse("/strong//")),
+                    Value::PathExpression(sdf::PathExpression::parse("/base//")),
+                ]
+            )?,
+            Some(Value::PathExpression(sdf::PathExpression::parse("/strong//")))
+        );
+        Ok(())
+    }
+
+    /// A value block stops the `%_` chain; the surviving weaker reference
+    /// resolves to the empty expression.
+    #[test]
+    fn path_expr_block_finalizes() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "expr",
+                &[
+                    Value::PathExpression(sdf::PathExpression::parse("/add// %_")),
+                    Value::ValueBlock,
+                    Value::PathExpression(sdf::PathExpression::parse("/base//")),
+                ]
+            )?,
+            Some(Value::PathExpression(sdf::PathExpression::parse("/add//")))
+        );
+        Ok(())
+    }
+
+    /// An expression authored across an external reference arc translates
+    /// into the root namespace: relative patterns anchor to the referenced
+    /// prim first, and an atom outside the arc's domain drops to nothing.
+    #[test]
+    fn path_expr_maps_across_reference() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"Inst\" ( references = @ref.usda@</Class> ) {}\n",
+        );
+        let mut reference = parse_named_layer("ref.usda", "#usda 1.0\ndef \"Class\" {}\n");
+        let class = sdf::path("/Class")?;
+        edit_layer(&mut reference, |l| {
+            l.data_mut().set_field(
+                &class,
+                "expr",
+                Value::PathExpression(sdf::PathExpression::parse("child// /Class/Sets// /Elsewhere//")),
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        assert_eq!(
+            cache.resolve_field(&graph, &sdf::path("/Inst")?, "expr")?,
+            Some(Value::PathExpression(sdf::PathExpression::parse(
+                "/Inst/child// /Inst/Sets//"
+            )))
+        );
+        Ok(())
+    }
+
+    /// A weaker opinion authored as a plain string parses into the `%_`
+    /// chain, matching the lenient reads collection queries accept.
+    #[test]
+    fn path_expr_weaker_string() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "expr",
+                &[
+                    Value::PathExpression(sdf::PathExpression::parse("/add// %_")),
+                    Value::String("/base//".to_string()),
+                ]
+            )?,
+            Some(Value::PathExpression(sdf::PathExpression::parse("/add// /base//")))
+        );
+        Ok(())
+    }
+
+    /// Array elements translate across a reference arc like the scalar form,
+    /// and a surviving `%_` in an element resolves to the empty expression.
+    #[test]
+    fn path_expr_vec_maps() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"Inst\" ( references = @ref.usda@</Class> ) {}\n",
+        );
+        let mut reference = parse_named_layer("ref.usda", "#usda 1.0\ndef \"Class\" {}\n");
+        let class = sdf::path("/Class")?;
+        edit_layer(&mut reference, |l| {
+            l.data_mut().set_field(
+                &class,
+                "exprs",
+                Value::PathExpressionVec(vec![
+                    sdf::PathExpression::parse("child//"),
+                    sdf::PathExpression::parse("/Class/Sets// %_"),
+                ]),
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        assert_eq!(
+            cache.resolve_field(&graph, &sdf::path("/Inst")?, "exprs")?,
+            Some(Value::PathExpressionVec(vec![
+                sdf::PathExpression::parse("/Inst/child//"),
+                sdf::PathExpression::parse("/Inst/Sets//"),
+            ]))
+        );
+        Ok(())
+    }
+
+    /// A local default of a composing kind (here a path expression carrying
+    /// `%_`) resolves through full composition instead of winning raw, so
+    /// opinions across the reference arc still contribute.
+    #[test]
+    fn local_default_composes() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"Inst\" ( references = @ref.usda@</Class> )\n{\n    custom pathExpression e = \"/local// %_\"\n}\n",
+        );
+        let reference = parse_named_layer(
+            "ref.usda",
+            "#usda 1.0\ndef \"Class\"\n{\n    custom pathExpression e = \"/Class/child//\"\n}\n",
+        );
+        let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/Inst.e")?, 0.0, &interp)?,
+            Some(Value::PathExpression(sdf::PathExpression::parse(
+                "/local// /Inst/child//"
+            )))
         );
         Ok(())
     }

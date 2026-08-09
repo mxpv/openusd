@@ -117,6 +117,8 @@ impl PrimIndex {
     ///   for the fields [`sdf::folds_list_ops`] accepts — a field composed by
     ///   dedicated machinery (arcs, targets, clips, values) keeps its raw
     ///   strongest opinion here
+    /// - path expressions: `%_` weaker references composed across opinions,
+    ///   each mapped into the root namespace through its node
     ///
     /// When `prop_suffix` is `None`, queries use the node's path directly (zero-copy).
     /// When `Some`, appends the suffix to form a property path for each node.
@@ -424,6 +426,23 @@ impl PrimIndex {
         }
     }
 
+    /// Maps a path expression authored at a node into the stage's root
+    /// namespace (C++ `_PathExprToStage`): relative patterns and reference
+    /// paths anchor to the authoring prim first, then every path maps through
+    /// the node's map function. An atom whose path does not translate has no
+    /// meaning at the root and becomes the empty expression.
+    fn map_expression_to_root(expr: sdf::PathExpression, anchor: &Path, map: &MapFunction) -> sdf::PathExpression {
+        expr.make_absolute(anchor).map_paths(|path| {
+            // A variant-qualified anchor makes the absolute form carry a
+            // selection, which map functions never do.
+            let mut absolute = path.clone();
+            if absolute.contains_prim_variant_selection() {
+                absolute = absolute.strip_all_variant_selections();
+            }
+            map.map_source_to_target(&absolute)
+        })
+    }
+
     /// Builds the query path for a node, applying `prop_suffix` if given.
     /// Borrows the node's path when no suffix is needed (zero-copy).
     fn query_path<'a>(node: &'a Node, prop_suffix: Option<&str>) -> Result<Cow<'a, Path>> {
@@ -510,25 +529,80 @@ impl PrimIndex {
     }
 
     /// Walks nodes from strongest to weakest, returning the first opinion.
-    /// A [`Value::ValueBlock`] returns `None`, blocking weaker layers. When
-    /// the strongest opinion is a dictionary, weaker dictionary opinions are
-    /// recursively merged into it (spec 12.2.5); a `ValueBlock` then blocks
-    /// only the remaining weaker opinions, and weaker non-dictionary opinions
-    /// are ignored.
+    /// A [`Value::ValueBlock`] returns `None`, blocking weaker layers. Two
+    /// value kinds keep composing past the strongest opinion:
+    ///
+    /// - a dictionary recursively merges weaker dictionary opinions into
+    ///   itself (spec 12.2.5); a `ValueBlock` then blocks only the remaining
+    ///   weaker opinions, and weaker non-dictionary opinions are ignored
+    /// - a path expression substitutes each `%_` with the next-weaker
+    ///   opinion's expression (C++ registers `SdfPathExpression`'s
+    ///   compose-over with generic value resolution); a surviving `%_`
+    ///   resolves to the empty expression, and every opinion is mapped into
+    ///   the root namespace through its node first
     fn resolve_strongest(&self, field: &str, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>> {
-        let mut merged: Option<HashMap<String, Value>> = None;
-        for opinion in self.opinions(field, stack, prop_suffix) {
-            let value = opinion?.value;
-            match (merged.as_mut(), value.into_owned()) {
-                (None, Value::ValueBlock) => return Ok(None),
-                (None, Value::Dictionary(dict)) => merged = Some(dict),
-                (None, other) => return Ok(Some(other)),
-                (Some(_), Value::ValueBlock) => break,
-                (Some(strong), Value::Dictionary(weaker)) => sdf::dictionary_over(strong, weaker),
-                (Some(_), _) => {}
+        let mut opinions = self.opinions(field, stack, prop_suffix);
+        let Some(first) = opinions.next() else {
+            return Ok(None);
+        };
+        let first = first?;
+        match first.value.into_owned() {
+            Value::ValueBlock => Ok(None),
+            Value::Dictionary(mut merged) => {
+                for opinion in opinions {
+                    match opinion?.value.into_owned() {
+                        Value::ValueBlock => break,
+                        Value::Dictionary(weaker) => sdf::dictionary_over(&mut merged, weaker),
+                        _ => {}
+                    }
+                }
+                Ok(Some(Value::Dictionary(merged)))
             }
+            Value::PathExpression(expr) => {
+                let mut composed =
+                    Self::map_expression_to_root(expr, &first.query_path.prim_path(), &first.node.map_to_root);
+                for opinion in opinions {
+                    if !composed.contains_weaker_reference() {
+                        break;
+                    }
+                    let opinion = opinion?;
+                    // String and token opinions parse leniently, matching the
+                    // schema-less reads collection queries accept.
+                    let weaker = match opinion.value.into_owned() {
+                        Value::ValueBlock => break,
+                        Value::PathExpression(weaker) => weaker,
+                        Value::String(text) => sdf::PathExpression::parse(&text),
+                        Value::Token(text) => sdf::PathExpression::parse(text.as_str()),
+                        _ => continue,
+                    };
+                    let weaker = Self::map_expression_to_root(
+                        weaker,
+                        &opinion.query_path.prim_path(),
+                        &opinion.node.map_to_root,
+                    );
+                    composed = composed.compose_over(&weaker);
+                }
+                // A weaker reference that outlived the stack has no opinion
+                // left to name: it resolves to the empty expression.
+                composed = composed.compose_over(&sdf::PathExpression::nothing());
+                Ok(Some(Value::PathExpression(composed)))
+            }
+            Value::PathExpressionVec(exprs) => {
+                // Array elements translate across arcs like the scalar form;
+                // with no per-element weaker stack to draw on, a surviving
+                // weaker reference resolves to the empty expression.
+                let anchor = first.query_path.prim_path();
+                let composed = exprs
+                    .into_iter()
+                    .map(|expr| {
+                        Self::map_expression_to_root(expr, &anchor, &first.node.map_to_root)
+                            .compose_over(&sdf::PathExpression::nothing())
+                    })
+                    .collect();
+                Ok(Some(Value::PathExpressionVec(composed)))
+            }
+            other => Ok(Some(other)),
         }
-        Ok(merged.map(Value::Dictionary))
     }
 
     /// Resolves `timeSamples` across the composition graph, applying each
