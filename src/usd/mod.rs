@@ -8,6 +8,7 @@ mod attribute;
 mod capture;
 mod clips;
 mod collection;
+mod collection_expr;
 mod connections;
 mod diff;
 mod editor;
@@ -26,9 +27,10 @@ pub use attribute::{Attribute, AttributeQuery, ValueSource};
 pub use capture::{ReplayStage, UndoStage};
 pub use clips::ClipsAPI;
 pub use collection::{
-    apply_collection, collections_on, compute_included_paths, is_collection_api_path, Collection, ExpansionRule,
-    MembershipQuery, PathExpansionRuleMap, PathRule,
+    apply_collection, collections_on, compute_included_paths, is_collection_api_path, Collection, CollectionMode,
+    ExpansionRule, MembershipQuery, PathExpansionRuleMap, PathRule,
 };
+pub use collection_expr::{resolve_complete_membership_expression, CollectionEvaluator};
 pub use connections::ConnectionGraph;
 pub use diff::{ApplyMode, Diff, Edit, FieldValue};
 pub use editor::{NamespaceEditError, NamespaceEditor};

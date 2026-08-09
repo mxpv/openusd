@@ -1,0 +1,45 @@
+#usda 1.0
+(
+    subLayers = [
+        @./collections_weak.usda@
+    ]
+)
+
+def Scope "World"
+{
+    def Scope "Chars"
+    {
+        def Scope "Mike"
+        {
+        }
+
+        def Scope "Sully"
+        {
+        }
+    }
+
+    def Scope "Props"
+    {
+        def Scope "Ball"
+        {
+        }
+    }
+}
+
+def Scope "Sets" (
+    prepend apiSchemas = ["CollectionAPI:heroes", "CollectionAPI:combined"]
+)
+{
+    # The weak layer's expression fills the `%_` slot during composition.
+    uniform pathExpression collection:heroes:membershipExpression = "/World/Chars/M* %_"
+
+    # A reference to the sibling collection, forced into expression mode.
+    uniform pathExpression collection:combined:membershipExpression = "%:heroes /World/Props//"
+    uniform token collection:combined:mode = "expression"
+}
+
+def "RefRoot" (
+    references = @./collections_ref.usda@</Asset>
+)
+{
+}

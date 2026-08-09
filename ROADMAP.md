@@ -158,8 +158,8 @@ that broader spec behavior can be considered fully covered.
 
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
-| [CollectionAPI](https://openusd.org/release/api/class_usd_collection_a_p_i.html) | `15.1` | :white_check_mark: | `0.5.0` | Multi-apply `UsdCollectionAPI` in `usd::collection`: instance discovery, `expansionRule` / `includeRoot` / `includes` / `excludes` accessors, read + authoring (`apply_collection`, `include_path` / `exclude_path` with edit minimization)<br>Remaining — pattern-based `membershipExpression` mode (the `SdfPathExpression` engine) |
-| Authoring and evaluating collections | `15.2` | :white_check_mark: | `0.5.0` | `MembershipQuery` (closest-ancestor `is_path_included`), `compute_membership_query` with nested-collection merge + cycle guard, and `compute_included_paths` stage traversal (excludes precedence, property expansion) |
+| [CollectionAPI](https://openusd.org/release/api/class_usd_collection_a_p_i.html) | `15.1` | :white_check_mark: | `main` | Multi-apply `UsdCollectionAPI` in `usd::collection`: instance discovery, `expansionRule` / `includeRoot` / `includes` / `excludes` / `membershipExpression` / `mode` accessors, read + authoring (`apply_collection`, `include_path` / `exclude_path` with edit minimization)<br>Pattern-based expression mode: `sdf::PathExpression` + `sdf::path_expr::PathExpressionEval`, `%_` composition and cross-arc mapping during field resolution, `usd::resolve_complete_membership_expression`, and the collection predicate library<br>Remaining — the incremental searcher (performance only; one-shot matching with constancy pruning answers everything) |
+| Authoring and evaluating collections | `15.2` | :white_check_mark: | `main` | `MembershipQuery` (closest-ancestor `is_path_included`, rule-map-wins expression dispatch), `compute_membership_query` with nested-collection merge + cycle guard, and `compute_included_paths` stage traversal (excludes precedence, property expansion, constancy-pruned expression enumeration) |
 
 ## Core File Formats (Spec 16)
 

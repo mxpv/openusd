@@ -1,0 +1,6 @@
+#usda 1.0
+
+over "Sets"
+{
+    uniform pathExpression collection:heroes:membershipExpression = "/World/Chars/Sully"
+}

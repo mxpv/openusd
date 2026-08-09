@@ -15,19 +15,24 @@
 //!
 //! [`Collection`] is the schema surface — locating collections on a prim
 //! and reading their authored opinions. [`MembershipQuery`] is the resolved
-//! path-membership predicate built from those opinions.
-//!
-//! The newer pattern-based `membershipExpression` mode (an
-//! `SdfPathExpression` predicate) is read here as a typed expression but is
-//! not yet *evaluated* — that engine is a separate effort. Relationship-mode
-//! collections are fully supported.
+//! path-membership predicate built from those opinions, in either of the
+//! two membership languages: the relationship-linking opinions resolve into
+//! a rule map, and a pattern-based `membershipExpression`
+//! ([`sdf::PathExpression`](crate::sdf::PathExpression)) resolves into a
+//! compiled [`CollectionEvaluator`](super::CollectionEvaluator). The `mode`
+//! attribute picks between them; under the default `automatic` mode a
+//! non-empty rule map wins.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use anyhow::Result;
 
+use crate::sdf::path_expr::PredResult;
 use crate::sdf::{self, FieldKey, Path, Value, Variability};
 use crate::usd::{Prim, PrimPredicate, Relationship, Stage};
+
+use super::collection_expr::{resolve_complete_membership_expression, CollectionEvaluator};
 
 /// Multiple-apply API schema name; instances appear in `apiSchemas` as
 /// `CollectionAPI:<name>`.
@@ -41,11 +46,17 @@ const INCLUDE_ROOT: &str = "includeRoot";
 const INCLUDES: &str = "includes";
 const EXCLUDES: &str = "excludes";
 const MEMBERSHIP_EXPRESSION: &str = "membershipExpression";
+const MODE: &str = "mode";
 
 // `expansionRule` token values.
 const TOK_EXPLICIT_ONLY: &str = "explicitOnly";
 const TOK_EXPAND_PRIMS: &str = "expandPrims";
 const TOK_EXPAND_PRIMS_AND_PROPERTIES: &str = "expandPrimsAndProperties";
+
+// `mode` token values.
+const TOK_AUTOMATIC: &str = "automatic";
+const TOK_RELATIONSHIP: &str = "relationship";
+const TOK_EXPRESSION: &str = "expression";
 
 /// How a collection's `includes`/`excludes` targets expand to members
 /// (`collection:<name>:expansionRule`).
@@ -75,6 +86,39 @@ impl ExpansionRule {
             TOK_EXPLICIT_ONLY => ExpansionRule::ExplicitOnly,
             TOK_EXPAND_PRIMS => ExpansionRule::ExpandPrims,
             TOK_EXPAND_PRIMS_AND_PROPERTIES => ExpansionRule::ExpandPrimsAndProperties,
+            _ => return None,
+        })
+    }
+}
+
+/// Which membership language governs a collection
+/// (`collection:<name>:mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CollectionMode {
+    /// Relationship mode when its opinions resolve to any rule, otherwise
+    /// the membership expression (the default).
+    #[default]
+    Automatic,
+    /// Only the relationship-linking opinions; the expression is ignored.
+    Relationship,
+    /// Only the membership expression; relationship opinions are ignored.
+    Expression,
+}
+
+impl CollectionMode {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            CollectionMode::Automatic => TOK_AUTOMATIC,
+            CollectionMode::Relationship => TOK_RELATIONSHIP,
+            CollectionMode::Expression => TOK_EXPRESSION,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            TOK_AUTOMATIC => CollectionMode::Automatic,
+            TOK_RELATIONSHIP => CollectionMode::Relationship,
+            TOK_EXPRESSION => CollectionMode::Expression,
             _ => return None,
         })
     }
@@ -150,9 +194,9 @@ impl Collection {
         stage.relationship(self.prop(EXCLUDES)?).targets()
     }
 
-    /// The composed `membershipExpression`, if authored. A string or token
-    /// opinion parses leniently into an expression. Read-only —
-    /// expression-mode evaluation is not implemented yet.
+    /// The composed `membershipExpression`, if authored. Composition already
+    /// substituted `%_` chains and mapped the expression across arcs; a
+    /// string- or token-typed opinion parses leniently.
     pub fn membership_expression(&self, stage: &Stage) -> Result<Option<sdf::PathExpression>> {
         Ok(
             match stage.field::<Value>(self.prop(MEMBERSHIP_EXPRESSION)?, FieldKey::Default)? {
@@ -164,32 +208,50 @@ impl Collection {
         )
     }
 
-    /// Whether this collection is authored in expression mode (a
-    /// `membershipExpression` with no `includes`/`excludes`/`includeRoot`).
-    /// Such collections are not yet evaluated.
-    pub fn has_expression(&self, stage: &Stage) -> Result<bool> {
-        Ok(self.membership_expression(stage)?.is_some()
-            && self.includes(stage)?.is_empty()
-            && self.excludes(stage)?.is_empty()
-            && !self.include_root(stage)?)
+    /// The membership language governing this collection — defaults to
+    /// [`CollectionMode::Automatic`].
+    pub fn mode(&self, stage: &Stage) -> Result<CollectionMode> {
+        Ok(match stage.field::<Value>(self.prop(MODE)?, FieldKey::Default)? {
+            Some(Value::Token(t)) => CollectionMode::from_token(t.as_str()).unwrap_or_default(),
+            _ => CollectionMode::default(),
+        })
     }
 
     /// Resolve this collection's authored opinions into a
-    /// [`MembershipQuery`] (relationship mode, spec §15.2): `includeRoot`
-    /// and each `includes` target take the collection's `expansionRule`,
-    /// each `excludes` target is marked excluded, and an `includes` target
-    /// that is itself another collection is recursively merged in.
-    ///
-    /// Cycles among chained collections are broken (each collection visited
-    /// once); excludes are applied last so they always win over includes.
-    /// Expression-mode collections (`has_expression`) currently resolve to
-    /// an empty query.
+    /// [`MembershipQuery`] (spec §15.2). Outside [`CollectionMode::Expression`],
+    /// the relationship opinions build the rule map: `includeRoot` and each
+    /// `includes` target take the collection's `expansionRule`, each
+    /// `excludes` target is marked excluded, and an `includes` target that is
+    /// itself another collection is recursively merged in (cycles broken,
+    /// excludes applied last so they always win). Outside
+    /// [`CollectionMode::Relationship`], the resolved membership expression
+    /// compiles into the query's evaluator; at query time a non-empty rule
+    /// map wins.
     pub fn compute_membership_query(&self, stage: &Stage) -> Result<MembershipQuery> {
-        let mut map = PathExpansionRuleMap::new();
-        let mut visited = HashSet::new();
-        visited.insert(self.collection_path()?);
-        self.build_into(stage, &mut map, &mut visited)?;
-        Ok(MembershipQuery::new(map))
+        let mode = self.mode(stage)?;
+        let mut query = MembershipQuery {
+            rule_map: PathExpansionRuleMap::new(),
+            top_expansion_rule: self.expansion_rule(stage)?,
+            evaluator: None,
+        };
+        if mode != CollectionMode::Expression {
+            let mut visited = HashSet::new();
+            visited.insert(self.collection_path()?);
+            self.build_into(stage, &mut query.rule_map, &mut visited)?;
+        }
+        if mode != CollectionMode::Relationship {
+            let expression = resolve_complete_membership_expression(stage, self)?;
+            if !expression.is_empty() {
+                // TODO: report an expression that fails to compile (an
+                // unknown predicate, or arguments its binder refuses); the
+                // query falls back to matching nothing, as C++ does after
+                // its warning.
+                if let Ok(evaluator) = CollectionEvaluator::build(stage, expression) {
+                    query.evaluator = Some(Rc::new(evaluator));
+                }
+            }
+        }
+        Ok(query)
     }
 
     /// `collection:<name>:<suffix>` relationship/property name (unanchored).
@@ -221,6 +283,26 @@ impl Collection {
             .set_variability(Variability::Uniform)?
             .set_custom(false)?
             .set(Value::Bool(value))?;
+        Ok(())
+    }
+
+    /// Set `membershipExpression` (`uniform pathExpression`).
+    pub fn set_membership_expression(&self, stage: &Stage, expression: sdf::PathExpression) -> Result<()> {
+        stage
+            .create_attribute(self.prop(MEMBERSHIP_EXPRESSION)?, "pathExpression")?
+            .set_variability(Variability::Uniform)?
+            .set_custom(false)?
+            .set(Value::PathExpression(expression))?;
+        Ok(())
+    }
+
+    /// Set `mode` (`uniform token`).
+    pub fn set_mode(&self, stage: &Stage, mode: CollectionMode) -> Result<()> {
+        stage
+            .create_attribute(self.prop(MODE)?, "token")?
+            .set_variability(Variability::Uniform)?
+            .set_custom(false)?
+            .set(Value::token(mode.as_token()))?;
         Ok(())
     }
 
@@ -291,7 +373,7 @@ impl Collection {
     /// `true` when the collection includes nothing (mirroring C++
     /// `UsdCollectionAPI::HasNoIncludedPaths`): no `includes`, `includeRoot`
     /// off, and either an `excludes` opinion exists or there is no membership
-    /// expression. (The expression term matters once expression mode lands.)
+    /// expression.
     pub fn has_no_included_paths(&self, stage: &Stage) -> Result<bool> {
         Ok(self.includes(stage)?.is_empty()
             && !self.include_root(stage)?
@@ -404,6 +486,9 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
     if query.is_empty() {
         return Ok(out);
     }
+    if !query.uses_path_expansion_rule_map() {
+        return compute_included_by_expression(stage, query, predicate);
+    }
     let mut seen = HashSet::new();
     let mut err: Result<()> = Ok(());
     let collect_props = query
@@ -463,6 +548,85 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
     Ok(out)
 }
 
+/// Enumerate an expression-mode query by stage traversal, with subtree
+/// pruning driven by result constancy (C++
+/// `UsdComputeIncludedObjectsFromCollection`'s expression arm).
+fn compute_included_by_expression(
+    stage: &Stage,
+    query: &MembershipQuery,
+    predicate: PrimPredicate,
+) -> Result<Vec<Path>> {
+    let Some(evaluator) = query.expression_evaluator() else {
+        return Ok(Vec::new());
+    };
+    let search_properties = query.top_expansion_rule() == ExpansionRule::ExpandPrimsAndProperties;
+    let mut out = Vec::new();
+    let mut err: Result<()> = Ok(());
+    // A constant result extends over the whole subtree; the parent's answer
+    // is inherited down the pre-order walk so descendants skip re-matching —
+    // the pruning C++ gets from `PruneChildren`.
+    let mut forced: HashMap<Path, Option<bool>> = HashMap::new();
+    stage.traverse(predicate, |prim| {
+        if err.is_err() {
+            return;
+        }
+        let inherited = prim.parent().and_then(|parent| forced.get(&parent).copied().flatten());
+        if inherited == Some(false) {
+            // Under a constantly-excluded ancestor nothing below is tested,
+            // properties included — the subtree was pruned at its root.
+            forced.insert(prim.clone(), Some(false));
+            return;
+        }
+        let result = match inherited {
+            Some(value) => PredResult::constant(value),
+            None => evaluator.match_path(prim),
+        };
+        forced.insert(prim.clone(), result.constant.then_some(result.value));
+        if result.value {
+            out.push(prim.clone());
+        }
+        if search_properties {
+            // Mirroring C++: a constant-true prim bulk-includes its
+            // properties, a varying-true prim's properties are not searched,
+            // and a non-member prim's properties are tested one by one.
+            let push = if result.value && result.constant {
+                Some(push_all_properties(stage, prim, &mut out))
+            } else if !result.value {
+                Some(push_matching_properties(stage, evaluator, prim, &mut out))
+            } else {
+                None
+            };
+            if let Some(Err(e)) = push {
+                err = Err(e);
+            }
+        }
+    })?;
+    err?;
+    Ok(out)
+}
+
+fn push_all_properties(stage: &Stage, prim: &Path, out: &mut Vec<Path>) -> Result<()> {
+    for name in stage.prim(prim.clone()).property_names()? {
+        out.push(prim.append_property(&name)?);
+    }
+    Ok(())
+}
+
+fn push_matching_properties(
+    stage: &Stage,
+    evaluator: &CollectionEvaluator,
+    prim: &Path,
+    out: &mut Vec<Path>,
+) -> Result<()> {
+    for name in stage.prim(prim.clone()).property_names()? {
+        let prop = prim.append_property(&name)?;
+        if evaluator.match_path(&prop).value {
+            out.push(prop);
+        }
+    }
+    Ok(())
+}
+
 fn push_member_properties(
     stage: &Stage,
     prim: &Path,
@@ -510,21 +674,49 @@ impl PathRule {
 /// collection's includes/excludes/expansionRule/includeRoot opinions.
 pub type PathExpansionRuleMap = HashMap<Path, PathRule>;
 
-/// A resolved, stage-free membership predicate for a collection (the
-/// relationship-linking mode). Build it once (see
+/// A resolved membership predicate for a collection. Build it once (see
 /// `compute_membership_query`) and query [`is_path_included`] cheaply; it
 /// clones freely so consumers can cache one per collection path.
 ///
+/// The query carries both membership languages: the relationship opinions'
+/// rule map and, for expression-capable modes, the compiled membership
+/// expression. A non-empty rule map answers; otherwise the expression does
+/// (C++ `UsdCollectionMembershipQuery`). Two queries carrying evaluators
+/// never compare equal — evaluators run code — only their absence does.
+///
+/// The two sides snapshot differently (matching C++): the rule map is fixed
+/// at build time, while the evaluator holds a stage handle and answers its
+/// predicates (`isa`, `hasAPI`, `variant`, ...) against the stage's state at
+/// each query, so later edits shift an expression query's answers.
+///
 /// [`is_path_included`]: MembershipQuery::is_path_included
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct MembershipQuery {
     rule_map: PathExpansionRuleMap,
+    top_expansion_rule: ExpansionRule,
+    evaluator: Option<Rc<CollectionEvaluator>>,
+}
+
+impl PartialEq for MembershipQuery {
+    /// Deliberately non-reflexive for expression-carrying queries: an
+    /// evaluator runs code, so two are never known equivalent — not even a
+    /// query and its clone (C++ `UsdCollectionMembershipQuery` equality).
+    fn eq(&self, other: &Self) -> bool {
+        self.rule_map == other.rule_map
+            && self.top_expansion_rule == other.top_expansion_rule
+            && self.evaluator.is_none()
+            && other.evaluator.is_none()
+    }
 }
 
 impl MembershipQuery {
-    /// Build a query from a resolved rule map.
+    /// Build a relationship-mode query from a resolved rule map.
     pub fn new(rule_map: PathExpansionRuleMap) -> Self {
-        MembershipQuery { rule_map }
+        MembershipQuery {
+            rule_map,
+            top_expansion_rule: ExpansionRule::default(),
+            evaluator: None,
+        }
     }
 
     /// The resolved per-path rule map.
@@ -532,13 +724,32 @@ impl MembershipQuery {
         &self.rule_map
     }
 
-    /// `true` when the query has no opinions (includes nothing).
-    pub fn is_empty(&self) -> bool {
-        self.rule_map.is_empty()
+    /// The collection's own `expansionRule`, which expression-mode
+    /// enumeration consults for property expansion.
+    pub fn top_expansion_rule(&self) -> ExpansionRule {
+        self.top_expansion_rule
     }
 
-    /// Whether `path` is a member, by walking from `path` toward the root and
-    /// taking the **closest ancestor with an opinion** (spec §15.2):
+    /// The compiled membership expression, when one governs this query.
+    pub fn expression_evaluator(&self) -> Option<&CollectionEvaluator> {
+        self.evaluator.as_deref()
+    }
+
+    /// Whether membership is answered by the rule map rather than the
+    /// expression — true whenever the map has any opinion (C++
+    /// `UsesPathExpansionRuleMap`).
+    pub fn uses_path_expansion_rule_map(&self) -> bool {
+        !self.rule_map.is_empty()
+    }
+
+    /// `true` when the query has no opinions at all (includes nothing).
+    pub fn is_empty(&self) -> bool {
+        self.rule_map.is_empty() && self.evaluator.is_none()
+    }
+
+    /// Whether `path` is a member. With rule-map opinions, walks from `path`
+    /// toward the root and takes the **closest ancestor with an opinion**
+    /// (spec §15.2):
     ///
     /// - `Exclude` → not a member;
     /// - `ExplicitOnly` → member only if the opinion is on `path` itself;
@@ -546,17 +757,29 @@ impl MembershipQuery {
     ///   the explicitly listed path;
     /// - `ExpandPrimsAndProperties` → member.
     ///
-    /// Paths with no ancestor opinion are not members.
+    /// Paths with no ancestor opinion are not members. Without rule-map
+    /// opinions, the membership expression answers.
     pub fn is_path_included(&self, path: &Path) -> bool {
-        let (rule, on_self) = self.closest_rule(path);
-        rule_includes(rule, on_self, path.is_property_path())
+        if self.uses_path_expansion_rule_map() {
+            let (rule, on_self) = self.closest_rule(path);
+            return rule_includes(rule, on_self, path.is_property_path());
+        }
+        match &self.evaluator {
+            Some(evaluator) => evaluator.match_path(path).value,
+            None => false,
+        }
     }
 
     /// Fast top-down variant for stage traversal: given the rule that applies
     /// to `path`'s parent, decide inclusion and the rule to propagate to
     /// `path`'s own children — without re-walking ancestors. An opinion
-    /// authored directly on `path` overrides the inherited `parent_rule`.
+    /// authored directly on `path` overrides the inherited `parent_rule`. An
+    /// expression-mode query answers through the expression and passes the
+    /// parent rule through.
     pub fn is_path_included_below(&self, path: &Path, parent_rule: PathRule) -> (bool, PathRule) {
+        if !self.uses_path_expansion_rule_map() {
+            return (self.is_path_included(path), parent_rule);
+        }
         let on_self = self.rule_map.contains_key(path);
         let rule = self.rule_map.get(path).copied().unwrap_or(parent_rule);
         (rule_includes(rule, on_self, path.is_property_path()), rule)
@@ -1180,6 +1403,231 @@ mod tests {
         let paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
         assert!(paths.contains(&sdf::path("/W/B.size")?)); // exists → emitted
         assert!(!paths.contains(&sdf::path("/W/B.ghost")?)); // unauthored → skipped
+        Ok(())
+    }
+
+    /// Authors an expression-mode collection named `name` on `/Col`.
+    fn build_expression(stage: &Stage, name: &str, expression: &str) -> Result<Collection> {
+        author_collection(stage, "/Col", name)?;
+        let coll = Collection::new(sdf::path("/Col")?, name);
+        coll.set_membership_expression(stage, sdf::PathExpression::parse(expression))?;
+        Ok(coll)
+    }
+
+    #[test]
+    fn mode_round_trips() {
+        for mode in [
+            CollectionMode::Automatic,
+            CollectionMode::Relationship,
+            CollectionMode::Expression,
+        ] {
+            assert_eq!(CollectionMode::from_token(mode.as_token()), Some(mode));
+        }
+        assert_eq!(CollectionMode::from_token("bogus"), None);
+    }
+
+    #[test]
+    fn expression_membership() -> Result<()> {
+        let stage = scene()?;
+        let coll = build_expression(&stage, "e", "/W/A//")?;
+        let q = coll.compute_membership_query(&stage)?;
+        assert!(!q.uses_path_expansion_rule_map());
+        assert!(!q.is_empty());
+        assert!(q.is_path_included(&sdf::path("/W/A")?));
+        assert!(q.is_path_included(&sdf::path("/W/A/C")?));
+        assert!(!q.is_path_included(&sdf::path("/W/B")?));
+        // A path with no composed object is a constant non-member.
+        assert!(!q.is_path_included(&sdf::path("/W/A/ghost")?));
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_rule_map_wins() -> Result<()> {
+        let stage = scene()?;
+        build_collection(&stage, "/Col", "c", ExpansionRule::ExpandPrims, false, &["/W/B"], &[])?;
+        let coll = Collection::new(sdf::path("/Col")?, "c");
+        coll.set_membership_expression(&stage, sdf::PathExpression::parse("/W/A//"))?;
+
+        // Automatic mode: the non-empty rule map answers, not the expression.
+        let q = coll.compute_membership_query(&stage)?;
+        assert!(q.uses_path_expansion_rule_map());
+        assert!(q.is_path_included(&sdf::path("/W/B")?));
+        assert!(!q.is_path_included(&sdf::path("/W/A")?));
+
+        // Expression mode ignores the includes outright.
+        coll.set_mode(&stage, CollectionMode::Expression)?;
+        let q = coll.compute_membership_query(&stage)?;
+        assert!(!q.uses_path_expansion_rule_map());
+        assert!(q.is_path_included(&sdf::path("/W/A")?));
+        assert!(!q.is_path_included(&sdf::path("/W/B")?));
+        Ok(())
+    }
+
+    #[test]
+    fn mode_relationship_ignores_expr() -> Result<()> {
+        let stage = scene()?;
+        let coll = build_expression(&stage, "e", "/W/A//")?;
+        coll.set_mode(&stage, CollectionMode::Relationship)?;
+        let q = coll.compute_membership_query(&stage)?;
+        assert!(q.is_empty());
+        assert!(!q.is_path_included(&sdf::path("/W/A")?));
+        Ok(())
+    }
+
+    #[test]
+    fn expression_included_paths() -> Result<()> {
+        let stage = scene()?;
+        let coll = build_expression(&stage, "e", "/W/A//")?;
+        let q = coll.compute_membership_query(&stage)?;
+        let mut paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
+        paths.sort();
+        assert_eq!(paths, vec![sdf::path("/W/A")?, sdf::path("/W/A/C")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn expression_included_properties() -> Result<()> {
+        let stage = scene()?;
+        stage
+            .create_attribute(sdf::path("/W/A.size")?, "float")?
+            .set(Value::Float(1.0))?;
+        stage
+            .create_attribute(sdf::path("/W/B.size")?, "float")?
+            .set(Value::Float(2.0))?;
+
+        // A property pattern matches prims varying-false, so each prim's
+        // properties are tested individually under expandPrimsAndProperties.
+        let coll = build_expression(&stage, "e", "//A.size")?;
+        coll.set_expansion_rule(&stage, ExpansionRule::ExpandPrimsAndProperties)?;
+        let q = coll.compute_membership_query(&stage)?;
+        let paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
+        assert!(paths.contains(&sdf::path("/W/A.size")?));
+        assert!(!paths.contains(&sdf::path("/W/B.size")?));
+
+        // A constant-true prim bulk-includes its properties.
+        let bulk = build_expression(&stage, "b", "/W/B//")?;
+        bulk.set_expansion_rule(&stage, ExpansionRule::ExpandPrimsAndProperties)?;
+        let q = bulk.compute_membership_query(&stage)?;
+        let paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
+        assert!(paths.contains(&sdf::path("/W/B")?));
+        assert!(paths.contains(&sdf::path("/W/B.size")?));
+        Ok(())
+    }
+
+    #[test]
+    fn expression_resolves_references() -> Result<()> {
+        let stage = scene()?;
+        let big = build_expression(&stage, "big", "/W/A// %:small")?;
+        build_expression(&stage, "small", "/W/B//")?;
+
+        let resolved = resolve_complete_membership_expression(&stage, &big)?;
+        assert_eq!(resolved.to_string(), "/W/A// /W/B//");
+
+        let q = big.compute_membership_query(&stage)?;
+        assert!(q.is_path_included(&sdf::path("/W/A")?));
+        assert!(q.is_path_included(&sdf::path("/W/B")?));
+        Ok(())
+    }
+
+    #[test]
+    fn expression_reference_cycle() -> Result<()> {
+        let stage = scene()?;
+        let a = build_expression(&stage, "a", "/W/A// %:b")?;
+        build_expression(&stage, "b", "/W/B// %/Col:a")?;
+
+        // The circular hop contributes nothing; both direct patterns stand.
+        let resolved = resolve_complete_membership_expression(&stage, &a)?;
+        assert_eq!(resolved.to_string(), "/W/A// /W/B//");
+        Ok(())
+    }
+
+    #[test]
+    fn expression_unknown_reference() -> Result<()> {
+        let stage = scene()?;
+        let coll = build_expression(&stage, "e", "/W/A// %:missing")?;
+        let resolved = resolve_complete_membership_expression(&stage, &coll)?;
+        assert_eq!(resolved.to_string(), "/W/A//");
+        Ok(())
+    }
+
+    #[test]
+    fn expression_reference_diamond() -> Result<()> {
+        let stage = scene()?;
+        let top = build_expression(&stage, "top", "%:x %:y")?;
+        build_expression(&stage, "x", "%:shared")?;
+        build_expression(&stage, "y", "%:shared /W/A//")?;
+        build_expression(&stage, "shared", "/W/B//")?;
+
+        // `shared` resolves once and replays from the memo on the second
+        // branch.
+        let resolved = resolve_complete_membership_expression(&stage, &top)?;
+        assert_eq!(resolved.to_string(), "/W/B// (/W/B// /W/A//)");
+        Ok(())
+    }
+
+    #[test]
+    fn expression_cycle_not_memoized() -> Result<()> {
+        let stage = scene()?;
+        let top = build_expression(&stage, "top", "%:a %:b")?;
+        build_expression(&stage, "a", "%:b /W/A//")?;
+        build_expression(&stage, "b", "%:a /W/B//")?;
+
+        // Each branch drops only its own back-edge: the chain-dependent
+        // placeholder must not replay from the memo, so `b` still expands
+        // fully under the second branch.
+        let resolved = resolve_complete_membership_expression(&stage, &top)?;
+        assert_eq!(resolved.to_string(), "/W/B// /W/A// (/W/A// /W/B//)");
+        Ok(())
+    }
+
+    #[test]
+    fn predicate_unknown_keyword() -> Result<()> {
+        let stage = scene()?;
+        stage
+            .define_prim(sdf::path("/W/M")?)?
+            .set_type_name("Scope")?
+            .set_kind("component")?;
+
+        // A stray keyword refuses to bind, so the expression fails to
+        // compile and the query matches nothing.
+        let coll = build_expression(&stage, "k", "/W//{kind(component, bogus=true)}")?;
+        let q = coll.compute_membership_query(&stage)?;
+        assert!(!q.is_path_included(&sdf::path("/W/M")?));
+
+        let ok = build_expression(&stage, "k2", "/W//{kind(component, strict=true)}")?;
+        let q = ok.compute_membership_query(&stage)?;
+        assert!(q.is_path_included(&sdf::path("/W/M")?));
+        Ok(())
+    }
+
+    #[test]
+    fn expression_predicates() -> Result<()> {
+        let stage = scene()?;
+        stage.override_prim(sdf::path("/W/O")?)?;
+
+        // Every scene prim is a def; the over is not defined.
+        let defined = build_expression(&stage, "d", "/W//{specifier:def}")?;
+        let q = defined.compute_membership_query(&stage)?;
+        assert!(q.is_path_included(&sdf::path("/W/A")?));
+        assert!(!q.is_path_included(&sdf::path("/W/O")?));
+
+        let overs = build_expression(&stage, "o", "/W//{specifier:over}")?;
+        let q = overs.compute_membership_query(&stage)?;
+        assert!(q.is_path_included(&sdf::path("/W/O")?));
+        assert!(!q.is_path_included(&sdf::path("/W/A")?));
+        Ok(())
+    }
+
+    #[test]
+    fn expression_query_equality() -> Result<()> {
+        let stage = scene()?;
+        let coll = build_expression(&stage, "e", "/W/A//")?;
+        let a = coll.compute_membership_query(&stage)?;
+        let b = coll.compute_membership_query(&stage)?;
+        // Expression-carrying queries never compare equal — not even a query
+        // and its own clone; evaluators run code.
+        assert_ne!(a, b);
+        assert_ne!(a.clone(), a.clone());
         Ok(())
     }
 }
