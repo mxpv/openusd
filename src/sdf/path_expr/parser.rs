@@ -44,7 +44,7 @@ pub(super) fn parse_predicate_expression(input: &str) -> PredicateExpression {
         if cursor.at_end() {
             return Ok(None);
         }
-        let node = parse_pred_expr(&mut cursor, 0)?;
+        let node = parse_pred_expr(&mut cursor, 0, 0)?;
         cursor.skip_blanks();
         if !cursor.at_end() {
             return Err(cursor.fail("expected end of predicate expression"));
@@ -295,16 +295,7 @@ fn parse_reference(cursor: &mut Cursor) -> Result<ExpressionReference, ParseFail
     let mut path = String::new();
     if cursor.eat('/') {
         // Absolute: `/ident(/ident)*:name`.
-        path.push('/');
-        path.push_str(&parse_identifier(
-            cursor,
-            "expected expression reference path after '/'",
-        )?);
-        while cursor.peek() == Some('/') {
-            cursor.pos += 1;
-            path.push('/');
-            path.push_str(&parse_identifier(cursor, "expected identifier")?);
-        }
+        parse_reference_elements(cursor, &mut path, "expected expression reference path after '/'")?;
     } else {
         // Relative: an optional `..(/..)*` chain, then either `/ident...` or
         // directly the `:name`.
@@ -319,13 +310,7 @@ fn parse_reference(cursor: &mut Cursor) -> Result<ExpressionReference, ParseFail
             }
         }
         if cursor.eat('/') {
-            path.push('/');
-            path.push_str(&parse_identifier(cursor, "expected identifier")?);
-            while cursor.peek() == Some('/') {
-                cursor.pos += 1;
-                path.push('/');
-                path.push_str(&parse_identifier(cursor, "expected identifier")?);
-            }
+            parse_reference_elements(cursor, &mut path, "expected identifier")?;
         } else if path.is_empty() && !cursor.at_str(":") {
             // Bare `%name` has no form: a relative reference needs `..`, a
             // `/`, or an immediate `:`.
@@ -341,6 +326,19 @@ fn parse_reference(cursor: &mut Cursor) -> Result<ExpressionReference, ParseFail
         path: Path::new(&path).expect("a reference path string is a valid path"),
         name,
     })
+}
+
+/// Appends the `ident('/'ident)*` run of a reference path to `path`, each
+/// element with its leading `/`; the opening `/` is already consumed.
+/// `first` is the failure message for the leading identifier.
+fn parse_reference_elements(cursor: &mut Cursor, path: &mut String, first: &str) -> Result<(), ParseFail> {
+    path.push('/');
+    path.push_str(&parse_identifier(cursor, first)?);
+    while cursor.eat('/') {
+        path.push('/');
+        path.push_str(&parse_identifier(cursor, "expected identifier")?);
+    }
+    Ok(())
 }
 
 /// Parses one path pattern, or `None` when the cursor does not sit at one.
@@ -484,7 +482,7 @@ fn parse_element(
 
     let predicate = if cursor.eat('{') {
         cursor.skip_blanks();
-        let node = parse_pred_expr(cursor, 0)?;
+        let node = parse_pred_expr(cursor, 0, 0)?;
         cursor.skip_blanks();
         if !cursor.eat('}') {
             return Err(cursor.fail("expected '}' to close predicate expression"));
@@ -507,57 +505,47 @@ fn at_keyword(cursor: &Cursor, word: &str) -> bool {
     cursor.at_str(word) && !cursor.peek_at(word.chars().count()).is_some_and(is_identifier_char)
 }
 
-fn parse_pred_expr(cursor: &mut Cursor, depth: usize) -> Result<PredNode, ParseFail> {
-    // or := and ('or' and)*
-    let mut lhs = parse_pred_and(cursor, depth)?;
-    loop {
-        let save = cursor.pos;
-        cursor.skip_blanks();
-        if at_keyword(cursor, "or") {
-            cursor.pos += 2;
-            cursor.skip_blanks();
-            let rhs = parse_pred_and(cursor, depth)?;
-            lhs = PredNode::Op(PredOp::Or, Box::new(lhs), Box::new(rhs));
-        } else {
-            cursor.pos = save;
-            return Ok(lhs);
-        }
+/// The infix operator keywords; whitespace alone spells
+/// [`PredOp::ImpliedAnd`], which no keyword introduces.
+const PRED_KEYWORDS: [(&str, PredOp); 2] = [("or", PredOp::Or), ("and", PredOp::And)];
+
+/// Binding power per predicate operator; higher binds tighter, as in
+/// [`binding_power`] on the path-expression side.
+fn pred_binding_power(op: PredOp) -> u8 {
+    match op {
+        PredOp::ImpliedAnd => 30,
+        PredOp::And => 20,
+        PredOp::Or => 10,
     }
 }
 
-fn parse_pred_and(cursor: &mut Cursor, depth: usize) -> Result<PredNode, ParseFail> {
-    // and := implied ('and' implied)*
-    let mut lhs = parse_pred_implied(cursor, depth)?;
-    loop {
-        let save = cursor.pos;
-        cursor.skip_blanks();
-        if at_keyword(cursor, "and") {
-            cursor.pos += 3;
-            cursor.skip_blanks();
-            let rhs = parse_pred_implied(cursor, depth)?;
-            lhs = PredNode::Op(PredOp::And, Box::new(lhs), Box::new(rhs));
-        } else {
-            cursor.pos = save;
-            return Ok(lhs);
-        }
-    }
-}
-
-fn parse_pred_implied(cursor: &mut Cursor, depth: usize) -> Result<PredNode, ParseFail> {
-    // implied := unary (whitespace unary)*, binding tighter than `and`.
+/// Parses a chain of unary operands joined by `and`, `or`, or the
+/// whitespace that spells an implied and, loosest operator first. Left
+/// associativity comes from re-entering with `bp + 1`.
+fn parse_pred_expr(cursor: &mut Cursor, min_bp: u8, depth: usize) -> Result<PredNode, ParseFail> {
     let mut lhs = parse_pred_unary(cursor, depth)?;
     loop {
         let save = cursor.pos;
         let blanks = cursor.skip_blanks();
-        let continues =
-            blanks > 0 && !at_keyword(cursor, "and") && !at_keyword(cursor, "or") && at_pred_unary_start(cursor);
-        if continues {
-            let rhs = parse_pred_unary(cursor, depth)?;
-            lhs = PredNode::Op(PredOp::ImpliedAnd, Box::new(lhs), Box::new(rhs));
-        } else {
+        // A keyword wins over the implied-and reading of the whitespace that
+        // precedes it.
+        let op = PRED_KEYWORDS
+            .iter()
+            .find(|(word, _)| at_keyword(cursor, word))
+            .map(|&(word, op)| (op, word.chars().count()))
+            .or_else(|| (blanks > 0 && at_pred_unary_start(cursor)).then_some((PredOp::ImpliedAnd, 0)));
+        let Some((op, keyword)) = op else {
+            cursor.pos = save;
+            return Ok(lhs);
+        };
+        if pred_binding_power(op) < min_bp {
             cursor.pos = save;
             return Ok(lhs);
         }
+        cursor.pos += keyword;
+        cursor.skip_blanks();
+        let rhs = parse_pred_expr(cursor, pred_binding_power(op) + 1, depth)?;
+        lhs = PredNode::Op(op, Box::new(lhs), Box::new(rhs));
     }
 }
 
@@ -577,7 +565,8 @@ fn parse_pred_unary(cursor: &mut Cursor, depth: usize) -> Result<PredNode, Parse
     }
     if cursor.eat('(') {
         cursor.skip_blanks();
-        let inner = parse_pred_expr(cursor, depth + 1)?;
+        // A group resets precedence, as its parentheses spell out.
+        let inner = parse_pred_expr(cursor, 0, depth + 1)?;
         cursor.skip_blanks();
         if !cursor.eat(')') {
             return Err(cursor.fail("expected ')' to close predicate group"));
@@ -794,6 +783,10 @@ mod tests {
         canonical("//{not abstract}");
         canonical("//{a b or c}");
         canonical("//{(a or b) and c}");
+        // Left associativity: a right-leaning tree of equal-rank operators
+        // would print its right operand parenthesized.
+        canonical("//{a or b or c}");
+        canonical("//{a and b and c}");
         canonical("//{isClose(1.23, tolerance=0.01)}");
         canonical("//{variant(standin=render)}");
         round_trip("//{ isa:Imageable }", "//{isa:Imageable}");
