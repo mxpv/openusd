@@ -1,0 +1,18 @@
+#usda 1.0
+(
+    defaultPrim = "Model"
+)
+
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip_1.usda@, @./clip_2.usda@]
+            string primPath = "/Clip/A"
+            double2[] active = [(0, 0), (4, 1), (8, 0)]
+        }
+    }
+)
+{
+    double a
+    double d
+}

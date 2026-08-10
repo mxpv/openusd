@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use crate::gf;
 use crate::pcp::clip::keys;
+use crate::pcp::clip_manifest;
 use crate::sdf::{self, AssetPath, Value};
 
 use super::{Prim, StageAuthoringError};
@@ -248,6 +249,64 @@ impl ClipsAPI {
         self.set_field(clip_set, keys::TEMPLATE_ACTIVE_OFFSET, Value::Double(offset))
     }
 
+    /// Generate a manifest layer for `clip_set` (C++
+    /// `UsdClipsAPI::GenerateClipManifest`), declaring every attribute the set's
+    /// clips carry time samples for. Opens each clip the set's `active` schedule
+    /// names; one that cannot be opened contributes nothing rather than failing
+    /// the call.
+    ///
+    /// `None` when the prim is the pseudo-root, when no set of that name
+    /// resolves here, or when the prim lies outside the stage's population mask
+    /// — a masked-out prim is not composed, so no manifest can be derived for
+    /// it.
+    ///
+    /// With `write_blocks_for_missing`, the manifest also carries a value block
+    /// at each clip's activation time for the attributes that clip has no
+    /// samples for. Value resolution reads those blocks when filling a gap under
+    /// `interpolateMissingClipValues`, skipping a clip it can tell is empty
+    /// without opening it.
+    ///
+    /// The manifest is returned, not installed: export it and name it from
+    /// `manifestAssetPath` to put it to use.
+    ///
+    /// ```no_run
+    /// # use openusd::{sdf, usd::{Stage, ClipsAPI}};
+    /// # fn demo(stage: &Stage) -> anyhow::Result<()> {
+    /// let clips = ClipsAPI::new(&stage.prim(sdf::path("/World/Anim")?));
+    /// if let Some(manifest) = clips.generate_clip_manifest("default", false)? {
+    ///     manifest.export("manifest.usda")?;
+    ///     clips.set_clip_manifest_asset_path("default", "./manifest.usda")?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn generate_clip_manifest(
+        &self,
+        clip_set: &str,
+        write_blocks_for_missing: bool,
+    ) -> anyhow::Result<Option<sdf::Layer>> {
+        let path = self.prim.path().clone();
+        self.prim.stage().masked(&path, |g, cache| {
+            cache.generate_clip_manifest(g, &path, clip_set, write_blocks_for_missing)
+        })
+    }
+
+    /// Generate a manifest layer for `clip_layers`, queried under
+    /// `clip_prim_path` (C++ `UsdClipsAPI::GenerateClipManifestFromLayers`).
+    ///
+    /// The clip-set form, [`generate_clip_manifest`](Self::generate_clip_manifest),
+    /// resolves and opens the clips itself and can write value blocks; this one
+    /// takes layers the caller already holds and only declares.
+    pub fn generate_clip_manifest_from_layers(
+        clip_layers: &[&sdf::Layer],
+        clip_prim_path: &sdf::Path,
+    ) -> anyhow::Result<sdf::Layer> {
+        // Without an activation schedule there are no times to block at, so
+        // every clip is passed for declaration only.
+        let clips: Vec<(&sdf::Layer, Option<f64>)> = clip_layers.iter().map(|layer| (*layer, None)).collect();
+        clip_manifest::generate_manifest(&clips, clip_prim_path, clip_manifest::CLIP_MANIFEST_TAG)
+    }
+
     /// Read a single field from `clip_set`'s entry in the composed `clips`
     /// dictionary and coerce it to `T` via [`Value::cast`]. Returns `None` when
     /// the set (or field) is unauthored, or its value can't cast to `T`.
@@ -299,7 +358,7 @@ impl ClipsAPI {
 mod tests {
     use super::*;
     use crate::gf;
-    use crate::usd::Stage;
+    use crate::usd::{Stage, TimeCode};
     use std::collections::HashMap;
 
     fn fixture(name: &str) -> String {
@@ -473,6 +532,123 @@ mod tests {
         assert_eq!(clips.clip_set_names()?, vec!["default".to_string()]);
         assert_eq!(clips.clip_prim_path("default")?.as_deref(), Some("/Geo"));
         assert!(clips.clips()?.is_some());
+        Ok(())
+    }
+
+    /// Every attribute path `manifest` declares, in its sorted order.
+    fn declared(manifest: &sdf::Layer) -> Vec<String> {
+        manifest
+            .data()
+            .spec_paths()
+            .into_iter()
+            .filter(|path| path.is_property_path())
+            .map(|path| path.as_str().to_owned())
+            .collect()
+    }
+
+    /// The generated manifest declares the attributes the clips carry samples
+    /// for under `primPath`, including one inside a variant, and leaves out an
+    /// attribute with no samples (`d`) and everything outside `primPath`
+    /// (`/Clip/B`). Ported from the C++ `testUsdValueClips` manifest-generation
+    /// assets.
+    #[test]
+    fn generate_manifest_declares_sampled() -> anyhow::Result<()> {
+        let stage = Stage::open(&fixture("clip_manifest_gen"))?;
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+
+        let manifest = clips.generate_clip_manifest("default", false)?.expect("set resolves");
+        assert_eq!(
+            declared(&manifest),
+            ["/Clip/A.a", "/Clip/A.b", "/Clip/A.z", "/Clip/A{v=a}.c"]
+        );
+        // Declarations only — the clips' sample values are not copied.
+        let a = manifest.attribute(sdf::path("/Clip/A.a")?).expect("declared");
+        assert_eq!(a.type_name().as_deref(), Some("double"));
+        assert!(a.time_samples().is_none());
+        assert!(a.default().is_none());
+        Ok(())
+    }
+
+    /// With blocks requested, each attribute is blocked at the activation time
+    /// of every clip that carries no samples for it. `clip_1` is activated at 0
+    /// and again at 8, so `z` — which only `clip_2` carries — is blocked twice.
+    #[test]
+    fn generate_manifest_blocks_missing() -> anyhow::Result<()> {
+        let stage = Stage::open(&fixture("clip_manifest_gen"))?;
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+
+        let manifest = clips.generate_clip_manifest("default", true)?.expect("set resolves");
+        let blocked = |path: &str| -> anyhow::Result<Vec<f64>> {
+            Ok(manifest
+                .attribute(sdf::path(path)?)
+                .expect("declared")
+                .time_samples()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(time, value)| {
+                    assert_eq!(value, Value::ValueBlock);
+                    time
+                })
+                .collect())
+        };
+        assert_eq!(blocked("/Clip/A.a")?, vec![4.0]);
+        assert_eq!(blocked("/Clip/A{v=a}.c")?, vec![4.0]);
+        assert_eq!(blocked("/Clip/A.z")?, vec![0.0, 8.0]);
+        Ok(())
+    }
+
+    /// A generated manifest is consumable: exported and named from
+    /// `manifestAssetPath`, it gates value resolution exactly as the synthesized
+    /// one it replaces did. An unknown clip-set name generates nothing.
+    #[test]
+    fn generate_manifest_round_trip() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = Stage::open(&fixture("clip_manifest_gen"))?;
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+        assert!(clips.generate_clip_manifest("nope", false)?.is_none());
+
+        // `a` is declared by the clips, `d` is authored without samples.
+        let value = |name: &str| stage.attribute(name).get_at(TimeCode::from(0.0));
+        assert_eq!(value("/Model.a")?, Some(1.0f64));
+        assert_eq!(value("/Model.d")?, None::<f64>);
+
+        let path = dir.path().join("manifest.usda");
+        clips
+            .generate_clip_manifest("default", false)?
+            .expect("set resolves")
+            .export(path.to_string_lossy())?;
+        clips.set_clip_manifest_asset_path("default", path.to_string_lossy().as_ref())?;
+
+        assert_eq!(
+            clips.clip_manifest_asset_path("default")?,
+            Some(AssetPath::new(path.to_string_lossy()))
+        );
+        assert_eq!(value("/Model.a")?, Some(1.0f64));
+        assert_eq!(value("/Model.d")?, None::<f64>);
+        Ok(())
+    }
+
+    /// The from-layers form declares over layers the caller already holds,
+    /// without an activation schedule, so it never writes blocks.
+    #[test]
+    fn generate_manifest_from_layers() -> anyhow::Result<()> {
+        let mut clip = sdf::Layer::new_anonymous("clip.usda");
+        clip.edit(|l| {
+            sdf::AttributeSpec::new(l.data_mut(), "/A.sampled", "double", sdf::Variability::Varying, false)?
+                .set_time_sample(0.0, Value::Double(1.0));
+            sdf::AttributeSpec::new(l.data_mut(), "/A.bare", "double", sdf::Variability::Varying, false)?;
+            Ok(())
+        })?;
+
+        let manifest = ClipsAPI::generate_clip_manifest_from_layers(&[&clip], &sdf::path("/A")?)?;
+        assert_eq!(declared(&manifest), ["/A.sampled"]);
+        assert!(
+            manifest
+                .attribute(sdf::path("/A.sampled")?)
+                .expect("declared")
+                .time_samples()
+                .is_none()
+        );
         Ok(())
     }
 

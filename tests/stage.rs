@@ -4837,6 +4837,116 @@ fn write_clip_scene(dir: &std::path::Path, root_body: &str, manifest_body: &str,
     Ok(dir.join("root.usda").to_string_lossy().into_owned())
 }
 
+/// A clip that cannot be opened contributes nothing rather than failing the
+/// read: the set still resolves from the clips that did open, at every time.
+/// Because the manifest synthesized while a clip was missing is not cached, the
+/// clip is picked up as soon as it can be opened — a sequence still being
+/// written does not poison the stage for its lifetime.
+#[test]
+fn clip_missing_asset_recovers() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("clip0.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 1 }\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "Model"
+)
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip0.usda@, @./clip1.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+    )?;
+
+    let root = dir.path().join("root.usda").to_string_lossy().into_owned();
+    let stage = Stage::open(&root)?;
+    // clip1.usda does not exist yet: the read succeeds on clip0's window.
+    assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(1.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 10.0), None);
+
+    fs::write(
+        dir.path().join("clip1.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 10: 2 }\n}\n",
+    )?;
+    assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(2.0));
+    Ok(())
+}
+
+/// A manifest value block at a clip's activation time is the author's statement
+/// that the clip carries no samples for the attribute, and the gap search under
+/// `interpolateMissingClipValues` honours it without opening that clip — which
+/// is the whole point of authoring blocks. The empty clip at stage 10 leaves a
+/// gap at `t = 15`; the forward bracket is normally clipC at stage 20, but a
+/// block there sends the search on to clipD at stage 30 instead. The manifest
+/// wins over what clipC actually holds, so the two answers differ.
+#[test]
+fn clip_manifest_block_skips_clip() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    for (name, body) in [
+        ("clipA.usda", "float size.timeSamples = { 0: 0.0 }"),
+        ("clipB.usda", ""),
+        ("clipC.usda", "float size.timeSamples = { 20: 100.0 }"),
+        ("clipD.usda", "float size.timeSamples = { 30: 300.0 }"),
+    ] {
+        fs::write(
+            dir.path().join(name),
+            format!("#usda 1.0\ndef \"Model\"\n{{\n    {body}\n}}\n"),
+        )?;
+    }
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "Model"
+)
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clipA.usda@, @./clipB.usda@, @./clipC.usda@, @./clipD.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1), (20, 2), (30, 3)]
+            bool interpolateMissingClipValues = true
+        }
+    }
+)
+{
+    float size
+}
+"#,
+    )?;
+    let root = dir.path().join("root.usda").to_string_lossy().into_owned();
+
+    // Unblocked: the gap at 15 brackets clipA's 0 at stage 0 and clipC's 100 at
+    // stage 20.
+    fs::write(
+        dir.path().join("manifest.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+    )?;
+    assert_eq!(value_f64(&Stage::open(&root)?, "/Model.size", 15.0), Some(75.0));
+
+    // Blocked at clipC's activation time, the forward bracket becomes clipD's
+    // 300 at stage 30.
+    fs::write(
+        dir.path().join("manifest.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 20: None }\n}\n",
+    )?;
+    assert_eq!(value_f64(&Stage::open(&root)?, "/Model.size", 15.0), Some(150.0));
+    Ok(())
+}
+
 /// Value-clip sample times surface through the introspection accessors (spec
 /// 12.3.4): the template set schedules clip.1 at stage 1 and clip.2 at stage 2,
 /// so `/Model.size` — which authors no local `timeSamples` — reports those.
@@ -5124,13 +5234,12 @@ def "Model" (
     Ok(())
 }
 
-/// A manifest-less clip set whose later clip authors nothing still reports that
-/// clip's activation boundary as a sample time, because the value changes there:
-/// clip0 holds its lone sample back over stage `[0, 10)`, then clip1 (empty)
-/// falls through to the reference at `t >= 10`. The reported boundary at 10 is
-/// the sole `value_at` change point, so introspection agrees with resolution —
-/// no under-reporting (the missed switch) and no arc bleed-through (the
-/// reference's `5.0`, a time where the held value never changes).
+/// A clip set that authors no manifest gets one synthesized from its clips, so
+/// clip0's `size` samples make the set own the attribute. clip0 holds its lone
+/// sample back over stage `[0, 10)`, and from the switch at 10 the empty clip1
+/// is active: the set answers authoritatively that there is no value, rather
+/// than deferring to the reference's `999`. The reported boundary at 10 is the
+/// sole `value_at` change point, so introspection agrees with resolution.
 #[test]
 fn clip_manifestless_held_boundary() -> Result<()> {
     let stage = Stage::open(&fixture_path("clip_manifestless_held/root.usda"))?;
@@ -5140,11 +5249,9 @@ fn clip_manifestless_held_boundary() -> Result<()> {
     // Two active clips can each serve a different value, so the attribute is
     // time-varying even though the discrete sample count is one.
     assert!(size.value_might_be_time_varying()?);
-    // value_at agrees: clip0 holds 50 backward, clip1 falls through to the
-    // reference's 999 from the switch at 10.
     assert_eq!(value_f64(&stage, "/Model.size", 5.0), Some(50.0));
     assert_eq!(value_f64(&stage, "/Model.size", 9.999), Some(50.0));
-    assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(999.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 10.0), None);
     Ok(())
 }
 

@@ -55,6 +55,8 @@
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
 //! | `prim_graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. |
 //! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
+//! | `clip` | `Usd_Clips` / `Usd_ClipSet` | Value clips (spec 12.3.4): the `ClipSet` metadata model with its stage-to-clip timing, and the `ClipCache` holding the clip and manifest layers that stay outside the composition graph. |
+//! | `clip_manifest` | `Usd_GenerateClipManifest` | Builds the manifest layer indexing which attributes a clip set's clips carry time samples for — generated on request through [`ClipsAPI`](crate::usd::ClipsAPI), and synthesized by `ClipCache` for a set that authors none. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
 //! | `load_rules` | `UsdStageLoadRules` | Per-path payload-inclusion policy ([`LoadRules`]/[`Rule`]): nearest-ancestor-with-lookahead rule resolution, plus the `IndexCache` glue that turns a rule change into per-build payload-expansion decisions and bounded cache invalidation. |
@@ -289,6 +291,7 @@ use std::collections::HashMap;
 
 pub(crate) mod change;
 pub(crate) mod clip;
+pub(crate) mod clip_manifest;
 mod compose_site;
 pub(crate) mod dependencies;
 pub(crate) mod index_cache;

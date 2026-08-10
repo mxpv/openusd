@@ -22,6 +22,7 @@ use crate::sdf::{LayerOffset, Path, SpecType, Value};
 use crate::tf::Token;
 
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
+use super::clip_manifest;
 use super::dependencies::Dependencies;
 use super::index_store::IndexStore;
 use super::instancing::PrototypeRegistry;
@@ -454,18 +455,11 @@ impl IndexCache {
         }
         // Value clips own the attribute when a set participates, reporting every
         // active-window boundary so a held window's switch point agrees with
-        // where `value_at` changes. The participation rule (manifest declares,
-        // or manifest-less with an authored sample) is the same one `clip_value_at`
-        // applies per-time, but computed independently there — the two must stay
-        // in agreement; the consistency tests in `tests/stage.rs` pin it.
-        //
-        // TODO: a manifest-less set reports only its own boundaries/samples here,
-        // but `clip_value_at` falls through to weaker sources (arc `timeSamples`)
-        // inside a fully-empty active window. Arc samples landing in such a gap
-        // window are served by `value_at` yet absent from this list. Closing the
-        // gap means unioning weaker-source sample times that fall within active
-        // windows the clip set authors nothing for — a clip/arc tier crossing
-        // tied to the broader `clip_value_at` unification.
+        // where `value_at` changes. The participation rule — the set's manifest,
+        // authored or synthesized, declares the attribute — is the same one
+        // `clip_value_at` applies per-time, but computed independently there;
+        // the two must stay in agreement, and the consistency tests in
+        // `tests/stage.rs` pin it.
         if let Some(times) = self.clip_sample_times(graph, &prim, &suffix)? {
             return Ok(Some(times));
         }
@@ -639,6 +633,49 @@ impl IndexCache {
     fn clip_sets_for(&mut self, graph: &LayerGraph, anchor: &Path) -> Result<Vec<ResolvedClipSet>> {
         self.ensure_index(graph, anchor)?;
         self.cached(anchor).resolve_clip_sets(graph)
+    }
+
+    /// Generates a manifest layer for the clip set named `clip_set` composed on
+    /// `prim` (C++ `UsdClipsAPI::GenerateClipManifest`), declaring every
+    /// attribute the set's clips carry time samples for. `write_blocks` authors
+    /// a value block at each clip's activation time for the attributes that clip
+    /// has no samples for.
+    ///
+    /// `None` for the pseudo-root or when no set of that name resolves on
+    /// `prim`. The manifest is a fresh anonymous layer: it is not installed on
+    /// the set, so authoring `manifestAssetPath` after exporting it is the
+    /// caller's to do.
+    pub(crate) fn generate_clip_manifest(
+        &mut self,
+        graph: &LayerGraph,
+        prim: &Path,
+        clip_set: &str,
+        write_blocks: bool,
+    ) -> Result<Option<sdf::Layer>> {
+        if prim.is_abs_root() {
+            return Ok(None);
+        }
+        // An instance proxy's clips are composed on the shared prototype, so
+        // read them from there — the same redirect every other query entry
+        // point applies.
+        let prim = &self.effective_path(graph, prim)?;
+        let sets = self.clip_sets_for(graph, prim)?;
+        let Some(resolved) = sets.into_iter().find(|resolved| resolved.set.name == clip_set) else {
+            return Ok(None);
+        };
+        // A set without its own `primPath` queries its clips under the prim the
+        // metadata is composed on (spec 12.3.4.1.1.1).
+        let clip_prim_path = resolved.set.prim_path.clone().unwrap_or_else(|| prim.clone());
+        // A clip that could not be opened contributes nothing to the manifest;
+        // the caller sees a manifest indexing the clips that did open.
+        let (manifest, _complete) = self.clip_cache.generate_manifest(
+            graph,
+            &resolved,
+            &clip_prim_path,
+            clip_manifest::CLIP_MANIFEST_TAG,
+            write_blocks,
+        )?;
+        Ok(Some(manifest))
     }
 
     /// Redirects `attr_path` through [`Self::effective_path`] and ensures the
@@ -3073,13 +3110,13 @@ def "Scope"
         Ok(())
     }
 
-    /// A manifest-less clip holds its value across its active interval, so it
-    /// owns the attribute even at times where it authors no sample inside that
-    /// interval. `resolve_value_source` must agree with `value_at` here: clip0
-    /// (active over stage `[0, 10)`) authors only at clip-time 50, yet holds
-    /// `50.0` at stage 5, so the source is `Clips` (deferring to `value_at`) and
-    /// must not collapse to the reference's weaker `999.0` time sample — the
-    /// divergence a discrete sample-time gate would cache.
+    /// A clip holds its value across its active interval, so it owns the
+    /// attribute even at times where it authors no sample inside that interval.
+    /// `resolve_value_source` must agree with `value_at` here: clip0 (active
+    /// over stage `[0, 10)`) authors only at clip-time 50, yet holds `50.0` at
+    /// stage 5, so the source is `Clips` (deferring to `value_at`) and must not
+    /// collapse to the reference's weaker `999.0` time sample — the divergence a
+    /// discrete sample-time gate would cache.
     #[test]
     fn value_source_clips_held_manifestless() -> Result<()> {
         let root = format!("{}/fixtures/clip_manifestless_held/root.usda", manifest_dir());
