@@ -17,15 +17,17 @@
 //! ```
 //!
 //! [`Connectable`] is the shared `inputs:` / `outputs:` surface (C++
-//! `UsdShadeConnectableAPI`); connections are wired with
-//! [`Attribute::connect_to`](crate::usd::Attribute::connect_to) and read back
-//! through [`connections`](crate::usd::Attribute::connections). The
-//! connection-following computation is kept as
-//! [`Material::compute_surface_source`] (resolve a Material's surface terminal
-//! back to its shader) and [`read_preview_surface`] (decode the canonical
-//! `UsdPreviewSurface` / `UsdUVTexture` graph). To find every shading prim on a
-//! stage, traverse it and gate each prim through the typed `get` (e.g.
-//! [`Material::get`]), mirroring C++ `prim.IsA<UsdShadeMaterial>()`.
+//! `UsdShadeConnectableAPI`). [`Input`] and [`Output`] are typed views over the
+//! underlying [`Attribute`](crate::usd::Attribute). Connections remain core
+//! attribute `connectionPaths`, available as raw composed paths through
+//! [`Attribute::connections`](crate::usd::Attribute::connections).
+//! [`ConnectedSources`] interprets those paths as valid or invalid UsdShade
+//! sources, and the value-producing queries follow container interfaces to
+//! logical shader outputs or authored interface values. Specialized consumers
+//! include [`Material::compute_surface_source`] and [`read_preview_surface`].
+//! To find every shading prim on a stage, traverse it and gate each prim
+//! through the typed `get` (e.g. [`Material::get`]), mirroring C++
+//! `prim.IsA<UsdShadeMaterial>()`.
 //!
 //! # Example
 //!
@@ -53,12 +55,19 @@ pub mod tokens;
 
 mod binding;
 mod connectable;
+mod input;
+mod output;
 mod preview;
 mod schema;
 mod traits;
+mod utils;
 
 pub use binding::MaterialBindingAPI;
-pub use connectable::base_name;
+pub use connectable::{
+    AttributeType, ConnectedSources, ConnectionSource, ShadingAttribute, base_name, base_name_and_type,
+};
+pub use input::Input;
+pub use output::Output;
 pub use preview::{Channel, ReadPreviewSurface, read_preview_surface};
 pub use schema::{Material, NodeGraph, Shader};
 pub use traits::Connectable;

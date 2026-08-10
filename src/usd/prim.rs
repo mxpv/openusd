@@ -897,6 +897,19 @@ impl Prim {
             .masked(&self.path, |g, cache| cache.prim_properties(g, &self.path))
     }
 
+    /// Returns handles to the composed attributes with authored scene
+    /// description. Mirrors C++ `UsdPrim::GetAuthoredAttributes`.
+    pub fn authored_attributes(&self) -> anyhow::Result<Vec<Attribute>> {
+        let mut attributes = Vec::new();
+        for name in self.authored_property_names()? {
+            let path = self.property_path(name);
+            if self.stage.spec_type(&path)? == Some(sdf::SpecType::Attribute) {
+                attributes.push(Attribute::new(&self.stage, path));
+            }
+        }
+        Ok(attributes)
+    }
+
     /// Returns handles to the composed attributes of this prim. Mirrors C++
     /// `UsdPrim::GetAttributes`.
     pub fn attributes(&self) -> anyhow::Result<Vec<Attribute>> {
@@ -1161,7 +1174,13 @@ mod tests {
     #[test]
     fn schema_properties_split_by_kind() -> anyhow::Result<()> {
         let stage = schema_stage()?;
-        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let prim = stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        prim.create_attribute("authored", "double")?;
+        prim.create_relationship("authoredRel")?;
+
+        let authored = prim.authored_attributes()?;
+        assert_eq!(authored.len(), 1);
+        assert_eq!(authored[0].path().as_str(), "/Sun.authored");
 
         // A property with no authored spec still sorts into attributes or
         // relationships by what the schema declares it to be.
@@ -1171,12 +1190,16 @@ mod tests {
         assert!(!names.iter().any(|name| name.ends_with("includes")), "{names:?}");
 
         let relationships = stage.prim("/Sun").relationships()?;
-        assert_eq!(relationships.len(), 1);
+        assert_eq!(relationships.len(), 2);
         assert!(
-            relationships[0]
-                .path()
-                .as_str()
-                .ends_with("collection:lightLink:includes")
+            relationships
+                .iter()
+                .any(|relationship| relationship.path().as_str().ends_with("collection:lightLink:includes"))
+        );
+        assert!(
+            relationships
+                .iter()
+                .any(|relationship| relationship.path().as_str() == "/Sun.authoredRel")
         );
         Ok(())
     }

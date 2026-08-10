@@ -17,6 +17,7 @@ doc-valid-idents = [
     "MaterialX",
     "NodeDefAPI",
     "NodeGraph",
+    "NodeGraphs",
     "OmniPBR",
     "OpenUSD",
     "OpenVDB",

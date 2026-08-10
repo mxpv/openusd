@@ -6,6 +6,7 @@ use crate::sdf::{self, Variability};
 use crate::tf::Token;
 use crate::usd::{Attribute, Prim, Stage};
 
+use super::Output;
 use super::impl_shade_schema;
 use super::tokens as tok;
 use crate::schemas::common::get_typed;
@@ -172,37 +173,37 @@ impl Material {
 
     /// Handle to the universal `outputs:surface` terminal
     /// (C++ `UsdShadeMaterial::GetSurfaceOutput`).
-    pub fn surface_output(&self) -> Attribute {
-        self.attribute(tok::A_OUTPUTS_SURFACE)
+    pub fn surface_output(&self) -> Output {
+        Output::new(self.attribute(tok::A_OUTPUTS_SURFACE))
     }
 
     /// Author the universal `outputs:surface` terminal
     /// (C++ `CreateSurfaceOutput`). Wire it with `.set_connections([source])`.
-    pub fn create_surface_output(&self) -> Result<Attribute> {
+    pub fn create_surface_output(&self) -> Result<Output> {
         self.create_terminal_output(tok::UNIVERSAL_RENDER_CONTEXT, tok::TERMINAL_SURFACE)
     }
 
     /// Handle to the universal `outputs:displacement` terminal
     /// (C++ `UsdShadeMaterial::GetDisplacementOutput`).
-    pub fn displacement_output(&self) -> Attribute {
-        self.attribute(tok::A_OUTPUTS_DISPLACEMENT)
+    pub fn displacement_output(&self) -> Output {
+        Output::new(self.attribute(tok::A_OUTPUTS_DISPLACEMENT))
     }
 
     /// Author the universal `outputs:displacement` terminal
     /// (C++ `CreateDisplacementOutput`).
-    pub fn create_displacement_output(&self) -> Result<Attribute> {
+    pub fn create_displacement_output(&self) -> Result<Output> {
         self.create_terminal_output(tok::UNIVERSAL_RENDER_CONTEXT, tok::TERMINAL_DISPLACEMENT)
     }
 
     /// Handle to the universal `outputs:volume` terminal
     /// (C++ `UsdShadeMaterial::GetVolumeOutput`).
-    pub fn volume_output(&self) -> Attribute {
-        self.attribute(tok::A_OUTPUTS_VOLUME)
+    pub fn volume_output(&self) -> Output {
+        Output::new(self.attribute(tok::A_OUTPUTS_VOLUME))
     }
 
     /// Author the universal `outputs:volume` terminal
     /// (C++ `CreateVolumeOutput`).
-    pub fn create_volume_output(&self) -> Result<Attribute> {
+    pub fn create_volume_output(&self) -> Result<Output> {
         self.create_terminal_output(tok::UNIVERSAL_RENDER_CONTEXT, tok::TERMINAL_VOLUME)
     }
 
@@ -210,7 +211,7 @@ impl Material {
     /// `"ri"` → `outputs:ri:surface`). Pass
     /// [`UNIVERSAL_RENDER_CONTEXT`](super::tokens::UNIVERSAL_RENDER_CONTEXT) for
     /// the universal terminal. C++ `CreateSurfaceOutput(renderContext)`.
-    pub fn create_surface_output_for(&self, render_context: &str) -> Result<Attribute> {
+    pub fn create_surface_output_for(&self, render_context: &str) -> Result<Output> {
         self.create_terminal_output(render_context, tok::TERMINAL_SURFACE)
     }
 
@@ -256,13 +257,13 @@ impl Material {
     /// The terminal output name for `terminal` in `render_context`. Universal
     /// context (empty) yields the bare `outputs:<terminal>`; a non-empty
     /// context yields `outputs:<ctx>:<terminal>`.
-    fn create_terminal_output(&self, render_context: &str, terminal: &str) -> Result<Attribute> {
+    fn create_terminal_output(&self, render_context: &str, terminal: &str) -> Result<Output> {
         let name = if render_context == tok::UNIVERSAL_RENDER_CONTEXT {
             format!("outputs:{terminal}")
         } else {
             format!("outputs:{render_context}:{terminal}")
         };
-        Ok(self.create_attribute(&name, "token")?.set_custom(false)?)
+        Ok(Output::new(self.create_attribute(&name, "token")?.set_custom(false)?))
     }
 }
 
@@ -290,16 +291,30 @@ mod tests {
             shader.input("diffuseColor").get::<Value>()?,
             Some(Value::vec3f(0.8_f32, 0.2, 0.2))
         );
-        assert!(
-            shader
-                .input_names()
-                .iter()
-                .any(|v| v.contains(&"diffuseColor".to_string()))
-        );
+        assert!(shader.inputs()?.iter().any(|input| input.base_name() == "diffuseColor"));
         assert_eq!(
             stage.spec_type("/Mat/Surface.outputs:surface")?,
             Some(sdf::SpecType::Attribute)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn lists_skip_relationships() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let shader = Shader::define(&stage, "/Mat/Surface")?;
+        shader.create_input("roughness", "float")?;
+        shader.create_output("surface", "token")?;
+        shader.create_relationship("inputs:binding")?;
+        shader.create_relationship("outputs:binding")?;
+
+        let inputs = shader.inputs()?;
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].base_name(), "roughness");
+
+        let outputs = shader.outputs()?;
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].base_name(), "surface");
         Ok(())
     }
 
@@ -367,7 +382,7 @@ mod tests {
         ng.create_output("out", "color3f")?;
         let ng = NodeGraph::get(&stage, "/NG")?.expect("NodeGraph");
         assert_eq!(ng.input("gain").get::<f32>()?, Some(2.0));
-        assert!(ng.output_names().iter().any(|v| v.contains(&"out".to_string())));
+        assert!(ng.outputs()?.iter().any(|output| output.base_name() == "out"));
         Ok(())
     }
 
@@ -380,27 +395,28 @@ mod tests {
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
-        // `connect_to` chains off `create_input`, wiring it to the texture output.
+        // The typed connection method preserves the input/output roles.
         surf.create_input("diffuseColor", "color3f")?
-            .connect_to(&tex.output("rgb"))?;
+            .connect_to_output(&tex.output("rgb"))?;
         assert_eq!(
             surf.input("diffuseColor").connections()?,
             vec![sdf::path("/Mat/Tex.outputs:rgb")?]
         );
 
         // Connectability defaults to Full, and round-trips once authored.
-        assert_eq!(surf.input_connectability("diffuseColor")?, Connectability::Full);
-        surf.set_input_connectability("diffuseColor", Connectability::InterfaceOnly)?;
+        assert_eq!(surf.input("diffuseColor").connectability()?, Connectability::Full);
+        surf.input("diffuseColor")
+            .set_connectability(Connectability::InterfaceOnly)?;
         assert_eq!(
-            surf.input_connectability("diffuseColor")?,
+            surf.input("diffuseColor").connectability()?,
             Connectability::InterfaceOnly
         );
 
         // Render type round-trips on both an input and an output.
-        surf.set_input_render_type("diffuseColor", "color")?;
-        assert_eq!(surf.input_render_type("diffuseColor")?.as_deref(), Some("color"));
-        tex.set_output_render_type("rgb", "color")?;
-        assert_eq!(tex.output_render_type("rgb")?.as_deref(), Some("color"));
+        surf.input("diffuseColor").set_render_type("color")?;
+        assert_eq!(surf.input("diffuseColor").render_type()?.as_deref(), Some("color"));
+        tex.output("rgb").set_render_type("color")?;
+        assert_eq!(tex.output("rgb").render_type()?.as_deref(), Some("color"));
 
         // `base_name` strips the namespace prefix.
         assert_eq!(base_name("inputs:diffuseColor"), "diffuseColor");
