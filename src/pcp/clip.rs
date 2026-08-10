@@ -236,17 +236,16 @@ impl ClipSet {
     /// For each clip active over a stage interval, the result gathers the
     /// timing-curve knots in the interval and the clip's in-clip sample times
     /// mapped to stage time through [`Self::stage_times_for_clip_time`] and
-    /// clamped to the interval, plus the clip-switch boundary. The first active
-    /// entry is active from negative infinity (spec 12.3.4.3, matching
-    /// [`Self::active_clip`]), so its interval has no lower bound and its stage
-    /// time is not a switch; each later entry's stage time bounds its interval
-    /// and is itself a switch boundary (the value can jump as the active clip
-    /// changes). Returns the union sorted ascending; empty when no clip is active.
+    /// clamped to the interval, plus the stage time the clip activates at. The
+    /// first active entry is active from negative infinity (spec 12.3.4.3,
+    /// matching [`Self::active_clip`]), so its interval has no lower bound; each
+    /// later entry's stage time bounds its interval. Returns the union sorted
+    /// ascending; empty when no clip is active.
     ///
-    /// Every active interval contributes its switch boundary, mirroring C++
-    /// `Usd_ClipSet` with `interpolateMissingClipValues` off: a clip authoring
-    /// no in-interval sample still reports the boundary where it becomes active,
-    /// since the active clip changes there. Whether the set sources the
+    /// Every clip contributes the stage time it activates at, whether or not it
+    /// authors a sample there, mirroring C++ `Usd_Clip::ListTimeSamplesForPath`.
+    /// The activation time isolates a clip from its neighbours, so a sample-time
+    /// query is answered from the active clip alone. Whether the set sources the
     /// attribute at all is decided by the caller's participation check before
     /// this routine runs.
     pub(crate) fn stage_sample_times(&self, per_clip: &[Vec<f64>]) -> Vec<f64> {
@@ -255,13 +254,11 @@ impl ClipSet {
             let samples = per_clip.get(clip_index).map_or(&[][..], Vec::as_slice);
             let end = self.active.get(k + 1).map(|next| next.0);
             // The first entry is active from negative infinity; later entries
-            // start at `start`, which is also a clip-switch sample time.
+            // start at `start`.
             let lower = (k > 0).then_some(start);
             let in_interval = |t: f64| lower.is_none_or(|l| t >= l) && end.is_none_or(|e| t < e);
 
-            if let Some(boundary) = lower {
-                out.push(boundary);
-            }
+            out.push(start);
             out.extend(self.times.iter().map(|knot| knot.x).filter(|&x| in_interval(x)));
             for &clip_time in samples {
                 out.extend(
@@ -1335,12 +1332,12 @@ mod tests {
 
     #[test]
     fn stage_times_before_first_active() {
-        // The first clip is active from -∞ (matches active_clip): a sample
-        // mapping before the first active entry's stage time is still reported,
-        // and that stage time is not a spurious switch boundary.
+        // The first clip is active from -∞ (matches active_clip), so a sample
+        // mapping before its activation time is still reported — alongside the
+        // activation time itself, which every clip contributes.
         let cs = clip_set(vec![(10.0, 0)], vec![]);
         let times = cs.stage_sample_times(&[vec![5.0, 15.0]]);
-        assert_eq!(times, vec![5.0, 15.0]);
+        assert_eq!(times, vec![5.0, 10.0, 15.0]);
     }
 
     #[test]

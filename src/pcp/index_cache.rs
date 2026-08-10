@@ -3133,19 +3133,19 @@ def "Scope"
         Ok(())
     }
 
-    /// `clip_sample_times` reports every active-window boundary of a
-    /// participating set and `None` when no set sources the attribute. The
-    /// manifest-less held set contributes only clip1's boundary at 10 (clip0's
-    /// sole sample maps to stage 50, outside its `[0, 10)` window). A
-    /// manifest that omits an attribute does not source it: `extra` returns
-    /// `None`, falling through to the arc.
+    /// `clip_sample_times` reports each clip's activation time in a
+    /// participating set and `None` when no set sources the attribute. The held
+    /// set contributes both activations and neither clip's samples — clip0's
+    /// sole sample maps to stage 50, outside its `[0, 10)` window, and clip1
+    /// authors none. A manifest that omits an attribute does not source it:
+    /// `extra` returns `None`, falling through to the arc.
     #[test]
     fn clip_sample_times_boundaries() -> Result<()> {
         let held = format!("{}/fixtures/clip_manifestless_held/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&held);
         assert_eq!(
             cache.clip_sample_times(&graph, &sdf::path("/Model")?, ".size")?,
-            Some(vec![10.0])
+            Some(vec![0.0, 10.0])
         );
 
         let arc = format!("{}/fixtures/clip_undeclared_arc/root.usda", manifest_dir());

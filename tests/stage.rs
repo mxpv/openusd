@@ -5235,19 +5235,19 @@ def "Model" (
 }
 
 /// A clip set that authors no manifest gets one synthesized from its clips, so
-/// clip0's `size` samples make the set own the attribute. clip0 holds its lone
-/// sample back over stage `[0, 10)`, and from the switch at 10 the empty clip1
-/// is active: the set answers authoritatively that there is no value, rather
-/// than deferring to the reference's `999`. The reported boundary at 10 is the
-/// sole `value_at` change point, so introspection agrees with resolution.
+/// clip0's `size` samples make the set own the attribute. Each clip reports the
+/// stage time it activates at — 0 and 10 — while clip0's lone sample maps to
+/// stage 50, outside its `[0, 10)` window, and clip1 authors none.
+///
+/// clip0 holds its sample back over its window, and from the switch at 10 the
+/// empty clip1 is active: the set answers authoritatively that there is no
+/// value, rather than deferring to the reference's `999`.
 #[test]
 fn clip_manifestless_held_boundary() -> Result<()> {
     let stage = Stage::open(&fixture_path("clip_manifestless_held/root.usda"))?;
     let size = stage.attribute("/Model.size");
-    assert_eq!(size.time_sample_times()?, vec![10.0]);
-    assert_eq!(size.num_time_samples()?, 1);
-    // Two active clips can each serve a different value, so the attribute is
-    // time-varying even though the discrete sample count is one.
+    assert_eq!(size.time_sample_times()?, vec![0.0, 10.0]);
+    assert_eq!(size.num_time_samples()?, 2);
     assert!(size.value_might_be_time_varying()?);
     assert_eq!(value_f64(&stage, "/Model.size", 5.0), Some(50.0));
     assert_eq!(value_f64(&stage, "/Model.size", 9.999), Some(50.0));
