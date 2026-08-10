@@ -8,6 +8,8 @@
 //! authoring utility on [`ClipsAPI`](crate::usd::ClipsAPI), which can also write
 //! the value blocks that let value resolution skip opening a clip.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 
 use crate::sdf::schema::FieldKey;
@@ -59,8 +61,14 @@ pub(crate) fn generate_manifest(
 
         // Declarations union across the clips in activation order, so the
         // earliest clip to carry an attribute fixes its type and variability.
+        // A clip the schedule activates more than once declares the same
+        // attributes each time, so each distinct layer is walked once.
         let mut declared: Vec<Path> = Vec::new();
+        let mut walked: HashSet<&str> = HashSet::new();
         for &(clip, _) in clips {
+            if !walked.insert(clip.identifier()) {
+                continue;
+            }
             for (path, type_name, variability) in sampled_attributes(clip, clip_prim_path) {
                 if data.has_spec(&path) {
                     continue;
@@ -92,17 +100,19 @@ pub(crate) fn generate_manifest(
     Ok(manifest)
 }
 
-/// Which clip set a synthesized manifest was generated for: the prim path its
-/// clips are queried under, and the set's name. The set it was generated from is
-/// stored alongside and compared on lookup, so any edit to the set's clips or
-/// schedule supersedes the manifest (the C++ `Usd_ClipCache` manifest key).
+/// Which clip set a synthesized manifest was generated for: the prim carrying
+/// the set, and the set's name. Identifies the authored set — unlike the set's
+/// `primPath`, which addresses the clips' own namespace and which unrelated
+/// prims routinely share. The set it was generated from is stored alongside and
+/// compared on lookup, so any edit to the set supersedes the manifest (the C++
+/// `Usd_ClipCache` manifest key).
 ///
 /// Deliberately cheap to build — no asset path is resolved to an identifier —
 /// because value resolution constructs one on every clipped attribute read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ManifestKey {
-    /// The prim path the clips are queried under.
-    pub clip_prim_path: Path,
+    /// The prim the clip set is composed on.
+    pub prim: Path,
     /// The clip set's name, the key it holds in the `clips` dictionary.
     pub clip_set: String,
 }
@@ -156,9 +166,10 @@ mod tests {
     use super::*;
     use crate::usda;
 
-    /// Parses `text` as a `usda` clip layer.
-    fn clip(text: &str) -> sdf::Layer {
-        sdf::Layer::new("clip.usda", Box::new(usda::parse(text).expect("valid usda")))
+    /// Parses `text` as a `usda` clip layer identified as `name`. Distinct
+    /// names matter: generation walks each distinct layer once.
+    fn clip(name: &str, text: &str) -> sdf::Layer {
+        sdf::Layer::new(name, Box::new(usda::parse(text).expect("valid usda")))
     }
 
     /// Every attribute path the manifest declares, sorted.
@@ -178,6 +189,7 @@ mod tests {
     #[test]
     fn declares_sampled_union() -> Result<()> {
         let one = clip(
+            "one.usda",
             r#"#usda 1.0
 def "Clip"
 {
@@ -197,6 +209,7 @@ def "Clip"
 "#,
         );
         let two = clip(
+            "two.usda",
             r#"#usda 1.0
 def "Clip"
 {
@@ -229,6 +242,7 @@ def "Clip"
     #[test]
     fn declares_variant_and_uniform() -> Result<()> {
         let one = clip(
+            "one.usda",
             r#"#usda 1.0
 def "A"
 {
@@ -265,6 +279,7 @@ def "A"
     #[test]
     fn blocks_clips_without_samples() -> Result<()> {
         let full = clip(
+            "full.usda",
             r#"#usda 1.0
 def "A"
 {
@@ -274,6 +289,7 @@ def "A"
 "#,
         );
         let partial = clip(
+            "partial.usda",
             r#"#usda 1.0
 def "A"
 {
@@ -308,8 +324,11 @@ def "A"
     /// synthesized during value resolution.
     #[test]
     fn no_blocks_without_active_times() -> Result<()> {
-        let empty = clip("#usda 1.0\ndef \"A\"\n{\n}\n");
-        let sampled = clip("#usda 1.0\ndef \"A\"\n{\n    double x.timeSamples = { 0: 1.0 }\n}\n");
+        let empty = clip("empty.usda", "#usda 1.0\ndef \"A\"\n{\n}\n");
+        let sampled = clip(
+            "sampled.usda",
+            "#usda 1.0\ndef \"A\"\n{\n    double x.timeSamples = { 0: 1.0 }\n}\n",
+        );
 
         let manifest = generate_manifest(&[(&sampled, None), (&empty, None)], &sdf::path("/A")?, "test.usda")?;
         assert!(

@@ -252,8 +252,13 @@ impl ClipsAPI {
     /// Generate a manifest layer for `clip_set` (C++
     /// `UsdClipsAPI::GenerateClipManifest`), declaring every attribute the set's
     /// clips carry time samples for. Opens each clip the set's `active` schedule
-    /// names; one that cannot be opened contributes nothing rather than failing
-    /// the call.
+    /// names.
+    ///
+    /// Errors when a clip cannot be read, rather than returning a manifest that
+    /// omits what it carried: naming such a manifest from `manifestAssetPath`
+    /// would stop value resolution sourcing those attributes from the clips at
+    /// all. Synthesis during value resolution makes the opposite trade and
+    /// degrades to the clips it can read.
     ///
     /// `None` when the prim is the pseudo-root, when no set of that name
     /// resolves here, or when the prim lies outside the stage's population mask
@@ -625,6 +630,43 @@ mod tests {
         );
         assert_eq!(value("/Model.a")?, Some(1.0f64));
         assert_eq!(value("/Model.d")?, None::<f64>);
+        Ok(())
+    }
+
+    /// A clip the schedule names but cannot be read fails generation, so a
+    /// manifest that would silently de-source that clip's attributes is never
+    /// handed back for export.
+    #[test]
+    fn generate_manifest_unreadable_clip_errors() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("clip.usda"),
+            "#usda 1.0\ndef \"Model\"\n{\n    double a.timeSamples = { 0: 1.0 }\n}\n",
+        )?;
+        std::fs::write(
+            dir.path().join("root.usda"),
+            r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@, @./absent.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (4, 1)]
+        }
+    }
+)
+{
+    double a
+}
+"#,
+        )?;
+
+        let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+        let error = clips
+            .generate_clip_manifest("default", false)
+            .expect_err("clip missing");
+        assert!(format!("{error:#}").contains("absent.usda"), "{error:#}");
         Ok(())
     }
 

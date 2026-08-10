@@ -817,6 +817,9 @@ impl PrimIndex {
         // node (whose schedule is derived later and retimed afterwards).
         let mut explicit_sets: HashSet<String> = HashSet::new();
         let mut template_offsets: HashMap<String, LayerOffset> = HashMap::new();
+        // Offset of the node that supplied `active`, kept so a manifest's own
+        // authored times can be mapped into the retimed schedule's frame.
+        let mut active_offsets: HashMap<String, LayerOffset> = HashMap::new();
 
         // Opinions fan out per contributing sublayer, strongest first; a value
         // block on any layer stops every weaker opinion (spec 12.3.4).
@@ -854,6 +857,9 @@ impl PrimIndex {
                             // no explicit `assetPaths` has been composed — else a
                             // weaker template layer would mis-anchor the explicit
                             // paths the stronger layer authored.
+                            if field == clip::keys::ACTIVE {
+                                active_offsets.insert(set_name.clone(), offset);
+                            }
                             if field == clip::keys::ASSET_PATHS {
                                 asset_layers.insert(set_name.clone(), layer);
                                 explicit_sets.insert(set_name.clone());
@@ -888,15 +894,24 @@ impl PrimIndex {
                 // Explicit `active`/`times` were retimed as they composed. A
                 // template schedule is derived in clip time, so retime its
                 // stage times here by the authoring node's offset.
+                let template_offset = template_offsets.get(&set.name).copied();
                 if !explicit_sets.contains(&set.name)
-                    && let Some(&offset) = template_offsets.get(&set.name)
+                    && let Some(offset) = template_offset
                 {
                     set.retime_stage_times(offset);
                 }
+                // The offset the schedule now carries, so a manifest read off
+                // its own layer can be compared against it in stage time.
+                let active_offset = if explicit_sets.contains(&set.name) {
+                    active_offsets.get(&set.name).copied().unwrap_or(LayerOffset::IDENTITY)
+                } else {
+                    template_offset.unwrap_or(LayerOffset::IDENTITY)
+                };
                 Some(clip::ResolvedClipSet {
                     set,
                     asset_layer,
                     manifest_layer,
+                    active_offset,
                 })
             })
             .collect())

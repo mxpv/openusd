@@ -4838,10 +4838,15 @@ fn write_clip_scene(dir: &std::path::Path, root_body: &str, manifest_body: &str,
 }
 
 /// A clip that cannot be opened contributes nothing rather than failing the
-/// read: the set still resolves from the clips that did open, at every time.
-/// Because the manifest synthesized while a clip was missing is not cached, the
+/// read: the set still resolves from the clips that did open, at every time, and
+/// the unreadable clip is reported as a composition error rather than silently
+/// dropping what it carried.
+///
+/// Because a manifest synthesized while a clip was missing is never reused, the
 /// clip is picked up as soon as it can be opened — a sequence still being
-/// written does not poison the stage for its lifetime.
+/// written does not poison the stage for its lifetime. `extra` is what pins
+/// that: only the late clip declares it, so it can resolve only if the manifest
+/// was regenerated.
 #[test]
 fn clip_missing_asset_recovers() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -4866,6 +4871,7 @@ def "Model" (
 )
 {
     float size
+    float extra
 }
 "#,
     )?;
@@ -4875,12 +4881,20 @@ def "Model" (
     // clip1.usda does not exist yet: the read succeeds on clip0's window.
     assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(1.0));
     assert_eq!(value_f64(&stage, "/Model.size", 10.0), None);
+    assert_eq!(value_f64(&stage, "/Model.extra", 10.0), None);
+    assert!(stage.composition_errors().iter().any(
+        |error| matches!(error, openusd::pcp::Error::UnreadableClip { asset_path, .. }
+                                  if asset_path.contains("clip1.usda"))
+    ));
 
     fs::write(
         dir.path().join("clip1.usda"),
-        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 10: 2 }\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 10: 2 }\n    float extra.timeSamples = { 10: 7 }\n}\n",
     )?;
     assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(2.0));
+    // Only the late clip declares `extra`, so this resolves only because the
+    // incomplete manifest was regenerated rather than reused.
+    assert_eq!(value_f64(&stage, "/Model.extra", 10.0), Some(7.0));
     Ok(())
 }
 
@@ -4930,20 +4944,26 @@ def "Model" (
     let root = dir.path().join("root.usda").to_string_lossy().into_owned();
 
     // Unblocked: the gap at 15 brackets clipA's 0 at stage 0 and clipC's 100 at
-    // stage 20.
+    // stage 20, and reading clipC's own window returns what it holds.
     fs::write(
         dir.path().join("manifest.usda"),
         "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
     )?;
-    assert_eq!(value_f64(&Stage::open(&root)?, "/Model.size", 15.0), Some(75.0));
+    let stage = Stage::open(&root)?;
+    assert_eq!(value_f64(&stage, "/Model.size", 15.0), Some(75.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 20.0), Some(100.0));
 
     // Blocked at clipC's activation time, the forward bracket becomes clipD's
-    // 300 at stage 30.
+    // 300 at stage 30 — and reading inside clipC's own window honours the same
+    // block instead of returning the 100 the clip holds, so the two paths agree
+    // on what clipC contributes.
     fs::write(
         dir.path().join("manifest.usda"),
         "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 20: None }\n}\n",
     )?;
-    assert_eq!(value_f64(&Stage::open(&root)?, "/Model.size", 15.0), Some(150.0));
+    let stage = Stage::open(&root)?;
+    assert_eq!(value_f64(&stage, "/Model.size", 15.0), Some(150.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 20.0), Some(200.0));
     Ok(())
 }
 

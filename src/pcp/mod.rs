@@ -462,6 +462,21 @@ pub enum Error {
         reason: String,
     },
 
+    /// A value clip named by a clip set could not be read (C++ "Unable to open
+    /// clip layer @%s@"). The clip contributes neither declarations to the set's
+    /// manifest nor values, while the rest of the schedule still resolves.
+    #[error("unreadable clip layer @{asset_path}@ for clip set {clip_set:?} at {prim_path}: {reason}")]
+    UnreadableClip {
+        /// The clip asset path, anchored to the layer that authored the set.
+        asset_path: String,
+        /// Name of the clip set that names the clip.
+        clip_set: String,
+        /// The prim the clip set is composed on.
+        prim_path: Path,
+        /// Why the clip could not be read.
+        reason: String,
+    },
+
     /// A reference or payload targets a muted layer (C++ `PcpErrorMutedAssetPath`).
     /// A muted target contributes no opinions, so the arc is dropped while the rest
     /// of the prim still composes. Recorded whether or not the target was ever

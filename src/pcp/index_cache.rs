@@ -580,7 +580,20 @@ impl IndexCache {
             attr_prim,
             suffix,
         };
-        self.clip_cache.value_in_sets(graph, &sets, &query, time, interp)
+        let value = self.clip_cache.value_in_sets(graph, &sets, &query, time, interp);
+        self.record_clip_errors();
+        value
+    }
+
+    /// Merges any clip a manifest synthesis could not read into the cache's
+    /// query diagnostics, so a clip missing from an otherwise-resolving stage is
+    /// reported rather than silently dropping the attributes it carried.
+    fn record_clip_errors(&mut self) {
+        for error in self.clip_cache.take_errors() {
+            if !self.query_errors.contains(&error) {
+                self.query_errors.push(error);
+            }
+        }
     }
 
     /// The value-clip introspection for `attr_prim + suffix` from the first
@@ -605,7 +618,9 @@ impl IndexCache {
                 attr_prim,
                 suffix,
             };
-            if let Some(introspection) = self.clip_cache.clip_introspection_in_sets(graph, &sets, &query)? {
+            let introspection = self.clip_cache.clip_introspection_in_sets(graph, &sets, &query);
+            self.record_clip_errors();
+            if let Some(introspection) = introspection? {
                 return Ok(Some(introspection));
             }
             match anchor.parent() {
@@ -645,6 +660,12 @@ impl IndexCache {
     /// `prim`. The manifest is a fresh anonymous layer: it is not installed on
     /// the set, so authoring `manifestAssetPath` after exporting it is the
     /// caller's to do.
+    ///
+    /// Errors when a clip the schedule names cannot be read. An authored
+    /// manifest that silently omits a clip's attributes would stop value
+    /// resolution sourcing them at all, so the incomplete result is refused
+    /// rather than returned — unlike synthesis during value resolution, which
+    /// degrades to the clips it can read.
     pub(crate) fn generate_clip_manifest(
         &mut self,
         graph: &LayerGraph,
@@ -663,18 +684,18 @@ impl IndexCache {
         let Some(resolved) = sets.into_iter().find(|resolved| resolved.set.name == clip_set) else {
             return Ok(None);
         };
-        // A set without its own `primPath` queries its clips under the prim the
-        // metadata is composed on (spec 12.3.4.1.1.1).
-        let clip_prim_path = resolved.set.prim_path.clone().unwrap_or_else(|| prim.clone());
-        // A clip that could not be opened contributes nothing to the manifest;
-        // the caller sees a manifest indexing the clips that did open.
-        let (manifest, _complete) = self.clip_cache.generate_manifest(
+        let (manifest, unread) = self.clip_cache.generate_manifest(
             graph,
             &resolved,
-            &clip_prim_path,
+            prim,
             clip_manifest::CLIP_MANIFEST_TAG,
             write_blocks,
         )?;
+        if let Some(error) = unread.first() {
+            return Err(anyhow::anyhow!(error.clone()).context(format!(
+                "cannot generate a complete manifest for clip set {clip_set:?} on {prim}"
+            )));
+        }
         Ok(Some(manifest))
     }
 
