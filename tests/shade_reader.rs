@@ -4,30 +4,29 @@
 
 use anyhow::Result;
 use openusd::schemas::shade::{self, Channel, Connectable, Material, MaterialBindingAPI, Shader};
-use openusd::sdf;
-use openusd::usd::{PrimPredicate, Stage};
+use openusd::{sdf, usd};
 
 const FIXTURE: &str = "fixtures/usdShade_scene.usda";
 
-fn open() -> Result<Stage> {
-    Stage::open(FIXTURE)
+fn open() -> Result<usd::Stage> {
+    usd::Stage::open(FIXTURE)
 }
 
 /// Every `Material` on the stage, found by traversing and gating each prim
 /// through `Material::get` — the C++-style `prim.IsA<UsdShadeMaterial>()` filter.
-fn materials(stage: &Stage) -> Result<Vec<Material>> {
+fn materials(stage: &usd::Stage) -> Result<Vec<Material>> {
     typed(stage, Material::get)
 }
 
 /// Every `Shader` on the stage (`prim.IsA<UsdShadeShader>()`).
-fn shaders(stage: &Stage) -> Result<Vec<Shader>> {
+fn shaders(stage: &usd::Stage) -> Result<Vec<Shader>> {
     typed(stage, Shader::get)
 }
 
 /// Traverse `stage` and collect the prims that `get` resolves to a view.
-fn typed<S>(stage: &Stage, get: impl Fn(&Stage, sdf::Path) -> Result<Option<S>>) -> Result<Vec<S>> {
+fn typed<S>(stage: &usd::Stage, get: impl Fn(&usd::Stage, sdf::Path) -> Result<Option<S>>) -> Result<Vec<S>> {
     let mut paths = Vec::new();
-    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |p| paths.push(p.clone()))?;
+    stage.traverse(usd::PrimPredicate::DEFAULT_PROXIES, |p| paths.push(p.clone()))?;
     paths.into_iter().filter_map(|p| get(stage, p).transpose()).collect()
 }
 
@@ -49,8 +48,9 @@ fn finds_every_shade_prim() -> Result<()> {
 fn resolves_surface_terminal_to_shader() -> Result<()> {
     let stage = open()?;
     let mat = Material::get(&stage, "/World/Looks/BrickMat")?.expect("Material");
-    let shader = mat.compute_surface_source()?.expect("surface shader");
-    assert_eq!(shader.path().as_str(), "/World/Looks/BrickMat/Surface");
+    let terminal = mat.compute_surface_source(&[])?.expect("surface terminal");
+    let source = terminal.sources().first().expect("surface source");
+    assert_eq!(source.shader().path().as_str(), "/World/Looks/BrickMat/Surface");
     Ok(())
 }
 
@@ -87,7 +87,7 @@ fn reads_material_bindings_from_fixture() -> Result<()> {
 
 #[test]
 fn author_then_read_back_roundtrip() -> Result<()> {
-    let stage = Stage::builder().in_memory("anon.usda")?;
+    let stage = usd::Stage::builder().in_memory("anon.usda")?;
     stage.define_prim("/World")?.set_type_name("Xform")?;
     stage.define_prim("/World/Looks")?.set_type_name("Scope")?;
     stage.define_prim("/World/Geo")?.set_type_name("Mesh")?;
