@@ -11,9 +11,7 @@
 
 use anyhow::Result;
 
-use crate::gf;
-use crate::sdf::{Path, Value};
-use crate::usd::Stage;
+use crate::{gf, sdf, usd};
 
 use super::tokens::*;
 use super::{Connectable, Input, Material, ProducerFilter, Shader};
@@ -76,31 +74,35 @@ pub struct ReadPreviewSurface {
 /// Resolve `material`'s surface shader and, if it is a `UsdPreviewSurface`,
 /// decode every channel. Returns `None` when the material has no surface shader
 /// or the shader is not a `UsdPreviewSurface`.
-pub fn read_preview_surface(stage: &Stage, material: &Path) -> Result<Option<ReadPreviewSurface>> {
+pub fn read_preview_surface(stage: &usd::Stage, material: &sdf::Path) -> Result<Option<ReadPreviewSurface>> {
     let Some(material) = Material::get(stage, material.clone())? else {
         return Ok(None);
     };
-    let Some(shader) = material.compute_surface_source()? else {
+    let Some(terminal) = material.compute_surface_source(&[])? else {
         return Ok(None);
     };
+    let Some(source) = terminal.sources().first() else {
+        return Ok(None);
+    };
+    let shader = source.shader();
     if shader.id()?.as_deref() != Some(SHADER_ID_PREVIEW_SURFACE) {
         return Ok(None);
     }
 
     Ok(Some(ReadPreviewSurface {
         shader: shader.path().as_str().to_string(),
-        diffuse_color: read_color_channel(&shader, PS_DIFFUSE_COLOR)?,
-        emissive_color: read_color_channel(&shader, PS_EMISSIVE_COLOR)?,
-        specular_color: read_color_channel(&shader, PS_SPECULAR_COLOR)?,
-        metallic: read_scalar_channel(&shader, PS_METALLIC)?,
-        roughness: read_scalar_channel(&shader, PS_ROUGHNESS)?,
-        clearcoat: read_scalar_channel(&shader, PS_CLEARCOAT)?,
-        clearcoat_roughness: read_scalar_channel(&shader, PS_CLEARCOAT_ROUGHNESS)?,
-        opacity: read_scalar_channel(&shader, PS_OPACITY)?,
-        opacity_threshold: read_scalar_channel(&shader, PS_OPACITY_THRESHOLD)?,
-        ior: read_scalar_channel(&shader, PS_IOR)?,
-        normal: read_color_channel(&shader, PS_NORMAL)?,
-        occlusion: read_scalar_channel(&shader, PS_OCCLUSION)?,
+        diffuse_color: read_color_channel(shader, PS_DIFFUSE_COLOR)?,
+        emissive_color: read_color_channel(shader, PS_EMISSIVE_COLOR)?,
+        specular_color: read_color_channel(shader, PS_SPECULAR_COLOR)?,
+        metallic: read_scalar_channel(shader, PS_METALLIC)?,
+        roughness: read_scalar_channel(shader, PS_ROUGHNESS)?,
+        clearcoat: read_scalar_channel(shader, PS_CLEARCOAT)?,
+        clearcoat_roughness: read_scalar_channel(shader, PS_CLEARCOAT_ROUGHNESS)?,
+        opacity: read_scalar_channel(shader, PS_OPACITY)?,
+        opacity_threshold: read_scalar_channel(shader, PS_OPACITY_THRESHOLD)?,
+        ior: read_scalar_channel(shader, PS_IOR)?,
+        normal: read_color_channel(shader, PS_NORMAL)?,
+        occlusion: read_scalar_channel(shader, PS_OCCLUSION)?,
     }))
 }
 
@@ -141,9 +143,9 @@ fn resolve_asset_value(input: &Input) -> Result<Option<String>> {
     };
     Ok(source
         .attribute()
-        .get::<Value>()?
+        .get::<sdf::Value>()?
         .as_ref()
-        .and_then(Value::as_str)
+        .and_then(sdf::Value::as_str)
         .map(str::to_owned))
 }
 
@@ -151,10 +153,10 @@ fn read_color_channel(shader: &Shader, base: &str) -> Result<Channel<gf::Vec3f>>
     if let Some(file) = connected_texture_file(shader, base)? {
         return Ok(Channel::Texture(file));
     }
-    Ok(match shader.input(base).get::<Value>()? {
-        Some(Value::Vec3f(v)) => Channel::Value(v),
-        Some(Value::Vec3d(v)) => Channel::Value(gf::vec3f(v.x as f32, v.y as f32, v.z as f32)),
-        Some(Value::Vec3h(v)) => Channel::Value(gf::vec3f(v.x.to_f32(), v.y.to_f32(), v.z.to_f32())),
+    Ok(match shader.input(base).get::<sdf::Value>()? {
+        Some(sdf::Value::Vec3f(v)) => Channel::Value(v),
+        Some(sdf::Value::Vec3d(v)) => Channel::Value(gf::vec3f(v.x as f32, v.y as f32, v.z as f32)),
+        Some(sdf::Value::Vec3h(v)) => Channel::Value(gf::vec3f(v.x.to_f32(), v.y.to_f32(), v.z.to_f32())),
         _ => Channel::Unset,
     })
 }
@@ -163,11 +165,11 @@ fn read_scalar_channel(shader: &Shader, base: &str) -> Result<Channel<f32>> {
     if let Some(file) = connected_texture_file(shader, base)? {
         return Ok(Channel::Texture(file));
     }
-    Ok(match shader.input(base).get::<Value>()? {
-        Some(Value::Float(f)) => Channel::Value(f),
-        Some(Value::Double(d)) => Channel::Value(d as f32),
-        Some(Value::Half(h)) => Channel::Value(h.to_f32()),
-        Some(Value::Int(i)) => Channel::Value(i as f32),
+    Ok(match shader.input(base).get::<sdf::Value>()? {
+        Some(sdf::Value::Float(f)) => Channel::Value(f),
+        Some(sdf::Value::Double(d)) => Channel::Value(d as f32),
+        Some(sdf::Value::Half(h)) => Channel::Value(h.to_f32()),
+        Some(sdf::Value::Int(i)) => Channel::Value(i as f32),
         _ => Channel::Unset,
     })
 }
@@ -175,25 +177,24 @@ fn read_scalar_channel(shader: &Shader, base: &str) -> Result<Channel<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdf;
 
     #[test]
     fn scalar_and_textured_channels() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
 
         // A UsdUVTexture feeding diffuseColor; roughness/metallic are scalars.
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
         tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
         tex.create_input("file", "asset")?
-            .set(Value::AssetPath("./albedo.png".into()))?;
+            .set(sdf::Value::AssetPath("./albedo.png".into()))?;
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
         surf.create_input("diffuseColor", "color3f")?
             .set_connections([sdf::path("/Mat/DiffuseTex.outputs:rgb")?])?;
-        surf.create_input("roughness", "float")?.set(Value::Float(0.4))?;
-        surf.create_input("metallic", "float")?.set(Value::Float(1.0))?;
+        surf.create_input("roughness", "float")?.set(sdf::Value::Float(0.4))?;
+        surf.create_input("metallic", "float")?.set(sdf::Value::Float(1.0))?;
         surf.create_output("surface", "token")?;
 
         Material::define(&stage, "/Mat")?
@@ -213,13 +214,13 @@ mod tests {
 
     #[test]
     fn interface_driven_texture() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
 
         // The texture's file path is driven by a Material interface input rather
         // than authored directly on the texture.
         let mat = Material::define(&stage, "/Mat")?;
         mat.create_input("diffuseTexFile", "asset")?
-            .set(Value::AssetPath("./albedo.png".into()))?;
+            .set(sdf::Value::AssetPath("./albedo.png".into()))?;
 
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
         tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
@@ -242,7 +243,7 @@ mod tests {
 
     #[test]
     fn non_preview_surface_none() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.create_id_attr()?
             .set(sdf::Value::token("ND_standard_surface_surfaceshader"))?;

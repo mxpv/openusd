@@ -10,9 +10,10 @@
 //! ```text
 //! SchemaBase
 //!  ├ Connectable (interface; inputs: / outputs:)
-//!  │  ├ Shader        (typed; info:id + NodeDefAPI surface)
-//!  │  ├ NodeGraph     (typed; a shading-network container)
-//!  │  └ Material      (typed; surface / displacement / volume terminals)
+//!  │  ├ Shader             (typed; info:id + NodeDefAPI surface)
+//!  │  └ NodeGraphInterface (interface-input consumer maps)
+//!  │     ├ NodeGraph       (typed; a shading-network container)
+//!  │     └ Material        (typed; surface / displacement / volume terminals)
 //!  └ MaterialBindingAPI (single-apply; direct + collection bindings)
 //! ```
 //!
@@ -25,8 +26,9 @@
 //! sources, and [`Input::value_producing_attributes`] /
 //! [`Output::value_producing_attributes`] follow container interfaces to the
 //! logical shader outputs or authored interface values behind an attribute,
-//! as far as [`ProducerFilter`] admits. Specialized consumers include
-//! [`Material::compute_surface_source`] and [`read_preview_surface`].
+//! as far as [`ProducerFilter`] admits. [`NodeGraphInterface`] maps interface
+//! inputs in the reverse direction to their consumers. Specialized consumers
+//! include [`Material::compute_surface_source`] and [`read_preview_surface`].
 //! To find every shading prim on a stage, traverse it and gate each prim
 //! through the typed `get` (e.g. [`Material::get`]), mirroring C++
 //! `prim.IsA<UsdShadeMaterial>()`.
@@ -49,8 +51,9 @@
 //!     .connect_to(&terminal).unwrap();
 //!
 //! let mat = shade::Material::get(&stage, "/Mat").unwrap().expect("Material");
-//! let resolved = mat.compute_surface_source().unwrap().expect("surface shader");
-//! assert_eq!(resolved.id().unwrap().as_deref(), Some("UsdPreviewSurface"));
+//! let terminal = mat.compute_surface_source(&[]).unwrap().expect("surface terminal");
+//! let source = terminal.sources().first().expect("surface source");
+//! assert_eq!(source.shader().id().unwrap().as_deref(), Some("UsdPreviewSurface"));
 //! ```
 
 pub mod tokens;
@@ -58,6 +61,7 @@ pub mod tokens;
 mod binding;
 mod connectable;
 mod input;
+mod interface;
 mod output;
 mod preview;
 mod schema;
@@ -70,9 +74,10 @@ pub use connectable::{
     base_name_and_type,
 };
 pub use input::Input;
+pub use interface::{InterfaceInputConsumersMap, NodeGraphInterface};
 pub use output::Output;
 pub use preview::{Channel, ReadPreviewSurface, read_preview_surface};
-pub use schema::{Material, NodeGraph, Shader};
+pub use schema::{Material, NodeGraph, ResolvedTerminal, Shader, TerminalKind, TerminalSource};
 pub use traits::Connectable;
 pub use utils::ProducerFilter;
 

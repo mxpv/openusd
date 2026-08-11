@@ -248,21 +248,25 @@ pub fn base_name_and_type(full_name: &str) -> Option<(&str, AttributeType)> {
 
 /// The connectable prim owning a source attribute, paired with whether it is a
 /// container.
-///
-/// A container is a prim that holds other connectable prims and reaches them
-/// through its own interface — a NodeGraph, or the Material that derives from
-/// one. A prim of any other type produces its outputs directly.
-///
-/// TODO: C++ reads containment off a plugin-registered connectable behavior,
-/// so a site can teach it about its own container types. Naming the two
-/// built-in ones stands in for that registry.
 fn source_prim(stage: &usd::Stage, path: &sdf::Path) -> Result<Option<(usd::Prim, bool)>> {
     let prim = stage.prim(path.clone());
     if !prim.is_valid()? {
         return Ok(None);
     }
-    let is_container = is_any_typed(&prim, &[T_NODE_GRAPH, T_MATERIAL])?;
-    Ok(Some((prim, is_container)))
+    let source_is_container = is_container(&prim)?;
+    Ok(Some((prim, source_is_container)))
+}
+
+/// Whether `prim` is a NodeGraph or Material container.
+///
+/// A container holds other connectable prims and reaches them through its own
+/// interface. A prim of any other type produces its outputs directly.
+///
+/// TODO: C++ reads containment off a plugin-registered connectable behavior,
+/// so a site can teach it about its own container types. Naming the two
+/// built-in ones stands in for that registry.
+pub(super) fn is_container(prim: &usd::Prim) -> Result<bool> {
+    is_any_typed(prim, &[T_NODE_GRAPH, T_MATERIAL])
 }
 
 #[cfg(test)]
