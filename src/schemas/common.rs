@@ -1,7 +1,7 @@
 //! Low-level building blocks shared across the schema families.
 //!
-//! The view-gate helpers ([`get_typed`], [`get_typed_in_family`],
-//! [`get_with_api`])
+//! The view-gate helpers ([`get_typed`], [`is_typed`], [`is_any_typed`],
+//! [`get_typed_in_family`], [`get_with_api`])
 //! back the type-gated `get` lookups every trait-view family shares, and the
 //! small value reader ([`read_token`]) plus the
 //! [`impl_token_value!`] macro cover the decoding that would otherwise be
@@ -34,18 +34,34 @@ pub(crate) fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Optio
 /// on its authored `typeName` alone, which is what resolves the views while
 /// [`SchemaRegistryBuilder::compiled_in`](crate::usd::SchemaRegistryBuilder::compiled_in)
 /// registers no schema data.
+pub(crate) fn get_typed(stage: &Stage, path: impl Into<Path>, type_name: impl Into<tf::Token>) -> Result<Option<Prim>> {
+    let prim = stage.prim(path);
+    Ok(is_typed(&prim, type_name)?.then_some(prim))
+}
+
+/// Whether `prim` is `type_name` or derives from it — the gate [`get_typed`]
+/// applies, asked of a prim already in hand.
+pub(crate) fn is_typed(prim: &Prim, type_name: impl Into<tf::Token>) -> Result<bool> {
+    let type_name = type_name.into();
+    is_any_typed(prim, &[type_name.as_str()])
+}
+
+/// Whether `prim` is any of `type_names`, or derives from one.
+///
+/// The prim's schema type is resolved once and tested against every candidate,
+/// so asking about several types costs no more lookups than asking about one.
 // TODO: drop the authored-name arm once every stage's registry carries the
 // schema data — it answers for prims whose type the *stage's* registry does not
 // know, so a partially registered custom registry still needs it.
-pub(crate) fn get_typed(stage: &Stage, path: impl Into<Path>, type_name: impl Into<tf::Token>) -> Result<Option<Prim>> {
-    let prim = stage.prim(path);
-    let type_name = type_name.into();
-
-    let matched = match prim.schema_type()? {
-        Some(schema_type) => stage.schema_registry().is_a(&schema_type, &type_name),
-        None => prim.type_name()?.as_deref() == Some(type_name.as_str()),
-    };
-    Ok(matched.then_some(prim))
+pub(crate) fn is_any_typed(prim: &Prim, type_names: &[&str]) -> Result<bool> {
+    if let Some(schema_type) = prim.schema_type()? {
+        let registry = prim.stage().schema_registry();
+        return Ok(type_names
+            .iter()
+            .any(|name| registry.is_a(&schema_type, &tf::Token::from(*name))));
+    }
+    let authored = prim.type_name()?;
+    Ok(type_names.iter().any(|name| authored.as_deref() == Some(*name)))
 }
 
 /// Like [`get_typed`], but matches any version of the schema family `family` —

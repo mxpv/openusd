@@ -11,6 +11,10 @@ use super::{Input, Output};
 /// Material prims (C++ `UsdShadeConnectableAPI`).
 pub trait Connectable: SchemaBase {
     /// The `inputs:<base>` attribute view (C++ `GetInput`).
+    ///
+    /// The handle comes back whether or not anything is authored there, as
+    /// [`Prim::attribute`](crate::usd::Prim::attribute) does; an input nothing
+    /// defines reads back empty.
     fn input(&self, base: &str) -> Input {
         Input::new(self.prim().attribute(input_name(base)))
     }
@@ -34,7 +38,8 @@ pub trait Connectable: SchemaBase {
             .collect())
     }
 
-    /// The `outputs:<base>` attribute view (C++ `GetOutput`).
+    /// The `outputs:<base>` attribute view (C++ `GetOutput`), returned whether
+    /// or not anything is authored there.
     fn output(&self, base: &str) -> Output {
         Output::new(self.prim().attribute(output_name(base)))
     }

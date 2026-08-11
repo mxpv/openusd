@@ -1,71 +1,126 @@
 //! Logical UsdShade value-producing attribute resolution.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::{sdf, usd};
 
 use super::connectable::{AttributeType, ConnectionSource, ShadingAttribute};
 
+/// Which upstream attributes count as producing a value, the choice C++
+/// `UsdShadeUtils::GetValueProducingAttributes` spells `shaderOutputsOnly`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProducerFilter {
+    /// Any producer: an output on a shader node, or an input or output
+    /// carrying an authored value, which is how a NodeGraph or Material
+    /// interface supplies a constant.
+    #[default]
+    Any,
+    /// Only outputs on shader nodes — the terminals a renderer can evaluate.
+    /// Authored interface values are skipped, which also makes the walk
+    /// cheaper by never asking whether a value is authored.
+    ShaderOutputsOnly,
+}
+
+/// The longest connection chain the walk descends before giving up.
+///
+/// Following a chain costs a stack frame per hop, so scene description alone
+/// would decide how deep the recursion goes. Shading networks nest a handful
+/// of levels; this leaves several orders of magnitude of room before a chain
+/// is treated as scene description the walk refuses to trust.
+const MAX_CONNECTION_DEPTH: usize = 256;
+
 pub(super) fn value_producing_attributes(
     attribute: ShadingAttribute,
-    shader_outputs_only: bool,
+    filter: ProducerFilter,
 ) -> Result<Vec<ShadingAttribute>> {
     let mut producing = Vec::new();
-    resolve_recursive(attribute, &mut Vec::new(), &mut producing, shader_outputs_only)?;
+    resolve_recursive(attribute, &mut Vec::new(), &mut producing, filter)?;
     Ok(producing)
 }
 
+/// Walk `attribute`'s connections, appending every attribute that produces a
+/// value to `producing`, and report whether any was found.
+///
+/// `chain` holds the connected attributes between the walk's origin and
+/// `attribute`, so it is both the cycle guard and the depth counter: an
+/// attribute already on the chain is a back edge, while one a sibling branch
+/// reached and left is not.
 fn resolve_recursive(
     attribute: ShadingAttribute,
-    visited: &mut Vec<sdf::Path>,
+    chain: &mut Vec<sdf::Path>,
     producing: &mut Vec<ShadingAttribute>,
-    shader_outputs_only: bool,
+    filter: ProducerFilter,
 ) -> Result<bool> {
-    if attribute.attribute().type_name()?.is_none() || visited.contains(attribute.path()) {
+    if !attribute.attribute().is_defined()? || chain.contains(attribute.path()) {
         return Ok(false);
     }
 
-    let sources = match &attribute {
-        ShadingAttribute::Input(input) => input.connected_sources()?,
-        ShadingAttribute::Output(output) => output.connected_sources()?,
-    };
-    if !sources.is_empty() {
-        visited.push(attribute.path().clone());
+    let sources = attribute.connected_sources()?;
+    let sources = distinct_sources(&sources);
+    let connected = !sources.is_empty();
+    if connected {
+        if chain.len() >= MAX_CONNECTION_DEPTH {
+            bail!(
+                "connection chain at {} is deeper than {MAX_CONNECTION_DEPTH} hops",
+                attribute.path()
+            );
+        }
+        chain.push(attribute.path().clone());
     }
 
     let mut found = false;
-    if sources.sources().len() > 1 {
-        for source in sources.sources() {
-            let mut branch_visited = visited.clone();
-            found |= follow_source(source, &mut branch_visited, producing, shader_outputs_only)?;
-        }
-    } else if let Some(source) = sources.sources().first() {
-        found = follow_source(source, visited, producing, shader_outputs_only)?;
+    for source in sources {
+        found |= follow_source(source, chain, producing, filter)?;
     }
 
-    if !shader_outputs_only && !found && attribute.attribute().value_source()? == usd::ValueSource::Authored {
+    if connected {
+        chain.pop();
+    }
+
+    // Nothing upstream produced a value, so an authored value here is what a
+    // consumer resolves to — a NodeGraph or Material interface value.
+    if filter == ProducerFilter::Any && !found && attribute.attribute().value_source()? == usd::ValueSource::Authored {
         producing.push(attribute);
         found = true;
     }
     Ok(found)
 }
 
+/// The sources of `connected` with repeats dropped, keeping composed order.
+///
+/// One source drives one value however many times a connection list names it,
+/// and following it once per mention would multiply the walk at every hop.
+fn distinct_sources(connected: &super::ConnectedSources) -> Vec<&ConnectionSource> {
+    let mut distinct: Vec<&ConnectionSource> = Vec::new();
+    for source in connected.sources() {
+        if !distinct.iter().any(|seen| seen.source_path() == source.source_path()) {
+            distinct.push(source);
+        }
+    }
+    distinct
+}
+
 fn follow_source(
     source: &ConnectionSource,
-    visited: &mut Vec<sdf::Path>,
+    chain: &mut Vec<sdf::Path>,
     producing: &mut Vec<ShadingAttribute>,
-    shader_outputs_only: bool,
+    filter: ProducerFilter,
 ) -> Result<bool> {
     let attribute = source.attribute();
     match source.source_type() {
+        // An output on a shader node is a terminal producer; nothing upstream
+        // of it takes part in the value.
         AttributeType::Output if !source.source_is_container() => {
             producing.push(attribute);
             Ok(true)
         }
+        // Reaching an input on a node that holds no others ends the chain: an
+        // input can only legally consume, so there is nothing further to
+        // follow and no value to take.
         AttributeType::Input if !source.source_is_container() => Ok(false),
-        AttributeType::Input | AttributeType::Output => {
-            resolve_recursive(attribute, visited, producing, shader_outputs_only)
-        }
+        // A container was reached through its interface, so the value comes
+        // from whatever that interface resolves to inside.
+        AttributeType::Input | AttributeType::Output => resolve_recursive(attribute, chain, producing, filter),
     }
 }
 
@@ -73,30 +128,10 @@ fn follow_source(
 mod tests {
     use super::*;
     use crate::schemas::shade::{AttributeType, Connectable, Material, NodeGraph, Shader};
-    use crate::{sdf, usd};
+    use crate::usd;
 
     #[test]
-    fn structured_sources() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
-        let source = Shader::define(&stage, "/Mat/Source")?;
-        let output = source.create_output("rgb", "float3")?;
-        let sink = Shader::define(&stage, "/Mat/Sink")?;
-        sink.create_input("color", "color3f")?.connect_to_output(&output)?;
-
-        let connected = sink.input("color").connected_sources()?;
-        assert!(connected.invalid_source_paths().is_empty());
-        let source = connected.sources().first().expect("connected source");
-        assert_eq!(source.source_prim().path().as_str(), "/Mat/Source");
-        assert_eq!(source.source_path().as_str(), "/Mat/Source.outputs:rgb");
-        assert_eq!(source.source_name().as_str(), "rgb");
-        assert_eq!(source.full_name(), "outputs:rgb");
-        assert_eq!(source.source_type(), AttributeType::Output);
-        assert_eq!(source.type_name().as_str(), "float3");
-        Ok(())
-    }
-
-    #[test]
-    fn untyped_source_valid() -> Result<()> {
+    fn untyped_source_terminal() -> Result<()> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let source = stage.override_prim("/Mat/Source")?;
         let source_output = source.create_attribute("outputs:result", "float")?;
@@ -104,12 +139,9 @@ mod tests {
         sink.create_input("value", "float")?
             .set_connections([source_output.path().clone()])?;
 
-        let connected = sink.input("value").connected_sources()?;
-        assert!(connected.invalid_source_paths().is_empty());
-        assert_eq!(connected.sources().len(), 1);
-        assert_eq!(connected.sources()[0].source_prim().path(), source.path());
-
-        let producing = sink.input("value").value_producing_attributes(false)?;
+        // A prim of no shading type holds no others, so its output is a
+        // terminal producer rather than an interface to follow.
+        let producing = sink.input("value").value_producing_attributes(ProducerFilter::Any)?;
         assert_eq!(producing.len(), 1);
         assert_eq!(producing[0].path(), source_output.path());
         assert_eq!(producing[0].attribute_type(), AttributeType::Output);
@@ -123,18 +155,16 @@ mod tests {
         let source_output = source.create_output("result", "float")?;
 
         let inner = NodeGraph::define(&stage, "/Mat/Inner")?;
-        inner
-            .create_output("result", "float")?
-            .connect_to_output(&source_output)?;
+        inner.create_output("result", "float")?.connect_to(&source_output)?;
         let outer = NodeGraph::define(&stage, "/Mat/Outer")?;
         outer
             .create_output("result", "float")?
-            .connect_to_output(&inner.output("result"))?;
+            .connect_to(&inner.output("result"))?;
         let sink = Shader::define(&stage, "/Mat/Sink")?;
         sink.create_input("value", "float")?
-            .connect_to_output(&outer.output("result"))?;
+            .connect_to(&outer.output("result"))?;
 
-        let producing = sink.input("value").value_producing_attributes(false)?;
+        let producing = sink.input("value").value_producing_attributes(ProducerFilter::Any)?;
         assert_eq!(producing.len(), 1);
         assert_eq!(producing[0].path().as_str(), "/Mat/Source.outputs:result");
         assert_eq!(producing[0].attribute_type(), AttributeType::Output);
@@ -149,13 +179,21 @@ mod tests {
         let graph = NodeGraph::define(&stage, "/Mat/Graph")?;
         graph
             .create_output("result", "float")?
-            .connect_to_input(&material.input("gain"))?;
+            .connect_to(&material.input("gain"))?;
 
-        let producing = graph.output("result").value_producing_attributes(false)?;
+        let producing = graph.output("result").value_producing_attributes(ProducerFilter::Any)?;
         assert_eq!(producing.len(), 1);
         assert_eq!(producing[0].path().as_str(), "/Mat.inputs:gain");
         assert_eq!(producing[0].attribute_type(), AttributeType::Input);
-        assert!(graph.output("result").value_producing_attributes(true)?.is_empty());
+
+        // A renderer terminal takes shader outputs only, so an interface value
+        // is no answer at all.
+        assert!(
+            graph
+                .output("result")
+                .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)?
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -170,51 +208,92 @@ mod tests {
         let first_graph = NodeGraph::define(&stage, "/Mat/FirstGraph")?;
         first_graph
             .create_output("result", "float")?
-            .connect_to_output(&first_output)?;
+            .connect_to(&first_output)?;
         let second_graph = NodeGraph::define(&stage, "/Mat/SecondGraph")?;
         second_graph
             .create_output("result", "float")?
-            .connect_to_output(&second_output)?;
+            .connect_to(&second_output)?;
         let root = NodeGraph::define(&stage, "/Mat/Root")?;
         root.create_output("result", "float")?.set_connections([
             second_graph.output("result").path().clone(),
             first_graph.output("result").path().clone(),
         ])?;
 
-        let producing = root.output("result").value_producing_attributes(false)?;
+        let producing = root.output("result").value_producing_attributes(ProducerFilter::Any)?;
         let paths: Vec<&str> = producing.iter().map(|attribute| attribute.path().as_str()).collect();
         assert_eq!(paths, vec!["/Mat/Second.outputs:result", "/Mat/First.outputs:result"]);
         Ok(())
     }
 
     #[test]
-    fn invalid_sources_reported() -> Result<()> {
+    fn diamond_resolves_both() -> Result<()> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
-        let valid = Shader::define(&stage, "/Mat/Valid")?;
-        let valid_output = valid.create_output("result", "float")?;
-        let missing_output = Shader::define(&stage, "/Mat/MissingOutput")?;
-        let plain = stage.define_prim("/Mat/Plain")?.set_type_name("Scope")?;
-        plain.create_attribute("result", "float")?;
-        let sink = Shader::define(&stage, "/Mat/Sink")?;
-        sink.create_input("value", "float")?.set_connections([
-            sdf::path("/Missing.outputs:result")?,
-            sdf::path("/Mat/Plain.result")?,
-            missing_output.path().append_property("outputs:result")?,
-            valid_output.path().clone(),
+        let shader = Shader::define(&stage, "/Mat/Source")?;
+        let shader_output = shader.create_output("result", "float")?;
+        let shared = NodeGraph::define(&stage, "/Mat/Shared")?;
+        shared.create_output("result", "float")?.connect_to(&shader_output)?;
+
+        // Two distinct branches converging on one attribute is a diamond, not
+        // a cycle: the second reaches an attribute the first has already left,
+        // so both resolve.
+        let left = NodeGraph::define(&stage, "/Mat/Left")?;
+        left.create_output("result", "float")?
+            .connect_to(&shared.output("result"))?;
+        let right = NodeGraph::define(&stage, "/Mat/Right")?;
+        right
+            .create_output("result", "float")?
+            .connect_to(&shared.output("result"))?;
+        let root = NodeGraph::define(&stage, "/Mat/Root")?;
+        root.create_output("result", "float")?.set_connections([
+            left.output("result").path().clone(),
+            right.output("result").path().clone(),
         ])?;
 
-        let connected = sink.input("value").connected_sources()?;
-        assert_eq!(connected.sources().len(), 1);
-        assert_eq!(connected.sources()[0].source_path(), valid_output.path());
-        let invalid: Vec<&str> = connected.invalid_source_paths().iter().map(sdf::Path::as_str).collect();
-        assert_eq!(
-            invalid,
-            vec![
-                "/Missing.outputs:result",
-                "/Mat/Plain.result",
-                "/Mat/MissingOutput.outputs:result"
-            ]
-        );
+        let producing = root.output("result").value_producing_attributes(ProducerFilter::Any)?;
+        let paths: Vec<&str> = producing.iter().map(|attribute| attribute.path().as_str()).collect();
+        assert_eq!(paths, vec!["/Mat/Source.outputs:result", "/Mat/Source.outputs:result"]);
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_source_followed_once() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let shader = Shader::define(&stage, "/Mat/Source")?;
+        let shader_output = shader.create_output("result", "float")?;
+        let root = NodeGraph::define(&stage, "/Mat/Root")?;
+
+        // One source drives one value however often a connection list names
+        // it, so repeats never multiply the walk.
+        root.create_output("result", "float")?
+            .set_connections([shader_output.path().clone(), shader_output.path().clone()])?;
+
+        let producing = root.output("result").value_producing_attributes(ProducerFilter::Any)?;
+        assert_eq!(producing.len(), 1);
+        assert_eq!(producing[0].path().as_str(), "/Mat/Source.outputs:result");
+        Ok(())
+    }
+
+    #[test]
+    fn deep_chain_errors() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let depth = MAX_CONNECTION_DEPTH + 2;
+        for hop in 0..depth {
+            NodeGraph::define(&stage, format!("/Mat/N{hop}"))?.create_output("result", "float")?;
+        }
+        for hop in 0..depth - 1 {
+            let next = stage.attribute(format!("/Mat/N{}.outputs:result", hop + 1));
+            stage
+                .attribute(format!("/Mat/N{hop}.outputs:result"))
+                .set_connections([next.path().clone()])?;
+        }
+
+        // A chain past the depth budget is refused rather than walked until
+        // the stack runs out.
+        let head = NodeGraph::get(&stage, "/Mat/N0")?.expect("NodeGraph");
+        let Err(error) = head.output("result").value_producing_attributes(ProducerFilter::Any) else {
+            panic!("a chain past the depth budget should be refused");
+        };
+        assert!(error.to_string().contains("deeper than"), "{error}");
         Ok(())
     }
 
@@ -225,10 +304,15 @@ mod tests {
         let second = NodeGraph::define(&stage, "/Mat/Second")?;
         first.create_output("result", "float")?;
         second.create_output("result", "float")?;
-        first.output("result").connect_to_output(&second.output("result"))?;
-        second.output("result").connect_to_output(&first.output("result"))?;
+        first.output("result").connect_to(&second.output("result"))?;
+        second.output("result").connect_to(&first.output("result"))?;
 
-        assert!(first.output("result").value_producing_attributes(false)?.is_empty());
+        assert!(
+            first
+                .output("result")
+                .value_producing_attributes(ProducerFilter::Any)?
+                .is_empty()
+        );
         Ok(())
     }
 }

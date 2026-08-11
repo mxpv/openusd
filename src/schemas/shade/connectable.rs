@@ -2,10 +2,11 @@
 
 use anyhow::Result;
 
+use crate::schemas::common::is_any_typed;
 use crate::{sdf, tf, usd};
 
-use super::tokens::{NS_INPUTS, NS_OUTPUTS};
-use super::{Input, Material, NodeGraph, Output};
+use super::tokens::{NS_INPUTS, NS_OUTPUTS, T_MATERIAL, T_NODE_GRAPH};
+use super::{Input, Output};
 
 /// Whether a shading attribute is an `inputs:` or `outputs:` property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,6 +25,16 @@ impl AttributeType {
             AttributeType::Output => NS_OUTPUTS,
         }
     }
+}
+
+/// A UsdShade attribute a connection may name as its source.
+///
+/// Only an `inputs:` or `outputs:` attribute is a legal connection source, so
+/// the typed views implement this and a bare
+/// [`usd::Attribute`](crate::usd::Attribute) does not.
+pub trait ConnectionTarget {
+    /// The full property path a connection should record.
+    fn target_path(&self) -> &sdf::Path;
 }
 
 /// A typed UsdShade input or output attribute.
@@ -64,21 +75,32 @@ impl ShadingAttribute {
     pub fn path(&self) -> &sdf::Path {
         self.attribute().path()
     }
+
+    /// Valid and invalid upstream connection sources, in composed order.
+    pub fn connected_sources(&self) -> Result<ConnectedSources> {
+        connected_sources(self.attribute())
+    }
+}
+
+impl ConnectionTarget for ShadingAttribute {
+    fn target_path(&self) -> &sdf::Path {
+        self.path()
+    }
 }
 
 /// Information about one valid upstream UsdShade connection source.
 ///
-/// This is the Rust counterpart of `UsdShadeConnectionSourceInfo`. The source
-/// path is valid when its owning prim and namespaced source attribute exist.
-/// The prim may be an untyped `over`, as OpenUSD permits for connection
-/// targets.
+/// This is the Rust counterpart of `UsdShadeConnectionSourceInfo`. A source
+/// path is valid when a namespaced attribute is defined there. Nothing is
+/// asked of the owning prim's type: it may be an untyped `over`, as OpenUSD
+/// permits for connection targets.
 #[derive(Clone)]
 pub struct ConnectionSource {
     source_prim: usd::Prim,
     source_path: sdf::Path,
     source_name: tf::Token,
     source_type: AttributeType,
-    type_name: tf::Token,
+    type_name: Option<tf::Token>,
     source_is_container: bool,
 }
 
@@ -111,9 +133,10 @@ impl ConnectionSource {
         self.source_type
     }
 
-    /// The source attribute's composed USD value type.
-    pub fn type_name(&self) -> &tf::Token {
-        &self.type_name
+    /// The source attribute's composed USD value type, absent when the
+    /// attribute is defined without one.
+    pub fn type_name(&self) -> Option<&tf::Token> {
+        self.type_name.as_ref()
     }
 
     /// The typed source attribute.
@@ -156,11 +179,6 @@ impl ConnectedSources {
     pub fn into_sources(self) -> Vec<ConnectionSource> {
         self.sources
     }
-
-    /// Whether no valid connection source was found.
-    pub fn is_empty(&self) -> bool {
-        self.sources.is_empty()
-    }
 }
 
 pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedSources> {
@@ -180,10 +198,10 @@ pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedS
         };
 
         let source_attribute = attribute.stage().attribute(source_path.clone());
-        let Some(type_name) = source_attribute.type_name()? else {
+        if !source_attribute.is_defined()? {
             result.invalid_source_paths.push(source_path);
             continue;
-        };
+        }
         let source_name = tf::Token::from(source_name);
 
         result.sources.push(ConnectionSource {
@@ -191,7 +209,7 @@ pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedS
             source_path,
             source_name,
             source_type,
-            type_name,
+            type_name: source_attribute.type_name()?,
             source_is_container,
         });
     }
@@ -228,16 +246,118 @@ pub fn base_name_and_type(full_name: &str) -> Option<(&str, AttributeType)> {
         })
 }
 
-/// Full property path of an input on `prim`.
-pub(super) fn input_path(prim: &sdf::Path, base: &str) -> Result<sdf::Path> {
-    prim.append_property(input_name(base))
-}
-
+/// The connectable prim owning a source attribute, paired with whether it is a
+/// container.
+///
+/// A container is a prim that holds other connectable prims and reaches them
+/// through its own interface — a NodeGraph, or the Material that derives from
+/// one. A prim of any other type produces its outputs directly.
+///
+/// TODO: C++ reads containment off a plugin-registered connectable behavior,
+/// so a site can teach it about its own container types. Naming the two
+/// built-in ones stands in for that registry.
 fn source_prim(stage: &usd::Stage, path: &sdf::Path) -> Result<Option<(usd::Prim, bool)>> {
     let prim = stage.prim(path.clone());
     if !prim.is_valid()? {
         return Ok(None);
     }
-    let is_container = NodeGraph::get(stage, path.clone())?.is_some() || Material::get(stage, path.clone())?.is_some();
+    let is_container = is_any_typed(&prim, &[T_NODE_GRAPH, T_MATERIAL])?;
     Ok(Some((prim, is_container)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schemas::shade::{Connectable, Shader};
+
+    #[test]
+    fn structured_sources() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let source = Shader::define(&stage, "/Mat/Source")?;
+        let output = source.create_output("rgb", "float3")?;
+        let sink = Shader::define(&stage, "/Mat/Sink")?;
+        sink.create_input("color", "color3f")?.connect_to(&output)?;
+
+        let connected = sink.input("color").connected_sources()?;
+        assert!(connected.invalid_source_paths().is_empty());
+        let source = connected.sources().first().expect("connected source");
+        assert_eq!(source.source_prim().path().as_str(), "/Mat/Source");
+        assert_eq!(source.source_path().as_str(), "/Mat/Source.outputs:rgb");
+        assert_eq!(source.source_name().as_str(), "rgb");
+        assert_eq!(source.full_name(), "outputs:rgb");
+        assert_eq!(source.source_type(), AttributeType::Output);
+        assert_eq!(source.type_name().map(tf::Token::as_str), Some("float3"));
+        Ok(())
+    }
+
+    #[test]
+    fn untyped_source_valid() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let source = stage.override_prim("/Mat/Source")?;
+        let source_output = source.create_attribute("outputs:result", "float")?;
+        let sink = Shader::define(&stage, "/Mat/Sink")?;
+        // An attribute authored through the generic API becomes a connection
+        // target by way of the namespace-checked wrapper.
+        let source_output = Output::from_attribute(source_output).expect("an outputs: attribute");
+        sink.create_input("value", "float")?.connect_to(&source_output)?;
+
+        // Nothing is asked of the source prim's type, so an `over` carrying a
+        // namespaced attribute is a source like any other.
+        let connected = sink.input("value").connected_sources()?;
+        assert!(connected.invalid_source_paths().is_empty());
+        assert_eq!(connected.sources().len(), 1);
+        assert_eq!(connected.sources()[0].source_prim().path(), source.path());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_sources_reported() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let valid = Shader::define(&stage, "/Mat/Valid")?;
+        let valid_output = valid.create_output("result", "float")?;
+        let missing_output = Shader::define(&stage, "/Mat/MissingOutput")?;
+        let plain = stage.define_prim("/Mat/Plain")?.set_type_name("Scope")?;
+        plain.create_attribute("result", "float")?;
+        let sink = Shader::define(&stage, "/Mat/Sink")?;
+        sink.create_input("value", "float")?.set_connections([
+            sdf::path("/Missing.outputs:result")?,
+            sdf::path("/Mat/Plain.result")?,
+            missing_output.path().append_property("outputs:result")?,
+            valid_output.path().clone(),
+        ])?;
+
+        let connected = sink.input("value").connected_sources()?;
+        assert_eq!(connected.sources().len(), 1);
+        assert_eq!(connected.sources()[0].source_path(), valid_output.path());
+
+        // A missing prim, a name outside the shading namespaces, and a
+        // namespaced name nothing defines each fail for their own reason.
+        let invalid: Vec<&str> = connected.invalid_source_paths().iter().map(sdf::Path::as_str).collect();
+        assert_eq!(
+            invalid,
+            vec![
+                "/Missing.outputs:result",
+                "/Mat/Plain.result",
+                "/Mat/MissingOutput.outputs:result"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn material_is_container() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let material = crate::schemas::shade::Material::define(&stage, "/Mat")?;
+        material.create_input("gain", "float")?;
+        let shader = Shader::define(&stage, "/Mat/Shader")?;
+        shader
+            .create_input("value", "float")?
+            .connect_to(&material.input("gain"))?;
+
+        let connected = shader.input("value").connected_sources()?;
+        let source = connected.sources().first().expect("connected source");
+        assert_eq!(source.source_type(), AttributeType::Input);
+        assert!(source.source_is_container(), "a Material is a NodeGraph container");
+        Ok(())
+    }
 }

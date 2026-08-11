@@ -6,9 +6,10 @@ use crate::sdf::{self, Variability};
 use crate::tf::Token;
 use crate::usd::{Attribute, Prim, Stage};
 
-use super::Output;
+use super::connectable::output_name;
 use super::impl_shade_schema;
 use super::tokens as tok;
+use super::{Output, ProducerFilter, ShadingAttribute};
 use crate::schemas::common::get_typed;
 
 /// A shading node (C++ `UsdShadeShader`) — a `def Shader` prim that identifies
@@ -216,42 +217,65 @@ impl Material {
     }
 
     /// Resolve this material's surface terminal to the [`Shader`] that drives
-    /// it (C++ `UsdShadeMaterial::ComputeSurfaceSource`). Follows
-    /// `outputs:surface.connect` to the connected shader output, trying the
-    /// universal render context first and falling back to any authored
-    /// context-specific `surface` terminal (candidates sorted for a stable
-    /// choice). Returns `None` when no surface terminal is connected, or its
-    /// source prim is not a `Shader`.
+    /// it (C++ `UsdShadeMaterial::ComputeSurfaceSource`).
+    ///
+    /// The terminal is followed through any NodeGraph or Material interface
+    /// between it and the shader, so a surface wrapped in a node graph
+    /// resolves to the shader inside. Returns `None` when no surface terminal
+    /// produces a shader output.
     pub fn compute_surface_source(&self) -> Result<Option<Shader>> {
-        let mut conns = self.surface_output().connections()?;
-        if conns.is_empty() {
-            let suffix = format!(":{}", tok::TERMINAL_SURFACE);
-            let mut contexts: Vec<String> = self
-                .stage()
-                .prim(self.path().clone())
-                .authored_property_names()?
-                .into_iter()
-                .filter(|prop| {
-                    prop.strip_prefix(tok::NS_OUTPUTS)
-                        .and_then(|rest| rest.strip_suffix(&suffix))
-                        .is_some_and(|ctx| !ctx.is_empty() && !ctx.contains(':'))
-                })
-                .map(String::from)
-                .collect();
-            contexts.sort();
-            for prop in contexts {
-                conns = self.attribute(&prop).connections()?;
-                if !conns.is_empty() {
-                    break;
-                }
-            }
-        }
-        let Some(source) = conns.into_iter().next() else {
+        let Some(source) = self.compute_terminal_source(tok::TERMINAL_SURFACE)? else {
             return Ok(None);
         };
-        // The connection target is a property path (`/Mat/Surface.outputs:surface`);
-        // the shader prim is its owning prim.
-        Shader::get(self.stage(), source.prim_path())
+        // The producing attribute is a property path
+        // (`/Mat/Surface.outputs:surface`); the shader is its owning prim.
+        Shader::get(self.stage(), source.path().prim_path())
+    }
+
+    /// The first shader output producing `terminal`.
+    ///
+    /// A connected universal `outputs:<terminal>` answers on its own, even
+    /// when nothing is behind it: naming a source is the material stating
+    /// where its terminal comes from. Only an unconnected universal terminal
+    /// hands the question to the authored render contexts, which are tried in
+    /// name order. Several sources on one terminal keep the first, since a
+    /// renderer evaluates one terminal node.
+    ///
+    /// TODO: C++ takes a caller-ordered render-context vector and treats the
+    /// universal terminal as the last resort, so a renderer states which
+    /// context it wants. Discovering the authored contexts stands in for that
+    /// until the terminal accessors take a render context.
+    fn compute_terminal_source(&self, terminal: &str) -> Result<Option<ShadingAttribute>> {
+        let universal = Output::new(self.attribute(output_name(terminal)));
+        if !universal.connections()?.is_empty() {
+            return shader_output_behind(&universal);
+        }
+
+        for name in self.render_context_terminals(terminal)? {
+            let output = Output::new(self.attribute(&name));
+            if let Some(source) = shader_output_behind(&output)? {
+                return Ok(Some(source));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The authored `outputs:<context>:<terminal>` property names, sorted so
+    /// the choice among them is stable.
+    fn render_context_terminals(&self, terminal: &str) -> Result<Vec<String>> {
+        let suffix = format!(":{terminal}");
+        let mut names: Vec<String> = self
+            .authored_property_names()?
+            .into_iter()
+            .filter(|prop| {
+                prop.strip_prefix(tok::NS_OUTPUTS)
+                    .and_then(|rest| rest.strip_suffix(&suffix))
+                    .is_some_and(|ctx| !ctx.is_empty() && !ctx.contains(':'))
+            })
+            .map(String::from)
+            .collect();
+        names.sort();
+        Ok(names)
     }
 
     /// The terminal output name for `terminal` in `render_context`. Universal
@@ -268,6 +292,14 @@ impl Material {
 }
 
 impl_shade_schema!(connectable Material);
+
+/// The first shader output `terminal` resolves to, if any.
+fn shader_output_behind(terminal: &Output) -> Result<Option<ShadingAttribute>> {
+    Ok(terminal
+        .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)?
+        .into_iter()
+        .next())
+}
 
 #[cfg(test)]
 mod tests {
@@ -361,6 +393,62 @@ mod tests {
     }
 
     #[test]
+    fn surface_through_node_graph() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let shader = Shader::define(&stage, "/Mat/NG/Surface")?;
+        let shader_output = shader.create_output("surface", "token")?;
+        let graph = NodeGraph::define(&stage, "/Mat/NG")?;
+        graph.create_output("surface", "token")?.connect_to(&shader_output)?;
+        Material::define(&stage, "/Mat")?
+            .create_surface_output()?
+            .connect_to(&graph.output("surface"))?;
+
+        // The terminal names the node graph, but the shader inside it is what
+        // drives the surface.
+        let mat = Material::get(&stage, "/Mat")?.expect("Material");
+        let surface = mat.compute_surface_source()?.expect("surface shader");
+        assert_eq!(surface.path().as_str(), "/Mat/NG/Surface");
+        Ok(())
+    }
+
+    #[test]
+    fn render_context_terminal_source() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let ri = Shader::define(&stage, "/Mat/RiSurface")?;
+        let ri_output = ri.create_output("surface", "token")?;
+        Material::define(&stage, "/Mat")?
+            .create_surface_output_for("ri")?
+            .connect_to(&ri_output)?;
+
+        // With no universal terminal authored, the render-context terminal
+        // answers.
+        let mat = Material::get(&stage, "/Mat")?.expect("Material");
+        let surface = mat.compute_surface_source()?.expect("surface shader");
+        assert_eq!(surface.path().as_str(), "/Mat/RiSurface");
+        Ok(())
+    }
+
+    #[test]
+    fn universal_terminal_decides() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let ri = Shader::define(&stage, "/Mat/RiSurface")?;
+        let ri_output = ri.create_output("surface", "token")?;
+        let mat = Material::define(&stage, "/Mat")?;
+        mat.create_surface_output_for("ri")?.connect_to(&ri_output)?;
+
+        // A connected universal terminal states where the surface comes from,
+        // so a render-context terminal never stands in for it — not even when
+        // the source it names produces nothing.
+        let empty = NodeGraph::define(&stage, "/Mat/Empty")?;
+        mat.create_surface_output()?
+            .connect_to(&empty.create_output("surface", "token")?)?;
+
+        let mat = Material::get(&stage, "/Mat")?.expect("Material");
+        assert!(mat.compute_surface_source()?.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn material_render_context_terminal() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let src = sdf::path("/Mat/RiSurface.outputs:surface")?;
@@ -395,9 +483,9 @@ mod tests {
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
-        // The typed connection method preserves the input/output roles.
+        // The typed connection method keeps the input view for chaining.
         surf.create_input("diffuseColor", "color3f")?
-            .connect_to_output(&tex.output("rgb"))?;
+            .connect_to(&tex.output("rgb"))?;
         assert_eq!(
             surf.input("diffuseColor").connections()?,
             vec![sdf::path("/Mat/Tex.outputs:rgb")?]

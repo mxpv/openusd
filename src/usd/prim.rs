@@ -41,6 +41,17 @@ use super::{
 use crate::tf::Token;
 use crate::{pcp, sdf};
 
+/// Which property names [`Prim::properties_of_type`] walks, and whether a
+/// schema declaration may answer for a name no layer authors.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PropertySource {
+    /// Every composed property name. A name with no composed spec is one only
+    /// a schema declares, so the declaration decides its kind.
+    Composed,
+    /// Only the names layers author, each classified by its composed spec.
+    Authored,
+}
+
 /// Stage-composed prim handle. Mirrors C++ `UsdPrim`.
 #[derive(Clone)]
 pub struct Prim {
@@ -897,24 +908,21 @@ impl Prim {
             .masked(&self.path, |g, cache| cache.prim_properties(g, &self.path))
     }
 
-    /// Returns handles to the composed attributes with authored scene
-    /// description. Mirrors C++ `UsdPrim::GetAuthoredAttributes`.
-    pub fn authored_attributes(&self) -> anyhow::Result<Vec<Attribute>> {
-        let mut attributes = Vec::new();
-        for name in self.authored_property_names()? {
-            let path = self.property_path(name);
-            if self.stage.spec_type(&path)? == Some(sdf::SpecType::Attribute) {
-                attributes.push(Attribute::new(&self.stage, path));
-            }
-        }
-        Ok(attributes)
-    }
-
     /// Returns handles to the composed attributes of this prim. Mirrors C++
     /// `UsdPrim::GetAttributes`.
     pub fn attributes(&self) -> anyhow::Result<Vec<Attribute>> {
         Ok(self
-            .properties_of_type(sdf::SpecType::Attribute)?
+            .properties_of_type(PropertySource::Composed, sdf::SpecType::Attribute)?
+            .into_iter()
+            .map(|path| Attribute::new(&self.stage, path))
+            .collect())
+    }
+
+    /// Returns handles to the attributes layers author on this prim. Mirrors
+    /// C++ `UsdPrim::GetAuthoredAttributes`.
+    pub fn authored_attributes(&self) -> anyhow::Result<Vec<Attribute>> {
+        Ok(self
+            .properties_of_type(PropertySource::Authored, sdf::SpecType::Attribute)?
             .into_iter()
             .map(|path| Attribute::new(&self.stage, path))
             .collect())
@@ -924,7 +932,17 @@ impl Prim {
     /// `UsdPrim::GetRelationships`.
     pub fn relationships(&self) -> anyhow::Result<Vec<Relationship>> {
         Ok(self
-            .properties_of_type(sdf::SpecType::Relationship)?
+            .properties_of_type(PropertySource::Composed, sdf::SpecType::Relationship)?
+            .into_iter()
+            .map(|path| Relationship::new(&self.stage, path))
+            .collect())
+    }
+
+    /// Returns handles to the relationships layers author on this prim. Mirrors
+    /// C++ `UsdPrim::GetAuthoredRelationships`.
+    pub fn authored_relationships(&self) -> anyhow::Result<Vec<Relationship>> {
+        Ok(self
+            .properties_of_type(PropertySource::Authored, sdf::SpecType::Relationship)?
             .into_iter()
             .map(|path| Relationship::new(&self.stage, path))
             .collect())
@@ -938,21 +956,28 @@ impl Prim {
         self.stage.has_spec(&self.path)
     }
 
-    /// Property paths under this prim whose composed spec type matches `ty`,
-    /// preserving the composed property order.
-    fn properties_of_type(&self, ty: sdf::SpecType) -> anyhow::Result<Vec<sdf::Path>> {
+    /// The property paths of `source` whose spec type matches `ty`, in composed
+    /// order.
+    fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType) -> anyhow::Result<Vec<sdf::Path>> {
+        let names = match source {
+            PropertySource::Composed => self.property_names()?,
+            PropertySource::Authored => self.authored_property_names()?,
+        };
         let info = self.prim_type_info()?;
         let definition = info.prim_definition();
 
         let mut paths = Vec::new();
-        for name in self.property_names()? {
+        for name in names {
             let path = self.property_path(&name);
-            // A property the prim only inherits from its schema has no composed
-            // spec, so its kind comes from the declaration instead.
-            let spec_type = self
-                .stage
-                .spec_type(&path)?
-                .or_else(|| definition.property(&name).map(|property| property.spec_type()));
+            let spec_type = match (self.stage.spec_type(&path)?, source) {
+                (Some(spec_type), _) => Some(spec_type),
+                // A property the prim only inherits from its schema has no
+                // composed spec, so its kind comes from the declaration.
+                (None, PropertySource::Composed) => definition.property(&name).map(|property| property.spec_type()),
+                // Nothing a schema declares is authored, so a name with no
+                // composed spec belongs to neither kind.
+                (None, PropertySource::Authored) => None,
+            };
             if spec_type == Some(ty) {
                 paths.push(path);
             }
@@ -1174,13 +1199,7 @@ mod tests {
     #[test]
     fn schema_properties_split_by_kind() -> anyhow::Result<()> {
         let stage = schema_stage()?;
-        let prim = stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
-        prim.create_attribute("authored", "double")?;
-        prim.create_relationship("authoredRel")?;
-
-        let authored = prim.authored_attributes()?;
-        assert_eq!(authored.len(), 1);
-        assert_eq!(authored[0].path().as_str(), "/Sun.authored");
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
         // A property with no authored spec still sorts into attributes or
         // relationships by what the schema declares it to be.
@@ -1190,17 +1209,32 @@ mod tests {
         assert!(!names.iter().any(|name| name.ends_with("includes")), "{names:?}");
 
         let relationships = stage.prim("/Sun").relationships()?;
-        assert_eq!(relationships.len(), 2);
+        assert_eq!(relationships.len(), 1);
         assert!(
-            relationships
-                .iter()
-                .any(|relationship| relationship.path().as_str().ends_with("collection:lightLink:includes"))
+            relationships[0]
+                .path()
+                .as_str()
+                .ends_with("collection:lightLink:includes")
         );
-        assert!(
-            relationships
-                .iter()
-                .any(|relationship| relationship.path().as_str() == "/Sun.authoredRel")
-        );
+        Ok(())
+    }
+
+    #[test]
+    fn authored_properties_by_kind() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        let prim = stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        prim.create_attribute("authored", "double")?;
+        prim.create_relationship("authoredRel")?;
+
+        // Only what a layer wrote, unlike `attributes` / `relationships`, which
+        // also report every property the schema declares.
+        let attributes = prim.authored_attributes()?;
+        assert_eq!(attributes.len(), 1);
+        assert_eq!(attributes[0].path().as_str(), "/Sun.authored");
+
+        let relationships = prim.authored_relationships()?;
+        assert_eq!(relationships.len(), 1);
+        assert_eq!(relationships[0].path().as_str(), "/Sun.authoredRel");
         Ok(())
     }
 

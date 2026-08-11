@@ -12,12 +12,11 @@
 use anyhow::Result;
 
 use crate::gf;
-use crate::sdf::{FieldKey, Path, Value};
+use crate::sdf::{Path, Value};
 use crate::usd::Stage;
 
-use super::connectable::input_path;
 use super::tokens::*;
-use super::{Connectable, Material, Shader};
+use super::{Connectable, Input, Material, ProducerFilter, Shader};
 
 /// One UsdPreviewSurface channel: either a constant value, a texture asset path
 /// (the input connects to a `UsdUVTexture`), or unauthored.
@@ -105,24 +104,27 @@ pub fn read_preview_surface(stage: &Stage, material: &Path) -> Result<Option<Rea
     }))
 }
 
-/// Upper bound on connection hops [`resolve_asset_value`] follows before giving
-/// up, guarding against connection cycles.
-const MAX_CONNECTION_HOPS: usize = 8;
-
-/// If `shader`'s `inputs:<base>` connects to a `UsdUVTexture`, return that
+/// If `shader`'s `inputs:<base>` resolves to a `UsdUVTexture`, return that
 /// texture's `inputs:file` asset path.
+///
+/// The input is resolved to the shader output that produces it, so a texture
+/// reached through a NodeGraph interface is found the same as one wired
+/// directly.
 fn connected_texture_file(shader: &Shader, base: &str) -> Result<Option<String>> {
-    let Some(source) = shader.input(base).connections()?.into_iter().next() else {
+    let produced = shader
+        .input(base)
+        .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)?;
+    let Some(source) = produced.first() else {
         return Ok(None);
     };
     let stage = shader.stage();
-    let Some(tex) = Shader::get(stage, source.prim_path())? else {
+    let Some(tex) = Shader::get(stage, source.path().prim_path())? else {
         return Ok(None);
     };
     if tex.id()?.as_deref() != Some(SHADER_ID_UV_TEXTURE) {
         return Ok(None);
     }
-    resolve_asset_value(stage, &input_path(tex.path(), TEX_FILE)?)
+    resolve_asset_value(&tex.input(TEX_FILE))
 }
 
 /// Resolve an `asset`-typed input to its authored path. When the input is
@@ -132,20 +134,17 @@ fn connected_texture_file(shader: &Shader, base: &str) -> Result<Option<String>>
 ///
 /// TODO: the returned path is the raw authored token; anchoring it to the layer
 /// that authored the opinion is not yet done.
-fn resolve_asset_value(stage: &Stage, attr: &Path) -> Result<Option<String>> {
-    let mut current = attr.clone();
-    for _ in 0..MAX_CONNECTION_HOPS {
-        if let Some(source) = stage.attribute(current.clone()).connections()?.into_iter().next() {
-            current = source;
-            continue;
-        }
-        return Ok(stage
-            .field::<Value>(current, FieldKey::Default.as_str())?
-            .as_ref()
-            .and_then(Value::as_str)
-            .map(str::to_owned));
-    }
-    Ok(None)
+fn resolve_asset_value(input: &Input) -> Result<Option<String>> {
+    let produced = input.value_producing_attributes(ProducerFilter::Any)?;
+    let Some(source) = produced.first() else {
+        return Ok(None);
+    };
+    Ok(source
+        .attribute()
+        .get::<Value>()?
+        .as_ref()
+        .and_then(Value::as_str)
+        .map(str::to_owned))
 }
 
 fn read_color_channel(shader: &Shader, base: &str) -> Result<Channel<gf::Vec3f>> {

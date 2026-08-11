@@ -348,6 +348,21 @@ impl Attribute {
             .unwrap_or(false))
     }
 
+    /// `true` when an attribute is composed at this path — an authored spec,
+    /// or a declaration from the owning prim's schema. Mirrors C++
+    /// `UsdAttribute::IsDefined`.
+    ///
+    /// The composed spec answers first and a schema declaration answers for a
+    /// path no layer authors, so a relationship composed where a schema
+    /// declares an attribute is not one.
+    pub fn is_defined(&self) -> anyhow::Result<bool> {
+        let spec_type = match self.stage.spec_type(&self.path)? {
+            Some(spec_type) => Some(spec_type),
+            None => self.declared_spec_type()?,
+        };
+        Ok(spec_type == Some(sdf::SpecType::Attribute))
+    }
+
     /// Composed value type (the `typeName` field), if set. Mirrors C++
     /// `UsdAttribute::GetTypeName`.
     ///
@@ -438,6 +453,18 @@ impl Attribute {
             return Ok(None);
         };
         Ok(property.field(field).cloned())
+    }
+
+    /// The spec type the owning prim's schema declares for this property, or
+    /// `None` when no schema declares it.
+    fn declared_spec_type(&self) -> anyhow::Result<Option<sdf::SpecType>> {
+        let Some((info, name)) = self.declaring_definition()? else {
+            return Ok(None);
+        };
+        Ok(info
+            .prim_definition()
+            .property(&name)
+            .map(|property| property.spec_type()))
     }
 
     /// The schema of the prim this attribute hangs off, with the attribute's
@@ -845,6 +872,25 @@ mod tests {
         Stage::builder()
             .schema_registry(SchemaRegistry::test_registry())
             .in_memory("anon.usda")
+    }
+
+    #[test]
+    fn defined_by_schema_or_spec() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        // A schema declaration defines an attribute no layer authors.
+        assert!(stage.attribute("/Sun.inputs:intensity").is_defined()?);
+        // A name no schema declares and no layer authors is nothing.
+        assert!(!stage.attribute("/Sun.inputs:nope").is_defined()?);
+        // A declared relationship is not an attribute.
+        assert!(!stage.attribute("/Sun.collection:lightLink:includes").is_defined()?);
+
+        stage.prim("/Sun").create_attribute("authored", "double")?;
+        assert!(stage.attribute("/Sun.authored").is_defined()?);
+        stage.prim("/Sun").create_relationship("authoredRel")?;
+        assert!(!stage.attribute("/Sun.authoredRel").is_defined()?);
+        Ok(())
     }
 
     #[test]
