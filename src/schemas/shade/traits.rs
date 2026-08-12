@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::usd::SchemaBase;
 
-use super::connectable::{input_name, output_name};
+use super::connectable::{authored_inputs, input_name, output_name};
 use super::{Input, Output};
 
 /// The `inputs:` and `outputs:` surface shared by Shader, NodeGraph, and
@@ -30,12 +30,7 @@ pub trait Connectable: SchemaBase {
 
     /// The authored inputs in composed property order (C++ `GetInputs`).
     fn inputs(&self) -> Result<Vec<Input>> {
-        Ok(self
-            .prim()
-            .authored_attributes()?
-            .into_iter()
-            .filter_map(Input::from_attribute)
-            .collect())
+        authored_inputs(self.prim())
     }
 
     /// The `outputs:<base>` attribute view (C++ `GetOutput`), returned whether

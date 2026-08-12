@@ -1,15 +1,14 @@
 //! Reverse queries for NodeGraph interface-input connections.
 
 use std::collections::{HashMap, HashSet};
-use std::ptr;
 
 use anyhow::Result;
 
 use crate::{sdf, usd};
 
-use super::connectable::is_container;
+use super::connectable::{authored_inputs, is_container};
 
-use super::{Connectable, Input, Material, NodeGraph, Shader};
+use super::{Connectable, Input, Material, NodeGraph};
 
 /// A NodeGraph's interface inputs and the inputs that consume their values.
 ///
@@ -18,6 +17,9 @@ use super::{Connectable, Input, Material, NodeGraph, Shader};
 #[derive(Clone, Default)]
 pub struct InterfaceInputConsumersMap {
     entries: Vec<InterfaceInputConsumers>,
+    /// Entry position by interface-input property path; the entry's stage
+    /// identity is confirmed on lookup.
+    index: HashMap<sdf::Path, usize>,
 }
 
 impl InterfaceInputConsumersMap {
@@ -45,27 +47,44 @@ impl InterfaceInputConsumersMap {
     }
 
     fn entry(&self, interface_input: &Input) -> Option<&InterfaceInputConsumers> {
-        self.entries
-            .iter()
-            .find(|entry| same_input(&entry.interface_input, interface_input))
+        let entry = &self.entries[*self.index.get(interface_input.path())?];
+        same_input(&entry.interface_input, interface_input).then_some(entry)
     }
 
     fn entry_mut(&mut self, stage: &usd::Stage, path: &sdf::Path) -> Option<&mut InterfaceInputConsumers> {
-        self.entries
-            .iter_mut()
-            .find(|entry| input_matches(&entry.interface_input, stage, path))
+        let position = *self.index.get(path)?;
+        let entry = &mut self.entries[position];
+        input_matches(&entry.interface_input, stage, path).then_some(entry)
+    }
+
+    fn insert(&mut self, entry: InterfaceInputConsumers) {
+        self.index
+            .insert(entry.interface_input.path().clone(), self.entries.len());
+        self.entries.push(entry);
     }
 }
 
+/// One interface input and the consumers recorded for it during the walk.
 #[derive(Clone)]
 struct InterfaceInputConsumers {
     interface_input: Input,
     consumers: Vec<Input>,
+    /// Consumer property paths already recorded, deduping converging
+    /// connections while the direct map is built.
+    seen: HashSet<sdf::Path>,
 }
 
 impl InterfaceInputConsumers {
+    fn new(interface_input: Input) -> Self {
+        InterfaceInputConsumers {
+            interface_input,
+            consumers: Vec::new(),
+            seen: HashSet::new(),
+        }
+    }
+
     fn push_consumer(&mut self, consumer: Input) {
-        if !self.consumers.iter().any(|existing| same_input(existing, &consumer)) {
+        if self.seen.insert(consumer.path().clone()) {
             self.consumers.push(consumer);
         }
     }
@@ -97,10 +116,9 @@ pub trait NodeGraphInterface: Connectable {
 
         let mut resolved = InterfaceInputConsumersMap::default();
         for (interface_input, consumers) in direct.iter() {
-            resolved.entries.push(InterfaceInputConsumers {
-                interface_input: interface_input.clone(),
-                consumers: resolve_consumers(consumers, &nested_maps),
-            });
+            let mut entry = InterfaceInputConsumers::new(interface_input.clone());
+            entry.consumers = resolve_consumers(consumers, &nested_maps);
+            resolved.insert(entry);
         }
         Ok(resolved)
     }
@@ -109,17 +127,18 @@ pub trait NodeGraphInterface: Connectable {
 impl NodeGraphInterface for NodeGraph {}
 impl NodeGraphInterface for Material {}
 
+/// Builds the non-transitive map for `root`: every interface input of the
+/// container, each with the consumer inputs inside the container's subtree
+/// that connect directly to it.
+// TODO(perf): this hand-rolls a prim-rooted DFS (C++ `UsdPrimRange`) because
+// `Stage::traverse` can only start at the pseudo-root, and each
+// `prim_matches` call re-walks the prim's ancestor chain. Grow a prim-rooted
+// traversal on `Stage` and use it here.
 fn compute_direct_map(root: &usd::Prim) -> Result<InterfaceInputConsumersMap> {
-    let mut result = InterfaceInputConsumersMap {
-        entries: connectable_inputs(root)?
-            .unwrap_or_default()
-            .into_iter()
-            .map(|interface_input| InterfaceInputConsumers {
-                interface_input,
-                consumers: Vec::new(),
-            })
-            .collect(),
-    };
+    let mut result = InterfaceInputConsumersMap::default();
+    for interface_input in connectable_inputs(root)?.unwrap_or_default() {
+        result.insert(InterfaceInputConsumers::new(interface_input));
+    }
 
     let mut stack = if root.is_instance()? {
         Vec::new()
@@ -154,20 +173,25 @@ fn compute_direct_map(root: &usd::Prim) -> Result<InterfaceInputConsumersMap> {
     Ok(result)
 }
 
+/// The authored inputs of `prim` when it takes part in connectable
+/// evaluation, or `None` for a prim whose inputs never consume.
+///
+/// Any typed prim participates — shaders, containers, and the light family,
+/// whose inputs C++ admits through `UsdShadeConnectableAPIBehavior`; an
+/// untyped prim has no behavior and is skipped.
+// TODO(shade): replace the any-typed-prim heuristic with a
+// connectable-behavior registry so typed prims without a behavior (e.g.
+// Scope) are excluded, as in C++.
 fn connectable_inputs(prim: &usd::Prim) -> Result<Option<Vec<Input>>> {
-    let stage = prim.stage();
-    let path = prim.path();
-    if Shader::get(stage, path.clone())?.is_none() && !is_container(prim)? {
+    if prim.type_name()?.is_none() {
         return Ok(None);
     }
-    Ok(Some(
-        prim.authored_attributes()?
-            .into_iter()
-            .filter_map(Input::from_attribute)
-            .collect(),
-    ))
+    Ok(Some(authored_inputs(prim)?))
 }
 
+/// Computes the direct map of every container reachable through consumer
+/// inputs, keyed by container prim path. Non-container consumers are visited
+/// once and dropped.
 fn collect_nested_maps(
     consumers: &InterfaceInputConsumersMap,
     stage: &usd::Stage,
@@ -175,8 +199,9 @@ fn collect_nested_maps(
 ) -> Result<()> {
     let mut pending = nested_container_paths(consumers);
     pending.reverse();
+    let mut visited: HashSet<sdf::Path> = HashSet::new();
     while let Some(path) = pending.pop() {
-        if maps.contains_key(&path) {
+        if !visited.insert(path.clone()) {
             continue;
         }
         let prim = stage.prim(path.clone())?;
@@ -192,14 +217,21 @@ fn collect_nested_maps(
     Ok(())
 }
 
+/// The owning-prim path of every consumer in `consumers`, in map order.
+/// Duplicates (one prim consuming through several inputs) are kept; the
+/// caller's visited set collapses them.
 fn nested_container_paths(consumers: &InterfaceInputConsumersMap) -> Vec<sdf::Path> {
     consumers
         .iter()
         .flat_map(|(_, consumers)| consumers)
-        .map(|consumer| consumer.prim().path().clone())
+        .map(|consumer| consumer.path().prim_path())
         .collect()
 }
 
+/// Follows container-interface consumers through `nested_maps` to their leaf
+/// inputs, in worklist order. A consumer outside any container map is a leaf;
+/// a nested interface input with no consumers of its own is kept, and a
+/// converging path is visited once.
 fn resolve_consumers(consumers: &[Input], nested_maps: &HashMap<sdf::Path, InterfaceInputConsumersMap>) -> Vec<Input> {
     let mut pending: Vec<Input> = consumers.iter().rev().cloned().collect();
     let mut visited = HashSet::new();
@@ -208,7 +240,7 @@ fn resolve_consumers(consumers: &[Input], nested_maps: &HashMap<sdf::Path, Inter
         if !visited.insert(consumer.path().clone()) {
             continue;
         }
-        let Some(map) = nested_maps.get(consumer.prim().path()) else {
+        let Some(map) = nested_maps.get(&consumer.path().prim_path()) else {
             resolved.push(consumer);
             continue;
         };
@@ -224,12 +256,16 @@ fn resolve_consumers(consumers: &[Input], nested_maps: &HashMap<sdf::Path, Inter
     resolved
 }
 
+/// Whether two inputs denote the same attribute: same stage instance, same
+/// property path.
 fn same_input(left: &Input, right: &Input) -> bool {
     input_matches(left, right.attribute().stage(), right.path())
 }
 
+/// Whether `input` denotes the attribute at `path` on the stage instance
+/// `stage`.
 fn input_matches(input: &Input, stage: &usd::Stage, path: &sdf::Path) -> bool {
-    ptr::eq(&**input.attribute().stage(), &**stage) && input.path() == path
+    input.attribute().stage().ptr_eq(stage) && input.path() == path
 }
 
 #[cfg(test)]
@@ -411,6 +447,26 @@ mod tests {
     }
 
     #[test]
+    fn typed_consumer_included() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let graph = NodeGraph::define(&stage, "/Graph")?;
+        let gain = graph.create_input("gain", "float")?;
+        // A non-Shader typed prim (a light) consumes the interface input; an
+        // untyped defined prim does not.
+        let light = stage.define_prim("/Graph/Light")?.set_type_name("SphereLight")?;
+        Input::new(light.create_attribute("inputs:intensity", "float")?).connect_to(&gain)?;
+        let plain = stage.define_prim("/Graph/Plain")?;
+        Input::new(plain.create_attribute("inputs:x", "float")?).connect_to(&gain)?;
+
+        let map = graph.compute_interface_input_consumers_map(false)?;
+        assert_eq!(
+            paths(map.consumers(&gain).expect("gain entry")),
+            ["/Graph/Light.inputs:intensity"]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn instance_consumers() -> Result<()> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let source = NodeGraph::define(&stage, "/Source")?;
@@ -451,15 +507,11 @@ mod tests {
 
         let mut maps = HashMap::with_capacity(DEPTH - 1);
         for pair in chain.windows(2) {
-            maps.insert(
-                pair[0].prim().path().clone(),
-                InterfaceInputConsumersMap {
-                    entries: vec![InterfaceInputConsumers {
-                        interface_input: pair[0].clone(),
-                        consumers: vec![pair[1].clone()],
-                    }],
-                },
-            );
+            let mut map = InterfaceInputConsumersMap::default();
+            let mut entry = InterfaceInputConsumers::new(pair[0].clone());
+            entry.push_consumer(pair[1].clone());
+            map.insert(entry);
+            maps.insert(pair[0].prim().path().clone(), map);
         }
 
         let resolved = resolve_consumers(&chain[..1], &maps);

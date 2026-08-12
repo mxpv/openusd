@@ -72,19 +72,23 @@ pub struct ReadPreviewSurface {
 }
 
 /// Resolve `material`'s surface shader and, if it is a `UsdPreviewSurface`,
-/// decode every channel. Returns `None` when the material has no surface shader
-/// or the shader is not a `UsdPreviewSurface`.
+/// decode every channel. The universal surface terminal is consulted first;
+/// when it resolves nothing, the authored render-context surface terminals
+/// are tried in sorted order, so a context-only material still decodes.
+/// Returns `None` when no terminal yields a `UsdPreviewSurface` shader.
 pub fn read_preview_surface(stage: &usd::Stage, material: &sdf::Path) -> Result<Option<ReadPreviewSurface>> {
     let Some(material) = Material::get(stage, material.clone())? else {
         return Ok(None);
     };
-    let Some(terminal) = material.compute_surface_source(&[])? else {
+    let Some(terminal) = resolve_surface_terminal(&material)? else {
         return Ok(None);
     };
     let Some(source) = terminal.sources().first() else {
         return Ok(None);
     };
-    let shader = source.shader();
+    let Some(shader) = source.shader() else {
+        return Ok(None);
+    };
     if shader.id()?.as_deref() != Some(SHADER_ID_PREVIEW_SURFACE) {
         return Ok(None);
     }
@@ -104,6 +108,27 @@ pub fn read_preview_surface(stage: &usd::Stage, material: &sdf::Path) -> Result<
         normal: read_color_channel(shader, PS_NORMAL)?,
         occlusion: read_scalar_channel(shader, PS_OCCLUSION)?,
     }))
+}
+
+/// Resolve the surface terminal: the universal context first, then the
+/// authored render-context terminals in sorted order for a stable choice.
+fn resolve_surface_terminal(material: &Material) -> Result<Option<super::ResolvedTerminal>> {
+    if let Some(terminal) = material.compute_surface_source(&[])? {
+        return Ok(Some(terminal));
+    }
+    let suffix = format!(":{}", TERMINAL_SURFACE);
+    let mut contexts: Vec<String> = material
+        .surface_outputs()?
+        .iter()
+        .filter_map(|output| output.base_name().strip_suffix(&suffix))
+        .map(String::from)
+        .collect();
+    contexts.sort();
+    if contexts.is_empty() {
+        return Ok(None);
+    }
+    let contexts: Vec<&str> = contexts.iter().map(String::as_str).collect();
+    material.compute_surface_source(&contexts)
 }
 
 /// If `shader`'s `inputs:<base>` resolves to a `UsdUVTexture`, return that
@@ -177,6 +202,26 @@ fn read_scalar_channel(shader: &Shader, base: &str) -> Result<Channel<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_only_surface() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let surf = Shader::define(&stage, "/Mat/Surface")?;
+        surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
+        surf.create_input("roughness", "float")?.set(sdf::Value::Float(0.4))?;
+        surf.create_output("surface", "token")?;
+
+        // Only a render-context surface terminal is authored; the reader
+        // falls back to it when the universal terminal resolves nothing.
+        Material::define(&stage, "/Mat")?
+            .create_surface_output_for("ri")?
+            .set_connections(["/Mat/Surface.outputs:surface"])?;
+
+        let ps = read_preview_surface(&stage, &sdf::path("/Mat")?)?.expect("context-only decodes");
+        assert_eq!(ps.shader, "/Mat/Surface");
+        assert_eq!(ps.roughness.value(), Some(&0.4));
+        Ok(())
+    }
 
     #[test]
     fn scalar_and_textured_channels() -> Result<()> {

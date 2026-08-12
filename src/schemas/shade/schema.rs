@@ -1,13 +1,16 @@
 //! The UsdShade prim views: [`Shader`], [`NodeGraph`], and [`Material`].
 
-use anyhow::Result;
+use std::borrow::Cow;
+use std::collections::HashSet;
+
+use anyhow::{Result, ensure};
 
 use crate::{sdf, tf, usd};
 
 use super::impl_shade_schema;
 use super::tokens as tok;
 use super::{AttributeType, Connectable, Output, ProducerFilter, ShadingAttribute};
-use crate::schemas::common::get_typed;
+use crate::schemas::common::{get_typed, is_typed};
 
 /// A shading node (C++ `UsdShadeShader`) — a `def Shader` prim that identifies
 /// a shading implementation through the NodeDefAPI `info:*` attributes (a
@@ -167,23 +170,35 @@ impl TerminalKind {
             TerminalKind::Volume => tok::TERMINAL_VOLUME,
         }
     }
+
+    /// The universal terminal's full property name (e.g. `outputs:surface`).
+    pub const fn universal_attribute(self) -> &'static str {
+        match self {
+            TerminalKind::Surface => tok::A_OUTPUTS_SURFACE,
+            TerminalKind::Displacement => tok::A_OUTPUTS_DISPLACEMENT,
+            TerminalKind::Volume => tok::A_OUTPUTS_VOLUME,
+        }
+    }
 }
 
-/// One shader attribute that contributes to a resolved material terminal.
+/// One value-producing attribute that contributes to a resolved material
+/// terminal.
 ///
 /// Multiple instances are retained when the selected terminal branches through
 /// a multi-connection. The attribute records the exact endpoint, including its
 /// base name, Input/Output role, path, and composed USD value type.
 #[derive(Clone)]
 pub struct TerminalSource {
-    shader: Shader,
+    shader: Option<Shader>,
     attribute: ShadingAttribute,
 }
 
 impl TerminalSource {
-    /// The shader prim that owns the source attribute.
-    pub fn shader(&self) -> &Shader {
-        &self.shader
+    /// The `Shader`-typed prim that owns the source attribute, or `None` when
+    /// the endpoint's prim carries another (or no) type — the analog of C++'s
+    /// invalid `UsdShadeShader` result for such endpoints.
+    pub fn shader(&self) -> Option<&Shader> {
+        self.shader.as_ref()
     }
 
     /// The exact value-producing shader attribute.
@@ -259,9 +274,12 @@ impl Material {
 
     /// Handle to the `surface` terminal for `render_context`.
     ///
-    /// An empty context addresses the universal `outputs:surface` terminal.
-    pub fn surface_output_for(&self, render_context: &str) -> Output {
-        self.terminal_output(render_context, TerminalKind::Surface)
+    /// An empty context addresses the universal `outputs:surface` terminal;
+    /// a context that is not a namespaced identifier errors, as the create
+    /// counterpart does.
+    pub fn surface_output_for(&self, render_context: &str) -> Result<Output> {
+        checked_context(render_context)?;
+        Ok(self.terminal_output(render_context, TerminalKind::Surface))
     }
 
     /// Every authored surface terminal, with the universal terminal first.
@@ -291,9 +309,11 @@ impl Material {
     /// Handle to the `displacement` terminal for `render_context`.
     ///
     /// An empty context addresses the universal `outputs:displacement`
-    /// terminal.
-    pub fn displacement_output_for(&self, render_context: &str) -> Output {
-        self.terminal_output(render_context, TerminalKind::Displacement)
+    /// terminal; a context that is not a namespaced identifier errors, as the
+    /// create counterpart does.
+    pub fn displacement_output_for(&self, render_context: &str) -> Result<Output> {
+        checked_context(render_context)?;
+        Ok(self.terminal_output(render_context, TerminalKind::Displacement))
     }
 
     /// Every authored displacement terminal, with the universal terminal
@@ -323,9 +343,12 @@ impl Material {
 
     /// Handle to the `volume` terminal for `render_context`.
     ///
-    /// An empty context addresses the universal `outputs:volume` terminal.
-    pub fn volume_output_for(&self, render_context: &str) -> Output {
-        self.terminal_output(render_context, TerminalKind::Volume)
+    /// An empty context addresses the universal `outputs:volume` terminal; a
+    /// context that is not a namespaced identifier errors, as the create
+    /// counterpart does.
+    pub fn volume_output_for(&self, render_context: &str) -> Result<Output> {
+        checked_context(render_context)?;
+        Ok(self.terminal_output(render_context, TerminalKind::Volume))
     }
 
     /// Every authored volume terminal, with the universal terminal first.
@@ -371,6 +394,9 @@ impl Material {
         kind: TerminalKind,
         render_contexts: &[&str],
     ) -> Result<Option<ResolvedTerminal>> {
+        for &render_context in render_contexts {
+            checked_context(render_context)?;
+        }
         let mut universal_visited = false;
         for &render_context in render_contexts {
             universal_visited |= render_context == tok::UNIVERSAL_RENDER_CONTEXT;
@@ -387,10 +413,18 @@ impl Material {
     fn resolve_terminal(&self, kind: TerminalKind, render_context: &str) -> Result<Option<ResolvedTerminal>> {
         let output = self.terminal_output(render_context, kind);
         let mut sources = Vec::new();
+        let mut seen = HashSet::new();
         for attribute in output.value_producing_attributes(ProducerFilter::ShaderOutputsOnly)? {
-            let Some(shader) = Shader::get(self.stage(), attribute.path().prim_path())? else {
+            // Sibling branches can converge on one endpoint; report it once.
+            if !seen.insert(attribute.path().clone()) {
                 continue;
-            };
+            }
+            // Any value-producing endpoint commits this terminal, whether or
+            // not its prim is typed Shader — C++ hands back an invalid
+            // UsdShadeShader rather than falling through to a weaker render
+            // context.
+            let prim = usd::Prim::new(attribute.attribute().stage(), attribute.path().prim_path());
+            let shader = is_typed(&prim, tok::T_SHADER)?.then(|| Shader(prim));
             sources.push(TerminalSource { shader, attribute });
         }
         if sources.is_empty() {
@@ -404,7 +438,7 @@ impl Material {
     }
 
     fn terminal_output(&self, render_context: &str, kind: TerminalKind) -> Output {
-        Output::new(self.attribute(terminal_output_name(render_context, kind)))
+        Output::new(self.attribute(terminal_output_name(render_context, kind).as_ref()))
     }
 
     fn terminal_outputs(&self, kind: TerminalKind) -> Result<Vec<Output>> {
@@ -426,16 +460,30 @@ impl Material {
 
     fn create_terminal_output(&self, render_context: &str, kind: TerminalKind) -> Result<Output> {
         let name = terminal_output_name(render_context, kind);
-        Ok(Output::new(self.create_attribute(&name, "token")?.set_custom(false)?))
+        Ok(Output::new(
+            self.create_attribute(name.as_ref(), "token")?.set_custom(false)?,
+        ))
     }
 }
 
-fn terminal_output_name(render_context: &str, kind: TerminalKind) -> String {
+/// The terminal's full property name for `render_context`: the universal
+/// constant, or `outputs:<context>:<terminal>`.
+fn terminal_output_name(render_context: &str, kind: TerminalKind) -> Cow<'static, str> {
     if render_context == tok::UNIVERSAL_RENDER_CONTEXT {
-        format!("{}{}", tok::NS_OUTPUTS, kind.as_str())
+        Cow::Borrowed(kind.universal_attribute())
     } else {
-        format!("{}{render_context}:{}", tok::NS_OUTPUTS, kind.as_str())
+        Cow::Owned(format!("{}{render_context}:{}", tok::NS_OUTPUTS, kind.as_str()))
     }
+}
+
+/// Validates a caller-supplied render context: the universal context, or a
+/// namespaced identifier (`ri`, `mtlx:standard`).
+fn checked_context(render_context: &str) -> Result<()> {
+    ensure!(
+        render_context == tok::UNIVERSAL_RENDER_CONTEXT || sdf::Path::is_valid_namespace_identifier(render_context),
+        "invalid render context {render_context:?}"
+    );
+    Ok(())
 }
 
 impl_shade_schema!(connectable Material);
@@ -531,7 +579,7 @@ mod tests {
         assert!(terminal.render_context().is_empty());
         assert_eq!(terminal.sources().len(), 1);
         let source = terminal.sources().first().expect("surface source");
-        assert_eq!(source.shader().path().as_str(), "/Mat/Surface");
+        assert_eq!(source.shader().expect("shader source").path().as_str(), "/Mat/Surface");
         assert_eq!(source.source_name(), "surface");
         assert_eq!(source.source_type(), AttributeType::Output);
         Ok(())
@@ -553,7 +601,10 @@ mod tests {
         let mat = Material::get(&stage, "/Mat")?.expect("Material");
         let terminal = mat.compute_surface_source(&[])?.expect("surface terminal");
         let source = terminal.sources().first().expect("surface source");
-        assert_eq!(source.shader().path().as_str(), "/Mat/NG/Surface");
+        assert_eq!(
+            source.shader().expect("shader source").path().as_str(),
+            "/Mat/NG/Surface"
+        );
         Ok(())
     }
 
@@ -571,7 +622,10 @@ mod tests {
         let mat = Material::get(&stage, "/Mat")?.expect("Material");
         let terminal = mat.compute_surface_source(&["ri"])?.expect("surface terminal");
         let source = terminal.sources().first().expect("surface source");
-        assert_eq!(source.shader().path().as_str(), "/Mat/RiSurface");
+        assert_eq!(
+            source.shader().expect("shader source").path().as_str(),
+            "/Mat/RiSurface"
+        );
         Ok(())
     }
 
@@ -674,11 +728,21 @@ mod tests {
             .compute_displacement_source(&[])?
             .expect("displacement terminal");
         assert_eq!(displacement.kind(), TerminalKind::Displacement);
-        assert_eq!(displacement.sources()[0].shader().path().as_str(), "/Mat/Displace");
+        assert_eq!(
+            displacement.sources()[0]
+                .shader()
+                .expect("shader source")
+                .path()
+                .as_str(),
+            "/Mat/Displace"
+        );
 
         let volume = material.compute_volume_source(&[])?.expect("volume terminal");
         assert_eq!(volume.kind(), TerminalKind::Volume);
-        assert_eq!(volume.sources()[0].shader().path().as_str(), "/Mat/Volume");
+        assert_eq!(
+            volume.sources()[0].shader().expect("shader source").path().as_str(),
+            "/Mat/Volume"
+        );
         Ok(())
     }
 
@@ -696,13 +760,19 @@ mod tests {
 
         let selected = material.compute_surface_source(&["mtlx", "ri"])?.expect("ri terminal");
         assert_eq!(selected.render_context().as_str(), "ri");
-        assert_eq!(selected.sources()[0].shader().path().as_str(), "/Mat/Renderman");
+        assert_eq!(
+            selected.sources()[0].shader().expect("shader source").path().as_str(),
+            "/Mat/Renderman"
+        );
 
         let fallback = material
             .compute_surface_source(&["unknown"])?
             .expect("universal terminal");
         assert!(fallback.render_context().is_empty());
-        assert_eq!(fallback.sources()[0].shader().path().as_str(), "/Mat/Universal");
+        assert_eq!(
+            fallback.sources()[0].shader().expect("shader source").path().as_str(),
+            "/Mat/Universal"
+        );
         Ok(())
     }
 
@@ -724,7 +794,7 @@ mod tests {
         let paths: Vec<&str> = terminal
             .sources()
             .iter()
-            .map(|source| source.shader().path().as_str())
+            .map(|source| source.shader().expect("shader source").path().as_str())
             .collect();
         let names: Vec<&str> = terminal.sources().iter().map(TerminalSource::source_name).collect();
         assert_eq!(paths, ["/Mat/Second", "/Mat/First"]);
@@ -735,6 +805,60 @@ mod tests {
                 .iter()
                 .all(|source| source.source_type() == AttributeType::Output)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_commits_untyped_endpoint() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let material = Material::define(&stage, "/Mat")?;
+        // The ri terminal ends on a custom-typed node; the universal terminal
+        // ends on a Shader.
+        let custom = stage.define_prim("/Mat/Custom")?.set_type_name("MyNode")?;
+        let custom_out = Output::new(custom.create_attribute("outputs:out", "token")?);
+        material.create_surface_output_for("ri")?.connect_to(&custom_out)?;
+        let universal = Shader::define(&stage, "/Mat/Universal")?;
+        let universal_out = universal.create_output("surface", "token")?;
+        material.create_surface_output()?.connect_to(&universal_out)?;
+
+        // The requested context commits to its own endpoint (with no shader
+        // view) rather than falling through to the universal shader.
+        let terminal = material.compute_surface_source(&["ri"])?.expect("ri terminal");
+        assert_eq!(terminal.render_context().as_str(), "ri");
+        let source = &terminal.sources()[0];
+        assert!(source.shader().is_none());
+        assert_eq!(source.attribute().path().as_str(), "/Mat/Custom.outputs:out");
+        Ok(())
+    }
+
+    #[test]
+    fn converging_sources_dedup() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let material = Material::define(&stage, "/Mat")?;
+        let shader = Shader::define(&stage, "/Mat/S")?;
+        let shader_out = shader.create_output("surface", "token")?;
+        let graph = NodeGraph::define(&stage, "/Mat/NG")?;
+        let graph_out = graph.create_output("out", "token")?.connect_to(&shader_out)?;
+        // Two branches of the terminal converge on one shader endpoint.
+        material
+            .create_surface_output()?
+            .set_connections([shader_out.path().clone(), graph_out.path().clone()])?;
+
+        let terminal = material.compute_surface_source(&[])?.expect("terminal");
+        assert_eq!(terminal.sources().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_context_rejected() -> Result<()> {
+        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let material = Material::define(&stage, "/Mat")?;
+        assert!(material.surface_output_for("ri ").is_err());
+        assert!(material.displacement_output_for("ri:").is_err());
+        assert!(material.volume_output_for("a b").is_err());
+        assert!(material.compute_surface_source(&["ri "]).is_err());
+        // The universal context stays addressable through the empty string.
+        assert!(material.surface_output_for("").is_ok());
         Ok(())
     }
 
@@ -757,12 +881,12 @@ mod tests {
         assert!(names.contains(&"mtlx:standard:surface"));
         assert_eq!(material.displacement_outputs()?.len(), 1);
         assert_eq!(material.volume_outputs()?.len(), 1);
-        assert_eq!(material.surface_output_for("ri").full_name(), "outputs:ri:surface");
+        assert_eq!(material.surface_output_for("ri")?.full_name(), "outputs:ri:surface");
         assert_eq!(
-            material.displacement_output_for("ri").full_name(),
+            material.displacement_output_for("ri")?.full_name(),
             "outputs:ri:displacement"
         );
-        assert_eq!(material.volume_output_for("ri").full_name(), "outputs:ri:volume");
+        assert_eq!(material.volume_output_for("ri")?.full_name(), "outputs:ri:volume");
         Ok(())
     }
 }

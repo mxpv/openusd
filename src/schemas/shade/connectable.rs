@@ -269,6 +269,17 @@ pub(super) fn is_container(prim: &usd::Prim) -> Result<bool> {
     is_any_typed(prim, &[T_NODE_GRAPH, T_MATERIAL])
 }
 
+/// The authored `inputs:` attributes of `prim` in composed property order —
+/// the collection behind [`Connectable::inputs`](super::Connectable::inputs)
+/// and the interface-consumer walk.
+pub(super) fn authored_inputs(prim: &usd::Prim) -> Result<Vec<Input>> {
+    Ok(prim
+        .authored_attributes()?
+        .into_iter()
+        .filter_map(Input::from_attribute)
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

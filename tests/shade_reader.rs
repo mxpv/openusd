@@ -50,7 +50,10 @@ fn resolves_surface_terminal_to_shader() -> Result<()> {
     let mat = Material::get(&stage, "/World/Looks/BrickMat")?.expect("Material");
     let terminal = mat.compute_surface_source(&[])?.expect("surface terminal");
     let source = terminal.sources().first().expect("surface source");
-    assert_eq!(source.shader().path().as_str(), "/World/Looks/BrickMat/Surface");
+    assert_eq!(
+        source.shader().expect("shader source").path().as_str(),
+        "/World/Looks/BrickMat/Surface"
+    );
     Ok(())
 }
 

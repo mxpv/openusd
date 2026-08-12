@@ -53,7 +53,8 @@
 //! let mat = shade::Material::get(&stage, "/Mat").unwrap().expect("Material");
 //! let terminal = mat.compute_surface_source(&[]).unwrap().expect("surface terminal");
 //! let source = terminal.sources().first().expect("surface source");
-//! assert_eq!(source.shader().id().unwrap().as_deref(), Some("UsdPreviewSurface"));
+//! let shader = source.shader().expect("shader-typed source");
+//! assert_eq!(shader.id().unwrap().as_deref(), Some("UsdPreviewSurface"));
 //! ```
 
 pub mod tokens;

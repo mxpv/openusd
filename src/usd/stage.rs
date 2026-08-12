@@ -805,6 +805,15 @@ impl PrimTypeMemo {
 #[derive(Clone)]
 pub struct Stage(Rc<StageInner>);
 
+impl Stage {
+    /// Whether `self` and `other` are the same stage instance — handle
+    /// identity, like C++ `UsdStage` pointer equality — as opposed to two
+    /// stages that merely compose the same content.
+    pub fn ptr_eq(&self, other: &Stage) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 impl std::ops::Deref for Stage {
     type Target = StageInner;
 
