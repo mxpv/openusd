@@ -49,9 +49,13 @@ impl Shader {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// The composed `info:id` as a string, if authored — the convenience
-    /// behind dispatching on shader type (C++ `UsdShadeShader::GetShaderId`).
+    /// The composed `info:id` as a string when identifier mode is active — the
+    /// convenience behind dispatching on shader type (C++
+    /// `UsdShadeShader::GetShaderId`).
     pub fn id(&self) -> Result<Option<String>> {
+        if self.implementation_source()? != super::ImplementationSource::Id {
+            return Ok(None);
+        }
         Ok(self.id_attr().get::<tf::Token>()?.map(Into::into))
     }
 

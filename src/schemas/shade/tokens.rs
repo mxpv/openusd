@@ -14,6 +14,8 @@ pub const API_NODE_DEF: &str = "NodeDefAPI";
 pub const API_MATERIAL_BINDING: &str = "MaterialBindingAPI";
 
 // Property namespace prefixes
+/// Node-definition properties are authored under `info:`.
+pub const NS_INFO: &str = "info:";
 /// Input attributes are authored as `inputs:<base>`.
 pub const NS_INPUTS: &str = "inputs:";
 /// Output attributes are authored as `outputs:<base>`.
@@ -30,6 +32,8 @@ pub const A_INFO_SOURCE_ASSET_SUBIDENTIFIER: &str = "info:sourceAsset:subIdentif
 pub const IMPL_SOURCE_ID: &str = "id";
 pub const IMPL_SOURCE_SOURCE_ASSET: &str = "sourceAsset";
 pub const IMPL_SOURCE_SOURCE_CODE: &str = "sourceCode";
+/// Source-asset sub-identifier suffix used after an optional source type.
+pub const SOURCE_ASSET_SUBIDENTIFIER: &str = "sourceAsset:subIdentifier";
 
 // Material / NodeGraph terminal output base names
 pub const TERMINAL_SURFACE: &str = "surface";
@@ -53,6 +57,8 @@ pub const CONNECTABILITY_INTERFACE_ONLY: &str = "interfaceOnly";
 // `renderType` metadata on a connectable input / output — a renderer-specific
 // type hint (C++ `UsdShadeInput`/`UsdShadeOutput::SetRenderType`).
 pub const META_RENDER_TYPE: &str = "renderType";
+/// Shader-registry metadata on a shader, input, or output.
+pub const META_SDR_METADATA: &str = "sdrMetadata";
 
 // MaterialBindingAPI relationship names + binding metadata
 pub const REL_MATERIAL_BINDING: &str = "material:binding";

@@ -29,6 +29,9 @@
 //! as far as [`ProducerFilter`] admits. [`NodeGraphInterface`] maps interface
 //! inputs in the reverse direction to their consumers. Specialized consumers
 //! include [`Material::compute_surface_source`] and [`read_preview_surface`].
+//! [`Shader::implementation_source`] and the source queries interpret the
+//! active `NodeDef` implementation family, while [`SdrMetadata`] exposes the
+//! composed shader-registry metadata on shaders, inputs, and outputs.
 //! To find every shading prim on a stage, traverse it and gate each prim
 //! through the typed `get` (e.g. [`Material::get`]), mirroring C++
 //! `prim.IsA<UsdShadeMaterial>()`.
@@ -63,6 +66,7 @@ mod binding;
 mod connectable;
 mod input;
 mod interface;
+mod node_def;
 mod output;
 mod preview;
 mod schema;
@@ -76,6 +80,7 @@ pub use connectable::{
 };
 pub use input::Input;
 pub use interface::{InterfaceInputConsumersMap, NodeGraphInterface};
+pub use node_def::SdrMetadata;
 pub use output::Output;
 pub use preview::{Channel, ReadPreviewSurface, read_preview_surface};
 pub use schema::{Material, NodeGraph, ResolvedTerminal, Shader, TerminalKind, TerminalSource};
