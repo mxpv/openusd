@@ -2,9 +2,11 @@
 //! hand-authored UsdShade fixture, and a full author → read-back roundtrip on
 //! an in-memory stage.
 
+use std::fs;
+
 use anyhow::Result;
-use openusd::schemas::shade::{self, Channel, Connectable, Material, MaterialBindingAPI, Shader};
-use openusd::{sdf, usd};
+use openusd::schemas::shade::{self, Channel, Connectable, ImplementationSource, Material, MaterialBindingAPI, Shader};
+use openusd::{sdf, tf, usd};
 
 const FIXTURE: &str = "fixtures/usdShade_scene.usda";
 
@@ -132,5 +134,35 @@ fn author_then_read_back_roundtrip() -> Result<()> {
     // material + its two shaders.
     assert!(Material::get(&stage, sdf::path("/World/Looks/M")?)?.is_some());
     assert_eq!(shaders(&stage)?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn reads_node_def_source() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let source_path = directory.path().join("shader.osl");
+    fs::write(&source_path, "shader Example() {}")?;
+    let scene_path = directory.path().join("scene.usda");
+    fs::write(
+        &scene_path,
+        r#"#usda 1.0
+def Shader "Source"
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:osl:sourceAsset = @./shader.osl@
+}
+"#,
+    )?;
+
+    let scene = scene_path.to_string_lossy();
+    let stage = usd::Stage::open(scene.as_ref())?;
+    let shader = Shader::get(&stage, "/Source")?.expect("Shader");
+    assert_eq!(shader.implementation_source()?, ImplementationSource::SourceAsset);
+    assert_eq!(shader.source_types()?, vec![tf::Token::from("osl")]);
+
+    let asset = shader.source_asset("osl")?.expect("OSL source asset");
+    assert_eq!(asset.authored_path, "./shader.osl");
+    let resolved = source_path.canonicalize()?;
+    assert_eq!(asset.resolved_path(), Some(resolved.to_string_lossy().as_ref()));
     Ok(())
 }
