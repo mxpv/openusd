@@ -508,6 +508,19 @@ pub enum Error {
         site_path: Path,
     },
 
+    /// A composed variant selection is not a valid variant name, so the
+    /// variant arc cannot be addressed in layer storage. The arc is dropped
+    /// while the rest of the prim still composes.
+    #[error("invalid variant selection {{{set}={selection}}} at {site_path}")]
+    InvalidVariantSelection {
+        /// The variant set name.
+        set: String,
+        /// The invalid selected variant.
+        selection: String,
+        /// The prim path where the selection applies.
+        site_path: Path,
+    },
+
     /// A reference/payload resolved its target layer, but the named prim path
     /// authors no spec there (C++ `PcpErrorUnresolvedPrimPath`). The arc is
     /// dropped while the rest of the prim still composes.

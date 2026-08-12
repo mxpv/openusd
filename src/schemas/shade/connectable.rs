@@ -141,7 +141,7 @@ impl ConnectionSource {
 
     /// The typed source attribute.
     pub fn attribute(&self) -> ShadingAttribute {
-        let attribute = self.source_prim.stage().attribute(self.source_path.clone());
+        let attribute = usd::Attribute::new(self.source_prim.stage(), self.source_path.clone());
         match self.source_type {
             AttributeType::Input => ShadingAttribute::Input(Input::new(attribute)),
             AttributeType::Output => ShadingAttribute::Output(Output::new(attribute)),
@@ -197,7 +197,7 @@ pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedS
             continue;
         };
 
-        let source_attribute = attribute.stage().attribute(source_path.clone());
+        let source_attribute = attribute.stage().attribute(source_path.clone())?;
         if !source_attribute.is_defined()? {
             result.invalid_source_paths.push(source_path);
             continue;
@@ -249,7 +249,7 @@ pub fn base_name_and_type(full_name: &str) -> Option<(&str, AttributeType)> {
 /// The connectable prim owning a source attribute, paired with whether it is a
 /// container.
 fn source_prim(stage: &usd::Stage, path: &sdf::Path) -> Result<Option<(usd::Prim, bool)>> {
-    let prim = stage.prim(path.clone());
+    let prim = stage.prim(path.clone())?;
     if !prim.is_valid()? {
         return Ok(None);
     }

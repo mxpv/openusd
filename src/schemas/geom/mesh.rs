@@ -24,12 +24,12 @@ pub struct Mesh(Prim);
 
 impl Mesh {
     /// Author a `def Mesh` prim at `path` (C++ `UsdGeomMesh::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_MESH)?))
     }
 
     /// Wrap `path` as a `Mesh` if it is typed `Mesh` (C++ `UsdGeomMesh::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_MESH).map(|o| o.map(Self))
     }
 
@@ -249,13 +249,13 @@ pub struct GeomSubset(Prim);
 impl GeomSubset {
     /// Author a `def GeomSubset` prim at `path`
     /// (C++ `UsdGeomSubset::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_GEOM_SUBSET)?))
     }
 
     /// Wrap `path` as a `GeomSubset` if it is typed `GeomSubset`
     /// (C++ `UsdGeomSubset::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_GEOM_SUBSET).map(|o| o.map(Self))
     }
 

@@ -21,13 +21,13 @@ pub struct Points(Prim);
 
 impl Points {
     /// Author a `def Points` prim at `path` (C++ `UsdGeomPoints::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_POINTS)?))
     }
 
     /// Wrap `path` as a `Points` if it is typed `Points`
     /// (C++ `UsdGeomPoints::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_POINTS).map(|o| o.map(Self))
     }
 
@@ -71,13 +71,13 @@ pub struct TetMesh(Prim);
 
 impl TetMesh {
     /// Author a `def TetMesh` prim at `path` (C++ `UsdGeomTetMesh::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_TET_MESH)?))
     }
 
     /// Wrap `path` as a `TetMesh` if it is typed `TetMesh`
     /// (C++ `UsdGeomTetMesh::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_TET_MESH).map(|o| o.map(Self))
     }
 

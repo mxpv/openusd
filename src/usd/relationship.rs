@@ -48,7 +48,10 @@ impl Relationship {
     ///
     /// [`Attribute::set_variability`]: crate::usd::Attribute::set_variability
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v)))
+        self.edit(|spec| {
+            spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v));
+            Ok(())
+        })
     }
 
     /// Set the relationship's `custom` flag. Always authors an explicit
@@ -56,7 +59,10 @@ impl Relationship {
     ///
     /// [`Attribute::set_variability`]: crate::usd::Attribute::set_variability
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom)))
+        self.edit(|spec| {
+            spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom));
+            Ok(())
+        })
     }
 
     /// `true` when this relationship is composed as `custom`. Mirrors C++
@@ -76,14 +82,15 @@ impl Relationship {
     }
 
     /// Append a target path. No-op if already present.
-    pub fn add_target(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.add_target(target))
+    pub fn add_target(self, target: impl sdf::IntoPath) -> Result<Self, StageAuthoringError> {
+        let target = sdf::try_into_path(target)?;
+        self.edit(|spec| Ok(spec.add_target(target)?))
     }
 
     /// Replace the entire target list.
-    pub fn set_targets<I: IntoIterator<Item = sdf::Path>>(self, targets: I) -> Result<Self, StageAuthoringError> {
-        let targets: Vec<sdf::Path> = targets.into_iter().collect();
-        self.edit(|spec| spec.set_target_paths(targets))
+    pub fn set_targets(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
+        let targets: Vec<sdf::Path> = targets.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
+        self.edit(|spec| Ok(spec.set_target_paths(targets)?))
     }
 
     /// Author a generic metadata field on the relationship spec.
@@ -99,17 +106,23 @@ impl Relationship {
     /// [`Attribute::set_metadata`]: crate::usd::Attribute::set_metadata
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        self.edit(|spec| spec.set(key, value))
+        self.edit(|spec| {
+            spec.set(key, value);
+            Ok(())
+        })
     }
 
     /// Remove a target path. Returns `Ok(true)` if it was present. Takes
     /// `&self` rather than consuming — `remove_target` returns a `bool` (not
     /// `Self`), so it doesn't fit the chain pattern. Skips cache invalidation
     /// when the target wasn't authored (no mutation occurred).
-    pub fn remove_target(&self, target: &sdf::Path) -> Result<bool, StageAuthoringError> {
-        let target = target.clone();
+    pub fn remove_target(&self, target: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
+        let target = sdf::try_into_path(target)?;
         let mut removed = false;
-        self.edit_spec(|spec| removed = spec.remove_target(&target))?;
+        self.edit_spec(|spec| {
+            removed = spec.remove_target(&target);
+            Ok(())
+        })?;
         Ok(removed)
     }
 
@@ -178,7 +191,7 @@ impl Relationship {
     /// Returns `InvalidPath` if no relationship spec exists at the path.
     fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>),
+        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), sdf::AuthoringError>,
     {
         self.edit_spec(f)?;
         Ok(self)
@@ -192,7 +205,7 @@ impl Relationship {
     /// authorable on the handle `Prim::relationships` hands back.
     fn edit_spec<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>),
+        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), sdf::AuthoringError>,
     {
         let declared = self.declared_variability().map_err(StageAuthoringError::Composition)?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
@@ -206,10 +219,7 @@ impl Relationship {
                 path,
                 "no relationship spec at path on the edit target layer",
                 sdf::RelationshipSpecMut::get,
-                |spec| {
-                    f(spec);
-                    Ok(())
-                },
+                f,
             )
         })?;
         Ok(())
@@ -335,9 +345,9 @@ mod tests {
         let stage = stage()?;
         stage.define_prim("/Geom")?;
         let p = stage.define_prim("/P")?;
-        p.create_relationship("c")?.set_targets([sdf::path("/Geom")?])?;
-        p.create_relationship("b")?.set_targets([sdf::path("/P.c")?])?;
-        let a = p.create_relationship("a")?.set_targets([sdf::path("/P.b")?])?;
+        p.create_relationship("c")?.set_targets(["/Geom"])?;
+        p.create_relationship("b")?.set_targets(["/P.c"])?;
+        let a = p.create_relationship("a")?.set_targets(["/P.b"])?;
 
         assert_eq!(a.forwarded_targets()?, vec![sdf::path("/Geom")?]);
         Ok(())
@@ -352,13 +362,13 @@ mod tests {
         let host = stage.define_prim("/Host")?;
         const N: usize = 4_000;
         // r0 -> r1 -> ... -> r{N-1} -> /Geom, all relationships on one prim.
-        let r0 = host.create_relationship("r0")?.set_targets([sdf::path("/Host.r1")?])?;
+        let r0 = host.create_relationship("r0")?.set_targets(["/Host.r1"])?;
         for i in 1..N - 1 {
             host.create_relationship(format!("r{i}"))?
                 .set_targets([sdf::path(format!("/Host.r{}", i + 1))?])?;
         }
         host.create_relationship(format!("r{}", N - 1))?
-            .set_targets([sdf::path("/Geom")?])?;
+            .set_targets(["/Geom"])?;
 
         assert_eq!(r0.forwarded_targets()?, vec![sdf::path("/Geom")?]);
         Ok(())
@@ -372,13 +382,13 @@ mod tests {
         let stage = stage()?;
         stage.define_prim("/Geom")?;
         let p = stage.define_prim("/P")?;
-        let a = p.create_relationship("a")?.set_targets([sdf::path("/P.b")?])?;
+        let a = p.create_relationship("a")?.set_targets(["/P.b"])?;
 
         // /P.b is not a relationship yet -> a forwards to the raw path /P.b.
         assert_eq!(a.forwarded_targets()?, vec![sdf::path("/P.b")?]);
 
         // Author /P.b as a relationship; forwarding must now follow it.
-        p.create_relationship("b")?.set_targets([sdf::path("/Geom")?])?;
+        p.create_relationship("b")?.set_targets(["/Geom"])?;
         assert_eq!(a.forwarded_targets()?, vec![sdf::path("/Geom")?]);
         Ok(())
     }
@@ -409,7 +419,7 @@ mod tests {
         let stage = stage()?;
         stage.define_prim("/Geom")?;
         let p = stage.define_prim("/P")?;
-        p.create_relationship("b")?.set_targets([sdf::path("/Geom")?])?;
+        p.create_relationship("b")?.set_targets(["/Geom"])?;
         let a = p
             .create_relationship("a")?
             .set_targets([sdf::path("/Geom")?, sdf::path("/P.b")?])?;
@@ -425,8 +435,8 @@ mod tests {
     fn forwarded_targets_cycle() -> anyhow::Result<()> {
         let stage = stage()?;
         let p = stage.define_prim("/P")?;
-        let a = p.create_relationship("a")?.set_targets([sdf::path("/P.b")?])?;
-        p.create_relationship("b")?.set_targets([sdf::path("/P.a")?])?;
+        let a = p.create_relationship("a")?.set_targets(["/P.b"])?;
+        p.create_relationship("b")?.set_targets(["/P.a"])?;
 
         assert!(a.forwarded_targets()?.is_empty());
         Ok(())

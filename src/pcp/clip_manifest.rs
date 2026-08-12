@@ -69,7 +69,7 @@ pub(crate) fn generate_manifest(
             if !walked.insert(clip.identifier()) {
                 continue;
             }
-            for (path, type_name, variability) in sampled_attributes(clip, clip_prim_path) {
+            for (path, type_name, variability) in sampled_attributes(clip, clip_prim_path)? {
                 if data.has_spec(&path) {
                     continue;
                 }
@@ -130,18 +130,27 @@ pub(crate) struct ManifestKey {
 // namespace is walked in full for one rig. C++ uses `SdfLayer::Traverse` from
 // the prim path; the equivalent here needs a prefix-scan on `AbstractData`,
 // whose `Data` backing is an unordered map today.
-fn sampled_attributes(clip: &sdf::Layer, clip_prim_path: &Path) -> Vec<(Path, tf::Token, Variability)> {
-    clip.data()
-        .spec_paths()
-        .into_iter()
-        .filter(|path| path.is_property_path() && path.has_prefix(clip_prim_path))
-        .filter_map(|path| {
-            let attr = clip.attribute(path.clone())?;
-            let type_name = attr.type_name()?;
-            let variability = attr.variability();
-            has_time_samples(clip, &path).then_some((path, type_name, variability))
-        })
-        .collect()
+fn sampled_attributes(
+    clip: &sdf::Layer,
+    clip_prim_path: &Path,
+) -> Result<Vec<(Path, tf::Token, Variability)>, sdf::PathParseError> {
+    let mut out = Vec::new();
+    for path in clip.data().spec_paths() {
+        if !path.is_property_path() || !path.has_prefix(clip_prim_path) {
+            continue;
+        }
+        let Some(attr) = clip.attribute(&path)? else {
+            continue;
+        };
+        let Some(type_name) = attr.type_name() else {
+            continue;
+        };
+        let variability = attr.variability();
+        if has_time_samples(clip, &path) {
+            out.push((path, type_name, variability));
+        }
+    }
+    Ok(out)
 }
 
 /// Whether `layer` authors a non-empty `timeSamples` map for the attribute at
@@ -229,7 +238,7 @@ def "Clip"
         let manifest = generate_manifest(&[(&one, None), (&two, None)], &sdf::path("/Clip/A")?, "test.usda")?;
         assert_eq!(declared(&manifest), ["/Clip/A.a", "/Clip/A.b", "/Clip/A.z"]);
         // Declarations only: no default, no samples carried over.
-        let a = manifest.attribute(sdf::path("/Clip/A.a")?).expect("declared");
+        let a = manifest.attribute("/Clip/A.a")?.expect("declared");
         assert_eq!(a.type_name().as_deref(), Some("double"));
         assert!(a.default().is_none());
         assert!(a.time_samples().is_none());
@@ -260,14 +269,11 @@ def "A"
         let manifest = generate_manifest(&[(&one, None)], &sdf::path("/A")?, "test.usda")?;
         assert_eq!(declared(&manifest), ["/A.u", "/A{v=a}.c"]);
         assert_eq!(
-            manifest.attribute(sdf::path("/A.u")?).expect("declared").variability(),
+            manifest.attribute("/A.u")?.expect("declared").variability(),
             Variability::Uniform
         );
         assert_eq!(
-            manifest
-                .attribute(sdf::path("/A{v=a}.c")?)
-                .expect("declared")
-                .variability(),
+            manifest.attribute("/A{v=a}.c")?.expect("declared").variability(),
             Variability::Varying
         );
         Ok(())
@@ -306,13 +312,13 @@ def "A"
 
         assert!(
             manifest
-                .attribute(sdf::path("/A.both")?)
+                .attribute("/A.both")?
                 .expect("declared")
                 .time_samples()
                 .is_none()
         );
         let only = manifest
-            .attribute(sdf::path("/A.only")?)
+            .attribute("/A.only")?
             .expect("declared")
             .time_samples()
             .expect("blocked");
@@ -331,13 +337,7 @@ def "A"
         );
 
         let manifest = generate_manifest(&[(&sampled, None), (&empty, None)], &sdf::path("/A")?, "test.usda")?;
-        assert!(
-            manifest
-                .attribute(sdf::path("/A.x")?)
-                .expect("declared")
-                .time_samples()
-                .is_none()
-        );
+        assert!(manifest.attribute("/A.x")?.expect("declared").time_samples().is_none());
         Ok(())
     }
 }

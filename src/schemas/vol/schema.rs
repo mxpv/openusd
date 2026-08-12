@@ -19,13 +19,13 @@ pub struct Volume(Prim);
 
 impl Volume {
     /// Author a `def Volume` prim at `path` (C++ `UsdVolVolume::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_VOLUME)?))
     }
 
     /// Wrap `path` as a `Volume` if it is typed `Volume`
     /// (C++ `UsdVolVolume::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_VOLUME).map(|o| o.map(Self))
     }
 
@@ -39,13 +39,13 @@ impl Volume {
     /// `field:<name>` relationship (C++ `UsdVolVolume::CreateFieldRelationship`).
     /// `name` must be non-empty, otherwise the property name would end in a
     /// colon (`field:`), which is not a valid USD property name.
-    pub fn create_field_relationship(self, name: &str, target: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn create_field_relationship(self, name: &str, target: impl sdf::IntoPath) -> Result<Self> {
         if name.is_empty() {
             bail!("Volume field name must not be empty");
         }
         self.create_relationship(format!("{}{name}", tok::NS_FIELD))?
             .set_custom(false)?
-            .add_target(target.into())?;
+            .add_target(target)?;
         Ok(self)
     }
 
@@ -53,19 +53,19 @@ impl Volume {
     /// (C++ `UsdVolVolume::HasFieldRelationship`).
     pub fn has_field_relationship(&self, name: &str) -> Result<bool> {
         let rel = self.path().append_property(format!("{}{name}", tok::NS_FIELD))?;
-        Ok(!self.stage().relationship(rel).targets()?.is_empty())
+        Ok(!self.stage().relationship(rel)?.targets()?.is_empty())
     }
 
     /// The volume's `(field name, target prim path)` bindings, sorted by field
     /// name (C++ `UsdVolVolume::GetFieldPaths`).
     pub fn field_paths(&self) -> Result<Vec<(String, sdf::Path)>> {
         let mut fields = Vec::new();
-        for name in self.stage().prim(self.path().clone()).authored_property_names()? {
+        for name in self.stage().prim(self.path().clone())?.authored_property_names()? {
             let Some(field_name) = name.strip_prefix(tok::NS_FIELD) else {
                 continue;
             };
             let rel = self.path().append_property(&name)?;
-            if let Some(target) = self.stage().relationship(rel).targets()?.into_iter().next() {
+            if let Some(target) = self.stage().relationship(rel)?.targets()?.into_iter().next() {
                 fields.push((field_name.to_string(), target));
             }
         }
@@ -84,13 +84,13 @@ pub struct OpenVDBAsset(Prim);
 impl OpenVDBAsset {
     /// Author a `def OpenVDBAsset` prim at `path`
     /// (C++ `UsdVolOpenVDBAsset::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_OPENVDB_ASSET)?))
     }
 
     /// Wrap `path` as an `OpenVDBAsset` if it is typed `OpenVDBAsset`
     /// (C++ `UsdVolOpenVDBAsset::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_OPENVDB_ASSET).map(|o| o.map(Self))
     }
 
@@ -122,13 +122,13 @@ pub struct Field3DAsset(Prim);
 impl Field3DAsset {
     /// Author a `def Field3DAsset` prim at `path`
     /// (C++ `UsdVolField3DAsset::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_FIELD3D_ASSET)?))
     }
 
     /// Wrap `path` as a `Field3DAsset` if it is typed `Field3DAsset`
     /// (C++ `UsdVolField3DAsset::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_FIELD3D_ASSET).map(|o| o.map(Self))
     }
 

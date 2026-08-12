@@ -470,7 +470,7 @@ impl<'a> Parser<'a> {
         self.ensure_pun('=')?;
 
         // Create the variant set spec.
-        let vset_path = prim_path.append_variant_selection(&name, "");
+        let vset_path = prim_path.append_variant_selection(&name, "")?;
         let mut vset_spec = sdf::SpecData::new(sdf::SpecType::VariantSet);
         let mut variant_children = Vec::new();
 
@@ -480,7 +480,7 @@ impl<'a> Parser<'a> {
 
             variant_children.push(variant_name.clone());
 
-            let variant_path = prim_path.append_variant_selection(&name, &variant_name);
+            let variant_path = prim_path.append_variant_selection(&name, &variant_name)?;
             let mut variant_spec = sdf::SpecData::new(sdf::SpecType::Variant);
 
             // Optional metadata block.
@@ -676,7 +676,7 @@ impl<'a> Parser<'a> {
 
     /// Parses a single `<...>` path reference token into an `sdf::Path`.
     fn parse_path_reference(&mut self) -> Result<sdf::Path> {
-        sdf::Path::new(self.fetch_path_ref()?)
+        path_ref_to_path(self.fetch_path_ref()?)
     }
 
     /// Parses a relocates dictionary: `{ <source>: <target>, ... }`.
@@ -688,7 +688,7 @@ impl<'a> Parser<'a> {
                 .context("Expected ':' between relocate source and target")?;
             let tgt = this.fetch_path_ref().context("Expected relocate target path")?;
             let src_path = sdf::Path::new(src)?;
-            let tgt_path = sdf::Path::from(tgt);
+            let tgt_path = path_ref_to_path(tgt)?;
             reject_variant_selection_in_path(&src_path, "Relocate source")?;
             reject_variant_selection_in_path(&tgt_path, "Relocate target")?;
             pairs.push((src_path, tgt_path));
@@ -1323,12 +1323,12 @@ impl<'a> Parser<'a> {
             Token::AssetRef(asset_path) => {
                 reference.asset_path = asset_path.to_string();
                 if let Some(Ok(Token::PathRef(path))) = self.peek_next() {
-                    reference.prim_path = sdf::Path::new(path)?;
+                    reference.prim_path = path_ref_to_path(path)?;
                     self.fetch_next()?;
                 }
             }
             Token::PathRef(path) => {
-                reference.prim_path = sdf::Path::new(path)?;
+                reference.prim_path = path_ref_to_path(path)?;
             }
             token => {
                 bail!("Expected asset reference (@...@) or path reference (<...>), got {token:?}");
@@ -1389,12 +1389,12 @@ impl<'a> Parser<'a> {
             Token::AssetRef(asset_path) => {
                 payload.asset_path = asset_path.to_string();
                 if let Some(Ok(Token::PathRef(path))) = self.peek_next() {
-                    payload.prim_path = sdf::Path::new(path)?;
+                    payload.prim_path = path_ref_to_path(path)?;
                     self.fetch_next()?;
                 }
             }
             Token::PathRef(path) => {
-                payload.prim_path = sdf::Path::new(path)?;
+                payload.prim_path = path_ref_to_path(path)?;
             }
             token => {
                 bail!("Expected asset reference (@...@) or path reference (<...>), got {token:?}");
@@ -1954,6 +1954,16 @@ enum Type {
     Custom,
 }
 
+/// Converts the text of a `<...>` path-reference token into a path. `<>`
+/// carries the empty path (e.g. a reference resolving to the target layer's
+/// defaultPrim), as in C++.
+fn path_ref_to_path(text: &str) -> Result<sdf::Path> {
+    if text.is_empty() {
+        return Ok(sdf::Path::default());
+    }
+    Ok(sdf::Path::new(text)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1976,7 +1986,7 @@ def "Mesh"
         )
         .expect("parses");
         let variability = |path: &str| {
-            data.spec(&sdf::Path::from(path))
+            data.spec(&sdf::Path::new(path).unwrap())
                 .expect("spec")
                 .fields
                 .iter()

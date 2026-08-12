@@ -42,7 +42,7 @@ pub use layer::{AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSin
 pub(crate) use layer::{dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
 pub use ordering::{apply_ordering, element_cmp};
-pub use path::{Path, PathComponent, PathComponents, PathElement, path};
+pub use path::{IntoPath, Path, PathComponent, PathComponents, PathElement, PathParseError, path, try_into_path};
 pub use path_expr::{ExpressionReference, PathExpression, PathPattern, PredicateExpression};
 pub use path_table::PathTable;
 pub use schema::{ChildrenKey, FieldKey, folds_list_ops};

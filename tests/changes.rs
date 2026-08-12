@@ -35,12 +35,13 @@ fn open_in_memory() -> usd::Stage {
 }
 
 fn exists(stage: &usd::Stage, path: &str) -> bool {
-    stage.prim(path).is_valid().unwrap()
+    stage.prim(path).unwrap().is_valid().unwrap()
 }
 
 fn child_names(stage: &usd::Stage, path: &str) -> Vec<String> {
     stage
         .prim(path)
+        .unwrap()
         .child_names()
         .unwrap()
         .into_iter()
@@ -55,8 +56,8 @@ fn author_keeps_sibling_indexed() {
     stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Bar").unwrap().set_type_name("Xform").unwrap();
 
-    let _ = stage.prim(sdf::path("/Foo").unwrap()).type_name().unwrap();
-    let _ = stage.prim(sdf::path("/Bar").unwrap()).type_name().unwrap();
+    let _ = stage.prim("/Foo").unwrap().type_name().unwrap();
+    let _ = stage.prim("/Bar").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
     assert!(stage.is_indexed(&sdf::path("/Bar").unwrap()));
 
@@ -80,8 +81,8 @@ fn significant_at_ancestor_drops_descendant() {
     stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Foo/Bar").unwrap().set_type_name("Xform").unwrap();
 
-    let _ = stage.prim(sdf::path("/Foo").unwrap()).type_name().unwrap();
-    let _ = stage.prim(sdf::path("/Foo/Bar").unwrap()).type_name().unwrap();
+    let _ = stage.prim("/Foo").unwrap().type_name().unwrap();
+    let _ = stage.prim("/Foo/Bar").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
     assert!(stage.is_indexed(&sdf::path("/Foo/Bar").unwrap()));
 
@@ -107,7 +108,7 @@ fn attribute_value_keeps_owner_indexed() {
         .set(sdf::Value::Double(1.0))
         .unwrap();
 
-    let _ = stage.prim(sdf::path("/A").unwrap()).type_name().unwrap();
+    let _ = stage.prim("/A").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
     let attr = attr.set(sdf::Value::Double(2.0)).unwrap();
@@ -124,8 +125,8 @@ fn set_instanceable_invalidates_owner() {
     let stage = open_in_memory();
     stage.define_prim("/Inst").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Other").unwrap().set_type_name("Xform").unwrap();
-    let _ = stage.prim(sdf::path("/Inst").unwrap()).type_name().unwrap();
-    let _ = stage.prim(sdf::path("/Other").unwrap()).type_name().unwrap();
+    let _ = stage.prim("/Inst").unwrap().type_name().unwrap();
+    let _ = stage.prim("/Other").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Inst").unwrap()));
 
     stage.override_prim("/Inst").unwrap().set_instanceable(true).unwrap();
@@ -146,7 +147,7 @@ fn set_instanceable_invalidates_owner() {
 fn kind_change_no_op_for_cache() {
     let stage = open_in_memory();
     let prim = stage.define_prim("/A").unwrap().set_type_name("Xform").unwrap();
-    let _ = stage.prim(sdf::path("/A").unwrap()).type_name().unwrap();
+    let _ = stage.prim("/A").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
     prim.set_kind("group").unwrap();
@@ -155,7 +156,7 @@ fn kind_change_no_op_for_cache() {
         stage.is_indexed(&sdf::path("/A").unwrap()),
         "spec-only field changes must not invalidate the prim graph",
     );
-    assert_eq!(stage.prim("/A").kind().unwrap().as_deref(), Some("group"));
+    assert_eq!(stage.prim("/A").unwrap().kind().unwrap().as_deref(), Some("group"));
 }
 
 /// `set_default_prim` is significant-at-root — every cached index drops.
@@ -165,8 +166,8 @@ fn default_prim_clears_root_cache() {
     stage.define_prim("/World").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Other").unwrap().set_type_name("Xform").unwrap();
 
-    let _ = stage.prim(sdf::path("/World").unwrap()).type_name().unwrap();
-    let _ = stage.prim(sdf::path("/Other").unwrap()).type_name().unwrap();
+    let _ = stage.prim("/World").unwrap().type_name().unwrap();
+    let _ = stage.prim("/Other").unwrap().type_name().unwrap();
     assert!(stage.indexed_count() >= 2);
 
     stage.set_default_prim("World").unwrap();
@@ -228,8 +229,8 @@ fn idempotent_define_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Foo/Child").unwrap();
-    let _ = stage.prim(sdf::path("/Foo").unwrap()).type_name().unwrap();
-    let _ = stage.prim(sdf::path("/Foo/Child").unwrap()).type_name().unwrap();
+    let _ = stage.prim("/Foo").unwrap().type_name().unwrap();
+    let _ = stage.prim("/Foo/Child").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
     assert!(stage.is_indexed(&sdf::path("/Foo/Child").unwrap()));
 
@@ -244,7 +245,7 @@ fn idempotent_define_preserves_cache() {
 fn idempotent_override_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/Foo").unwrap();
-    let _ = stage.prim(sdf::path("/Foo").unwrap()).type_name().unwrap();
+    let _ = stage.prim("/Foo").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
 
     stage.override_prim("/Foo").unwrap();
@@ -258,7 +259,10 @@ fn idempotent_override_preserves_cache() {
 fn add_applied_schema_invalidates_owner() {
     let stage = open_in_memory();
     let prim = stage.define_prim("/A").unwrap().set_type_name("Xform").unwrap();
-    assert_eq!(stage.prim(prim.path()).api_schemas().unwrap(), Vec::<tf::Token>::new());
+    assert_eq!(
+        stage.prim(prim.path()).unwrap().api_schemas().unwrap(),
+        Vec::<tf::Token>::new()
+    );
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
     prim.add_applied_schema("MaterialBindingAPI").unwrap();
@@ -268,7 +272,7 @@ fn add_applied_schema_invalidates_owner() {
         "apiSchemas authoring must invalidate the owner's cached prim index",
     );
     assert_eq!(
-        stage.prim(sdf::path("/A").unwrap()).api_schemas().unwrap(),
+        stage.prim("/A").unwrap().api_schemas().unwrap(),
         vec![tf::Token::from("MaterialBindingAPI")],
     );
 }
@@ -279,7 +283,7 @@ fn idempotent_default_prim_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/World").unwrap();
     stage.set_default_prim("World").unwrap();
-    let _ = stage.prim(sdf::path("/World").unwrap()).type_name().unwrap();
+    let _ = stage.prim("/World").unwrap().type_name().unwrap();
     let pre = stage.indexed_count();
     assert!(pre > 0);
 
@@ -319,8 +323,8 @@ def "Other" {
 "#,
     )?;
     let stage = usd::Stage::open(root.to_str().unwrap())?;
-    assert_eq!(stage.attribute("/User.vx").get::<f64>()?, Some(1.0), "SEL=x at open");
-    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(3.0));
+    assert_eq!(stage.attribute("/User.vx")?.get::<f64>()?, Some(1.0), "SEL=x at open");
+    assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
     assert!(stage.is_indexed(&sdf::path("/User")?));
     assert!(stage.is_indexed(&sdf::path("/Other")?));
     Ok(stage)
@@ -372,11 +376,11 @@ fn used_var_drops_user() -> Result<()> {
         "/Other reads no variable — its index survives"
     );
     assert_eq!(
-        stage.attribute("/User.vy").get::<f64>()?,
+        stage.attribute("/User.vy")?.get::<f64>()?,
         Some(2.0),
         "/User recomposes with the new selection"
     );
-    assert_eq!(stage.attribute("/User.vx").get::<f64>()?, None);
+    assert_eq!(stage.attribute("/User.vx")?.get::<f64>()?, None);
     Ok(())
 }
 
@@ -417,8 +421,8 @@ def "B" {
     )?;
 
     let stage = usd::Stage::open(root.to_str().unwrap())?;
-    assert_eq!(stage.attribute("/A.x").get::<f64>()?, Some(1.0), "W=a at open");
-    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(3.0));
+    assert_eq!(stage.attribute("/A.x")?.get::<f64>()?, Some(1.0), "W=a at open");
+    assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
 
     stage.set_expression_variables(HashMap::from([("W".to_string(), sdf::Value::String("b".to_string()))]))?;
 
@@ -427,12 +431,12 @@ def "B" {
         "W selects a root-stack sublayer, so the change is stack-significant"
     );
     assert_eq!(
-        stage.attribute("/B.y").get::<f64>()?,
+        stage.attribute("/B.y")?.get::<f64>()?,
         Some(2.0),
         "the newly selected b.usda loads and composes"
     );
     assert_eq!(
-        stage.attribute("/A.x").get::<f64>()?,
+        stage.attribute("/A.x")?.get::<f64>()?,
         None,
         "a.usda's selection dropped"
     );
@@ -470,8 +474,8 @@ def "P" {
     )?;
 
     let stage = usd::Stage::open(root.to_str().unwrap())?;
-    assert_eq!(stage.attribute("/P.x").get::<f64>()?, Some(1.0));
-    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(3.0));
+    assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
 
     let target_id = stage
         .layer_identifiers()
@@ -490,7 +494,7 @@ def "P" {
         stage.is_indexed(&sdf::path("/Other")?),
         "/Other does not use the target stack — its index survives"
     );
-    assert_eq!(stage.attribute("/P.x").get::<f64>()?, Some(1.0), "/P recomposes");
+    assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0), "/P recomposes");
     Ok(())
 }
 
@@ -556,11 +560,11 @@ def "O" {
 
     let stage = usd::Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.vx").get::<f64>()?,
+        stage.attribute("/P.vx")?.get::<f64>()?,
         Some(1.0),
         "V=x reaches the referenced stack's `${{V}}` reference"
     );
-    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(3.0));
+    assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
 
     stage.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("y".to_string()))]))?;
 
@@ -573,11 +577,11 @@ def "O" {
         "/Other reads no variable — its index survives"
     );
     assert_eq!(
-        stage.attribute("/P.vy").get::<f64>()?,
+        stage.attribute("/P.vy")?.get::<f64>()?,
         Some(2.0),
         "/P recomposes against the newly selected y.usda"
     );
-    assert_eq!(stage.attribute("/P.vx").get::<f64>()?, None);
+    assert_eq!(stage.attribute("/P.vx")?.get::<f64>()?, None);
     Ok(())
 }
 
@@ -613,7 +617,7 @@ def "P" {
 
     let stage = usd::Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.local").get::<f64>()?,
+        stage.attribute("/P.local")?.get::<f64>()?,
         Some(5.0),
         "the prim composes past the failed arc expression"
     );
@@ -632,7 +636,7 @@ def "P" {
     )]))?;
 
     assert_eq!(
-        stage.attribute("/P.x").get::<f64>()?,
+        stage.attribute("/P.x")?.get::<f64>()?,
         Some(1.0),
         "defining TGT resyncs /P and the repaired reference composes"
     );

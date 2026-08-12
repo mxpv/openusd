@@ -78,8 +78,8 @@ pub trait Imageable: SchemaBase {
                 return Ok(Visibility::Invisible);
             }
             match cur.parent() {
-                Some(p) => cur = p,
-                None => return Ok(Visibility::Inherited),
+                Some(p) if !p.is_abs_root() => cur = p,
+                _ => return Ok(Visibility::Inherited),
             }
         }
     }
@@ -98,8 +98,8 @@ pub trait Imageable: SchemaBase {
                 return Ok(Purpose::from_token(token).unwrap_or_default());
             }
             match cur.parent() {
-                Some(p) => cur = p,
-                None => return Ok(Purpose::Default),
+                Some(p) if !p.is_abs_root() => cur = p,
+                _ => return Ok(Purpose::Default),
             }
         }
     }

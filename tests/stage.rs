@@ -92,13 +92,13 @@ fn fixture_path(relative: &str) -> String {
 
 // Composed-scene query shims used throughout these tests: each routes
 // through the handle that now owns the query so the assertions stay terse.
-fn child_names(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
-    Ok(stage.prim(path).child_names()?.into_iter().map(String::from).collect())
+fn child_names(stage: &Stage, path: impl sdf::IntoPath) -> Result<Vec<String>> {
+    Ok(stage.prim(path)?.child_names()?.into_iter().map(String::from).collect())
 }
 
-fn prop_names(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
+fn prop_names(stage: &Stage, path: impl sdf::IntoPath) -> Result<Vec<String>> {
     Ok(stage
-        .prim(path)
+        .prim(path)?
         .property_names()?
         .into_iter()
         .map(String::from)
@@ -106,15 +106,15 @@ fn prop_names(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<String>> 
 }
 
 fn connections(stage: &Stage, attr: &sdf::Path) -> Result<Vec<sdf::Path>> {
-    stage.attribute(attr).connections()
+    stage.attribute(attr)?.connections()
 }
 
 fn rel_targets(stage: &Stage, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
-    stage.relationship(rel).targets()
+    stage.relationship(rel)?.targets()
 }
 
 fn fwd_targets(stage: &Stage, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
-    stage.relationship(rel).forwarded_targets()
+    stage.relationship(rel)?.forwarded_targets()
 }
 
 /// Number of `UnresolvedSublayer` collection diagnostics the stage reports for
@@ -151,7 +151,7 @@ fn missing_sublayer_retained() -> Result<()> {
             introduced_by,
         } if asset_path == "missing.usda" && introduced_by.ends_with("root.usda")
     )));
-    assert!(stage.prim("/Root").is_valid()?);
+    assert!(stage.prim("/Root")?.is_valid()?);
     Ok(())
 }
 
@@ -442,7 +442,7 @@ fn lazy_ref_missing_sublayer() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0)),
         "the reference target loads despite its missing sublayer"
     );
@@ -472,7 +472,7 @@ fn lazy_ref_unreadable_target() -> Result<()> {
     fs::write(&target, "#usda 1.0\ndef Broken {{{ not valid\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert!(stage.prim("/P").is_valid()?, "/P still composes without the arc");
+    assert!(stage.prim("/P")?.is_valid()?, "/P still composes without the arc");
     assert!(
         stage.composition_errors().iter().any(|error| matches!(
             error,
@@ -496,7 +496,7 @@ fn failed_load_retried_after_edit() -> Result<()> {
     fs::write(&target, "#usda 1.0\ndef Broken {{{ not valid\n")?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert!(stage.prim("/P").is_valid()?);
+    assert!(stage.prim("/P")?.is_valid()?);
     assert!(
         stage.composition_errors().iter().any(|e| matches!(
             e,
@@ -514,7 +514,7 @@ fn failed_load_retried_after_edit() -> Result<()> {
     stage.define_prim("/Trigger")?;
 
     assert_eq!(
-        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(7.0)),
         "the repaired reference composes once the failure is cleared"
     );
@@ -545,7 +545,7 @@ fn instance_proxy_cold_query() -> Result<()> {
     // identity redirect against the not-yet-loaded reference.
     assert_eq!(
         stage
-            .attribute("/World/Inst/Child.x")
+            .attribute("/World/Inst/Child.x")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(3.0))
     );
@@ -576,7 +576,7 @@ fn lazy_ref_inherited_expr_var() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(9.0)),
         "the target's `${{V}}` sublayer resolves against the referrer's variable"
     );
@@ -621,7 +621,7 @@ fn sublayer_expr_var_ignored() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         None,
         "`a` is a sublayer, so its `V` is ignored and `b`'s expression sublayer does not resolve"
     );
@@ -653,7 +653,7 @@ fn cross_ref_expr_sublayer() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(9.0)),
         "the referrer's variable resolves the target's `${{V}}` sublayer"
     );
@@ -697,12 +697,16 @@ fn dual_context_same_pass() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/M.vx").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage
+            .attribute("/M.vx")?
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0)),
         "s1's V=x resolves the target's sublayer under the first arc"
     );
     assert_eq!(
-        stage.attribute("/M.vy").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage
+            .attribute("/M.vy")?
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(2.0)),
         "s2's V=y resolves the target's sublayer under the second arc"
     );
@@ -735,8 +739,8 @@ fn session_var_edit_loads() -> Result<()> {
     let stage = Stage::builder()
         .session_layer(session.to_str().unwrap())
         .open(root.to_str().unwrap())?;
-    assert_eq!(stage.attribute("/A.x").get::<f64>()?, Some(1.0), "WHICH=a at open");
-    assert_eq!(stage.attribute("/B.y").get::<f64>()?, None, "b.usda is not loaded");
+    assert_eq!(stage.attribute("/A.x")?.get::<f64>()?, Some(1.0), "WHICH=a at open");
+    assert_eq!(stage.attribute("/B.y")?.get::<f64>()?, None, "b.usda is not loaded");
 
     let session_id = stage.session_layer().expect("session layer").identifier().to_string();
     stage.layer_mut(&session_id).expect("session layer is live").edit(|e| {
@@ -746,12 +750,12 @@ fn session_var_edit_loads() -> Result<()> {
         )]))
     })?;
     assert_eq!(
-        stage.attribute("/B.y").get::<f64>()?,
+        stage.attribute("/B.y")?.get::<f64>()?,
         Some(2.0),
         "the edit loads the newly selected b.usda"
     );
     assert_eq!(
-        stage.attribute("/A.x").get::<f64>()?,
+        stage.attribute("/A.x")?.get::<f64>()?,
         None,
         "a.usda's selection dropped"
     );
@@ -780,7 +784,7 @@ fn target_var_edit_loads() -> Result<()> {
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert_eq!(stage.attribute("/P.x").get::<f64>()?, Some(1.0), "V=a selects a.usda");
+    assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0), "V=a selects a.usda");
 
     let target_id = stage
         .layer_identifiers()
@@ -791,7 +795,7 @@ fn target_var_edit_loads() -> Result<()> {
         e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("b".to_string()))]))
     })?;
     assert_eq!(
-        stage.attribute("/P.y").get::<f64>()?,
+        stage.attribute("/P.y")?.get::<f64>()?,
         Some(2.0),
         "the edit loads the newly selected b.usda into the target stack"
     );
@@ -812,7 +816,7 @@ fn vars_edit_notifies_resync() -> Result<()> {
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert_eq!(stage.attribute("/Other.o").get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(1.0));
     assert!(stage.is_indexed(&sdf::path("/Other")?));
 
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
@@ -854,7 +858,7 @@ fn sublayer_vars_no_resync() -> Result<()> {
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert_eq!(stage.attribute("/P.x").get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0));
     assert!(stage.is_indexed(&sdf::path("/P")?));
 
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
@@ -912,8 +916,8 @@ fn session_var_swap_loads() -> Result<()> {
     let stage = Stage::builder()
         .session_layer(session.to_str().unwrap())
         .open(root.to_str().unwrap())?;
-    assert_eq!(stage.attribute("/SA.a").get::<f64>()?, Some(1.0), "S=sa at open");
-    assert_eq!(stage.attribute("/SB.b").get::<f64>()?, None, "sb.usda is not loaded");
+    assert_eq!(stage.attribute("/SA.a")?.get::<f64>()?, Some(1.0), "S=sa at open");
+    assert_eq!(stage.attribute("/SB.b")?.get::<f64>()?, None, "sb.usda is not loaded");
 
     let session_id = stage.session_layer().expect("session layer").identifier().to_string();
     stage.layer_mut(&session_id).expect("session layer is live").edit(|e| {
@@ -921,12 +925,12 @@ fn session_var_swap_loads() -> Result<()> {
     })?;
 
     assert_eq!(
-        stage.attribute("/SB.b").get::<f64>()?,
+        stage.attribute("/SB.b")?.get::<f64>()?,
         Some(2.0),
         "the edit loads the newly selected session sublayer"
     );
     assert_eq!(
-        stage.attribute("/SA.a").get::<f64>()?,
+        stage.attribute("/SA.a")?.get::<f64>()?,
         None,
         "the old selection drops out of the session region"
     );
@@ -952,7 +956,7 @@ fn session_insert_layer() -> Result<()> {
     stage.insert_layer(&session_id, 0, extra, sdf::LayerOffset::IDENTITY)?;
 
     assert_eq!(
-        stage.attribute("/A.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/A.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(7.0)),
         "the inserted session sublayer's opinion composes"
     );
@@ -988,7 +992,7 @@ fn session_missing_heals() -> Result<()> {
     // Any edit clears the failure memo, requeueing the entry for the barrier.
     stage.define_prim("/Poke")?;
     assert_eq!(
-        stage.attribute("/L.x").get::<f64>()?,
+        stage.attribute("/L.x")?.get::<f64>()?,
         Some(4.0),
         "the repaired session sublayer loads and composes"
     );
@@ -1029,16 +1033,16 @@ fn mute_exposes_selection_loads() -> Result<()> {
         .session_layer(session.to_str().unwrap())
         .open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/A.x").get::<f64>()?,
+        stage.attribute("/A.x")?.get::<f64>()?,
         Some(1.0),
         "the session's WHICH=a wins"
     );
-    assert_eq!(stage.attribute("/B.y").get::<f64>()?, None, "b.usda is not loaded");
+    assert_eq!(stage.attribute("/B.y")?.get::<f64>()?, None, "b.usda is not loaded");
 
     let session_id = stage.session_layer().expect("session layer").identifier().to_string();
     stage.mute_layer(session_id);
     assert_eq!(
-        stage.attribute("/B.y").get::<f64>()?,
+        stage.attribute("/B.y")?.get::<f64>()?,
         Some(2.0),
         "muting the session exposes the root's WHICH=b and loads its selection"
     );
@@ -1068,7 +1072,7 @@ fn self_selected_sublayer_loads() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/R.x").get::<f64>()?,
+        stage.attribute("/R.x")?.get::<f64>()?,
         Some(3.0),
         "the target's own V selects a.usda for its reference stack"
     );
@@ -1102,12 +1106,12 @@ fn literal_sublayer_edit_loads() -> Result<()> {
         Ok(())
     })?;
     assert_eq!(
-        stage.attribute("/E.x").get::<f64>()?,
+        stage.attribute("/E.x")?.get::<f64>()?,
         Some(1.0),
         "the authored literal sublayer loads"
     );
     assert_eq!(
-        stage.attribute("/N.y").get::<f64>()?,
+        stage.attribute("/N.y")?.get::<f64>()?,
         Some(2.0),
         "its nested sublayer loads with it"
     );
@@ -1134,7 +1138,7 @@ fn failed_selection_terminates() -> Result<()> {
         sdf::Value::String("missing".to_string()),
     )]))?;
     assert_eq!(
-        stage.attribute("/W.w").get::<f64>()?,
+        stage.attribute("/W.w")?.get::<f64>()?,
         Some(0.0),
         "the stage composes without the missing selection"
     );
@@ -1146,7 +1150,7 @@ fn failed_selection_terminates() -> Result<()> {
         "the failed open is reported: {errors:?}"
     );
     assert_eq!(
-        stage.attribute("/W.w").get::<f64>()?,
+        stage.attribute("/W.w")?.get::<f64>()?,
         Some(0.0),
         "the failure is terminal, not re-demanded per query"
     );
@@ -1160,7 +1164,7 @@ fn failed_selection_terminates() -> Result<()> {
         sdf::Value::String("late".to_string()),
     )]))?;
     assert_eq!(
-        stage.attribute("/L.z").get::<f64>()?,
+        stage.attribute("/L.z")?.get::<f64>()?,
         Some(5.0),
         "the retried selection loads once the edit re-demands it"
     );
@@ -1263,20 +1267,20 @@ fn same_round_shared_selection() -> Result<()> {
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert_eq!(stage.attribute("/P1.x").get::<f64>()?, Some(1.0));
-    assert_eq!(stage.attribute("/P2.x").get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/P1.x")?.get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/P2.x")?.get::<f64>()?, Some(1.0));
 
     stage.set_expression_variables(HashMap::from([(
         "V".to_string(),
         sdf::Value::String("shared".to_string()),
     )]))?;
     assert_eq!(
-        stage.attribute("/P1.y").get::<f64>()?,
+        stage.attribute("/P1.y")?.get::<f64>()?,
         Some(7.0),
         "the stack whose demand opened the layer recomposes"
     );
     assert_eq!(
-        stage.attribute("/P2.y").get::<f64>()?,
+        stage.attribute("/P2.y")?.get::<f64>()?,
         Some(7.0),
         "the stack whose demand found the layer interned recomposes too"
     );
@@ -1308,7 +1312,7 @@ fn sublayer_failure_keeps_arc_loadable() -> Result<()> {
         "#usda 1.0\ndef \"L\" {\n    custom double z = 5\n}\n",
     )?;
     assert_eq!(
-        stage.attribute("/P.z").get::<f64>()?,
+        stage.attribute("/P.z")?.get::<f64>()?,
         Some(5.0),
         "the appeared file loads through the reference with no edit"
     );
@@ -1347,7 +1351,7 @@ fn repaired_sublayer_reloads() -> Result<()> {
     // A prim edit touches no layer stack, so only the requeue can retry.
     stage.define_prim("/X")?;
     assert_eq!(
-        stage.attribute("/L.z").get::<f64>()?,
+        stage.attribute("/L.z")?.get::<f64>()?,
         Some(5.0),
         "the repaired sublayer loads on the next edit"
     );
@@ -1393,7 +1397,7 @@ fn mute_retries_resolvable() -> Result<()> {
         .expect("other.usda is loaded");
     stage.mute_layer(other);
     assert_eq!(
-        stage.attribute("/L.z").get::<f64>()?,
+        stage.attribute("/L.z")?.get::<f64>()?,
         Some(5.0),
         "the mute's rebuild retries the now-resolvable sublayer"
     );
@@ -1454,7 +1458,7 @@ fn expr_failure_reported_once() -> Result<()> {
         sdf::Value::String("fix.usda".to_string()),
     )]))?;
     assert_eq!(
-        stage.attribute("/F.q").get::<f64>()?,
+        stage.attribute("/F.q")?.get::<f64>()?,
         Some(3.0),
         "the fixed expression selects and loads"
     );
@@ -1491,7 +1495,7 @@ fn lazy_ref_inside_usdz_resolves() -> Result<()> {
     }
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert!(stage.prim("/P").is_valid()?, "/P composes from the package");
+    assert!(stage.prim("/P")?.is_valid()?, "/P composes from the package");
     assert!(
         stage.composition_errors().is_empty(),
         "the in-package reference should resolve cleanly, got {:?}",
@@ -1499,7 +1503,7 @@ fn lazy_ref_inside_usdz_resolves() -> Result<()> {
     );
     assert_eq!(
         stage
-            .attribute("/P.probe")
+            .attribute("/P.probe")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Int(7)),
         "the sibling layer's opinion composes through the in-package reference"
@@ -1529,7 +1533,10 @@ fn lazy_ref_inside_usdz_missing() -> Result<()> {
     }
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert!(stage.prim("/P").is_valid()?, "/P still composes from the package layer");
+    assert!(
+        stage.prim("/P")?.is_valid()?,
+        "/P still composes from the package layer"
+    );
     assert!(
         stage.composition_errors().iter().any(|error| matches!(
             error,
@@ -1555,7 +1562,7 @@ fn lazy_ref_empty_usdz_malformed() -> Result<()> {
     ArchiveWriter::create(&package)?.finish()?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert!(stage.prim("/P").is_valid()?, "/P still composes from its own opinion");
+    assert!(stage.prim("/P")?.is_valid()?, "/P still composes from its own opinion");
     assert!(
         stage.composition_errors().iter().any(|error| matches!(
             error,
@@ -1602,7 +1609,7 @@ fn usdz_subdir_first_layer_anchors() -> Result<()> {
     );
     assert_eq!(
         stage
-            .attribute("/P.probe")
+            .attribute("/P.probe")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Int(9)),
         "the sibling under Scenes/ composes through the in-package reference"
@@ -1627,7 +1634,7 @@ fn asset_value_usdz_is_package_path() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     let value = stage
-        .attribute("/P.a")
+        .attribute("/P.a")?
         .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?
         .expect("asset value resolves");
     let asset = value.try_as_asset_path().expect("attribute is asset-typed");
@@ -1663,7 +1670,7 @@ fn lazy_ref_corrupt_sublayer() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0)),
         "the target composes despite its corrupt sublayer"
     );
@@ -1709,7 +1716,7 @@ fn mute_nested_reference_target() -> Result<()> {
     // Compose /P, following the nested reference to mid.usda and reaching the
     // muted model reference; its identifier matches the muted one, so it is
     // recognized at the demand point and never read.
-    assert!(stage.prim("/P").is_valid()?);
+    assert!(stage.prim("/P")?.is_valid()?);
     let opened_has = |needle: &str| opened.borrow().iter().any(|p| p.contains(needle));
     assert!(opened_has("mid.usda"), "the nested referrer must load");
     assert!(
@@ -1751,7 +1758,7 @@ fn mute_target_under_nested_sublayer() -> Result<()> {
         .mute(["detail/model.usda"])
         .open(root.to_str().unwrap())?;
 
-    assert!(stage.prim("/P").is_valid()?);
+    assert!(stage.prim("/P")?.is_valid()?);
     let opened_has = |needle: &str| opened.borrow().iter().any(|p| p.contains(needle));
     assert!(opened_has("extra.usda"), "the authoring sublayer must load");
     assert!(
@@ -1779,7 +1786,7 @@ fn mute_alternate_spelling() -> Result<()> {
     let abs = weak.to_str().unwrap();
     // The identifier both spellings resolve to (what muting stores and notifies).
     let canonical = ar::DefaultResolver::new().create_identifier(abs, None);
-    let read_x = || stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0));
+    let read_x = || stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0));
 
     let muted = Rc::new(RefCell::new(Vec::<String>::new()));
     let unmuted = Rc::new(RefCell::new(Vec::<String>::new()));
@@ -1859,7 +1866,7 @@ fn mute_open_dedup() -> Result<()> {
     );
     assert!(stage.is_layer_muted("weak.usda") && stage.is_layer_muted(abs));
     assert_eq!(
-        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         None,
         "the muted weak layer contributes nothing"
     );
@@ -1885,7 +1892,7 @@ fn mute_nested_sublayer() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     let abs = weak.to_str().unwrap();
-    let read_x = || stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0));
+    let read_x = || stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0));
     assert_eq!(
         read_x()?,
         Some(sdf::Value::Double(1.0)),
@@ -1932,12 +1939,12 @@ fn bad_expr_sublayer_dropped() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0)),
         "the target's own opinion composes despite the bad expression sublayer"
     );
     assert_eq!(
-        stage.attribute("/P.y").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.y")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(2.0)),
         "the valid sublayer still composes"
     );
@@ -2121,7 +2128,7 @@ fn session_var_loads_sublayer() -> Result<()> {
     let session = fixture_path("session_expr_sublayer/session.usda");
     let stage = Stage::builder().session_layer(&session).open(&root)?;
     assert_eq!(
-        stage.attribute("/A.x").get::<f64>()?,
+        stage.attribute("/A.x")?.get::<f64>()?,
         Some(1.0),
         "the session WHICH variable loads and resolves the root's expression sublayer"
     );
@@ -2151,7 +2158,7 @@ fn session_sublayer_var_ignored() -> Result<()> {
         let stage = Stage::builder()
             .session_layer(session.to_str().expect("utf-8 temp path"))
             .open(root.to_str().expect("utf-8 temp path"))?;
-        stage.attribute("/A.x").get::<f64>()
+        stage.attribute("/A.x")?.get::<f64>()
     };
     // WHICH authored on a session sublayer is ignored, so the root's expression
     // sublayer does not resolve and `/A` never composes.
@@ -2192,7 +2199,7 @@ fn session_sublayer_root_var() -> Result<()> {
         .session_layer(session.to_str().expect("utf-8 temp path"))
         .open(root.to_str().expect("utf-8 temp path"))?;
     assert_eq!(
-        stage.attribute("/A.x").get::<f64>()?,
+        stage.attribute("/A.x")?.get::<f64>()?,
         Some(1.0),
         "the session sublayer resolves the stage root's CHILD to strong.usda",
     );
@@ -2222,19 +2229,19 @@ fn unmute_session_root_subtree() -> Result<()> {
         .session_layer(session.to_str().expect("utf-8 temp path"))
         .open(root.to_str().expect("utf-8 temp path"))?;
     assert!(
-        stage.prim("/A/Child").is_valid()?,
+        stage.prim("/A/Child")?.is_valid()?,
         "the stage root's CHILD selects strong.usda in the session"
     );
 
     stage.mute_layer(session.to_str().expect("utf-8 temp path"));
     assert!(
-        !stage.prim("/A/Child").is_valid()?,
+        !stage.prim("/A/Child")?.is_valid()?,
         "muting the session root prunes the selected strong.usda"
     );
 
     stage.unmute_layer(session.to_str().expect("utf-8 temp path"));
     assert!(
-        stage.prim("/A/Child").is_valid()?,
+        stage.prim("/A/Child")?.is_valid()?,
         "unmuting restores the pruned session subtree"
     );
     Ok(())
@@ -2271,7 +2278,7 @@ fn packaged_root_mute_anchor() -> Result<()> {
         .mute(["strong.usda"])
         .open(&package)?;
     assert_eq!(
-        stage.attribute("/A.x").get::<f64>()?,
+        stage.attribute("/A.x")?.get::<f64>()?,
         Some(1.0),
         "mute(\"strong.usda\") is anchored relative to the packaged root layer, dropping strong's opinion"
     );
@@ -2317,7 +2324,7 @@ fn session_layer_preserves_children() -> Result<()> {
 fn api_schemas_returns_applied_schemas() -> Result<()> {
     let stage = Stage::open("fixtures/api_schemas.usda")?;
     let geo = sdf::Path::new("/World/Geo")?;
-    let schemas = stage.prim(geo.clone()).api_schemas()?;
+    let schemas = stage.prim(geo.clone())?.api_schemas()?;
     assert!(schemas.contains(&tf::Token::from("MaterialBindingAPI")));
     assert!(schemas.contains(&tf::Token::from("SkelBindingAPI")));
     Ok(())
@@ -2381,7 +2388,7 @@ over "World"
     )?;
 
     let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
-    let schemas = stage.prim(sdf::Path::new("/World/Geo")?).api_schemas()?;
+    let schemas = stage.prim(sdf::Path::new("/World/Geo")?)?.api_schemas()?;
     assert_eq!(schemas, vec![tf::Token::from("StrongAPI"), tf::Token::from("WeakAPI")]);
     Ok(())
 }
@@ -2425,7 +2432,7 @@ over "World"
     )?;
 
     let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
-    let schemas = stage.prim(sdf::Path::new("/World/Geo")?).api_schemas()?;
+    let schemas = stage.prim(sdf::Path::new("/World/Geo")?)?.api_schemas()?;
     assert_eq!(
         schemas,
         vec![tf::Token::from("C"), tf::Token::from("A"), tf::Token::from("B")]
@@ -2465,11 +2472,11 @@ def Xform "World"
     let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
     let geo = sdf::Path::new("/World/Geo")?;
     assert_eq!(
-        stage.prim(geo.clone()).api_schemas()?,
+        stage.prim(geo.clone())?.api_schemas()?,
         vec![tf::Token::from("LocalAPI"), tf::Token::from("BaseAPI")],
     );
-    assert!(stage.prim(geo.clone()).has_api_schema("BaseAPI")?);
-    assert!(stage.prim(geo.clone()).has_api_schema("LocalAPI")?);
+    assert!(stage.prim(geo.clone())?.has_api_schema("BaseAPI")?);
+    assert!(stage.prim(geo.clone())?.has_api_schema("LocalAPI")?);
     Ok(())
 }
 
@@ -2511,7 +2518,7 @@ def Xform "World"
     let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
     let geo = sdf::Path::new("/World/Geo")?;
     assert_eq!(
-        stage.prim(geo.clone()).api_schemas()?,
+        stage.prim(geo.clone())?.api_schemas()?,
         vec![tf::Token::from("LocalAPI"), tf::Token::from("AssetAPI")],
     );
     Ok(())
@@ -2551,7 +2558,7 @@ def Xform "World"
     )?;
     let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
     let geo = sdf::Path::new("/World/Geo")?;
-    let schemas = stage.prim(geo.clone()).api_schemas()?;
+    let schemas = stage.prim(geo.clone())?.api_schemas()?;
     assert!(
         schemas.contains(&tf::Token::from("VariantAPI")),
         "variant contribution missing: {schemas:?}",
@@ -2570,7 +2577,7 @@ fn api_schemas_property_path() -> Result<()> {
     let stage = Stage::open("fixtures/api_schemas.usda")?;
     let prim = sdf::Path::new("/World/Geo")?;
     let prop = sdf::Path::new("/World/Geo.points")?;
-    assert_eq!(stage.prim(prop).api_schemas()?, stage.prim(prim).api_schemas()?);
+    assert_eq!(stage.prim(prop)?.api_schemas()?, stage.prim(prim)?.api_schemas()?);
     Ok(())
 }
 
@@ -2724,7 +2731,7 @@ def "Hidden"
     )?;
 
     let stage = Stage::builder()
-        .mask(StagePopulationMask::new(["/Vis"]))
+        .mask(StagePopulationMask::new(["/Vis"])?)
         .open(root.to_str().expect("utf-8 temp path"))?;
 
     // /Hidden is masked out: its relationship is not followed.
@@ -2782,7 +2789,7 @@ def Shader "Mat" (
 fn api_schemas_empty_for_prim_without_schemas() -> Result<()> {
     let stage = Stage::open("fixtures/api_schemas.usda")?;
     let props = sdf::Path::new("/World/Props")?;
-    assert!(stage.prim(props).api_schemas()?.is_empty());
+    assert!(stage.prim(props)?.api_schemas()?.is_empty());
     Ok(())
 }
 
@@ -2790,8 +2797,8 @@ fn api_schemas_empty_for_prim_without_schemas() -> Result<()> {
 fn has_api_schema_matches_applied() -> Result<()> {
     let stage = Stage::open("fixtures/api_schemas.usda")?;
     let geo = sdf::Path::new("/World/Geo")?;
-    assert!(stage.prim(geo.clone()).has_api_schema("MaterialBindingAPI")?);
-    assert!(!stage.prim(geo.clone()).has_api_schema("SkelRootAPI")?);
+    assert!(stage.prim(geo.clone())?.has_api_schema("MaterialBindingAPI")?);
+    assert!(!stage.prim(geo.clone())?.has_api_schema("SkelRootAPI")?);
     Ok(())
 }
 
@@ -2799,11 +2806,11 @@ fn has_api_schema_matches_applied() -> Result<()> {
 fn type_name_returns_prim_type() -> Result<()> {
     let stage = Stage::open("fixtures/api_schemas.usda")?;
     assert_eq!(
-        stage.prim(sdf::Path::new("/World/Geo")?).type_name()?.as_deref(),
+        stage.prim(sdf::Path::new("/World/Geo")?)?.type_name()?.as_deref(),
         Some("Mesh")
     );
     assert_eq!(
-        stage.prim(sdf::Path::new("/World")?).type_name()?.as_deref(),
+        stage.prim(sdf::Path::new("/World")?)?.type_name()?.as_deref(),
         Some("Xform")
     );
     Ok(())
@@ -2817,14 +2824,14 @@ fn open_stage_queries_fixture() -> Result<Stage> {
 fn active_loaded() -> Result<()> {
     let stage = open_stage_queries_fixture()?;
 
-    assert!(stage.prim("/World/ActiveParent/Child").is_active()?);
-    assert!(stage.prim("/World/ActiveParent/Child").is_loaded()?);
+    assert!(stage.prim("/World/ActiveParent/Child")?.is_active()?);
+    assert!(stage.prim("/World/ActiveParent/Child")?.is_loaded()?);
 
-    assert!(!stage.prim("/World/InactiveParent").is_active()?);
-    assert!(!stage.prim("/World/InactiveParent/Child").is_active()?);
-    assert!(!stage.prim("/World/InactiveParent/Child").is_loaded()?);
+    assert!(!stage.prim("/World/InactiveParent")?.is_active()?);
+    assert!(!stage.prim("/World/InactiveParent/Child")?.is_active()?);
+    assert!(!stage.prim("/World/InactiveParent/Child")?.is_loaded()?);
 
-    assert!(!stage.prim("/World/Missing").is_active()?);
+    assert!(!stage.prim("/World/Missing")?.is_active()?);
     Ok(())
 }
 
@@ -2978,7 +2985,7 @@ fn load_none() -> Result<()> {
     // Lazy loading: only the root layer is loaded until composition reaches the
     // payload arc on `/World`.
     assert_eq!(loaded.layer_count(), 1);
-    assert!(loaded.prim("/World").is_loaded()?);
+    assert!(loaded.prim("/World")?.is_loaded()?);
     assert_eq!(child_names(&loaded, "/World")?, vec!["Cube"]);
     // Composing `/World` pulled its payload target in, so it is now loaded.
     assert_eq!(loaded.layer_count(), 2);
@@ -2986,7 +2993,7 @@ fn load_none() -> Result<()> {
     let unloaded = Stage::builder().load(InitialLoadSet::LoadNone).open(&path)?;
     assert_eq!(unloaded.initial_load_set(), InitialLoadSet::LoadNone);
     assert_eq!(unloaded.layer_count(), 1);
-    assert!(!unloaded.prim("/World").is_loaded()?);
+    assert!(!unloaded.prim("/World")?.is_loaded()?);
     assert_eq!(child_names(&unloaded, "/World")?, Vec::<String>::new());
 
     let mut prims = Vec::new();
@@ -3001,14 +3008,14 @@ fn load_none() -> Result<()> {
 fn runtime_load_unload() -> Result<()> {
     let path = composition_path("payload/payload_same_folder.usda");
     let stage = Stage::builder().load(InitialLoadSet::LoadNone).open(&path)?;
-    assert!(!stage.prim("/World").is_loaded()?);
+    assert!(!stage.prim("/World")?.is_loaded()?);
 
-    stage.load("/World", LoadPolicy::WithDescendants);
-    assert!(stage.prim("/World").is_loaded()?);
+    stage.load("/World", LoadPolicy::WithDescendants).unwrap();
+    assert!(stage.prim("/World")?.is_loaded()?);
     assert_eq!(child_names(&stage, "/World")?, vec!["Cube"]);
 
-    stage.unload("/World");
-    assert!(!stage.prim("/World").is_loaded()?);
+    stage.unload("/World").unwrap();
+    assert!(!stage.prim("/World")?.is_loaded()?);
     assert_eq!(child_names(&stage, "/World")?, Vec::<String>::new());
     Ok(())
 }
@@ -3021,11 +3028,11 @@ fn set_load_rules_round_trips() -> Result<()> {
     let stage = Stage::open(&path)?;
 
     let mut rules = pcp::LoadRules::all();
-    rules.unload(sdf::path("/World")?);
+    rules.unload(sdf::Path::new("/World")?);
     stage.set_load_rules(rules.clone());
 
     assert_eq!(stage.load_rules(), rules);
-    assert!(!stage.prim("/World").is_loaded()?);
+    assert!(!stage.prim("/World")?.is_loaded()?);
     Ok(())
 }
 
@@ -3048,17 +3055,17 @@ fn load_noop_fires_no_notification() -> Result<()> {
     };
 
     // Already loaded with the default (empty) rules -- a true no-op.
-    stage.load("/World", LoadPolicy::WithDescendants);
+    stage.load("/World", LoadPolicy::WithDescendants).unwrap();
     assert_eq!(
         *calls.borrow(),
         0,
         "already-loaded path with default rules fires nothing"
     );
 
-    stage.unload("/World");
+    stage.unload("/World").unwrap();
     assert_eq!(*calls.borrow(), 1);
 
-    stage.unload("/World");
+    stage.unload("/World").unwrap();
     assert_eq!(*calls.borrow(), 1, "repeated unload is a no-op");
     Ok(())
 }
@@ -3103,9 +3110,9 @@ fn nested_payload_find_loadable_and_load_set() -> Result<()> {
     );
     assert!(stage.load_set()?.is_empty(), "load rules still say LoadNone");
     // The transient discovery swap must not leave the rules changed.
-    assert!(!stage.prim("/World/A").is_loaded()?);
+    assert!(!stage.prim("/World/A")?.is_loaded()?);
 
-    stage.load("/World/A", LoadPolicy::WithDescendants);
+    stage.load("/World/A", LoadPolicy::WithDescendants).unwrap();
     assert_eq!(
         stage.load_set()?,
         vec![sdf::path("/World/A")?, sdf::path("/World/A/Deep")?]
@@ -3121,11 +3128,13 @@ fn load_and_unload_same_path_prefers_load() -> Result<()> {
     let root = write_nested_payload_scene(dir.path())?;
     let stage = Stage::open(root.to_str().unwrap())?;
 
-    stage.load_and_unload(
-        [(sdf::path("/World/A")?, LoadPolicy::WithDescendants)],
-        [sdf::path("/World/A")?],
-    );
-    assert!(stage.prim("/World/A").is_loaded()?);
+    stage
+        .load_and_unload(
+            [(sdf::path("/World/A")?, LoadPolicy::WithDescendants)],
+            [sdf::path("/World/A")?],
+        )
+        .unwrap();
+    assert!(stage.prim("/World/A")?.is_loaded()?);
     Ok(())
 }
 
@@ -3139,15 +3148,17 @@ fn load_and_unload_nested_ancestor_descendant() -> Result<()> {
     let root = write_nested_payload_scene(dir.path())?;
     let stage = Stage::open(root.to_str().unwrap())?;
 
-    stage.load_and_unload(
-        [(sdf::path("/World/A/Deep")?, LoadPolicy::WithDescendants)],
-        [sdf::path("/World/A")?],
-    );
-    assert!(stage.prim("/World/A").is_loaded()?);
-    assert!(stage.prim("/World/A/Deep").is_loaded()?);
+    stage
+        .load_and_unload(
+            [(sdf::path("/World/A/Deep")?, LoadPolicy::WithDescendants)],
+            [sdf::path("/World/A")?],
+        )
+        .unwrap();
+    assert!(stage.prim("/World/A")?.is_loaded()?);
+    assert!(stage.prim("/World/A/Deep")?.is_loaded()?);
     assert_eq!(
         stage
-            .attribute("/World/A/Deep.x")
+            .attribute("/World/A/Deep.x")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(42.0))
     );
@@ -3178,17 +3189,17 @@ fn instance_descendant_load_rule_splits_prototype() -> Result<()> {
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    let proto_a = stage.prim("/World/InstA").prototype()?.expect("InstA is an instance");
-    let proto_b = stage.prim("/World/InstB").prototype()?.expect("InstB is an instance");
+    let proto_a = stage.prim("/World/InstA")?.prototype()?.expect("InstA is an instance");
+    let proto_b = stage.prim("/World/InstB")?.prototype()?.expect("InstB is an instance");
     assert_eq!(
         proto_a, proto_b,
         "identical composition and load state share a prototype"
     );
 
-    stage.unload("/World/InstA/Heavy");
+    stage.unload("/World/InstA/Heavy").unwrap();
 
-    let proto_a = stage.prim("/World/InstA").prototype()?.expect("still an instance");
-    let proto_b = stage.prim("/World/InstB").prototype()?.expect("still an instance");
+    let proto_a = stage.prim("/World/InstA")?.prototype()?.expect("still an instance");
+    let proto_b = stage.prim("/World/InstB")?.prototype()?.expect("still an instance");
     assert_ne!(
         proto_a, proto_b,
         "differing load rules on a descendant split the prototype"
@@ -3216,7 +3227,7 @@ fn set_load_rules_strips_prototype_path() -> Result<()> {
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    let prototype = stage.prim("/World/Inst").prototype()?.expect("Inst is an instance");
+    let prototype = stage.prim("/World/Inst")?.prototype()?.expect("Inst is an instance");
 
     let mut rules = pcp::LoadRules::all();
     rules.unload(prototype);
@@ -3253,22 +3264,22 @@ fn is_loaded_through_prototype_path() -> Result<()> {
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    let prototype = stage.prim("/World/Inst").prototype()?.expect("Inst is an instance");
+    let prototype = stage.prim("/World/Inst")?.prototype()?.expect("Inst is an instance");
     let proto_heavy = prototype.append_path("Heavy")?;
 
     assert!(
-        stage.prim(&proto_heavy).is_loaded()?,
+        stage.prim(&proto_heavy)?.is_loaded()?,
         "loaded by default before any unload"
     );
 
-    stage.unload("/World/Inst/Heavy");
+    stage.unload("/World/Inst/Heavy").unwrap();
 
     assert!(
-        !stage.prim("/World/Inst/Heavy").is_loaded()?,
+        !stage.prim("/World/Inst/Heavy")?.is_loaded()?,
         "unloaded through the instance's own path"
     );
     assert!(
-        !stage.prim(&proto_heavy).is_loaded()?,
+        !stage.prim(&proto_heavy)?.is_loaded()?,
         "the prototype's own path must report the same, not the previous unconditional loaded"
     );
     Ok(())
@@ -3278,15 +3289,15 @@ fn is_loaded_through_prototype_path() -> Result<()> {
 fn defined_abstract() -> Result<()> {
     let stage = open_stage_queries_fixture()?;
 
-    assert_eq!(stage.prim("/World/OverOnly").specifier()?, Some(sdf::Specifier::Over));
-    assert!(stage.prim("/World/ActiveParent/Child").is_defined()?);
-    assert!(!stage.prim("/World/OverOnly").is_defined()?);
-    assert!(!stage.prim("/World/OverParent/Child").is_defined()?);
+    assert_eq!(stage.prim("/World/OverOnly")?.specifier()?, Some(sdf::Specifier::Over));
+    assert!(stage.prim("/World/ActiveParent/Child")?.is_defined()?);
+    assert!(!stage.prim("/World/OverOnly")?.is_defined()?);
+    assert!(!stage.prim("/World/OverParent/Child")?.is_defined()?);
 
-    assert!(stage.prim("/World/ClassParent/Child").is_defined()?);
-    assert!(stage.prim("/World/ClassParent").is_abstract()?);
-    assert!(stage.prim("/World/ClassParent/Child").is_abstract()?);
-    assert!(!stage.prim("/World/ActiveParent/Child").is_abstract()?);
+    assert!(stage.prim("/World/ClassParent/Child")?.is_defined()?);
+    assert!(stage.prim("/World/ClassParent")?.is_abstract()?);
+    assert!(stage.prim("/World/ClassParent/Child")?.is_abstract()?);
+    assert!(!stage.prim("/World/ActiveParent/Child")?.is_abstract()?);
     Ok(())
 }
 
@@ -3294,11 +3305,11 @@ fn defined_abstract() -> Result<()> {
 fn instance_flag() -> Result<()> {
     let stage = open_stage_queries_fixture()?;
 
-    assert!(stage.prim("/World/Instance").has_composition_arc()?);
-    assert!(stage.prim("/World/Instance").is_instance()?);
+    assert!(stage.prim("/World/Instance")?.has_composition_arc()?);
+    assert!(stage.prim("/World/Instance")?.is_instance()?);
 
-    assert!(!stage.prim("/World/InstanceableNoArc").has_composition_arc()?);
-    assert!(!stage.prim("/World/InstanceableNoArc").is_instance()?);
+    assert!(!stage.prim("/World/InstanceableNoArc")?.has_composition_arc()?);
+    assert!(!stage.prim("/World/InstanceableNoArc")?.is_instance()?);
     Ok(())
 }
 
@@ -3328,19 +3339,19 @@ fn shared_instances_resolve_identically() -> Result<()> {
 
     assert_eq!(
         stage
-            .attribute("/A/Child.size")
+            .attribute("/A/Child.size")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
     assert_eq!(
         stage
-            .attribute("/B/Child.size")
+            .attribute("/B/Child.size")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
     assert_eq!(
         stage
-            .attribute("/C/Child.size")
+            .attribute("/C/Child.size")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(9.0))
     );
@@ -3356,16 +3367,16 @@ fn shared_instances_resolve_identically() -> Result<()> {
 fn prototype_queries() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
 
-    let proto = stage.prim("/A").prototype()?;
+    let proto = stage.prim("/A")?.prototype()?;
     assert!(proto.is_some());
-    assert_eq!(stage.prim("/B").prototype()?, proto); // same composition → shared
-    assert_ne!(stage.prim("/C").prototype()?, proto); // different prototype
-    assert_eq!(stage.prim("/Proto").prototype()?, None); // not an instance
+    assert_eq!(stage.prim("/B")?.prototype()?, proto); // same composition → shared
+    assert_ne!(stage.prim("/C")?.prototype()?, proto); // different prototype
+    assert_eq!(stage.prim("/Proto")?.prototype()?, None); // not an instance
 
     let proto = proto.unwrap();
     // Returned sorted by path, so callers need not sort themselves.
     let instances: Vec<String> = stage
-        .prim(proto.clone())
+        .prim(proto.clone())?
         .instances()
         .iter()
         .map(|p| p.to_string())
@@ -3374,12 +3385,12 @@ fn prototype_queries() -> Result<()> {
 
     // The prototype namespace is addressable and resolves to the shared
     // (arc-only) subtree.
-    assert!(stage.prim(proto.clone()).is_prototype());
+    assert!(stage.prim(proto.clone())?.is_prototype());
     let child = sdf::path(format!("{proto}/Child"))?;
-    assert!(stage.prim(child.clone()).is_in_prototype());
+    assert!(stage.prim(child.clone())?.is_in_prototype());
     assert_eq!(
         stage
-            .attribute(child.append_property("size")?)
+            .attribute(child.append_property("size")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
@@ -3391,20 +3402,20 @@ fn prototype_queries() -> Result<()> {
 #[test]
 fn prototype_queries_masked() -> Result<()> {
     let stage = Stage::builder()
-        .mask(StagePopulationMask::new(["/A"]))
+        .mask(StagePopulationMask::new(["/A"])?)
         .open(&fixture_path("instancing_shared.usda"))?;
 
     // /A is in the mask; /B (which shares /A's prototype) is not.
-    assert!(stage.prim("/A").is_instance()?);
-    assert!(!stage.prim("/B").is_instance()?);
+    assert!(stage.prim("/A")?.is_instance()?);
+    assert!(!stage.prim("/B")?.is_instance()?);
 
-    let proto = stage.prim("/A").prototype()?;
+    let proto = stage.prim("/A")?.prototype()?;
     assert!(proto.is_some());
-    assert_eq!(stage.prim("/B").prototype()?, None);
+    assert_eq!(stage.prim("/B")?.prototype()?, None);
 
     // The masked-out /B is excluded from the prototype's instance list.
     let proto = proto.unwrap();
-    assert_eq!(stage.prim(proto.clone()).instances(), vec![sdf::path("/A")?]);
+    assert_eq!(stage.prim(proto.clone())?.instances(), vec![sdf::path("/A")?]);
     assert_eq!(stage.prototypes(), vec![proto]);
     Ok(())
 }
@@ -3418,34 +3429,34 @@ fn nested_instances() -> Result<()> {
 
     assert_eq!(
         stage
-            .attribute("/A/Sub/L.v")
+            .attribute("/A/Sub/L.v")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(7.0))
     );
     assert_eq!(
         stage
-            .attribute("/B/Sub/L.v")
+            .attribute("/B/Sub/L.v")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(7.0))
     );
 
     // The nested prims are instances and share one prototype.
-    assert!(stage.prim("/A/Sub").is_instance()?);
-    assert!(stage.prim("/B/Sub").is_instance()?);
-    let nested = stage.prim("/A/Sub").prototype()?;
+    assert!(stage.prim("/A/Sub")?.is_instance()?);
+    assert!(stage.prim("/B/Sub")?.is_instance()?);
+    let nested = stage.prim("/A/Sub")?.prototype()?;
     assert!(nested.is_some());
-    assert_eq!(stage.prim("/B/Sub").prototype()?, nested);
+    assert_eq!(stage.prim("/B/Sub")?.prototype()?, nested);
 
     // The outer instances share a distinct prototype.
-    let outer = stage.prim("/A").prototype()?;
-    assert_eq!(stage.prim("/B").prototype()?, outer);
+    let outer = stage.prim("/A")?.prototype()?;
+    assert_eq!(stage.prim("/B")?.prototype()?, outer);
     assert_ne!(outer, nested);
 
     // The nested subtree is also reachable through the outer prototype.
     let outer = outer.unwrap();
     assert_eq!(
         stage
-            .attribute(sdf::path(format!("{outer}/Sub/L.v"))?)
+            .attribute(sdf::path(format!("{outer}/Sub/L.v"))?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(7.0))
     );
@@ -3487,7 +3498,7 @@ fn prototype_descendant_target_remap() -> Result<()> {
 
     // The same connection queried directly on the prototype descendant stays
     // in the prototype namespace (no instance to remap to).
-    let proto = stage.prim("/I1").prototype()?.expect("I1 is an instance");
+    let proto = stage.prim("/I1")?.prototype()?.expect("I1 is an instance");
     let dst_in = proto.append_path("Dst")?.append_property("inputs:in")?;
     assert_eq!(
         connections(&stage, &dst_in)?,
@@ -3599,29 +3610,29 @@ fn prototype_root_drops_instance_overrides() -> Result<()> {
     // The instance root keeps its local overrides.
     assert_eq!(
         stage
-            .attribute("/A.shared")
+            .attribute("/A.shared")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(7.0))
     );
     assert_eq!(
         stage
-            .attribute("/A.rootOnly")
+            .attribute("/A.rootOnly")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(42.0))
     );
 
     // The shared prototype root drops them: the overridden property falls
     // back to the referenced value and the instance-only property is gone.
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
     assert_eq!(
         stage
-            .attribute(proto.append_property("shared")?)
+            .attribute(proto.append_property("shared")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
     assert_eq!(
         stage
-            .attribute(proto.append_property("rootOnly")?)
+            .attribute(proto.append_property("rootOnly")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         None
     );
@@ -3640,20 +3651,20 @@ fn prototype_root_survives_early_query() -> Result<()> {
     // this caches an empty index at /__Prototype_0.
     assert_eq!(
         stage
-            .attribute("/__Prototype_0.shared")
+            .attribute("/__Prototype_0.shared")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         None
     );
 
     // Composing the instance mints and materializes /__Prototype_0.
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
     assert_eq!(proto.as_str(), "/__Prototype_0");
 
     // The prototype root now holds the real composition, not the stale empty
     // index that the guard would otherwise have mistaken for it.
     assert_eq!(
         stage
-            .attribute(proto.append_property("shared")?)
+            .attribute(proto.append_property("shared")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
@@ -3673,13 +3684,13 @@ fn prototype_descendant_survives_early_query() -> Result<()> {
     // an identity (non-redirected) mapping.
     assert_eq!(
         stage
-            .attribute("/__Prototype_0/Child.size")
+            .attribute("/__Prototype_0/Child.size")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         None
     );
 
     // Composing the instance mints and materializes /__Prototype_0.
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
     assert_eq!(proto.as_str(), "/__Prototype_0");
 
     // The descendant now resolves the shared content: minting evicted the
@@ -3687,7 +3698,7 @@ fn prototype_descendant_survives_early_query() -> Result<()> {
     // query recomposes it in place from the materialized prototype root.
     assert_eq!(
         stage
-            .attribute(proto.append_path("Child")?.append_property("size")?)
+            .attribute(proto.append_path("Child")?.append_property("size")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
@@ -3705,12 +3716,12 @@ fn query_self_heals_prototype_materialization() -> Result<()> {
 
     // Use the query before any instance registers: the synthetic path resolves
     // to nothing yet, and the empty source must not be cached.
-    let q = stage.attribute_query("/__Prototype_0/Child.size");
+    let q = stage.attribute_query("/__Prototype_0/Child.size")?;
     assert_eq!(q.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?, None);
 
     // Composing an instance mints and materializes /__Prototype_0 — a lazy step
     // that does not bump the cache revision.
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
     assert_eq!(proto.as_str(), "/__Prototype_0");
 
     // The same query now resolves the shared content rather than the stale None.
@@ -3728,7 +3739,7 @@ fn prototype_root_keeps_variant_opinions() -> Result<()> {
     // The instance resolves the variant-authored property.
     assert_eq!(
         stage
-            .attribute("/A.picked")
+            .attribute("/A.picked")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
@@ -3736,10 +3747,10 @@ fn prototype_root_keeps_variant_opinions() -> Result<()> {
     // So must the prototype root: the variant opinion lives at the instance's
     // own namespace (/A{v=x}), and rebasing must not move the spec lookup off
     // it.
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
     assert_eq!(
         stage
-            .attribute(proto.append_property("picked")?)
+            .attribute(proto.append_property("picked")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
@@ -3770,7 +3781,7 @@ fn prototype_root_target_remap() -> Result<()> {
 
     // On the materialized prototype root they resolve into the prototype
     // namespace, not the canonical instance's.
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
     assert_eq!(
         rel_targets(&stage, &proto.append_property("myrel")?)?,
         vec![proto.append_path("Target")?]
@@ -3791,7 +3802,7 @@ fn variant_selection_keys_prototype() -> Result<()> {
 
     let proto = |p: &str| -> Result<sdf::Path> {
         stage
-            .prim(p)
+            .prim(p)?
             .prototype()?
             .ok_or_else(|| anyhow::anyhow!("{p} is not an instance"))
     };
@@ -3804,19 +3815,19 @@ fn variant_selection_keys_prototype() -> Result<()> {
     // Each prototype resolves its own variant content.
     assert_eq!(
         stage
-            .attribute("/A.picked")
+            .attribute("/A.picked")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
     assert_eq!(
         stage
-            .attribute("/B.picked")
+            .attribute("/B.picked")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(2.0))
     );
     assert_eq!(
         stage
-            .attribute("/C.picked")
+            .attribute("/C.picked")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
@@ -3830,11 +3841,11 @@ fn variant_selection_keys_prototype() -> Result<()> {
 #[test]
 fn variant_rel_in_prototype() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_variant_rel.usda"))?;
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
 
     let rig = proto.append_path("Rig")?;
     assert_eq!(
-        stage.relationship(rig.append_property("wires")?).targets()?,
+        stage.relationship(rig.append_property("wires")?)?.targets()?,
         vec![proto.append_path("Geom")?],
         "the variant-authored target lands in the prototype namespace"
     );
@@ -3934,7 +3945,7 @@ def Xform "Root"
                 .open(dir.path().join("outer.usda").to_str().unwrap())?;
             let base = if instanceable {
                 stage
-                    .prim("/Root/Inst")
+                    .prim("/Root/Inst")?
                     .prototype()?
                     .expect("instance resolves a prototype")
             } else {
@@ -3942,7 +3953,9 @@ def Xform "Root"
             };
             let instancer = base.append_path("geometry")?.append_path("instancer")?;
             assert_eq!(
-                stage.relationship(instancer.append_property("prototypes")?).targets()?,
+                stage
+                    .relationship(instancer.append_property("prototypes")?)?
+                    .targets()?,
                 vec![instancer.append_path("Proto1")?],
                 "variant={variant} instanceable={instanceable}"
             );
@@ -3963,20 +3976,20 @@ def Xform "Root"
 #[test]
 fn prototype_visible_under_mask() -> Result<()> {
     let stage = Stage::builder()
-        .mask(StagePopulationMask::new(["/A"]))
+        .mask(StagePopulationMask::new(["/A"])?)
         .open(&fixture_path("instancing_shared.usda"))?;
 
     // /A is in the mask and is an instance; its prototype is reachable.
-    assert!(stage.prim("/A").is_instance()?);
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    assert!(stage.prim("/A")?.is_instance()?);
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
 
     // The prototype's shared content is readable even though /__Prototype_N
     // is never named in the mask, because instance /A is.
     let child = proto.append_path("Child")?;
-    assert!(stage.prim(child.clone()).is_valid()?);
+    assert!(stage.prim(child.clone())?.is_valid()?);
     assert_eq!(
         stage
-            .attribute(child.append_property("size")?)
+            .attribute(child.append_property("size")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
@@ -3995,21 +4008,21 @@ fn prototype_visible_under_mask() -> Result<()> {
 fn nested_instance_in_prototype() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_nested_in_prototype.usda"))?;
 
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
 
     // The proxy chain through the instance namespace resolves the nested
     // value (/A/Nested is itself an instance).
-    assert!(stage.prim("/A/Nested").is_instance()?);
+    assert!(stage.prim("/A/Nested")?.is_instance()?);
     assert_eq!(
         stage
-            .attribute("/A/Nested/Leaf.v")
+            .attribute("/A/Nested/Leaf.v")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(3.0))
     );
 
     // Inside the prototype namespace, the nested prim is an instance and
     // mints its own, distinct prototype.
-    let nested = stage.prim(proto.append_path("Nested")?);
+    let nested = stage.prim(proto.append_path("Nested")?)?;
     assert!(nested.is_instance()?);
     let nested_proto = nested.prototype()?.expect("nested prim is an instance");
     assert_ne!(nested_proto, proto);
@@ -4017,7 +4030,7 @@ fn nested_instance_in_prototype() -> Result<()> {
     // A prim beneath the nested instance (inside the prototype namespace) is
     // an instance proxy of the nested prototype — previously this was
     // reported as plain prototype content.
-    let leaf = stage.prim(proto.append_path("Nested")?.append_path("Leaf")?);
+    let leaf = stage.prim(proto.append_path("Nested")?.append_path("Leaf")?)?;
     assert!(leaf.is_instance_proxy()?);
     let in_proto = leaf.prim_in_prototype()?.expect("Leaf is an instance proxy");
     assert_eq!(in_proto.path(), &nested_proto.append_path("Leaf")?);
@@ -4031,12 +4044,12 @@ fn nested_instance_in_prototype() -> Result<()> {
 fn instance_proxy_api() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
 
-    assert!(!stage.prim("/A").is_instance_proxy()?);
-    assert!(stage.prim("/A/Child").is_instance_proxy()?);
+    assert!(!stage.prim("/A")?.is_instance_proxy()?);
+    assert!(stage.prim("/A/Child")?.is_instance_proxy()?);
 
-    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
     let in_proto = stage
-        .prim("/A/Child")
+        .prim("/A/Child")?
         .prim_in_prototype()?
         .expect("Child is an instance proxy");
     assert_eq!(in_proto.path(), &proto.append_path("Child")?);
@@ -4047,8 +4060,8 @@ fn instance_proxy_api() -> Result<()> {
 
     // A nonexistent path under an instance is not a proxy, and has no prim in
     // the prototype.
-    assert!(!stage.prim("/A/Missing").is_instance_proxy()?);
-    assert!(stage.prim("/A/Missing").prim_in_prototype()?.is_none());
+    assert!(!stage.prim("/A/Missing")?.is_instance_proxy()?);
+    assert!(stage.prim("/A/Missing")?.prim_in_prototype()?.is_none());
     Ok(())
 }
 
@@ -4061,7 +4074,7 @@ fn instance_descendant_ignores_local_override() -> Result<()> {
     // Instance: the local `over Child { size = 999 }` is ignored.
     assert_eq!(
         stage
-            .attribute("/Instance/Child.size")
+            .attribute("/Instance/Child.size")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
@@ -4069,7 +4082,7 @@ fn instance_descendant_ignores_local_override() -> Result<()> {
     // Non-instance: the local override wins as usual.
     assert_eq!(
         stage
-            .attribute("/NonInstance/Child.size")
+            .attribute("/NonInstance/Child.size")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(999.0))
     );
@@ -4085,7 +4098,7 @@ fn instance_descendant_ignores_local_arc() -> Result<()> {
     // discarded, so the value comes from the prototype, not /Other/Child.
     assert_eq!(
         stage
-            .attribute("/A/Child.v")
+            .attribute("/A/Child.v")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
@@ -4096,24 +4109,27 @@ fn instance_descendant_ignores_local_arc() -> Result<()> {
 fn model_hierarchy() -> Result<()> {
     let stage = open_stage_queries_fixture()?;
 
-    assert_eq!(stage.prim("/World").kind()?.as_deref(), Some("assembly"));
-    assert!(stage.prim("/World").is_model()?);
-    assert!(stage.prim("/World").is_group()?);
+    assert_eq!(stage.prim("/World")?.kind()?.as_deref(), Some("assembly"));
+    assert!(stage.prim("/World")?.is_model()?);
+    assert!(stage.prim("/World")?.is_group()?);
 
-    assert!(stage.prim("/World/Group").is_model()?);
-    assert!(stage.prim("/World/Group").is_group()?);
-    assert!(stage.prim("/World/Group/Component").is_model()?);
-    assert!(stage.prim("/World/Group/Component").is_component()?);
+    assert!(stage.prim("/World/Group")?.is_model()?);
+    assert!(stage.prim("/World/Group")?.is_group()?);
+    assert!(stage.prim("/World/Group/Component")?.is_model()?);
+    assert!(stage.prim("/World/Group/Component")?.is_component()?);
 
-    assert!(!stage.prim("/World/Group/Subcomponent").is_model()?);
-    assert!(stage.prim("/World/Group/Subcomponent").is_subcomponent()?);
+    assert!(!stage.prim("/World/Group/Subcomponent")?.is_model()?);
+    assert!(stage.prim("/World/Group/Subcomponent")?.is_subcomponent()?);
 
     assert_eq!(
-        stage.prim("/World/InvalidComponentParent/Component").kind()?.as_deref(),
+        stage
+            .prim("/World/InvalidComponentParent/Component")?
+            .kind()?
+            .as_deref(),
         Some("component")
     );
-    assert!(!stage.prim("/World/InvalidComponentParent/Component").is_model()?);
-    assert!(!stage.prim("/World/InvalidComponentParent/Component").is_component()?);
+    assert!(!stage.prim("/World/InvalidComponentParent/Component")?.is_model()?);
+    assert!(!stage.prim("/World/InvalidComponentParent/Component")?.is_component()?);
     Ok(())
 }
 
@@ -4257,7 +4273,7 @@ fn edit_target_local_is_identity() -> Result<()> {
 /// namespace; paths outside the variant prim map to themselves.
 #[test]
 fn variant_target_maps_selection() -> Result<()> {
-    let target = EditTarget::for_local_direct_variant("test", sdf::path("/Prim{set=sel}")?);
+    let target = EditTarget::for_local_direct_variant("test", sdf::path("/Prim{set=sel}")?)?;
     assert_eq!(
         target.map_to_spec_path(&sdf::path("/Prim/child")?),
         Some(sdf::path("/Prim{set=sel}child")?)
@@ -4293,7 +4309,10 @@ fn define_prim_at_variant_leaf_errors() -> Result<()> {
     let stage = in_memory_stage()?;
     let root = stage.edit_target().layer_identifier().to_string();
     stage.define_prim("/Prim")?;
-    stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+    stage.set_edit_target(EditTarget::for_local_direct_variant(
+        root,
+        sdf::path("/Prim{set=sel}")?,
+    )?)?;
     // `/Prim` maps to the variant selection `/Prim{set=sel}`.
     assert!(matches!(
         stage.define_prim("/Prim"),
@@ -4390,7 +4409,7 @@ def Scope "P" (
     )?;
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P/Child.val").get::<f64>()?,
+        stage.attribute("/P/Child.val")?.get::<f64>()?,
         Some(1.0),
         "the in-variant class composes onto the inheritor"
     );
@@ -4413,7 +4432,7 @@ def Scope "P" (
             .set(sdf::Value::Double(4.0))?;
     }
     assert_eq!(
-        stage.attribute("/P/Child.extra").get::<f64>()?,
+        stage.attribute("/P/Child.extra")?.get::<f64>()?,
         Some(4.0),
         "the opinion authored at the variant-qualified class path composes back"
     );
@@ -4458,12 +4477,12 @@ def Scope "P" (
     )?;
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P/Child.val").get::<f64>()?,
+        stage.attribute("/P/Child.val")?.get::<f64>()?,
         Some(1.0),
         "the relatively-inherited in-variant class composes"
     );
     assert_eq!(
-        stage.relationship("/P/Child.self_rel").targets()?,
+        stage.relationship("/P/Child.self_rel")?.targets()?,
         vec![sdf::path("/P/Child")?],
         "the within-class target translates to the inheritor's image"
     );
@@ -4498,7 +4517,7 @@ fn variant_ref_path_error() -> Result<()> {
             ..Default::default()
         }])),
     )?;
-    assert!(stage.prim("/P").is_valid()?);
+    assert!(stage.prim("/P")?.is_valid()?);
     assert!(
         stage
             .composition_errors()
@@ -4520,7 +4539,7 @@ fn edit_target_authors_into_class() -> Result<()> {
         let _ctx = stage.edit_context(target)?;
         stage.define_prim("/Prim/Child")?;
     }
-    assert!(stage.prim("/Prim/Child").is_valid()?);
+    assert!(stage.prim("/Prim/Child")?.is_valid()?);
     assert!(stage.root_layer().data().has_spec(&sdf::path("/_Class/Child")?));
     assert!(!stage.root_layer().data().has_spec(&sdf::path("/Prim/Child")?));
     Ok(())
@@ -4564,7 +4583,7 @@ fn map_spec_path_local_keeps_target() -> Result<()> {
 /// selection on the target path (target paths never carry selections).
 #[test]
 fn map_spec_path_variant_strips_target() -> Result<()> {
-    let target = EditTarget::for_local_direct_variant("test", sdf::path("/Prim{set=sel}")?);
+    let target = EditTarget::for_local_direct_variant("test", sdf::path("/Prim{set=sel}")?)?;
     assert_eq!(
         target.map_to_spec_path(&sdf::path("/Prim.rel[/Prim/T]")?),
         Some(sdf::path("/Prim{set=sel}.rel[/Prim/T]")?)
@@ -4656,7 +4675,7 @@ fn edit_target_null_and_valid() -> Result<()> {
 fn edit_target_compose_over() -> Result<()> {
     let stage = Stage::open(&fixture_path("ref_external.usda"))?;
     let weaker = stage.edit_target_for_node(&sdf::path("/World/MyPrim")?, EditTargetArc::Reference)?;
-    let stronger = EditTarget::for_local_direct_variant(weaker.layer_identifier(), sdf::path("/Source{set=sel}")?);
+    let stronger = EditTarget::for_local_direct_variant(weaker.layer_identifier(), sdf::path("/Source{set=sel}")?)?;
 
     let composed = stronger.compose_over(&weaker);
     assert_eq!(composed.layer_identifier(), weaker.layer_identifier());
@@ -4716,16 +4735,16 @@ fn arc_target_retimes_time_sample() -> Result<()> {
     {
         let _ctx = stage.edit_context(target)?;
         stage
-            .attribute("/Prim.x")
+            .attribute("/Prim.x")?
             .set_at(sdf::Value::Double(42.0), usd::TimeCode::new(15.0))?;
     }
 
     // The sample landed at source time 5 in the root layer...
-    let samples = stage.attribute("/Source.x").time_samples()?.expect("samples");
+    let samples = stage.attribute("/Source.x")?.time_samples()?.expect("samples");
     assert_eq!(samples, vec![(5.0, sdf::Value::Double(42.0))]);
     // ...and reads back at stage time 15 through the offset reference.
     assert_eq!(
-        stage.attribute("/Prim.x").get_at::<f64>(usd::TimeCode::new(15.0))?,
+        stage.attribute("/Prim.x")?.get_at::<f64>(usd::TimeCode::new(15.0))?,
         Some(42.0)
     );
     Ok(())
@@ -4752,7 +4771,7 @@ fn time_sample_times_retimed() -> Result<()> {
         }])),
     )?;
 
-    let attr = stage.attribute("/Prim.x");
+    let attr = stage.attribute("/Prim.x")?;
     let map = attr.time_samples()?.expect("samples");
     let retimed_keys: Vec<f64> = map.iter().map(|(t, _)| *t).collect();
     assert_eq!(retimed_keys, vec![10.0, 20.0]);
@@ -4769,7 +4788,7 @@ fn time_sample_times_retimed() -> Result<()> {
 #[test]
 fn time_sample_times_masked() -> Result<()> {
     let stage = Stage::builder()
-        .mask(StagePopulationMask::new(["/B"]))
+        .mask(StagePopulationMask::new(["/B"])?)
         .in_memory("anon.usda")?;
     stage
         .define_prim("/A")?
@@ -4778,7 +4797,7 @@ fn time_sample_times_masked() -> Result<()> {
         .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
     stage.define_prim("/B")?.create_attribute("y", "double")?;
 
-    let masked = stage.attribute("/A.x");
+    let masked = stage.attribute("/A.x")?;
     assert!(masked.time_sample_times()?.is_empty());
     assert_eq!(masked.num_time_samples()?, 0);
     Ok(())
@@ -4798,7 +4817,7 @@ fn edit_target_for_instance_proxy() -> Result<()> {
     // The prototype-namespace path remaps to the shared arc source; the proxy
     // path falls outside the mapping's domain, so it does not reach that source.
     let proto = stage
-        .prim("/World/Inst")
+        .prim("/World/Inst")?
         .prototype()?
         .expect("instance has a prototype");
     let proto_child = proto.append_path(sdf::path("OtherChild")?)?;
@@ -4820,6 +4839,7 @@ fn clip_asset(name: &str) -> String {
 fn value_f64(stage: &Stage, attr: &str, time: f64) -> Option<f64> {
     match stage
         .attribute(attr)
+        .unwrap()
         .get_at::<sdf::Value>(usd::TimeCode::new(time))
         .expect("value_at")
     {
@@ -4973,7 +4993,7 @@ def "Model" (
 #[test]
 fn clip_time_samples_gathered() -> Result<()> {
     let stage = Stage::open(&fixture_path("clip_template/root.usda"))?;
-    let size = stage.attribute("/Model.size");
+    let size = stage.attribute("/Model.size")?;
     assert_eq!(size.time_sample_times()?, vec![1.0, 2.0]);
     assert_eq!(size.num_time_samples()?, 2);
     assert!(size.value_might_be_time_varying()?);
@@ -4988,7 +5008,7 @@ fn clip_time_samples_gathered() -> Result<()> {
 #[test]
 fn clip_interpolate_missing_boundary_is_a_sample() -> Result<()> {
     let stage = Stage::open(&fixture_path("clip_missing_interp/root.usda"))?;
-    let size = stage.attribute("/Model.size");
+    let size = stage.attribute("/Model.size")?;
     // clipA@0, the empty-clip boundary at 10, and clipC@20.
     assert_eq!(size.time_sample_times()?, vec![0.0, 10.0, 20.0]);
     // The reported boundary at 10 is real: the value jumps there (clipA holds
@@ -5015,7 +5035,7 @@ fn clip_basic_overrides_reference() -> Result<()> {
 #[test]
 fn query_clip_fallback() -> Result<()> {
     let stage = Stage::open(&clip_asset("clip_basic"))?;
-    let attr = stage.attribute("/Model.size");
+    let attr = stage.attribute("/Model.size")?;
     let q = attr.query();
     for t in [0.0, 7.0, 10.0, 15.0] {
         assert_eq!(
@@ -5122,7 +5142,7 @@ def "Model"
     )?;
 
     let stage = Stage::open(&root)?;
-    let attr = stage.attribute("/Model.localDefault");
+    let attr = stage.attribute("/Model.localDefault")?;
     assert_eq!(value_f64(&stage, "/Model.localDefault", 0.0), Some(3.0));
     assert!(attr.time_sample_times()?.is_empty());
     assert_eq!(attr.num_time_samples()?, 0);
@@ -5158,7 +5178,7 @@ def "Model" (
     )?;
 
     let stage = Stage::open(&root)?;
-    let attr = stage.attribute("/Model.size");
+    let attr = stage.attribute("/Model.size")?;
     assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(3.0));
     assert_eq!(value_f64(&stage, "/Model.size", 12.0), Some(3.0));
     assert!(attr.time_sample_times()?.is_empty());
@@ -5198,9 +5218,9 @@ def "Model" (
 
     let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
     // The clip authors `size`, so its sample times surface.
-    assert_eq!(stage.attribute("/Model.size").time_sample_times()?, vec![0.0, 4.0]);
+    assert_eq!(stage.attribute("/Model.size")?.time_sample_times()?, vec![0.0, 4.0]);
     // The clip never authors `other`: no spurious clip-boundary sample times.
-    let other = stage.attribute("/Model.other");
+    let other = stage.attribute("/Model.other")?;
     assert!(other.time_sample_times()?.is_empty());
     assert_eq!(other.num_time_samples()?, 0);
     Ok(())
@@ -5245,7 +5265,7 @@ def "Model" (
     )?;
 
     let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
-    let size = stage.attribute("/Model.size");
+    let size = stage.attribute("/Model.size")?;
     // The scheduled clip (index 1) is empty, so the set does not source `size`;
     // introspection reports the reference arc's times, agreeing with value_at.
     assert_eq!(size.time_sample_times()?, vec![5.0, 8.0]);
@@ -5265,7 +5285,7 @@ def "Model" (
 #[test]
 fn clip_manifestless_held_boundary() -> Result<()> {
     let stage = Stage::open(&fixture_path("clip_manifestless_held/root.usda"))?;
-    let size = stage.attribute("/Model.size");
+    let size = stage.attribute("/Model.size")?;
     assert_eq!(size.time_sample_times()?, vec![0.0, 10.0]);
     assert_eq!(size.num_time_samples()?, 2);
     assert!(size.value_might_be_time_varying()?);
@@ -5311,7 +5331,7 @@ def "Model" (
 "#,
     )?;
     let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
-    let size = stage.attribute("/Model.size");
+    let size = stage.attribute("/Model.size")?;
     // clip0's samples, the empty middle window's boundary at 10, clip2's samples.
     assert_eq!(size.time_sample_times()?, vec![0.0, 2.0, 10.0, 20.0, 22.0]);
     // value_at changes at every reported time: held 2 up to the empty window,
@@ -5355,7 +5375,7 @@ def "Model" (
     )?;
 
     let stage = Stage::open(&root)?;
-    let size = stage.attribute("/Model.size");
+    let size = stage.attribute("/Model.size")?;
     // Local timeSamples win: their times are reported, not the clip's {1, 5}.
     assert_eq!(size.time_sample_times()?, vec![0.0, 10.0]);
     assert_eq!(size.num_time_samples()?, 2);
@@ -5660,7 +5680,7 @@ fn insert_layer_authors_metadata() -> Result<()> {
     stage.insert_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
 
     assert_eq!(
-        stage.attribute("/A.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/A.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
     assert_eq!(authored_sublayers(&stage), vec![weak_id]);
@@ -5677,14 +5697,14 @@ fn remove_layer_clears_metadata() -> Result<()> {
     let weak_id = weak.identifier().to_string();
     stage.insert_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
     assert_eq!(
-        stage.attribute("/A.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/A.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
 
     assert!(stage.remove_layer(&root_id, &weak_id)?, "a sublayer was removed");
 
     assert_eq!(
-        stage.attribute("/A.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/A.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         None,
         "the removed sublayer's opinion is gone"
     );
@@ -5812,10 +5832,10 @@ fn define_prim() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/World")?.set_type_name("Xform")?;
     stage.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
-    assert!(stage.prim("/World").is_defined()?);
-    assert!(stage.prim("/World/Mesh").is_defined()?);
-    assert_eq!(stage.prim("/World").type_name()?.as_deref(), Some("Xform"));
-    assert_eq!(stage.prim("/World/Mesh").type_name()?.as_deref(), Some("Mesh"));
+    assert!(stage.prim("/World")?.is_defined()?);
+    assert!(stage.prim("/World/Mesh")?.is_defined()?);
+    assert_eq!(stage.prim("/World")?.type_name()?.as_deref(), Some("Xform"));
+    assert_eq!(stage.prim("/World/Mesh")?.type_name()?.as_deref(), Some("Mesh"));
     Ok(())
 }
 
@@ -5824,12 +5844,12 @@ fn define_prim() -> Result<()> {
 #[test]
 fn authoring_invalidates_cached_miss() -> Result<()> {
     let stage = in_memory_stage()?;
-    assert!(!stage.prim("/World").is_valid()?);
+    assert!(!stage.prim("/World")?.is_valid()?);
 
     stage.define_prim("/World")?.set_type_name("Xform")?;
 
-    assert!(stage.prim("/World").is_valid()?);
-    assert_eq!(stage.prim("/World").type_name()?.as_deref(), Some("Xform"));
+    assert!(stage.prim("/World")?.is_valid()?);
+    assert_eq!(stage.prim("/World")?.type_name()?.as_deref(), Some("Xform"));
     Ok(())
 }
 
@@ -5837,8 +5857,8 @@ fn authoring_invalidates_cached_miss() -> Result<()> {
 fn override_prim() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.override_prim("/A/B")?;
-    assert_eq!(stage.prim("/A").specifier()?, Some(sdf::Specifier::Over));
-    assert_eq!(stage.prim("/A/B").specifier()?, Some(sdf::Specifier::Over));
+    assert_eq!(stage.prim("/A")?.specifier()?, Some(sdf::Specifier::Over));
+    assert_eq!(stage.prim("/A/B")?.specifier()?, Some(sdf::Specifier::Over));
     Ok(())
 }
 
@@ -5858,18 +5878,18 @@ fn permission_edit_does_not_inert_opinion() -> Result<()> {
     )?;
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/Inst.attr").get::<sdf::Value>()?,
+        stage.attribute("/Inst.attr")?.get::<sdf::Value>()?,
         Some(sdf::Value::Double(5.0)),
         "the inherited opinion contributes before the permission edit",
     );
 
-    stage.prim("/Class").set_metadata(
+    stage.prim("/Class")?.set_metadata(
         sdf::FieldKey::Permission.as_str(),
         sdf::Value::Permission(sdf::Permission::Private),
     )?;
 
     assert_eq!(
-        stage.attribute("/Inst.attr").get::<sdf::Value>()?,
+        stage.attribute("/Inst.attr")?.get::<sdf::Value>()?,
         Some(sdf::Value::Double(5.0)),
         "permission is inert metadata; the inherited opinion still resolves",
     );
@@ -5910,7 +5930,7 @@ fn clips_edit_resolves_live() -> Result<()> {
         "the reference time sample resolves before any clips are authored",
     );
 
-    let prim = stage.prim("/Model");
+    let prim = stage.prim("/Model")?;
     let api = usd::ClipsAPI::new(&prim);
     api.set_clip_asset_paths("default", vec![clip.display().to_string()])?;
     api.set_clip_prim_path("default", "/Model")?;
@@ -5934,17 +5954,14 @@ fn target_edit_drops_memo() -> Result<()> {
     stage.define_prim("/A")?;
     stage.define_prim("/B")?;
     stage.define_prim("/C")?;
-    stage
-        .prim("/A")
-        .create_relationship("r")?
-        .set_targets([sdf::path("/B")?])?;
+    stage.prim("/A")?.create_relationship("r")?.set_targets(["/B"])?;
 
     // First query populates the memo.
-    assert_eq!(stage.relationship("/A.r").targets()?, vec![sdf::path("/B")?]);
+    assert_eq!(stage.relationship("/A.r")?.targets()?, vec![sdf::path("/B")?]);
 
-    stage.relationship("/A.r").set_targets([sdf::path("/C")?])?;
+    stage.relationship("/A.r")?.set_targets(["/C"])?;
     assert_eq!(
-        stage.relationship("/A.r").targets()?,
+        stage.relationship("/A.r")?.targets()?,
         vec![sdf::path("/C")?],
         "the re-authored targets must be visible, not the memoized list",
     );
@@ -5962,9 +5979,9 @@ fn target_edit_fans_out_to_dependent() -> Result<()> {
     stage.define_prim("/Class/Local")?;
     stage.define_prim("/Class/Other")?;
     stage
-        .prim("/Class")
+        .prim("/Class")?
         .create_relationship("r")?
-        .set_targets([sdf::path("/Class/Local")?])?;
+        .set_targets(["/Class/Local"])?;
     stage.define_prim("/Inst")?.set_metadata(
         sdf::FieldKey::InheritPaths.as_str(),
         sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/Class")?])),
@@ -5974,16 +5991,14 @@ fn target_edit_fans_out_to_dependent() -> Result<()> {
 
     // First query memoizes the inherited relationship's translated targets.
     assert_eq!(
-        stage.relationship("/Inst.r").targets()?,
+        stage.relationship("/Inst.r")?.targets()?,
         vec![sdf::path("/Inst/Local")?],
         "the inherited target translates into the instance namespace",
     );
 
-    stage
-        .relationship("/Class.r")
-        .set_targets([sdf::path("/Class/Other")?])?;
+    stage.relationship("/Class.r")?.set_targets(["/Class/Other"])?;
     assert_eq!(
-        stage.relationship("/Inst.r").targets()?,
+        stage.relationship("/Inst.r")?.targets()?,
         vec![sdf::path("/Inst/Other")?],
         "editing the class relationship restales the inheriting prim's memo",
     );
@@ -5999,17 +6014,14 @@ fn target_spec_removal_drops_memo() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/A")?;
     stage.define_prim("/B")?;
-    stage
-        .prim("/A")
-        .create_relationship("r")?
-        .set_targets([sdf::path("/B")?])?;
+    stage.prim("/A")?.create_relationship("r")?.set_targets(["/B"])?;
 
     // Populate the memo.
-    assert_eq!(stage.relationship("/A.r").targets()?, vec![sdf::path("/B")?]);
+    assert_eq!(stage.relationship("/A.r")?.targets()?, vec![sdf::path("/B")?]);
 
     assert!(stage.remove_property("/A.r")?);
     assert_eq!(
-        stage.relationship("/A.r").targets()?,
+        stage.relationship("/A.r")?.targets()?,
         Vec::<sdf::Path>::new(),
         "the removed relationship's memoized targets must not persist",
     );
@@ -6025,10 +6037,7 @@ fn target_edit_is_info_only_not_resync() -> Result<()> {
     stage.define_prim("/A")?;
     stage.define_prim("/B")?;
     stage.define_prim("/C")?;
-    stage
-        .prim("/A")
-        .create_relationship("r")?
-        .set_targets([sdf::path("/B")?])?;
+    stage.prim("/A")?.create_relationship("r")?.set_targets(["/B"])?;
 
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
@@ -6039,7 +6048,7 @@ fn target_edit_is_info_only_not_resync() -> Result<()> {
             info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
         })
     };
-    stage.relationship("/A.r").set_targets([sdf::path("/C")?])?;
+    stage.relationship("/A.r")?.set_targets(["/C"])?;
 
     assert!(
         !resynced.borrow().contains(&sdf::path("/A")?),
@@ -6084,10 +6093,7 @@ fn rel_removal_not_info_only() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/A")?;
     stage.define_prim("/B")?;
-    stage
-        .prim("/A")
-        .create_relationship("r")?
-        .set_targets([sdf::path("/B")?])?;
+    stage.prim("/A")?.create_relationship("r")?.set_targets(["/B"])?;
 
     let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let _token = {
@@ -6129,17 +6135,17 @@ fn instance_target_memo_not_stale() -> Result<()> {
     // `Class`, so the class connection to it is dropped. Then drop `Target`'s
     // inherit so it is no longer an instance, and re-query.
     let a = Stage::open(root.to_str().unwrap())?;
-    let before = a.attribute(attr).connections()?;
-    a.prim(target.clone())
+    let before = a.attribute(attr)?.connections()?;
+    a.prim(target.clone())?
         .set_metadata(sdf::FieldKey::InheritPaths.as_str(), drop_inherit())?;
-    let after_cached = a.attribute(attr).connections()?;
+    let after_cached = a.attribute(attr)?.connections()?;
 
     // Stage B: apply the same edit before any query, so its result is composed
     // from scratch with no memo in play.
     let b = Stage::open(root.to_str().unwrap())?;
-    b.prim(target)
+    b.prim(target)?
         .set_metadata(sdf::FieldKey::InheritPaths.as_str(), drop_inherit())?;
-    let fresh = b.attribute(attr).connections()?;
+    let fresh = b.attribute(attr)?.connections()?;
 
     assert_eq!(after_cached, fresh, "the cached path must agree with a fresh compose");
     assert_ne!(
@@ -6168,7 +6174,7 @@ fn permission_private_inherit_composes_normally() -> Result<()> {
     // visible and composing it raises no error.
     assert!(
         stage
-            .prim("/Model")
+            .prim("/Model")?
             .property_names()?
             .iter()
             .any(|n| n.as_str() == "attr"),
@@ -6189,8 +6195,8 @@ fn field_single_layer() -> Result<()> {
     let stage = Stage::open(&path)?;
 
     // CubeInactive composes as inactive; CubeActive as active.
-    assert!(!stage.prim("/World/CubeInactive").is_active()?);
-    assert!(stage.prim("/World/CubeActive").is_active()?);
+    assert!(!stage.prim("/World/CubeInactive")?.is_active()?);
+    assert!(stage.prim("/World/CubeActive")?.is_active()?);
 
     Ok(())
 }
@@ -6210,7 +6216,7 @@ fn sublayer_stronger_opinion_wins() -> Result<()> {
     // /World/Cube.primvars:displayColor is overridden to blue [(0,0,1)] in
     // the stronger layer, base has red [(1,0,0)].
     let prop_path = sdf::Path::new("/World/Cube")?.append_property("primvars:displayColor")?;
-    let value = stage.attribute(&prop_path).get::<sdf::Value>()?;
+    let value = stage.attribute(&prop_path)?.get::<sdf::Value>()?;
     assert!(value.is_some(), "displayColor should have a composed value");
 
     // The composed value must come from the stronger layer (blue),
@@ -6229,8 +6235,8 @@ fn field_active_metadata() -> Result<()> {
     let path = composition_path("active.usda");
     let stage = Stage::open(&path)?;
 
-    assert!(!stage.prim("/World/CubeInactive").is_active()?);
-    assert!(stage.prim("/World/CubeActive").is_active()?);
+    assert!(!stage.prim("/World/CubeInactive")?.is_active()?);
+    assert!(stage.prim("/World/CubeActive")?.is_active()?);
 
     Ok(())
 }
@@ -6247,7 +6253,7 @@ fn reference_external_default_prim() -> Result<()> {
     let stage = Stage::open(&path)?;
 
     // /World/MyPrim should exist via the reference.
-    assert!(stage.prim("/World/MyPrim").is_valid()?);
+    assert!(stage.prim("/World/MyPrim")?.is_valid()?);
 
     // /World/MyPrim/Child should be reachable via namespace remapping.
     let children = child_names(&stage, "/World/MyPrim")?;
@@ -6269,7 +6275,7 @@ fn inherit_local_opinion_wins() -> Result<()> {
 
     // The local displayColor (red) should win over inherited (green).
     let prop = sdf::Path::new("/World/cubeWithSetColor")?.append_property("primvars:displayColor")?;
-    let value = stage.attribute(&prop).get::<sdf::Value>()?;
+    let value = stage.attribute(&prop)?.get::<sdf::Value>()?;
     assert!(value.is_some());
 
     // Verify it's the local red, not the inherited green.
@@ -6292,7 +6298,7 @@ fn variant_local_opinion_wins() -> Result<()> {
 
     // The local radius=1 should win over variant radius=2.
     let prop = sdf::Path::new("/World/Sphere")?.append_property("radius")?;
-    let value = stage.attribute(&prop).get::<f64>()?;
+    let value = stage.attribute(&prop)?.get::<f64>()?;
     assert_eq!(value, Some(1.0), "local opinion (1) should win over variant (2)");
 
     Ok(())
@@ -6308,7 +6314,7 @@ fn specialize_local_opinion_wins() -> Result<()> {
     let stage = Stage::open(&path)?;
 
     let prop = sdf::Path::new("/World/cubeScene/specializes")?.append_property("primvars:displayColor")?;
-    let value = stage.attribute(&prop).get::<sdf::Value>()?;
+    let value = stage.attribute(&prop)?.get::<sdf::Value>()?;
     assert!(value.is_some());
 
     // Local is yellow (0.8, 0.8, 0), source is red (0.8, 0, 0).
@@ -6324,7 +6330,7 @@ fn instanceable_true_parses_and_is_readable() -> Result<()> {
     let path = fixture_path("instanceable_metadata.usda");
     let stage = Stage::open(&path)?;
 
-    assert!(stage.prim("/Root/InstancePrototype").is_instanceable()?);
+    assert!(stage.prim("/Root/InstancePrototype")?.is_instanceable()?);
 
     Ok(())
 }
@@ -6335,7 +6341,7 @@ fn instanceable_false_parses_and_is_readable() -> Result<()> {
     let path = fixture_path("instanceable_metadata.usda");
     let stage = Stage::open(&path)?;
 
-    assert!(!stage.prim("/Root/NotInstanceable").is_instanceable()?);
+    assert!(!stage.prim("/Root/NotInstanceable")?.is_instanceable()?);
 
     Ok(())
 }
@@ -6346,7 +6352,7 @@ fn instanceable_absent_defaults_false() -> Result<()> {
     let path = fixture_path("instanceable_metadata.usda");
     let stage = Stage::open(&path)?;
 
-    assert!(!stage.prim("/Root").is_instanceable()?);
+    assert!(!stage.prim("/Root")?.is_instanceable()?);
 
     Ok(())
 }
@@ -6364,7 +6370,7 @@ fn variant_fallback_selects_preferred() -> Result<()> {
     // /NoSelection has no authored selection. With fallback "simple",
     // the complexity field should be 0.5 (not 1.0 from "full").
     let prop = sdf::Path::new("/NoSelection")?.append_property("complexity")?;
-    let value = stage.attribute(&prop).get::<f64>()?;
+    let value = stage.attribute(&prop)?.get::<f64>()?;
     assert_eq!(value, Some(0.5), "fallback 'simple' should give complexity=0.5");
 
     Ok(())
@@ -6381,7 +6387,7 @@ fn variant_fallback_does_not_override_authored() -> Result<()> {
     // /Root has authored selection "full". Even with fallback "none",
     // the authored selection should win.
     let prop = sdf::Path::new("/Root")?.append_property("complexity")?;
-    let value = stage.attribute(&prop).get::<f64>()?;
+    let value = stage.attribute(&prop)?.get::<f64>()?;
     assert_eq!(value, Some(1.0), "authored 'full' should win over fallback 'none'");
 
     Ok(())
@@ -6407,7 +6413,7 @@ fn inherit_child_exists_without_local_override() -> Result<()> {
     // The inherited property should be accessible.
     assert!(
         stage
-            .prim("/Instance/Child")
+            .prim("/Instance/Child")?
             .property_names()?
             .iter()
             .any(|n| n.as_str() == "name"),
@@ -6440,7 +6446,7 @@ fn inherit_nested_child_propagation() -> Result<()> {
 
     assert!(
         stage
-            .prim("/Prim/A/B")
+            .prim("/Prim/A/B")?
             .property_names()?
             .iter()
             .any(|n| n.as_str() == "val"),
@@ -6466,7 +6472,7 @@ fn inherit_chain_child_propagation() -> Result<()> {
 
     assert!(
         stage
-            .prim("/Leaf/Deep")
+            .prim("/Leaf/Deep")?
             .property_names()?
             .iter()
             .any(|n| n.as_str() == "x"),
@@ -6492,7 +6498,7 @@ fn session_layer_opinion_wins() -> Result<()> {
     );
 
     let prop = sdf::Path::new("/World")?.append_property("radius")?;
-    let value = stage.attribute(&prop).get::<f64>()?;
+    let value = stage.attribute(&prop)?.get::<f64>()?;
     assert_eq!(value, Some(99.0), "session layer opinion should win");
 
     Ok(())
@@ -6504,7 +6510,7 @@ fn session_layer_adds_properties() -> Result<()> {
     let stage = open_with_session()?;
 
     let prop = sdf::Path::new("/World")?.append_property("visibility")?;
-    let value = stage.attribute(&prop).get::<String>()?;
+    let value = stage.attribute(&prop)?.get::<String>()?;
     assert_eq!(value, Some("hidden".to_string()));
 
     Ok(())
@@ -6517,7 +6523,7 @@ fn session_layer_preserves_root_opinions() -> Result<()> {
     let stage = open_with_session()?;
 
     let prop = sdf::Path::new("/World")?.append_property("name")?;
-    let value = stage.attribute(&prop).get::<String>()?;
+    let value = stage.attribute(&prop)?.get::<String>()?;
     assert_eq!(value, Some("root".to_string()));
 
     Ok(())
@@ -6526,7 +6532,7 @@ fn session_layer_preserves_root_opinions() -> Result<()> {
 #[test]
 fn mask_traverse() -> Result<()> {
     let stage = Stage::builder()
-        .mask(StagePopulationMask::new(["/World/ActiveParent/Child"]))
+        .mask(StagePopulationMask::new(["/World/ActiveParent/Child"])?)
         .open("fixtures/stage_queries.usda")?;
 
     assert_eq!(
@@ -6536,10 +6542,10 @@ fn mask_traverse() -> Result<()> {
     assert_eq!(child_names(&stage, "/World")?, vec!["ActiveParent"]);
     assert_eq!(child_names(&stage, "/World/ActiveParent")?, vec!["Child"]);
 
-    assert!(stage.prim("/World").is_valid()?);
-    assert!(stage.prim("/World/ActiveParent/Child").is_valid()?);
-    assert!(!stage.prim("/World/Group").is_valid()?);
-    assert_eq!(stage.prim("/World/Group").kind()?, None);
+    assert!(stage.prim("/World")?.is_valid()?);
+    assert!(stage.prim("/World/ActiveParent/Child")?.is_valid()?);
+    assert!(!stage.prim("/World/Group")?.is_valid()?);
+    assert_eq!(stage.prim("/World/Group")?.kind()?, None);
 
     let mut prims = Vec::new();
     stage.traverse(PrimPredicate::ALL, |p| prims.push(p.as_str().to_string()))?;
@@ -6554,7 +6560,7 @@ fn mask_traverse() -> Result<()> {
 fn mask_skips_dependency() -> Result<()> {
     let path = composition_path("references/reference_invalid.usda");
     let stage = Stage::builder()
-        .mask(StagePopulationMask::new(["/World/cube"]))
+        .mask(StagePopulationMask::new(["/World/cube"])?)
         .open(&path)?;
 
     assert_eq!(
@@ -6562,7 +6568,7 @@ fn mask_skips_dependency() -> Result<()> {
         ["World"]
     );
     assert_eq!(child_names(&stage, "/World")?, vec!["cube"]);
-    assert!(!stage.prim("/World/invalid_reference").is_valid()?);
+    assert!(!stage.prim("/World/invalid_reference")?.is_valid()?);
     Ok(())
 }
 
@@ -6589,12 +6595,12 @@ fn create_attribute() -> Result<()> {
     stage.define_prim("/Sphere")?.set_type_name("Sphere")?;
     stage.create_attribute("/Sphere.radius", "double")?;
 
-    let attr = stage.attribute("/Sphere.radius");
+    let attr = stage.attribute("/Sphere.radius")?;
     assert_eq!(attr.type_name()?.as_deref(), Some("double"));
     assert!(attr.is_custom()?, "generic attributes are authored custom");
     // The property composes as an attribute (not a relationship).
     let radius = sdf::Path::new("/Sphere.radius")?;
-    let attrs = stage.prim("/Sphere").attributes()?;
+    let attrs = stage.prim("/Sphere")?.attributes()?;
     assert!(attrs.iter().any(|a| a.path() == &radius));
     Ok(())
 }
@@ -6610,7 +6616,7 @@ fn create_relationship() -> Result<()> {
     assert!(rel.is_custom()?, "generic relationships are authored custom");
     // The property composes as a relationship (not an attribute).
     let binding = sdf::Path::new("/Mesh.material:binding")?;
-    let rels = stage.prim("/Mesh").relationships()?;
+    let rels = stage.prim("/Mesh")?.relationships()?;
     assert!(rels.iter().any(|r| r.path() == &binding));
     Ok(())
 }
@@ -6642,7 +6648,7 @@ fn in_memory_session_layer() -> Result<()> {
     assert_eq!(stage.layer_count(), 2);
     assert_eq!(stage.edit_target().layer_identifier(), stage.root_layer().identifier());
     stage.define_prim("/World")?.set_type_name("Xform")?;
-    assert!(stage.prim("/World").is_defined()?);
+    assert!(stage.prim("/World")?.is_defined()?);
     Ok(())
 }
 
@@ -6692,11 +6698,14 @@ fn variant_edit_invalidates_stripped_path() -> Result<()> {
     stage.define_prim("/Prim")?;
 
     // Cache a composed miss at the scene path.
-    assert!(!stage.prim("/Prim/child").is_valid()?);
+    assert!(!stage.prim("/Prim/child")?.is_valid()?);
     assert!(stage.is_indexed(&sdf::path("/Prim/child")?));
 
     // Author the child inside the variant: `/Prim/child` -> `/Prim{set=sel}child`.
-    stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+    stage.set_edit_target(EditTarget::for_local_direct_variant(
+        root,
+        sdf::path("/Prim{set=sel}")?,
+    )?)?;
     stage.define_prim("/Prim/child")?;
 
     // The stripped composed key must be dropped so the next query rebuilds.
@@ -6742,7 +6751,7 @@ def "Model"
     let stage = Stage::open(&root)?;
     assert!(
         !stage
-            .prim("/Model")
+            .prim("/Model")?
             .property_names()?
             .iter()
             .any(|n| n.as_str() == "ghost"),
@@ -6750,7 +6759,7 @@ def "Model"
     );
     assert_eq!(
         stage
-            .attribute("/Model.ghost")
+            .attribute("/Model.ghost")?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         None
     );
@@ -6817,7 +6826,10 @@ fn listener_info_under_variant_target() -> Result<()> {
     let stage = in_memory_stage()?;
     let root = stage.edit_target().layer_identifier().to_string();
     stage.define_prim("/Prim")?;
-    stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+    stage.set_edit_target(EditTarget::for_local_direct_variant(
+        root,
+        sdf::path("/Prim{set=sel}")?,
+    )?)?;
     // Create the attribute inside the variant before installing the listener, so
     // the listener only observes the info-only `set` below.
     let attr = stage.create_attribute("/Prim.size", "double")?;
@@ -6852,7 +6864,10 @@ fn listener_resync_under_variant_target() -> Result<()> {
     let stage = in_memory_stage()?;
     let root = stage.edit_target().layer_identifier().to_string();
     stage.define_prim("/Prim")?;
-    stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+    stage.set_edit_target(EditTarget::for_local_direct_variant(
+        root,
+        sdf::path("/Prim{set=sel}")?,
+    )?)?;
 
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let _token = {
@@ -7015,7 +7030,7 @@ fn layer_sink_veto_rolls_back() -> Result<()> {
         });
     let result = stage.define_prim("/World");
     assert!(matches!(result, Err(StageAuthoringError::Rejected(_))));
-    assert!(!stage.prim("/World").is_valid()?, "the rejected edit rolled back");
+    assert!(!stage.prim("/World")?.is_valid()?, "the rejected edit rolled back");
     Ok(())
 }
 
@@ -7031,13 +7046,13 @@ fn namespace_edit_fires_sink() -> Result<()> {
         stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| after.set(after.get() + 1));
     }
     let mut editor = usd::NamespaceEditor::new(&stage);
-    editor.delete_prim("/A/B");
+    editor.delete_prim("/A/B").unwrap();
     // A dry run proves the batch applies but commits nothing — no sink fires.
     editor.can_apply().unwrap();
     assert_eq!(after.get(), 0, "a dry run does not reach after_commit");
     editor.apply()?;
     assert_eq!(after.get(), 1, "the namespace edit delivered after_commit once");
-    assert!(!stage.prim("/A/B").is_valid()?);
+    assert!(!stage.prim("/A/B")?.is_valid()?);
     Ok(())
 }
 
@@ -7056,12 +7071,12 @@ fn namespace_edit_veto_atomic() -> Result<()> {
             ..Default::default()
         });
     let mut editor = usd::NamespaceEditor::new(&stage);
-    editor.delete_prim("/A/B");
+    editor.delete_prim("/A/B").unwrap();
     assert!(matches!(
         editor.apply(),
         Err(usd::NamespaceEditError::Stage(StageAuthoringError::Rejected(_)))
     ));
-    assert!(stage.prim("/A/B").is_valid()?, "the vetoed batch left the prim intact");
+    assert!(stage.prim("/A/B")?.is_valid()?, "the vetoed batch left the prim intact");
     Ok(())
 }
 
@@ -7132,7 +7147,7 @@ fn listener_reentrant_author() -> Result<()> {
         })
     };
     stage.define_prim("/World")?;
-    assert!(stage.prim("/Nested").is_valid()?);
+    assert!(stage.prim("/Nested")?.is_valid()?);
     Ok(())
 }
 
@@ -7157,7 +7172,7 @@ fn empty_edit_no_fire() -> Result<()> {
 fn remove_prim_drops_spec() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/A/B")?;
-    assert!(stage.prim("/A/B").is_valid()?);
+    assert!(stage.prim("/A/B")?.is_valid()?);
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let _token = {
         let resynced = resynced.clone();
@@ -7166,7 +7181,7 @@ fn remove_prim_drops_spec() -> Result<()> {
         })
     };
     assert!(stage.remove_prim("/A/B")?);
-    assert!(!stage.prim("/A/B").is_valid()?);
+    assert!(!stage.prim("/A/B")?.is_valid()?);
     assert!(!child_names(&stage, "/A")?.contains(&"B".to_string()));
     assert!(resynced.borrow().contains(&sdf::path("/A/B")?));
     // Nothing left to remove.
@@ -7181,11 +7196,11 @@ fn remove_property_drops_spec() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/A")?;
     stage.create_attribute("/A.size", "double")?;
-    assert!(stage.prim("/A").property_names()?.iter().any(|t| t == "size"));
+    assert!(stage.prim("/A")?.property_names()?.iter().any(|t| t == "size"));
 
     assert!(stage.remove_property("/A.size")?);
-    assert!(!stage.prim("/A").property_names()?.iter().any(|t| t == "size"));
-    assert!(stage.prim("/A").is_valid()?);
+    assert!(!stage.prim("/A")?.property_names()?.iter().any(|t| t == "size"));
+    assert!(stage.prim("/A")?.is_valid()?);
     assert!(!stage.remove_property("/A.size")?);
     Ok(())
 }
@@ -7208,7 +7223,7 @@ fn remove_rejects_wrong_path_kind() -> Result<()> {
     ));
 
     // The rejected calls left both specs intact.
-    assert!(stage.prim("/A").is_valid()?);
-    assert!(stage.prim("/A").property_names()?.iter().any(|t| t == "size"));
+    assert!(stage.prim("/A")?.is_valid()?);
+    assert!(stage.prim("/A")?.property_names()?.iter().any(|t| t == "size"));
     Ok(())
 }

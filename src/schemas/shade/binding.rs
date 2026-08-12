@@ -18,7 +18,7 @@ use std::collections::hash_map::Entry;
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value};
+use crate::sdf::{self, Path, Value};
 use crate::usd::{Collection, MembershipQuery, Prim, Relationship, Stage, is_collection_api_path};
 
 use super::BindingStrength;
@@ -38,7 +38,7 @@ pub struct MaterialBindingAPI(Prim);
 impl MaterialBindingAPI {
     /// Apply `MaterialBindingAPI` to the prim at `path`
     /// (C++ `UsdShadeMaterialBindingAPI::Apply`). The prim is opened as `over`.
-    pub fn apply(stage: &Stage, path: impl Into<Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.override_prim(path)?.add_applied_schema(API_MATERIAL_BINDING)?,
         ))
@@ -46,13 +46,13 @@ impl MaterialBindingAPI {
 
     /// Wrap `path` as a `MaterialBindingAPI` if it carries `MaterialBindingAPI`
     /// in its `apiSchemas` (C++ `UsdShadeMaterialBindingAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[API_MATERIAL_BINDING]).map(|o| o.map(Self))
     }
 
     /// Author an all-purpose **direct** binding (`material:binding`) targeting
     /// `material` (C++ `UsdShadeMaterialBindingAPI::Bind`).
-    pub fn bind(&self, material: impl Into<Path>) -> Result<&Self> {
+    pub fn bind(&self, material: impl sdf::IntoPath) -> Result<&Self> {
         self.bind_for_purpose(PURPOSE_ALL, material, BindingStrength::WeakerThanDescendants)
     }
 
@@ -64,12 +64,12 @@ impl MaterialBindingAPI {
     pub fn bind_for_purpose(
         &self,
         purpose: &str,
-        material: impl Into<Path>,
+        material: impl sdf::IntoPath,
         strength: BindingStrength,
     ) -> Result<&Self> {
         let rel = self
             .0
-            .author_relationship_targets(&direct_binding_rel(purpose), [material.into()])?;
+            .author_relationship_targets(&direct_binding_rel(purpose), [sdf::try_into_path(material)?])?;
         apply_binding_strength(self.stage(), rel, strength)?;
         Ok(self)
     }
@@ -81,14 +81,14 @@ impl MaterialBindingAPI {
     pub fn bind_collection(
         &self,
         binding_name: &str,
-        collection: impl Into<Path>,
-        material: impl Into<Path>,
+        collection: impl sdf::IntoPath,
+        material: impl sdf::IntoPath,
         purpose: &str,
         strength: BindingStrength,
     ) -> Result<&Self> {
         let rel = self.0.author_relationship_targets(
             &collection_binding_rel(purpose, binding_name),
-            [collection.into(), material.into()],
+            [sdf::try_into_path(collection)?, sdf::try_into_path(material)?],
         )?;
         apply_binding_strength(self.stage(), rel, strength)?;
         Ok(self)
@@ -109,7 +109,7 @@ impl MaterialBindingAPI {
         let rel = self
             .path()
             .append_property(collection_binding_rel(purpose, binding_name))?;
-        let targets = self.stage().relationship(rel).targets()?;
+        let targets = self.stage().relationship(rel)?.targets()?;
         Ok(match targets.as_slice() {
             [collection, material] => Some((collection.clone(), material.clone())),
             _ => None,
@@ -195,7 +195,7 @@ fn composed_strength(stage: &Stage, rel: &Path) -> Result<BindingStrength> {
 /// The directly-bound Material for `purpose` on the prim at `prim`.
 fn direct_binding(stage: &Stage, prim: &Path, purpose: &str) -> Result<Option<Path>> {
     let rel = prim.append_property(direct_binding_rel(purpose))?;
-    Ok(stage.relationship(rel).targets()?.into_iter().next())
+    Ok(stage.relationship(rel)?.targets()?.into_iter().next())
 }
 
 /// The `bindMaterialAs` strength on the direct binding for `purpose`.
@@ -254,7 +254,7 @@ fn winning_binding_at(
 fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<(Path, Path, BindingStrength)>> {
     let prefix = format!("{REL_MATERIAL_BINDING_COLLECTION}:");
     let mut out = Vec::new();
-    for name in stage.prim(p.clone()).authored_property_names()? {
+    for name in stage.prim(p.clone())?.authored_property_names()? {
         let Some(rest) = name.strip_prefix(&prefix) else {
             continue;
         };
@@ -270,7 +270,7 @@ fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<
             continue;
         }
         let rel = p.append_property(&name)?;
-        if let [collection, material] = stage.relationship(rel.clone()).targets()?.as_slice() {
+        if let [collection, material] = stage.relationship(rel.clone())?.targets()?.as_slice() {
             out.push((collection.clone(), material.clone(), composed_strength(stage, &rel)?));
         }
     }
@@ -290,7 +290,7 @@ fn is_collection_member(
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => {
             let query = match is_collection_api_path(collection_path) {
-                Some((prim, name)) => Some(Collection::new(prim, name).compute_membership_query(stage)?),
+                Some((prim, name)) => Some(Collection::from_parts(prim, name).compute_membership_query(stage)?),
                 None => None,
             };
             e.insert(query)
@@ -392,7 +392,7 @@ mod tests {
     }
 
     fn bound(stage: &Stage, prim: &str, purpose: &str) -> Option<String> {
-        MaterialBindingAPI(stage.prim(sdf::path(prim).unwrap()))
+        MaterialBindingAPI(stage.prim(prim).unwrap())
             .compute_bound_material(purpose)
             .unwrap()
             .map(|p| p.as_str().to_string())

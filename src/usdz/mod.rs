@@ -123,7 +123,7 @@ mod tests {
         let stage = Stage::open(path.to_str().unwrap())?;
         assert_eq!(
             stage
-                .attribute("/World.probe")
+                .attribute("/World.probe")?
                 .get_at::<sdf::Value>(TimeCode::new(0.0))?,
             Some(sdf::Value::Int(42)),
             "reference to a layer inside the package should compose"

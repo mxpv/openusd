@@ -15,7 +15,7 @@
 
 use anyhow::Result;
 
-use crate::sdf::{FieldKey, Path};
+use crate::sdf::{self, FieldKey, Path};
 use crate::tf;
 use crate::usd::{Prim, Stage, VersionFilter};
 
@@ -34,8 +34,12 @@ pub(crate) fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Optio
 /// on its authored `typeName` alone, which is what resolves the views while
 /// [`SchemaRegistryBuilder::compiled_in`](crate::usd::SchemaRegistryBuilder::compiled_in)
 /// registers no schema data.
-pub(crate) fn get_typed(stage: &Stage, path: impl Into<Path>, type_name: impl Into<tf::Token>) -> Result<Option<Prim>> {
-    let prim = stage.prim(path);
+pub(crate) fn get_typed(
+    stage: &Stage,
+    path: impl sdf::IntoPath,
+    type_name: impl Into<tf::Token>,
+) -> Result<Option<Prim>> {
+    let prim = stage.prim(path)?;
     Ok(is_typed(&prim, type_name)?.then_some(prim))
 }
 
@@ -74,18 +78,18 @@ pub(crate) fn is_any_typed(prim: &Prim, type_names: &[&str]) -> Result<bool> {
 /// names.
 pub(crate) fn get_typed_in_family(
     stage: &Stage,
-    path: impl Into<Path>,
+    path: impl sdf::IntoPath,
     family: impl Into<tf::Token>,
 ) -> Result<Option<Prim>> {
-    let prim = stage.prim(path);
+    let prim = stage.prim(path)?;
     Ok(prim.is_in_family(family, VersionFilter::All)?.then_some(prim))
 }
 
 /// Wrap `path` as an applied-API view's `Prim` if any of `apis` appears in the
 /// prim's composed `apiSchemas` — the gate every single-apply API view's `get`
 /// performs.
-pub(crate) fn get_with_api(stage: &Stage, path: impl Into<Path>, apis: &[impl AsRef<str>]) -> Result<Option<Prim>> {
-    let prim = stage.prim(path);
+pub(crate) fn get_with_api(stage: &Stage, path: impl sdf::IntoPath, apis: &[impl AsRef<str>]) -> Result<Option<Prim>> {
+    let prim = stage.prim(path)?;
     let applied = prim.api_schemas()?;
     if apis.iter().any(|a| applied.iter().any(|s| s.as_str() == a.as_ref())) {
         Ok(Some(prim))

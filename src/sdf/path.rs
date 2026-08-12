@@ -1,19 +1,30 @@
-use std::{fmt, result, str::FromStr};
+use std::{convert::Infallible, fmt, str::FromStr};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{bail, ensure};
 
 use crate::tf;
 
+/// Parses `str` into a validated [`Path`] — the terse form of [`Path::new`].
 #[inline]
-pub fn path(str: impl AsRef<str>) -> Result<Path> {
+pub fn path(str: impl AsRef<str>) -> Result<Path, PathParseError> {
     let path = str.as_ref();
     Path::new(path)
 }
 
-/// A character that may appear in a prim name (an alphanumeric or `_`). Used to
-/// detect where a prim child attaches directly to a variant selection.
-fn is_prim_name_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+/// Bound alias for path parameters: any argument convertible into a [`Path`]
+/// via [`TryInto`] whose failure converts into a [`PathParseError`].
+/// Blanket-implemented, so [`Path`], `&Path`, `&str`, and `String` all
+/// satisfy it; a third-party type opts in by implementing `TryFrom<T> for
+/// Path`.
+pub trait IntoPath: TryInto<Path, Error: Into<PathParseError>> {}
+
+impl<T: TryInto<Path, Error: Into<PathParseError>>> IntoPath for T {}
+
+/// Converts a path argument into an owned [`Path`], surfacing the parse
+/// error. The single conversion point the crate's generic
+/// [`IntoPath`] parameters funnel through.
+pub fn try_into_path(path: impl IntoPath) -> Result<Path, PathParseError> {
+    path.try_into().map_err(Into::into)
 }
 
 /// `SdfPath` implementation.
@@ -27,6 +38,10 @@ fn is_prim_name_char(c: char) -> bool {
 ///   begin with a colon.
 /// - Brackets ("[" and "]") are used to indicate relationship target paths for
 ///   relational attributes.
+///
+/// Parsing via [`Path::new`] (or [`FromStr`]) validates this grammar and
+/// rejects malformed text with a [`PathParseError`]. The empty path is not
+/// parseable; construct it with [`Path::default`].
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Path {
     path: String,
@@ -45,16 +60,51 @@ impl serde::Serialize for Path {
     }
 }
 
-impl FromStr for Path {
-    type Err = anyhow::Error;
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Path {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        // The empty path is a valid `Path` value (e.g. a `Reference` with no
+        // prim path serializes to `""`), so round-tripping accepts it.
+        if text.is_empty() {
+            return Ok(Path::default());
+        }
+        Path::try_from(text).map_err(serde::de::Error::custom)
+    }
+}
 
-    fn from_str(s: &str) -> result::Result<Path, Self::Err> {
+/// Error produced when a string fails to parse as a [`Path`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid path {input:?}: {reason} (at byte {offset})")]
+pub struct PathParseError {
+    /// The offending path string.
+    pub input: String,
+    /// Byte offset in [`input`](Self::input) where the problem sits.
+    pub offset: usize,
+    /// What the string violates.
+    pub reason: &'static str,
+}
+
+impl From<Infallible> for PathParseError {
+    fn from(error: Infallible) -> Self {
+        match error {}
+    }
+}
+
+impl FromStr for Path {
+    type Err = PathParseError;
+
+    fn from_str(s: &str) -> Result<Path, Self::Err> {
+        Path::validate(s)?;
         Ok(Path { path: s.to_string() })
     }
 }
 
 impl Path {
-    pub fn new(path: &str) -> Result<Self> {
+    /// Parses `path`, validating it against the path grammar described on
+    /// the type. The empty path is not parseable; construct it with
+    /// [`Path::default`].
+    pub fn new(path: &str) -> Result<Self, PathParseError> {
         Path::from_str(path)
     }
 
@@ -63,7 +113,16 @@ impl Path {
         Path::from_str_unchecked("/")
     }
 
-    fn from_str_unchecked(path: &str) -> Path {
+    /// Wraps `path` without validating it — the fast path for strings a
+    /// derivation method recombined from already-validated paths. External
+    /// input must go through [`Path::new`].
+    pub(crate) fn from_str_unchecked(path: &str) -> Path {
+        // Derivations of the empty path (e.g. `prim_path()` of `.bar`)
+        // legitimately produce `""`, which `validate` rejects.
+        debug_assert!(
+            path.is_empty() || Path::validate(path).is_ok(),
+            "from_str_unchecked on invalid path {path:?}"
+        );
         Path { path: path.to_string() }
     }
 
@@ -91,13 +150,29 @@ impl Path {
         self.path.is_empty()
     }
 
-    pub fn append_property(&self, property: impl Into<tf::Token>) -> Result<Path> {
+    pub fn append_property(&self, property: impl Into<tf::Token>) -> Result<Path, PathParseError> {
         let property = property.into();
         let property = property.as_str();
-        // TODO: Validate property name more carefully here.
-        ensure!(!property.is_empty(), "Property name cannot be empty");
-        ensure!(!self.is_property_path(), "Cannot append property to property path");
-        ensure!(property != ".", "Property name cannot be '.'");
+        let fail = |offset, reason| PathParseError {
+            input: format!("{}.{property}", self.path),
+            offset,
+            reason,
+        };
+        if self.is_property_path() {
+            return Err(fail(0, "cannot append a property to a property path"));
+        }
+        // The pseudo-root, the empty path, and the `.`/`..` relative anchors
+        // cannot own properties; appending to them would build an unparseable
+        // path like `/.foo`.
+        if self.is_empty() || self.is_abs_root() || self.path == "." || self.path.ends_with("..") {
+            return Err(fail(0, "path cannot own properties"));
+        }
+        if !Path::is_valid_namespace_identifier(property) {
+            return Err(fail(
+                self.path.len() + 1,
+                "property name is not a valid namespaced identifier",
+            ));
+        }
 
         let mut new_path = self.path.clone();
         new_path.push('.');
@@ -106,8 +181,8 @@ impl Path {
         Ok(Path { path: new_path })
     }
 
-    pub fn append_path(&self, path: impl Into<Path>) -> Result<Path> {
-        let append: Path = path.into();
+    pub fn append_path(&self, path: impl TryInto<Path, Error: Into<PathParseError>>) -> anyhow::Result<Path> {
+        let append: Path = try_into_path(path)?;
 
         if self.is_abs() && append.is_abs() {
             bail!("Cannot append absolute path to absolute path");
@@ -118,6 +193,21 @@ impl Path {
         if append.as_str() == "." {
             return Ok(self.clone());
         }
+
+        // The reflexive base is the identity anchor: appending to `.` yields
+        // the argument itself (C++ `SdfPath::AppendPath` on the reflexive
+        // relative path).
+        if self.path == "." {
+            return Ok(append);
+        }
+
+        // A `.`-anchored argument (a `..` step or a property-relative `.attr`)
+        // cannot attach under a prim namespace; the concatenation would not be
+        // a valid path.
+        ensure!(
+            !append.as_str().starts_with('.'),
+            "Cannot append `.`-anchored path {append} under {self}"
+        );
 
         // If base is slash only.
         // "/" + "foo/bar" => "/foo/bar"
@@ -141,12 +231,13 @@ impl Path {
             None => return false,
         };
 
-        // Make sure the dot is preceded by a prim name character (not a variant
-        // selection closing brace or another dot) and followed by a valid
-        // property name. Property names may contain alphanumerics, underscores,
-        // and colons (for namespaced properties like `primvars:displayColor`).
+        // The final dot must be followed by a valid property name: identifier
+        // characters plus `:` for namespaced properties like
+        // `primvars:displayColor` — the same alphabet the path validator
+        // accepts. A tail carrying structural characters (`}`, `]`) belongs to
+        // a variant selection or target path, not a property.
         let tail = &self.path[pos + 1..];
-        !tail.is_empty() && tail.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+        !tail.is_empty() && tail.chars().all(|c| c == ':' || is_identifier_cont(c))
     }
 
     /// Returns `true` if this path's final component is a variant selection,
@@ -207,7 +298,7 @@ impl Path {
             // variant selection. `is_property_path` separates `Foo.bar` from a
             // relative `..`, which has no property tail and is its own prim.
             if self.is_property_path()
-                && let Some(dot) = self.path.find('.')
+                && let Some(dot) = find_component_dot(&self.path)
             {
                 return Path::from_str_unchecked(&self.path[..dot]);
             }
@@ -234,7 +325,7 @@ impl Path {
             return Path::from_str_unchecked(&self.path[..sz]);
         }
 
-        let first_dot = match after.find('.') {
+        let first_dot = match find_component_dot(after) {
             Some(dot) => dot,
             // No dots found, so we have a prim path
             None => return self.clone(),
@@ -387,6 +478,25 @@ impl Path {
             && let Some(open) = self.path.rfind('{')
         {
             return Some(Path::from_str_unchecked(&self.path[..open]));
+        }
+        // A relationship/connection target path (`/A.rel[/T]`): its parent is
+        // the property owning the bracket, as in C++ `SdfPath::GetParentPath`.
+        if self.path.ends_with(']') {
+            let mut nesting = 0usize;
+            for (i, byte) in self.path.bytes().enumerate().rev() {
+                match byte {
+                    b']' => nesting += 1,
+                    b'[' => {
+                        nesting -= 1;
+                        if nesting == 0 {
+                            return Some(Path::from_str_unchecked(&self.path[..i]));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // No `[` balances the trailing `]`; the path is malformed.
+            return None;
         }
         if self.is_property_path() {
             return Some(self.prim_path());
@@ -549,7 +659,7 @@ impl Path {
                     // variant (`/A{v=s}B`); reintroduce the `/` separator when
                     // the stripped variant is followed by a prim name. A `{`
                     // (next variant), `.` (property), or end needs no separator.
-                    if rest.starts_with(is_prim_name_char) {
+                    if rest.starts_with(is_identifier_cont) {
                         out.push('/');
                     }
                     chars = rest.char_indices();
@@ -652,7 +762,7 @@ impl Path {
         // `.` or nested variant `{` attaches directly in any namespace.
         let (body, is_prim_child) = if let Some(rest) = suffix.strip_prefix('/') {
             (rest, true)
-        } else if old_prefix.is_prim_variant_selection_path() && suffix.starts_with(is_prim_name_char) {
+        } else if old_prefix.is_prim_variant_selection_path() && suffix.starts_with(is_identifier_cont) {
             (suffix, true)
         } else {
             (suffix, false)
@@ -670,17 +780,69 @@ impl Path {
 
     /// Appends a variant selection to a prim path, producing a path like
     /// `/MyPrim{variantSet=selection}`.
-    pub fn append_variant_selection(&self, set: impl AsRef<str>, selection: impl AsRef<str>) -> Path {
-        Path::from_str_unchecked(&format!("{}{{{}={}}}", self.path, set.as_ref(), selection.as_ref()))
+    ///
+    /// The set name must be non-empty and both names must use the variant
+    /// alphabet ([`is_valid_variant_identifier`](Self::is_valid_variant_identifier),
+    /// where an empty selection names the bare variant set); the base must be
+    /// a prim or variant-selection path.
+    pub fn append_variant_selection(
+        &self,
+        set: impl AsRef<str>,
+        selection: impl AsRef<str>,
+    ) -> Result<Path, PathParseError> {
+        let set = set.as_ref();
+        let selection = selection.as_ref();
+        let fail = |input: &str, reason| PathParseError {
+            input: input.to_string(),
+            offset: 0,
+            reason,
+        };
+        if set.is_empty() || !Path::is_valid_variant_identifier(set) {
+            return Err(fail(set, "invalid variant set name"));
+        }
+        if !Path::is_valid_variant_identifier(selection) {
+            return Err(fail(selection, "invalid variant selection name"));
+        }
+        // Only a prim or variant-selection path can carry a `{set=sel}`
+        // segment; the pseudo-root, properties, targets, and the `.`/`..`
+        // relative anchors cannot.
+        if self.is_empty()
+            || self.is_abs_root()
+            || self.is_property_path()
+            || self.path == "."
+            || self.path.ends_with("..")
+            || self.path.ends_with(']')
+        {
+            return Err(fail(&self.path, "path cannot carry a variant selection"));
+        }
+        Ok(Path::from_str_unchecked(&format!("{}{{{set}={selection}}}", self.path)))
     }
 
     /// Appends a raw variant segment (e.g. `{set=sel}`) directly to this path.
     ///
-    /// Unlike [`Self::append_path`], no `/` separator is inserted — variant segments
-    /// attach directly to the prim path to produce canonical forms like
-    /// `/Prim{set=sel}`.
-    pub fn append_variant_segment(&self, segment: &str) -> Path {
-        Path::from_str_unchecked(&format!("{}{segment}", self.path))
+    /// Unlike [`Self::append_path`], no `/` separator is inserted — variant
+    /// segments attach directly to the prim path to produce canonical forms
+    /// like `/Prim{set=sel}`. The segment text is external input (a usdc
+    /// path-table element token), so it is validated.
+    pub(crate) fn append_variant_segment(&self, segment: &str) -> Result<Path, PathParseError> {
+        let fail = |(offset, reason)| PathParseError {
+            input: segment.to_string(),
+            offset,
+            reason,
+        };
+        let inner = segment
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))
+            .ok_or_else(|| fail((0, "variant segment must be `{set=selection}`")))?;
+        let (set, selection) = inner
+            .split_once('=')
+            .ok_or_else(|| fail((offset_in(segment, inner), "expected `=` in variant segment")))?;
+        if set.is_empty() {
+            return Err(fail((offset_in(segment, set), "empty variant set name")));
+        }
+        validate_variant_name(segment, set).map_err(fail)?;
+        validate_variant_name(segment, selection).map_err(fail)?;
+        Ok(Path::from_str_unchecked(&format!("{}{segment}", self.path)))
     }
 
     /// Resolve a relative path against this path as anchor.
@@ -688,7 +850,10 @@ impl Path {
     /// Absolute paths are returned as-is. Relative segments (`..`) walk up
     /// from the anchor's prim path.
     ///
-    /// Equivalent to C++ `SdfPath::MakeAbsolutePath`.
+    /// Equivalent to C++ `SdfPath::MakeAbsolutePath`. When the combination
+    /// is not a representable path (e.g. a property-relative step anchored at
+    /// the pseudo-root, `"/"` + `".y"`), the empty path is returned —
+    /// C++'s empty-path failure mode.
     ///
     /// ```text
     /// "/A/B".make_absolute("../C")   -> "/A/C"
@@ -724,7 +889,11 @@ impl Path {
         } else {
             "/"
         };
-        Path::from_str_unchecked(&format!("{anchor}{sep}{rest}"))
+        let combined = format!("{anchor}{sep}{rest}");
+        if Path::validate(&combined).is_err() {
+            return Path::default();
+        }
+        Path::from_str_unchecked(&combined)
     }
 
     #[inline]
@@ -732,24 +901,41 @@ impl Path {
         &self.path
     }
 
-    /// Validate identifier
-    ///
-    /// Rules are:
-    /// - Must be 1 char len
-    /// - Must start with a letter or underscore
-    /// - Must contain only letters, underscores, and numbers.
+    /// Whether `name` is a valid prim or property identifier: non-empty,
+    /// opening with a letter or `_` and continuing with letters, digits, and
+    /// `_`. ASCII rules are strict; non-ASCII characters are accepted
+    /// whenever they are neither whitespace nor control characters, a
+    /// superset of the UTF-8 identifiers C++ OpenUSD allows.
     pub fn is_valid_identifier(name: &str) -> bool {
-        if name.is_empty() {
-            return false;
-        }
-
-        name.chars()
-            .enumerate()
-            .all(|(i, c)| c == '_' || if i == 0 { c.is_alphabetic() } else { c.is_alphanumeric() })
+        let mut chars = name.chars();
+        chars.next().is_some_and(is_identifier_start) && chars.all(is_identifier_cont)
     }
 
+    /// Whether every `:`- or `.`-separated segment of `name` is a valid
+    /// identifier — the shape of a namespaced property name.
     pub fn is_valid_namespace_identifier(name: &str) -> bool {
-        name.split(&[':', '.']).all(Self::is_valid_identifier)
+        name.split([':', '.']).all(Self::is_valid_identifier)
+    }
+
+    /// Whether `name` may serve as a variant set or selection name:
+    /// identifier characters plus `|`, `-`, and `.`, in any position. The
+    /// empty string is allowed — a variant *selection* may be empty
+    /// (`{set=}`); a variant set name must additionally be non-empty.
+    pub fn is_valid_variant_identifier(name: &str) -> bool {
+        name.chars().all(is_variant_char)
+    }
+
+    /// Checks `s` against the path grammar; `Ok` iff [`Path::new`] would
+    /// accept it. The grammar covers absolute and relative prim paths,
+    /// `{set=selection}` variant segments, leading `..` steps, property
+    /// tails with `:` namespaces and dotted chains, and bracketed `[…]`
+    /// target paths (validated recursively).
+    fn validate(s: &str) -> Result<(), PathParseError> {
+        validate_path(s, s, 0).map_err(|(offset, reason)| PathParseError {
+            input: s.to_string(),
+            offset,
+            reason,
+        })
     }
 }
 
@@ -860,27 +1046,248 @@ impl<'a> Iterator for PathComponents<'a> {
     }
 }
 
+/// Maximum `[…]` target-path nesting depth [`Path::validate`] accepts,
+/// guarding its recursion against pathological input.
+const MAX_TARGET_NESTING: u8 = 64;
+
+/// Whether `c` may open an identifier: `_`, an ASCII letter, or any
+/// non-ASCII character that is neither whitespace nor control. ASCII is
+/// strict; the non-ASCII rule is a superset of the UTF-8 identifiers C++
+/// OpenUSD allows, so no asset it reads is rejected here.
+fn is_identifier_start(c: char) -> bool {
+    c == '_' || c.is_ascii_alphabetic() || (!c.is_ascii() && !c.is_whitespace() && !c.is_control())
+}
+
+/// Whether `c` may continue an identifier: an identifier-start character or
+/// an ASCII digit.
+fn is_identifier_cont(c: char) -> bool {
+    c.is_ascii_digit() || is_identifier_start(c)
+}
+
+/// Whether `c` may appear in a variant set or selection name: identifier
+/// characters plus `|`, `-`, and `.` (C++ `SdfSchemaBase`'s variant
+/// identifier alphabet).
+fn is_variant_char(c: char) -> bool {
+    matches!(c, '|' | '-' | '.') || is_identifier_cont(c)
+}
+
+/// Byte position of the first `.` in `segment` outside `{…}` variant
+/// selections and `[…]` target brackets — the dot introducing a property, as
+/// opposed to one embedded in a dotted variant name or a bracketed target
+/// path.
+fn find_component_dot(segment: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, byte) in segment.bytes().enumerate() {
+        match byte {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            b'.' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Byte offset of `part` within `full`, of which it must be a subslice.
+fn offset_in(full: &str, part: &str) -> usize {
+    part.as_ptr() as usize - full.as_ptr() as usize
+}
+
+/// Validates one path — the whole string or a bracketed `[…]` target span
+/// of it. Error offsets are relative to `full`.
+fn validate_path(full: &str, s: &str, depth: u8) -> Result<(), (usize, &'static str)> {
+    let base = offset_in(full, s);
+    if depth > MAX_TARGET_NESTING {
+        return Err((base, "target paths nested too deeply"));
+    }
+    if s.is_empty() {
+        return Err((base, "empty path"));
+    }
+    if s == "/" || s == "." {
+        return Ok(());
+    }
+
+    // Anchor: `/` for an absolute path, a `..(/..)*` run for a relative one.
+    // What remains opens with a prim chain or a property tail.
+    let abs = s.starts_with('/');
+    let mut rest = s;
+    if abs {
+        rest = &s[1..];
+    } else {
+        while let Some(after) = rest.strip_prefix("..") {
+            if after.is_empty() {
+                return Ok(());
+            }
+            let Some(after_slash) = after.strip_prefix('/') else {
+                return Err((offset_in(full, after), "expected `/` after `..`"));
+            };
+            if after_slash.is_empty() {
+                return Err((offset_in(full, after_slash), "trailing `/`"));
+            }
+            rest = after_slash;
+        }
+    }
+
+    // The prim chain, through the same iterator `Path::components` exposes;
+    // per-character identifier checks layer on its structural grammar.
+    let mut components = PathComponents {
+        rest,
+        expect_slash: false,
+        emitted: false,
+    };
+    for component in components.by_ref() {
+        match component {
+            PathComponent::Prim(name) => validate_identifier(full, name)?,
+            PathComponent::Variant { set, selection } => {
+                if set.is_empty() {
+                    return Err((offset_in(full, set), "empty variant set name"));
+                }
+                validate_variant_name(full, set)?;
+                validate_variant_name(full, selection)?;
+            }
+        }
+    }
+
+    let tail = components.remainder();
+    if abs && !components.emitted {
+        return Err((base + 1, "expected a prim name"));
+    }
+    if tail.is_empty() {
+        return Ok(());
+    }
+    match tail.as_bytes()[0] {
+        b'.' => validate_tail(full, tail, depth),
+        b'/' => Err((offset_in(full, tail), "stray `/`")),
+        b'{' => Err((offset_in(full, tail), "malformed or misplaced variant selection")),
+        _ => Err((offset_in(full, tail), "expected `.`")),
+    }
+}
+
+/// Validates a property tail — the `.name` / `[target]` items following the
+/// prim chain. `tail` starts with `.`; a `[` recurses into
+/// [`validate_path`] for the bracketed target.
+fn validate_tail(full: &str, tail: &str, depth: u8) -> Result<(), (usize, &'static str)> {
+    let mut rest = tail;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix('.') {
+            let end = after.find(['.', '[']).unwrap_or(after.len());
+            let name = &after[..end];
+            if name.is_empty() {
+                return Err((offset_in(full, after), "empty property name"));
+            }
+            validate_property_name(full, name)?;
+            rest = &after[end..];
+        } else if let Some(after) = rest.strip_prefix('[') {
+            let mut nesting = 1u32;
+            let mut close = None;
+            for (i, byte) in after.bytes().enumerate() {
+                match byte {
+                    b'[' => nesting += 1,
+                    b']' => {
+                        nesting -= 1;
+                        if nesting == 0 {
+                            close = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close) = close else {
+                return Err((offset_in(full, rest), "unterminated `[`"));
+            };
+            validate_path(full, &after[..close], depth + 1)?;
+            rest = &after[close + 1..];
+        } else {
+            return Err((offset_in(full, rest), "expected `.` or `[`"));
+        }
+    }
+    Ok(())
+}
+
+/// Validates one prim or property-namespace identifier segment.
+fn validate_identifier(full: &str, name: &str) -> Result<(), (usize, &'static str)> {
+    let mut chars = name.char_indices();
+    match chars.next() {
+        None => return Err((offset_in(full, name), "empty identifier")),
+        Some((_, c)) if !is_identifier_start(c) => {
+            return Err((offset_in(full, name), "invalid identifier start"));
+        }
+        _ => {}
+    }
+    for (i, c) in chars {
+        if !is_identifier_cont(c) {
+            return Err((offset_in(full, name) + i, "invalid character in identifier"));
+        }
+    }
+    Ok(())
+}
+
+/// Validates a property name: `:`-separated identifier segments, none
+/// empty.
+fn validate_property_name(full: &str, name: &str) -> Result<(), (usize, &'static str)> {
+    for segment in name.split(':') {
+        if segment.is_empty() {
+            return Err((offset_in(full, segment), "empty namespace segment in property name"));
+        }
+        validate_identifier(full, segment)?;
+    }
+    Ok(())
+}
+
+/// Validates a variant set or selection name (which may be empty).
+fn validate_variant_name(full: &str, name: &str) -> Result<(), (usize, &'static str)> {
+    for (i, c) in name.char_indices() {
+        if !is_variant_char(c) {
+            return Err((offset_in(full, name) + i, "invalid character in variant name"));
+        }
+    }
+    Ok(())
+}
+
 impl From<&Path> for Path {
     fn from(p: &Path) -> Self {
         p.clone()
     }
 }
 
-impl From<&str> for Path {
-    fn from(s: &str) -> Self {
-        Path { path: s.to_string() }
+impl TryFrom<&str> for Path {
+    type Error = PathParseError;
+
+    fn try_from(s: &str) -> Result<Path, PathParseError> {
+        Path::new(s)
     }
 }
 
-impl From<String> for Path {
-    fn from(value: String) -> Self {
-        Path { path: value }
+impl TryFrom<String> for Path {
+    type Error = PathParseError;
+
+    /// Validates and reuses `value`'s allocation.
+    fn try_from(value: String) -> Result<Path, PathParseError> {
+        Path::validate(&value)?;
+        Ok(Path { path: value })
+    }
+}
+
+impl TryFrom<&String> for Path {
+    type Error = PathParseError;
+
+    fn try_from(value: &String) -> Result<Path, PathParseError> {
+        Path::new(value)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+
     use super::*;
+
+    /// Builds a `Path` directly from `path`, skipping validation — for
+    /// exercising lenient read-side behavior on malformed input.
+    fn raw(path: &str) -> Path {
+        Path { path: path.to_string() }
+    }
 
     #[test]
     fn prim_element_count() {
@@ -906,7 +1313,7 @@ mod tests {
             Some(Path::new("/B.rel2[/C]").unwrap())
         );
         // An unclosed bracket has no balanced close.
-        assert_eq!(Path::new("/A.rel[/T").unwrap().embedded_target_path(), None);
+        assert_eq!(raw("/A.rel[/T").embedded_target_path(), None);
         assert_eq!(Path::new("/A/B").unwrap().embedded_target_path(), None);
     }
 
@@ -1107,7 +1514,7 @@ mod tests {
             ("../A{v=x}", "../A"),
         ];
         for (input, expected) in cases {
-            let p = Path::from_str_unchecked(input);
+            let p = raw(input);
             assert_eq!(p.strip_all_variant_selections().as_str(), *expected, "input {input}");
         }
     }
@@ -1127,11 +1534,7 @@ mod tests {
             ("..", false),
         ];
         for (input, expected) in cases {
-            assert_eq!(
-                Path::from_str_unchecked(input).contains_prim_variant_selection(),
-                *expected,
-                "input {input}"
-            );
+            assert_eq!(raw(input).contains_prim_variant_selection(), *expected, "input {input}");
         }
     }
 
@@ -1140,7 +1543,7 @@ mod tests {
         // Render the element as an owned string so it doesn't borrow the
         // temporary `Path`: `name`, `.name` for a property, `{set=sel}`.
         let last = |s: &str| -> Option<String> {
-            Path::from_str_unchecked(s).last_element().map(|e| match e {
+            raw(s).last_element().map(|e| match e {
                 PathElement::Prim(name) => name.to_owned(),
                 PathElement::Property(name) => format!(".{name}"),
                 PathElement::Variant { set, selection } => format!("{{{set}={selection}}}"),
@@ -1167,11 +1570,7 @@ mod tests {
 
     #[test]
     fn test_split_property() {
-        let split = |s: &str| {
-            Path::from_str_unchecked(s)
-                .split_property()
-                .map(|(p, n)| (p.path, n.to_owned()))
-        };
+        let split = |s: &str| raw(s).split_property().map(|(p, n)| (p.path, n.to_owned()));
         let owned = |p: &str, n: &str| Some((p.to_owned(), n.to_owned()));
 
         assert_eq!(split("/World/Mesh.points"), owned("/World/Mesh", "points"));
@@ -1186,7 +1585,7 @@ mod tests {
 
     #[test]
     fn test_property_suffix() {
-        let suffix = |s: &str| Path::from_str_unchecked(s).property_suffix().to_owned();
+        let suffix = |s: &str| raw(s).property_suffix().to_owned();
 
         assert_eq!(suffix("/A.points"), ".points");
         assert_eq!(suffix("/A/B.inputs:diffuse"), ".inputs:diffuse");
@@ -1201,7 +1600,7 @@ mod tests {
         // Render each component as an owned string so the result doesn't borrow
         // the temporary `Path`: a prim is its name, a variant is `{set=sel}`.
         let parse = |s: &str| -> (Vec<String>, String) {
-            let p = Path::from_str_unchecked(s);
+            let p = raw(s);
             let mut it = p.components();
             let items = it
                 .by_ref()
@@ -1314,7 +1713,7 @@ mod tests {
         ];
 
         for &(path, expected) in cases {
-            let parent = Path::new(path).unwrap().parent();
+            let parent = raw(path).parent();
             let parent = parent.as_ref().map(|p| p.as_str());
             assert_eq!(parent, expected, "parent of {path:?}");
             // A parent must make progress — never return the path itself.
@@ -1354,7 +1753,7 @@ mod tests {
         ];
 
         for &(path, expected) in cases {
-            assert_eq!(Path::new(path).unwrap().name(), expected, "name of {path:?}",);
+            assert_eq!(raw(path).name(), expected, "name of {path:?}",);
         }
     }
 
@@ -1432,12 +1831,9 @@ mod tests {
     fn test_append_variant_selection() {
         let p = Path::new("/MyPrim").unwrap();
         assert_eq!(
-            p.append_variant_selection("model", "high").as_str(),
+            p.append_variant_selection("model", "high").unwrap().as_str(),
             "/MyPrim{model=high}"
         );
-
-        let root = Path::new("/").unwrap();
-        assert_eq!(root.append_variant_selection("s", "v").as_str(), "/{s=v}");
     }
 
     #[test]
@@ -1471,7 +1867,7 @@ mod tests {
 
     #[test]
     fn make_absolute() {
-        let abs = |anchor, target| Path::from_str_unchecked(anchor).make_absolute(&Path::from_str_unchecked(target));
+        let abs = |anchor, target| raw(anchor).make_absolute(&raw(target));
 
         assert_eq!(abs("/A/B", "/X/Y").as_str(), "/X/Y");
         assert_eq!(abs("/A/B", "../C").as_str(), "/A/C");
@@ -1493,17 +1889,175 @@ mod tests {
 
     #[test]
     fn append_variant_segment() {
-        let p = |s| Path::from_str_unchecked(s);
+        let p = raw;
 
         // Variant set and selection attach directly without a slash separator.
-        assert_eq!(p("/A").append_variant_segment("{v=sel}").as_str(), "/A{v=sel}");
+        assert_eq!(p("/A").append_variant_segment("{v=sel}").unwrap().as_str(), "/A{v=sel}");
         assert_eq!(
-            p("/A/B").append_variant_segment("{color=red}").as_str(),
+            p("/A/B").append_variant_segment("{color=red}").unwrap().as_str(),
             "/A/B{color=red}"
         );
         // Empty selection (variant set path).
-        assert_eq!(p("/A").append_variant_segment("{v=}").as_str(), "/A{v=}");
+        assert_eq!(p("/A").append_variant_segment("{v=}").unwrap().as_str(), "/A{v=}");
         // Nested variant segments stack.
-        assert_eq!(p("/A{v=x}").append_variant_segment("{w=y}").as_str(), "/A{v=x}{w=y}");
+        assert_eq!(
+            p("/A{v=x}").append_variant_segment("{w=y}").unwrap().as_str(),
+            "/A{v=x}{w=y}"
+        );
+    }
+
+    #[test]
+    fn variant_segment_rejects() {
+        let p = raw("/A");
+        assert!(p.append_variant_segment("{v=sel").is_err());
+        assert!(p.append_variant_segment("v=sel}").is_err());
+        assert!(p.append_variant_segment("{vsel}").is_err());
+        assert!(p.append_variant_segment("{=x}").is_err());
+        assert!(p.append_variant_segment("{v=s l}").is_err());
+    }
+
+    #[test]
+    fn parse_accepts() {
+        #[rustfmt::skip]
+        let cases = [
+            "/", ".", "..", "../..", "../C.foo", "Foo", "A/B/C",
+            "/A.foo:bar:baz", "/A{x=y}", "/A{x=}", "/A{x=y}{p=q}",
+            "/A{x=y}B", "/A{x=y}.attr", ".bar", "../.foo[target].bar",
+            "/A.rel[/T].attr", "/A.rel1[/A/B.rel2[/C].attr2].attr1",
+            "/foo/bar.attr.mapper[/target].arg", "/A.attr[/target.attr]",
+            "/A.foo.bar", "/_underscore/_1", "/Ünïcode/日本",
+        ];
+        for case in cases {
+            assert!(Path::new(case).is_ok(), "should parse: {case}");
+        }
+    }
+
+    #[test]
+    fn parse_rejects() {
+        #[rustfmt::skip]
+        let cases = [
+            "", "/foo bar", "//A", "/A/", "../", "/A{x=y", "/A{x}",
+            "/{x=y}", "/.foo", "./A", "..foo", "/A.", "/A.foo::bar",
+            "/A.foo:", "/A.rel[/T", "/A[3]", "/A{x=y}/B", "/A{=y}",
+            "/A.rel[]", "/A..b", "/1digit", "/A.foo/bar", "/A{x=y}}",
+        ];
+        for case in cases {
+            assert!(Path::new(case).is_err(), "should reject: {case}");
+        }
+    }
+
+    #[test]
+    fn parse_error_details() {
+        let err = Path::new("/World/foo bar").unwrap_err();
+        assert_eq!(err.offset, 10);
+        assert_eq!(err.reason, "invalid character in identifier");
+
+        let err = Path::new("").unwrap_err();
+        assert_eq!(err.reason, "empty path");
+
+        // The offset points into the embedded target of a bracketed path.
+        let err = Path::new("/A.rel[/T x].attr").unwrap_err();
+        assert_eq!(err.offset, 9);
+    }
+
+    #[test]
+    fn parse_depth_cap() {
+        // Reasonable nesting parses; pathological nesting is refused rather
+        // than recursing without bound.
+        let nested = |n: usize| {
+            let mut path = String::from("/B");
+            for _ in 0..n {
+                path = format!("/A.r[{path}]");
+            }
+            path
+        };
+        assert!(Path::new(&nested(8)).is_ok());
+        assert!(Path::new(&nested(70)).is_err());
+    }
+
+    #[test]
+    fn dotted_variant_names() {
+        // A dot inside a variant name is not a property separator.
+        let p = Path::new("/A{v=1.5}.attr").unwrap();
+        assert_eq!(p.prim_path().as_str(), "/A{v=1.5}");
+        assert_eq!(p.parent().unwrap().as_str(), "/A{v=1.5}");
+        assert_eq!(Path::new("Foo{v=1.5}.attr").unwrap().prim_path().as_str(), "Foo{v=1.5}");
+    }
+
+    #[test]
+    fn append_property_rejects_base() {
+        // Bases that cannot own properties error instead of minting an
+        // unparseable path.
+        assert!(Path::abs_root().append_property("y").is_err());
+        assert!(raw("").append_property("y").is_err());
+        assert!(Path::new("..").unwrap().append_property("y").is_err());
+        assert!(Path::new(".").unwrap().append_property("y").is_err());
+        // A relational-attribute target still owns properties.
+        assert!(Path::new("/A.rel[/T]").unwrap().append_property("x").is_ok());
+    }
+
+    #[test]
+    fn append_path_rejects_anchored() {
+        // `.`-anchored arguments cannot attach under a prim namespace.
+        assert!(Path::new("/A/B").unwrap().append_path("../C").is_err());
+        assert!(Path::new("/A").unwrap().append_path(".attr").is_err());
+        // The reflexive base is the identity anchor.
+        assert_eq!(Path::new(".").unwrap().append_path("C/D").unwrap().as_str(), "C/D");
+    }
+
+    #[test]
+    fn variant_selection_rejects() {
+        let p = Path::new("/A").unwrap();
+        assert!(p.append_variant_selection("bad name", "x").is_err());
+        assert!(p.append_variant_selection("v", "bad sel").is_err());
+        assert!(p.append_variant_selection("", "x").is_err());
+        assert!(Path::abs_root().append_variant_selection("v", "x").is_err());
+        assert!(
+            Path::new("/A.attr")
+                .unwrap()
+                .append_variant_selection("v", "x")
+                .is_err()
+        );
+        // The variant alphabet allows `.`, `-`, and `|`.
+        assert_eq!(
+            p.append_variant_selection("v", "hi-res.2|b").unwrap().as_str(),
+            "/A{v=hi-res.2|b}"
+        );
+    }
+
+    #[test]
+    fn make_absolute_unrepresentable() {
+        // A property-relative step anchored at the pseudo-root has no
+        // representable result: the empty path, as in C++.
+        let anchor = Path::new("/X.r").unwrap();
+        assert!(anchor.make_absolute(&Path::new("../.y").unwrap()).is_empty());
+        assert_eq!(anchor.make_absolute(&Path::new("../Y.y").unwrap()).as_str(), "/Y.y");
+    }
+
+    #[test]
+    fn unicode_alphabet_agreement() {
+        // The lenient non-ASCII identifier rule holds across the read-side
+        // classifiers, not just the validator.
+        let p = Path::new("/A.p\u{2603}").unwrap();
+        assert!(p.is_property_path());
+        assert_eq!(p.parent().unwrap().as_str(), "/A");
+        let stripped = Path::new("/A{v=x}\u{2206}B").unwrap().strip_all_variant_selections();
+        assert_eq!(stripped.as_str(), "/A/\u{2206}B");
+    }
+
+    /// Every derivation of a parsed path must itself re-validate — the
+    /// contract `from_str_unchecked` debug-asserts.
+    #[test]
+    fn derived_revalidate() {
+        for case in ["/A/B/C.attr", "/A{x=y}B", "../C.foo", "/A.rel[/T].attr"] {
+            let path = Path::new(case).unwrap();
+            for derived in [path.prim_path(), path.strip_all_variant_selections()] {
+                let text = derived.as_str();
+                assert!(text.is_empty() || Path::new(text).is_ok(), "derived {text} of {case}");
+            }
+            for ancestor in path.ancestors() {
+                assert!(Path::new(ancestor.as_str()).is_ok(), "ancestor {ancestor} of {case}");
+            }
+        }
     }
 }

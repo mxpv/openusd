@@ -21,13 +21,13 @@ pub struct SpatialAudio(Prim);
 impl SpatialAudio {
     /// Author a `def SpatialAudio` prim at `path`
     /// (C++ `UsdMediaSpatialAudio::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_SPATIAL_AUDIO)?))
     }
 
     /// Wrap `path` as a `SpatialAudio` if it is typed `SpatialAudio`
     /// (C++ `UsdMediaSpatialAudio::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_SPATIAL_AUDIO).map(|o| o.map(Self))
     }
 
@@ -167,7 +167,7 @@ pub struct AssetPreviewsAPI(Prim);
 impl AssetPreviewsAPI {
     /// Apply `AssetPreviewsAPI` to the prim at `path`
     /// (C++ `UsdMediaAssetPreviewsAPI::Apply`). The prim is opened as `over`.
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.override_prim(path)?.add_applied_schema(tok::API_ASSET_PREVIEWS)?,
         ))
@@ -176,7 +176,7 @@ impl AssetPreviewsAPI {
     /// Wrap `path` as an `AssetPreviewsAPI` if it carries `AssetPreviewsAPI` in
     /// its `apiSchemas` (C++ `UsdMediaAssetPreviewsAPI::Get`); returns `None`
     /// otherwise.
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_ASSET_PREVIEWS]).map(|o| o.map(Self))
     }
 
@@ -294,11 +294,7 @@ mod tests {
         stage.define_prim("/Chair")?.set_type_name("Xform")?;
         AssetPreviewsAPI::apply(&stage, "/Chair")?.set_default_thumbnail("./chair_thumb.jpg")?;
 
-        assert!(
-            stage
-                .prim(sdf::path("/Chair")?)
-                .has_api_schema(tok::API_ASSET_PREVIEWS)?
-        );
+        assert!(stage.prim("/Chair")?.has_api_schema(tok::API_ASSET_PREVIEWS)?);
         let previews = AssetPreviewsAPI::get(&stage, "/Chair")?.expect("AssetPreviewsAPI");
         assert_eq!(previews.default_thumbnail()?.as_deref(), Some("./chair_thumb.jpg"));
         Ok(())
@@ -324,7 +320,7 @@ mod tests {
         AssetPreviewsAPI::apply(&stage, "/Chair")?.set_default_thumbnail("./t.jpg")?;
 
         // The pre-existing `name` entry survives alongside the new previews.
-        let Some(Value::Dictionary(info)) = stage.field::<Value>(sdf::path("/Chair")?, FieldKey::AssetInfo)? else {
+        let Some(Value::Dictionary(info)) = stage.field::<Value>("/Chair", FieldKey::AssetInfo)? else {
             panic!("assetInfo");
         };
         assert_eq!(info.get("name"), Some(&Value::String("Chair".to_string())));

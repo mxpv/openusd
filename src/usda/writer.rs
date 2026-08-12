@@ -175,7 +175,7 @@ impl<W: Write> Emitter<'_, W> {
         // Variant sets
         if let Some(Value::TokenVec(vset_names)) = get_value(data, path, ChildrenKey::VariantSetChildren.as_str()) {
             for vset in &vset_names {
-                let vset_path = path.append_variant_selection(vset, "");
+                let vset_path = path.append_variant_selection(vset, "")?;
                 self.emit_variant_set(data, &vset_path, vset.as_str())?;
             }
         }
@@ -560,7 +560,7 @@ impl<W: Write> Emitter<'_, W> {
         {
             let prim = vset_path.prim_path();
             for v_name in &variant_names {
-                let v_path = prim.append_variant_selection(name, v_name);
+                let v_path = prim.append_variant_selection(name, v_name)?;
                 self.emit_variant(data, &v_path, v_name.as_str())?;
             }
         }
@@ -1449,7 +1449,7 @@ def "Mesh"
 
         let reparsed = crate::usda::parse(&text).expect("re-parses");
         for name in ["plain", "moving", "owned"] {
-            let path = crate::sdf::Path::from(format!("/Mesh.{name}").as_str());
+            let path = crate::sdf::Path::new(&format!("/Mesh.{name}")).unwrap();
             assert_eq!(
                 data.spec(&path).expect("spec").fields,
                 reparsed.spec(&path).expect("spec").fields,

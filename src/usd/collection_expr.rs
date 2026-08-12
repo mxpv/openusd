@@ -200,7 +200,7 @@ fn resolve_impl(stage: &Stage, collection: &Collection, state: &mut ResolveState
             cacheable = false;
             return sdf::PathExpression::nothing();
         }
-        let nested = Collection::new(prim, reference.name.clone());
+        let nested = Collection::from_parts(prim, reference.name.clone());
         let resolved = match resolve_impl(stage, &nested, state) {
             Ok(resolved) => resolved,
             Err(e) => {

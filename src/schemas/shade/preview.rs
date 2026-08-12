@@ -192,14 +192,14 @@ mod tests {
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
         surf.create_input("diffuseColor", "color3f")?
-            .set_connections([sdf::path("/Mat/DiffuseTex.outputs:rgb")?])?;
+            .set_connections(["/Mat/DiffuseTex.outputs:rgb"])?;
         surf.create_input("roughness", "float")?.set(sdf::Value::Float(0.4))?;
         surf.create_input("metallic", "float")?.set(sdf::Value::Float(1.0))?;
         surf.create_output("surface", "token")?;
 
         Material::define(&stage, "/Mat")?
             .create_surface_output()?
-            .set_connections([sdf::path("/Mat/Surface.outputs:surface")?])?;
+            .set_connections(["/Mat/Surface.outputs:surface"])?;
 
         let ps = read_preview_surface(&stage, &sdf::path("/Mat")?)?.expect("UsdPreviewSurface");
         assert_eq!(ps.shader, "/Mat/Surface");
@@ -225,16 +225,16 @@ mod tests {
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
         tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
         tex.create_input("file", "asset")?
-            .set_connections([sdf::path("/Mat.inputs:diffuseTexFile")?])?;
+            .set_connections(["/Mat.inputs:diffuseTexFile"])?;
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
         surf.create_input("diffuseColor", "color3f")?
-            .set_connections([sdf::path("/Mat/DiffuseTex.outputs:rgb")?])?;
+            .set_connections(["/Mat/DiffuseTex.outputs:rgb"])?;
         surf.create_output("surface", "token")?;
         mat.create_surface_output()?
-            .set_connections([sdf::path("/Mat/Surface.outputs:surface")?])?;
+            .set_connections(["/Mat/Surface.outputs:surface"])?;
 
         let ps = read_preview_surface(&stage, &sdf::path("/Mat")?)?.expect("UsdPreviewSurface");
         assert_eq!(ps.diffuse_color.texture(), Some("./albedo.png"));
@@ -250,7 +250,7 @@ mod tests {
         surf.create_output("surface", "token")?;
         Material::define(&stage, "/Mat")?
             .create_surface_output()?
-            .set_connections([sdf::path("/Mat/Surface.outputs:surface")?])?;
+            .set_connections(["/Mat/Surface.outputs:surface"])?;
         assert!(read_preview_surface(&stage, &sdf::path("/Mat")?)?.is_none());
         Ok(())
     }

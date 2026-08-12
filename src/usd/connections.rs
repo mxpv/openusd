@@ -63,9 +63,14 @@ impl ConnectionGraph {
     }
 
     fn index_prim(&mut self, stage: &Stage, prim: &Path) -> Result<()> {
-        for prop in stage.prim(prim.clone()).authored_property_names()? {
-            let attr = prim.append_property(&prop)?;
-            let sources = stage.attribute(attr.clone()).connections()?;
+        for prop in stage.prim(prim.clone())?.authored_property_names()? {
+            // A composed property name that is not a valid identifier cannot
+            // address a spec; skip it, as C++ does for unaddressable names in
+            // children lists.
+            let Ok(attr) = prim.append_property(&prop) else {
+                continue;
+            };
+            let sources = stage.attribute(attr.clone())?.connections()?;
             if sources.is_empty() {
                 continue;
             }
@@ -155,10 +160,10 @@ mod tests {
         let b = stage.define_prim("/G/B")?.set_type_name("Shader")?;
         b.create_attribute("outputs:out", "float")?;
         b.create_attribute("inputs:in", "float")?
-            .set_connections([sdf::path("/G/C.outputs:out")?])?;
+            .set_connections(["/G/C.outputs:out"])?;
         let a = stage.define_prim("/G/A")?.set_type_name("Shader")?;
         a.create_attribute("inputs:in", "float")?
-            .set_connections([sdf::path("/G/B.outputs:out")?])?;
+            .set_connections(["/G/B.outputs:out"])?;
         Ok(stage)
     }
 
@@ -219,9 +224,9 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let p = stage.define_prim("/P")?.set_type_name("Shader")?;
         p.create_attribute("inputs:a", "float")?
-            .set_connections([sdf::path("/P.inputs:b")?])?;
+            .set_connections(["/P.inputs:b"])?;
         p.create_attribute("inputs:b", "float")?
-            .set_connections([sdf::path("/P.inputs:a")?])?;
+            .set_connections(["/P.inputs:a"])?;
         let graph = ConnectionGraph::from_stage(&stage)?;
         // Resolving a cycle terminates (no terminal reached, but no hang).
         let terminals = graph.resolve_chain(&sdf::path("/P.inputs:a")?);

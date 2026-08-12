@@ -49,6 +49,8 @@ impl PathMap {
 
 /// A namespace mapping function (C++
 /// [`PcpMapFunction`](https://openusd.org/dev/api/class_pcp_map_function.html)).
+/// Pair paths are owned, already-validated [`Path`] values; parse text with
+/// [`Path::new`] before building a mapping.
 ///
 /// Stores explicit (source, target) path pairs for longest-prefix matching plus
 /// a `has_root_identity` flag (the `/ → /` catch-all that lets paths outside the
@@ -387,8 +389,7 @@ impl MapFunction {
             let composed_tgt = if inner_tgt.is_empty() {
                 inner_tgt.clone()
             } else {
-                self.map_source_to_target(inner_tgt)
-                    .unwrap_or_else(|| Path::from(String::new()))
+                self.map_source_to_target(inner_tgt).unwrap_or_default()
             };
             pairs.push((inner_src.clone(), composed_tgt));
         }
@@ -520,7 +521,7 @@ mod tests {
     use super::*;
 
     fn p(s: &str) -> Path {
-        Path::from(s.to_string())
+        Path::new(s).unwrap()
     }
 
     #[test]

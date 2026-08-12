@@ -103,7 +103,7 @@ fn author_then_read_back_roundtrip() -> Result<()> {
     surface.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
     surface
         .create_input("diffuseColor", "color3f")?
-        .set_connections([sdf::path("/World/Looks/M/Albedo.outputs:rgb")?])?;
+        .set_connections(["/World/Looks/M/Albedo.outputs:rgb"])?;
     surface.create_input("metallic", "float")?.set(sdf::Value::Float(1.0))?;
     surface
         .create_input("roughness", "float")?
@@ -112,7 +112,7 @@ fn author_then_read_back_roundtrip() -> Result<()> {
 
     Material::define(&stage, "/World/Looks/M")?
         .create_surface_output()?
-        .set_connections([sdf::path("/World/Looks/M/Surface.outputs:surface")?])?;
+        .set_connections(["/World/Looks/M/Surface.outputs:surface"])?;
 
     MaterialBindingAPI::apply(&stage, sdf::path("/World/Geo")?)?.bind(sdf::path("/World/Looks/M")?)?;
 

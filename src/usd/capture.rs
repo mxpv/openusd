@@ -444,18 +444,18 @@ mod tests {
     fn undo_unwinds_stack() -> Result<()> {
         let stage = UndoStage::from(in_memory_stage()?);
         stage.define_prim("/World")?.set_type_name("Xform")?;
-        assert!(stage.prim("/World").is_valid()?);
+        assert!(stage.prim("/World")?.is_valid()?);
         assert_eq!(stage.undo_depth(), 2);
 
         // The newest transaction is the type-name edit: undo restores its
         // absence, the prim survives.
         assert!(stage.undo()?);
-        assert_eq!(stage.prim("/World").type_name()?.as_deref(), None);
-        assert!(stage.prim("/World").is_valid()?);
+        assert_eq!(stage.prim("/World")?.type_name()?.as_deref(), None);
+        assert!(stage.prim("/World")?.is_valid()?);
 
         // Undo the define: the prim is gone, and the stack is empty.
         assert!(stage.undo()?);
-        assert!(!stage.prim("/World").is_valid()?);
+        assert!(!stage.prim("/World")?.is_valid()?);
         assert!(!stage.can_undo());
         assert!(!stage.undo()?);
         Ok(())
@@ -467,11 +467,11 @@ mod tests {
         let stage = UndoStage::from(in_memory_stage()?);
         stage.define_prim("/World")?;
         stage.create_attribute("/World.size", "double")?.set(1.0_f64)?;
-        stage.attribute("/World.size").set(2.0_f64)?;
-        assert_eq!(stage.attribute("/World.size").get::<f64>()?, Some(2.0));
+        stage.attribute("/World.size")?.set(2.0_f64)?;
+        assert_eq!(stage.attribute("/World.size")?.get::<f64>()?, Some(2.0));
 
         assert!(stage.undo()?);
-        assert_eq!(stage.attribute("/World.size").get::<f64>()?, Some(1.0));
+        assert_eq!(stage.attribute("/World.size")?.get::<f64>()?, Some(1.0));
         Ok(())
     }
 
@@ -481,12 +481,12 @@ mod tests {
     fn undo_groups_transaction() -> Result<()> {
         let stage = UndoStage::from(in_memory_stage()?);
         stage.define_prim("/A/B/C")?;
-        assert!(stage.prim("/A/B/C").is_valid()?);
+        assert!(stage.prim("/A/B/C")?.is_valid()?);
         assert_eq!(stage.undo_depth(), 1);
 
         assert!(stage.undo()?);
-        assert!(!stage.prim("/A").is_valid()?);
-        assert!(!stage.prim("/A/B/C").is_valid()?);
+        assert!(!stage.prim("/A")?.is_valid()?);
+        assert!(!stage.prim("/A/B/C")?.is_valid()?);
         Ok(())
     }
 
@@ -506,16 +506,16 @@ mod tests {
         stage.define_prim("/Staged")?;
 
         // Both transactions were recorded, newest first.
-        assert!(stage.prim("/Direct").is_valid()?);
-        assert!(stage.prim("/Staged").is_valid()?);
+        assert!(stage.prim("/Direct")?.is_valid()?);
+        assert!(stage.prim("/Staged")?.is_valid()?);
         assert_eq!(stage.undo_depth(), 2);
 
         assert!(stage.undo()?); // undo the staged edit
-        assert!(!stage.prim("/Staged").is_valid()?);
-        assert!(stage.prim("/Direct").is_valid()?, "the direct edit survives");
+        assert!(!stage.prim("/Staged")?.is_valid()?);
+        assert!(stage.prim("/Direct")?.is_valid()?, "the direct edit survives");
 
         assert!(stage.undo()?); // undo the direct edit
-        assert!(!stage.prim("/Direct").is_valid()?);
+        assert!(!stage.prim("/Direct")?.is_valid()?);
         Ok(())
     }
 
@@ -533,7 +533,7 @@ mod tests {
         }
         // No composed read or stage edit drains the pending edit before undo.
         assert!(stage.undo()?, "the pending direct edit is undone");
-        assert!(!stage.prim("/Direct").is_valid()?);
+        assert!(!stage.prim("/Direct")?.is_valid()?);
         assert!(!stage.can_undo());
         Ok(())
     }
@@ -545,7 +545,7 @@ mod tests {
         let stage = UndoStage::from(in_memory_stage()?);
         stage.define_prim("/World")?;
         stage.reset();
-        assert!(stage.prim("/World").is_valid()?);
+        assert!(stage.prim("/World")?.is_valid()?);
         assert!(!stage.can_undo());
         assert!(!stage.undo()?);
         Ok(())
@@ -561,8 +561,8 @@ mod tests {
         assert_eq!(stage.undo_depth(), 1);
 
         assert!(stage.undo()?);
-        assert!(!stage.prim("/B").is_valid()?);
-        assert!(stage.prim("/A").is_valid()?, "the evicted /A edit is permanent");
+        assert!(!stage.prim("/B")?.is_valid()?);
+        assert!(stage.prim("/A")?.is_valid()?, "the evicted /A edit is permanent");
         assert!(!stage.undo()?);
         Ok(())
     }
@@ -576,8 +576,8 @@ mod tests {
         let stage = undo.into_inner();
         assert_eq!(stage.sink_count(), 0, "into_inner removes the sink");
         stage.define_prim("/Another")?;
-        assert!(stage.prim("/World").is_valid()?);
-        assert!(stage.prim("/Another").is_valid()?);
+        assert!(stage.prim("/World")?.is_valid()?);
+        assert!(stage.prim("/Another")?.is_valid()?);
         Ok(())
     }
 
@@ -596,8 +596,8 @@ mod tests {
         assert_eq!(stage.sink_count(), 0, "the sink is removed when the wrapper drops");
         // The surviving clone still authors, no longer recording.
         stage.define_prim("/Another")?;
-        assert!(stage.prim("/World").is_valid()?);
-        assert!(stage.prim("/Another").is_valid()?);
+        assert!(stage.prim("/World")?.is_valid()?);
+        assert!(stage.prim("/Another")?.is_valid()?);
         Ok(())
     }
 
@@ -616,9 +616,9 @@ mod tests {
         for diff in source.diff() {
             mirror.apply_diff(&diff, ApplyMode::CurrentEditTarget)?;
         }
-        assert_eq!(mirror.prim("/World").type_name()?.as_deref(), Some("Xform"));
-        assert_eq!(mirror.prim("/World/Mesh").type_name()?.as_deref(), Some("Mesh"));
-        assert_eq!(mirror.attribute("/World/Mesh.size").get::<f64>()?, Some(2.0));
+        assert_eq!(mirror.prim("/World")?.type_name()?.as_deref(), Some("Xform"));
+        assert_eq!(mirror.prim("/World/Mesh")?.type_name()?.as_deref(), Some("Mesh"));
+        assert_eq!(mirror.attribute("/World/Mesh.size")?.get::<f64>()?, Some(2.0));
         Ok(())
     }
 
@@ -635,7 +635,7 @@ mod tests {
         let stage = source.into_inner();
         assert_eq!(stage.sink_count(), 0, "into_inner removes the sink");
         stage.define_prim("/Another")?;
-        assert!(stage.prim("/Another").is_valid()?);
+        assert!(stage.prim("/Another")?.is_valid()?);
         Ok(())
     }
 

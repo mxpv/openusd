@@ -267,14 +267,7 @@ impl Prim {
         type_name: impl Into<String>,
     ) -> Result<Attribute, StageAuthoringError> {
         let name = name.into();
-        let attr_path = self.path.append_property(&name).map_err(|_| {
-            // Synthesize the would-be path so the error surfaces the
-            // offending name rather than just the parent prim.
-            StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath {
-                path: sdf::Path::from(format!("{}.{}", self.path, name).as_str()),
-                reason: "attribute name is not a valid property name",
-            })
-        })?;
+        let attr_path = self.path.append_property(&name)?;
         self.stage.create_attribute(attr_path, type_name)
     }
 
@@ -282,28 +275,19 @@ impl Prim {
     /// `UsdPrim::CreateRelationship`.
     pub fn create_relationship(&self, name: impl Into<Token>) -> Result<Relationship, StageAuthoringError> {
         let name = name.into();
-        let rel_path = self.path.append_property(&name).map_err(|_| {
-            // Synthesize the would-be path so the error surfaces the
-            // offending name rather than just the parent prim.
-            StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath {
-                path: sdf::Path::from(format!("{}.{}", self.path, name).as_str()),
-                reason: "relationship name is not a valid property name",
-            })
-        })?;
+        let rel_path = self.path.append_property(&name)?;
         self.stage.create_relationship(rel_path)
     }
 
     /// Author a relationship `name` with the given target paths and the
     /// schema-authoring convention `custom = false`. Shortcut for
     /// `create_relationship(name) + set_custom(false) + set_targets`.
-    pub fn author_relationship_targets<I, P>(&self, name: &str, targets: I) -> Result<Relationship, StageAuthoringError>
-    where
-        I: IntoIterator<Item = P>,
-        P: Into<sdf::Path>,
-    {
-        self.create_relationship(name)?
-            .set_custom(false)?
-            .set_targets(targets.into_iter().map(Into::into))
+    pub fn author_relationship_targets(
+        &self,
+        name: &str,
+        targets: impl IntoIterator<Item: sdf::IntoPath>,
+    ) -> Result<Relationship, StageAuthoringError> {
+        self.create_relationship(name)?.set_custom(false)?.set_targets(targets)
     }
 
     /// Append `value` to the `uniform token[]` attribute named `name` on this
@@ -985,10 +969,11 @@ impl Prim {
         Ok(paths)
     }
 
-    /// Property path for `name` under this prim, falling back to the prim path
-    /// for an invalid name (the handle then resolves as empty).
+    /// Property path for `name` under this prim. An invalid name yields the
+    /// empty path, so the returned handle resolves nothing — the analog of
+    /// C++'s invalid `UsdProperty` handle.
     fn property_path(&self, name: impl Into<Token>) -> sdf::Path {
-        self.path.append_property(name).unwrap_or_else(|_| self.path.clone())
+        self.path.append_property(name).unwrap_or_default()
     }
 
     /// Returns the variant sets composed onto this prim. Mirrors C++
@@ -1136,9 +1121,9 @@ mod tests {
 
         // Two prims of the same type share one composed definition; a different
         // type gets its own.
-        let a = stage.prim("/A").prim_type_info()?;
-        let b = stage.prim("/B").prim_type_info()?;
-        let c = stage.prim("/C").prim_type_info()?;
+        let a = stage.prim("/A")?.prim_type_info()?;
+        let b = stage.prim("/B")?.prim_type_info()?;
+        let c = stage.prim("/C")?.prim_type_info()?;
         assert!(Arc::ptr_eq(&a, &b));
         assert!(!Arc::ptr_eq(&a, &c));
 
@@ -1180,7 +1165,7 @@ mod tests {
 
         // Authored names keep their composed order; the schema's declarations
         // follow, and a property appears once whether or not it is authored.
-        let names = stage.prim("/Sun").property_names()?;
+        let names = stage.prim("/Sun")?.property_names()?;
         assert_eq!(
             names,
             [
@@ -1203,12 +1188,12 @@ mod tests {
 
         // A property with no authored spec still sorts into attributes or
         // relationships by what the schema declares it to be.
-        let attributes = stage.prim("/Sun").attributes()?;
+        let attributes = stage.prim("/Sun")?.attributes()?;
         let names: Vec<&str> = attributes.iter().map(|attr| attr.path().as_str()).collect();
         assert!(names.contains(&"/Sun.inputs:intensity"), "{names:?}");
         assert!(!names.iter().any(|name| name.ends_with("includes")), "{names:?}");
 
-        let relationships = stage.prim("/Sun").relationships()?;
+        let relationships = stage.prim("/Sun")?.relationships()?;
         assert_eq!(relationships.len(), 1);
         assert!(
             relationships[0]
@@ -1246,7 +1231,7 @@ mod tests {
 
         // The default registry knows no schemas, so only authored properties
         // are enumerated.
-        assert_eq!(stage.prim("/Sun").property_names()?, [Token::new("authored")]);
+        assert_eq!(stage.prim("/Sun")?.property_names()?, [Token::new("authored")]);
         Ok(())
     }
 
@@ -1258,7 +1243,7 @@ mod tests {
         stage.define_prim("/Sun")?.set_type_name("MyStudioLight")?;
 
         // No registry knows `MyStudioLight`, so it resolves nothing on its own.
-        assert!(stage.prim("/Sun").prim_definition()?.is_empty());
+        assert!(stage.prim("/Sun")?.prim_definition()?.is_empty());
 
         let root_id = stage.root_layer().identifier.clone();
         {
@@ -1277,7 +1262,7 @@ mod tests {
 
         // The first registered fallback supplies the definition, while the
         // prim's own `typeName` still reads back as authored.
-        let prim = stage.prim("/Sun");
+        let prim = stage.prim("/Sun")?;
         assert_eq!(prim.type_name()?, Some(Token::new("MyStudioLight")));
         assert_eq!(
             prim.prim_definition()?
@@ -1298,7 +1283,7 @@ mod tests {
         let stage = schema_stage()?;
         stage.define_prim("/Plain")?;
 
-        let info = stage.prim("/Plain").prim_type_info()?;
+        let info = stage.prim("/Plain")?.prim_type_info()?;
         assert!(info.id().is_empty());
         assert!(Arc::ptr_eq(&info, stage.schema_registry().empty_prim_type_info()));
         Ok(())
@@ -1314,13 +1299,13 @@ mod tests {
 
         // The registry knowing nothing means an empty *definition*, not an
         // empty identity — two unrelated types must not share one.
-        let sun = stage.prim("/Sun").prim_type_info()?;
+        let sun = stage.prim("/Sun")?.prim_type_info()?;
         assert_eq!(sun.id().type_name(), &Token::new("DistantLight"));
         assert_eq!(sun.id().applied_api_schemas(), [Token::new("CollectionAPI:render")]);
         assert!(sun.prim_definition().is_empty());
 
         stage.define_prim("/Ball")?.set_type_name("Sphere")?;
-        assert!(!Arc::ptr_eq(&sun, &stage.prim("/Ball").prim_type_info()?));
+        assert!(!Arc::ptr_eq(&sun, &stage.prim("/Ball")?.prim_type_info()?));
         Ok(())
     }
 
@@ -1329,7 +1314,7 @@ mod tests {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
-        let sun = stage.prim("/Sun");
+        let sun = stage.prim("/Sun")?;
         assert!(sun.is_a("DistantLight")?);
         assert!(sun.is_a("NonboundableLightBase")?);
         assert!(sun.is_a("Typed")?);
@@ -1345,7 +1330,7 @@ mod tests {
         // Nothing is registered, so `DistantLight` names no schema and the prim
         // is not it. The typed views keep resolving because their gate checks
         // the authored name before asking this question.
-        let sun = stage.prim("/Sun");
+        let sun = stage.prim("/Sun")?;
         assert!(!sun.is_a("DistantLight")?);
         assert!(!sun.is_a("Typed")?);
         Ok(())
@@ -1359,28 +1344,28 @@ mod tests {
         // A multiple-apply schema applies per instance; a single-apply one
         // applies whole. Getting that wrong is refused before anything is
         // authored.
-        let missing = stage.prim("/Sun").apply_api("CollectionAPI").err().expect("rejected");
+        let missing = stage.prim("/Sun")?.apply_api("CollectionAPI").err().expect("rejected");
         assert!(matches!(
             missing,
             StageAuthoringError::Schema(ApplyApiError::MissingInstanceName { .. })
         ));
-        let unexpected = stage.prim("/Sun").apply_api("LightAPI:extra").err().expect("rejected");
+        let unexpected = stage.prim("/Sun")?.apply_api("LightAPI:extra").err().expect("rejected");
         assert!(matches!(
             unexpected,
             StageAuthoringError::Schema(ApplyApiError::UnexpectedInstanceName { .. })
         ));
-        let typed = stage.prim("/Sun").apply_api("DistantLight").err().expect("rejected");
+        let typed = stage.prim("/Sun")?.apply_api("DistantLight").err().expect("rejected");
         assert!(matches!(
             typed,
             StageAuthoringError::Schema(ApplyApiError::NotAppliedApi { .. })
         ));
-        assert!(stage.prim("/Sun").authored_api_schemas()?.is_empty());
+        assert!(stage.prim("/Sun")?.authored_api_schemas()?.is_empty());
 
         // The well-formed spellings author.
-        stage.prim("/Sun").apply_api("LightAPI")?;
-        stage.prim("/Sun").apply_api("CollectionAPI:render")?;
+        stage.prim("/Sun")?.apply_api("LightAPI")?;
+        stage.prim("/Sun")?.apply_api("CollectionAPI:render")?;
         assert_eq!(
-            stage.prim("/Sun").authored_api_schemas()?,
+            stage.prim("/Sun")?.authored_api_schemas()?,
             [Token::new("LightAPI"), Token::new("CollectionAPI:render")]
         );
         Ok(())
@@ -1392,9 +1377,9 @@ mod tests {
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
         // A name the registry does not know carries no rules to break.
-        stage.prim("/Sun").apply_api("SomeUnregisteredAPI")?;
-        stage.prim("/Sun").can_apply_api("SomeUnregisteredAPI")?;
-        assert!(stage.prim("/Sun").has_api_schema("SomeUnregisteredAPI")?);
+        stage.prim("/Sun")?.apply_api("SomeUnregisteredAPI")?;
+        stage.prim("/Sun")?.can_apply_api("SomeUnregisteredAPI")?;
+        assert!(stage.prim("/Sun")?.has_api_schema("SomeUnregisteredAPI")?);
         Ok(())
     }
 
@@ -1405,22 +1390,22 @@ mod tests {
         stage.define_prim("/Plain")?.set_type_name("DomeLight_1")?;
 
         // `LightAPI` declares `apiSchemaCanOnlyApplyTo = ["DistantLight"]`.
-        stage.prim("/Sun").can_apply_api("LightAPI")?;
-        let wrong_type = stage.prim("/Plain").can_apply_api("LightAPI").unwrap_err();
+        stage.prim("/Sun")?.can_apply_api("LightAPI")?;
+        let wrong_type = stage.prim("/Plain")?.can_apply_api("LightAPI").unwrap_err();
         assert!(matches!(wrong_type, ApplyApiError::PrimTypeNotAllowed { .. }));
 
         // `SlotAPI` restricts itself to `NonboundableLightBase`, which `/Sun`
         // is not by name — it is a `DistantLight` deriving from it, so the
         // check runs through `is_a` rather than comparing type names. It also
         // restricts its instance names.
-        stage.prim("/Sun").can_apply_api("SlotAPI:left")?;
-        let wrong_instance = stage.prim("/Sun").can_apply_api("SlotAPI:middle").unwrap_err();
+        stage.prim("/Sun")?.can_apply_api("SlotAPI:left")?;
+        let wrong_instance = stage.prim("/Sun")?.can_apply_api("SlotAPI:middle").unwrap_err();
         assert!(matches!(wrong_instance, ApplyApiError::InstanceNameNotAllowed { .. }));
 
         // The restrictions are advisory: `apply_api` authors regardless, as
         // C++ `ApplyAPI` does.
-        stage.prim("/Plain").apply_api("LightAPI")?;
-        assert!(stage.prim("/Plain").has_api_schema("LightAPI")?);
+        stage.prim("/Plain")?.apply_api("LightAPI")?;
+        assert!(stage.prim("/Plain")?.has_api_schema("LightAPI")?);
         Ok(())
     }
 
@@ -1433,32 +1418,32 @@ mod tests {
         // Either version answers for the family, which is the point of asking
         // by family rather than by identifier.
         let family = Token::new("DomeLight");
-        assert!(stage.prim("/Old").is_in_family(&family, VersionFilter::All)?);
-        assert!(stage.prim("/New").is_in_family(&family, VersionFilter::All)?);
+        assert!(stage.prim("/Old")?.is_in_family(&family, VersionFilter::All)?);
+        assert!(stage.prim("/New")?.is_in_family(&family, VersionFilter::All)?);
         assert_eq!(
-            stage.prim("/Old").version_in_family(&family, VersionFilter::All)?,
+            stage.prim("/Old")?.version_in_family(&family, VersionFilter::All)?,
             Some(0)
         );
         assert_eq!(
-            stage.prim("/New").version_in_family(&family, VersionFilter::All)?,
+            stage.prim("/New")?.version_in_family(&family, VersionFilter::All)?,
             Some(1)
         );
 
         // The filter narrows which versions count.
         assert!(
             !stage
-                .prim("/Old")
+                .prim("/Old")?
                 .is_in_family(&family, VersionFilter::GreaterThan(0))?
         );
         assert!(
             stage
-                .prim("/New")
+                .prim("/New")?
                 .is_in_family(&family, VersionFilter::GreaterThan(0))?
         );
 
         // A prim of another family is in none of it.
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
-        assert!(!stage.prim("/Sun").is_in_family(&family, VersionFilter::All)?);
+        assert!(!stage.prim("/Sun")?.is_in_family(&family, VersionFilter::All)?);
         Ok(())
     }
 
@@ -1477,22 +1462,22 @@ mod tests {
         let render = Token::new("render");
         assert!(
             stage
-                .prim("/Sun")
+                .prim("/Sun")?
                 .has_api_in_family(&family, VersionFilter::All, None)?
         );
         assert!(
             stage
-                .prim("/Sun")
+                .prim("/Sun")?
                 .has_api_in_family(&family, VersionFilter::All, Some(&render))?
         );
         assert!(
             stage
-                .prim("/Sun")
+                .prim("/Sun")?
                 .has_api_in_family(&family, VersionFilter::All, Some(&Token::new("lightLink")))?
         );
         assert!(
             !stage
-                .prim("/Sun")
+                .prim("/Sun")?
                 .has_api_in_family(&family, VersionFilter::All, Some(&Token::new("other")))?
         );
 
@@ -1501,20 +1486,24 @@ mod tests {
         let light = Token::new("LightAPI");
         assert_eq!(
             stage
-                .prim("/Sun")
+                .prim("/Sun")?
                 .api_version_in_family(&light, VersionFilter::All, None)?,
             Some(0)
         );
         assert!(
             !stage
-                .prim("/Sun")
+                .prim("/Sun")?
                 .has_api_in_family(&light, VersionFilter::All, Some(&render))?
         );
 
         // Only an applied API schema is applied at all, so the prim's own typed
         // family answers nothing here.
         let typed = Token::new("DistantLight");
-        assert!(!stage.prim("/Sun").has_api_in_family(&typed, VersionFilter::All, None)?);
+        assert!(
+            !stage
+                .prim("/Sun")?
+                .has_api_in_family(&typed, VersionFilter::All, None)?
+        );
         Ok(())
     }
 
@@ -1530,31 +1519,31 @@ mod tests {
 
         // The prim query and the views' gate place a prim the same way, so
         // filtering a traversal cannot drop what a view would accept.
-        assert!(stage.prim("/New").is_in_family("DomeLight", VersionFilter::All)?);
+        assert!(stage.prim("/New")?.is_in_family("DomeLight", VersionFilter::All)?);
         assert_eq!(
-            stage.prim("/New").version_in_family("DomeLight", VersionFilter::All)?,
+            stage.prim("/New")?.version_in_family("DomeLight", VersionFilter::All)?,
             Some(1)
         );
-        assert!(!stage.prim("/New").is_in_family("DistantLight", VersionFilter::All)?);
+        assert!(!stage.prim("/New")?.is_in_family("DistantLight", VersionFilter::All)?);
 
         // An applied schema no registry knows was never composed, so it answers
         // from what the prim authors — as `has_api_schema` does beside it.
         let collection = Token::new("CollectionAPI");
         let render = Token::new("render");
-        assert!(stage.prim("/New").has_api_schema("CollectionAPI:render")?);
+        assert!(stage.prim("/New")?.has_api_schema("CollectionAPI:render")?);
         assert!(
             stage
-                .prim("/New")
+                .prim("/New")?
                 .has_api_in_family(&collection, VersionFilter::All, None)?
         );
         assert!(
             stage
-                .prim("/New")
+                .prim("/New")?
                 .has_api_in_family(&collection, VersionFilter::All, Some(&render))?
         );
         assert!(
             !stage
-                .prim("/New")
+                .prim("/New")?
                 .has_api_in_family(&collection, VersionFilter::All, Some(&Token::new("other")))?
         );
         Ok(())
@@ -1573,14 +1562,14 @@ mod tests {
         let family = Token::new("LightAPI");
         assert_eq!(
             stage
-                .prim("/Sun")
+                .prim("/Sun")?
                 .api_version_in_family(&family, VersionFilter::All, None)?,
             Some(0)
         );
         // The rejected version contributes nothing, so it answers for nothing.
         assert!(
             !stage
-                .prim("/Sun")
+                .prim("/Sun")?
                 .has_api_in_family(&family, VersionFilter::GreaterThan(0), None)?
         );
         Ok(())
@@ -1592,7 +1581,7 @@ mod tests {
 
         // Nothing composes at the path, so there is nothing to apply to —
         // answered before any schema question, as C++ `CanApplyAPI` does.
-        let missing = stage.prim("/Typo").can_apply_api("CollectionAPI:render").unwrap_err();
+        let missing = stage.prim("/Typo")?.can_apply_api("CollectionAPI:render").unwrap_err();
         assert!(matches!(missing, ApplyApiError::PrimNotValid { .. }));
         Ok(())
     }
@@ -1609,7 +1598,7 @@ mod tests {
             "CollectionAPI:render:",
             "CollectionAPI:1st",
         ] {
-            let rejected = stage.prim("/Sun").can_apply_api(name).unwrap_err();
+            let rejected = stage.prim("/Sun")?.can_apply_api(name).unwrap_err();
             assert!(
                 matches!(rejected, ApplyApiError::InstanceNameNotAllowed { .. }),
                 "{name} rejected as {rejected:?}"
@@ -1618,7 +1607,7 @@ mod tests {
 
         // A trailing delimiter names no instance at all, so a multiple-apply
         // schema is left without the instance it requires.
-        let empty = stage.prim("/Sun").can_apply_api("CollectionAPI:").unwrap_err();
+        let empty = stage.prim("/Sun")?.can_apply_api("CollectionAPI:").unwrap_err();
         assert!(matches!(empty, ApplyApiError::MissingInstanceName { .. }));
         Ok(())
     }
@@ -1633,7 +1622,7 @@ mod tests {
 
         // Adding a schema the registry knows must not make an unknown one
         // disappear: the built-ins come first, then what is authored on top.
-        let names = stage.prim("/Sun").api_schemas()?;
+        let names = stage.prim("/Sun")?.api_schemas()?;
         assert_eq!(
             names,
             [
@@ -1642,8 +1631,8 @@ mod tests {
                 Token::new("Unregistered"),
             ]
         );
-        assert!(stage.prim("/Sun").has_api_schema("Unregistered")?);
-        assert!(stage.prim("/Sun").has_api_schema("LightAPI")?);
+        assert!(stage.prim("/Sun")?.has_api_schema("Unregistered")?);
+        assert!(stage.prim("/Sun")?.has_api_schema("LightAPI")?);
         Ok(())
     }
 
@@ -1654,8 +1643,8 @@ mod tests {
 
         // `rel collection:lightLink:includes` declares no variability, and a
         // relationship is uniform.
-        let includes = stage.prim("/Sun").relationship("collection:lightLink:includes");
-        let definition = stage.prim("/Sun").prim_definition()?;
+        let includes = stage.prim("/Sun")?.relationship("collection:lightLink:includes");
+        let definition = stage.prim("/Sun")?.prim_definition()?;
         let declared = definition
             .property(&Token::new("collection:lightLink:includes"))
             .expect("includes");
@@ -1665,7 +1654,7 @@ mod tests {
         includes.clone().set_custom(true)?;
         assert!(
             !stage
-                .prim("/Sun")
+                .prim("/Sun")?
                 .relationship("collection:lightLink:includes")
                 .is_custom()?
         );
@@ -1680,9 +1669,9 @@ mod tests {
         // `collection:lightLink:includes` is declared by the schema alone, so
         // authoring targets on it has to stamp the spec first.
         let includes = stage
-            .prim("/Sun")
+            .prim("/Sun")?
             .relationship("collection:lightLink:includes")
-            .set_targets([sdf::path("/Sun")?])?;
+            .set_targets(["/Sun"])?;
         assert_eq!(includes.targets()?, vec![sdf::path("/Sun")?]);
         Ok(())
     }
@@ -1694,7 +1683,7 @@ mod tests {
 
         // The process registry ships without schema data, so a real USD type
         // resolves to an empty definition.
-        assert!(stage.prim("/Light").prim_definition()?.is_empty());
+        assert!(stage.prim("/Light")?.prim_definition()?.is_empty());
         Ok(())
     }
 
@@ -1708,13 +1697,13 @@ mod tests {
             let stage = stage()?;
             stage.define_prim("/A")?.set_type_name("Xform")?;
             stage.define_prim("/B")?.set_type_name("Scope")?;
-            vec![stage.prim("/A"), stage.prim("/B")]
+            vec![stage.prim("/A")?, stage.prim("/B")?]
             // `stage` is dropped here; each handle's cloned `Rc` keeps the
             // shared state alive.
         };
 
         assert_eq!(prims[0].path().as_str(), "/A");
-        let type_name = prims[1].stage().prim(prims[1].path()).type_name()?;
+        let type_name = prims[1].stage().prim(prims[1].path())?.type_name()?;
         assert_eq!(type_name.as_deref(), Some("Scope"));
         Ok(())
     }
@@ -1771,8 +1760,8 @@ mod tests {
         let stage = stage()?;
         stage.define_prim("/Def")?;
         stage.override_prim("/Over")?;
-        assert_eq!(stage.prim("/Def").specifier()?, Some(sdf::Specifier::Def));
-        assert_eq!(stage.prim("/Over").specifier()?, Some(sdf::Specifier::Over));
+        assert_eq!(stage.prim("/Def")?.specifier()?, Some(sdf::Specifier::Def));
+        assert_eq!(stage.prim("/Over")?.specifier()?, Some(sdf::Specifier::Over));
         Ok(())
     }
 
@@ -1785,11 +1774,11 @@ mod tests {
         stage
             .define_prim("/A")?
             .set_metadata(sdf::FieldKey::CustomData.as_str(), dict)?;
-        let Some(sdf::Value::Dictionary(read)) = stage.prim("/A").custom_data()? else {
+        let Some(sdf::Value::Dictionary(read)) = stage.prim("/A")?.custom_data()? else {
             panic!("customData should resolve to a dictionary");
         };
         assert_eq!(read.get("note"), Some(&sdf::Value::String("hi".into())));
-        assert!(stage.prim("/B").custom_data()?.is_none());
+        assert!(stage.prim("/B")?.custom_data()?.is_none());
         Ok(())
     }
 
@@ -1805,7 +1794,7 @@ mod tests {
             stage.field::<sdf::Value>("/World", sdf::FieldKey::TypeName)?,
             Some(sdf::Value::Token("Xform".into())),
         );
-        assert_eq!(stage.prim("/World").kind()?.as_deref(), Some("group"));
+        assert_eq!(stage.prim("/World")?.kind()?.as_deref(), Some("group"));
         Ok(())
     }
 
@@ -1814,10 +1803,10 @@ mod tests {
         let stage = stage()?;
         let prim = stage.define_prim("/World")?.add_applied_schema("MaterialBindingAPI")?;
         assert_eq!(
-            stage.prim(prim.path()).api_schemas()?,
+            stage.prim(prim.path())?.api_schemas()?,
             vec![Token::from("MaterialBindingAPI")]
         );
-        assert!(stage.prim(prim.path()).has_api_schema("MaterialBindingAPI")?);
+        assert!(stage.prim(prim.path())?.has_api_schema("MaterialBindingAPI")?);
         Ok(())
     }
 
@@ -1845,7 +1834,7 @@ mod tests {
 
         let op = stage
             .root_layer()
-            .prim("/World")
+            .prim("/World")?
             .expect("authored on the root layer")
             .api_schemas()
             .expect("apiSchemas authored");
@@ -1902,7 +1891,7 @@ mod tests {
     fn update_metadata_on_pseudo_root_errors() -> anyhow::Result<()> {
         let stage = stage()?;
         let result = stage
-            .prim(sdf::path("/")?)
+            .prim("/")?
             .set_metadata("documentation", sdf::Value::String("x".into()));
         assert!(result.is_err());
         Ok(())

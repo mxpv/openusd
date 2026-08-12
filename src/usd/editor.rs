@@ -193,41 +193,42 @@ impl NamespaceEditor {
 
     /// Stage a move of the prim at `old` to `new`. Mirrors C++
     /// `MovePrimAtPath`.
-    pub fn move_prim(&mut self, old: impl Into<sdf::Path>, new: impl Into<sdf::Path>) -> &mut Self {
-        self.push_move(old, new, ObjectKind::Prim)
+    pub fn move_prim(
+        &mut self,
+        old: impl sdf::IntoPath,
+        new: impl sdf::IntoPath,
+    ) -> Result<&mut Self, sdf::PathParseError> {
+        Ok(self.push_move(sdf::try_into_path(old)?, sdf::try_into_path(new)?, ObjectKind::Prim))
     }
 
     /// Stage a move of the property at `old` to `new`. Mirrors C++
     /// `MovePropertyAtPath`.
-    pub fn move_property(&mut self, old: impl Into<sdf::Path>, new: impl Into<sdf::Path>) -> &mut Self {
-        self.push_move(old, new, ObjectKind::Property)
+    pub fn move_property(
+        &mut self,
+        old: impl sdf::IntoPath,
+        new: impl sdf::IntoPath,
+    ) -> Result<&mut Self, sdf::PathParseError> {
+        Ok(self.push_move(sdf::try_into_path(old)?, sdf::try_into_path(new)?, ObjectKind::Property))
     }
 
     /// Stage a deletion of the prim at `path`. Mirrors C++ `DeletePrimAtPath`.
-    pub fn delete_prim(&mut self, path: impl Into<sdf::Path>) -> &mut Self {
-        self.push_delete(path, ObjectKind::Prim)
+    pub fn delete_prim(&mut self, path: impl sdf::IntoPath) -> Result<&mut Self, sdf::PathParseError> {
+        Ok(self.push_delete(sdf::try_into_path(path)?, ObjectKind::Prim))
     }
 
     /// Stage a deletion of the property at `path`. Mirrors C++
     /// `DeletePropertyAtPath`.
-    pub fn delete_property(&mut self, path: impl Into<sdf::Path>) -> &mut Self {
-        self.push_delete(path, ObjectKind::Property)
+    pub fn delete_property(&mut self, path: impl sdf::IntoPath) -> Result<&mut Self, sdf::PathParseError> {
+        Ok(self.push_delete(sdf::try_into_path(path)?, ObjectKind::Property))
     }
 
-    fn push_move(&mut self, old: impl Into<sdf::Path>, new: impl Into<sdf::Path>, kind: ObjectKind) -> &mut Self {
-        self.edits.push(NamespaceEdit::Move {
-            src: old.into(),
-            dst: new.into(),
-            kind,
-        });
+    fn push_move(&mut self, src: sdf::Path, dst: sdf::Path, kind: ObjectKind) -> &mut Self {
+        self.edits.push(NamespaceEdit::Move { src, dst, kind });
         self
     }
 
-    fn push_delete(&mut self, path: impl Into<sdf::Path>, kind: ObjectKind) -> &mut Self {
-        self.edits.push(NamespaceEdit::Delete {
-            path: path.into(),
-            kind,
-        });
+    fn push_delete(&mut self, path: sdf::Path, kind: ObjectKind) -> &mut Self {
+        self.edits.push(NamespaceEdit::Delete { path, kind });
         self
     }
 
@@ -239,7 +240,7 @@ impl NamespaceEditor {
         let dst = parent
             .append_path(new_name)
             .map_err(|_| NamespaceEditError::InvalidDestination(src.clone()))?;
-        Ok(self.move_prim(src, dst))
+        Ok(self.push_move(src, dst, ObjectKind::Prim))
     }
 
     /// Stage a reparent of `prim` under `new_parent`, keeping its name. Mirrors
@@ -262,7 +263,7 @@ impl NamespaceEditor {
             .path()
             .append_path(new_name)
             .map_err(|_| NamespaceEditError::InvalidDestination(src.clone()))?;
-        Ok(self.move_prim(src, dst))
+        Ok(self.push_move(src, dst, ObjectKind::Prim))
     }
 
     /// Check whether [`apply`](Self::apply) would succeed, without changing the
@@ -801,7 +802,7 @@ impl<'a> NamespaceProjection<'a> {
         let Some(origin) = projected_origin(path, earlier) else {
             return Ok((false, false));
         };
-        let index = self.stage.prim(origin.clone()).prim_index().graph()?;
+        let index = Prim::new(self.stage, origin.prim_path()).prim_index().graph()?;
         let facts = classify_source_nodes(&index, &origin, None);
         Ok((facts.realized, facts.masks))
     }
@@ -848,7 +849,7 @@ impl<'a> NamespaceProjection<'a> {
             return Ok(TargetFacts::default());
         };
         let prim = origin.prim_path();
-        let index = self.stage.prim(prim.clone()).prim_index().graph()?;
+        let index = Prim::new(self.stage, prim.clone()).prim_index().graph()?;
         let target_spec = target.map_to_spec_path(&prim);
         let target_node = target_spec.as_ref().and_then(|spec| {
             index
@@ -1772,12 +1773,13 @@ mod tests {
     }
 
     fn valid(stage: &Stage, p: &str) -> bool {
-        stage.prim(path(p).unwrap()).is_valid().unwrap()
+        stage.prim(path(p).unwrap()).unwrap().is_valid().unwrap()
     }
 
     fn rel_targets(stage: &Stage, p: &str) -> Vec<String> {
         stage
             .relationship(path(p).unwrap())
+            .unwrap()
             .targets()
             .unwrap()
             .iter()
@@ -1788,6 +1790,7 @@ mod tests {
     fn connections(stage: &Stage, p: &str) -> Vec<String> {
         stage
             .attribute(path(p).unwrap())
+            .unwrap()
             .connections()
             .unwrap()
             .iter()
@@ -1799,7 +1802,7 @@ mod tests {
     fn rename_subtree_targets() {
         let stage = sample();
         NamespaceEditor::new(&stage)
-            .rename_prim(&stage.prim(path("/A").unwrap()), "B")
+            .rename_prim(&stage.prim(path("/A").unwrap()).unwrap(), "B")
             .unwrap()
             .apply()
             .unwrap();
@@ -1818,7 +1821,10 @@ mod tests {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
         editor
-            .reparent_prim(&stage.prim(path("/A").unwrap()), &stage.prim(path("/Keep").unwrap()))
+            .reparent_prim(
+                &stage.prim(path("/A").unwrap()).unwrap(),
+                &stage.prim(path("/Keep").unwrap()).unwrap(),
+            )
             .unwrap();
         editor.apply().unwrap();
 
@@ -1831,7 +1837,7 @@ mod tests {
     fn delete_subtree_targets() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.delete_prim(path("/A").unwrap());
+        editor.delete_prim(path("/A").unwrap()).unwrap();
         editor.apply().unwrap();
 
         // The subtree is removed, and every external opinion that named the prim
@@ -1860,7 +1866,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
 
         NamespaceEditor::new(&stage)
-            .rename_prim(&stage.prim(path("/A").unwrap()), "B")
+            .rename_prim(&stage.prim(path("/A").unwrap()).unwrap(), "B")
             .unwrap()
             .apply()
             .unwrap();
@@ -1894,7 +1900,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
 
         NamespaceEditor::new(&stage)
-            .rename_prim(&stage.prim(path("/A").unwrap()), "B")
+            .rename_prim(&stage.prim(path("/A").unwrap()).unwrap(), "B")
             .unwrap()
             .apply()
             .unwrap();
@@ -1917,6 +1923,7 @@ mod tests {
         let stage = sample();
         NamespaceEditor::new(&stage)
             .move_property(path("/A.out").unwrap(), path("/A.renamed").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -1929,6 +1936,7 @@ mod tests {
         let stage = sample();
         NamespaceEditor::new(&stage)
             .delete_property(path("/A.out").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -1941,7 +1949,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/A").unwrap(), path("/B").unwrap())
-            .move_prim(path("/Keep").unwrap(), path("/Kept").unwrap());
+            .unwrap()
+            .move_prim(path("/Keep").unwrap(), path("/Kept").unwrap())
+            .unwrap();
         editor.apply().unwrap();
 
         assert!(valid(&stage, "/B") && valid(&stage, "/Kept"));
@@ -1957,7 +1967,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .delete_prim(path("/Keep").unwrap())
-            .move_prim(path("/A").unwrap(), path("/Keep").unwrap());
+            .unwrap()
+            .move_prim(path("/A").unwrap(), path("/Keep").unwrap())
+            .unwrap();
         editor.apply().unwrap();
 
         assert!(valid(&stage, "/Keep") && valid(&stage, "/Keep/Child"));
@@ -1970,7 +1982,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/A").unwrap(), path("/B").unwrap())
-            .delete_prim(path("/B/Child").unwrap());
+            .unwrap()
+            .delete_prim(path("/B/Child").unwrap())
+            .unwrap();
         editor.apply().unwrap();
 
         assert!(valid(&stage, "/B"));
@@ -1982,6 +1996,7 @@ mod tests {
         let stage = sample();
         NamespaceEditor::new(&stage)
             .move_prim(path("/A/Child").unwrap(), path("/B").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2000,7 +2015,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/A").unwrap(), path("/B").unwrap())
-            .move_prim(path("/B").unwrap(), path("/C").unwrap());
+            .unwrap()
+            .move_prim(path("/B").unwrap(), path("/C").unwrap())
+            .unwrap();
         editor.apply().unwrap();
 
         assert!(valid(&stage, "/C") && valid(&stage, "/C/Child"));
@@ -2026,7 +2043,7 @@ mod tests {
             .unwrap();
 
         NamespaceEditor::new(&stage)
-            .rename_prim(&stage.prim(path("/A").unwrap()), "B")
+            .rename_prim(&stage.prim(path("/A").unwrap()).unwrap(), "B")
             .unwrap()
             .apply()
             .unwrap();
@@ -2066,6 +2083,7 @@ mod tests {
         assert!(valid(&stage, "/Ref/Geom"));
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2086,6 +2104,7 @@ mod tests {
         let stage = referenced_stage();
         NamespaceEditor::new(&stage)
             .delete_prim(path("/Ref/Geom").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2105,7 +2124,9 @@ mod tests {
         let stage = referenced_stage();
         stage.define_prim("/Src").unwrap();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Src").unwrap(), path("/Ref/Geom").unwrap());
+        editor
+            .move_prim(path("/Src").unwrap(), path("/Ref/Geom").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::DestinationExists(_))
@@ -2116,7 +2137,7 @@ mod tests {
     fn can_apply_dry_run() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/A").unwrap(), path("/B").unwrap());
+        editor.move_prim(path("/A").unwrap(), path("/B").unwrap()).unwrap();
         // A feasible batch checks out, and the dry run leaves the stage untouched.
         editor.can_apply().unwrap();
         assert!(valid(&stage, "/A"));
@@ -2140,7 +2161,7 @@ mod tests {
     fn rejects_missing_source() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Nope").unwrap(), path("/B").unwrap());
+        editor.move_prim(path("/Nope").unwrap(), path("/B").unwrap()).unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
     }
 
@@ -2148,7 +2169,7 @@ mod tests {
     fn rejects_collision() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/A").unwrap(), path("/Keep").unwrap());
+        editor.move_prim(path("/A").unwrap(), path("/Keep").unwrap()).unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::DestinationExists(_))
@@ -2159,7 +2180,9 @@ mod tests {
     fn rejects_self_descendant() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/A").unwrap(), path("/A/Inside").unwrap());
+        editor
+            .move_prim(path("/A").unwrap(), path("/A/Inside").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::DestinationUnderSource { .. })
@@ -2170,7 +2193,9 @@ mod tests {
     fn rejects_cross_arc_descendant() {
         let stage = referenced_stage();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Geom/Sub").unwrap());
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Geom/Sub").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::DestinationUnderSource { .. })
@@ -2181,7 +2206,9 @@ mod tests {
     fn rejects_kind_mismatch() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/A").unwrap(), path("/Other.con").unwrap());
+        editor
+            .move_prim(path("/A").unwrap(), path("/Other.con").unwrap())
+            .unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::KindMismatch)));
     }
 
@@ -2191,7 +2218,7 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         // A prim path handed to a property method is rejected, not silently
         // moved as a prim subtree.
-        editor.move_property(path("/A").unwrap(), path("/B").unwrap());
+        editor.move_property(path("/A").unwrap(), path("/B").unwrap()).unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::KindMismatch)));
     }
 
@@ -2199,7 +2226,7 @@ mod tests {
     fn rejects_property_path_in_prim_edit() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.delete_prim(path("/A.out").unwrap());
+        editor.delete_prim(path("/A.out").unwrap()).unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::KindMismatch)));
     }
 
@@ -2212,10 +2239,7 @@ mod tests {
         stage.define_prim("/Prim").unwrap();
         let root = stage.root_layer().identifier().to_string();
         stage
-            .set_edit_target(EditTarget::for_local_direct_variant(
-                root,
-                path("/Prim{set=sel}").unwrap(),
-            ))
+            .set_edit_target(EditTarget::for_local_direct_variant(root, path("/Prim{set=sel}").unwrap()).unwrap())
             .unwrap();
         stage.define_prim("/Prim/child").unwrap();
         stage
@@ -2235,6 +2259,7 @@ mod tests {
         let stage = variant_stage();
         NamespaceEditor::new(&stage)
             .move_prim(path("/Prim/child").unwrap(), path("/Prim/renamed").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2275,6 +2300,7 @@ mod tests {
         let stage = variant_stage();
         NamespaceEditor::new(&stage)
             .move_prim(path("/Prim/child").unwrap(), path("/Prim/sibling/child").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2293,6 +2319,7 @@ mod tests {
         let stage = variant_stage();
         NamespaceEditor::new(&stage)
             .delete_prim(path("/Prim/child").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2334,14 +2361,13 @@ mod tests {
         assert!(valid(&stage, "/Prim/child"));
         let root = stage.root_layer().identifier().to_string();
         stage
-            .set_edit_target(EditTarget::for_local_direct_variant(
-                root,
-                path("/Prim{set=sel}").unwrap(),
-            ))
+            .set_edit_target(EditTarget::for_local_direct_variant(root, path("/Prim{set=sel}").unwrap()).unwrap())
             .unwrap();
 
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Prim/child").unwrap(), path("/Prim/renamed").unwrap());
+        editor
+            .move_prim(path("/Prim/child").unwrap(), path("/Prim/renamed").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::RequiresRelocate(_))
@@ -2388,6 +2414,7 @@ mod tests {
         assert!(valid(&stage, "/Ref/A"));
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2412,6 +2439,7 @@ mod tests {
         let stage = arc_target_stage();
         NamespaceEditor::new(&stage)
             .delete_prim(path("/Ref/A").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2459,6 +2487,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2510,6 +2539,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2534,7 +2564,9 @@ mod tests {
     fn arc_dest_occupied() {
         let stage = arc_target_stage();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/A").unwrap(), path("/Ref/B").unwrap());
+        editor
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/B").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::DestinationExists(_))
@@ -2547,7 +2579,9 @@ mod tests {
     fn mapped_outside_arc() {
         let stage = arc_target_stage();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/A").unwrap(), path("/Elsewhere").unwrap());
+        editor
+            .move_prim(path("/Ref/A").unwrap(), path("/Elsewhere").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::Stage(StageAuthoringError::OutsideEditTarget { .. }))
@@ -2611,6 +2645,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Inner").unwrap(), path("/Ref/Moved").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2639,6 +2674,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .delete_prim(path("/Ref/Inner").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2698,6 +2734,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Inner").unwrap(), path("/Ref/Moved").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2756,6 +2793,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2833,6 +2871,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -2851,7 +2890,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Inner").unwrap(), path("/Ref/Moved").unwrap())
-            .move_prim(path("/Ref/Missing").unwrap(), path("/Ref/X").unwrap());
+            .unwrap()
+            .move_prim(path("/Ref/Missing").unwrap(), path("/Ref/X").unwrap())
+            .unwrap();
         assert!(editor.apply().is_err());
 
         let model = stage.layer("model.usda").expect("model layer");
@@ -2908,7 +2949,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Inner/Grand").unwrap(), path("/Ref/Grand").unwrap())
-            .delete_prim(path("/Ref/Inner").unwrap());
+            .unwrap()
+            .delete_prim(path("/Ref/Inner").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -2923,7 +2966,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/A").unwrap(), path("/Ref/Moved").unwrap())
-            .move_prim(path("/Ref/Missing").unwrap(), path("/Ref/X").unwrap());
+            .unwrap()
+            .move_prim(path("/Ref/Missing").unwrap(), path("/Ref/X").unwrap())
+            .unwrap();
         assert!(editor.apply().is_err());
 
         let model = stage.layer("model.usda").expect("model layer");
@@ -2938,7 +2983,9 @@ mod tests {
     fn mapped_no_source() {
         let stage = arc_target_stage();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/Missing").unwrap(), path("/Ref/X").unwrap());
+        editor
+            .move_prim(path("/Ref/Missing").unwrap(), path("/Ref/X").unwrap())
+            .unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
     }
 
@@ -2947,7 +2994,9 @@ mod tests {
     fn mapped_layers_to_edit() {
         let stage = arc_target_stage();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap());
+        editor
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap();
         assert_eq!(editor.layers_to_edit().unwrap(), vec!["model.usda".to_string()]);
     }
 
@@ -2996,7 +3045,9 @@ mod tests {
         stage.set_edit_target(target).unwrap();
 
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap());
+        editor
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap();
         let layers = editor.layers_to_edit().unwrap();
         assert!(layers.contains(&"model.usda".to_string()), "got {layers:?}");
         assert!(layers.contains(&"model_sub.usda".to_string()), "got {layers:?}");
@@ -3054,7 +3105,9 @@ mod tests {
                 .has_spec(&path("/Model/B").unwrap())
         );
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/A").unwrap(), path("/Ref/B").unwrap());
+        editor
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/B").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::DestinationExists(_))
@@ -3069,7 +3122,9 @@ mod tests {
     fn mapped_source_multi_layer() {
         let stage = arc_overridden_stage(&["A"]);
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap());
+        editor
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::RequiresRelocate(_))
@@ -3084,7 +3139,7 @@ mod tests {
     fn mapped_delete_multi_layer() {
         let stage = arc_overridden_stage(&["A"]);
         let mut editor = NamespaceEditor::new(&stage);
-        editor.delete_prim(path("/Ref/A").unwrap());
+        editor.delete_prim(path("/Ref/A").unwrap()).unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::RequiresRelocate(_))
@@ -3095,7 +3150,9 @@ mod tests {
     fn rejects_relative_path() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(sdf::Path::from("A"), path("/B").unwrap());
+        editor
+            .move_prim(sdf::Path::new("A").unwrap(), path("/B").unwrap())
+            .unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::InvalidSource(_))));
     }
 
@@ -3107,7 +3164,9 @@ mod tests {
         // before anything is authored, so the first move never lands.
         editor
             .move_prim(path("/A").unwrap(), path("/B").unwrap())
-            .move_prim(path("/Nope").unwrap(), path("/X").unwrap());
+            .unwrap()
+            .move_prim(path("/Nope").unwrap(), path("/X").unwrap())
+            .unwrap();
         assert!(editor.apply().is_err());
         assert!(valid(&stage, "/A"));
         assert!(!valid(&stage, "/B"));
@@ -3117,7 +3176,7 @@ mod tests {
     fn rejects_pseudo_root() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.delete_prim(sdf::Path::abs_root());
+        editor.delete_prim(sdf::Path::abs_root()).unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::PseudoRoot)));
     }
 
@@ -3125,7 +3184,7 @@ mod tests {
     fn layers_to_edit_lists() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.delete_prim(path("/A").unwrap());
+        editor.delete_prim(path("/A").unwrap()).unwrap();
         let layers = editor.layers_to_edit().unwrap();
         assert_eq!(layers, vec![stage.root_layer().identifier().to_string()]);
     }
@@ -3143,7 +3202,7 @@ mod tests {
         });
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/B").unwrap(), path("/D").unwrap());
+        editor.move_prim(path("/B").unwrap(), path("/D").unwrap()).unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -3185,6 +3244,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -3245,6 +3305,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .delete_prim(path("/Ref/Geom").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -3272,7 +3333,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
-            .delete_prim(path("/Ref/Renamed").unwrap());
+            .unwrap()
+            .delete_prim(path("/Ref/Renamed").unwrap())
+            .unwrap();
         editor.apply().unwrap();
 
         let relocates = stage.root_layer().relocates();
@@ -3297,7 +3360,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
-            .move_prim(path("/Ref/Renamed").unwrap(), path("/Ref/Final").unwrap());
+            .unwrap()
+            .move_prim(path("/Ref/Renamed").unwrap(), path("/Ref/Final").unwrap())
+            .unwrap();
         editor.apply().unwrap();
 
         let relocates = stage.root_layer().relocates();
@@ -3332,7 +3397,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .delete_prim(path("/Ref/Renamed").unwrap())
-            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap());
+            .unwrap()
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
     }
 
@@ -3346,10 +3413,12 @@ mod tests {
         let stage = referenced_stage();
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Renamed").unwrap(), path("/Ref/Final").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -3398,7 +3467,9 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap()
             .move_prim(path("/Ref/Renamed/Sub").unwrap(), path("/Ref/Renamed/Sub2").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -3423,10 +3494,12 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .unwrap()
             .move_prim(
                 path("/Ref/Renamed/Missing").unwrap(),
                 path("/Ref/Renamed/Other").unwrap(),
-            );
+            )
+            .unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
     }
 
@@ -3458,7 +3531,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
-            .move_property(path("/Ref/Renamed.attr").unwrap(), path("/Ref/Renamed.attr2").unwrap());
+            .unwrap()
+            .move_property(path("/Ref/Renamed.attr").unwrap(), path("/Ref/Renamed.attr2").unwrap())
+            .unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
         assert!(
             !stage.root_layer().relocates().iter().any(|(s, _)| s.is_property_path()),
@@ -3500,7 +3575,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/A").unwrap())
-            .move_prim(path("/A/Sub").unwrap(), path("/A/Other").unwrap());
+            .unwrap()
+            .move_prim(path("/A/Sub").unwrap(), path("/A/Other").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::DestinationExists(_))
@@ -3517,8 +3594,11 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/A").unwrap())
+            .unwrap()
             .move_prim(path("/A/Sub").unwrap(), path("/B").unwrap())
-            .move_prim(path("/A").unwrap(), path("/C").unwrap());
+            .unwrap()
+            .move_prim(path("/A").unwrap(), path("/C").unwrap())
+            .unwrap();
         editor.apply().unwrap();
 
         let relocates = stage.root_layer().relocates();
@@ -3545,8 +3625,11 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/A").unwrap())
+            .unwrap()
             .move_prim(path("/A/Sub").unwrap(), path("/B").unwrap())
-            .delete_prim(path("/A").unwrap());
+            .unwrap()
+            .delete_prim(path("/A").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -3586,8 +3669,11 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/A").unwrap(), path("/Ref/B").unwrap())
+            .unwrap()
             .move_prim(path("/Ref/B").unwrap(), path("/Ref/C").unwrap())
-            .move_prim(path("/Ref/X").unwrap(), path("/Ref/B").unwrap());
+            .unwrap()
+            .move_prim(path("/Ref/X").unwrap(), path("/Ref/B").unwrap())
+            .unwrap();
         editor.apply().unwrap();
 
         assert!(valid(&stage, "/Ref/C"));
@@ -3604,6 +3690,7 @@ mod tests {
         let stage = referenced_stage();
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref").unwrap(), path("/Ref2").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         assert!(valid(&stage, "/Ref2/Geom"));
@@ -3642,7 +3729,9 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
         // /Ref.attr composes from the referenced /Model.attr (no local spec).
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_property(path("/Src.attr").unwrap(), path("/Ref.attr").unwrap());
+        editor
+            .move_property(path("/Src.attr").unwrap(), path("/Ref.attr").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::DestinationExists(_))
@@ -3680,6 +3769,7 @@ mod tests {
         // to a no-op and the metadata must be cleared.
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Orig").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         let relocates = stage.root_layer().relocates();
@@ -3721,6 +3811,7 @@ mod tests {
         // A purely local move of /Local must carry the relocate target with it.
         NamespaceEditor::new(&stage)
             .move_prim(path("/Local").unwrap(), path("/Moved").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         let relocates = stage.root_layer().relocates();
@@ -3754,6 +3845,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
         NamespaceEditor::new(&stage)
             .move_prim(path("/Local").unwrap(), path("/Moved").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         assert!(valid(&stage, "/Moved"));
@@ -3771,7 +3863,7 @@ mod tests {
         });
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/A").unwrap(), path("/C").unwrap());
+        editor.move_prim(path("/A").unwrap(), path("/C").unwrap()).unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -3823,6 +3915,7 @@ mod tests {
         assert!(valid(&stage, "/Ref/Geom"), "sublayer relocate should compose");
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         assert!(valid(&stage, "/Ref/Final"), "relocated prim should move to /Ref/Final");
@@ -3871,7 +3964,9 @@ mod tests {
         });
         let stage = Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new());
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/X").unwrap(), path("/Ref/C").unwrap());
+        editor
+            .move_prim(path("/Ref/X").unwrap(), path("/Ref/C").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -3908,6 +4003,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/X").unwrap(), path("/B").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         assert!(valid(&stage, "/B"));
@@ -3943,6 +4039,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Final").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -3985,6 +4082,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/World").unwrap(), path("/Scene").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -4046,6 +4144,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Final").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -4118,8 +4217,11 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/A").unwrap())
+            .unwrap()
             .delete_prim(path("/A/Sub").unwrap())
-            .move_prim(path("/Local").unwrap(), path("/A/Sub").unwrap());
+            .unwrap()
+            .move_prim(path("/Local").unwrap(), path("/A/Sub").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -4165,6 +4267,7 @@ mod tests {
         assert!(valid(&stage, "/Ref/Geom"));
         NamespaceEditor::new(&stage)
             .delete_prim(path("/Ref/Geom").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         assert!(
@@ -4219,7 +4322,9 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/B").unwrap())
-            .delete_prim(path("/Ref").unwrap());
+            .unwrap()
+            .delete_prim(path("/Ref").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -4237,7 +4342,9 @@ mod tests {
         assert!(valid(&stage, "/Local/Geom"));
         NamespaceEditor::new(&stage)
             .move_prim(path("/Local").unwrap(), path("/Moved").unwrap())
+            .unwrap()
             .move_prim(path("/Moved/Geom").unwrap(), path("/Final").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         assert!(valid(&stage, "/Final"));
@@ -4270,6 +4377,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref").unwrap(), path("/Ref2").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         assert!(valid(&stage, "/Ref2"));
@@ -4298,6 +4406,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
         NamespaceEditor::new(&stage)
             .move_prim(path("/A").unwrap(), path("/Moved").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -4330,6 +4439,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
         NamespaceEditor::new(&stage)
             .move_prim(path("/A").unwrap(), path("/Moved").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         assert!(
@@ -4355,6 +4465,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
         NamespaceEditor::new(&stage)
             .move_prim(path("/A").unwrap(), path("/B").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
         assert_eq!(
@@ -4387,6 +4498,7 @@ mod tests {
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/A").unwrap(), path("/Moved").unwrap())
+            .unwrap()
             .apply()
             .unwrap();
 
@@ -4405,7 +4517,9 @@ mod tests {
     fn layers_to_edit_relocates() {
         let stage = sublayer_relocate_stage(("/Ref/Orig", "/Ref/Geom"), &["Orig"]);
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap());
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap())
+            .unwrap();
         let layers = editor.layers_to_edit().unwrap();
         assert!(
             layers.iter().any(|id| id == "sub.usda"),
@@ -4450,7 +4564,9 @@ mod tests {
         let stage = relocate_target_masking_stage();
         assert!(valid(&stage, "/Ref/Geom"));
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Final").unwrap());
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Final").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -4464,7 +4580,7 @@ mod tests {
     fn rejects_masking_delete() {
         let stage = relocate_target_masking_stage();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.delete_prim(path("/Ref/Geom").unwrap());
+        editor.delete_prim(path("/Ref/Geom").unwrap()).unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -4522,7 +4638,9 @@ mod tests {
         stage.set_edit_target(target).unwrap();
 
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap());
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -4565,7 +4683,9 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
         assert!(valid(&stage, "/Ref/Geom"));
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Dst").unwrap());
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Dst").unwrap())
+            .unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
@@ -4607,7 +4727,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
         assert!(valid(&stage, "/Ref/Geom"));
         let mut editor = NamespaceEditor::new(&stage);
-        editor.delete_prim(path("/Ref/Geom").unwrap());
+        editor.delete_prim(path("/Ref/Geom").unwrap()).unwrap();
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))

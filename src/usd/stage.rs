@@ -225,30 +225,30 @@ impl StagePopulationMask {
     }
 
     /// Creates a mask from prim paths.
-    pub fn new(paths: impl IntoIterator<Item = impl Into<sdf::Path>>) -> Self {
+    pub fn new(paths: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, sdf::PathParseError> {
         let mut mask = Self::empty();
         for path in paths {
-            mask.add_path(path);
+            mask.add_path(path)?;
         }
-        mask
+        Ok(mask)
     }
 
     /// Returns a copy of this mask with `path` added.
-    pub fn with_path(mut self, path: impl Into<sdf::Path>) -> Self {
-        self.add_path(path);
-        self
+    pub fn with_path(mut self, path: impl sdf::IntoPath) -> Result<Self, sdf::PathParseError> {
+        self.add_path(path)?;
+        Ok(self)
     }
 
     /// Adds a prim path to the mask.
-    pub fn add_path(&mut self, path: impl Into<sdf::Path>) -> &mut Self {
-        let path = sdf::Path::abs_root().make_absolute(&path.into().prim_path());
+    pub fn add_path(&mut self, path: impl sdf::IntoPath) -> Result<&mut Self, sdf::PathParseError> {
+        let path = sdf::Path::abs_root().make_absolute(&sdf::try_into_path(path)?.prim_path());
         if path == sdf::Path::abs_root() {
             self.paths.clear();
             self.paths.push(path);
         } else if !self.is_all() && !self.paths.contains(&path) {
             self.paths.push(path);
         }
-        self
+        Ok(self)
     }
 
     /// Returns the authored mask paths.
@@ -391,14 +391,18 @@ impl EditTarget {
     ///
     /// Mirrors C++ `UsdEditTarget::ForLocalDirectVariant`. Paths outside the
     /// variant prim map to themselves, so authoring elsewhere is unaffected.
-    pub fn for_local_direct_variant(layer_identifier: impl Into<String>, var_sel_path: sdf::Path) -> Self {
+    pub fn for_local_direct_variant(
+        layer_identifier: impl Into<String>,
+        var_sel_path: impl sdf::IntoPath,
+    ) -> Result<Self, sdf::PathParseError> {
+        let var_sel_path = sdf::try_into_path(var_sel_path)?;
         let stripped = var_sel_path.strip_all_variant_selections();
-        Self {
+        Ok(Self {
             layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::from_pair_identity(var_sel_path, stripped),
             layer_stack: None,
             authoring_stack: None,
-        }
+        })
     }
 
     /// The identifier of the layer this target writes to.
@@ -555,6 +559,10 @@ impl Drop for EditContext<'_> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StageAuthoringError {
+    /// A path argument failed to parse.
+    #[error(transparent)]
+    Parse(#[from] sdf::PathParseError),
+
     /// The layer at the current edit target rejected the authoring call.
     #[error(transparent)]
     Layer(#[from] sdf::AuthoringError),
@@ -1092,8 +1100,8 @@ impl Stage {
     /// returned handle lets callers chain field setters (`set_type_name`,
     /// `set_active`, `set_kind`, …) and child-property authoring
     /// (`create_attribute`, `create_relationship`).
-    pub fn define_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim, StageAuthoringError> {
-        let path = path.into();
+    pub fn define_prim(&self, path: impl sdf::IntoPath) -> Result<super::Prim, StageAuthoringError> {
+        let path = sdf::try_into_path(path)?;
         self.with_target_layer_at(&path, |layer, layer_path| {
             // The layer records the spec add and any auto-created ancestor
             // `over`s; an idempotent call (existing def) records nothing because
@@ -1109,8 +1117,8 @@ impl Stage {
     /// `path` its specifier is left untouched — `override_prim` does not
     /// downgrade an existing `def` or `class` to `over`. Chain fluent
     /// setters on the returned handle to author additional fields.
-    pub fn override_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim, StageAuthoringError> {
-        let path = path.into();
+    pub fn override_prim(&self, path: impl sdf::IntoPath) -> Result<super::Prim, StageAuthoringError> {
+        let path = sdf::try_into_path(path)?;
         self.with_target_layer_at(&path, |layer, layer_path| {
             sdf::PrimSpec::over(layer.data_mut(), layer_path)?;
             Ok(())
@@ -1125,10 +1133,10 @@ impl Stage {
     /// [`Attribute`](super::Attribute) handle's fluent setters.
     pub fn create_attribute(
         &self,
-        path: impl Into<sdf::Path>,
+        path: impl sdf::IntoPath,
         type_name: impl Into<String>,
     ) -> Result<super::Attribute, StageAuthoringError> {
-        let path = path.into();
+        let path = sdf::try_into_path(path)?;
         let type_name = type_name.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
             // The owning prim and any missing ancestors are auto-created as
@@ -1143,8 +1151,8 @@ impl Stage {
     /// layer with default variability `Varying` and `custom = true`, matching
     /// C++ `UsdPrim::CreateRelationship`. Override the defaults and add targets
     /// via the returned [`Relationship`] handle's fluent setters.
-    pub fn create_relationship(&self, path: impl Into<sdf::Path>) -> Result<super::Relationship, StageAuthoringError> {
-        let path = path.into();
+    pub fn create_relationship(&self, path: impl sdf::IntoPath) -> Result<super::Relationship, StageAuthoringError> {
+        let path = sdf::try_into_path(path)?;
         self.with_target_layer_at(&path, |layer, layer_path| {
             sdf::RelationshipSpec::new(layer.data_mut(), layer_path, sdf::Variability::Uniform, true)?;
             Ok(())
@@ -1161,8 +1169,8 @@ impl Stage {
     /// the affected composition subtree — a prim removed from the edit-target
     /// layer drops out of the composed stage when no weaker layer still defines
     /// it.
-    pub fn remove_prim(&self, path: impl Into<sdf::Path>) -> Result<bool, StageAuthoringError> {
-        let path = path.into();
+    pub fn remove_prim(&self, path: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
+        let path = sdf::try_into_path(path)?;
         if path.is_property_path() {
             return Err(sdf::AuthoringError::InvalidPath {
                 path,
@@ -1180,8 +1188,8 @@ impl Stage {
     /// edit-target layer had nothing at `path`. The removal is authored on the
     /// current [`EditTarget`], delivers a `CommittedChange` to sinks, and invalidates
     /// the owning prim.
-    pub fn remove_property(&self, path: impl Into<sdf::Path>) -> Result<bool, StageAuthoringError> {
-        let path = path.into();
+    pub fn remove_property(&self, path: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
+        let path = sdf::try_into_path(path)?;
         if !path.is_property_path() {
             return Err(sdf::AuthoringError::InvalidPath {
                 path,
@@ -2029,26 +2037,28 @@ impl Stage {
     /// never be consulted. No inactive-ancestor validation is performed — an
     /// inactive subtree never composes regardless of its load rule, so a rule
     /// authored there is inert but harmless.
-    pub fn load(&self, path: impl Into<sdf::Path>, policy: LoadPolicy) {
-        let Some(path) = self.normalize_load_target(path.into()) else {
-            return;
+    pub fn load(&self, path: impl sdf::IntoPath, policy: LoadPolicy) -> Result<(), sdf::PathParseError> {
+        let Some(path) = self.normalize_load_target(sdf::try_into_path(path)?) else {
+            return Ok(());
         };
         let victims = self.install_load_rules(|rules| match policy {
             LoadPolicy::WithDescendants => rules.load_with_descendants(path.clone()),
             LoadPolicy::WithoutDescendants => rules.load_without_descendants(path.clone()),
         });
         self.notify_load_rules_changed(&victims);
+        Ok(())
     }
 
     /// Unloads `path`'s payload and everything beneath it (C++
     /// `UsdStage::Unload`). Same leniency as [`load`](Self::load) for a
     /// prototype-namespace path.
-    pub fn unload(&self, path: impl Into<sdf::Path>) {
-        let Some(path) = self.normalize_load_target(path.into()) else {
-            return;
+    pub fn unload(&self, path: impl sdf::IntoPath) -> Result<(), sdf::PathParseError> {
+        let Some(path) = self.normalize_load_target(sdf::try_into_path(path)?) else {
+            return Ok(());
         };
         let victims = self.install_load_rules(|rules| rules.unload(path.clone()));
         self.notify_load_rules_changed(&victims);
+        Ok(())
     }
 
     /// Loads every path in `to_load` (with `policy`) and unloads every path
@@ -2063,17 +2073,25 @@ impl Stage {
     /// [`pcp::LoadRules::effective_rule`]'s lookahead).
     pub fn load_and_unload(
         &self,
-        to_load: impl IntoIterator<Item = (impl Into<sdf::Path>, LoadPolicy)>,
-        to_unload: impl IntoIterator<Item = impl Into<sdf::Path>>,
-    ) {
+        to_load: impl IntoIterator<Item = (impl sdf::IntoPath, LoadPolicy)>,
+        to_unload: impl IntoIterator<Item: sdf::IntoPath>,
+    ) -> Result<(), sdf::PathParseError> {
+        // Convert (and fail) before any rule is edited, so a bad path in
+        // either set leaves the stage untouched.
         let to_unload: Vec<sdf::Path> = to_unload
             .into_iter()
-            .filter_map(|path| self.normalize_load_target(path.into()))
-            .collect();
+            .map(|path| Ok(self.normalize_load_target(sdf::try_into_path(path)?)))
+            .filter_map(Result::transpose)
+            .collect::<Result<_, sdf::PathParseError>>()?;
         let to_load: Vec<(sdf::Path, LoadPolicy)> = to_load
             .into_iter()
-            .filter_map(|(path, policy)| self.normalize_load_target(path.into()).map(|path| (path, policy)))
-            .collect();
+            .map(|(path, policy)| {
+                Ok(self
+                    .normalize_load_target(sdf::try_into_path(path)?)
+                    .map(|path| (path, policy)))
+            })
+            .filter_map(Result::transpose)
+            .collect::<Result<_, sdf::PathParseError>>()?;
         let victims = self.install_load_rules(|rules| {
             for path in to_unload {
                 rules.unload(path);
@@ -2086,6 +2104,7 @@ impl Stage {
             }
         });
         self.notify_load_rules_changed(&victims);
+        Ok(())
     }
 
     /// A clone of the stage's current load rules (C++
@@ -2133,8 +2152,8 @@ impl Stage {
     // `InitialLoadSet::LoadNone` pays two full-store recomposes per call. A
     // scratch cache the walk composes into, left uncommitted, would avoid
     // this, but is a larger change than this method currently needs.
-    pub fn find_loadable(&self, root: impl Into<sdf::Path>) -> anyhow::Result<Vec<sdf::Path>> {
-        let root = root.into();
+    pub fn find_loadable(&self, root: impl sdf::IntoPath) -> anyhow::Result<Vec<sdf::Path>> {
+        let root = sdf::try_into_path(root)?.prim_path();
         let _guard = LoadRulesGuard {
             stage: self,
             original: self.load_rules(),
@@ -2168,7 +2187,7 @@ impl Stage {
     fn walk_loadable(&self, path: &sdf::Path, found: &mut Vec<sdf::Path>) -> anyhow::Result<()> {
         let mut stack = vec![path.clone()];
         while let Some(path) = stack.pop() {
-            let prim = self.prim(path.clone());
+            let prim = super::Prim::new(self, path.clone());
             if !prim.is_active()? {
                 continue;
             }
@@ -2403,7 +2422,8 @@ impl Stage {
     /// This returns raw composed samples. Read through
     /// [`Attribute::get`](super::Attribute::get) with a time code when you
     /// need the stage's [`InterpolationType`] applied to a specific time.
-    pub fn time_samples(&self, attr_path: impl Into<sdf::Path>) -> Result<Option<sdf::TimeSampleMap>> {
+    pub fn time_samples(&self, attr_path: impl sdf::IntoPath) -> Result<Option<sdf::TimeSampleMap>> {
+        let attr_path = sdf::try_into_path(attr_path)?;
         Ok(match self.field::<sdf::Value>(attr_path, sdf::FieldKey::TimeSamples)? {
             Some(sdf::Value::TimeSamples(samples)) => Some(samples),
             _ => None,
@@ -2414,15 +2434,15 @@ impl Stage {
     /// `None` when none are authored. Resolves the times without cloning the
     /// sample values, retimed by the contributing layer offsets to match
     /// [`Self::time_samples`].
-    pub fn time_sample_times(&self, attr_path: impl Into<sdf::Path>) -> Result<Option<Vec<f64>>> {
-        let attr_path = attr_path.into();
+    pub fn time_sample_times(&self, attr_path: impl sdf::IntoPath) -> Result<Option<Vec<f64>>> {
+        let attr_path = sdf::try_into_path(attr_path)?;
         self.masked(&attr_path, |g, c| c.time_sample_times(g, &attr_path))
     }
 
     /// Returns the number of composed `timeSamples` for an attribute, zero when
     /// none are authored. Resolves the count without cloning the sample values.
-    pub fn num_time_samples(&self, attr_path: impl Into<sdf::Path>) -> Result<usize> {
-        let attr_path = attr_path.into();
+    pub fn num_time_samples(&self, attr_path: impl sdf::IntoPath) -> Result<usize> {
+        let attr_path = sdf::try_into_path(attr_path)?;
         self.masked(&attr_path, |g, c| c.num_time_samples(g, &attr_path))
     }
 
@@ -2432,8 +2452,8 @@ impl Stage {
     /// sample, and conservatively when that source is a value-clip set with more
     /// than one active clip — those clips can each contribute a different value
     /// even where the discrete sample count collapses to one (spec 12.3.4).
-    pub fn value_might_be_time_varying(&self, attr_path: impl Into<sdf::Path>) -> Result<bool> {
-        let attr_path = attr_path.into();
+    pub fn value_might_be_time_varying(&self, attr_path: impl sdf::IntoPath) -> Result<bool> {
+        let attr_path = sdf::try_into_path(attr_path)?;
         self.masked(&attr_path, |g, c| c.value_might_be_time_varying(g, &attr_path))
     }
 
@@ -2451,8 +2471,8 @@ impl Stage {
     /// authored value is a [`sdf::Value::ValueBlock`] / [`sdf::Value::None`]
     /// (the spec sentinels for "no value"), or when the queried prim
     /// is excluded by the stage's population mask.
-    pub(crate) fn resolve_at(&self, attr_path: impl Into<sdf::Path>, time: f64) -> Result<Option<sdf::Value>> {
-        let attr_path = attr_path.into();
+    pub(crate) fn resolve_at(&self, attr_path: impl sdf::IntoPath, time: f64) -> Result<Option<sdf::Value>> {
+        let attr_path = sdf::try_into_path(attr_path)?;
         if !self.mask_includes(&attr_path.prim_path()) {
             return Ok(None);
         }
@@ -2493,8 +2513,8 @@ impl Stage {
     /// with every other prim resolving to the same pair. A prim with neither —
     /// including one the population mask excludes — gets the registry's empty
     /// type.
-    pub fn prim_type_info(&self, path: impl Into<sdf::Path>) -> Result<Arc<PrimTypeInfo>> {
-        let path = path.into();
+    pub fn prim_type_info(&self, path: impl sdf::IntoPath) -> Result<Arc<PrimTypeInfo>> {
+        let path = sdf::try_into_path(path)?;
         let revision = self.cache_revision();
         if let Some(info) = self.prim_types.borrow().lookup(revision, &path) {
             return Ok(info);
@@ -2503,7 +2523,7 @@ impl Stage {
         // Keyed on the authored list, not the composed one: the composed list
         // is what the definition this identity selects reports back
         // (C++ `_ComposeAuthoredAppliedSchemas`).
-        let prim = self.prim(&path);
+        let prim = super::Prim::new(self, path.prim_path());
         let mut id = PrimTypeId::new(prim.type_name()?, prim.authored_api_schemas()?);
         if let Some(mapped) = self.fallback_prim_type(id.type_name())? {
             id = id.with_mapped_type_name(mapped);
@@ -2551,30 +2571,31 @@ impl Stage {
 
     /// Returns a [`Prim`](super::Prim) handle anchored to `path`. Mirrors C++
     /// `UsdStage::GetPrimAtPath`. The handle is a value-type `(stage, path)`
-    /// wrapper; it is returned unconditionally and does not assert that a prim
-    /// is composed at the path (query the handle to find out).
-    pub fn prim(&self, path: impl Into<sdf::Path>) -> super::Prim {
-        super::Prim::new(self, path.into().prim_path())
+    /// wrapper; `Ok` does not assert that a prim is composed at the path
+    /// (query the handle to find out) — `Err` means `path` failed to parse.
+    pub fn prim(&self, path: impl sdf::IntoPath) -> Result<super::Prim, sdf::PathParseError> {
+        Ok(super::Prim::new(self, sdf::try_into_path(path)?.prim_path()))
     }
 
     /// Returns an [`Attribute`](super::Attribute) handle anchored to `path`.
-    /// Mirrors C++ `UsdStage::GetAttributeAtPath`. Like [`Self::prim`],
-    /// the handle is returned unconditionally; query it to resolve a value.
-    pub fn attribute(&self, path: impl Into<sdf::Path>) -> super::Attribute {
-        super::Attribute::new(self, path.into())
+    /// Mirrors C++ `UsdStage::GetAttributeAtPath`. Like [`Self::prim`], the
+    /// `Ok` handle asserts nothing about composed scene content; query it to
+    /// resolve a value.
+    pub fn attribute(&self, path: impl sdf::IntoPath) -> Result<super::Attribute, sdf::PathParseError> {
+        Ok(super::Attribute::new(self, sdf::try_into_path(path)?))
     }
 
     /// Returns a [`Relationship`](super::Relationship) handle anchored to `path`.
     /// Mirrors C++ `UsdStage::GetRelationshipAtPath`.
-    pub fn relationship(&self, path: impl Into<sdf::Path>) -> super::Relationship {
-        super::Relationship::new(self, path.into())
+    pub fn relationship(&self, path: impl sdf::IntoPath) -> Result<super::Relationship, sdf::PathParseError> {
+        Ok(super::Relationship::new(self, sdf::try_into_path(path)?))
     }
 
     /// Returns an [`AttributeQuery`](super::AttributeQuery) for the attribute at
     /// `path` — a cached value source for repeated time-code reads. The
     /// `Stage`-anchored spelling of [`Attribute::query`](super::Attribute::query).
-    pub fn attribute_query(&self, path: impl Into<sdf::Path>) -> super::AttributeQuery {
-        super::AttributeQuery::new(&self.attribute(path))
+    pub fn attribute_query(&self, path: impl sdf::IntoPath) -> Result<super::AttributeQuery, sdf::PathParseError> {
+        Ok(super::AttributeQuery::new(&self.attribute(path)?))
     }
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
@@ -2606,8 +2627,8 @@ impl Stage {
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
-    pub(crate) fn spec_type(&self, path: impl Into<sdf::Path>) -> Result<Option<sdf::SpecType>> {
-        let path = path.into();
+    pub(crate) fn spec_type(&self, path: impl sdf::IntoPath) -> Result<Option<sdf::SpecType>> {
+        let path = sdf::try_into_path(path)?;
         if !self.mask_includes(&path.prim_path()) {
             return Ok(None);
         }
@@ -2641,12 +2662,12 @@ impl Stage {
     /// Accepts both [`sdf::FieldKey`] and `&str` as the field name.
     ///
     /// [`Attribute::get`]: super::Attribute::get
-    pub(crate) fn field<T>(&self, path: impl Into<sdf::Path>, field: impl AsRef<str>) -> Result<Option<T>>
+    pub(crate) fn field<T>(&self, path: impl sdf::IntoPath, field: impl AsRef<str>) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
         T::Error: std::error::Error + Send + Sync + 'static,
     {
-        let path = path.into();
+        let path = sdf::try_into_path(path)?;
         if !self.mask_includes(&path.prim_path()) {
             return Ok(None);
         }
@@ -2700,8 +2721,8 @@ impl Stage {
     /// `UsdPrim::GetPrimIndex`). The handle is a cheap `(stage, path)` value;
     /// each of its queries borrows the cache briefly, so it can be held and
     /// reused freely.
-    pub fn prim_index(&self, prim: impl Into<sdf::Path>) -> super::PrimIndexRef {
-        super::PrimIndexRef::new(self, prim.into())
+    pub fn prim_index(&self, prim: impl sdf::IntoPath) -> Result<super::PrimIndexRef, sdf::PathParseError> {
+        Ok(super::PrimIndexRef::new(self, sdf::try_into_path(prim)?))
     }
 
     /// Resolves a layer id — as carried by a composition
@@ -2745,15 +2766,15 @@ impl Stage {
     }
 
     /// Returns the resolved stage status bits for a prim.
-    pub fn prim_status(&self, prim: impl Into<sdf::Path>) -> Result<PrimStatus> {
-        self.prim_status_masked(&prim.into().prim_path(), PrimStatus::all())
+    pub fn prim_status(&self, prim: impl sdf::IntoPath) -> Result<PrimStatus> {
+        self.prim_status_masked(&sdf::try_into_path(prim)?.prim_path(), PrimStatus::all())
     }
 
     /// Computes only the status bits set in `mask`. Bits outside `mask` are
     /// left unset. Used by traversal so unused checks (e.g. INSTANCE, MODEL
     /// for default traversal) are skipped.
     fn prim_status_masked(&self, prim: &sdf::Path, mask: PrimStatus) -> Result<PrimStatus> {
-        let prim = self.prim(prim.clone());
+        let prim = super::Prim::new(self, prim.clone());
         let mut status = PrimStatus::empty();
         if mask.contains(PrimStatus::ACTIVE) {
             status.set(PrimStatus::ACTIVE, prim.is_active()?);
@@ -4022,7 +4043,8 @@ mod tests {
                 true,
             )
             .unwrap()
-            .set_connection_paths([target.clone()]);
+            .set_connection_paths([target.clone()])
+            .unwrap();
         });
 
         let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
@@ -4034,7 +4056,7 @@ mod tests {
 
         let op = stage
             .root_layer()
-            .attribute(input.clone())
+            .attribute(input.clone())?
             .expect("delete authored on the root layer")
             .connection_path_list()
             .unwrap();
@@ -4071,7 +4093,8 @@ mod tests {
                 true,
             )
             .unwrap()
-            .set_connection_paths([target.clone()]);
+            .set_connection_paths([target.clone()])
+            .unwrap();
         });
 
         let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
@@ -4084,7 +4107,7 @@ mod tests {
         assert!(
             stage
                 .root_layer()
-                .attribute(input.clone())
+                .attribute(input.clone())?
                 .and_then(|attr| attr.connection_path_list())
                 .is_none()
         );
@@ -4120,7 +4143,8 @@ mod tests {
                 true,
             )
             .unwrap()
-            .set_connection_paths([target.clone()]);
+            .set_connection_paths([target.clone()])
+            .unwrap();
         });
 
         let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
@@ -4133,7 +4157,7 @@ mod tests {
         assert_eq!(attr.connections()?, vec![target.clone()]);
         let op = stage
             .root_layer()
-            .attribute(input.clone())
+            .attribute(input.clone())?
             .expect("authored on the root layer")
             .connection_path_list()
             .unwrap();
@@ -4156,7 +4180,7 @@ mod tests {
         stage.set_edit_target(EditTarget::for_local_direct_variant(
             root.clone(),
             sdf::path("/Prim{set=sel}")?,
-        ))?;
+        )?)?;
         stage.define_prim("/Prim/child")?;
 
         let landed = {
@@ -4181,7 +4205,7 @@ mod tests {
         stage.set_edit_target(EditTarget::for_local_direct_variant(
             root.clone(),
             sdf::path("/Prim{set=sel}")?,
-        ))?;
+        )?)?;
         stage.create_attribute("/Prim.size", "double")?;
 
         let landed = {
@@ -4232,7 +4256,7 @@ mod tests {
         stage.insert_layer(&mid_id, 0, opinion_layer("leaf.usda", 5.0)?, sdf::LayerOffset::IDENTITY)?;
         assert_eq!(
             stage
-                .attribute("/A.x")
+                .attribute("/A.x")?
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(5.0))
         );
@@ -4248,7 +4272,7 @@ mod tests {
         )?;
         assert_eq!(
             stage
-                .attribute("/A.x")
+                .attribute("/A.x")?
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(5.0)),
             "the already-loaded mid layer's child edge to leaf must survive re-insertion"
@@ -4280,7 +4304,7 @@ mod tests {
         let stage = Stage::open(&root_path.to_string_lossy())?;
         assert_eq!(
             stage
-                .attribute("/A.x")
+                .attribute("/A.x")?
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(5.0)),
             "the relative sublayer composes its opinion"
@@ -4307,7 +4331,7 @@ mod tests {
         );
         assert_eq!(
             stage
-                .attribute("/A.x")
+                .attribute("/A.x")?
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             None,
             "the removed sublayer's opinion is gone"
@@ -4372,13 +4396,13 @@ over "T" {
         // Compose `/P` first, loading the shared target under the empty (no
         // variable) context.
         let _ = stage
-            .attribute("/P.x")
+            .attribute("/P.x")?
             .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?;
         // `/Q` reaches the same target carrying `V=chosen`; the target's `${V}`
         // sublayer must resolve and contribute `chosen.usda`'s opinion.
         assert_eq!(
             stage
-                .attribute("/Q.x")
+                .attribute("/Q.x")?
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(42.0)),
             "the later variable-carrying arc seeds the shared target's ${{V}} sublayer",
@@ -4502,7 +4526,7 @@ over "T" {
         // target's `${V}` sublayer resolves to `chosen.usda`.
         assert_eq!(
             stage
-                .attribute("/Q.x")
+                .attribute("/Q.x")?
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(42.0)),
             "the variable-carrying arc resolves the `${{V}}` sublayer",
@@ -4511,7 +4535,7 @@ over "T" {
         // resolve, so `/P.x` stays absent — not polluted by `/Q`'s context.
         assert_eq!(
             stage
-                .attribute("/P.x")
+                .attribute("/P.x")?
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             None,
             "the variable-free arc is isolated from the other arc's context",
@@ -4561,7 +4585,7 @@ def "T" {
         let stage = Stage::builder().make_stage(vec![root, opinion_layer("sub.usda", 5.0)?], 0, Vec::new());
         assert_eq!(
             stage
-                .attribute("/A.x")
+                .attribute("/A.x")?
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(5.0)),
             "the dot-relative sublayer composes its opinion"
@@ -4571,7 +4595,7 @@ def "T" {
 
     /// Reads the composed `/A.x` default value as an `f64`, for the muting tests.
     fn read_ax(stage: &Stage) -> Result<Option<f64>> {
-        stage.attribute("/A.x").get_at::<f64>(crate::usd::TimeCode::new(0.0))
+        stage.attribute("/A.x")?.get_at::<f64>(crate::usd::TimeCode::new(0.0))
     }
 
     /// A root layer sublayering each `(identifier, value)` opinion in strength
@@ -4769,19 +4793,19 @@ def "T" {
         });
         let stage = Stage::builder().make_stage(vec![root, strong, opinion_layer("weak.usda", 1.0)?], 0, Vec::new());
         assert!(
-            stage.prim("/A/Child").is_valid()?,
+            stage.prim("/A/Child")?.is_valid()?,
             "the expression sublayer strong.usda contributes /A/Child"
         );
 
         stage.mute_layer("strong.usda");
         assert!(
-            !stage.prim("/A/Child").is_valid()?,
+            !stage.prim("/A/Child")?.is_valid()?,
             "muting strong.usda removes its /A/Child"
         );
 
         stage.unmute_layer("strong.usda");
         assert!(
-            stage.prim("/A/Child").is_valid()?,
+            stage.prim("/A/Child")?.is_valid()?,
             "unmuting recomposes the index so /A/Child, selected via the expression sublayer, returns"
         );
         Ok(())
@@ -4845,7 +4869,7 @@ def "T" {
             0,
             Vec::new(),
         );
-        let query = stage.attribute("/A.x").query();
+        let query = stage.attribute("/A.x")?.query();
         assert_eq!(query.get_at::<f64>(crate::usd::TimeCode::new(0.0))?, Some(9.0));
 
         stage.mute_layer("strong.usda");
@@ -4975,7 +4999,7 @@ def "T" {
         });
 
         let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
-        let read_px = |stage: &Stage| stage.attribute("/P.x").get_at::<f64>(crate::usd::TimeCode::new(0.0));
+        let read_px = |stage: &Stage| stage.attribute("/P.x")?.get_at::<f64>(crate::usd::TimeCode::new(0.0));
         assert_eq!(read_px(&stage)?, Some(5.0), "the reference brings /Target.x to /P.x");
 
         stage.mute_layer("target.usda");
@@ -5017,8 +5041,8 @@ def "T" {
         let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
         let (refp, indep) = (sdf::path("/Ref")?, sdf::path("/Indep")?);
         // Force both prim indices into the cache.
-        assert!(stage.prim(refp.clone()).is_valid()?);
-        assert!(stage.prim(indep.clone()).is_valid()?);
+        assert!(stage.prim(refp.clone())?.is_valid()?);
+        assert!(stage.prim(indep.clone())?.is_valid()?);
         assert!(stage.is_indexed(&refp) && stage.is_indexed(&indep));
 
         stage.mute_layer("target.usda");
@@ -5027,7 +5051,7 @@ def "T" {
 
         // Rebuild the referencing prim's index (now recording the muted target),
         // then unmute and confirm it is dropped again while the sibling stays warm.
-        assert!(stage.prim(refp.clone()).is_valid()?);
+        assert!(stage.prim(refp.clone())?.is_valid()?);
         stage.unmute_layer("target.usda");
         assert!(!stage.is_indexed(&refp), "unmuting recomposes the referencing prim");
         assert!(stage.is_indexed(&indep), "unmuting leaves the independent prim cached");
@@ -5057,7 +5081,7 @@ def "T" {
         // spans [session, root, child].
         let stage = Stage::builder().make_stage(vec![session, root, child], 1, Vec::new());
         let p = sdf::path("/P")?;
-        assert!(stage.prim(p.clone()).is_valid()?);
+        assert!(stage.prim(p.clone())?.is_valid()?);
         assert!(stage.is_indexed(&p), "the sublayer opinion composes and caches");
 
         stage.mute_layer("child.usda");
@@ -5097,8 +5121,8 @@ def "T" {
         let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
         let (refp, indep) = (sdf::path("/Ref")?, sdf::path("/Indep")?);
         // Force both prim indices into the cache (querying /Ref loads the target).
-        assert!(stage.prim(refp.clone()).is_valid()?);
-        assert!(stage.prim(indep.clone()).is_valid()?);
+        assert!(stage.prim(refp.clone())?.is_valid()?);
+        assert!(stage.prim(indep.clone())?.is_valid()?);
         assert!(stage.is_indexed(&refp) && stage.is_indexed(&indep));
 
         // Edit the reference target's sublayer stack — only /Ref reads it.
@@ -5137,7 +5161,7 @@ def "T" {
         });
 
         let stage = Stage::builder().make_stage(vec![root, target, opinion_layer("base.usda", 1.0)?], 0, Vec::new());
-        let ref_x = || stage.attribute("/Ref.x").get::<f64>();
+        let ref_x = || stage.attribute("/Ref.x")?.get::<f64>();
         assert_eq!(ref_x()?, Some(1.0), "the reference target's sublayer opinion composes");
 
         // Insert a stronger sublayer into the target's stack; the referencing prim
@@ -5165,7 +5189,7 @@ def "T" {
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
         let newp = sdf::path("/New")?;
         // Query the absent prim, caching a negative (empty) index.
-        assert!(!stage.prim(newp.clone()).is_valid()?, "the prim is absent");
+        assert!(!stage.prim(newp.clone())?.is_valid()?, "the prim is absent");
         assert!(stage.is_indexed(&newp), "the miss is cached");
 
         // Add a root sublayer that defines the prim.
@@ -5175,7 +5199,7 @@ def "T" {
         });
         stage.insert_layer("root.usda", 0, over, sdf::LayerOffset::IDENTITY)?;
         assert!(
-            stage.prim(newp.clone()).is_valid()?,
+            stage.prim(newp.clone())?.is_valid()?,
             "the subLayers edit invalidates the cached miss and the prim becomes visible"
         );
         Ok(())
@@ -5208,7 +5232,7 @@ def "T" {
         let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
         let missing = sdf::path("/Ref/Missing")?;
         assert!(
-            !stage.prim(missing.clone()).is_valid()?,
+            !stage.prim(missing.clone())?.is_valid()?,
             "the reference descendant is absent"
         );
         assert!(stage.is_indexed(&missing), "the miss is cached");
@@ -5221,7 +5245,7 @@ def "T" {
         });
         stage.insert_layer("target.usda", 0, over, sdf::LayerOffset::IDENTITY)?;
         assert!(
-            stage.prim(missing.clone()).is_valid()?,
+            stage.prim(missing.clone())?.is_valid()?,
             "editing the target's subLayers invalidates the cached reference-descendant miss"
         );
         Ok(())
@@ -5249,7 +5273,7 @@ def "T" {
             });
             Stage::builder().make_stage(vec![root, sub], 0, Vec::new())
         };
-        let read = |s: &Stage| s.attribute("/A.x").get_at::<f64>(crate::usd::TimeCode::new(8.0));
+        let read = |s: &Stage| s.attribute("/A.x")?.get_at::<f64>(crate::usd::TimeCode::new(8.0));
 
         let stage = build(1.0);
         let before = read(&stage)?;
@@ -5284,13 +5308,13 @@ def "T" {
         );
 
         assert_eq!(
-            stage.attribute("/A.x").get::<f64>()?,
+            stage.attribute("/A.x")?.get::<f64>()?,
             Some(1.0),
             "the WHICH-valued sublayer resolves to a.usda"
         );
         stage.set_expression_variables(HashMap::from([("WHICH".to_string(), sdf::Value::String("b".into()))]))?;
         assert_eq!(
-            stage.attribute("/A.x").get::<f64>()?,
+            stage.attribute("/A.x")?.get::<f64>()?,
             Some(2.0),
             "editing WHICH re-expands the sublayer to b.usda and recomposes the cached index"
         );
@@ -5325,7 +5349,7 @@ def "T" {
         );
 
         assert_eq!(
-            stage.attribute("/A.x").get::<f64>()?,
+            stage.attribute("/A.x")?.get::<f64>()?,
             Some(1.0),
             "the root sublayer expression resolves against the session layer's WHICH variable"
         );
@@ -5529,8 +5553,8 @@ def "T" {
             Ok(())
         })?;
         assert!(changed);
-        assert!(stage.prim(sdf::path("/FromRoot")?).is_valid()?);
-        assert!(stage.prim(sdf::path("/FromWeak")?).is_valid()?);
+        assert!(stage.prim("/FromRoot")?.is_valid()?);
+        assert!(stage.prim("/FromWeak")?.is_valid()?);
         Ok(())
     }
 
@@ -5583,7 +5607,7 @@ def "T" {
         });
         assert!(result.is_err());
         assert!(
-            !stage.prim(sdf::path("/FromRoot")?).is_valid()?,
+            !stage.prim("/FromRoot")?.is_valid()?,
             "the staged root edit rolled back with the batch"
         );
         Ok(())

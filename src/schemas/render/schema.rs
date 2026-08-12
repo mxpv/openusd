@@ -19,13 +19,13 @@ pub struct RenderSettings(Prim);
 impl RenderSettings {
     /// Author a `def RenderSettings` prim at `path`
     /// (C++ `UsdRenderSettings::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_RENDER_SETTINGS)?))
     }
 
     /// Wrap `path` as a `RenderSettings` if it is typed `RenderSettings`
     /// (C++ `UsdRenderSettings::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_RENDER_SETTINGS).map(|o| o.map(Self))
     }
 
@@ -37,12 +37,12 @@ impl RenderSettings {
     /// Read-only: authoring this stage metadata needs a generic stage-metadata
     /// setter the core `Stage` API does not yet expose.
     pub fn stage_settings_path(stage: &Stage) -> Result<Option<sdf::Path>> {
-        stage
+        Ok(stage
             .stage_metadata(tok::META_RENDER_SETTINGS_PRIM_PATH)?
             .as_ref()
             .and_then(Value::as_str)
             .map(sdf::Path::new)
-            .transpose()
+            .transpose()?)
     }
 
     /// The `products` relationship — the `RenderProduct` prims to produce.
@@ -122,13 +122,13 @@ pub struct RenderProduct(Prim);
 impl RenderProduct {
     /// Author a `def RenderProduct` prim at `path`
     /// (C++ `UsdRenderProduct::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_RENDER_PRODUCT)?))
     }
 
     /// Wrap `path` as a `RenderProduct` if it is typed `RenderProduct`
     /// (C++ `UsdRenderProduct::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_RENDER_PRODUCT).map(|o| o.map(Self))
     }
 
@@ -185,13 +185,13 @@ pub struct RenderVar(Prim);
 
 impl RenderVar {
     /// Author a `def RenderVar` prim at `path` (C++ `UsdRenderVar::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_RENDER_VAR)?))
     }
 
     /// Wrap `path` as a `RenderVar` if it is typed `RenderVar`
     /// (C++ `UsdRenderVar::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_RENDER_VAR).map(|o| o.map(Self))
     }
 
@@ -260,13 +260,13 @@ pub struct RenderPass(Prim);
 
 impl RenderPass {
     /// Author a `def RenderPass` prim at `path` (C++ `UsdRenderPass::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_RENDER_PASS)?))
     }
 
     /// Wrap `path` as a `RenderPass` if it is typed `RenderPass`
     /// (C++ `UsdRenderPass::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_RENDER_PASS).map(|o| o.map(Self))
     }
 
@@ -387,7 +387,7 @@ pub struct RenderDenoisePass(Prim);
 impl RenderDenoisePass {
     /// Author a `def RenderDenoisePass` prim at `path`
     /// (C++ `UsdRenderDenoisePass::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.define_prim(path)?.set_type_name(tok::T_RENDER_DENOISE_PASS)?,
         ))
@@ -395,7 +395,7 @@ impl RenderDenoisePass {
 
     /// Wrap `path` as a `RenderDenoisePass` if it is typed `RenderDenoisePass`
     /// (C++ `UsdRenderDenoisePass::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_RENDER_DENOISE_PASS).map(|o| o.map(Self))
     }
 }
@@ -416,9 +416,8 @@ mod tests {
         s.create_resolution_attr()?.set(gf::vec2i(1280, 720))?;
         s.create_aspect_ratio_conform_policy_attr()?
             .set(AspectRatioConformPolicy::AdjustApertureWidth)?;
-        s.create_camera_rel()?.add_target(sdf::path("/World/Cam")?)?;
-        s.create_products_rel()?
-            .add_target(sdf::path("/Render/Products/beauty")?)?;
+        s.create_camera_rel()?.add_target("/World/Cam")?;
+        s.create_products_rel()?.add_target("/Render/Products/beauty")?;
         s.create_included_purposes_attr()?
             .set(Value::TokenVec(vec!["default".into(), "render".into()]))?;
         s.create_rendering_color_space_attr()?
@@ -441,7 +440,7 @@ mod tests {
         );
 
         // A non-RenderSettings prim reads back as None.
-        stage.define_prim(sdf::path("/NotSettings")?)?.set_type_name("Scope")?;
+        stage.define_prim("/NotSettings")?.set_type_name("Scope")?;
         assert!(RenderSettings::get(&stage, "/NotSettings")?.is_none());
         Ok(())
     }
@@ -454,8 +453,7 @@ mod tests {
         p.create_product_name_attr()?.set(sdf::Value::token("beauty.exr"))?;
         // A product-level override of an inherited base attribute.
         p.create_resolution_attr()?.set(gf::vec2i(512, 512))?;
-        p.create_ordered_vars_rel()?
-            .add_target(sdf::path("/Render/Vars/color")?)?;
+        p.create_ordered_vars_rel()?.add_target("/Render/Vars/color")?;
 
         let p = RenderProduct::get(&stage, "/Render/Products/beauty")?.expect("RenderProduct");
         assert_eq!(p.product_type_attr().get::<ProductType>()?, Some(ProductType::Raster));
@@ -495,8 +493,7 @@ mod tests {
         ]))?;
         p.create_file_name_attr()?
             .set(Value::AssetPath("./beauty.rib".into()))?;
-        p.create_render_source_rel()?
-            .add_target(sdf::path("/Render/Settings")?)?;
+        p.create_render_source_rel()?.add_target("/Render/Settings")?;
         p.create_camera_visibility_include_root_attr()?.set(false)?;
 
         let p = RenderPass::get(&stage, "/Render/Passes/beauty")?.expect("RenderPass");

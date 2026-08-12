@@ -10,25 +10,21 @@ fn main() -> anyhow::Result<()> {
 
     let mut data = sdf::Data::new();
 
-    let root = sdf::Path::abs_root();
-    let root_spec = data.create_spec(root.clone(), SpecType::PseudoRoot);
+    let root_spec = data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
     root_spec.add(ChildrenKey::PrimChildren, Value::TokenVec(vec!["World".into()]));
     root_spec.add(FieldKey::DefaultPrim, Value::Token("World".into()));
 
-    let world = sdf::path("/World")?;
-    let world_spec = data.create_spec(world.clone(), SpecType::Prim);
+    let world_spec = data.create_spec(sdf::Path::new("/World").unwrap(), SpecType::Prim);
     world_spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
     world_spec.add(FieldKey::TypeName, Value::Token("Xform".into()));
     world_spec.add(ChildrenKey::PrimChildren, Value::TokenVec(vec!["Cube".into()]));
 
-    let cube = sdf::path("/World/Cube")?;
-    let cube_spec = data.create_spec(cube.clone(), SpecType::Prim);
+    let cube_spec = data.create_spec(sdf::Path::new("/World/Cube").unwrap(), SpecType::Prim);
     cube_spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
     cube_spec.add(FieldKey::TypeName, Value::Token("Cube".into()));
     cube_spec.add(ChildrenKey::PropertyChildren, Value::TokenVec(vec!["size".into()]));
 
-    let size = cube.append_property("size")?;
-    let attr_spec = data.create_spec(size, SpecType::Attribute);
+    let attr_spec = data.create_spec(sdf::Path::new("/World/Cube.size").unwrap(), SpecType::Attribute);
     attr_spec.add(FieldKey::TypeName, Value::Token("double".into()));
     attr_spec.add(FieldKey::Default, Value::Double(1.0));
 

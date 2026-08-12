@@ -84,7 +84,8 @@ impl PathPattern {
         &self.prefix
     }
 
-    /// Replaces the prefix. When components exist the prefix must stay a
+    /// Replaces the prefix with an owned, already-validated [`Path`] (parse
+    /// text with [`Path::new`]). When components exist the prefix must stay a
     /// prim-or-root path; with none, a property path also sets the property
     /// flag (mirroring what folding a literal property produces).
     pub fn set_prefix(&mut self, prefix: Path) {

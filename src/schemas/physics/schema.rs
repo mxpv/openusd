@@ -16,13 +16,13 @@ pub struct Scene(Prim);
 
 impl Scene {
     /// Author a `def PhysicsScene` prim at `path` (C++ `UsdPhysicsScene::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_PHYSICS_SCENE)?))
     }
 
     /// Wrap `path` as a `Scene` if it is typed `PhysicsScene`
     /// (C++ `UsdPhysicsScene::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PHYSICS_SCENE).map(|o| o.map(Self))
     }
 
@@ -67,7 +67,7 @@ pub struct CollisionGroup(Prim);
 impl CollisionGroup {
     /// Author a `def PhysicsCollisionGroup` prim at `path`
     /// (C++ `UsdPhysicsCollisionGroup::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.define_prim(path)?.set_type_name(tok::T_PHYSICS_COLLISION_GROUP)?,
         ))
@@ -75,7 +75,7 @@ impl CollisionGroup {
 
     /// Wrap `path` as a `CollisionGroup` if it is typed `PhysicsCollisionGroup`
     /// (C++ `UsdPhysicsCollisionGroup::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PHYSICS_COLLISION_GROUP).map(|o| o.map(Self))
     }
 
@@ -136,13 +136,13 @@ pub struct Joint(Prim);
 
 impl Joint {
     /// Author a `def PhysicsJoint` prim at `path` (C++ `UsdPhysicsJoint::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_PHYSICS_JOINT)?))
     }
 
     /// Wrap `path` as a `Joint` if it is typed `PhysicsJoint`
     /// (C++ `UsdPhysicsJoint::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PHYSICS_JOINT).map(|o| o.map(Self))
     }
 }
@@ -158,7 +158,7 @@ pub struct FixedJoint(Prim);
 impl FixedJoint {
     /// Author a `def PhysicsFixedJoint` prim at `path`
     /// (C++ `UsdPhysicsFixedJoint::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.define_prim(path)?.set_type_name(tok::T_PHYSICS_FIXED_JOINT)?,
         ))
@@ -166,7 +166,7 @@ impl FixedJoint {
 
     /// Wrap `path` as a `FixedJoint` if it is typed `PhysicsFixedJoint`
     /// (C++ `UsdPhysicsFixedJoint::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PHYSICS_FIXED_JOINT).map(|o| o.map(Self))
     }
 }
@@ -181,7 +181,7 @@ pub struct RevoluteJoint(Prim);
 impl RevoluteJoint {
     /// Author a `def PhysicsRevoluteJoint` prim at `path`
     /// (C++ `UsdPhysicsRevoluteJoint::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.define_prim(path)?.set_type_name(tok::T_PHYSICS_REVOLUTE_JOINT)?,
         ))
@@ -189,7 +189,7 @@ impl RevoluteJoint {
 
     /// Wrap `path` as a `RevoluteJoint` if it is typed `PhysicsRevoluteJoint`
     /// (C++ `UsdPhysicsRevoluteJoint::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PHYSICS_REVOLUTE_JOINT).map(|o| o.map(Self))
     }
 
@@ -245,7 +245,7 @@ pub struct PrismaticJoint(Prim);
 impl PrismaticJoint {
     /// Author a `def PhysicsPrismaticJoint` prim at `path`
     /// (C++ `UsdPhysicsPrismaticJoint::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.define_prim(path)?.set_type_name(tok::T_PHYSICS_PRISMATIC_JOINT)?,
         ))
@@ -253,7 +253,7 @@ impl PrismaticJoint {
 
     /// Wrap `path` as a `PrismaticJoint` if it is typed `PhysicsPrismaticJoint`
     /// (C++ `UsdPhysicsPrismaticJoint::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PHYSICS_PRISMATIC_JOINT).map(|o| o.map(Self))
     }
 
@@ -310,7 +310,7 @@ pub struct SphericalJoint(Prim);
 impl SphericalJoint {
     /// Author a `def PhysicsSphericalJoint` prim at `path`
     /// (C++ `UsdPhysicsSphericalJoint::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.define_prim(path)?.set_type_name(tok::T_PHYSICS_SPHERICAL_JOINT)?,
         ))
@@ -318,7 +318,7 @@ impl SphericalJoint {
 
     /// Wrap `path` as a `SphericalJoint` if it is typed `PhysicsSphericalJoint`
     /// (C++ `UsdPhysicsSphericalJoint::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PHYSICS_SPHERICAL_JOINT).map(|o| o.map(Self))
     }
 
@@ -379,7 +379,7 @@ pub struct DistanceJoint(Prim);
 impl DistanceJoint {
     /// Author a `def PhysicsDistanceJoint` prim at `path`
     /// (C++ `UsdPhysicsDistanceJoint::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.define_prim(path)?.set_type_name(tok::T_PHYSICS_DISTANCE_JOINT)?,
         ))
@@ -387,7 +387,7 @@ impl DistanceJoint {
 
     /// Wrap `path` as a `DistanceJoint` if it is typed `PhysicsDistanceJoint`
     /// (C++ `UsdPhysicsDistanceJoint::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PHYSICS_DISTANCE_JOINT).map(|o| o.map(Self))
     }
 
@@ -428,7 +428,7 @@ pub struct RigidBodyAPI(Prim);
 impl RigidBodyAPI {
     /// Apply `PhysicsRigidBodyAPI` to the prim at `path`
     /// (C++ `UsdPhysicsRigidBodyAPI::Apply`). The prim is opened as `over`.
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.override_prim(path)?.add_applied_schema(tok::API_RIGID_BODY)?,
         ))
@@ -436,7 +436,7 @@ impl RigidBodyAPI {
 
     /// Wrap `path` as a `RigidBodyAPI` if it carries `PhysicsRigidBodyAPI` in its
     /// `apiSchemas` (C++ `UsdPhysicsRigidBodyAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_RIGID_BODY]).map(|o| o.map(Self))
     }
 
@@ -537,13 +537,13 @@ pub struct MassAPI(Prim);
 
 impl MassAPI {
     /// Apply `PhysicsMassAPI` to the prim at `path` (C++ `UsdPhysicsMassAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.override_prim(path)?.add_applied_schema(tok::API_MASS)?))
     }
 
     /// Wrap `path` as a `MassAPI` if it carries `PhysicsMassAPI`
     /// (C++ `UsdPhysicsMassAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_MASS]).map(|o| o.map(Self))
     }
 
@@ -629,13 +629,13 @@ pub struct CollisionAPI(Prim);
 impl CollisionAPI {
     /// Apply `PhysicsCollisionAPI` to the prim at `path`
     /// (C++ `UsdPhysicsCollisionAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.override_prim(path)?.add_applied_schema(tok::API_COLLISION)?))
     }
 
     /// Wrap `path` as a `CollisionAPI` if it carries `PhysicsCollisionAPI`
     /// (C++ `UsdPhysicsCollisionAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_COLLISION]).map(|o| o.map(Self))
     }
 
@@ -665,7 +665,7 @@ pub struct MeshCollisionAPI(Prim);
 impl MeshCollisionAPI {
     /// Apply `PhysicsMeshCollisionAPI` to the prim at `path`
     /// (C++ `UsdPhysicsMeshCollisionAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.override_prim(path)?.add_applied_schema(tok::API_MESH_COLLISION)?,
         ))
@@ -673,7 +673,7 @@ impl MeshCollisionAPI {
 
     /// Wrap `path` as a `MeshCollisionAPI` if it carries `PhysicsMeshCollisionAPI`
     /// (C++ `UsdPhysicsMeshCollisionAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_MESH_COLLISION]).map(|o| o.map(Self))
     }
 
@@ -705,7 +705,7 @@ pub struct MaterialAPI(Prim);
 impl MaterialAPI {
     /// Apply `PhysicsMaterialAPI` to the prim at `path`
     /// (C++ `UsdPhysicsMaterialAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage
                 .override_prim(path)?
@@ -715,7 +715,7 @@ impl MaterialAPI {
 
     /// Wrap `path` as a `MaterialAPI` if it carries `PhysicsMaterialAPI`
     /// (C++ `UsdPhysicsMaterialAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_PHYSICS_MATERIAL]).map(|o| o.map(Self))
     }
 
@@ -787,7 +787,7 @@ pub struct ArticulationRootAPI(Prim);
 impl ArticulationRootAPI {
     /// Apply `PhysicsArticulationRootAPI` to the prim at `path`
     /// (C++ `UsdPhysicsArticulationRootAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage
                 .override_prim(path)?
@@ -797,7 +797,7 @@ impl ArticulationRootAPI {
 
     /// Wrap `path` as an `ArticulationRootAPI` if it carries
     /// `PhysicsArticulationRootAPI` (C++ `UsdPhysicsArticulationRootAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_ARTICULATION_ROOT]).map(|o| o.map(Self))
     }
 }
@@ -811,7 +811,7 @@ pub struct FilteredPairsAPI(Prim);
 impl FilteredPairsAPI {
     /// Apply `PhysicsFilteredPairsAPI` to the prim at `path`
     /// (C++ `UsdPhysicsFilteredPairsAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.override_prim(path)?.add_applied_schema(tok::API_FILTERED_PAIRS)?,
         ))
@@ -819,7 +819,7 @@ impl FilteredPairsAPI {
 
     /// Wrap `path` as a `FilteredPairsAPI` if it carries `PhysicsFilteredPairsAPI`
     /// (C++ `UsdPhysicsFilteredPairsAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_FILTERED_PAIRS]).map(|o| o.map(Self))
     }
 
@@ -851,7 +851,7 @@ pub struct DriveAPI {
 impl DriveAPI {
     /// Apply `PhysicsDriveAPI:<name>` to the prim at `path`
     /// (C++ `UsdPhysicsDriveAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>, name: &str) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath, name: &str) -> Result<Self> {
         let prim = stage
             .override_prim(path)?
             .add_applied_schema(format!("{}:{name}", tok::API_DRIVE))?;
@@ -863,7 +863,7 @@ impl DriveAPI {
 
     /// Wrap `path` as a `DriveAPI` for instance `name` if the prim carries
     /// `PhysicsDriveAPI:<name>` (C++ `UsdPhysicsDriveAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>, name: &str) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath, name: &str) -> Result<Option<Self>> {
         let api = format!("{}:{name}", tok::API_DRIVE);
         Ok(get_with_api(stage, path, &[api.as_str()])?.map(|prim| Self {
             prim,
@@ -873,8 +873,8 @@ impl DriveAPI {
 
     /// Every `PhysicsDriveAPI` instance applied to the prim at `path`, one per
     /// driven DOF (C++ `UsdPhysicsDriveAPI::GetAll`).
-    pub fn get_all(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<Self>> {
-        let prim = stage.prim(path);
+    pub fn get_all(stage: &Stage, path: impl sdf::IntoPath) -> Result<Vec<Self>> {
+        let prim = stage.prim(path)?;
         let prefix = format!("{}:", tok::API_DRIVE);
         Ok(prim
             .api_schemas()?
@@ -1011,7 +1011,7 @@ pub struct LimitAPI {
 impl LimitAPI {
     /// Apply `PhysicsLimitAPI:<name>` to the prim at `path`
     /// (C++ `UsdPhysicsLimitAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>, name: &str) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath, name: &str) -> Result<Self> {
         let prim = stage
             .override_prim(path)?
             .add_applied_schema(format!("{}:{name}", tok::API_LIMIT))?;
@@ -1023,7 +1023,7 @@ impl LimitAPI {
 
     /// Wrap `path` as a `LimitAPI` for instance `name` if the prim carries
     /// `PhysicsLimitAPI:<name>` (C++ `UsdPhysicsLimitAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>, name: &str) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath, name: &str) -> Result<Option<Self>> {
         let api = format!("{}:{name}", tok::API_LIMIT);
         Ok(get_with_api(stage, path, &[api.as_str()])?.map(|prim| Self {
             prim,
@@ -1033,8 +1033,8 @@ impl LimitAPI {
 
     /// Every `PhysicsLimitAPI` instance applied to the prim at `path`, one per
     /// limited DOF (C++ `UsdPhysicsLimitAPI::GetAll`).
-    pub fn get_all(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<Self>> {
-        let prim = stage.prim(path);
+    pub fn get_all(stage: &Stage, path: impl sdf::IntoPath) -> Result<Vec<Self>> {
+        let prim = stage.prim(path)?;
         let prefix = format!("{}:", tok::API_LIMIT);
         Ok(prim
             .api_schemas()?

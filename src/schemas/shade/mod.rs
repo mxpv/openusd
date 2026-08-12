@@ -182,10 +182,10 @@ macro_rules! impl_shading_attribute {
             }
 
             /// Replace this attribute's composed connection source paths.
-            pub fn set_connections<I>(self, targets: I) -> Result<Self, $crate::usd::StageAuthoringError>
-            where
-                I: IntoIterator<Item = $crate::sdf::Path>,
-            {
+            pub fn set_connections(
+                self,
+                targets: impl IntoIterator<Item: $crate::sdf::IntoPath>,
+            ) -> Result<Self, $crate::usd::StageAuthoringError> {
                 Ok(Self {
                     attribute: self.attribute.set_connections(targets)?,
                 })

@@ -664,7 +664,7 @@ mod tests {
     /// pairs are Pcp's own recoverable error and are not reported.
     #[test]
     fn fresh_value_conflict() {
-        let p = Path::from;
+        let p = |s: &str| Path::new(s).unwrap();
         let pairs = vec![(p("/W/A"), p("/W/B")), (p("/W/A"), p("/W/B"))];
         let status = analyze_relocate_occurrences(&pairs);
         let batch = |fresh: [bool; 2]| -> Vec<BatchRelocate> {
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn invalid_seed_inactive() {
-        let p = Path::from;
+        let p = |s: &str| Path::new(s).unwrap();
         let pairs = vec![(p("/A"), p("/B")), (p("/World/A"), p("/World/B"))];
         assert_eq!(
             analyze_relocate_occurrences(&pairs),
@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn conflicting_seeds_inactive() {
-        let p = Path::from;
+        let p = |s: &str| Path::new(s).unwrap();
         let pairs = vec![
             (p("/World/A"), p("/World/C")),
             (p("/World/B"), p("/World/D")),
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn duplicate_source_strength() {
-        let p = Path::from;
+        let p = |s: &str| Path::new(s).unwrap();
         let pairs = vec![(p("/World/A"), p("/World/C")), (p("/World/A"), p("/World/D"))];
         assert_eq!(
             analyze_relocate_occurrences(&pairs),
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn duplicate_source_skips_conflict() {
-        let p = Path::from;
+        let p = |s: &str| Path::new(s).unwrap();
         let pairs = vec![
             (p("/World/A"), p("/World/C")),
             (p("/World/A"), p("/World/D")),
@@ -749,7 +749,14 @@ mod tests {
         let layer = LayerId::from_raw(0);
         let all: Vec<AuthoredRelocate> = pairs
             .iter()
-            .map(|(s, t)| (Path::from(*s), Path::from(*t), layer, "root.usda".to_string()))
+            .map(|(s, t)| {
+                (
+                    Path::new(s).unwrap(),
+                    Path::new(t).unwrap(),
+                    layer,
+                    "root.usda".to_string(),
+                )
+            })
             .collect();
         let scope = (0..all.len()).collect();
         (all, vec![scope])
@@ -789,7 +796,14 @@ mod tests {
     /// source/target pairs stay valid.
     #[test]
     fn relocate_validity() {
-        let p = Path::from;
+        // A relocate deletion carries the empty path as its target.
+        let p = |s: &str| {
+            if s.is_empty() {
+                Path::default()
+            } else {
+                Path::new(s).unwrap()
+            }
+        };
         let reason = |s, t| relocate_invalid_reason(&p(s), &p(t));
         // Target is an ancestor of the source (the bug-92827 hang).
         assert_eq!(
@@ -820,29 +834,29 @@ mod tests {
     #[test]
     fn nearest_ancestor_only() {
         let renames = vec![
-            (Path::from("/Rig"), Path::from("/Rig2")),
-            (Path::from("/Rig2/Sub"), Path::from("/Rig2/SubX")),
+            (Path::new("/Rig").unwrap(), Path::new("/Rig2").unwrap()),
+            (Path::new("/Rig2/Sub").unwrap(), Path::new("/Rig2/SubX").unwrap()),
         ];
         // `/Rig` is the only ancestor rename that prefixes the as-authored
         // endpoint, so the shift applies it once and stops: `/Rig/Sub/Anim`
         // becomes `/Rig2/Sub/Anim`, and the deeper `/Rig2/Sub` rename — which
         // matches only the shifted path — is not re-applied.
-        let shifted = shift_through_nearest_ancestor(&Path::from("/Rig/Sub/Anim"), &renames);
-        assert_eq!(shifted, Path::from("/Rig2/Sub/Anim"));
+        let shifted = shift_through_nearest_ancestor(&Path::new("/Rig/Sub/Anim").unwrap(), &renames);
+        assert_eq!(shifted, Path::new("/Rig2/Sub/Anim").unwrap());
     }
 
     /// An endpoint with no ancestor rename is returned unchanged, and a rename
     /// whose source equals the endpoint itself never applies.
     #[test]
     fn no_ancestor_match_unchanged() {
-        let renames = vec![(Path::from("/A"), Path::from("/B"))];
+        let renames = vec![(Path::new("/A").unwrap(), Path::new("/B").unwrap())];
         assert_eq!(
-            shift_through_nearest_ancestor(&Path::from("/A"), &renames),
-            Path::from("/A")
+            shift_through_nearest_ancestor(&Path::new("/A").unwrap(), &renames),
+            Path::new("/A").unwrap()
         );
         assert_eq!(
-            shift_through_nearest_ancestor(&Path::from("/X/Y"), &renames),
-            Path::from("/X/Y")
+            shift_through_nearest_ancestor(&Path::new("/X/Y").unwrap(), &renames),
+            Path::new("/X/Y").unwrap()
         );
     }
 
@@ -853,14 +867,14 @@ mod tests {
     #[test]
     fn relocated_in_children_element_ordered() {
         let pairs = vec![
-            (Path::from("/Src/B10"), Path::from("/Dst/B10")),
-            (Path::from("/Src/B9"), Path::from("/Dst/B9")),
+            (Path::new("/Src/B10").unwrap(), Path::new("/Dst/B10").unwrap()),
+            (Path::new("/Src/B9").unwrap(), Path::new("/Dst/B9").unwrap()),
         ];
         let mut name_order = Vec::new();
         let mut name_set = HashSet::new();
         let mut prohibited = HashSet::new();
         apply_child_relocates(
-            &Path::from("/Dst"),
+            &Path::new("/Dst").unwrap(),
             &pairs,
             &mut name_order,
             &mut name_set,

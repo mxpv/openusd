@@ -39,7 +39,7 @@ pub enum ValueSource {
 }
 
 impl Attribute {
-    pub(super) fn new(stage: &Stage, path: sdf::Path) -> Self {
+    pub(crate) fn new(stage: &Stage, path: sdf::Path) -> Self {
         Self {
             stage: stage.clone(),
             path,
@@ -66,13 +66,19 @@ impl Attribute {
     /// the Sdf-tier `Spec::remove` directly if you instead want to clear the
     /// local opinion entirely.
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v)))
+        self.edit(|spec| {
+            spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v));
+            Ok(())
+        })
     }
 
     /// Set the attribute's `custom` flag. Always authors an explicit
     /// opinion (see [`Attribute::set_variability`] for the rationale).
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom)))
+        self.edit(|spec| {
+            spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom));
+            Ok(())
+        })
     }
 
     /// Set the attribute's default value. The convenience spelling of
@@ -98,10 +104,16 @@ impl Attribute {
     ) -> Result<Self, StageAuthoringError> {
         let value = value.into();
         match time.into() {
-            None => self.edit(|spec| spec.set_default(value)),
+            None => self.edit(|spec| {
+                spec.set_default(value);
+                Ok(())
+            }),
             Some(time) => {
                 let spec_time = self.stage.map_to_spec_time(time.value());
-                self.edit(|spec| spec.set_time_sample(spec_time, value))
+                self.edit(|spec| {
+                    spec.set_time_sample(spec_time, value);
+                    Ok(())
+                })
             }
         }
     }
@@ -120,13 +132,17 @@ impl Attribute {
                 }
                 spec.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(samples));
             }
+            Ok(())
         })
     }
 
     /// Set the `colorSpace` token.
     pub fn set_color_space(self, color_space: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let color_space = color_space.into();
-        self.edit(|spec| spec.set_color_space(color_space))
+        self.edit(|spec| {
+            spec.set_color_space(color_space);
+            Ok(())
+        })
     }
 
     /// Author a generic metadata field on the attribute spec. Mirrors C++
@@ -144,7 +160,10 @@ impl Attribute {
     /// a runtime-built string.
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        self.edit(|spec| spec.set(key, value))
+        self.edit(|spec| {
+            spec.set(key, value);
+            Ok(())
+        })
     }
 
     /// Author the attribute's `connectionPaths` — the `.connect` targets
@@ -156,12 +175,9 @@ impl Attribute {
     /// any previously authored connections (the list op is written
     /// `explicit`). This is the primitive every UsdShade input/output
     /// connection is built on.
-    pub fn set_connections<I>(self, targets: I) -> Result<Self, StageAuthoringError>
-    where
-        I: IntoIterator<Item = sdf::Path>,
-    {
-        let targets: Vec<sdf::Path> = targets.into_iter().collect();
-        self.edit(|spec| spec.set_connection_paths(targets))
+    pub fn set_connections(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
+        let targets: Vec<sdf::Path> = targets.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
+        self.edit(|spec| Ok(spec.set_connection_paths(targets)?))
     }
 
     /// Wire this attribute to a single `source` property, replacing any
@@ -179,22 +195,22 @@ impl Attribute {
     /// No-op if already present (skips cache invalidation in that case).
     /// Joins the prepended-items list op, matching C++
     /// `UsdAttribute::AddConnection`'s default back-of-prepend position.
-    pub fn add_connection(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.add_connection_at(target, true)
+    pub fn add_connection(self, target: impl sdf::IntoPath) -> Result<Self, StageAuthoringError> {
+        self.add_connection_at(sdf::try_into_path(target)?, true)
     }
 
     /// Add a single connection target to the prepended list op. No-op if
     /// already present. This is the explicit spelling of the default USD
     /// `AddConnection` position.
-    pub fn add_connection_prepended(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.add_connection_at(target, true)
+    pub fn add_connection_prepended(self, target: impl sdf::IntoPath) -> Result<Self, StageAuthoringError> {
+        self.add_connection_at(sdf::try_into_path(target)?, true)
     }
 
     /// Add a single connection target to the appended list op. No-op if
     /// already present. Use this when the new target should compose behind
     /// prepended opinions from this layer.
-    pub fn add_connection_appended(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.add_connection_at(target, false)
+    pub fn add_connection_appended(self, target: impl sdf::IntoPath) -> Result<Self, StageAuthoringError> {
+        self.add_connection_at(sdf::try_into_path(target)?, false)
     }
 
     fn add_connection_at(self, target: sdf::Path, prepend: bool) -> Result<Self, StageAuthoringError> {
@@ -204,14 +220,14 @@ impl Attribute {
         if self.connections()?.iter().any(|p| p == &target) {
             return Ok(self);
         }
-        self.edit_connection(move |spec| spec.add_connection_path(target, prepend))
+        self.edit_connection(move |spec| Ok(spec.add_connection_path(target, prepend)?))
     }
 
     /// Remove a single connection target. Returns `Ok(true)` if it was
     /// present. Takes `&self` (returns `bool`, not `Self`, so it doesn't
     /// chain). Mirrors C++ `UsdAttribute::RemoveConnection`.
-    pub fn remove_connection(&self, target: &sdf::Path) -> Result<bool, StageAuthoringError> {
-        let target = target.clone();
+    pub fn remove_connection(&self, target: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
+        let target = sdf::try_into_path(target)?;
         // The target may exist only through weaker layers. Check the composed
         // list first so this call can author a delete opinion even when the
         // edit-target layer has no local connection item to remove.
@@ -243,7 +259,7 @@ impl Attribute {
                 "no attribute spec at path on the edit target layer",
                 sdf::AttributeSpecMut::get,
                 |spec| {
-                    removed = spec.delete_connection_path(&target);
+                    removed = spec.delete_connection_path(&target)?;
                     Ok(())
                 },
             )
@@ -255,7 +271,7 @@ impl Attribute {
     /// cache invalidation when no opinion was authored. Mirrors C++
     /// `UsdAttribute::ClearConnections`.
     pub fn clear_connections(self) -> Result<Self, StageAuthoringError> {
-        self.edit_connection(|spec| spec.clear_connection_paths())
+        self.edit_connection(|spec| Ok(spec.clear_connection_paths()))
     }
 
     /// Run `f` on the attribute spec at the edit target's layer. The layer
@@ -264,11 +280,9 @@ impl Attribute {
     /// helper for the connection authoring methods above.
     fn edit_connection<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> bool,
+        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<bool, sdf::AuthoringError>,
     {
-        self.edit_spec(|spec| {
-            f(spec);
-        })?;
+        self.edit_spec(|spec| f(spec).map(|_| ()))?;
         Ok(self)
     }
 
@@ -648,7 +662,7 @@ impl Attribute {
     /// a spec nor a declaration exists.
     fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::AttributeSpecMut<'_>),
+        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), sdf::AuthoringError>,
     {
         self.edit_spec(f)?;
         Ok(self)
@@ -661,7 +675,7 @@ impl Attribute {
     /// fallback can be authored whichever setter the caller reaches for.
     fn edit_spec<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::AttributeSpecMut<'_>),
+        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), sdf::AuthoringError>,
     {
         let declared = self.declared_spec().map_err(StageAuthoringError::Composition)?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
@@ -675,10 +689,7 @@ impl Attribute {
                 path,
                 "no attribute spec at path on the edit target layer",
                 sdf::AttributeSpecMut::get,
-                |spec| {
-                    f(spec);
-                    Ok(())
-                },
+                f,
             )
         })?;
         Ok(())
@@ -880,16 +891,16 @@ mod tests {
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
         // A schema declaration defines an attribute no layer authors.
-        assert!(stage.attribute("/Sun.inputs:intensity").is_defined()?);
+        assert!(stage.attribute("/Sun.inputs:intensity")?.is_defined()?);
         // A name no schema declares and no layer authors is nothing.
-        assert!(!stage.attribute("/Sun.inputs:nope").is_defined()?);
+        assert!(!stage.attribute("/Sun.inputs:nope")?.is_defined()?);
         // A declared relationship is not an attribute.
-        assert!(!stage.attribute("/Sun.collection:lightLink:includes").is_defined()?);
+        assert!(!stage.attribute("/Sun.collection:lightLink:includes")?.is_defined()?);
 
-        stage.prim("/Sun").create_attribute("authored", "double")?;
-        assert!(stage.attribute("/Sun.authored").is_defined()?);
-        stage.prim("/Sun").create_relationship("authoredRel")?;
-        assert!(!stage.attribute("/Sun.authoredRel").is_defined()?);
+        stage.prim("/Sun")?.create_attribute("authored", "double")?;
+        assert!(stage.attribute("/Sun.authored")?.is_defined()?);
+        stage.prim("/Sun")?.create_relationship("authoredRel")?;
+        assert!(!stage.attribute("/Sun.authoredRel")?.is_defined()?);
         Ok(())
     }
 
@@ -900,7 +911,7 @@ mod tests {
 
         // Nothing authored the attribute at all — not even a spec — so the
         // value comes entirely from the schema.
-        let intensity = stage.attribute("/Sun.inputs:intensity");
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<f32>()?, Some(50000.0));
         assert_eq!(intensity.value_source()?, ValueSource::Fallback);
         Ok(())
@@ -912,7 +923,7 @@ mod tests {
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage.create_attribute("/Sun.inputs:intensity", "float")?.set(3.0_f32)?;
 
-        let intensity = stage.attribute("/Sun.inputs:intensity");
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<f32>()?, Some(3.0));
         assert_eq!(intensity.value_source()?, ValueSource::Authored);
         Ok(())
@@ -925,7 +936,7 @@ mod tests {
 
         // The untimed and timed reads funnel through the same fallback step, so
         // they agree by construction — through the query handle too.
-        let intensity = stage.attribute("/Sun.inputs:intensity");
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<f32>()?, Some(50000.0));
         assert_eq!(intensity.get_at::<f32>(TimeCode::new(0.0))?, Some(50000.0));
 
@@ -945,7 +956,7 @@ mod tests {
 
         // Blocking removes the authored opinion; resolution then reaches the
         // schema, per spec 12.3.6.
-        let intensity = stage.attribute("/Sun.inputs:intensity");
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<f32>()?, Some(50000.0));
         assert_eq!(intensity.value_source()?, ValueSource::Fallback);
         Ok(())
@@ -960,11 +971,11 @@ mod tests {
 
         // A typeless prim still gets what its applied schemas declare, with the
         // multiple-apply template instantiated under the applied instance name.
-        let rule = stage.attribute("/Group.collection:render:expansionRule");
+        let rule = stage.attribute("/Group.collection:render:expansionRule")?;
         assert_eq!(rule.get::<tf::Token>()?, Some(tf::Token::new("expandPrims")));
         assert_eq!(
             stage
-                .attribute("/Group.collection:other:expansionRule")
+                .attribute("/Group.collection:other:expansionRule")?
                 .get::<tf::Token>()?,
             None
         );
@@ -978,11 +989,11 @@ mod tests {
 
         // Nothing is authored, so the type and variability come from the
         // schema's declaration alongside the fallback value.
-        let intensity = stage.attribute("/Sun.inputs:intensity");
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.type_name()?, Some(tf::Token::new("float")));
         assert_eq!(intensity.variability()?, Some(sdf::Variability::Varying));
 
-        let rule = stage.attribute("/Sun.collection:lightLink:expansionRule");
+        let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
         assert_eq!(rule.type_name()?, Some(tf::Token::new("token")));
         assert_eq!(rule.variability()?, Some(sdf::Variability::Uniform));
         Ok(())
@@ -996,7 +1007,7 @@ mod tests {
         // Declaration metadata is readable for a property with no authored
         // spec. Property metadata parses untyped, so the token list reads back
         // as a string array.
-        let rule = stage.attribute("/Sun.collection:lightLink:expansionRule");
+        let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
         let allowed = rule.get_metadata::<sdf::Value>("allowedTokens")?;
         assert_eq!(
             allowed,
@@ -1016,12 +1027,12 @@ mod tests {
 
         // The schematics declare `inputs:angle` varying by omitting the field
         // entirely, so the declaration still has to win.
-        let angle = stage.attribute("/Sun.inputs:angle");
+        let angle = stage.attribute("/Sun.inputs:angle")?;
         assert_eq!(angle.variability()?, Some(sdf::Variability::Varying));
 
         angle.clone().set_variability(sdf::Variability::Uniform)?;
         assert_eq!(
-            stage.attribute("/Sun.inputs:angle").variability()?,
+            stage.attribute("/Sun.inputs:angle")?.variability()?,
             Some(sdf::Variability::Varying)
         );
         Ok(())
@@ -1034,11 +1045,11 @@ mod tests {
 
         // Nothing authors `inputs:angle`, so there is no spec to edit — the
         // declaration supplies the type and variability to create one with.
-        let angle = stage.attribute("/Sun.inputs:angle");
+        let angle = stage.attribute("/Sun.inputs:angle")?;
         assert_eq!(angle.get::<f32>()?, Some(0.53));
         angle.set(1.5_f32)?;
 
-        let angle = stage.attribute("/Sun.inputs:angle");
+        let angle = stage.attribute("/Sun.inputs:angle")?;
         assert_eq!(angle.get::<f32>()?, Some(1.5));
         assert_eq!(angle.type_name()?, Some(tf::Token::new("float")));
         // A schema property is not custom, however it was created.
@@ -1053,13 +1064,13 @@ mod tests {
 
         // Every handle `attributes()` hands back can be written, not just the
         // authored ones.
-        for attr in stage.prim("/Sun").attributes()? {
+        for attr in stage.prim("/Sun")?.attributes()? {
             if let Some(sdf::Value::Float(value)) = attr.get::<sdf::Value>()? {
                 attr.set(value * 2.0)?;
             }
         }
-        assert_eq!(stage.attribute("/Sun.inputs:angle").get::<f32>()?, Some(1.06));
-        assert_eq!(stage.attribute("/Sun.inputs:intensity").get::<f32>()?, Some(100000.0));
+        assert_eq!(stage.attribute("/Sun.inputs:angle")?.get::<f32>()?, Some(1.06));
+        assert_eq!(stage.attribute("/Sun.inputs:intensity")?.get::<f32>()?, Some(100000.0));
         Ok(())
     }
 
@@ -1071,18 +1082,18 @@ mod tests {
         // Each of these reaches the edit target through a different path; none
         // may fail just because only the schema declares the attribute.
         stage
-            .attribute("/Sun.inputs:angle")
+            .attribute("/Sun.inputs:angle")?
             .set_metadata("displayGroup", sdf::Value::String("Basic".into()))?;
         assert_eq!(
             stage
-                .attribute("/Sun.inputs:angle")
+                .attribute("/Sun.inputs:angle")?
                 .get_metadata::<String>("displayGroup")?,
             Some("Basic".to_owned())
         );
 
-        stage.attribute("/Sun.inputs:intensity").clear_connections()?;
+        stage.attribute("/Sun.inputs:intensity")?.clear_connections()?;
         stage
-            .attribute("/Sun.collection:lightLink:expansionRule")
+            .attribute("/Sun.collection:lightLink:expansionRule")?
             .set_color_space("srgb")?;
         Ok(())
     }
@@ -1096,7 +1107,7 @@ mod tests {
             .set_custom(true)?;
 
         // A schema declares the property, so an authored `custom` is ignored.
-        assert!(!stage.attribute("/Sun.inputs:intensity").is_custom()?);
+        assert!(!stage.attribute("/Sun.inputs:intensity")?.is_custom()?);
         // A property no schema declares still reports what layers author.
         assert!(stage.create_attribute("/Sun.mine", "double")?.is_custom()?);
         Ok(())
@@ -1113,7 +1124,7 @@ mod tests {
 
         // The only authored opinion is time samples, and it is what `get_at`
         // resolves, so the source is authored rather than the schema fallback.
-        let intensity = stage.attribute("/Sun.inputs:intensity");
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.value_source()?, ValueSource::Authored);
         assert_eq!(intensity.get_at::<f32>(TimeCode::new(5.0))?, Some(150.0));
         Ok(())
@@ -1128,7 +1139,7 @@ mod tests {
         // The value type is part of the declaration, so a layer cannot
         // redeclare a schema attribute as a different type.
         assert_eq!(
-            stage.attribute("/Sun.inputs:angle").type_name()?,
+            stage.attribute("/Sun.inputs:angle")?.type_name()?,
             Some(tf::Token::new("float"))
         );
         // A property no schema declares still reports what layers author.
@@ -1150,7 +1161,7 @@ mod tests {
 
         // Reading these generically has to give what the accessor that owns the
         // rule gives, not the raw composed opinion.
-        let rule = stage.attribute("/Sun.collection:lightLink:expansionRule");
+        let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
         assert_eq!(
             rule.get_metadata::<sdf::Variability>(sdf::FieldKey::Variability.as_str())?,
             rule.variability()?
@@ -1174,7 +1185,7 @@ mod tests {
 
         // Schema metadata parses untyped, so asking for a variant it does not
         // hold reads as undeclared rather than failing.
-        let rule = stage.attribute("/Sun.collection:lightLink:expansionRule");
+        let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
         assert_eq!(rule.get_metadata::<Vec<tf::Token>>("allowedTokens")?, None);
         Ok(())
     }
@@ -1190,7 +1201,7 @@ mod tests {
         // The schema declares it uniform, and that is part of the declaration.
         assert_eq!(
             stage
-                .attribute("/Sun.collection:lightLink:expansionRule")
+                .attribute("/Sun.collection:lightLink:expansionRule")?
                 .variability()?,
             Some(sdf::Variability::Uniform)
         );
@@ -1202,7 +1213,7 @@ mod tests {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
-        let unknown = stage.attribute("/Sun.notASchemaProperty");
+        let unknown = stage.attribute("/Sun.notASchemaProperty")?;
         assert_eq!(unknown.get::<sdf::Value>()?, None);
         assert_eq!(unknown.value_source()?, ValueSource::None);
         Ok(())
@@ -1212,14 +1223,14 @@ mod tests {
     fn masked_prim_has_no_fallback() -> anyhow::Result<()> {
         let stage = Stage::builder()
             .schema_registry(SchemaRegistry::test_registry())
-            .mask(crate::usd::StagePopulationMask::new(["/Keep"]))
+            .mask(crate::usd::StagePopulationMask::new(["/Keep"])?)
             .in_memory("anon.usda")?;
         stage.define_prim("/Keep")?.set_type_name("DistantLight")?;
         stage.define_prim("/Drop")?.set_type_name("DistantLight")?;
 
-        assert_eq!(stage.attribute("/Keep.inputs:intensity").get::<f32>()?, Some(50000.0));
+        assert_eq!(stage.attribute("/Keep.inputs:intensity")?.get::<f32>()?, Some(50000.0));
         // An excluded prim resolves no type, so it resolves no fallback either.
-        assert_eq!(stage.attribute("/Drop.inputs:intensity").get::<f32>()?, None);
+        assert_eq!(stage.attribute("/Drop.inputs:intensity")?.get::<f32>()?, None);
         Ok(())
     }
 
@@ -1229,7 +1240,7 @@ mod tests {
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
         // The default process registry ships without schema data.
-        let intensity = stage.attribute("/Sun.inputs:intensity");
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<sdf::Value>()?, None);
         assert_eq!(intensity.value_source()?, ValueSource::None);
         Ok(())
@@ -1448,7 +1459,7 @@ mod tests {
             .define_prim("/Surface")?
             .set_type_name("Shader")?
             .create_attribute("inputs:diffuseColor", "color3f")?
-            .set_connections::<[sdf::Path; 0]>([])?;
+            .set_connections(Vec::<sdf::Path>::new())?;
         assert!(attr.has_authored_connections()?);
         assert!(attr.connections()?.is_empty());
         Ok(())
@@ -1470,7 +1481,7 @@ mod tests {
 
         let op = stage
             .root_layer()
-            .attribute(attr.path().clone())
+            .attribute(attr.path().clone())?
             .expect("authored on the root layer")
             .connection_path_list()
             .unwrap();
@@ -1493,7 +1504,7 @@ mod tests {
 
         let op = stage
             .root_layer()
-            .attribute(attr.path().clone())
+            .attribute(attr.path().clone())?
             .expect("authored on the root layer")
             .connection_path_list()
             .unwrap();
@@ -1521,7 +1532,7 @@ mod tests {
 
         let op = stage
             .root_layer()
-            .attribute(attr.path().clone())
+            .attribute(attr.path().clone())?
             .expect("authored on the root layer")
             .connection_path_list()
             .unwrap();
@@ -1608,7 +1619,7 @@ mod tests {
             }])),
         )?;
 
-        let attr = stage.attribute("/Prim.x");
+        let attr = stage.attribute("/Prim.x")?;
         let q = attr.query();
         // Sample at source 0/10 reads back at stage 10/20 through the offset.
         for t in [10.0, 15.0, 20.0] {

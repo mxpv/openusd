@@ -635,7 +635,7 @@ impl ClipCache {
             // resolves to a manifest default or a value block, never to a
             // weaker value source.
             let manifest = self.manifest_id(graph, resolved, query.anchor)?;
-            if !self.manifest_declares(manifest.as_deref(), &clip_path) {
+            if !self.manifest_declares(manifest.as_deref(), &clip_path)? {
                 continue;
             }
 
@@ -836,11 +836,13 @@ impl ClipCache {
     /// A set whose manifest does not declare the attribute never sources it; one
     /// that does owns it authoritatively (spec 12.3.4.6), gap-filling rather
     /// than falling through to weaker sources.
-    fn manifest_declares(&self, manifest: Option<&str>, clip_path: &Path) -> bool {
-        manifest
-            .and_then(|id| self.layer(id))
-            .and_then(|layer| layer.attribute(clip_path.clone()))
-            .is_some_and(|attr| attr.variability() == sdf::Variability::Varying)
+    fn manifest_declares(&self, manifest: Option<&str>, clip_path: &Path) -> Result<bool, sdf::PathParseError> {
+        let Some(layer) = manifest.and_then(|id| self.layer(id)) else {
+            return Ok(false);
+        };
+        Ok(layer
+            .attribute(clip_path)?
+            .is_some_and(|attr| attr.variability() == sdf::Variability::Varying))
     }
 
     /// Whether the manifest layer blocks `clip_path` at `stage_time`, the time a
@@ -939,7 +941,7 @@ impl ClipCache {
             return Ok(None);
         }
         let manifest = self.manifest_id(graph, resolved, prim)?;
-        if !self.manifest_declares(manifest.as_deref(), clip_path) {
+        if !self.manifest_declares(manifest.as_deref(), clip_path)? {
             return Ok(None);
         }
         let mut per_clip: Vec<Vec<f64>> = Vec::with_capacity(set.asset_paths.len());
@@ -1180,8 +1182,8 @@ mod tests {
 
         // clip0 samples `size`, so the synthesized manifest declares it as
         // varying and the set owns the attribute.
-        assert!(clips.manifest_declares(Some(&first), &sdf::path("/Model.size")?));
-        assert!(!clips.manifest_declares(Some(&first), &sdf::path("/Model.absent")?));
+        assert!(clips.manifest_declares(Some(&first), &sdf::path("/Model.size")?)?);
+        assert!(!clips.manifest_declares(Some(&first), &sdf::path("/Model.absent")?)?);
 
         // Re-authoring the set supersedes the manifest — an edit that only moves
         // an activation time, or one that only changes the clip-internal prim

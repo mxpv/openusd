@@ -1041,12 +1041,12 @@ mod tests {
         let stack = LayerStackId::from_raw(1);
         let layer = LayerId::from_raw(0);
         let mut g = PrimIndexGraph::default();
-        g.init_root(stack, layer, Path::from(local));
+        g.init_root(stack, layer, Path::new(local).unwrap());
         let root = g.add_child(
             NodeId::INVALID,
             stack,
             layer,
-            Path::from(local),
+            Path::new(local).unwrap(),
             ArcType::Root,
             MapFunction::identity(),
             false,
@@ -1055,12 +1055,12 @@ mod tests {
             root,
             stack,
             layer,
-            Path::from(target),
+            Path::new(target).unwrap(),
             arc,
             MapFunction::identity(),
             false,
         );
-        let mut prim = Path::from(local);
+        let mut prim = Path::new(local).unwrap();
         for name in deepen {
             prim = prim.append_path(*name).expect("child path");
             g.append_child_name_to_all_sites(&prim);
@@ -1074,14 +1074,14 @@ mod tests {
         let (g, id) = arc_graph("/Model", ArcType::Inherit, "/_class_Model", &[]);
         assert_eq!(g.depth_below_introduction(id), 0);
         assert!(!g.is_due_to_ancestor(id));
-        assert_eq!(g.path_at_introduction(id), Path::from("/_class_Model"));
+        assert_eq!(g.path_at_introduction(id), Path::new("/_class_Model").unwrap());
 
         // The same arc deepened two levels into a descendant: depth 2, and the
         // introduction path strips the two trailing elements.
         let (g, id) = arc_graph("/Model", ArcType::Inherit, "/_class_Model", &["Rig", "Anim"]);
         assert_eq!(g.depth_below_introduction(id), 2);
         assert!(g.is_due_to_ancestor(id));
-        assert_eq!(g.path_at_introduction(id), Path::from("/_class_Model"));
+        assert_eq!(g.path_at_introduction(id), Path::new("/_class_Model").unwrap());
     }
 
     /// The depth is measured on the introducing parent's site, so an arc whose
@@ -1092,15 +1092,15 @@ mod tests {
         // A reference from a depth-2 prim onto a depth-1 target.
         let (g, id) = arc_graph("/World/G", ArcType::Reference, "/Ref", &[]);
         assert_eq!(g.depth_below_introduction(id), 0);
-        assert_eq!(g.path_at_introduction(id), Path::from("/Ref"));
+        assert_eq!(g.path_at_introduction(id), Path::new("/Ref").unwrap());
 
         let (g, id) = arc_graph("/World/G", ArcType::Reference, "/Ref", &["A"]);
         assert_eq!(g.depth_below_introduction(id), 1);
-        assert_eq!(g.path_at_introduction(id), Path::from("/Ref"));
+        assert_eq!(g.path_at_introduction(id), Path::new("/Ref").unwrap());
 
         // And the reverse: a depth-1 prim referencing a depth-2 target.
         let (g, id) = arc_graph("/World", ArcType::Reference, "/Ref/Inner", &["A"]);
         assert_eq!(g.depth_below_introduction(id), 1);
-        assert_eq!(g.path_at_introduction(id), Path::from("/Ref/Inner"));
+        assert_eq!(g.path_at_introduction(id), Path::new("/Ref/Inner").unwrap());
     }
 }

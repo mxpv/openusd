@@ -50,9 +50,9 @@ use crate::ar;
 
 use super::schema::FieldKey;
 use super::{
-    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, LayerData, Patch, Path,
-    PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef,
-    RelocateList, SpecError, SpecType, Value, sink,
+    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, IntoPath, LayerData, Patch,
+    Path, PathParseError, PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut,
+    RelationshipSpecRef, RelocateList, SpecError, SpecType, Value, sink, try_into_path,
 };
 
 /// A [`sink::Id`] for a [`LayerSink`] installed on a [`Layer`].
@@ -195,7 +195,7 @@ impl Layer {
     ///         Ok(())
     ///     })
     ///     .expect("authored and committed");
-    /// assert!(layer.prim("/World").is_some());
+    /// assert!(layer.prim("/World").unwrap().is_some());
     ///
     /// // If the closure returns an error, the whole batch rolls back — neither
     /// // spec below survives, because the second authoring call fails.
@@ -205,7 +205,7 @@ impl Layer {
     ///     Ok(())
     /// });
     /// assert!(result.is_err());
-    /// assert!(layer.prim("/Good").is_none());
+    /// assert!(layer.prim("/Good").unwrap().is_none());
     /// ```
     pub fn edit(
         &mut self,
@@ -377,6 +377,10 @@ impl Layer {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AuthoringError {
+    /// A path argument failed to parse.
+    #[error(transparent)]
+    Parse(#[from] PathParseError),
+
     /// The target spec rejected an edit.
     #[error(transparent)]
     Spec(#[from] SpecError),
@@ -521,20 +525,20 @@ impl Layer {
         identifier.starts_with(ANONYMOUS_PREFIX)
     }
 
-    /// Look up a prim spec at `path`. Returns `None` if no spec exists or the
-    /// spec is not a prim.
-    pub fn prim(&self, path: impl Into<Path>) -> Option<PrimSpecRef<'_>> {
-        PrimSpecRef::get(self.data(), path.into())
+    /// Look up a prim spec at `path`. `Ok(None)` when no spec exists there or
+    /// the spec is not a prim; `Err` when `path` fails to parse.
+    pub fn prim(&self, path: impl IntoPath) -> Result<Option<PrimSpecRef<'_>>, PathParseError> {
+        Ok(PrimSpecRef::get(self.data(), try_into_path(path)?))
     }
 
     /// Look up an attribute spec at a property path.
-    pub fn attribute(&self, path: impl Into<Path>) -> Option<AttributeSpecRef<'_>> {
-        AttributeSpecRef::get(self.data(), path.into())
+    pub fn attribute(&self, path: impl IntoPath) -> Result<Option<AttributeSpecRef<'_>>, PathParseError> {
+        Ok(AttributeSpecRef::get(self.data(), try_into_path(path)?))
     }
 
     /// Look up a relationship spec at a property path.
-    pub fn relationship(&self, path: impl Into<Path>) -> Option<RelationshipSpecRef<'_>> {
-        RelationshipSpecRef::get(self.data(), path.into())
+    pub fn relationship(&self, path: impl IntoPath) -> Result<Option<RelationshipSpecRef<'_>>, PathParseError> {
+        Ok(RelationshipSpecRef::get(self.data(), try_into_path(path)?))
     }
 
     /// View this layer's root pseudo-spec, which carries layer-wide metadata
@@ -671,18 +675,18 @@ impl LayerEdit<'_> {
     }
 
     /// Mutably look up the prim spec at `path`.
-    pub fn prim_mut(&mut self, path: impl Into<Path>) -> Option<PrimSpecMut<'_>> {
-        PrimSpecMut::get(self.data_mut(), path.into())
+    pub fn prim_mut(&mut self, path: impl IntoPath) -> Result<Option<PrimSpecMut<'_>>, PathParseError> {
+        Ok(PrimSpecMut::get(self.data_mut(), try_into_path(path)?))
     }
 
     /// Mutably look up the attribute spec at a property path.
-    pub fn attribute_mut(&mut self, path: impl Into<Path>) -> Option<AttributeSpecMut<'_>> {
-        AttributeSpecMut::get(self.data_mut(), path.into())
+    pub fn attribute_mut(&mut self, path: impl IntoPath) -> Result<Option<AttributeSpecMut<'_>>, PathParseError> {
+        Ok(AttributeSpecMut::get(self.data_mut(), try_into_path(path)?))
     }
 
     /// Mutably look up the relationship spec at a property path.
-    pub fn relationship_mut(&mut self, path: impl Into<Path>) -> Option<RelationshipSpecMut<'_>> {
-        RelationshipSpecMut::get(self.data_mut(), path.into())
+    pub fn relationship_mut(&mut self, path: impl IntoPath) -> Result<Option<RelationshipSpecMut<'_>>, PathParseError> {
+        Ok(RelationshipSpecMut::get(self.data_mut(), try_into_path(path)?))
     }
 
     /// Mutably view the root pseudo-spec, which carries layer-wide metadata
@@ -950,8 +954,8 @@ mod tests {
         assert!(layer.relocates().is_empty());
 
         let pairs = vec![
-            (Path::from("/Rig/Model"), Path::from("/Group/Model")),
-            (Path::from("/Rig/Dead"), Path::from("")),
+            (Path::new("/Rig/Model").unwrap(), Path::new("/Group/Model").unwrap()),
+            (Path::new("/Rig/Dead").unwrap(), Path::default()),
         ];
         edit_layer(&mut layer, |e| {
             e.set_relocates(pairs.clone()).unwrap();
@@ -1050,7 +1054,7 @@ mod tests {
             })
             .expect("no error or veto");
         assert!(changed);
-        assert!(layer.prim(Path::from("/World")).is_some());
+        assert!(layer.prim(Path::new("/World").unwrap()).unwrap().is_some());
     }
 
     /// `edit` rolls the batch back when the closure returns an error, leaving the
@@ -1067,7 +1071,10 @@ mod tests {
             })
         });
         assert!(result.is_err());
-        assert!(layer.prim(Path::from("/A")).is_none(), "the staged edit rolled back");
+        assert!(
+            layer.prim(Path::new("/A").unwrap()).unwrap().is_none(),
+            "the staged edit rolled back"
+        );
         assert!(!layer.is_dirty());
     }
 
@@ -1086,7 +1093,10 @@ mod tests {
             });
         }));
         assert!(panicked.is_err(), "the panic propagates");
-        assert!(layer.prim(Path::from("/A")).is_none(), "the staged edit rolled back");
+        assert!(
+            layer.prim(Path::new("/A").unwrap()).unwrap().is_none(),
+            "the staged edit rolled back"
+        );
         assert!(!layer.is_dirty(), "no staged edits or recorded changes remain");
 
         // The layer is still usable afterwards.
@@ -1097,7 +1107,7 @@ mod tests {
             })
             .expect("no error");
         assert!(changed);
-        assert!(layer.prim(Path::from("/B")).is_some());
+        assert!(layer.prim(Path::new("/B").unwrap()).unwrap().is_some());
     }
 
     /// A panicking `after_commit` cannot strand a partially committed group:
@@ -1121,11 +1131,11 @@ mod tests {
         }));
         assert!(panicked.is_err(), "the after_commit panic propagates");
         assert!(
-            a.prim(Path::from("/A")).is_some(),
+            a.prim(Path::new("/A").unwrap()).unwrap().is_some(),
             "layer a committed despite the panic"
         );
         assert!(
-            b.prim(Path::from("/B")).is_some(),
+            b.prim(Path::new("/B").unwrap()).unwrap().is_some(),
             "layer b committed despite the panic"
         );
     }
@@ -1145,7 +1155,7 @@ mod tests {
         layer.discard_changes();
         assert!(!layer.is_dirty());
         assert!(
-            layer.prim(Path::from("/World")).is_some(),
+            layer.prim(Path::new("/World").unwrap()).unwrap().is_some(),
             "the authored content survives"
         );
     }
@@ -1208,7 +1218,7 @@ mod tests {
             .expect("sink accepts");
 
         assert_eq!((rec.before.get(), rec.after.get()), (1, 1));
-        assert!(layer.prim(Path::from("/World")).is_some());
+        assert!(layer.prim(Path::new("/World").unwrap()).unwrap().is_some());
     }
 
     /// A `before_commit` rejection rolls the edit back: `after_commit` never
@@ -1230,7 +1240,10 @@ mod tests {
         assert!(matches!(result, Err(EditError::Rejected(_))), "the sink vetoes");
 
         assert_eq!((rec.before.get(), rec.after.get()), (1, 0), "after_commit never fired");
-        assert!(layer.prim(Path::from("/World")).is_none(), "the edit rolled back");
+        assert!(
+            layer.prim(Path::new("/World").unwrap()).unwrap().is_none(),
+            "the edit rolled back"
+        );
         assert!(!layer.is_dirty());
     }
 
@@ -1419,7 +1432,7 @@ mod tests {
                 .set_kind("group");
         });
 
-        let world = layer.prim("/World").expect("prim authored");
+        let world = layer.prim("/World")?.expect("prim authored");
         assert_eq!(world.type_name().as_deref(), Some("Xform"));
         assert_eq!(world.specifier(), Some(sdf::Specifier::Def));
         assert_eq!(world.kind().as_deref(), Some("group"));
@@ -1435,14 +1448,17 @@ mod tests {
 
         // Leaf is Def; ancestors are Over.
         assert_eq!(
-            layer.prim("/A/B/C").and_then(|p| p.specifier()),
+            layer.prim("/A/B/C")?.and_then(|p| p.specifier()),
             Some(sdf::Specifier::Def)
         );
         assert_eq!(
-            layer.prim("/A/B").and_then(|p| p.specifier()),
+            layer.prim("/A/B")?.and_then(|p| p.specifier()),
             Some(sdf::Specifier::Over)
         );
-        assert_eq!(layer.prim("/A").and_then(|p| p.specifier()), Some(sdf::Specifier::Over));
+        assert_eq!(
+            layer.prim("/A")?.and_then(|p| p.specifier()),
+            Some(sdf::Specifier::Over)
+        );
         Ok(())
     }
 
@@ -1460,7 +1476,7 @@ mod tests {
         let root_children: Vec<&str> = root_children.iter().map(|t| t.as_str()).collect();
         assert_eq!(root_children, ["World"]);
 
-        let world = layer.prim("/World").expect("prim");
+        let world = layer.prim("/World")?.expect("prim");
         let world_children = world.prim_children().unwrap();
         let world_children: Vec<&str> = world_children.iter().map(|t| t.as_str()).collect();
         assert_eq!(world_children, ["Mesh", "Cube"]);
@@ -1492,7 +1508,7 @@ mod tests {
                 .unwrap();
         });
 
-        let mesh = layer.prim("/Mesh").expect("prim");
+        let mesh = layer.prim("/Mesh")?.expect("prim");
         let props = mesh.property_children().unwrap();
         let props: Vec<&str> = props.iter().map(|t| t.as_str()).collect();
         assert_eq!(props, ["points", "normals", "material:binding"]);
@@ -1507,14 +1523,14 @@ mod tests {
                 .unwrap();
         });
 
-        let rel = layer.relationship("/Mesh.material:binding").expect("relationship");
+        let rel = layer.relationship("/Mesh.material:binding")?.expect("relationship");
         assert_eq!(rel.variability(), sdf::Variability::Uniform);
 
         edit_layer(&mut layer, |e| {
             sdf::RelationshipSpec::new(e.data_mut(), "/Mesh.material:binding", sdf::Variability::Varying, false)
                 .unwrap();
         });
-        let rel = layer.relationship("/Mesh.material:binding").expect("relationship");
+        let rel = layer.relationship("/Mesh.material:binding")?.expect("relationship");
         assert_eq!(rel.variability(), sdf::Variability::Varying);
         assert!(rel.field(sdf::FieldKey::Variability.as_str()).ok().flatten().is_none());
         Ok(())
@@ -1606,7 +1622,7 @@ mod tests {
             radius.set_time_sample(5.0, sdf::Value::Double(2.0));
         });
 
-        let read = layer.attribute("/Sphere.radius").expect("attr");
+        let read = layer.attribute("/Sphere.radius")?.expect("attr");
         assert_eq!(read.type_name().as_deref(), Some("double"));
         assert_eq!(read.default(), Some(sdf::Value::Double(2.5)));
         let samples = read.time_samples().expect("samples authored");
@@ -1694,7 +1710,7 @@ mod tests {
         });
         // NaN does not collide with finite samples — both finite values survive.
         let samples = layer
-            .attribute("/Sphere.radius")
+            .attribute("/Sphere.radius")?
             .unwrap()
             .time_samples()
             .unwrap()
@@ -1705,11 +1721,15 @@ mod tests {
         // erase_time_sample(NaN) can find the NaN entry via total_cmp.
         let mut erased = false;
         edit_layer(&mut layer, |e| {
-            erased = e.attribute_mut("/Sphere.radius").unwrap().erase_time_sample(f64::NAN);
+            erased = e
+                .attribute_mut("/Sphere.radius")
+                .unwrap()
+                .unwrap()
+                .erase_time_sample(f64::NAN);
         });
         assert!(erased);
         let times: Vec<f64> = layer
-            .attribute("/Sphere.radius")
+            .attribute("/Sphere.radius")?
             .unwrap()
             .time_samples()
             .unwrap()
@@ -1727,9 +1747,12 @@ mod tests {
             sdf::PrimSpec::over(e.data_mut(), "/A/B").unwrap();
         });
 
-        assert_eq!(layer.prim("/A").and_then(|p| p.specifier()), Some(sdf::Specifier::Over));
         assert_eq!(
-            layer.prim("/A/B").and_then(|p| p.specifier()),
+            layer.prim("/A")?.and_then(|p| p.specifier()),
+            Some(sdf::Specifier::Over)
+        );
+        assert_eq!(
+            layer.prim("/A/B")?.and_then(|p| p.specifier()),
             Some(sdf::Specifier::Over)
         );
 
@@ -1739,7 +1762,7 @@ mod tests {
             sdf::PrimSpec::over(e.data_mut(), "/Defined").unwrap();
         });
         assert_eq!(
-            layer.prim("/Defined").and_then(|p| p.specifier()),
+            layer.prim("/Defined")?.and_then(|p| p.specifier()),
             Some(sdf::Specifier::Def)
         );
         Ok(())
@@ -1803,11 +1826,17 @@ mod tests {
             sdf::RelationshipSpec::new(e.data_mut(), "A.foo", sdf::Variability::Varying, false)?;
             Ok(())
         }));
-        // Root-level property paths (`/.foo`) must also error, not panic.
-        assert!(invalid(&mut layer, |e| {
-            sdf::AttributeSpec::new(e.data_mut(), "/.foo", "double", sdf::Variability::Varying, false)?;
-            Ok(())
-        }));
+        // Root-level property paths (`/.foo`) are not parseable at all, so
+        // they surface as a parse error rather than an authoring rejection.
+        assert!(matches!(
+            layer
+                .edit(|e| {
+                    sdf::AttributeSpec::new(e.data_mut(), "/.foo", "double", sdf::Variability::Varying, false)?;
+                    Ok(())
+                })
+                .unwrap_err(),
+            sdf::EditError::Author(sdf::AuthoringError::Parse(_))
+        ));
         // Target-bracket property paths slip past `is_property_path` because the
         // tail after the last `.` is alphanumeric — split_property_path must reject them.
         assert!(invalid(&mut layer, |e| {
@@ -1929,7 +1958,7 @@ mod tests {
                 false,
             )
             .unwrap();
-            binding.add_target(material.clone());
+            binding.add_target(material.clone()).unwrap();
             let mut surface = sdf::AttributeSpec::new(
                 e.data_mut(),
                 "/World/Sphere.inputs:surface",
@@ -1938,7 +1967,9 @@ mod tests {
                 false,
             )
             .unwrap();
-            surface.set_connection_paths([sdf::path("/World/Material.outputs:surface").unwrap()]);
+            surface
+                .set_connection_paths([sdf::path("/World/Material.outputs:surface").unwrap()])
+                .unwrap();
         });
 
         let tmp = std::env::temp_dir().join("openusd_authoring_roundtrip.usda");

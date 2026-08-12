@@ -21,7 +21,7 @@ pub struct GenerativeProcedural(Prim);
 impl GenerativeProcedural {
     /// Author a `def GenerativeProcedural` prim at `path`
     /// (C++ `UsdProcGenerativeProcedural::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.define_prim(path)?.set_type_name(tok::T_GENERATIVE_PROCEDURAL)?,
         ))
@@ -29,7 +29,7 @@ impl GenerativeProcedural {
 
     /// Wrap `path` as a `GenerativeProcedural` if it is typed
     /// `GenerativeProcedural` (C++ `UsdProcGenerativeProcedural::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_GENERATIVE_PROCEDURAL).map(|o| o.map(Self))
     }
 

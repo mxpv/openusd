@@ -2986,8 +2986,10 @@ def "Scope"
 
         let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |e| {
             e.relationship_mut("/P.relA")
+                .unwrap()
                 .expect("relationship spec")
-                .set_target_paths([sdf::path("/Z").unwrap()]);
+                .set_target_paths([sdf::path("/Z").unwrap()])
+                .unwrap();
             Ok(())
         })?;
         let mut changes = crate::pcp::Changes::new();

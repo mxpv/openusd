@@ -179,7 +179,7 @@ fn collect_nested_maps(
         if maps.contains_key(&path) {
             continue;
         }
-        let prim = stage.prim(path.clone());
+        let prim = stage.prim(path.clone())?;
         if !is_container(&prim)? {
             continue;
         }
@@ -396,7 +396,7 @@ mod tests {
         abstract_shader.create_input("gain", "float")?.connect_to(&gain)?;
         let root_id = stage.root_layer().identifier().to_owned();
         stage.layer_mut(&root_id).expect("root layer").edit(|edit| {
-            edit.prim_mut("/Graph/Abstract")
+            edit.prim_mut("/Graph/Abstract")?
                 .expect("abstract prim")
                 .set_specifier(sdf::Specifier::Class);
             Ok(())
@@ -446,7 +446,7 @@ mod tests {
             let name = sdf::path(format!("N{index}"))?;
             let prim_path = sdf::Path::abs_root().append_path(name)?;
             let input_path = prim_path.append_property("inputs:value")?;
-            chain.push(Input::new(stage.attribute(input_path)));
+            chain.push(Input::new(stage.attribute(input_path)?));
         }
 
         let mut maps = HashMap::with_capacity(DEPTH - 1);

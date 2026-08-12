@@ -19,13 +19,13 @@ pub struct Backdrop(Prim);
 
 impl Backdrop {
     /// Author a `def Backdrop` prim at `path` (C++ `UsdUIBackdrop::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_BACKDROP)?))
     }
 
     /// Wrap `path` as a `Backdrop` if it is typed `Backdrop`
     /// (C++ `UsdUIBackdrop::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_BACKDROP).map(|o| o.map(Self))
     }
 
@@ -56,7 +56,7 @@ pub struct SceneGraphPrimAPI(Prim);
 impl SceneGraphPrimAPI {
     /// Apply `SceneGraphPrimAPI` to the prim at `path`
     /// (C++ `UsdUISceneGraphPrimAPI::Apply`). The prim is opened as `over`.
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage
                 .override_prim(path)?
@@ -66,7 +66,7 @@ impl SceneGraphPrimAPI {
 
     /// Wrap `path` as a `SceneGraphPrimAPI` if it carries `SceneGraphPrimAPI` in
     /// its `apiSchemas` (C++ `UsdUISceneGraphPrimAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_SCENE_GRAPH_PRIM]).map(|o| o.map(Self))
     }
 
@@ -115,7 +115,7 @@ pub struct NodeGraphNodeAPI(Prim);
 impl NodeGraphNodeAPI {
     /// Apply `NodeGraphNodeAPI` to the prim at `path`
     /// (C++ `UsdUINodeGraphNodeAPI::Apply`). The prim is opened as `over`.
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.override_prim(path)?.add_applied_schema(tok::API_NODEGRAPH_NODE)?,
         ))
@@ -123,7 +123,7 @@ impl NodeGraphNodeAPI {
 
     /// Wrap `path` as a `NodeGraphNodeAPI` if it carries `NodeGraphNodeAPI` in
     /// its `apiSchemas` (C++ `UsdUINodeGraphNodeAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_NODEGRAPH_NODE]).map(|o| o.map(Self))
     }
 
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn scene_graph_prim_roundtrip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        stage.define_prim(sdf::path("/World/Mesh")?)?.set_type_name("Mesh")?;
+        stage.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
         let sg = SceneGraphPrimAPI::apply(&stage, "/World/Mesh")?;
         sg.create_display_name_attr()?.set(sdf::Value::token("Hero Mesh"))?;
         sg.create_display_group_attr()?.set(sdf::Value::token("Characters"))?;
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(p.display_group_attr().get::<Token>()?.as_deref(), Some("Characters"));
 
         // Unapplied prim → None.
-        stage.define_prim(sdf::path("/Bare")?)?.set_type_name("Scope")?;
+        stage.define_prim("/Bare")?.set_type_name("Scope")?;
         assert!(SceneGraphPrimAPI::get(&stage, "/Bare")?.is_none());
         Ok(())
     }
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn nodegraph_node_roundtrip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        stage.define_prim(sdf::path("/Mat/Shader")?)?.set_type_name("Shader")?;
+        stage.define_prim("/Mat/Shader")?.set_type_name("Shader")?;
         let n = NodeGraphNodeAPI::apply(&stage, "/Mat/Shader")?;
         n.create_pos_attr()?.set(gf::vec2f(12.0, 34.0))?;
         n.create_size_attr()?.set(gf::vec2f(180.0, 90.0))?;

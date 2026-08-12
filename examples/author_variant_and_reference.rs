@@ -13,8 +13,7 @@ fn main() -> anyhow::Result<()> {
 fn write_spheres(path: &str) -> anyhow::Result<()> {
     let mut data = sdf::Data::new();
 
-    let root = sdf::Path::abs_root();
-    let root_spec = data.create_spec(root.clone(), SpecType::PseudoRoot);
+    let root_spec = data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
     root_spec.add(FieldKey::DefaultPrim, Value::Token("BlueSphere".into()));
     root_spec.add(
         ChildrenKey::PrimChildren,
@@ -40,8 +39,7 @@ fn add_sphere(data: &mut sdf::Data, prim_path: &str, color: gf::Vec3f) -> anyhow
         Value::TokenVec(vec!["primvars:displayColor".into()]),
     );
 
-    let color_prop = prim.append_property("primvars:displayColor")?;
-    let attr_spec = data.create_spec(color_prop, SpecType::Attribute);
+    let attr_spec = data.create_spec(prim.append_property("primvars:displayColor")?, SpecType::Attribute);
     attr_spec.add(FieldKey::TypeName, Value::Token("color3f[]".into()));
     attr_spec.add(FieldKey::Default, Value::Vec3fVec(vec![color]));
 
@@ -53,14 +51,12 @@ fn add_sphere(data: &mut sdf::Data, prim_path: &str, color: gf::Vec3f) -> anyhow
 fn write_scene(path: &str) -> anyhow::Result<()> {
     let mut data = sdf::Data::new();
 
-    let root = sdf::Path::abs_root();
-    let root_spec = data.create_spec(root.clone(), SpecType::PseudoRoot);
+    let root_spec = data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
     root_spec.add(FieldKey::DefaultPrim, Value::Token("ColoredSphere".into()));
     root_spec.add(ChildrenKey::PrimChildren, Value::TokenVec(vec!["ColoredSphere".into()]));
 
     // /ColoredSphere — owns the variant set.
-    let sphere = sdf::path("/ColoredSphere")?;
-    let sphere_spec = data.create_spec(sphere.clone(), SpecType::Prim);
+    let sphere_spec = data.create_spec(sdf::Path::new("/ColoredSphere").unwrap(), SpecType::Prim);
     sphere_spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
 
     // Declare the "color" variant set and choose "blue" as the default selection.
@@ -82,8 +78,7 @@ fn write_scene(path: &str) -> anyhow::Result<()> {
     sphere_spec.add(ChildrenKey::VariantSetChildren, Value::TokenVec(vec!["color".into()]));
 
     // /ColoredSphere{color=} — the variant set spec.
-    let vset_path = sdf::Path::new("/ColoredSphere{color=}")?;
-    let vset_spec = data.create_spec(vset_path, SpecType::VariantSet);
+    let vset_spec = data.create_spec(sdf::Path::new("/ColoredSphere{color=}").unwrap(), SpecType::VariantSet);
     vset_spec.add(
         ChildrenKey::VariantChildren,
         Value::TokenVec(vec!["blue".into(), "green".into(), "red".into()]),

@@ -634,12 +634,18 @@ impl LayerRegistry {
                 && let sdf::Value::TokenVec(set_names) = value.into_owned()
             {
                 for set_name in &set_names {
-                    let set_path = path.append_variant_selection(set_name, "");
+                    // An invalid authored set or variant name cannot address
+                    // variant storage; there is nothing to visit under it.
+                    let Ok(set_path) = path.append_variant_selection(set_name, "") else {
+                        continue;
+                    };
                     if let Some(value) = data.try_field(&set_path, sdf::ChildrenKey::VariantChildren.as_str())?
                         && let sdf::Value::TokenVec(variant_names) = value.into_owned()
                     {
                         for variant_name in &variant_names {
-                            queue.push(path.append_variant_selection(set_name, variant_name));
+                            if let Ok(variant_path) = path.append_variant_selection(set_name, variant_name) {
+                                queue.push(variant_path);
+                            }
                         }
                     }
                 }

@@ -26,7 +26,7 @@ use super::{Prim, StageAuthoringError};
 /// ```no_run
 /// # use openusd::usd::{Stage, ClipsAPI};
 /// # fn demo(stage: &Stage) -> anyhow::Result<()> {
-/// let prim = stage.prim(openusd::sdf::path("/World/Anim")?);
+/// let prim = stage.prim("/World/Anim")?;
 /// let clips = ClipsAPI::new(&prim);
 /// for set in clips.clip_set_names()? {
 ///     let assets = clips.clip_asset_paths(&set)?;
@@ -277,7 +277,7 @@ impl ClipsAPI {
     /// ```no_run
     /// # use openusd::{sdf, usd::{Stage, ClipsAPI}};
     /// # fn demo(stage: &Stage) -> anyhow::Result<()> {
-    /// let clips = ClipsAPI::new(&stage.prim(sdf::path("/World/Anim")?));
+    /// let clips = ClipsAPI::new(&stage.prim("/World/Anim")?);
     /// if let Some(manifest) = clips.generate_clip_manifest("default", false)? {
     ///     manifest.export("manifest.usda")?;
     ///     clips.set_clip_manifest_asset_path("default", "./manifest.usda")?;
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn reads_explicit_clip_set_from_fixture() -> anyhow::Result<()> {
         let stage = Stage::open(&fixture("clip_asset_anchor"))?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+        let clips = ClipsAPI::new(&stage.prim("/Model")?);
 
         assert_eq!(clips.clip_set_names()?, vec!["default".to_string()]);
         assert_eq!(clips.clip_asset_paths("default")?, vec![AssetPath::new("./clip.usda")]);
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn reads_template_clip_set_from_fixture() -> anyhow::Result<()> {
         let stage = Stage::open(&fixture("clip_template"))?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+        let clips = ClipsAPI::new(&stage.prim("/Model")?);
 
         assert_eq!(
             clips.clip_template_asset_path("default")?.as_deref(),
@@ -431,11 +431,11 @@ mod tests {
             .into_iter()
             .collect::<HashMap<_, _>>(),
         );
-        stage.define_prim(sdf::path("/Anim")?)?.set_metadata(
+        stage.define_prim("/Anim")?.set_metadata(
             "clips",
             Value::Dictionary([("default".to_string(), set)].into_iter().collect()),
         )?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Anim")?));
+        let clips = ClipsAPI::new(&stage.prim("/Anim")?);
 
         assert_eq!(
             clips.clip_times("default")?,
@@ -451,11 +451,7 @@ mod tests {
         // Missing set, missing field, and a prim with no clips at all.
         assert!(clips.clip_asset_paths("nope")?.is_empty());
         assert!(clips.clip_prim_path("default")?.is_none());
-        assert!(
-            ClipsAPI::new(&stage.prim(sdf::path("/Absent")?))
-                .clip_set_names()?
-                .is_empty()
-        );
+        assert!(ClipsAPI::new(&stage.prim("/Absent")?).clip_set_names()?.is_empty());
         Ok(())
     }
 
@@ -465,8 +461,8 @@ mod tests {
     #[test]
     fn set_get_round_trip() -> anyhow::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        stage.define_prim(sdf::path("/Anim")?)?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Anim")?));
+        stage.define_prim("/Anim")?;
+        let clips = ClipsAPI::new(&stage.prim("/Anim")?);
 
         clips.set_clip_asset_paths("default", ["a.usda", "b.usda"])?;
         clips.set_clip_active("default", vec![gf::vec2d(0.0, 0.0), gf::vec2d(10.0, 1.0)])?;
@@ -512,8 +508,8 @@ mod tests {
     #[test]
     fn clip_sets_list_op_round_trip() -> anyhow::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        stage.define_prim(sdf::path("/Anim")?)?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Anim")?));
+        stage.define_prim("/Anim")?;
+        let clips = ClipsAPI::new(&stage.prim("/Anim")?);
 
         assert!(clips.clip_sets()?.is_none());
         clips.set_clip_sets(sdf::StringListOp::explicit(vec!["b".into(), "a".into()]))?;
@@ -527,8 +523,8 @@ mod tests {
     #[test]
     fn clips_dict_round_trip() -> anyhow::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        stage.define_prim(sdf::path("/Anim")?)?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Anim")?));
+        stage.define_prim("/Anim")?;
+        let clips = ClipsAPI::new(&stage.prim("/Anim")?);
         assert!(clips.clips()?.is_none());
 
         let set = Value::Dictionary([(keys::PRIM_PATH.to_string(), Value::String("/Geo".into()))].into());
@@ -559,7 +555,7 @@ mod tests {
     #[test]
     fn generate_manifest_declares_sampled() -> anyhow::Result<()> {
         let stage = Stage::open(&fixture("clip_manifest_gen"))?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+        let clips = ClipsAPI::new(&stage.prim("/Model")?);
 
         let manifest = clips.generate_clip_manifest("default", false)?.expect("set resolves");
         assert_eq!(
@@ -567,7 +563,7 @@ mod tests {
             ["/Clip/A.a", "/Clip/A.b", "/Clip/A.z", "/Clip/A{v=a}.c"]
         );
         // Declarations only — the clips' sample values are not copied.
-        let a = manifest.attribute(sdf::path("/Clip/A.a")?).expect("declared");
+        let a = manifest.attribute("/Clip/A.a")?.expect("declared");
         assert_eq!(a.type_name().as_deref(), Some("double"));
         assert!(a.time_samples().is_none());
         assert!(a.default().is_none());
@@ -580,12 +576,12 @@ mod tests {
     #[test]
     fn generate_manifest_blocks_missing() -> anyhow::Result<()> {
         let stage = Stage::open(&fixture("clip_manifest_gen"))?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+        let clips = ClipsAPI::new(&stage.prim("/Model")?);
 
         let manifest = clips.generate_clip_manifest("default", true)?.expect("set resolves");
         let blocked = |path: &str| -> anyhow::Result<Vec<f64>> {
             Ok(manifest
-                .attribute(sdf::path(path)?)
+                .attribute(sdf::path(path)?)?
                 .expect("declared")
                 .time_samples()
                 .unwrap_or_default()
@@ -609,11 +605,11 @@ mod tests {
     fn generate_manifest_round_trip() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let stage = Stage::open(&fixture("clip_manifest_gen"))?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+        let clips = ClipsAPI::new(&stage.prim("/Model")?);
         assert!(clips.generate_clip_manifest("nope", false)?.is_none());
 
         // `a` is declared by the clips, `d` is authored without samples.
-        let value = |name: &str| stage.attribute(name).get_at(TimeCode::from(0.0));
+        let value = |name: &str| stage.attribute(name)?.get_at(TimeCode::from(0.0));
         assert_eq!(value("/Model.a")?, Some(1.0f64));
         assert_eq!(value("/Model.d")?, None::<f64>);
 
@@ -662,7 +658,7 @@ def "Model" (
         )?;
 
         let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
+        let clips = ClipsAPI::new(&stage.prim("/Model")?);
         let error = clips
             .generate_clip_manifest("default", false)
             .expect_err("clip missing");
@@ -686,7 +682,7 @@ def "Model" (
         assert_eq!(declared(&manifest), ["/A.sampled"]);
         assert!(
             manifest
-                .attribute(sdf::path("/A.sampled")?)
+                .attribute("/A.sampled")?
                 .expect("declared")
                 .time_samples()
                 .is_none()
@@ -699,7 +695,7 @@ def "Model" (
     #[test]
     fn set_creates_over_without_local_spec() -> anyhow::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        let clips = ClipsAPI::new(&stage.prim(sdf::path("/NoSpec")?));
+        let clips = ClipsAPI::new(&stage.prim("/NoSpec")?);
         clips.set_clip_prim_path("default", "/Geo")?;
         assert_eq!(clips.clip_prim_path("default")?.as_deref(), Some("/Geo"));
         Ok(())

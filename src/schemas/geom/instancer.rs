@@ -22,13 +22,13 @@ pub struct PointInstancer(Prim);
 impl PointInstancer {
     /// Author a `def PointInstancer` prim at `path`
     /// (C++ `UsdGeomPointInstancer::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_POINT_INSTANCER)?))
     }
 
     /// Wrap `path` as a `PointInstancer` if it is typed `PointInstancer`
     /// (C++ `UsdGeomPointInstancer::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_POINT_INSTANCER).map(|o| o.map(Self))
     }
 
@@ -224,7 +224,7 @@ mod tests {
             .set(0.1_f64)?;
 
         let pi = PointInstancer::define(&stage, "/Instances")?;
-        pi.create_prototypes_rel()?.set_targets([sdf::path("/Proto/Marker")?])?;
+        pi.create_prototypes_rel()?.set_targets(["/Proto/Marker"])?;
         pi.create_proto_indices_attr()?.set(sdf::Value::IntVec(vec![0, 0, 0]))?;
         pi.create_positions_attr()?.set(sdf::Value::Vec3fVec(vec![
             [0.0_f32, 0.0, 0.0].into(),

@@ -24,12 +24,12 @@ pub struct Cube(Prim);
 
 impl Cube {
     /// Author a `def Cube` prim at `path` (C++ `UsdGeomCube::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_CUBE)?))
     }
 
     /// Wrap `path` as a `Cube` if it is typed `Cube` (C++ `UsdGeomCube::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_CUBE).map(|o| o.map(Self))
     }
 
@@ -57,13 +57,13 @@ pub struct Sphere(Prim);
 
 impl Sphere {
     /// Author a `def Sphere` prim at `path` (C++ `UsdGeomSphere::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_SPHERE)?))
     }
 
     /// Wrap `path` as a `Sphere` if it is typed `Sphere`
     /// (C++ `UsdGeomSphere::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_SPHERE).map(|o| o.map(Self))
     }
 
@@ -90,12 +90,12 @@ pub struct Cone(Prim);
 
 impl Cone {
     /// Author a `def Cone` prim at `path` (C++ `UsdGeomCone::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_CONE)?))
     }
 
     /// Wrap `path` as a `Cone` if it is typed `Cone` (C++ `UsdGeomCone::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_CONE).map(|o| o.map(Self))
     }
 
@@ -151,13 +151,13 @@ pub struct Cylinder(Prim);
 
 impl Cylinder {
     /// Author a `def Cylinder` prim at `path` (C++ `UsdGeomCylinder::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_CYLINDER)?))
     }
 
     /// Wrap `path` as a `Cylinder` if it is typed `Cylinder`
     /// (C++ `UsdGeomCylinder::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_CYLINDER).map(|o| o.map(Self))
     }
 
@@ -215,13 +215,13 @@ pub struct Capsule(Prim);
 
 impl Capsule {
     /// Author a `def Capsule` prim at `path` (C++ `UsdGeomCapsule::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_CAPSULE)?))
     }
 
     /// Wrap `path` as a `Capsule` if it is typed `Capsule`
     /// (C++ `UsdGeomCapsule::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_CAPSULE).map(|o| o.map(Self))
     }
 
@@ -280,13 +280,13 @@ pub struct Plane(Prim);
 
 impl Plane {
     /// Author a `def Plane` prim at `path` (C++ `UsdGeomPlane::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_PLANE)?))
     }
 
     /// Wrap `path` as a `Plane` if it is typed `Plane`
     /// (C++ `UsdGeomPlane::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PLANE).map(|o| o.map(Self))
     }
 

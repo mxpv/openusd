@@ -24,7 +24,7 @@ fn included(stage: &usd::Stage, coll: &Collection) -> Vec<String> {
 #[test]
 fn weaker_expression_composes() {
     let stage = open();
-    let coll = Collection::new(sdf::path("/Sets").unwrap(), "heroes");
+    let coll = Collection::new(sdf::path("/Sets").unwrap(), "heroes").unwrap();
 
     // The strong layer's `%_` picked up the weak layer's expression.
     let expr = coll.membership_expression(&stage).unwrap().expect("authored");
@@ -40,7 +40,7 @@ fn weaker_expression_composes() {
 #[test]
 fn collection_reference_expands() {
     let stage = open();
-    let coll = Collection::new(sdf::path("/Sets").unwrap(), "combined");
+    let coll = Collection::new(sdf::path("/Sets").unwrap(), "combined").unwrap();
 
     let resolved = resolve_complete_membership_expression(&stage, &coll).expect("resolve");
     assert_eq!(
@@ -62,7 +62,7 @@ fn collection_reference_expands() {
 #[test]
 fn expression_across_reference() {
     let stage = open();
-    let coll = Collection::new(sdf::path("/RefRoot").unwrap(), "parts");
+    let coll = Collection::new(sdf::path("/RefRoot").unwrap(), "parts").unwrap();
 
     // Authored as `.//` against /Asset in the referenced layer; composition
     // anchored it there and mapped it into the referencing namespace.

@@ -30,13 +30,13 @@ pub struct SphereLight(Prim);
 impl SphereLight {
     /// Author a `def SphereLight` prim at `path`
     /// (C++ `UsdLuxSphereLight::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_SPHERE_LIGHT)?))
     }
 
     /// Wrap `path` as a `SphereLight` if it is typed `SphereLight`
     /// (C++ `UsdLuxSphereLight::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_SPHERE_LIGHT).map(|o| o.map(Self))
     }
 
@@ -78,13 +78,13 @@ pub struct DiskLight(Prim);
 
 impl DiskLight {
     /// Author a `def DiskLight` prim at `path` (C++ `UsdLuxDiskLight::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_DISK_LIGHT)?))
     }
 
     /// Wrap `path` as a `DiskLight` if it is typed `DiskLight`
     /// (C++ `UsdLuxDiskLight::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_DISK_LIGHT).map(|o| o.map(Self))
     }
 
@@ -111,13 +111,13 @@ pub struct RectLight(Prim);
 
 impl RectLight {
     /// Author a `def RectLight` prim at `path` (C++ `UsdLuxRectLight::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_RECT_LIGHT)?))
     }
 
     /// Wrap `path` as a `RectLight` if it is typed `RectLight`
     /// (C++ `UsdLuxRectLight::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_RECT_LIGHT).map(|o| o.map(Self))
     }
 
@@ -170,13 +170,13 @@ pub struct CylinderLight(Prim);
 impl CylinderLight {
     /// Author a `def CylinderLight` prim at `path`
     /// (C++ `UsdLuxCylinderLight::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_CYLINDER_LIGHT)?))
     }
 
     /// Wrap `path` as a `CylinderLight` if it is typed `CylinderLight`
     /// (C++ `UsdLuxCylinderLight::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_CYLINDER_LIGHT).map(|o| o.map(Self))
     }
 
@@ -230,13 +230,13 @@ pub struct PortalLight(Prim);
 impl PortalLight {
     /// Author a `def PortalLight` prim at `path`
     /// (C++ `UsdLuxPortalLight::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_PORTAL_LIGHT)?))
     }
 
     /// Wrap `path` as a `PortalLight` if it is typed `PortalLight`
     /// (C++ `UsdLuxPortalLight::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_PORTAL_LIGHT).map(|o| o.map(Self))
     }
 
@@ -276,13 +276,13 @@ pub struct DistantLight(Prim);
 impl DistantLight {
     /// Author a `def DistantLight` prim at `path`
     /// (C++ `UsdLuxDistantLight::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_DISTANT_LIGHT)?))
     }
 
     /// Wrap `path` as a `DistantLight` if it is typed `DistantLight`
     /// (C++ `UsdLuxDistantLight::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_DISTANT_LIGHT).map(|o| o.map(Self))
     }
 
@@ -311,13 +311,13 @@ pub struct GeometryLight(Prim);
 impl GeometryLight {
     /// Author a `def GeometryLight` prim at `path`
     /// (C++ `UsdLuxGeometryLight::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_GEOMETRY_LIGHT)?))
     }
 
     /// Wrap `path` as a `GeometryLight` if it is typed `GeometryLight`
     /// (C++ `UsdLuxGeometryLight::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_GEOMETRY_LIGHT).map(|o| o.map(Self))
     }
 
@@ -345,19 +345,19 @@ pub struct DomeLight(Prim);
 
 impl DomeLight {
     /// Author a `def DomeLight` prim at `path` (C++ `UsdLuxDomeLight::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_DOME_LIGHT)?))
     }
 
     /// Author a `def DomeLight_1` prim at `path` — the versioned form that
     /// also carries `poleAxis` (C++ `UsdLuxDomeLight_1::Define`).
-    pub fn define_v1(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define_v1(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_DOME_LIGHT_1)?))
     }
 
     /// Wrap `path` as a `DomeLight` if its type is any version of the
     /// `DomeLight` family (C++ `UsdLuxDomeLight::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed_in_family(stage, path, tok::T_DOME_LIGHT).map(|o| o.map(Self))
     }
 
@@ -448,13 +448,13 @@ pub struct LightFilter(Prim);
 impl LightFilter {
     /// Author a `def LightFilter` prim at `path`
     /// (C++ `UsdLuxLightFilter::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_LIGHT_FILTER)?))
     }
 
     /// Wrap `path` as a `LightFilter` if it is typed `LightFilter`
     /// (C++ `UsdLuxLightFilter::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_LIGHT_FILTER).map(|o| o.map(Self))
     }
 }
@@ -473,7 +473,7 @@ impl LightAPI {
     /// Apply `LightAPI` to the prim at `path` (C++ `UsdLuxLightAPI::Apply`).
     /// The prim is opened as `over`; author its typeName separately if it does
     /// not exist yet.
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.override_prim(path)?.add_applied_schema(tok::API_LIGHT)?))
     }
 
@@ -481,7 +481,7 @@ impl LightAPI {
     /// or `VolumeLightAPI` in its `apiSchemas` (C++ `UsdLuxLightAPI::Get`);
     /// returns `None` otherwise. The two derived APIs apply the same inputs to
     /// meshes and volumes.
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(
             stage,
             path,
@@ -501,13 +501,13 @@ pub struct ShapingAPI(Prim);
 
 impl ShapingAPI {
     /// Apply `ShapingAPI` to the prim at `path` (C++ `UsdLuxShapingAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.override_prim(path)?.add_applied_schema(tok::API_SHAPING)?))
     }
 
     /// Wrap `path` as a `ShapingAPI` if it carries `ShapingAPI` in its
     /// `apiSchemas` (C++ `UsdLuxShapingAPI::Get`); returns `None` otherwise.
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_SHAPING]).map(|o| o.map(Self))
     }
 
@@ -637,13 +637,13 @@ pub struct ShadowAPI(Prim);
 
 impl ShadowAPI {
     /// Apply `ShadowAPI` to the prim at `path` (C++ `UsdLuxShadowAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.override_prim(path)?.add_applied_schema(tok::API_SHADOW)?))
     }
 
     /// Wrap `path` as a `ShadowAPI` if it carries `ShadowAPI` in its
     /// `apiSchemas` (C++ `UsdLuxShadowAPI::Get`); returns `None` otherwise.
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_SHADOW]).map(|o| o.map(Self))
     }
 
@@ -737,7 +737,7 @@ pub struct LightListAPI(Prim);
 impl LightListAPI {
     /// Apply `LightListAPI` to the prim at `path`
     /// (C++ `UsdLuxLightListAPI::Apply`).
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.override_prim(path)?.add_applied_schema(tok::API_LIGHT_LIST)?,
         ))
@@ -745,7 +745,7 @@ impl LightListAPI {
 
     /// Wrap `path` as a `LightListAPI` if it carries `LightListAPI` in its
     /// `apiSchemas` (C++ `UsdLuxLightListAPI::Get`); returns `None` otherwise.
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_LIGHT_LIST]).map(|o| o.map(Self))
     }
 
@@ -812,7 +812,7 @@ mod tests {
         r.create_width_attr()?.set(2.0_f32)?;
         r.create_texture_file_attr()?
             .set(sdf::Value::AssetPath("./softbox.exr".into()))?;
-        r.create_filters_rel()?.set_targets([sdf::path("/Filter")?])?;
+        r.create_filters_rel()?.set_targets(["/Filter"])?;
 
         let r = RectLight::get(&stage, "/Rect")?.expect("RectLight");
         assert_eq!(r.width_attr().get()?, Some(sdf::Value::Float(2.0)));
@@ -838,7 +838,7 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Emitter")?.set_type_name("Mesh")?;
         let g = GeometryLight::define(&stage, "/Light")?;
-        g.create_geometry_rel()?.set_targets([sdf::path("/Emitter")?])?;
+        g.create_geometry_rel()?.set_targets(["/Emitter"])?;
 
         let g = GeometryLight::get(&stage, "/Light")?.expect("GeometryLight");
         assert_eq!(g.geometry_rel().targets()?, vec![sdf::path("/Emitter")?]);
@@ -851,7 +851,7 @@ mod tests {
         let d = DomeLight::define(&stage, "/Dome")?;
         d.create_texture_format_attr()?
             .set(sdf::Value::Token("latlong".into()))?;
-        d.create_portals_rel()?.set_targets([sdf::path("/Dome/Portal")?])?;
+        d.create_portals_rel()?.set_targets(["/Dome/Portal"])?;
         assert_eq!(
             DomeLight::get(&stage, "/Dome")?
                 .expect("DomeLight")
@@ -890,13 +890,7 @@ mod tests {
         let light = LightAPI::apply(&stage, "/Emitter")?;
         light.create_intensity_attr()?.set(1500.0_f32)?;
 
-        assert!(
-            stage
-                .prim(sdf::path("/Emitter")?)
-                .api_schemas()?
-                .iter()
-                .any(|s| s == "LightAPI")
-        );
+        assert!(stage.prim("/Emitter")?.api_schemas()?.iter().any(|s| s == "LightAPI"));
         let light = LightAPI::get(&stage, "/Emitter")?.expect("LightAPI");
         assert_eq!(light.intensity_attr().get()?, Some(sdf::Value::Float(1500.0)));
         assert!(light.is_applied_api_schema());
@@ -936,7 +930,7 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/World")?.set_type_name("Xform")?;
         let list = LightListAPI::apply(&stage, "/World")?;
-        list.create_light_list_rel()?.set_targets([sdf::path("/World/Sun")?])?;
+        list.create_light_list_rel()?.set_targets(["/World/Sun"])?;
         list.create_cache_behavior_attr()?
             .set(sdf::Value::Token("consumeAndContinue".into()))?;
 

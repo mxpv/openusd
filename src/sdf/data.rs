@@ -166,7 +166,9 @@ impl Data {
     /// Insert an empty spec record at `path`, returning it for field authoring.
     /// Replaces any existing spec. The convenience counterpart to the
     /// field-level [`AbstractData::create_spec`], which returns nothing because
-    /// the trait can't name `SpecData`.
+    /// the trait can't name `SpecData`. Takes an owned, already-validated
+    /// [`Path`], like the trait method; parse text with [`Path::new`] at the
+    /// boundary.
     pub fn create_spec(&mut self, path: Path, ty: SpecType) -> &mut SpecData {
         self.specs.insert(path.clone(), SpecData::new(ty));
         self.specs.get_mut(&path).expect("just inserted")

@@ -17,13 +17,13 @@ pub struct Xform(Prim);
 
 impl Xform {
     /// Author a `def Xform` prim at `path` (C++ `UsdGeomXform::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_XFORM)?))
     }
 
     /// Wrap `path` as an `Xform` if it is typed `Xform`
     /// (C++ `UsdGeomXform::Get`); returns `None` otherwise.
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_XFORM).map(|o| o.map(Self))
     }
 }
@@ -37,13 +37,13 @@ pub struct Scope(Prim);
 
 impl Scope {
     /// Author a `def Scope` prim at `path` (C++ `UsdGeomScope::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_SCOPE)?))
     }
 
     /// Wrap `path` as a `Scope` if it is typed `Scope`
     /// (C++ `UsdGeomScope::Get`); returns `None` otherwise.
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_SCOPE).map(|o| o.map(Self))
     }
 }
@@ -60,8 +60,8 @@ mod tests {
         Xform::define(&stage, "/Group")?;
         Scope::define(&stage, "/Stage")?;
 
-        assert_eq!(stage.prim(sdf::path("/Group")?).type_name()?.as_deref(), Some("Xform"));
-        assert_eq!(stage.prim(sdf::path("/Stage")?).type_name()?.as_deref(), Some("Scope"));
+        assert_eq!(stage.prim("/Group")?.type_name()?.as_deref(), Some("Xform"));
+        assert_eq!(stage.prim("/Stage")?.type_name()?.as_deref(), Some("Scope"));
         assert!(Xform::get(&stage, "/Group")?.is_some());
         assert!(Scope::get(&stage, "/Stage")?.is_some());
         assert!(Xform::get(&stage, "/Stage")?.is_none());

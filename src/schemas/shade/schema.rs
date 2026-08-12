@@ -18,13 +18,13 @@ pub struct Shader(usd::Prim);
 
 impl Shader {
     /// Author a `def Shader` prim at `path` (C++ `UsdShadeShader::Define`).
-    pub fn define(stage: &usd::Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &usd::Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_SHADER)?))
     }
 
     /// Wrap `path` as a `Shader` if it is typed `Shader`
     /// (C++ `UsdShadeShader::Get`).
-    pub fn get(stage: &usd::Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &usd::Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_SHADER).map(|o| o.map(Self))
     }
 
@@ -134,13 +134,13 @@ pub struct NodeGraph(usd::Prim);
 impl NodeGraph {
     /// Author a `def NodeGraph` prim at `path`
     /// (C++ `UsdShadeNodeGraph::Define`).
-    pub fn define(stage: &usd::Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &usd::Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_NODE_GRAPH)?))
     }
 
     /// Wrap `path` as a `NodeGraph` if it is typed `NodeGraph`
     /// (C++ `UsdShadeNodeGraph::Get`).
-    pub fn get(stage: &usd::Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &usd::Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_NODE_GRAPH).map(|o| o.map(Self))
     }
 }
@@ -241,13 +241,13 @@ pub struct Material(usd::Prim);
 
 impl Material {
     /// Author a `def Material` prim at `path` (C++ `UsdShadeMaterial::Define`).
-    pub fn define(stage: &usd::Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &usd::Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_MATERIAL)?))
     }
 
     /// Wrap `path` as a `Material` if it is typed `Material`
     /// (C++ `UsdShadeMaterial::Get`).
-    pub fn get(stage: &usd::Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &usd::Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_MATERIAL).map(|o| o.map(Self))
     }
 

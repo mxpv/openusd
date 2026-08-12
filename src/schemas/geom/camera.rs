@@ -19,13 +19,13 @@ pub struct Camera(Prim);
 
 impl Camera {
     /// Author a `def Camera` prim at `path` (C++ `UsdGeomCamera::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_CAMERA)?))
     }
 
     /// Wrap `path` as a `Camera` if it is typed `Camera`
     /// (C++ `UsdGeomCamera::Get`); returns `None` otherwise.
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_CAMERA).map(|o| o.map(Self))
     }
 

@@ -41,7 +41,7 @@ fn main() -> Result<()> {
     // deep namespaces are drawn without recursing.
     let mut prims = 0u64;
     let mut stack: Vec<(Prim, String, bool)> = Vec::new();
-    push_children(&mut stack, &stage.prim(sdf::Path::abs_root()), String::new())?;
+    push_children(&mut stack, &stage.prim(sdf::Path::abs_root())?, String::new())?;
 
     while let Some((prim, prefix, last)) = stack.pop() {
         prims += 1;

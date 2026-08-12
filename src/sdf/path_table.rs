@@ -20,7 +20,9 @@ use std::collections::{BTreeSet, HashMap};
 use crate::sdf::Path;
 
 /// A map from [`Path`] to `V` that also tracks the namespace parent/child
-/// hierarchy, supporting efficient subtree queries and erasure.
+/// hierarchy, supporting efficient subtree queries and erasure. Keys are
+/// owned, already-validated [`Path`] values; parse text with [`Path::new`]
+/// before inserting.
 ///
 /// Ancestors of an inserted path are materialized as value-less intermediate
 /// nodes so a [`subtree`](Self::subtree) query can navigate to a prefix that was

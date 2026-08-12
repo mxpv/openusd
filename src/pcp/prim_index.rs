@@ -1006,7 +1006,11 @@ fn resolve_variant_selections_in<'a>(
                 if selections.get(&set_name).is_some_and(|sel| !sel.is_empty()) {
                     continue;
                 }
-                let set_path = node.path.append_variant_selection(&set_name, "");
+                // An invalid authored set name cannot address variant
+                // storage, so it offers no fallback.
+                let Ok(set_path) = node.path.append_variant_selection(&set_name, "") else {
+                    continue;
+                };
                 let Ok(val) = data.get_field(&set_path, ChildrenKey::VariantChildren.as_str()) else {
                     continue;
                 };
@@ -1079,7 +1083,7 @@ pub(crate) mod tests {
     /// re-running (the test fixtures load every layer up front, so a demand only
     /// ever needs interning, never loading).
     pub(crate) fn build_with_fallbacks(stack: &mut LayerGraph, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
-        let path = Path::from(prim);
+        let path = Path::new(prim).unwrap();
 
         // Namespace chain from the topmost prim down to `path`.
         let mut chain: Vec<Path> = Vec::new();
@@ -1218,7 +1222,7 @@ pub(crate) mod tests {
         // matches; a direct arena filter is the ground truth. An off-by-one in the
         // binary-search bounds would drop a node from the run or pull in one from an
         // adjacent path, and the exact set comparison catches either.
-        for p in ["/A", "/B"].into_iter().map(Path::from) {
+        for p in ["/A", "/B"].into_iter().map(|s| Path::new(s).unwrap()) {
             let mut expected: Vec<NodeId> = index
                 .arena()
                 .iter()
@@ -1236,21 +1240,21 @@ pub(crate) mod tests {
         // root), so the loop above exercised the contiguous multi-node run the
         // two-bound binary search exists to return — not just single-node sites.
         assert!(
-            index.nodes_at(&Path::from("/A")).len() >= 2,
+            index.nodes_at(&Path::new("/A").unwrap()).len() >= 2,
             "the prim's own site carries the synthetic root and the local root"
         );
 
         // The reference target keeps its own namespace path /B.
         assert!(
             index
-                .nodes_at(&Path::from("/B"))
+                .nodes_at(&Path::new("/B").unwrap())
                 .iter()
                 .any(|&id| index.node(id).arc == ArcType::Reference),
             "the reference node is indexed at its target path"
         );
 
         // An absent path resolves to no nodes.
-        assert!(index.nodes_at(&Path::from("/Nope")).is_empty());
+        assert!(index.nodes_at(&Path::new("/Nope").unwrap()).is_empty());
         Ok(())
     }
 
@@ -1755,8 +1759,9 @@ def "World" (
 }
 "#,
         ));
-        let index = PrimIndex::build_with_context(&Path::from("/World"), &stack, &CompositionContext::default())
-            .expect("index build");
+        let index =
+            PrimIndex::build_with_context(&Path::new("/World").unwrap(), &stack, &CompositionContext::default())
+                .expect("index build");
         let ctx = index.context_for_children(&stack, &CompositionContext::default()).0;
         assert_eq!(
             ctx.selections.get("v").map(String::as_str),
@@ -1798,7 +1803,7 @@ def "World" (
             variant_fallbacks: VariantFallbackMap::new().add("v", ["hi"]),
             ..CompositionContext::default()
         };
-        let index = PrimIndex::build_with_context(&Path::from("/World"), &stack, &ctx).expect("index build");
+        let index = PrimIndex::build_with_context(&Path::new("/World").unwrap(), &stack, &ctx).expect("index build");
         assert!(
             index.nodes().any(|n| n.path.as_str() == "/World{v=hi}"),
             "the index composes the fallback, got {:?}",
@@ -1883,7 +1888,7 @@ def "Root" (
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
         let (_index, errors, _pending, _deps) = PrimIndex::build_with_cache(
-            &Path::from("/Root"),
+            &Path::new("/Root").unwrap(),
             &stack,
             &CompositionContext::default(),
             &sdf::PathTable::new(),
@@ -1931,7 +1936,7 @@ def "Outer"
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
         let (_index, errors, _pending, _deps) = PrimIndex::build_with_cache(
-            &Path::from("/Root"),
+            &Path::new("/Root").unwrap(),
             &stack,
             &CompositionContext::default(),
             &sdf::PathTable::new(),
@@ -1963,7 +1968,7 @@ def "Prim" (
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
         let (index, errors, _pending, _deps) = PrimIndex::build_with_cache(
-            &Path::from("/Prim"),
+            &Path::new("/Prim").unwrap(),
             &stack,
             &CompositionContext::default(),
             &sdf::PathTable::new(),
@@ -2002,7 +2007,7 @@ def "Prim" (
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
         let (index, errors, _pending, _deps) = PrimIndex::build_with_cache(
-            &Path::from("/Prim"),
+            &Path::new("/Prim").unwrap(),
             &stack,
             &CompositionContext::default(),
             &sdf::PathTable::new(),
@@ -2113,7 +2118,7 @@ def "Prim" (
     /// plus the ancestor-stronger rule for arbitrary nodes.
     #[test]
     fn node_strength_comparator() {
-        let p = |s: &str| Path::from(s.to_string());
+        let p = |s: &str| Path::new(s).unwrap();
         let id = MapFunction::identity();
         let lid = LayerId::from_raw(0);
         let lsid = LayerStackId::from_raw(1);
@@ -2472,7 +2477,8 @@ def "Model"
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default())?;
+        let index =
+            PrimIndex::build_with_context(&Path::new("/Root").unwrap(), &stack, &CompositionContext::default())?;
 
         let samples = index
             .resolve_time_samples(&stack, Some(".radius"))?
@@ -2500,7 +2506,8 @@ def "Root" (
         let model = parse_usda("#usda 1.0\ndef \"Model\" { custom double radius = 1.0 }\n");
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default())?;
+        let index =
+            PrimIndex::build_with_context(&Path::new("/Root").unwrap(), &stack, &CompositionContext::default())?;
 
         let sites = |index: &PrimIndex| -> Vec<(NodeId, f64, f64)> {
             index
@@ -2515,7 +2522,7 @@ def "Root" (
         );
 
         let mut rebased = index.clone();
-        rebased.rebase_root(&Path::from("/Root"), &Path::from("/__Prototype_1"));
+        rebased.rebase_root(&Path::new("/Root").unwrap(), &Path::new("/__Prototype_1").unwrap());
         assert_eq!(
             before,
             sites(&rebased),

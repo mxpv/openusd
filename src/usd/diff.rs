@@ -44,7 +44,7 @@
 //! for diff in producer.diff() {
 //!     mirror.apply_diff(&diff, ApplyMode::CurrentEditTarget)?;
 //! }
-//! assert_eq!(mirror.prim("/World").type_name()?.as_deref(), Some("Xform"));
+//! assert_eq!(mirror.prim("/World")?.type_name()?.as_deref(), Some("Xform"));
 //! # Ok(())
 //! # }
 //! ```
@@ -867,9 +867,9 @@ mod tests {
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
-        assert_eq!(b.prim("/World").child_names()?, vec![tf::Token::new("Mesh")]);
-        assert_eq!(b.prim("/World").type_name()?.as_deref(), Some("Xform"));
-        assert_eq!(b.attribute("/World/Mesh.size").get::<f64>()?, Some(2.0));
+        assert_eq!(b.prim("/World")?.child_names()?, vec![tf::Token::new("Mesh")]);
+        assert_eq!(b.prim("/World")?.type_name()?.as_deref(), Some("Xform"));
+        assert_eq!(b.attribute("/World/Mesh.size")?.get::<f64>()?, Some(2.0));
         Ok(())
     }
 
@@ -904,9 +904,9 @@ mod tests {
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
-        assert!(!b.prim("/World/Doomed").is_valid()?);
-        assert!(b.prim("/World/Target").is_valid()?);
-        assert!(b.attribute(&sdf::path("/World.size")?).connections()?.is_empty());
+        assert!(!b.prim("/World/Doomed")?.is_valid()?);
+        assert!(b.prim("/World/Target")?.is_valid()?);
+        assert!(b.attribute(&sdf::path("/World.size")?)?.connections()?.is_empty());
         Ok(())
     }
 
@@ -921,11 +921,14 @@ mod tests {
         a.define_prim("/Prim")?.set_type_name("Xform")?;
         a.define_prim("/Prim/child")?;
         a.create_attribute("/Prim/child.out", "double")?
-            .set_connections([sdf::path("/Prim/other.in")?])?;
+            .set_connections(["/Prim/other.in"])?;
 
         let b = in_memory_stage()?;
         let root = b.edit_target().layer_identifier().to_string();
-        b.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        b.set_edit_target(EditTarget::for_local_direct_variant(
+            root,
+            sdf::path("/Prim{set=sel}")?,
+        )?)?;
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
@@ -972,7 +975,7 @@ mod tests {
         let diffs = capture_diffs(&a);
         a.define_prim("/World/MyPrim/added")?;
         a.create_attribute("/World/MyPrim/added.out", "double")?
-            .set_connections([sdf::path("/World/MyPrim/Child.in")?])?;
+            .set_connections(["/World/MyPrim/Child.in"])?;
 
         let b = Stage::open(&fixture_path("ref_external.usda"))?;
         let target = b.edit_target_for_node(&sdf::path("/World/MyPrim")?, EditTargetArc::Reference)?;
@@ -984,9 +987,9 @@ mod tests {
         // The specs landed at the arc-source paths in the referenced layer, not in
         // the root layer, and compose back through the reference.
         assert!(!b.root_layer().data().has_spec(&sdf::path("/World/MyPrim/added")?));
-        assert!(b.prim("/World/MyPrim/added").is_valid()?);
+        assert!(b.prim("/World/MyPrim/added")?.is_valid()?);
         assert_eq!(
-            b.attribute(&sdf::path("/World/MyPrim/added.out")?).connections()?,
+            b.attribute(&sdf::path("/World/MyPrim/added.out")?)?.connections()?,
             vec![sdf::path("/World/MyPrim/Child.in")?]
         );
         Ok(())
@@ -1003,7 +1006,7 @@ mod tests {
         a.set_edit_target(EditTarget::for_local_direct_variant(
             root_a,
             sdf::path("/Prim{set=sel}")?,
-        ))?;
+        )?)?;
         let diffs = capture_diffs(&a);
         a.define_prim("/Prim/child")?.set_type_name("Scope")?;
 
@@ -1012,7 +1015,7 @@ mod tests {
         b.set_edit_target(EditTarget::for_local_direct_variant(
             root_b,
             sdf::path("/Prim{mirror=m}")?,
-        ))?;
+        )?)?;
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
@@ -1046,7 +1049,7 @@ mod tests {
         a.set_edit_target(EditTarget::for_local_direct_variant(
             root_a,
             sdf::path("/Prim{set=sel}")?,
-        ))?;
+        )?)?;
         let diffs = capture_diffs(&a);
         a.define_prim("/Prim/child")?.set_type_name("Scope")?;
 
@@ -1073,7 +1076,7 @@ mod tests {
         b.set_edit_target(EditTarget::for_local_direct_variant(
             root_b,
             sdf::path("/Prim{mirror=m}")?,
-        ))?;
+        )?)?;
         for (edits, mapping) in &wire {
             let mapping = match mapping {
                 Some((pairs, root_identity, offset)) => {
@@ -1114,7 +1117,10 @@ mod tests {
         let a = in_memory_stage()?;
         a.define_prim("/Prim")?;
         let root = a.edit_target().layer_identifier().to_string();
-        a.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        a.set_edit_target(EditTarget::for_local_direct_variant(
+            root,
+            sdf::path("/Prim{set=sel}")?,
+        )?)?;
         let diffs = capture_diffs(&a);
         a.define_prim("/Prim/child")?;
 
@@ -1150,7 +1156,7 @@ mod tests {
             b.apply_diff(&diffs.borrow()[0], ApplyMode::CurrentEditTarget),
             Err(StageAuthoringError::OutsideEditTarget { .. })
         ));
-        assert!(!b.prim("/Elsewhere").is_valid()?);
+        assert!(!b.prim("/Elsewhere")?.is_valid()?);
         Ok(())
     }
 
@@ -1171,7 +1177,7 @@ mod tests {
         }
         // The over landed at the arc-source path and composes back.
         assert!(!b.root_layer().data().has_spec(&sdf::path("/World/MyPrim/bare")?));
-        assert!(b.prim("/World/MyPrim/bare").is_valid()?);
+        assert!(b.prim("/World/MyPrim/bare")?.is_valid()?);
         Ok(())
     }
 
@@ -1204,7 +1210,7 @@ mod tests {
         {
             let target = a.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference)?;
             let _ctx = a.edit_context(target)?;
-            a.attribute("/Prim.x")
+            a.attribute("/Prim.x")?
                 .set_at(sdf::Value::Double(42.0), TimeCode::new(15.0))?;
         }
 
@@ -1217,7 +1223,7 @@ mod tests {
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
-        let local = b.attribute("/Prim.x").time_samples()?.expect("samples");
+        let local = b.attribute("/Prim.x")?.time_samples()?.expect("samples");
         assert_eq!(local, vec![(15.0, sdf::Value::Double(42.0))]);
 
         // An arc consumer maps it back into the source's time frame: keyed at
@@ -1230,9 +1236,9 @@ mod tests {
                 c.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
             }
         }
-        let source = c.attribute("/Source.x").time_samples()?.expect("samples");
+        let source = c.attribute("/Source.x")?.time_samples()?.expect("samples");
         assert_eq!(source, vec![(5.0, sdf::Value::Double(42.0))]);
-        assert_eq!(c.attribute("/Prim.x").get_at::<f64>(TimeCode::new(15.0))?, Some(42.0));
+        assert_eq!(c.attribute("/Prim.x")?.get_at::<f64>(TimeCode::new(15.0))?, Some(42.0));
         Ok(())
     }
 
@@ -1275,7 +1281,7 @@ mod tests {
         let a = in_memory_stage()?;
         a.create_attribute("/Prim.x", "double")?;
         let diffs = capture_diffs(&a);
-        a.attribute("/Prim.x").set(2.0_f64)?;
+        a.attribute("/Prim.x")?.set(2.0_f64)?;
 
         let b = in_memory_stage()?;
         assert!(matches!(
@@ -1298,7 +1304,10 @@ mod tests {
 
         let b = in_memory_stage()?;
         let root = b.edit_target().layer_identifier().to_string();
-        b.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        b.set_edit_target(EditTarget::for_local_direct_variant(
+            root,
+            sdf::path("/Prim{set=sel}")?,
+        )?)?;
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
@@ -1328,7 +1337,7 @@ mod tests {
         let a = Stage::open(&fixture_path("ref_external.usda"))?;
         let diffs = capture_diffs(&a);
         a.create_attribute("/World/MyPrim/added.out", "double")?
-            .set_connections([sdf::path("/Elsewhere.in")?])?;
+            .set_connections(["/Elsewhere.in"])?;
 
         let b = Stage::open(&fixture_path("ref_external.usda"))?;
         let target = b.edit_target_for_node(&sdf::path("/World/MyPrim")?, EditTargetArc::Reference)?;
@@ -1356,7 +1365,7 @@ mod tests {
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::ExactLayer(&root))?;
         }
-        assert_eq!(b.prim("/Prim").kind()?, None);
+        assert_eq!(b.prim("/Prim")?.kind()?, None);
         Ok(())
     }
 
@@ -1373,7 +1382,10 @@ mod tests {
 
         let b = in_memory_stage()?;
         let root = b.edit_target().layer_identifier().to_string();
-        b.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        b.set_edit_target(EditTarget::for_local_direct_variant(
+            root,
+            sdf::path("/Prim{set=sel}")?,
+        )?)?;
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
@@ -1423,7 +1435,7 @@ mod tests {
         let a = in_memory_stage()?;
         a.define_prim("/Prim")?.set_type_name("Xform")?;
         let diffs = capture_diffs(&a);
-        a.prim("/Prim").set_kind("component")?;
+        a.prim("/Prim")?.set_kind("component")?;
 
         // The consumer holds its own typeName opinion; replaying the kind-only
         // edit must not overwrite it.
@@ -1432,8 +1444,8 @@ mod tests {
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
-        assert_eq!(b.prim("/Prim").kind()?.as_deref(), Some("component"));
-        assert_eq!(b.prim("/Prim").type_name()?.as_deref(), Some("Scope"));
+        assert_eq!(b.prim("/Prim")?.kind()?.as_deref(), Some("component"));
+        assert_eq!(b.prim("/Prim")?.type_name()?.as_deref(), Some("Scope"));
 
         let c = in_memory_stage()?;
         c.define_prim("/Prim")?.set_type_name("Scope")?;
@@ -1441,8 +1453,8 @@ mod tests {
         for diff in diffs.borrow().iter() {
             c.apply_diff(diff, ApplyMode::ExactLayer(&root_c))?;
         }
-        assert_eq!(c.prim("/Prim").kind()?.as_deref(), Some("component"));
-        assert_eq!(c.prim("/Prim").type_name()?.as_deref(), Some("Scope"));
+        assert_eq!(c.prim("/Prim")?.kind()?.as_deref(), Some("component"));
+        assert_eq!(c.prim("/Prim")?.type_name()?.as_deref(), Some("Scope"));
         Ok(())
     }
 
@@ -1457,7 +1469,7 @@ mod tests {
         a.set_edit_target(EditTarget::for_local_direct_variant(
             root_a,
             sdf::path("/Prim{set=sel}")?,
-        ))?;
+        )?)?;
         let diffs = capture_diffs(&a);
         a.define_prim("/Prim/child")?;
 

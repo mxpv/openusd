@@ -322,10 +322,14 @@ fn parse_reference(cursor: &mut Cursor) -> Result<ExpressionReference, ParseFail
         return Err(cursor.fail("expected identifier"));
     }
     let name = parse_identifier(cursor, "expected identifier")?;
-    Ok(ExpressionReference {
-        path: Path::new(&path).expect("a reference path string is a valid path"),
-        name,
-    })
+    // A bare `%:name` carries no path — the reference resolves against the
+    // expression's own prim — represented as the empty path.
+    let path = if path.is_empty() {
+        Path::default()
+    } else {
+        Path::new(&path).map_err(|_| cursor.fail("invalid expression reference path"))?
+    };
+    Ok(ExpressionReference { path, name })
 }
 
 /// Appends the `ident('/'ident)*` run of a reference path to `path`, each

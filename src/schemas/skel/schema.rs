@@ -30,13 +30,13 @@ pub struct SkelRoot(Prim);
 
 impl SkelRoot {
     /// Author a `def SkelRoot` prim at `path` (C++ `UsdSkelRoot::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_SKEL_ROOT)?))
     }
 
     /// Wrap `path` as a `SkelRoot` if it is typed `SkelRoot`
     /// (C++ `UsdSkelRoot::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_SKEL_ROOT).map(|o| o.map(Self))
     }
 }
@@ -51,13 +51,13 @@ pub struct Skeleton(Prim);
 
 impl Skeleton {
     /// Author a `def Skeleton` prim at `path` (C++ `UsdSkelSkeleton::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_SKELETON)?))
     }
 
     /// Wrap `path` as a `Skeleton` if it is typed `Skeleton`
     /// (C++ `UsdSkelSkeleton::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_SKELETON).map(|o| o.map(Self))
     }
 
@@ -187,13 +187,13 @@ pub struct SkelAnimation(Prim);
 impl SkelAnimation {
     /// Author a `def SkelAnimation` prim at `path`
     /// (C++ `UsdSkelAnimation::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_SKEL_ANIMATION)?))
     }
 
     /// Wrap `path` as a `SkelAnimation` if it is typed `SkelAnimation`
     /// (C++ `UsdSkelAnimation::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_SKEL_ANIMATION).map(|o| o.map(Self))
     }
 
@@ -322,13 +322,13 @@ pub struct BlendShape(Prim);
 impl BlendShape {
     /// Author a `def BlendShape` prim at `path`
     /// (C++ `UsdSkelBlendShape::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_BLEND_SHAPE)?))
     }
 
     /// Wrap `path` as a `BlendShape` if it is typed `BlendShape`
     /// (C++ `UsdSkelBlendShape::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_BLEND_SHAPE).map(|o| o.map(Self))
     }
 
@@ -404,7 +404,7 @@ impl BlendShape {
     /// `offsets`, and optional `inbetweens:<name>:normalOffsets`.
     pub fn inbetweens(&self) -> Result<Vec<Inbetween>> {
         let mut out = Vec::new();
-        let props = self.stage().prim(self.path().clone()).authored_property_names()?;
+        let props = self.stage().prim(self.path().clone())?.authored_property_names()?;
         for name in &props {
             let Some(rest) = name.strip_prefix(tok::NS_INBETWEENS) else {
                 continue;
@@ -452,7 +452,7 @@ pub struct SkelBindingAPI(Prim);
 impl SkelBindingAPI {
     /// Apply `SkelBindingAPI` to the prim at `path`
     /// (C++ `UsdSkelBindingAPI::Apply`). The prim is opened as `over`.
-    pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(
             stage.override_prim(path)?.add_applied_schema(tok::API_SKEL_BINDING)?,
         ))
@@ -460,7 +460,7 @@ impl SkelBindingAPI {
 
     /// Wrap `path` as a `SkelBindingAPI` if it carries `SkelBindingAPI`
     /// (C++ `UsdSkelBindingAPI::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_with_api(stage, path, &[tok::API_SKEL_BINDING]).map(|o| o.map(Self))
     }
 
@@ -708,7 +708,7 @@ fn inherited_rel(stage: &Stage, prim: &sdf::Path, rel_name: impl Into<tf::Token>
     let mut cur = prim.clone();
     loop {
         let rel = cur.append_property(&rel_name)?;
-        if let Some(target) = stage.relationship(rel).targets()?.into_iter().next() {
+        if let Some(target) = stage.relationship(rel)?.targets()?.into_iter().next() {
             return Ok(Some(target));
         }
         match cur.parent() {
@@ -796,7 +796,7 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         // Skeleton bound on the root; influences on the mesh.
         let root = SkelBindingAPI::apply(&stage, "/Char")?;
-        root.create_skeleton_rel()?.add_target(sdf::path("/Char/Rig")?)?;
+        root.create_skeleton_rel()?.add_target("/Char/Rig")?;
 
         let body = SkelBindingAPI::apply(&stage, "/Char/Body")?;
         body.create_joint_indices_attr()?.set(Value::IntVec(vec![0, 1]))?;

@@ -66,13 +66,13 @@ pub struct BasisCurves(Prim);
 impl BasisCurves {
     /// Author a `def BasisCurves` prim at `path`
     /// (C++ `UsdGeomBasisCurves::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_BASIS_CURVES)?))
     }
 
     /// Wrap `path` as a `BasisCurves` if it is typed `BasisCurves`
     /// (C++ `UsdGeomBasisCurves::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_BASIS_CURVES).map(|o| o.map(Self))
     }
 
@@ -139,13 +139,13 @@ pub struct NurbsCurves(Prim);
 impl NurbsCurves {
     /// Author a `def NurbsCurves` prim at `path`
     /// (C++ `UsdGeomNurbsCurves::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_NURBS_CURVES)?))
     }
 
     /// Wrap `path` as a `NurbsCurves` if it is typed `NurbsCurves`
     /// (C++ `UsdGeomNurbsCurves::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_NURBS_CURVES).map(|o| o.map(Self))
     }
 
@@ -218,13 +218,13 @@ pub struct HermiteCurves(Prim);
 impl HermiteCurves {
     /// Author a `def HermiteCurves` prim at `path`
     /// (C++ `UsdGeomHermiteCurves::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_HERMITE_CURVES)?))
     }
 
     /// Wrap `path` as a `HermiteCurves` if it is typed `HermiteCurves`
     /// (C++ `UsdGeomHermiteCurves::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_HERMITE_CURVES).map(|o| o.map(Self))
     }
 
@@ -256,13 +256,13 @@ pub struct NurbsPatch(Prim);
 impl NurbsPatch {
     /// Author a `def NurbsPatch` prim at `path`
     /// (C++ `UsdGeomNurbsPatch::Define`).
-    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+    pub fn define(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
         Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_NURBS_PATCH)?))
     }
 
     /// Wrap `path` as a `NurbsPatch` if it is typed `NurbsPatch`
     /// (C++ `UsdGeomNurbsPatch::Get`).
-    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
         get_typed(stage, path, tok::T_NURBS_PATCH).map(|o| o.map(Self))
     }
 

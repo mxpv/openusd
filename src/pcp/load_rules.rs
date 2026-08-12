@@ -42,7 +42,9 @@ pub enum Rule {
 /// [`InitialLoadSet::LoadNone`](crate::usd::InitialLoadSet) seeds a root
 /// [`Rule::None`] instead. Assumes prim-only paths throughout (no property or
 /// variant-selection segments); the `usd`-facing boundary normalizes a
-/// caller's path before it ever reaches this type.
+/// caller's path before it ever reaches this type. Rule paths are owned,
+/// already-validated [`Path`] values — parse text with [`Path::new`] at
+/// that boundary.
 ///
 /// Backed by a `BTreeMap`, which derives `Hash`/`Eq` directly — needed since
 /// this type becomes part of an instancing key (see `pcp::instancing`).

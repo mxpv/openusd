@@ -174,7 +174,7 @@ impl ResolvedBase {
 /// available; only plain authored namespaced attributes are gathered here.
 pub fn compute_namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&str]) -> Result<Vec<(String, Value)>> {
     let mut out = Vec::new();
-    for name in stage.prim(prim.clone()).authored_property_names()? {
+    for name in stage.prim(prim.clone())?.authored_property_names()? {
         // TODO(shade): `outputs:`-connected settings are driven by a node
         // graph; resolving their value producer needs UsdShade.
         if name.starts_with("outputs:") {
@@ -238,7 +238,7 @@ fn collect_var_indices(
 /// aperture attributes by name so it needs no dependency on the `geom`
 /// feature — the conform policy only needs these two floats.
 fn read_camera_aperture(stage: &Stage, camera: &Path) -> Result<[f32; 2]> {
-    let prim = stage.prim(camera.clone());
+    let prim = stage.prim(camera.clone())?;
     Ok([
         read_f32(&prim.attribute("horizontalAperture"))?.unwrap_or(20.955),
         read_f32(&prim.attribute("verticalAperture"))?.unwrap_or(15.2908),
@@ -311,7 +311,7 @@ mod tests {
         // matte re-uses `color`, so it must NOT add a second global entry.
         RenderProduct::define(&stage, "/Render/Products/matte")?
             .create_ordered_vars_rel()?
-            .set_targets([sdf::path("/Render/Vars/color")?])?;
+            .set_targets(["/Render/Vars/color"])?;
 
         let settings = RenderSettings::define(&stage, "/Render/Settings")?;
         settings.create_resolution_attr()?.set(gf::vec2i(1024, 512))?;
@@ -343,9 +343,7 @@ mod tests {
         let settings = RenderSettings::define(&stage, "/Render/Settings")?;
         settings.create_resolution_attr()?.set(gf::vec2i(1920, 1080))?;
         settings.create_pixel_aspect_ratio_attr()?.set(2.0_f32)?;
-        settings
-            .create_products_rel()?
-            .set_targets([sdf::path("/Render/Products/p")?])?;
+        settings.create_products_rel()?.set_targets(["/Render/Products/p"])?;
         // Product authors only `resolution`.
         RenderProduct::define(&stage, "/Render/Products/p")?
             .create_resolution_attr()?
@@ -363,7 +361,7 @@ mod tests {
     #[test]
     fn conform_against_bound_camera() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        let cam = stage.define_prim(sdf::path("/World/Cam")?)?.set_type_name("Camera")?;
+        let cam = stage.define_prim("/World/Cam")?.set_type_name("Camera")?;
         for (name, v) in [("horizontalAperture", 10.0f32), ("verticalAperture", 10.0)] {
             stage
                 .create_attribute(cam.path().append_property(name)?, "float")?
@@ -372,10 +370,8 @@ mod tests {
         RenderProduct::define(&stage, "/Render/Products/p")?;
         let settings = RenderSettings::define(&stage, "/Render/Settings")?;
         settings.create_resolution_attr()?.set(gf::vec2i(200, 100))?;
-        settings.create_camera_rel()?.add_target(sdf::path("/World/Cam")?)?;
-        settings
-            .create_products_rel()?
-            .set_targets([sdf::path("/Render/Products/p")?])?;
+        settings.create_camera_rel()?.add_target("/World/Cam")?;
+        settings.create_products_rel()?.set_targets(["/Render/Products/p"])?;
 
         let spec = compute_render_spec(&stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec");
         let p = &spec.products[0];
@@ -389,7 +385,7 @@ mod tests {
     #[test]
     fn non_settings_prim_is_none() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        stage.define_prim(sdf::path("/Scope")?)?.set_type_name("Scope")?;
+        stage.define_prim("/Scope")?.set_type_name("Scope")?;
         assert!(compute_render_spec(&stage, &sdf::path("/Scope")?, &[])?.is_none());
         Ok(())
     }

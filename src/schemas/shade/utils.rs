@@ -283,8 +283,8 @@ mod tests {
         for hop in 0..depth - 1 {
             let next = stage.attribute(format!("/Mat/N{}.outputs:result", hop + 1));
             stage
-                .attribute(format!("/Mat/N{hop}.outputs:result"))
-                .set_connections([next.path().clone()])?;
+                .attribute(format!("/Mat/N{hop}.outputs:result"))?
+                .set_connections([next?.path().clone()])?;
         }
 
         // A chain past the depth budget is refused rather than walked until

@@ -382,6 +382,19 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         // loaded layer and dominates open time on large scenes. The deferred
         // sibling subtrees are independent and should be decoded in parallel, as
         // the C++ WorkDispatcher does.
+        //
+        // TODO(perf): the append_property / append_variant_segment calls below
+        // validate each element token; if the PATHS decode shows in large-scene
+        // profiles, add a pub(crate) unchecked single-element append for
+        // machine-written crate files.
+        //
+        // TODO(diagnostics): a single malformed element token fails the whole
+        // file load. C++ posts an error and skips the unaddressable subtree;
+        // matching that needs a layer-open diagnostics channel to carry the
+        // partial-load errors. The same channel would let the traversals that
+        // today skip unaddressable authored names silently — the connection
+        // graph and collection walks in `usd`, and the layer-registry variant
+        // walk — surface each skipped entry as a warning.
         // Nothing to decode when the PATHS section is empty.
         if path_indexes.is_empty() {
             return Ok(());
@@ -408,7 +421,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                     } else if element_token.starts_with('{') {
                         // Variant segments are appended directly without a separator
                         // to produce canonical paths like /Prim{set=sel}.
-                        parent_path.append_variant_segment(element_token)
+                        parent_path.append_variant_segment(element_token)?
                     } else {
                         parent_path.append_path(element_token)?
                     };

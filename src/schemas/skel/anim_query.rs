@@ -14,7 +14,7 @@
 use anyhow::Result;
 
 use crate::gf;
-use crate::sdf::{Path, Value};
+use crate::sdf::{self, Path, Value};
 use crate::tf;
 use crate::usd::{SchemaBase, Stage, TimeCode};
 
@@ -46,7 +46,7 @@ impl SkelAnimQuery {
     /// Build a query for a `SkelAnimation` prim. Returns `None` when
     /// the prim isn't typed `SkelAnimation`, or when neither joints
     /// nor blend shapes are authored on it.
-    pub fn new(stage: &Stage, prim: Path) -> Result<Option<Self>> {
+    pub fn new(stage: &Stage, prim: impl sdf::IntoPath) -> Result<Option<Self>> {
         let Some(anim) = SkelAnimation::get(stage, prim)? else {
             return Ok(None);
         };
@@ -142,7 +142,7 @@ impl SkelAnimQuery {
             return Ok(Vec::new());
         }
         let attr = self.prim.append_property(A_BLEND_SHAPE_WEIGHTS)?;
-        let v = stage.attribute(attr).get_at::<Value>(time.into())?;
+        let v = stage.attribute(attr)?.get_at::<Value>(time.into())?;
         Ok(match v {
             Some(Value::FloatVec(w)) if w.len() == n => w,
             Some(Value::DoubleVec(w)) if w.len() == n => w.into_iter().map(|d| d as f32).collect(),
@@ -160,7 +160,7 @@ impl SkelAnimQuery {
         default: gf::Vec3f,
     ) -> Result<Vec<gf::Vec3f>> {
         let attr = self.prim.append_property(name)?;
-        let v = stage.attribute(attr).get_at::<Value>(time)?;
+        let v = stage.attribute(attr)?.get_at::<Value>(time)?;
         Ok(match v {
             Some(Value::Vec3fVec(a)) if a.len() == n => a,
             Some(Value::Vec3dVec(a)) if a.len() == n => a
@@ -184,7 +184,7 @@ impl SkelAnimQuery {
         default: gf::Quatf,
     ) -> Result<Vec<gf::Quatf>> {
         let attr = self.prim.append_property(name)?;
-        let v = stage.attribute(attr).get_at::<Value>(time)?;
+        let v = stage.attribute(attr)?.get_at::<Value>(time)?;
         Ok(match v {
             Some(Value::QuatfVec(a)) if a.len() == n => a,
             Some(Value::QuatdVec(a)) if a.len() == n => a

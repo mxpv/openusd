@@ -459,11 +459,11 @@ fn join_child(parent: &sdf::Path, key: sdf::ChildrenKey, name: &str) -> Result<s
     match key {
         sdf::ChildrenKey::PrimChildren => parent.append_path(name).map_err(|_| invalid()),
         sdf::ChildrenKey::PropertyChildren => parent.append_property(name).map_err(|_| invalid()),
-        sdf::ChildrenKey::VariantSetChildren => Ok(parent.append_variant_selection(name, "")),
+        sdf::ChildrenKey::VariantSetChildren => parent.append_variant_selection(name, "").map_err(|_| invalid()),
         sdf::ChildrenKey::VariantChildren => {
             let prim = parent.parent().ok_or_else(invalid)?;
             let set = parent.variant_set_name().ok_or_else(invalid)?;
-            Ok(prim.append_variant_selection(set, name))
+            prim.append_variant_selection(set, name).map_err(|_| invalid())
         }
         _ => Err(invalid()),
     }

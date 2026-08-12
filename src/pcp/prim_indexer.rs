@@ -1982,7 +1982,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// Composes the variant names available in set `vset` at `vset_path`, across
     /// `node`'s layer stack (C++ `PcpComposeSiteVariantSetOptions`).
     fn compose_variant_options(&self, node: NodeId, vset_path: &Path, vset: &str) -> BuildResult<Vec<String>> {
-        let set_path = vset_path.append_variant_selection(vset, "");
+        // An invalid set name cannot address variant storage: no options.
+        let Ok(set_path) = vset_path.append_variant_selection(vset, "") else {
+            return Ok(Vec::new());
+        };
         // Variant names compose as tokens, but they are matched against the
         // `String`-keyed `VariantFallbackMap`, so flatten to `String` here.
         Ok(self
@@ -2009,7 +2012,15 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let n = self.node(node);
         let stack_id = n.layer_stack_id();
         let rep = n.layer_id();
-        let var_path = n.path.append_variant_selection(&vt.vset_name, vsel);
+        let site_path = n.path.clone();
+        let Ok(var_path) = site_path.append_variant_selection(&vt.vset_name, vsel) else {
+            self.errors.push(Error::InvalidVariantSelection {
+                set: vt.vset_name.to_string(),
+                selection: vsel.to_string(),
+                site_path,
+            });
+            return Ok(());
+        };
         let has_specs = self.stack_has_spec(stack_id, &var_path);
         // A variant does not remap the scenegraph namespace — it branches into
         // a different section of layer storage — so its map is the
@@ -2042,7 +2053,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let n = self.node(node);
         let node_path = n.path.clone();
         let stack_id = n.layer_stack_id();
-        let selected = vt.vset_path.append_variant_selection(&vt.vset_name, vsel);
+        let Ok(selected) = vt.vset_path.append_variant_selection(&vt.vset_name, vsel) else {
+            self.errors.push(Error::InvalidVariantSelection {
+                set: vt.vset_name.to_string(),
+                selection: vsel.to_string(),
+                site_path: vt.vset_path.clone(),
+            });
+            return Ok(());
+        };
         let Some(var_path) = node_path.replace_prefix(&vt.vset_path, &selected) else {
             return Ok(());
         };
@@ -3250,7 +3268,7 @@ mod tests {
         loop {
             let ambient = LayerStackId::ROOT;
             let out = Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient, true)
-                .build(&Path::from(prim))
+                .build(&Path::new(prim).unwrap())
                 .expect("indexer build");
             if !stack.intern_demanded(&out.pending_loads) {
                 return out;
@@ -3839,10 +3857,11 @@ mod tests {
         let ctx = CompositionContext::default();
         let ambient = LayerStackId::ROOT;
         // Seed the child build with the parent's composed index, as the cache does.
-        let root_index = PrimIndex::build_with_context(&Path::from("/Root"), &s, &ctx).expect("root index build");
+        let root_index =
+            PrimIndex::build_with_context(&Path::new("/Root").unwrap(), &s, &ctx).expect("root index build");
         let mut cached = sdf::PathTable::new();
         cached.insert(
-            Path::from("/Root"),
+            Path::new("/Root").unwrap(),
             PrimEntry {
                 index: root_index,
                 context: CompositionContext::default(),
@@ -3851,7 +3870,7 @@ mod tests {
             },
         );
         let child = Indexer::new(&s, &ctx, &cached, ambient, true)
-            .build(&Path::from("/Root/Child"))
+            .build(&Path::new("/Root/Child").unwrap())
             .expect("indexer build")
             .graph
             .expect("child composed by indexer");
