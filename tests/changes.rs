@@ -49,6 +49,15 @@ fn child_names(stage: &usd::Stage, path: &str) -> Vec<String> {
         .collect()
 }
 
+/// The identifier of the loaded layer whose file name is `leaf`.
+fn identifier_by_leaf(stage: &usd::Stage, leaf: &str) -> String {
+    stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| FsPath::new(id).ends_with(leaf))
+        .expect("layer is loaded")
+}
+
 /// Warm two sibling prim indices, author at one — the other must stay indexed.
 #[test]
 fn author_keeps_sibling_indexed() {
@@ -477,11 +486,7 @@ def "P" {
     assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0));
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
 
-    let target_id = stage
-        .layer_identifiers()
-        .into_iter()
-        .find(|id| FsPath::new(id).ends_with("t.usda"))
-        .expect("t.usda is loaded");
+    let target_id = identifier_by_leaf(&stage, "t.usda");
     stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
         e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("x".to_string()))]))
     })?;
@@ -660,4 +665,59 @@ fn reference_fixture_composes() {
     assert!(children.contains(&"Cube".to_string()));
     assert!(children.contains(&"Sphere".to_string()));
     assert!(stage.is_indexed(&sdf::path("/World").unwrap()));
+}
+
+/// The automatic layer-stack sweep, end to end through the public API:
+/// composing enough reference targets ripens the mint-count trigger, so the
+/// next edit seam (a mute) sweeps — removing the muted target's stack, which
+/// nothing references once its user's index dropped — and the unmute demand
+/// path recomposes it transparently, values intact.
+#[test]
+fn threshold_sweep_recomposes() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let count = 40;
+    let mut root_text = String::from("#usda 1.0\n");
+    for i in 0..count {
+        root_text.push_str(&format!("def \"P{i}\" (\n    references = @t{i}.usda@</P>\n) {{}}\n"));
+        fs::write(
+            dir.path().join(format!("t{i}.usda")),
+            format!("#usda 1.0\ndef \"P\" {{\n    custom double x = {i}\n}}\n"),
+        )?;
+    }
+    let root = dir.path().join("root.usda");
+    fs::write(&root, root_text)?;
+
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    for i in 0..count {
+        assert_eq!(stage.attribute(format!("/P{i}.x"))?.get::<f64>()?, Some(i as f64));
+    }
+
+    // The mute drops /P0's index and runs the ripe sweep; every other target
+    // stack stays referenced by its cached index and survives.
+    let t0 = identifier_by_leaf(&stage, "t0.usda");
+    stage.mute_layer(t0.clone());
+    assert_eq!(
+        stage.attribute("/P0.x")?.get::<f64>()?,
+        None,
+        "the muted target is gone"
+    );
+    assert!(
+        stage.is_indexed(&sdf::path("/P39")?),
+        "unrelated indices survive the sweep"
+    );
+
+    stage.unmute_layer(&t0);
+    for i in 0..count {
+        assert_eq!(
+            stage.attribute(format!("/P{i}.x"))?.get::<f64>()?,
+            Some(i as f64),
+            "every target composes after the sweep-and-recompose round trip"
+        );
+    }
+    assert!(
+        stage.composition_errors().is_empty(),
+        "no diagnostics accrete across the sweep, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
 }

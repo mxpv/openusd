@@ -2491,11 +2491,16 @@ mod tests {
             .apply()
             .unwrap();
 
-        let model = stage.layer("model.usda").expect("model layer");
-        assert_eq!(
-            model.data().spec_type(&path("/Model/Renamed").unwrap()),
-            Some(sdf::SpecType::Prim)
-        );
+        // Scoped: the layer guard borrows the graph, and the composed reads
+        // below may re-mint a reclaimed target stack through the load barrier,
+        // which needs the graph mutably.
+        {
+            let model = stage.layer("model.usda").expect("model layer");
+            assert_eq!(
+                model.data().spec_type(&path("/Model/Renamed").unwrap()),
+                Some(sdf::SpecType::Prim)
+            );
+        }
         assert!(valid(&stage, "/Ref/Renamed"));
         assert!(!valid(&stage, "/Ref/A"));
         assert!(stage.root_layer().relocates().is_empty());

@@ -249,21 +249,17 @@
 //!   every missing/unreadable sublayer raw, unaware of muting; the stage reports
 //!   only those a muted-aware check finds contributing
 //!   (`LayerGraph::sublayer_error_contributes` over `effective_layers`, the members
-//!   of every composed stack) and applies it at report time
-//!   (`Stage::composition_errors`). The raw diagnostics are never discarded, and the
-//!   effective set is a pure function of the muted set and the composed stacks — not
-//!   of which prim indices are cached — so a diagnostic's visibility is
-//!   deterministic: muting a branch suppresses it and unmuting restores it, for both
-//!   the root layer stack and reference/payload target stacks, and it never flickers
-//!   as the cache warms.
-//!   Remaining — precise target-diagnostic liveness: a reference/payload target
-//!   whose only arc becomes muted (the arc's authoring opinion is muted, but the
-//!   target root itself is not) stays interned with a non-empty stack, so its own
-//!   missing-sublayer diagnostic keeps reporting even though no unmuted arc reaches
-//!   it — a conservative over-report. Resolving it precisely means attaching
-//!   collection diagnostics to composition sites / stack instances so their
-//!   visibility tracks index lifetime and recomposition, rather than deriving it
-//!   from the composed-stack set.
+//!   of every live composed stack) and applies it at report time
+//!   (`Stage::composition_errors`). The effective set is a pure function of the
+//!   muted set and the live composed stacks: muting a branch suppresses its
+//!   diagnostics and unmuting restores them, for both the root layer stack and
+//!   reference/payload target stacks. Like all lazily composed state, the
+//!   reported set reflects the composition performed so far: a stack's members
+//!   and diagnostics retire together when a sweep reclaims the unreferenced
+//!   instance — losing the last owning prim index schedules that sweep at the
+//!   same edit seam, so a target severed from composition (its only arc muted,
+//!   unloaded, or deleted) stops reporting promptly — and recomposition
+//!   re-derives them if the problem still exists.
 //! - Masked cold prototype queries: a query on a `/__Prototype_N` path under a
 //!   non-default population mask resolves to empty until an instance sharing
 //!   that prototype has been composed (which registers the prototype). The
@@ -274,16 +270,6 @@
 //!   through an instance (`Prim::prototype`, or any instance-proxy query) first
 //!   registers it, after which masked prototype-content queries (including those
 //!   behind a lazily-loaded payload) resolve correctly.
-//! - Reclaiming stale contextual stack instances: the registry is append-only,
-//!   and a variable-source flip — a source stack's authored variables becoming
-//!   a no-op under its seed, or ceasing to be one — re-keys the sources
-//!   downstream arcs carry, so the old-keyed instance is never matched again,
-//!   yet the rebuild keeps re-resolving it; a long editing session accretes
-//!   registry memory and rebuild cost. A plain variable value edit strands
-//!   nothing (the seed is read live from the source instance, so the keyed
-//!   instance refreshes in place). Reclamation needs liveness tracking: cached
-//!   prim-index nodes hold stable `LayerStackId`s, so an instance cannot be
-//!   dropped while any index references it.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
@@ -314,7 +300,7 @@ pub(crate) use change::Changes;
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
 pub(crate) use layer_graph::{LayerGraph, LoadFailure, MuteChange, StackIdentity, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
-pub(crate) use layer_stack::LayerStackId;
+pub(crate) use layer_stack::{LayerStackId, StackMarks};
 pub use load_rules::{LoadRules, Rule};
 pub use mapping::MapFunction;
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};

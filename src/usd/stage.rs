@@ -939,14 +939,16 @@ impl Stage {
             errors.extend(cache_errors);
             return errors;
         }
-        // The effectively-composed layers: every composed stack's members (the root
-        // stack and each interned reference/payload target stack), which muting has
-        // pruned muted subtrees from. This is a pure function of the muted set and
-        // the graph, so a diagnostic's visibility is deterministic and does not
-        // flicker with cache warmth. A still-interned target whose only arc became
-        // muted keeps its diagnostic — a deliberate conservative over-report (see the
-        // pcp "Muted sublayer diagnostics" remaining-work note), chosen over hiding a
-        // valid error because an unrelated invalidation evicted the proving index.
+        // The effectively-composed layers: every interned composed stack's
+        // members (the root stack and each reference/payload target stack),
+        // which muting has pruned muted subtrees from. This is a pure function
+        // of the muted set and the interned stacks: a stack and its diagnostics
+        // are removed together when a sweep reclaims it, so a diagnostic never
+        // outlives the membership that justified it. Ownership-scheduled
+        // reclamation keeps the set tight — a target whose last owning index
+        // drops (a mute or unload severing its only arc included) is swept at
+        // that same edit seam, and recomposition re-derives whatever still
+        // holds.
         let effective = graph.effective_layers();
         errors.extend(
             cache_errors
@@ -1727,6 +1729,10 @@ impl Stage {
                 group.iter().map(|(_, id, changes, _)| (*id, changes)).collect();
             self.apply_change_sets(generation, &edits, &provenance);
         }
+        // Sweep before the requeue below: a sweep retires a reclaimed stack's
+        // failure diagnostics, so requeueing never re-derives a demand whose
+        // barrier would read a reclaimed stack's variables.
+        self.reclaim_stale_stacks();
         // A cleared sublayer failure retries even when this round's edits
         // rebuilt no stack: the failure diagnostics requeue as demands, so a
         // repaired asset loads and a still-broken one re-records the same
@@ -1735,6 +1741,34 @@ impl Stage {
             let requeued = self.layers.borrow().requeue_failed_sublayers();
             self.resolve_sublayer_demands(requeued);
         }
+    }
+
+    /// Reclaims layer-stack instances nothing live references — no cached
+    /// prim index, no pending demand, no eager graph root, no live
+    /// descendant's variable-source ancestry — see `LayerGraph::sweep_stacks`.
+    /// The sweep runs when a stack lost its last cache owner
+    /// (`IndexCache::ownership_lost`, unthresholded: a cached entry's removal
+    /// releases its stacks immediately, and the next edit seam collects and
+    /// retires the orphans' diagnostics) or when registry creation churn
+    /// passed the gate (`LayerGraph::sweep_ripe`, which amortizes re-keying
+    /// mints and interner value churn).
+    ///
+    /// Called only at edit seams — the end of a pending-edit drain, a mute, a
+    /// deliberate load-rules mutation — never inside the load path: an edit
+    /// strands an instance by re-keying its source or by dropping its last
+    /// owning index, while `load_demanded` and `mapped_target_stack_id` hold
+    /// freshly resolved handles that no cached index references yet, which a
+    /// sweep there would reclaim out from under them.
+    fn reclaim_stale_stacks(&self) {
+        let mut graph = self.layers.borrow_mut();
+        let mut cache = self.cache.borrow_mut();
+        if !cache.ownership_lost() && !graph.sweep_ripe() {
+            return;
+        }
+        cache.reset_ownership_lost();
+        let mut marks = pcp::StackMarks::default();
+        cache.mark_live_stacks(&mut marks);
+        graph.sweep_stacks(marks);
     }
 
     /// The [`Provenance`] for one transaction's group of recorded edits. A staged
@@ -2128,7 +2162,7 @@ impl Stage {
     /// use, not a blunt whole-stage drop, since the affected set is already
     /// provably sufficient (see [`pcp::LoadRules`]'s module documentation).
     pub fn set_load_rules(&self, rules: pcp::LoadRules) {
-        let victims = self.replace_load_rules(rules);
+        let victims = self.install_load_rules(|current| *current = rules);
         self.notify_load_rules_changed(&victims);
     }
 
@@ -2231,19 +2265,27 @@ impl Stage {
 
     /// Applies `edit` to a clone of the stage's current load rules and
     /// installs the result, returning the bounded set of paths whose cached
-    /// index was dropped (empty for a no-op edit). For `load`/`unload`/
-    /// `load_and_unload`, which build on the existing table.
+    /// index was dropped (empty for a no-op edit). The single deliberate
+    /// mutation entry: `load`/`unload`/`load_and_unload` build on the existing
+    /// table, and [`set_load_rules`](Self::set_load_rules) replaces it.
     fn install_load_rules(&self, edit: impl FnOnce(&mut pcp::LoadRules)) -> Vec<sdf::Path> {
         let mut rules = self.cache.borrow().load_rules().clone();
         edit(&mut rules);
-        self.replace_load_rules(rules)
+        let victims = self.replace_load_rules(rules);
+        // An unload can leave payload-target stacks unreferenced for a long
+        // stretch; reclaim them while the seam is quiet, whenever accumulated
+        // registry churn has ripened the trigger.
+        self.reclaim_stale_stacks();
+        victims
     }
 
     /// Installs `rules` directly in place of the stage's current load rules,
     /// returning the bounded set of paths whose cached index was dropped. The
-    /// entry point for callers that already hold the exact replacement
-    /// value: [`set_load_rules`](Self::set_load_rules) and the transient
-    /// swaps in [`find_loadable`](Self::find_loadable)/[`LoadRulesGuard`].
+    /// low-level swap shared by the deliberate mutation entry
+    /// ([`install_load_rules`](Self::install_load_rules), which also reclaims
+    /// stale stacks) and the transient swaps in
+    /// [`find_loadable`](Self::find_loadable)/[`LoadRulesGuard`], which must
+    /// leave the payload-target stacks the walk composes untouched.
     fn replace_load_rules(&self, rules: pcp::LoadRules) -> Vec<sdf::Path> {
         // Drain pending edits first so the mutation recomposes against a
         // current graph and cache, matching `apply_mute`.
@@ -2300,6 +2342,10 @@ impl Stage {
         // opened — the recompose recorded it as a demand; load it now, after
         // the graph and cache borrows are released.
         self.resolve_sublayer_demands(demands);
+        // A mute can flip a stack's variable source (its authored variables
+        // stop contributing), stranding the old-keyed instance — the mute path
+        // discards variable deltas, so the sweep is what reclaims it.
+        self.reclaim_stale_stacks();
         Some(changed)
     }
 
@@ -2749,9 +2795,12 @@ impl Stage {
     /// leaves the members to the cache, so this resolves them through the stage's
     /// layer graph for composition introspection. The offsets are the authored
     /// sublayer offsets; the arc time offset is read separately from the node's
-    /// `map_to_root`.
-    pub fn node_layer_stack(&self, node: &pcp::Node) -> Vec<(pcp::LayerId, sdf::LayerOffset)> {
-        self.layers().layer_stack(node.layer_stack_id()).to_vec()
+    /// `map_to_root`. Returns `None` for a stale view — a node cloned out of an
+    /// index the stage has since dropped, whose stack reclamation removed; a
+    /// recomposition mints a successor under a fresh id, never the stale
+    /// handle's.
+    pub fn node_layer_stack(&self, node: &pcp::Node) -> Option<Vec<(pcp::LayerId, sdf::LayerOffset)>> {
+        self.layers().try_layer_stack(node.layer_stack_id()).map(<[_]>::to_vec)
     }
 
     /// Returns the root layer's `customLayerData` dictionary, if authored.
@@ -3891,7 +3940,7 @@ mod tests {
         }
         write(
             "t.usda",
-            "#usda 1.0\n(\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
+            "#usda 1.0\n(\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {\n    custom double x\n}\n",
         )?;
         write("a.usda", "#usda 1.0\nover \"P\" {\n    custom double x = 1\n}\n")?;
         write("b.usda", "#usda 1.0\nover \"P\" {\n    custom double x = 2\n}\n")?;
@@ -4007,6 +4056,498 @@ mod tests {
                 Err(StageAuthoringError::EditTargetStackUnavailable { layer }) if layer.ends_with("mid1.usda")
             ),
             "the unopenable chain layer fails the resolution"
+        );
+        Ok(())
+    }
+
+    /// The identifier of the loaded layer whose file name is `leaf`.
+    fn identifier_by_leaf(stage: &Stage, leaf: &str) -> String {
+        let layers = stage.layers();
+        let id = layers.find_by_leaf(leaf).expect("layer is loaded");
+        layers.identifier(id).to_string()
+    }
+
+    /// Strands and reclaims /M1's contextual reference stack on the
+    /// cross-stage fixture: captures the /M1 reference edit target, resolves
+    /// its stack, then clears mid1's authored variables — the source flip
+    /// drops /M1's index, leaving the old contextual instance unowned, and
+    /// the sweep reclaims it. Returns the target layer and the reclaimed
+    /// stack id.
+    fn strand_m1_stack(stage: &Stage) -> Result<(pcp::LayerId, pcp::LayerStackId)> {
+        let target = stage.edit_target_for_node(&sdf::Path::new("/M1")?, EditTargetArc::Reference)?;
+        let t_layer = stage
+            .layers()
+            .id_of(target.layer_identifier())
+            .expect("t.usda is loaded");
+        stage.set_edit_target(target)?;
+        let before = stage.mapped_target_stack_id(t_layer)?;
+
+        let mid1 = identifier_by_leaf(stage, "mid1.usda");
+        stage
+            .layer_mut(&mid1)
+            .expect("mid1 is live")
+            .edit(|e| e.set_expression_variables(HashMap::new()))?;
+        // The drain seam drops /M1's index — the stack's only owner — and the
+        // ownership loss schedules the sweep at that same seam.
+        assert!(
+            !stage.layers().stack_is_live(before),
+            "losing the last owner reclaims the stack at the edit seam"
+        );
+        Ok((t_layer, before))
+    }
+
+    /// A source flip strands the old contextual stack and reclamation removes
+    /// it once its only owner — the referring prim's index — drops; the
+    /// re-keyed arc resolves a successor under a fresh id, never the
+    /// reclaimed one, and composes the flipped context's values.
+    #[test]
+    fn swept_key_recomposes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = write_cross_stage_fixture(dir.path())?;
+        let stage = Stage::open(&path)?;
+        let x_at_m1 = |stage: &Stage| -> Result<Option<sdf::Value>> {
+            stage
+                .attribute("/M1.x")?
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))
+        };
+        assert_eq!(x_at_m1(&stage)?, Some(sdf::Value::Double(1.0)), "V=a selects a.usda");
+
+        let (t_layer, before) = strand_m1_stack(&stage)?;
+
+        assert_eq!(
+            x_at_m1(&stage)?,
+            None,
+            "the flipped context no longer selects a.usda's opinion"
+        );
+        let after = stage.mapped_target_stack_id(t_layer)?;
+        assert_ne!(after, before, "the successor mints under a fresh id");
+        assert!(stage.layers().stack_is_live(after));
+        Ok(())
+    }
+
+    /// An edit target captured before a sweep stays usable after it: the
+    /// carried value identity re-resolves through the demand loop, minting a
+    /// successor for the reclaimed contextual stack, and an opinion authored
+    /// through the target composes.
+    #[test]
+    fn swept_edit_target_recomposes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = write_cross_stage_fixture(dir.path())?;
+        let stage = Stage::open(&path)?;
+        let (t_layer, before) = strand_m1_stack(&stage)?;
+
+        // Resolve the dormant target first — no query has recomposed /M1, so
+        // the demand loop itself must recompose the reclaimed chain.
+        let after = stage.mapped_target_stack_id(t_layer)?;
+        assert_ne!(after, before, "the dormant identity resolves a fresh successor");
+        assert!(stage.layers().stack_is_live(after));
+
+        stage.attribute("/M1.x")?.set(sdf::Value::Double(7.0))?;
+        assert_eq!(
+            stage
+                .attribute("/M1.x")?
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(sdf::Value::Double(7.0)),
+            "the opinion authored through the recomposed target composes"
+        );
+        Ok(())
+    }
+
+    /// Diagnostics stay coupled to composition state, not cache warmth: an
+    /// unresolved-selection error retires with the stack once nothing owns
+    /// it, recomposition re-derives the successor's own diagnostic, and a
+    /// later edit round's failure requeue resurrects neither.
+    #[test]
+    fn sweep_clears_stack_diagnostics() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        write(
+            "root.usda",
+            "#usda 1.0\ndef \"M1\" (\n    payload = @mid1.usda@</P>\n) {}\n",
+        )?;
+        write(
+            "mid1.usda",
+            "#usda 1.0\n(\n    expressionVariables = { string V = \"missing\" }\n)\ndef \"P\" (\n    references = @t.usda@</P>\n) {}\n",
+        )?;
+        write(
+            "t.usda",
+            "#usda 1.0\n(\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
+        )?;
+        let root_path = dir.path().join("root.usda");
+        let stage = Stage::open(root_path.to_str().expect("utf-8 path"))?;
+
+        let mentions = |stage: &Stage, needle: &str| {
+            stage
+                .composition_errors()
+                .iter()
+                .any(|error| error.to_string().contains(needle))
+        };
+        assert!(stage.prim("/M1")?.is_defined()?, "the payload chain composes");
+        assert!(mentions(&stage, "missing.usda"), "the unresolved selection reports");
+
+        // Clearing mid1's variables re-keys the arc away from the old
+        // contextual stack; the sweep retires it together with its bucket.
+        let (_, old) = strand_m1_stack(&stage)?;
+        assert!(
+            !mentions(&stage, "missing.usda"),
+            "the reclaimed stack's diagnostic retires with it"
+        );
+
+        // Recomposition re-derives diagnostics from current state: the
+        // flipped context leaves `${V}` undefined, so the successor reports
+        // V.usda.
+        let _ = stage.prim("/M1")?.is_defined()?;
+        assert!(!stage.layers().stack_is_live(old));
+        assert!(
+            mentions(&stage, "V.usda"),
+            "the successor stack's own unresolved selection reports"
+        );
+
+        // An edit clears the load-failure memo and requeues failures from the
+        // surviving buckets; the reclaimed bucket is gone, so no demand
+        // derives against the dead stack and the survivor keeps reporting.
+        stage.set_edit_target(stage.edit_target_root())?;
+        stage.define_prim("/Zed")?;
+        assert!(!mentions(&stage, "missing.usda"));
+        assert!(mentions(&stage, "V.usda"));
+        Ok(())
+    }
+
+    /// A source flip strands a whole fan of contextual stacks at once, and
+    /// the flip edit's own pending-drain seam — no bypassing sweep call —
+    /// reclaims them: dropping the referring indices releases every fan
+    /// member's last owner, which schedules the sweep directly.
+    #[test]
+    fn gated_seam_reclaims() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        let fan = 3;
+        let mut root_text = String::from("#usda 1.0\n");
+        let mut mid_text = String::from("#usda 1.0\n(\n    expressionVariables = { string V = \"a\" }\n)\n");
+        for i in 0..fan {
+            root_text.push_str(&format!("def \"P{i}\" (\n    payload = @mid.usda@</P{i}>\n) {{}}\n"));
+            mid_text.push_str(&format!("def \"P{i}\" (\n    references = @t{i}.usda@</P>\n) {{}}\n"));
+            write(
+                &format!("t{i}.usda"),
+                "#usda 1.0\ndef \"P\" {\n    custom double x\n}\n",
+            )?;
+        }
+        write("root.usda", &root_text)?;
+        write("mid.usda", &mid_text)?;
+        let root_path = dir.path().join("root.usda");
+        let stage = Stage::open(root_path.to_str().expect("utf-8 path"))?;
+
+        for i in 0..fan {
+            assert!(stage.prim(format!("/P{i}"))?.is_defined()?);
+        }
+        let target = stage.edit_target_for_node(&sdf::Path::new("/P0")?, EditTargetArc::Reference)?;
+        let t_layer = stage
+            .layers()
+            .id_of(target.layer_identifier())
+            .expect("t0.usda is loaded");
+        stage.set_edit_target(target)?;
+        let before = stage.mapped_target_stack_id(t_layer)?;
+        stage.set_edit_target(stage.edit_target_root())?;
+
+        // The flip drops every referring index, orphaning the whole fan; the
+        // drain seam of the next composed read sweeps it.
+        let mid = identifier_by_leaf(&stage, "mid.usda");
+        stage
+            .layer_mut(&mid)
+            .expect("mid is live")
+            .edit(|e| e.set_expression_variables(HashMap::new()))?;
+        assert!(stage.prim("/P0")?.is_defined()?);
+        assert!(
+            !stage.layers().stack_is_live(before),
+            "the gated seam sweep reclaims the stranded stack"
+        );
+        Ok(())
+    }
+
+    /// Warming a referenced prim and then removing it reclaims its target
+    /// stack and diagnostic at the next sweep, without the deleted path ever
+    /// being queried again.
+    #[test]
+    fn deleted_prim_reclaims() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        write(
+            "root.usda",
+            "#usda 1.0\ndef \"D\" (\n    references = @t.usda@</P>\n) {}\ndef \"Other\" {}\n",
+        )?;
+        write(
+            "t.usda",
+            "#usda 1.0\n(\n    subLayers = [@gone.usda@]\n)\ndef \"P\" {}\n",
+        )?;
+        let root_path = dir.path().join("root.usda");
+        let stage = Stage::open(root_path.to_str().expect("utf-8 path"))?;
+
+        let mentions_gone = |stage: &Stage| {
+            stage
+                .composition_errors()
+                .iter()
+                .any(|error| error.to_string().contains("gone.usda"))
+        };
+        assert!(stage.prim("/D")?.is_defined()?, "the reference composes");
+        assert!(mentions_gone(&stage), "the missing sublayer reports");
+        let target = stage.edit_target_for_node(&sdf::Path::new("/D")?, EditTargetArc::Reference)?;
+        let t_layer = stage
+            .layers()
+            .id_of(target.layer_identifier())
+            .expect("t.usda is loaded");
+        stage.set_edit_target(target)?;
+        let stack = stage.mapped_target_stack_id(t_layer)?;
+        stage.set_edit_target(stage.edit_target_root())?;
+
+        assert!(stage.remove_prim("/D")?, "the prim spec is removed");
+        assert!(
+            !stage.layers().stack_is_live(stack),
+            "the deleted prim's target stack is reclaimed at the edit seam, without a re-query"
+        );
+        assert!(!mentions_gone(&stage), "its diagnostic retires with it");
+        Ok(())
+    }
+
+    /// Repeatedly warming and deleting referenced prims keeps the registry
+    /// and the diagnostic buckets bounded: each cycle's stack and error are
+    /// reclaimed before the next.
+    #[test]
+    fn repeated_delete_bounded() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        let cycles = 5;
+        let mut root_text = String::from("#usda 1.0\n");
+        for i in 0..cycles {
+            root_text.push_str(&format!("def \"D{i}\" (\n    references = @t.usda@</P>\n) {{}}\n"));
+        }
+        write("root.usda", &root_text)?;
+        write(
+            "t.usda",
+            "#usda 1.0\n(\n    subLayers = [@gone.usda@]\n)\ndef \"P\" {}\n",
+        )?;
+        let root_path = dir.path().join("root.usda");
+        let stage = Stage::open(root_path.to_str().expect("utf-8 path"))?;
+
+        let mut baseline = None;
+        for i in 0..cycles {
+            assert!(stage.prim(format!("/D{i}"))?.is_defined()?);
+            assert!(stage.remove_prim(format!("/D{i}"))?);
+            let counts = {
+                let layers = stage.layers();
+                (layers.live_stack_count(), layers.diagnostic_bucket_count())
+            };
+            match baseline {
+                None => baseline = Some(counts),
+                Some(baseline) => assert_eq!(
+                    counts, baseline,
+                    "registry and diagnostics stay bounded across delete cycles"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// A single unload releases the payload target's last cache owner, and
+    /// the load-rules seam itself sweeps: stack and diagnostic retire without
+    /// any re-query, and reloading recomposes both.
+    #[test]
+    fn single_unload_reclaims() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        write(
+            "root.usda",
+            "#usda 1.0\ndef \"L\" (\n    payload = @p.usda@</P>\n) {}\n",
+        )?;
+        write(
+            "p.usda",
+            "#usda 1.0\n(\n    subLayers = [@gone.usda@]\n)\ndef \"P\" {}\n",
+        )?;
+        let root_path = dir.path().join("root.usda");
+        let stage = Stage::open(root_path.to_str().expect("utf-8 path"))?;
+
+        let mentions_gone = |stage: &Stage| {
+            stage
+                .composition_errors()
+                .iter()
+                .any(|error| error.to_string().contains("gone.usda"))
+        };
+        assert!(stage.prim("/L")?.is_defined()?, "the payload composes");
+        assert!(mentions_gone(&stage), "the missing sublayer reports");
+        let target = stage.edit_target_for_node(&sdf::Path::new("/L")?, EditTargetArc::Payload)?;
+        let p_layer = stage
+            .layers()
+            .id_of(target.layer_identifier())
+            .expect("p.usda is loaded");
+        stage.set_edit_target(target)?;
+        let stack = stage.mapped_target_stack_id(p_layer)?;
+        stage.set_edit_target(stage.edit_target_root())?;
+
+        stage.unload("/L")?;
+        assert!(
+            !stage.layers().stack_is_live(stack),
+            "the unload seam reclaims the orphaned payload stack"
+        );
+        assert!(!mentions_gone(&stage), "its diagnostic retires with it");
+
+        stage.load("/L", LoadPolicy::WithDescendants)?;
+        assert!(stage.prim("/L")?.is_defined()?, "reloading recomposes");
+        assert!(mentions_gone(&stage), "recomposition re-derives the diagnostic");
+        Ok(())
+    }
+
+    /// A single mute releases the reference target's last cache owner, and
+    /// the mute seam itself sweeps; unmuting and re-querying recomposes the
+    /// target and re-derives its diagnostic.
+    #[test]
+    fn single_mute_reclaims() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        write(
+            "root.usda",
+            "#usda 1.0\ndef \"M\" (\n    references = @t.usda@</P>\n) {}\n",
+        )?;
+        write(
+            "t.usda",
+            "#usda 1.0\n(\n    subLayers = [@gone.usda@]\n)\ndef \"P\" {}\n",
+        )?;
+        let root_path = dir.path().join("root.usda");
+        let stage = Stage::open(root_path.to_str().expect("utf-8 path"))?;
+
+        let mentions_gone = |stage: &Stage| {
+            stage
+                .composition_errors()
+                .iter()
+                .any(|error| error.to_string().contains("gone.usda"))
+        };
+        assert!(stage.prim("/M")?.is_defined()?, "the reference composes");
+        assert!(mentions_gone(&stage), "the missing sublayer reports");
+        let target = stage.edit_target_for_node(&sdf::Path::new("/M")?, EditTargetArc::Reference)?;
+        let t_layer = stage
+            .layers()
+            .id_of(target.layer_identifier())
+            .expect("t.usda is loaded");
+        stage.set_edit_target(target)?;
+        let stack = stage.mapped_target_stack_id(t_layer)?;
+        stage.set_edit_target(stage.edit_target_root())?;
+
+        let t_id = identifier_by_leaf(&stage, "t.usda");
+        stage.mute_layer(t_id.clone());
+        assert!(
+            !stage.layers().stack_is_live(stack),
+            "the mute seam reclaims the orphaned reference stack"
+        );
+        assert!(!mentions_gone(&stage), "its diagnostic retires with it");
+
+        stage.unmute_layer(&t_id);
+        assert!(stage.prim("/M")?.is_defined()?, "unmuting recomposes");
+        assert!(mentions_gone(&stage), "recomposition re-derives the diagnostic");
+        Ok(())
+    }
+
+    /// A stack shared by several cached prims survives until its final cache
+    /// owner is removed.
+    #[test]
+    fn shared_stack_survives() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        write(
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    references = @t.usda@</P>\n) {}\ndef \"B\" (\n    references = @t.usda@</P>\n) {}\n",
+        )?;
+        write("t.usda", "#usda 1.0\ndef \"P\" {}\n")?;
+        let root_path = dir.path().join("root.usda");
+        let stage = Stage::open(root_path.to_str().expect("utf-8 path"))?;
+
+        assert!(stage.prim("/A")?.is_defined()?);
+        assert!(stage.prim("/B")?.is_defined()?);
+        let target = stage.edit_target_for_node(&sdf::Path::new("/A")?, EditTargetArc::Reference)?;
+        let t_layer = stage
+            .layers()
+            .id_of(target.layer_identifier())
+            .expect("t.usda is loaded");
+        stage.set_edit_target(target)?;
+        let stack = stage.mapped_target_stack_id(t_layer)?;
+        stage.set_edit_target(stage.edit_target_root())?;
+
+        assert!(stage.remove_prim("/A")?);
+        assert!(
+            stage.layers().stack_is_live(stack),
+            "the shared stack survives while another cached prim owns it"
+        );
+        assert!(stage.remove_prim("/B")?);
+        assert!(
+            !stage.layers().stack_is_live(stack),
+            "removing the final owner reclaims the shared stack"
+        );
+        Ok(())
+    }
+
+    /// Deletion through a direct layer edit — not `Stage::remove_prim` —
+    /// reclaims the same way: ownership follows the cached index, not the
+    /// authoring entry point.
+    #[test]
+    fn direct_delete_reclaims() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        write(
+            "root.usda",
+            "#usda 1.0\ndef \"D\" (\n    references = @t.usda@</P>\n) {}\n",
+        )?;
+        write("t.usda", "#usda 1.0\ndef \"P\" {}\n")?;
+        let root_path = dir.path().join("root.usda");
+        let stage = Stage::open(root_path.to_str().expect("utf-8 path"))?;
+
+        assert!(stage.prim("/D")?.is_defined()?);
+        let target = stage.edit_target_for_node(&sdf::Path::new("/D")?, EditTargetArc::Reference)?;
+        let t_layer = stage
+            .layers()
+            .id_of(target.layer_identifier())
+            .expect("t.usda is loaded");
+        stage.set_edit_target(target)?;
+        let stack = stage.mapped_target_stack_id(t_layer)?;
+        stage.set_edit_target(stage.edit_target_root())?;
+
+        let root_id = identifier_by_leaf(&stage, "root.usda");
+        let d_path = sdf::Path::new("/D")?;
+        stage
+            .layer_mut(&root_id)
+            .expect("root is live")
+            .edit(|e| e.remove_spec(&d_path).map(|_| ()))?;
+        assert!(
+            !stage.layers().stack_is_live(stack),
+            "a direct-layer deletion reclaims the target stack too"
+        );
+        Ok(())
+    }
+
+    /// A node cloned out of a dropped index is a weak snapshot: after its
+    /// stack is reclaimed, `node_layer_stack` reports `None` rather than an
+    /// empty-but-plausible member list.
+    #[test]
+    fn stale_node_returns_none() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = write_cross_stage_fixture(dir.path())?;
+        let stage = Stage::open(&path)?;
+        assert!(stage.prim("/M1")?.is_defined()?);
+
+        let index = stage.prim_index("/M1")?.graph()?;
+        let target = stage.edit_target_for_node(&sdf::Path::new("/M1")?, EditTargetArc::Reference)?;
+        let t_layer = stage
+            .layers()
+            .id_of(target.layer_identifier())
+            .expect("t.usda is loaded");
+        stage.set_edit_target(target)?;
+        let before = stage.mapped_target_stack_id(t_layer)?;
+        let node = index
+            .nodes()
+            .find(|node| node.layer_stack_id() == before)
+            .expect("the reference node composes in the contextual stack");
+        assert!(stage.node_layer_stack(node).is_some(), "a live node's members resolve");
+
+        strand_m1_stack(&stage)?;
+        assert!(
+            stage.node_layer_stack(node).is_none(),
+            "a reclaimed stack reads as None, not as an empty stack"
         );
         Ok(())
     }

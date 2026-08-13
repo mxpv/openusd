@@ -27,6 +27,7 @@ use super::dependencies::Dependencies;
 use super::index_store::IndexStore;
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::LayerGraph;
+use super::layer_stack::StackMarks;
 use super::load_rules::LoadRules;
 use super::prim_graph::ArcType;
 use super::prim_index::{
@@ -246,6 +247,30 @@ impl IndexCache {
     /// recomposes until a pass demands nothing.
     pub(crate) fn swap_pending_loads(&mut self, buf: &mut Vec<Demand>) {
         mem::swap(&mut self.pending_loads, buf);
+    }
+
+    /// Marks every layer stack the cache holds live for a registry sweep
+    /// (`LayerGraph::sweep_stacks`): each cached prim index's nodes and the
+    /// contexts of pending arc-load demands, whose stacks the load barrier is
+    /// about to read.
+    pub(crate) fn mark_live_stacks(&self, marks: &mut StackMarks) {
+        self.store.mark_live_stacks(marks);
+        for demand in &self.pending_loads {
+            marks.mark(demand.context);
+        }
+    }
+
+    /// Whether some stack lost its last cache owner since the last sweep —
+    /// the signal that schedules reclamation at the stage's next edit seam.
+    /// Unthresholded: a single deletion, mute, or unload that orphans a stack
+    /// must retire it (and its diagnostics) promptly.
+    pub(crate) fn ownership_lost(&self) -> bool {
+        self.store.ownership_lost()
+    }
+
+    /// Clears the ownership-loss flag after a sweep consumed it.
+    pub(crate) fn reset_ownership_lost(&mut self) {
+        self.store.reset_ownership_lost();
     }
 
     /// The current composition revision (see the [`revision`](Self::revision)

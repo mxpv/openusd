@@ -11,12 +11,14 @@
 //! cross-cutting concerns (transient query errors, the prototype registry, the
 //! composition revision) around the store's index and dependency queries.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 use crate::sdf::{self, Path};
 
 use super::dependencies::Dependencies;
 use super::layer_graph::LayerGraph;
+use super::layer_stack::{LayerStackId, StackMarks};
 use super::prim_index::{CompositionContext, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
 use super::prim_indexer::ExprVarDeps;
 use super::{Error, LayerId};
@@ -35,6 +37,18 @@ pub(super) struct IndexStore {
     /// Sentinel returned by [`cached`](Self::cached) for a path left uncached
     /// because its build demanded a not-yet-loaded layer.
     empty_index: PrimIndex,
+    /// Cache-owner counts: for each non-root layer stack, how many cached
+    /// entries' arenas reference it. Incremented by [`insert`](Self::insert)
+    /// and decremented by the removals, so the key set is exactly the stacks
+    /// the cache keeps alive — the mark set
+    /// ([`mark_live_stacks`](Self::mark_live_stacks)) without walking any
+    /// arena.
+    stack_owners: HashMap<LayerStackId, usize>,
+    /// Whether some stack lost its last cache owner since the last sweep —
+    /// the signal that schedules a reclamation pass at the next edit seam,
+    /// deliberately unthresholded: a single deletion, mute, or unload that
+    /// orphans a stack must retire it (and its diagnostics) promptly.
+    ownership_lost: bool,
 }
 
 impl IndexStore {
@@ -82,6 +96,18 @@ impl IndexStore {
         self.entries.iter().flat_map(|(_, entry)| entry.errors.iter())
     }
 
+    /// Marks every layer stack some cached prim index owns — the key set of
+    /// the maintained owner counts, so no arena is walked. The counts cover
+    /// every arena node, inert and culled included, since query paths still
+    /// dereference their stacks (the spec-tier refresh reads culled nodes, and
+    /// a caller-held [`PrimIndex`] clone reaches every node); prototype
+    /// indices are ordinary entries, counted the same way.
+    pub(super) fn mark_live_stacks(&self, marks: &mut StackMarks) {
+        for &stack in self.stack_owners.keys() {
+            marks.mark(stack);
+        }
+    }
+
     /// Clears every entry's recorded build errors in place, keeping the indices —
     /// the test-only reset of accumulated diagnostics.
     #[cfg(test)]
@@ -105,6 +131,12 @@ impl IndexStore {
         errors: Vec<Error>,
         expr_var_deps: ExprVarDeps,
     ) {
+        // Owner counts pair one increment per entry with one decrement at its
+        // removal; a silent overwrite would double-count.
+        debug_assert!(!self.entries.contains_key(path), "insert over a cached entry");
+        for stack in owned_stacks(&index) {
+            *self.stack_owners.entry(stack).or_default() += 1;
+        }
         self.deps.add(path, &index, graph, expr_var_deps);
         self.entries.insert(
             path.clone(),
@@ -117,14 +149,34 @@ impl IndexStore {
         );
     }
 
-    /// Drops the entry at `path` and retracts its dependency registrations.
+    /// Releases a removed entry's stack ownership, flagging a reclamation
+    /// pass when a stack loses its last cache owner.
+    fn release_owned(&mut self, index: &PrimIndex) {
+        for stack in owned_stacks(index) {
+            match self.stack_owners.entry(stack) {
+                Entry::Occupied(mut count) => {
+                    *count.get_mut() -= 1;
+                    if *count.get() == 0 {
+                        count.remove();
+                        self.ownership_lost = true;
+                    }
+                }
+                Entry::Vacant(_) => debug_assert!(false, "released a stack with no recorded owner"),
+            }
+        }
+    }
+
+    /// Drops the entry at `path`, retracting its dependency registrations and
+    /// releasing its stack ownership.
     pub(super) fn remove(&mut self, path: &Path) {
-        self.entries.remove(path);
+        if let Some(entry) = self.entries.remove(path) {
+            self.release_owned(&entry.index);
+        }
         self.deps.remove(path);
     }
 
     /// Drops `prefix` and every namespace descendant, retracting each removed
-    /// entry's dependencies.
+    /// entry's dependencies and releasing its stack ownership.
     pub(super) fn remove_subtree(&mut self, prefix: &Path) {
         // `Path::has_prefix("")` returns `true` for every absolute path, so a
         // default-constructed `Path` would silently wipe the whole store without
@@ -135,9 +187,20 @@ impl IndexStore {
             !prefix.is_empty(),
             "remove_subtree called with empty prefix — use Path::abs_root() to drop everything",
         );
-        for (victim, _) in self.entries.remove_subtree(prefix) {
+        for (victim, entry) in self.entries.remove_subtree(prefix) {
+            self.release_owned(&entry.index);
             self.deps.remove(&victim);
         }
+    }
+
+    /// Whether some stack lost its last cache owner since the last sweep.
+    pub(super) fn ownership_lost(&self) -> bool {
+        self.ownership_lost
+    }
+
+    /// Clears the ownership-loss flag after a sweep consumed it.
+    pub(super) fn reset_ownership_lost(&mut self) {
+        self.ownership_lost = false;
     }
 
     /// The paths whose entry recorded a [`MalformedLayer`](Error::MalformedLayer)
@@ -228,4 +291,16 @@ impl IndexStore {
             entry.resolved_targets.remove(key);
         }
     }
+}
+
+/// The distinct non-root layer stacks an index's arena references — the
+/// stacks a cached entry owns. The full arena counts, inert and culled nodes
+/// included, since query paths still dereference their stacks.
+fn owned_stacks(index: &PrimIndex) -> HashSet<LayerStackId> {
+    index
+        .arena()
+        .iter()
+        .map(|node| node.layer_stack_id())
+        .filter(|&stack| stack != LayerStackId::ROOT)
+        .collect()
 }

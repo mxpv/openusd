@@ -38,7 +38,7 @@ use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 use crate::tf;
 
 use super::compose_site::{EvaluatedExpression, evaluate_expression};
-use super::layer_stack::{ExprVarId, LayerStackId, LayerStackRegistry, StackVarsDelta, VarsSource};
+use super::layer_stack::{ExprVarId, LayerStackId, LayerStackRegistry, StackMarks, StackVarsDelta, VarsSource};
 use super::mapping::MapFunction;
 use super::prim_index::Demand;
 use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
@@ -247,6 +247,11 @@ pub(crate) struct LayerGraph {
     /// The sublayer-resolution subsystem: what the `subLayers` walks derive and
     /// carry beyond the composed edges themselves (see [`SublayerState`]).
     sublayers: SublayerState,
+    /// The sublayer-DAG-root stacks minted once at finalize
+    /// ([`mint_eager_target_stacks`](Self::mint_eager_target_stacks)),
+    /// permanently marked in every sweep: their layers stay open for the
+    /// graph's life and nothing else re-mints them.
+    eager_stacks: Vec<LayerStackId>,
 }
 
 /// The [`LayerGraph`]'s sublayer-resolution subsystem: everything the
@@ -331,6 +336,24 @@ impl SublayerState {
         let bucket = self.errors.entry(stack).or_default();
         if !bucket.contains(&error) {
             bucket.push(error);
+        }
+    }
+
+    /// Marks the stack of every pending demand live for a sweep: the load
+    /// barrier is about to read those stacks' variables, so a demanded stack
+    /// always survives the sweep it is marked for.
+    fn mark_demanded(&self, marks: &mut StackMarks) {
+        for demand in &self.pending_demands {
+            marks.mark(demand.stack);
+        }
+    }
+
+    /// Drops the diagnostic buckets of stacks a sweep removed, so
+    /// [`diagnostics`](Self::diagnostics) and the failure requeue never
+    /// resurrect a reclaimed stack.
+    fn retire_stacks(&mut self, removed: &[LayerStackId]) {
+        for id in removed {
+            self.errors.remove(id);
         }
     }
 
@@ -547,6 +570,7 @@ impl LayerGraph {
             failed_loads: HashMap::new(),
             stacks: LayerStackRegistry::default(),
             sublayers: SublayerState::default(),
+            eager_stacks: Vec::new(),
         }
     }
 
@@ -961,11 +985,7 @@ impl LayerGraph {
         // variables), a member, or when its seed shifted: its key source's
         // referent changed this pass. The seed is read live from that referent,
         // already refreshed by this pass's ascending order.
-        // TODO(perf): this materializes every target instance per rebuild (the
-        // registry borrow must end before `build_stack_members` takes `&mut
-        // self`); an index-walk accessor on the registry would drop the
-        // allocation.
-        for (id, root, source) in self.stacks.targets().collect::<Vec<_>>() {
+        for (id, root, source) in self.stacks.targets() {
             let rebuild = match affected {
                 None => true,
                 Some(affected) => {
@@ -1115,6 +1135,33 @@ impl LayerGraph {
         demands
     }
 
+    /// Whether enough registry churn accumulated since the last sweep for
+    /// another to be worthwhile ([`LayerStackRegistry::ripe_for_sweep`]) —
+    /// the creation-churn half of the stage's sweep trigger, polled at the
+    /// edit seams before [`sweep_stacks`](Self::sweep_stacks).
+    pub(crate) fn sweep_ripe(&self) -> bool {
+        self.stacks.ripe_for_sweep()
+    }
+
+    /// Removes every layer-stack instance `marks` did not reach — extended
+    /// here with the stacks pending sublayer demands reference and the
+    /// eagerly minted sublayer-DAG roots, and closed over variable-source
+    /// ancestry by the registry ([`LayerStackRegistry::sweep`]) — and retires
+    /// the removed stacks' sublayer diagnostics with them, so
+    /// [`errors`](Self::errors) and
+    /// [`requeue_failed_sublayers`](Self::requeue_failed_sublayers) never
+    /// resurrect a reclaimed stack. The next arc deriving a reclaimed key
+    /// composes a fresh instance through the ordinary demand path, re-deriving
+    /// its diagnostics if the problem still exists.
+    pub(crate) fn sweep_stacks(&mut self, mut marks: StackMarks) {
+        self.sublayers.mark_demanded(&mut marks);
+        for &id in &self.eager_stacks {
+            marks.mark(id);
+        }
+        let removed = self.stacks.sweep(marks);
+        self.sublayers.retire_stacks(&removed);
+    }
+
     /// Mints a root-sourced stack instance for every sublayer-DAG root that lacks
     /// one — a reference/payload target interned eagerly by `from_layers` rather
     /// than through the demand path. The stacks are keyed `{root, Root}` and
@@ -1125,7 +1172,11 @@ impl LayerGraph {
     /// [`finalize`](Self::finalize): a production target loads after finalize and
     /// is minted by [`intern_external`](Self::intern_external) under its own
     /// context, so it never reaches here, and an edit-time recompose never
-    /// re-mints a never-queried instance for a contextual-only target.
+    /// re-mints a never-queried instance for a contextual-only target. The
+    /// minted ids are recorded as permanent sweep marks
+    /// ([`sweep_stacks`](Self::sweep_stacks)): the layers stay open for the
+    /// graph's life, and this one-shot mint is the only holder of their
+    /// composed view and its open-time diagnostics.
     fn mint_eager_target_stacks(&mut self) {
         let sublayered: HashSet<LayerId> = self
             .order
@@ -1139,7 +1190,8 @@ impl LayerGraph {
             .filter(|&id| !sublayered.contains(&id) && Some(id) != self.root)
             .collect();
         for root in dag_roots {
-            self.intern_target_stack(root, VarsSource::Root);
+            let (id, _) = self.intern_target_stack(root, VarsSource::Root);
+            self.eager_stacks.push(id);
         }
     }
 
@@ -1288,7 +1340,10 @@ impl LayerGraph {
     /// ([`intern_target_stack`](Self::intern_target_stack)): collapse to the
     /// root stack when the identity is the root stack's own
     /// ([`collapses_to_root`](Self::collapses_to_root)), else the interned
-    /// `(root, source)` instance, else [`ExternalStack::Demand`].
+    /// `(root, source)` instance, else [`ExternalStack::Demand`]. A key whose
+    /// instance a sweep reclaimed simply misses the lookup, so it demands and
+    /// re-mints like a key never composed — `${VAR}`-selected sublayers
+    /// reopened by the barrier and all.
     fn resolve_target_stack(&self, root: LayerId, source: VarsSource) -> ExternalStack {
         if self.collapses_to_root(root, source) {
             return ExternalStack::Ready(LayerStackId::ROOT);
@@ -1892,6 +1947,14 @@ impl LayerGraph {
         self.stacks.members(id)
     }
 
+    /// The members of `id`'s stack, or `None` when the registry no longer holds
+    /// the instance — the presence-aware read for introspection over a handle
+    /// that may be a stale view (a node cloned out of a dropped index whose
+    /// stack a sweep reclaimed).
+    pub(crate) fn try_layer_stack(&self, id: LayerStackId) -> Option<&[(LayerId, LayerOffset)]> {
+        self.stacks.try_members(id)
+    }
+
     /// The strongest (representative) layer of the stack `id` — its
     /// [`layer_stack`](Self::layer_stack)'s first member — or [`LayerId::INVALID`]
     /// when the stack is empty (an unknown or muted root).
@@ -2356,8 +2419,8 @@ impl LayerGraph {
     /// `${VAR}` sublayer selects the target. Each stack's subtree is resolved against
     /// its own variables (the root stack's structural variables for the stage root
     /// stack's root and session regions, a seed for a target), read regardless of
-    /// muting so the ancestor set is identical before a mute and after the matching
-    /// unmute.
+    /// muting so the ancestor set is identical across the interned stacks before a
+    /// mute and after the matching unmute.
     fn expression_ancestry_edges(&self) -> HashMap<LayerId, Vec<LayerId>> {
         let mut edges: HashMap<LayerId, Vec<LayerId>> = HashMap::new();
         if !self.sublayers.any_expr {
@@ -2380,6 +2443,7 @@ impl LayerGraph {
         specs.extend(
             self.stacks
                 .targets()
+                .into_iter()
                 .map(|(id, root, _)| (root, self.stacks.expression_variables(id))),
         );
         let mut resolution = HashMap::new();
@@ -2451,9 +2515,11 @@ impl LayerGraph {
     /// The layers of every composed stack — the effectively-present set the stage
     /// filters muted collection diagnostics against (see
     /// [`sublayer_error_contributes`](Self::sublayer_error_contributes)). Read from
-    /// the composed stacks (muting has pruned their muted subtrees), so it is a pure
-    /// function of the muted set and the graph, independent of which prim indices
-    /// are cached — a diagnostic's visibility does not change as the cache warms.
+    /// the composed stacks (muting has pruned their muted subtrees), so it is a
+    /// pure function of the muted set and the live stacks. Like the rest of the
+    /// lazily composed state, the set reflects the composition performed so far:
+    /// reclamation removes an unreferenced stack's members, and recomposition
+    /// re-derives them.
     pub(crate) fn effective_layers(&self) -> HashSet<LayerId> {
         self.stacks.member_layers()
     }
@@ -2464,8 +2530,8 @@ impl LayerGraph {
     /// unreadable sublayer survives only when its referencing layer is `effective`
     /// (a member of some composed stack) and the sublayer it names is not itself
     /// muted; otherwise muting prunes it and the raw diagnostic is spurious. The
-    /// `effective` set is a pure function of the muted set and the graph, so the
-    /// decision is deterministic across queries and independent of load order.
+    /// `effective` set is a pure function of the muted set and the live stacks
+    /// (see [`effective_layers`](Self::effective_layers)).
     pub(crate) fn sublayer_error_contributes(&self, error: &Error, effective: &HashSet<LayerId>) -> bool {
         let (asset_path, introduced_by) = match error {
             Error::UnresolvedSublayer {
@@ -2660,6 +2726,24 @@ impl LayerGraph {
             }
         }
         newly_interned
+    }
+
+    /// Whether the registry still holds the stack's instance, for tests
+    /// asserting reclamation and re-minting.
+    pub(crate) fn stack_is_live(&self, id: LayerStackId) -> bool {
+        self.stacks.member_set(id).is_some()
+    }
+
+    /// The number of stack instances the registry currently holds, for tests
+    /// asserting reclamation keeps the registry bounded.
+    pub(crate) fn live_stack_count(&self) -> usize {
+        self.stacks.instance_count()
+    }
+
+    /// The number of per-stack sublayer diagnostic buckets, for tests
+    /// asserting reclamation retires diagnostics with their stacks.
+    pub(crate) fn diagnostic_bucket_count(&self) -> usize {
+        self.sublayers.errors.len()
     }
 }
 
@@ -3472,12 +3556,12 @@ mod tests {
         );
     }
 
-    /// Removing a source's authored variables flips its variable source back to
-    /// its seed's, re-keying future arcs: the previously minted contextual
-    /// target instance is stranded — still interned and rebuilt in place — while
-    /// new arcs resolve the Root-sourced instance.
-    #[test]
-    fn vars_source_flip() {
+    /// A graph whose source stack's authored variables were just removed —
+    /// the variable source flipped back to its seed's, re-keying future arcs
+    /// away from the stranded contextual target instance. Returns the graph,
+    /// the source stack, and the stranded pre-flip target instance; the layer
+    /// ids for `target.usda` and `a.usda` are resolvable via `id_of`.
+    fn flipped_source_graph() -> (LayerGraph, LayerStackId, LayerStackId) {
         let root = sdf::Layer::new_in_memory("root.usda");
         let mut src = sdf::Layer::new_in_memory("src.usda");
         set_expr_var(&mut src, "V", "a");
@@ -3489,12 +3573,10 @@ mod tests {
         let mut graph = LayerGraph::from_layers(vec![root, src, target, a], 0, sdf::LayerRegistry::default());
         let src = graph.id_of("src.usda").unwrap();
         let target = graph.id_of("target.usda").unwrap();
-        let a = graph.id_of("a.usda").unwrap();
 
         let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
         let (old_t, fresh) = graph.intern_external(target, src_stack);
         assert!(fresh, "the authoring source mints a contextual instance");
-
         edit_layer(&mut graph.nodes.get_mut(&src).unwrap().layer, |e| {
             e.pseudo_root_mut().unwrap().set(
                 FieldKey::ExpressionVariables.as_str(),
@@ -3502,6 +3584,18 @@ mod tests {
             );
         });
         graph.recompute_sublayers(Some(&HashSet::from([src])));
+        (graph, src_stack, old_t)
+    }
+
+    /// Removing a source's authored variables flips its variable source back to
+    /// its seed's, re-keying future arcs: the previously minted contextual
+    /// target instance is stranded — still interned and rebuilt in place — while
+    /// new arcs resolve the Root-sourced instance.
+    #[test]
+    fn vars_source_flip() {
+        let (mut graph, src_stack, old_t) = flipped_source_graph();
+        let target = graph.id_of("target.usda").unwrap();
+        let a = graph.id_of("a.usda").unwrap();
 
         let new_t = graph.intern_external(target, src_stack).0;
         assert_ne!(
@@ -3511,6 +3605,167 @@ mod tests {
         assert!(
             !graph.layer_stack(old_t).iter().any(|&(l, _)| l == a),
             "the stranded instance was still rebuilt: its seed no longer selects a.usda"
+        );
+    }
+
+    /// The `vars_source_flip` fixture with a sweep after the flip: the
+    /// old-keyed instance no arc can reach again is removed, while the marked
+    /// re-keyed instance — and the root stack — survive.
+    #[test]
+    fn sweep_removes_stranded() {
+        let (mut graph, src_stack, old_t) = flipped_source_graph();
+        let target = graph.id_of("target.usda").unwrap();
+        let new_t = graph.intern_external(target, src_stack).0;
+
+        // The flip re-derived the stranded stack's `${V}` entry as an
+        // unresolved pending demand; the stage resolves demands before it
+        // sweeps, so the test drains them the same way — a pending demand is a
+        // mark root and would (correctly) keep its stack.
+        let _ = graph.take_sublayer_demands();
+        let mut marks = StackMarks::default();
+        marks.mark(new_t);
+        graph.sweep_stacks(marks);
+        assert!(
+            !graph.stack_is_live(old_t),
+            "the stranded old-keyed instance is removed"
+        );
+        assert!(graph.stack_is_live(new_t), "the marked instance survives");
+        assert!(
+            graph.stack_is_live(LayerStackId::ROOT),
+            "the root stack is never removed"
+        );
+    }
+
+    /// A live stack's variable-source ancestry survives a sweep even when no
+    /// cached index references the ancestor directly: the mark closure follows
+    /// the key source, so the survivor's rebuild seed stays readable.
+    #[test]
+    fn source_ancestor_kept() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut src = sdf::Layer::new_in_memory("src.usda");
+        set_expr_var(&mut src, "V", "x");
+        let target = sdf::Layer::new_in_memory("target.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, src, target], 0, sdf::LayerRegistry::default());
+        let src = graph.id_of("src.usda").unwrap();
+        let target = graph.id_of("target.usda").unwrap();
+
+        let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
+        let t = graph.intern_external(target, src_stack).0;
+
+        let mut marks = StackMarks::default();
+        marks.mark(t);
+        graph.sweep_stacks(marks);
+        assert!(graph.stack_is_live(t));
+        assert!(
+            graph.stack_is_live(src_stack),
+            "the live instance's key-source referent survives"
+        );
+    }
+
+    /// A stack referenced by an unresolved pending sublayer demand survives a
+    /// sweep — the load barrier is about to read its variables — and becomes
+    /// reclaimable once the demand is drained.
+    #[test]
+    fn pending_demand_survives() {
+        let (mut graph, _, old_t) = flipped_source_graph();
+        graph.sweep_stacks(StackMarks::default());
+        assert!(
+            graph.stack_is_live(old_t),
+            "the flip's unresolved `${{V}}` demand keeps its stack"
+        );
+        let _ = graph.take_sublayer_demands();
+        graph.sweep_stacks(StackMarks::default());
+        assert!(!graph.stack_is_live(old_t), "draining the demand releases the stack");
+    }
+
+    /// A reclaimed instance stays gone through a full rebuild pass — the pass
+    /// every on-demand load runs — because the rebuild walks only interned
+    /// instances; only an arc demanding its key composes a successor.
+    #[test]
+    fn rebuild_not_resurrects() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut src = sdf::Layer::new_in_memory("src.usda");
+        set_expr_var(&mut src, "V", "x");
+        let target = sdf::Layer::new_in_memory("target.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, src, target], 0, sdf::LayerRegistry::default());
+        let src = graph.id_of("src.usda").unwrap();
+        let target = graph.id_of("target.usda").unwrap();
+
+        let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
+        let t = graph.intern_external(target, src_stack).0;
+        graph.sweep_stacks(StackMarks::default());
+        assert!(!graph.stack_is_live(t));
+
+        graph.recompute_sublayers(None);
+        assert!(
+            !graph.stack_is_live(t),
+            "a full pass does not resurrect the reclaimed instance"
+        );
+    }
+
+    /// An eagerly minted sublayer-DAG-root stack survives every sweep: no
+    /// prim index composes through it, but its layers stay open for the
+    /// graph's life and this one-shot mint is the only holder of its composed
+    /// view and open-time diagnostics.
+    #[test]
+    fn eager_stack_kept() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let extra = sdf::Layer::new_in_memory("extra.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, extra], 0, sdf::LayerRegistry::default());
+        let extra = graph.id_of("extra.usda").unwrap();
+
+        let (stack, fresh) = graph.intern_external(extra, LayerStackId::ROOT);
+        assert!(!fresh, "the DAG root was minted eagerly at finalize");
+        graph.sweep_stacks(StackMarks::default());
+        assert!(graph.stack_is_live(stack), "the eager mint is a permanent sweep mark");
+    }
+
+    /// An arc reaching a reclaimed key comes back as a demand, and interning
+    /// that demand mints a fresh instance — a new id, never the reclaimed one —
+    /// with the same composed members and variables.
+    #[test]
+    fn reclaimed_key_remints() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut src = sdf::Layer::new_in_memory("src.usda");
+        set_expr_var(&mut src, "V", "x");
+        let target = sdf::Layer::new_in_memory("target.usda");
+        let mut graph = LayerGraph::from_layers(vec![root, src, target], 0, sdf::LayerRegistry::default());
+        let src = graph.id_of("src.usda").unwrap();
+        let target_id = graph.id_of("target.usda").unwrap();
+
+        let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
+        let t = graph.intern_external(target_id, src_stack).0;
+        let members: Vec<LayerId> = graph.layer_stack(t).iter().map(|&(l, _)| l).collect();
+        let vars = graph.stack_expression_variables(t).clone();
+
+        // Keep the demanding context alive; only the target instance sweeps.
+        let mut marks = StackMarks::default();
+        marks.mark(src_stack);
+        graph.sweep_stacks(marks);
+        assert!(!graph.stack_is_live(t));
+
+        assert!(
+            matches!(graph.external_stack_id(target_id, src_stack), ExternalStack::Demand),
+            "a reclaimed key misses the lookup and demands"
+        );
+        let demand = Demand {
+            asset_path: "target.usda".to_string(),
+            context: src_stack,
+        };
+        assert!(graph.intern_demanded(&[demand]), "the re-mint reports progress");
+        let (reminted, fresh) = graph.intern_external(target_id, src_stack);
+        assert!(!fresh, "the reminted instance now resolves ready");
+        assert_ne!(reminted, t, "the reclaimed id is never reused");
+        assert!(!graph.stack_is_live(t), "the reclaimed handle stays dead");
+        assert_eq!(
+            graph.layer_stack(reminted).iter().map(|&(l, _)| l).collect::<Vec<_>>(),
+            members,
+            "the reminted members match the reclaimed composition"
+        );
+        assert_eq!(
+            graph.stack_expression_variables(reminted),
+            &vars,
+            "the reminted composed variables match the reclaimed set"
         );
     }
 

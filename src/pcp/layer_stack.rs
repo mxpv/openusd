@@ -14,23 +14,34 @@
 //! This module is identity and storage only. Composing an instance's members
 //! needs the layers, which `layer_graph` owns, so it builds them and hands them
 //! here (see `LayerGraph::build_stack_members`).
+//!
+//! Instances are reference-tracked, not permanent. A mark-and-sweep pass
+//! ([`LayerStackRegistry::sweep`]) removes every instance nothing live
+//! references, key mapping included — the analog of a ref-counted C++
+//! `PcpLayerStack` expiring and erasing its `Pcp_LayerStackRegistry` entry —
+//! and the next arc deriving the same key composes a fresh instance under a
+//! fresh id. Ids are never reused.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::sdf::{LayerOffset, Value};
 
 use super::layer_graph::LayerId;
 
 /// An opaque handle to a composed layer stack within one
-/// [`LayerGraph`](super::layer_graph::LayerGraph) — an index into its
+/// [`LayerGraph`](super::layer_graph::LayerGraph) — a key into its
 /// [`LayerStackRegistry`].
 ///
 /// Every composition [`Node`](super::prim_graph::Node) stores this `Copy` handle
 /// instead of cloning the stack's members; resolve it back to them with
 /// [`LayerGraph::layer_stack`](super::layer_graph::LayerGraph::layer_stack). The
-/// handle is stable for the life of the graph even as a mute or `subLayers`
-/// rebuild changes the resolved members. It is not a cross-stage identity key
+/// handle is weak: it stays valid while anything live references its instance —
+/// a mute or `subLayers` rebuild changes the resolved members in place — and is
+/// never reused. Once a sweep reclaims an unreferenced instance, the handle's
+/// members read empty (`None` through the presence-aware reads), and
+/// re-composing the same inputs mints a successor under a new id, so a stale
+/// handle can never alias a later instance. It is not a cross-stage identity key
 /// (contrast `LayerStackIdentifier`); it is meaningful only within the graph that
 /// minted it. Handles order by mint order — for a target stack this is
 /// dependency order, since a key's source referent always precedes its owner.
@@ -47,10 +58,6 @@ impl LayerStackId {
     #[cfg(test)]
     pub(crate) const fn from_raw(raw: u32) -> Self {
         Self(raw)
-    }
-
-    fn idx(self) -> usize {
-        self.0 as usize
     }
 }
 
@@ -100,13 +107,20 @@ impl ExprVarId {
 /// Interns expression-variable contexts to [`ExprVarId`]s, deduplicating by
 /// structural equality so two equal contexts share one id. [`Value`] is not
 /// `Eq`/`Hash`, so the dedup is a linear scan comparing the canonicalized,
-/// name-sorted forms with [`value_eq`]. The context count is tiny (bounded by
-/// the variable-authoring layers), so the linear scan is not a concern.
+/// name-sorted forms with [`value_eq`]. The live context count is tiny
+/// (bounded by the variable-authoring layers), so the linear scan is not a
+/// concern; the value churn an editing session interns between sweeps is
+/// reclaimed by [`compact`](Self::compact).
 // TODO(perf): a hash-indexed table would drop the linear `value_eq` scan if a
 // pathological stack ever interns many distinct contexts.
 #[derive(Default)]
 pub(crate) struct ExprVarInterner {
     contexts: Vec<Vec<(String, Value)>>,
+    /// Contexts minted since the registry's last sweep considered the interner
+    /// — value churn on live stacks accretes dead contexts without minting any
+    /// instance, so this feeds [`LayerStackRegistry::ripe_for_sweep`] alongside
+    /// the instance mint counter.
+    fresh_since_sweep: usize,
 }
 
 impl ExprVarInterner {
@@ -119,6 +133,7 @@ impl ExprVarInterner {
         }
         let id = ExprVarId(self.contexts.len() as u32);
         self.contexts.push(canon);
+        self.fresh_since_sweep += 1;
         id
     }
 
@@ -135,11 +150,30 @@ impl ExprVarInterner {
             .map(|i| ExprVarId(i as u32))
     }
 
-    /// The canonical name-sorted `(name, value)` context interned at `id`. The
-    /// interner is append-only, so an id from an earlier rebuild still resolves —
-    /// a [`StackVarsDelta`]'s before/after pair reconstructs both contexts here.
+    /// The canonical name-sorted `(name, value)` context interned at `id`. Ids
+    /// are stable between sweeps: contexts are only dropped by
+    /// [`compact`](Self::compact), which runs inside a registry sweep, after
+    /// every [`StackVarsDelta`] of the change application that triggered it has
+    /// been consumed — so a delta's before/after pair always reconstructs here.
     fn vars(&self, id: ExprVarId) -> &[(String, Value)] {
         &self.contexts[id.idx()]
+    }
+
+    /// Drops every context outside `used`, repacking the survivors densely and
+    /// returning the old-to-new id mapping (`None` for dropped slots). The
+    /// caller rewrites every stored [`ExprVarId`] through the mapping in the
+    /// same pass, so no dangling id survives a compaction.
+    fn compact(&mut self, used: &HashSet<usize>) -> Vec<Option<ExprVarId>> {
+        let mut remap = vec![None; self.contexts.len()];
+        let mut kept = Vec::with_capacity(used.len());
+        for (i, context) in self.contexts.drain(..).enumerate() {
+            if used.contains(&i) {
+                remap[i] = Some(ExprVarId(kept.len() as u32));
+                kept.push(context);
+            }
+        }
+        self.contexts = kept;
+        remap
     }
 
     /// The variable names whose value differs between the contexts `old` and
@@ -251,9 +285,38 @@ struct LayerStackInstance {
     sublayer_var_deps: HashSet<String>,
 }
 
-/// Every composed layer stack a [`LayerGraph`](super::layer_graph::LayerGraph) has
-/// built, addressed by [`LayerStackId`] and interned by composition input
-/// ([`LayerStackKey`]). Instance 0 is always the stage root stack.
+/// The minimum number of instances that must mint since the last sweep before
+/// another is worthwhile — the floor of the trigger behind
+/// [`LayerStackRegistry::ripe_for_sweep`]. Instances strand only when an edit
+/// re-keys a variable source (fresh keys mint alongside), so a stage that
+/// never re-keys stops minting after warm-up and never sweeps.
+const SWEEP_MINT_THRESHOLD: usize = 32;
+
+/// The liveness set for one mark-and-sweep pass over a
+/// [`LayerStackRegistry`]: the cache and graph mark every stack something
+/// live references, and [`LayerStackRegistry::sweep`] closes the marks over
+/// variable-source ancestry and removes the rest. Sparse — storage is
+/// proportional to the marked ids, independent of how many ids the registry
+/// has ever minted or where the live ones sit in that range.
+#[derive(Default)]
+pub(crate) struct StackMarks {
+    marked: HashSet<LayerStackId>,
+}
+
+impl StackMarks {
+    /// Marks `id` live, keeping its instance through the coming sweep.
+    pub(crate) fn mark(&mut self, id: LayerStackId) {
+        self.marked.insert(id);
+    }
+
+    fn is_marked(&self, id: LayerStackId) -> bool {
+        self.marked.contains(&id)
+    }
+}
+
+/// Every composed layer stack a [`LayerGraph`](super::layer_graph::LayerGraph)
+/// currently holds, addressed by [`LayerStackId`] and interned by composition
+/// input ([`LayerStackKey`]). Instance 0 is always the stage root stack.
 ///
 /// Not every physical layer gets an instance — the set is sparse. Instances exist
 /// only for composition roots: the stage root, the sublayer-DAG roots an eagerly
@@ -268,23 +331,43 @@ struct LayerStackInstance {
 /// - A stored [`VarsSource`] is canonical: its referent's own
 ///   [`vars_source`](Self::vars_source) equals it at mint, so equal variable
 ///   contexts derived through different arc chains key identically.
-/// - A key's source referent has a smaller index than its owner (keys are
-///   immutable and the registry append-only), so ascending index order is
+/// - A key's source referent has a smaller id than its owner (keys are
+///   immutable and ids mint monotonically), so ascending id order is
 ///   dependency order: a rebuild pass reads every seed after refreshing its
-///   referent.
+///   referent. A sweep preserves this — it retains every survivor's source
+///   ancestry ([`close_over_referents`](Self::close_over_referents)), so a
+///   held key's referent always resolves.
+///
+/// Instances live only while referenced: [`sweep`](Self::sweep) removes every
+/// instance the mark pass did not reach, key mapping included, and a removed
+/// key re-mints on the next demand (see [`LayerStackId`] for the handle
+/// lifetime this implies).
 ///
 /// Storage and interning only: the graph composes members (it owns the layers) and
 /// hands them to [`set_root`](Self::set_root) / [`intern_target`](Self::intern_target).
 #[derive(Default)]
 pub(crate) struct LayerStackRegistry {
-    instances: Vec<LayerStackInstance>,
+    /// The interned instances, ordered by id — mint order, which is dependency
+    /// order, so ordered walks ([`targets`](Self::targets), the sweep's
+    /// ancestry closure) come straight off the map.
+    // TODO(perf): member reads are per-node composition hot spots and now pay
+    // an O(log n) map lookup; an id-indexed arena with never-reused slots
+    // would restore O(1) and drop `targets`' per-call allocation.
+    instances: BTreeMap<LayerStackId, LayerStackInstance>,
     by_key: HashMap<LayerStackKey, LayerStackId>,
     /// The interned composed expression-variable sets, keyed by [`ExprVarId`].
     contexts: ExprVarInterner,
+    /// The next handle to mint. Monotonic: a removed instance's id is never
+    /// handed out again.
+    next_id: u32,
+    /// Instances minted since the last sweep — the
+    /// [`ripe_for_sweep`](Self::ripe_for_sweep) trigger, together with the
+    /// interner's fresh-context count.
+    minted_since_sweep: usize,
 }
 
 impl LayerStackRegistry {
-    /// The target stack for `(root, source)`, if one has been interned.
+    /// The target stack for `(root, source)`, if one is currently interned.
     pub(crate) fn lookup_target(&self, root: LayerId, source: VarsSource) -> Option<LayerStackId> {
         self.by_key.get(&LayerStackKey::Target { root, source }).copied()
     }
@@ -305,7 +388,7 @@ impl LayerStackRegistry {
             None
         } else {
             debug_assert!(
-                matches!(self.instances[LayerStackId::ROOT.idx()].key, LayerStackKey::Root),
+                matches!(self.instances[&LayerStackId::ROOT].key, LayerStackKey::Root),
                 "instance 0 must be the root stack",
             );
             self.set_composed(LayerStackId::ROOT, members, expr_vars)
@@ -326,9 +409,9 @@ impl LayerStackRegistry {
         self.insert(LayerStackKey::Target { root, source }, members, expr_vars)
     }
 
-    /// Inserts a fresh instance for `key`, deriving its member set, interned
-    /// composed context, and variable source, and records it in
-    /// [`by_key`](Self::by_key).
+    /// Inserts a fresh instance for `key` under the next monotonic id, deriving
+    /// its member set, interned composed context, and variable source, and
+    /// records it in [`by_key`](Self::by_key).
     fn insert(
         &mut self,
         key: LayerStackKey,
@@ -337,28 +420,32 @@ impl LayerStackRegistry {
     ) -> LayerStackId {
         let member_set = members.iter().map(|&(id, _)| id).collect();
         let expr_id = self.contexts.intern(&expr_vars);
-        let id = LayerStackId(self.instances.len() as u32);
+        let id = LayerStackId(self.next_id);
+        // Ids are never reused, so exhaustion must fail loudly: a silent wrap
+        // would alias the root stack and compose the whole stage wrongly.
+        self.next_id = self.next_id.checked_add(1).expect("layer-stack id space exhausted");
         if let LayerStackKey::Target { source, .. } = key {
-            debug_assert!(
-                source.referent().idx() < id.idx(),
-                "a key's source referent must precede its owner",
-            );
+            debug_assert!(source.referent() < id, "a key's source referent must precede its owner",);
             debug_assert_eq!(
-                self.instances[source.referent().idx()].vars_source,
+                self.instances[&source.referent()].vars_source,
                 source,
                 "a minted key's source must be canonical",
             );
         }
         let vars_source = self.derive_vars_source(id, key, expr_id);
-        self.instances.push(LayerStackInstance {
-            key,
-            members,
-            member_set,
-            expr_vars,
-            expr_id,
-            vars_source,
-            sublayer_var_deps: HashSet::new(),
-        });
+        self.minted_since_sweep += 1;
+        self.instances.insert(
+            id,
+            LayerStackInstance {
+                key,
+                members,
+                member_set,
+                expr_vars,
+                expr_id,
+                vars_source,
+                sublayer_var_deps: HashSet::new(),
+            },
+        );
         self.by_key.insert(key, id);
         id
     }
@@ -374,7 +461,7 @@ impl LayerStackRegistry {
         match key {
             LayerStackKey::Root => VarsSource::Root,
             LayerStackKey::Target { source, .. } => {
-                let referent = &self.instances[source.referent().idx()];
+                let referent = &self.instances[&source.referent()];
                 if expr_id == referent.expr_id {
                     referent.vars_source
                 } else {
@@ -384,52 +471,64 @@ impl LayerStackRegistry {
         }
     }
 
-    /// The resolved members of a stack, or an empty slice for a handle the registry
-    /// has not minted yet — the root stack before [`set_root`](Self::set_root) runs
-    /// at finalize, or a target whose root is unknown.
+    /// The resolved members of a stack, or an empty slice for a handle the
+    /// registry does not hold — the root stack before
+    /// [`set_root`](Self::set_root) runs at finalize, a target whose root is
+    /// unknown, or a stale handle whose instance a sweep has since reclaimed.
     pub(crate) fn members(&self, id: LayerStackId) -> &[(LayerId, LayerOffset)] {
-        self.instances.get(id.idx()).map_or(&[], |inst| inst.members.as_slice())
+        self.instances
+            .get(&id)
+            .map_or(&[], |instance| instance.members.as_slice())
     }
 
     /// The member layer ids of a stack as a set, for containment tests, or `None`
-    /// for a handle the registry has not minted yet.
+    /// for a handle the registry does not hold.
     pub(crate) fn member_set(&self, id: LayerStackId) -> Option<&HashSet<LayerId>> {
-        self.instances.get(id.idx()).map(|inst| &inst.member_set)
+        self.instances.get(&id).map(|instance| &instance.member_set)
+    }
+
+    /// The resolved members of a stack the registry currently holds, or `None`
+    /// for an unminted or reclaimed handle — the presence-aware sibling of
+    /// [`members`](Self::members) for callers that must tell a reclaimed stack
+    /// from an empty one.
+    pub(crate) fn try_members(&self, id: LayerStackId) -> Option<&[(LayerId, LayerOffset)]> {
+        self.instances.get(&id).map(|instance| instance.members.as_slice())
     }
 
     /// Every layer that is a member of some composed stack — the root stack and
     /// each interned reference/payload target stack. Muting rebuilds every stack
     /// with its muted subtrees pruned (a fully muted target root resolves to an
     /// empty stack), so this is the effectively-present layer set and carries no
-    /// muted layer. Independent of which prim indices are cached.
+    /// muted layer. A reclaimed stack contributes nothing: its members retire in
+    /// a sweep together with the diagnostics they anchored.
     pub(crate) fn member_layers(&self) -> HashSet<LayerId> {
         self.instances
-            .iter()
-            .flat_map(|inst| inst.member_set.iter().copied())
+            .values()
+            .flat_map(|instance| instance.member_set.iter().copied())
             .collect()
     }
 
     /// The `(root, source)` key of a non-root target stack, or `None` for the
-    /// root stack.
+    /// root stack. Panics on a handle the registry does not hold.
     pub(crate) fn target_key(&self, id: LayerStackId) -> Option<(LayerId, VarsSource)> {
-        match self.instances[id.idx()].key {
+        match self.instances[&id].key {
             LayerStackKey::Root => None,
             LayerStackKey::Target { root, source } => Some((root, source)),
         }
     }
 
     /// Every non-root target instance as `(id, root, key source)`, in ascending
-    /// index order — dependency order, since a key's source referent always
+    /// id order — dependency order, since a key's source referent always
     /// precedes its owner. A rebuild walks this after refreshing the root stack
     /// so each instance's seed referent is already up to date when it is read.
-    pub(crate) fn targets(&self) -> impl Iterator<Item = (LayerStackId, LayerId, VarsSource)> {
+    pub(crate) fn targets(&self) -> Vec<(LayerStackId, LayerId, VarsSource)> {
         self.instances
             .iter()
-            .enumerate()
-            .filter_map(|(i, inst)| match inst.key {
+            .filter_map(|(&id, instance)| match instance.key {
                 LayerStackKey::Root => None,
-                LayerStackKey::Target { root, source } => Some((LayerStackId(i as u32), root, source)),
+                LayerStackKey::Target { root, source } => Some((id, root, source)),
             })
+            .collect()
     }
 
     /// Replaces a stack's members and composed expression variables after a
@@ -446,8 +545,8 @@ impl LayerStackRegistry {
         expr_vars: HashMap<String, Value>,
     ) -> Option<StackVarsDelta> {
         let expr_id = self.contexts.intern(&expr_vars);
-        let vars_source = self.derive_vars_source(id, self.instances[id.idx()].key, expr_id);
-        let instance = &mut self.instances[id.idx()];
+        let vars_source = self.derive_vars_source(id, self.instances[&id].key, expr_id);
+        let instance = self.instances.get_mut(&id).expect("a recomposed stack is interned");
         let delta = (instance.expr_id != expr_id || instance.vars_source != vars_source).then_some(StackVarsDelta {
             stack: id,
             old_expr: instance.expr_id,
@@ -464,35 +563,39 @@ impl LayerStackRegistry {
     }
 
     /// The composed expression variables of a stack. Unlike [`members`](Self::members)
-    /// there is no pre-finalize empty fallback: an expression lookup always comes
-    /// from a composition node, which always references a minted stack, so an
-    /// unminted handle is an invariant break and panics.
+    /// there is no empty fallback: an expression lookup always comes from a
+    /// composition node, which always references an interned stack, so a handle
+    /// the registry does not hold is an invariant break and panics.
     pub(crate) fn expression_variables(&self, id: LayerStackId) -> &HashMap<String, Value> {
-        &self.instances[id.idx()].expr_vars
+        &self.instances[&id].expr_vars
     }
 
     /// The source of a stack's composed expression variables — the value an arc
     /// out of this stack keys its target stack by (C++ `primIndex.cpp` keys the
     /// target identifier by the parent stack's composed-variables source, not by
-    /// the parent itself). Panics on an unminted handle, like
+    /// the parent itself). Panics on a handle the registry does not hold, like
     /// [`expression_variables`](Self::expression_variables).
     pub(crate) fn vars_source(&self, id: LayerStackId) -> VarsSource {
-        self.instances[id.idx()].vars_source
+        self.instances[&id].vars_source
     }
 
     /// The variable names a stack's `${VAR}` `subLayers` entries read when its
     /// members were last composed (see
-    /// [`LayerStackInstance::sublayer_var_deps`]). Panics on an unminted handle,
-    /// like [`expression_variables`](Self::expression_variables).
+    /// [`LayerStackInstance::sublayer_var_deps`]). Panics on a handle the
+    /// registry does not hold, like
+    /// [`expression_variables`](Self::expression_variables).
     pub(crate) fn sublayer_var_deps(&self, id: LayerStackId) -> &HashSet<String> {
-        &self.instances[id.idx()].sublayer_var_deps
+        &self.instances[&id].sublayer_var_deps
     }
 
     /// Replaces a stack's recorded sublayer variable dependencies with the names
     /// its latest member composition read — the supersession that keeps a fixed
     /// or removed `${VAR}` entry from pinning a stale dependency.
     pub(crate) fn set_sublayer_var_deps(&mut self, id: LayerStackId, deps: HashSet<String>) {
-        self.instances[id.idx()].sublayer_var_deps = deps;
+        self.instances
+            .get_mut(&id)
+            .expect("a recomposed stack is interned")
+            .sublayer_var_deps = deps;
     }
 
     /// The variable names whose value differs between the interned contexts `old`
@@ -500,6 +603,81 @@ impl LayerStackRegistry {
     /// [`StackVarsDelta`]'s targeted invalidation.
     pub(crate) fn changed_var_names(&self, old: ExprVarId, new: ExprVarId) -> HashSet<String> {
         self.contexts.changed_names(old, new)
+    }
+
+    /// Extends `marks` to the transitive closure over variable-source ancestry:
+    /// every marked instance's key source and stored variable source are
+    /// marked, so a survivor's seed reads and canonicality checks always reach
+    /// interned referents. A single descending-id pass reaches the fixed point
+    /// because both referents sit at smaller ids — a key's source referent
+    /// strictly precedes its owner, and a stored [`VarsSource`] names the
+    /// instance itself or an earlier one.
+    fn close_over_referents(&self, marks: &mut StackMarks) {
+        for (&id, instance) in self.instances.iter().rev() {
+            if !marks.is_marked(id) {
+                continue;
+            }
+            if let LayerStackKey::Target { source, .. } = instance.key {
+                marks.mark(source.referent());
+            }
+            marks.mark(instance.vars_source.referent());
+        }
+    }
+
+    /// Removes every non-root instance `marks` did not reach — after closing
+    /// the marks over variable-source ancestry
+    /// ([`close_over_referents`](Self::close_over_referents)) — together with
+    /// its [`by_key`](Self::by_key) entry, so the next arc deriving the key
+    /// mints a fresh instance. Resets the sweep trigger's counters and, when
+    /// dead contexts exist (from removals or from value churn re-interning a
+    /// live stack's variables), compacts the context interner to the
+    /// survivors' contexts. Returns the removed ids so the graph can retire
+    /// the per-stack state keyed by them.
+    pub(crate) fn sweep(&mut self, mut marks: StackMarks) -> Vec<LayerStackId> {
+        self.minted_since_sweep = 0;
+        self.contexts.fresh_since_sweep = 0;
+        self.close_over_referents(&mut marks);
+        let removed: Vec<LayerStackId> = self
+            .instances
+            .keys()
+            .copied()
+            .filter(|&id| id != LayerStackId::ROOT && !marks.is_marked(id))
+            .collect();
+        for &id in &removed {
+            let instance = self.instances.remove(&id).expect("removal ids were just enumerated");
+            self.by_key.remove(&instance.key);
+        }
+        let used: HashSet<usize> = self.instances.values().map(|instance| instance.expr_id.idx()).collect();
+        if used.len() < self.contexts.contexts.len() {
+            let remap = self.contexts.compact(&used);
+            for instance in self.instances.values_mut() {
+                instance.expr_id = remap[instance.expr_id.idx()].expect("a survivor's context outlives compaction");
+            }
+        }
+        removed
+    }
+
+    /// Whether enough registry churn accumulated since the last sweep for
+    /// another to be worthwhile — the creation-churn half of the stage's
+    /// sweep trigger (ownership loss schedules a sweep directly, without
+    /// passing through this gate). Two signals feed it: instances minted (a
+    /// re-keying edit strands the old key alongside its replacement mint) and
+    /// contexts interned (value churn on a live stack leaves dead contexts
+    /// behind). The bar scales with the live registry
+    /// ([`SWEEP_MINT_THRESHOLD`] or a quarter of the live instances,
+    /// whichever is larger), so sweep frequency stays proportional to the
+    /// work each sweep performs.
+    pub(crate) fn ripe_for_sweep(&self) -> bool {
+        self.minted_since_sweep + self.contexts.fresh_since_sweep >= SWEEP_MINT_THRESHOLD.max(self.instances.len() / 4)
+    }
+}
+
+#[cfg(test)]
+impl LayerStackRegistry {
+    /// The number of instances currently interned, for tests asserting
+    /// reclamation keeps the registry bounded.
+    pub(crate) fn instance_count(&self) -> usize {
+        self.instances.len()
     }
 }
 
@@ -552,5 +730,183 @@ mod tests {
         let first = interner.intern(&vars());
         let second = interner.intern(&vars());
         assert_eq!(first, second, "a NaN-valued context must intern to a single id");
+    }
+
+    /// A registry with a root stack and root-sourced target stacks for the
+    /// layers `1..=targets`, each with itself as its single member.
+    fn registry_with_targets(targets: u32) -> (LayerStackRegistry, Vec<LayerStackId>) {
+        let mut registry = LayerStackRegistry::default();
+        registry.set_root(vec![(LayerId::from_raw(0), LayerOffset::default())], HashMap::new());
+        let ids = (1..=targets)
+            .map(|i| {
+                let layer = LayerId::from_raw(i);
+                registry.intern_target(
+                    layer,
+                    VarsSource::Root,
+                    vec![(layer, LayerOffset::default())],
+                    HashMap::new(),
+                )
+            })
+            .collect();
+        (registry, ids)
+    }
+
+    #[test]
+    fn sweep_removes_unmarked() {
+        let (mut registry, ids) = registry_with_targets(2);
+        let (a, b) = (ids[0], ids[1]);
+        let mut marks = StackMarks::default();
+        marks.mark(b);
+        let swept = registry.sweep(marks);
+        assert_eq!(swept, vec![a], "only the unmarked instance is removed");
+        assert!(registry.member_set(a).is_none());
+        assert!(registry.members(a).is_empty(), "a reclaimed handle reads as empty");
+        assert_eq!(
+            registry.lookup_target(LayerId::from_raw(1), VarsSource::Root),
+            None,
+            "the key mapping is erased with the instance",
+        );
+        assert!(registry.member_set(b).is_some(), "a marked instance survives");
+        assert!(
+            registry.member_set(LayerStackId::ROOT).is_some(),
+            "the root stack is never removed"
+        );
+    }
+
+    /// Marking only the deepest stack of a variable-source chain keeps its
+    /// source ancestry: the sweep's closure walks `key.source` and
+    /// `vars_source` referents, so a survivor's seed reads stay interned.
+    #[test]
+    fn closure_keeps_source_chain() {
+        let mut registry = LayerStackRegistry::default();
+        registry.set_root(vec![], HashMap::new());
+        let vars = HashMap::from([("V".to_string(), Value::String("x".to_string()))]);
+        let authoring = registry.intern_target(LayerId::from_raw(1), VarsSource::Root, vec![], vars.clone());
+        let dependent = registry.intern_target(LayerId::from_raw(2), VarsSource::Instance(authoring), vec![], vars);
+        let mut marks = StackMarks::default();
+        marks.mark(dependent);
+        let swept = registry.sweep(marks);
+        assert!(swept.is_empty(), "a live stack's source ancestry survives the sweep");
+        assert!(registry.member_set(authoring).is_some() && registry.member_set(dependent).is_some());
+    }
+
+    /// A sweep never recycles an id: a fresh key mints past the reclaimed id,
+    /// and re-deriving the reclaimed key mints a fresh instance rather than
+    /// resurrecting the old handle.
+    #[test]
+    fn reclaimed_id_not_reused() {
+        let (mut registry, ids) = registry_with_targets(1);
+        let reclaimed = ids[0];
+        registry.sweep(StackMarks::default());
+        assert!(registry.member_set(reclaimed).is_none());
+        let fresh = registry.intern_target(LayerId::from_raw(9), VarsSource::Root, vec![], HashMap::new());
+        assert_ne!(fresh, reclaimed, "a reclaimed id is never reused for a new key");
+        let reminted = registry.intern_target(
+            LayerId::from_raw(1),
+            VarsSource::Root,
+            vec![(LayerId::from_raw(1), LayerOffset::default())],
+            HashMap::new(),
+        );
+        assert_ne!(reminted, reclaimed, "the reclaimed key mints a fresh instance");
+        assert_eq!(
+            registry.lookup_target(LayerId::from_raw(1), VarsSource::Root),
+            Some(reminted),
+        );
+    }
+
+    #[test]
+    fn ripe_threshold() {
+        let (mut registry, _) = registry_with_targets(SWEEP_MINT_THRESHOLD as u32 - 1);
+        assert!(
+            registry.ripe_for_sweep(),
+            "the root mint plus {} target mints reach the threshold",
+            SWEEP_MINT_THRESHOLD - 1,
+        );
+        let swept = registry.sweep(StackMarks::default());
+        assert_eq!(swept.len(), SWEEP_MINT_THRESHOLD - 1);
+        assert!(!registry.ripe_for_sweep(), "a sweep resets the trigger");
+        registry.intern_target(LayerId::from_raw(1), VarsSource::Root, vec![], HashMap::new());
+        assert_eq!(registry.minted_since_sweep, 1, "a re-mint counts toward the next sweep");
+    }
+
+    /// Value churn on a live stack accretes dead contexts without minting any
+    /// instance; the fresh-context counter still ripens the trigger, and a
+    /// sweep that removes no instance still compacts the interner.
+    #[test]
+    fn value_churn_compacts() {
+        let mut registry = LayerStackRegistry::default();
+        registry.set_root(vec![], HashMap::new());
+        let target = registry.intern_target(LayerId::from_raw(1), VarsSource::Root, vec![], HashMap::new());
+        let vars = |v: &str| HashMap::from([("V".to_string(), Value::String(v.to_string()))]);
+        for i in 0..SWEEP_MINT_THRESHOLD {
+            registry.set_composed(target, vec![], vars(&i.to_string()));
+        }
+        assert!(registry.ripe_for_sweep(), "context churn alone ripens the trigger");
+        let mut marks = StackMarks::default();
+        marks.mark(target);
+        let swept = registry.sweep(marks);
+        assert!(swept.is_empty(), "everything marked survives");
+        assert_eq!(
+            registry.contexts.contexts.len(),
+            2,
+            "the churned contexts compact away, keeping the empty seed and the last value",
+        );
+        assert!(!registry.ripe_for_sweep(), "the sweep resets the churn counter");
+    }
+
+    /// Sweeping leaves holes in the id space; survivors on both sides of a
+    /// hole stay intact through further mint/sweep rounds, and the sparse
+    /// marks track only what was marked.
+    #[test]
+    fn sparse_ids_survive() {
+        let (mut registry, ids) = registry_with_targets(3);
+        let keeper = ids[0];
+        let mut marks = StackMarks::default();
+        marks.mark(keeper);
+        registry.sweep(marks);
+        assert_eq!(registry.instance_count(), 2, "the root and the keeper remain");
+
+        let late = registry.intern_target(LayerId::from_raw(9), VarsSource::Root, vec![], HashMap::new());
+        let mut marks = StackMarks::default();
+        marks.mark(keeper);
+        marks.mark(late);
+        assert_eq!(marks.marked.len(), 2, "mark storage tracks only the marked ids");
+        registry.sweep(marks);
+        assert!(registry.member_set(keeper).is_some(), "the low survivor persists");
+        assert!(registry.member_set(late).is_some(), "the high survivor persists");
+        assert_eq!(registry.instance_count(), 3);
+    }
+
+    /// A sweep compacts the context interner to the survivors' contexts: the
+    /// removed instance's value churn is dropped and live ids are remapped in
+    /// place.
+    #[test]
+    fn sweep_compacts_interner() {
+        let mut registry = LayerStackRegistry::default();
+        registry.set_root(vec![], HashMap::new());
+        let vars = |v: &str| HashMap::from([("V".to_string(), Value::String(v.to_string()))]);
+        let kept = registry.intern_target(LayerId::from_raw(1), VarsSource::Root, vec![], vars("keep"));
+        let churn = registry.intern_target(LayerId::from_raw(2), VarsSource::Root, vec![], vars("a"));
+        registry.set_composed(churn, vec![], vars("b"));
+        registry.set_composed(churn, vec![], vars("c"));
+        assert_eq!(
+            registry.contexts.contexts.len(),
+            5,
+            "the empty seed, the survivor's context, and three churned values",
+        );
+        let mut marks = StackMarks::default();
+        marks.mark(kept);
+        registry.sweep(marks);
+        assert_eq!(
+            registry.contexts.contexts.len(),
+            2,
+            "only the contexts the survivors reference remain",
+        );
+        assert_eq!(
+            registry.expression_variables(kept),
+            &vars("keep"),
+            "a survivor's context id remaps in place",
+        );
+        assert_eq!(registry.expression_variables(LayerStackId::ROOT), &HashMap::new());
     }
 }

@@ -1046,6 +1046,12 @@ impl PrimIndexRef {
 
     /// Returns this prim's composition graph (C++ `UsdPrim::GetPrimIndex`),
     /// building it if needed. A clone, since the cache owns the cached index.
+    ///
+    /// The clone is a weak snapshot: its nodes name their layer stacks by
+    /// handle without keeping them alive, so once the stage drops this prim's
+    /// index and reclamation removes a stack, resolving that node's members
+    /// (e.g. [`Stage::node_layer_stack`](super::Stage::node_layer_stack))
+    /// reports `None`.
     pub fn graph(&self) -> anyhow::Result<pcp::PrimIndex> {
         self.stage.with_cache(|g, c| Ok(c.index(g, &self.path)?.clone()))
     }

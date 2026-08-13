@@ -321,15 +321,13 @@ fn unmute_restores_diagnostic() -> Result<()> {
     Ok(())
 }
 
-/// `composition_errors()` does not flicker with cache warmth: a reference
-/// target's missing-sublayer diagnostic stays reported after an unrelated mute
-/// evicts the prim index that first reached the target. The effective set is the
-/// composed stacks, not the currently-cached indices, so an eviction cannot hide a
-/// valid diagnostic. (Muting the arc's own authoring layer likewise keeps the
-/// diagnostic — a deliberate conservative over-report; see the pcp "Muted sublayer
-/// diagnostics" remaining-work note.)
+/// `composition_errors()` reflects the composition performed so far: an
+/// unrelated mute that drops the only prim index referencing a target
+/// releases the target stack's last owner, so the sweep at the mute seam
+/// retires the stack and its missing-sublayer diagnostic together;
+/// recomposing the prim re-derives the diagnostic from current state.
 #[test]
-fn muted_diagnostic_survives_eviction() -> Result<()> {
+fn eviction_rederives_diagnostic() -> Result<()> {
     let dir = tempfile::tempdir()?;
     // `/A` references `target` (which has a missing sublayer); the unrelated
     // sublayer `s` also contributes an opinion to `/A`, so muting `s` evicts `/A`'s
@@ -356,12 +354,21 @@ fn muted_diagnostic_survives_eviction() -> Result<()> {
         "the reached target's missing sublayer is reported"
     );
 
-    // Muting the unrelated `s` evicts `/A`'s cached index; the diagnostic must not
-    // vanish with the eviction.
+    // Muting the unrelated `s` drops `/A`'s cached index — the target stack's
+    // only owner — so the mute seam's sweep retires the stack and its
+    // diagnostic together.
     stage.mute_layer("s.usda");
     assert!(
+        !reports_unresolved_sublayer(&stage, "missing.usda"),
+        "the orphaned target's diagnostic retires with its stack, got {:?}",
+        stage.composition_errors()
+    );
+
+    // Recomposing `/A` re-reaches the target and re-derives the diagnostic.
+    let _ = child_names(&stage, "/A")?;
+    assert!(
         reports_unresolved_sublayer(&stage, "missing.usda"),
-        "an unrelated mute evicting the cached index must not hide the diagnostic, got {:?}",
+        "recomposition re-derives the diagnostic, got {:?}",
         stage.composition_errors()
     );
     Ok(())

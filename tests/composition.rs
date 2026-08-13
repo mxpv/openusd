@@ -349,7 +349,11 @@ mod pcp_txt {
             let has_offsets = walk.iter().any(|&id| {
                 let node = index.node(id);
                 !node.map_to_parent().time_offset().is_identity()
-                    || stage.node_layer_stack(node).iter().any(|(_, off)| !off.is_identity())
+                    || stage
+                        .node_layer_stack(node)
+                        .expect("a freshly composed node's stack is live")
+                        .iter()
+                        .any(|(_, off)| !off.is_identity())
             });
             if has_offsets {
                 let _ = writeln!(out, "Time Offsets:");
@@ -374,7 +378,10 @@ mod pcp_txt {
                         arc,
                         node.map_to_root().time_offset(),
                     );
-                    for &(layer, off) in stage.node_layer_stack(node).iter() {
+                    let members = stage
+                        .node_layer_stack(node)
+                        .expect("a freshly composed node's stack is live");
+                    for &(layer, off) in members.iter() {
                         if !off.is_identity() {
                             let layer_id = stage.layer_identifier(layer).unwrap_or_default();
                             time_offset_line(&mut out, base, &layer_id, None, "sublayer", off);
