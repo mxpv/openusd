@@ -3315,24 +3315,37 @@ def "Scope"
         Ok(())
     }
 
-    /// A nested instance introduced beneath a payload composes from its prim in
-    /// the outer prototype. Both arcs target sub-root prims in external layers,
-    /// matching production assets that keep reusable definitions below a shared
-    /// library namespace (spec 11.3.3).
+    /// A nested instance whose reference targets a sub-root prim composes from
+    /// its prim inside the enclosing prototype (spec 11.3.3): seeding the nested
+    /// prototype from the outer proxy's own namespace instead leaves its
+    /// descendants with no contributing specs.
     #[test]
-    fn nested_payload_proxy() -> Result<()> {
-        let root = format!("{}/fixtures/instancing_nested_payload/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
+    fn nested_subroot_proxy() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_subroot.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
+        // /A mints /__Prototype_0 for /Outer; the nested instance mints
+        // /__Prototype_1 for /Library/Inner, and the outer proxy's descendant
+        // stands in for a prim there.
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Placed/Nested/Leaf.value")?, 0.0, &interp)?,
-            Some(Value::Double(7.0))
+            cache.value_at(&graph, &sdf::path("/A/Nested/Leaf.v")?, 0.0, &interp)?,
+            Some(Value::Double(3.0))
         );
         assert_eq!(
-            cache.prim_in_prototype(&graph, &sdf::path("/Placed/Nested/Leaf")?)?,
+            cache.prim_in_prototype(&graph, &sdf::path("/A/Nested/Leaf")?)?,
             Some(sdf::path("/__Prototype_1/Leaf")?)
         );
+
+        // The nested instance is never composed at the proxy path, and reaching
+        // it through the instance namespace or the prototype namespace yields
+        // one prototype — two in total, not three.
+        assert!(!cache.is_indexed(&sdf::path("/A/Nested")?));
+        assert_eq!(
+            cache.prototype_of(&graph, &sdf::path("/A/Nested")?)?,
+            cache.prototype_of(&graph, &sdf::path("/__Prototype_0/Nested")?)?,
+        );
+        assert_eq!(cache.prototypes().len(), 2);
         Ok(())
     }
 
