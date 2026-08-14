@@ -1521,6 +1521,10 @@ impl IndexCache {
     /// consults this set per node contribution. A target inside the class itself
     /// (`connectionPathInsideInheritedClass`) is never an instance target.
     ///
+    /// Each candidate target prim is composed at the path that actually composes
+    /// it ([`Self::effective_path`]), so a target inside an instance is checked
+    /// against its shared prototype's subtree.
+    ///
     /// Returns the set paired with whether any candidate was gathered — i.e.
     /// whether the resolution read cross-prim instance state by composing target
     /// prims. The target memo is unsafe in that case (a target prim's later
@@ -1600,7 +1604,10 @@ impl IndexCache {
         let read_cross_prim = !candidates.is_empty();
         let mut instance_targets: HashSet<(Path, Path)> = HashSet::new();
         for c in candidates {
-            let target_prim = c.translated.prim_path();
+            // A target naming a prim inside an instance stands for a prim in that
+            // instance's shared prototype, so the class check reads the index
+            // that composes it (spec 11.3.3).
+            let target_prim = self.effective_path(graph, &c.translated.prim_path())?;
             self.ensure_index(graph, &target_prim)?;
             if target_prim_inherits_class(self.cached(&target_prim), graph, &c.class_layers, &c.class_path) {
                 instance_targets.insert((c.target, c.property));
@@ -2831,6 +2838,49 @@ def "Scope"
                 .any(|e| matches!(e, Error::InvalidInstanceTargetPath { .. })),
             "the class node's instance-target contribution is still reported: {errors:?}"
         );
+        Ok(())
+    }
+
+    /// A class target naming a prim inside an instance is checked against the
+    /// prim in the shared prototype it stands for (spec 11.3.3): a prim composed
+    /// under an instance drops its instance-local opinions, so the prototype's
+    /// subtree is where the target's composition lives. The instance references a
+    /// sub-root prim, the shape whose instance-suppressed build loses the arcs
+    /// below it.
+    #[test]
+    fn class_target_proxy_redirects() -> Result<()> {
+        let text = r#"#usda 1.0
+class "Rig"
+{
+    rel proxy = </Inst/Child>
+}
+
+def "Library"
+{
+    def "Proto"
+    {
+        def "Child" {}
+    }
+}
+
+def "Inst" (
+    instanceable = true
+    references = </Library/Proto>
+) {}
+
+def "Anchor" (inherits = </Rig>) {}
+"#;
+        let (graph, mut cache) = in_memory_stack(text);
+        let (targets, _) = cache.compute_relationship_target_paths(&graph, &sdf::path("/Anchor.proxy")?)?;
+        assert_eq!(
+            targets,
+            vec![sdf::path("/Inst/Child")?],
+            "the target keeps its stage-namespace path"
+        );
+
+        // The check composed the prototype's prim, leaving the proxy path unindexed.
+        assert!(!cache.is_indexed(&sdf::path("/Inst/Child")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Child")?));
         Ok(())
     }
 
