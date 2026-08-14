@@ -6,6 +6,7 @@
 //! fluent setters take `self` by value and return `Self`, so writes chain in a
 //! single statement that ends with the final handle bound.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -164,6 +165,66 @@ impl Attribute {
             spec.set(key, value);
             Ok(())
         })
+    }
+
+    /// Remove a metadata field's opinion from the attribute's spec on the
+    /// edit-target layer. Mirrors C++ `UsdObject::ClearMetadata`.
+    ///
+    /// Only the local opinion goes away; one on a weaker layer still composes.
+    /// Erasing reaches only an attribute spec the layer already holds, so a
+    /// property it says nothing about stays absent from it.
+    pub fn clear_metadata(self, key: &'static str) -> Result<Self, StageAuthoringError> {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
+            erase_attribute_field(layer.data_mut(), path, key);
+            Ok(())
+        })?;
+        Ok(self)
+    }
+
+    /// Read-modify-write a metadata field on the attribute's spec at the edit
+    /// target. `f` receives the field's current opinion on that layer (`None`
+    /// when it is unauthored locally) and returns the value to author, or
+    /// `None` to remove the local opinion.
+    ///
+    /// The attribute-level sibling of [`Prim::update_metadata`]: reading the
+    /// local opinion rather than the composed value keeps opinions on weaker
+    /// layers from being flattened into the edit target, which matters for the
+    /// dictionary-valued fields value resolution merges key-by-key across
+    /// layers (spec 12.2.5), such as UsdShade's `sdrMetadata`.
+    ///
+    /// The read is fallible so an undecodable local field surfaces instead of
+    /// reading back as absent and being overwritten.
+    ///
+    /// `key` is `&'static str` for the same change-tracking reason as
+    /// [`set_metadata`](Self::set_metadata).
+    pub fn update_metadata<F>(self, key: &'static str, f: F) -> Result<Self, StageAuthoringError>
+    where
+        F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
+    {
+        let declared = self.declared_spec().map_err(StageAuthoringError::Composition)?;
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
+            let local = layer.data_mut().try_field(&path, key)?.map(Cow::into_owned);
+            // Erasing reaches only an attribute spec this layer already holds,
+            // so a property it says nothing about stays absent from it.
+            let Some(value) = f(local) else {
+                erase_attribute_field(layer.data_mut(), path, key);
+                return Ok(());
+            };
+            // Authoring needs a spec, which the schema declaration supplies when
+            // the layer has none.
+            declare_spec(layer.data_mut(), &path, &declared)?;
+            super::edit_spec(
+                layer.data_mut(),
+                path,
+                "no attribute spec at path on the edit target layer",
+                sdf::AttributeSpecMut::get,
+                |spec| {
+                    spec.set(key, value);
+                    Ok(())
+                },
+            )
+        })?;
+        Ok(self)
     }
 
     /// Author the attribute's `connectionPaths` — the `.connect` targets
@@ -679,11 +740,7 @@ impl Attribute {
     {
         let declared = self.declared_spec().map_err(StageAuthoringError::Composition)?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            if let Some((type_name, variability)) = &declared
-                && sdf::AttributeSpecMut::get(layer.data_mut(), path.clone()).is_none()
-            {
-                sdf::AttributeSpec::new(layer.data_mut(), path.clone(), type_name.as_str(), *variability, false)?;
-            }
+            declare_spec(layer.data_mut(), &path, &declared)?;
             super::edit_spec(
                 layer.data_mut(),
                 path,
@@ -712,6 +769,34 @@ impl Attribute {
             .type_name()
             .map(|type_name| (type_name, property.variability())))
     }
+}
+
+/// Removes `key` from the attribute spec at `path`, when `data` holds one.
+///
+/// Going through the typed view keeps the erase to an attribute: a path
+/// addressing a prim, a relationship, or nothing at all owns fields this handle
+/// has no business removing.
+fn erase_attribute_field(data: &mut dyn sdf::AbstractData, path: sdf::Path, key: &str) {
+    if let Some(mut spec) = sdf::AttributeSpecMut::get(data, path) {
+        spec.erase(key);
+    }
+}
+
+/// Stamps a spec for the attribute at `path` from `declared`, the type and
+/// variability a schema states for it, when `data` holds none. Mirrors C++
+/// `UsdStage::_CreateNewPropertySpecFromSchema`, so a property that reads back a
+/// fallback can be authored.
+fn declare_spec(
+    data: &mut dyn sdf::AbstractData,
+    path: &sdf::Path,
+    declared: &Option<(tf::Token, sdf::Variability)>,
+) -> Result<(), sdf::AuthoringError> {
+    if let Some((type_name, variability)) = declared
+        && sdf::AttributeSpecMut::get(&mut *data, path.clone()).is_none()
+    {
+        sdf::AttributeSpec::new(data, path.clone(), type_name.as_str(), *variability, false)?;
+    }
+    Ok(())
 }
 
 /// Cached value query for one attribute. Mirrors C++ `UsdAttributeQuery`.
@@ -1630,6 +1715,55 @@ mod tests {
         }
         assert_eq!(q.get_at::<f64>(TimeCode::new(10.0))?, Some(1.0));
         assert_eq!(q.get_at::<f64>(TimeCode::new(20.0))?, Some(3.0));
+        Ok(())
+    }
+
+    /// Clearing metadata off an attribute the edit target does not author leaves
+    /// the layer alone: no spec is stamped from the schema declaration just to
+    /// hold the absence.
+    #[test]
+    fn clear_metadata_keeps_layer() -> anyhow::Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
+        assert!(intensity.is_defined()?, "the schema declares it");
+        intensity.clear_metadata("documentation")?;
+
+        let root = stage.root_layer().export_to_string()?;
+        assert!(!root.contains("inputs:intensity"));
+        Ok(())
+    }
+
+    /// An attribute handle at a non-property path addresses no attribute, so
+    /// clearing through it must not reach the prim's own metadata.
+    #[test]
+    fn clear_metadata_wrong_spec() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage
+            .define_prim("/P")?
+            .set_metadata("documentation", sdf::Value::String("keep".into()))?;
+
+        let _ = stage.attribute("/P")?.clear_metadata("documentation");
+
+        assert_eq!(
+            stage.prim("/P")?.get_metadata::<String>("documentation")?.as_deref(),
+            Some("keep"),
+            "the prim's own metadata is not an attribute's to clear"
+        );
+        Ok(())
+    }
+
+    /// A property neither authored nor declared has no opinion to clear, so
+    /// clearing one reports success without authoring anything.
+    #[test]
+    fn clear_metadata_absent_spec() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/P")?;
+
+        stage.attribute("/P.nope")?.clear_metadata("documentation")?;
+
+        assert!(!stage.root_layer().export_to_string()?.contains("nope"));
         Ok(())
     }
 }

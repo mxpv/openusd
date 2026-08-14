@@ -216,7 +216,7 @@ impl AssetPreviewsAPI {
                 let thumbnails = nested_dict_mut(previews, tok::THUMBNAILS);
                 let default = nested_dict_mut(thumbnails, tok::PREVIEW_DEFAULT);
                 default.insert(tok::DEFAULT_IMAGE.to_string(), Value::AssetPath(image.into()));
-                Value::Dictionary(asset_info)
+                Some(Value::Dictionary(asset_info))
             },
         )?;
         Ok(Self(prim))

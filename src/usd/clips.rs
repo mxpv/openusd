@@ -353,7 +353,7 @@ impl ClipsAPI {
                     }
                     other => *other = Value::Dictionary(HashMap::from([(key, value)])),
                 }
-                Value::Dictionary(sets)
+                Some(Value::Dictionary(sets))
             })?;
         Ok(())
     }

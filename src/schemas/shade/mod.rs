@@ -30,8 +30,9 @@
 //! inputs in the reverse direction to their consumers. Specialized consumers
 //! include [`Material::compute_surface_source`] and [`read_preview_surface`].
 //! [`Shader::implementation_source`] and the source queries interpret the
-//! active `NodeDef` implementation family, while [`SdrMetadata`] exposes the
-//! composed shader-registry metadata on shaders, inputs, and outputs.
+//! active `NodeDef` implementation family, which the matching setters
+//! ([`Shader::set_source_asset`] and friends) select. [`SdrMetadata`] carries
+//! the composed shader-registry metadata on shaders, inputs, and outputs.
 //! To find every shading prim on a stage, traverse it and gate each prim
 //! through the typed `get` (e.g. [`Material::get`]), mirroring C++
 //! `prim.IsA<UsdShadeMaterial>()`.
@@ -122,10 +123,10 @@ macro_rules! impl_shade_schema {
 pub(crate) use impl_shade_schema;
 
 /// Implement the shading-attribute surface shared by [`Input`] and [`Output`]:
-/// the namespace-checked constructors, the fluent authoring setters, and the
-/// connection queries. `$prefix` is the namespace prefix every attribute the
-/// view wraps carries. All paths are fully qualified, so the call site only
-/// needs the macro in scope.
+/// the namespace-checked constructors, the fluent authoring setters, the
+/// connection queries, and the [`SdrMetadata`] accessors. `$prefix` is the
+/// namespace prefix every attribute the view wraps carries. All paths are fully
+/// qualified, so the call site only needs the macro in scope.
 macro_rules! impl_shading_attribute {
     ($ty:ident, $prefix:expr) => {
         impl $ty {
@@ -228,6 +229,89 @@ macro_rules! impl_shading_attribute {
                     attribute: self.attribute.set_metadata(
                         $crate::schemas::shade::tokens::META_RENDER_TYPE,
                         $crate::sdf::Value::Token(render_type.into()),
+                    )?,
+                })
+            }
+
+            /// The composed `sdrMetadata` dictionary on this shading attribute.
+            ///
+            /// TODO(perf): each query in this group re-composes and clones the
+            /// whole dictionary, so reading N keys costs N compositions.
+            pub fn sdr_metadata(&self) -> ::anyhow::Result<$crate::schemas::shade::SdrMetadata> {
+                $crate::schemas::shade::node_def::attribute_sdr_metadata(&self.attribute)
+            }
+
+            /// The composed `sdrMetadata` value for `key` on this shading
+            /// attribute.
+            pub fn sdr_metadata_by_key(&self, key: impl AsRef<str>) -> ::anyhow::Result<Option<String>> {
+                $crate::schemas::shade::node_def::attribute_sdr_metadata_by_key(&self.attribute, key.as_ref())
+            }
+
+            /// Whether a composed `sdrMetadata` field exists on this shading
+            /// attribute.
+            pub fn has_sdr_metadata(&self) -> ::anyhow::Result<bool> {
+                $crate::schemas::shade::node_def::attribute_has_sdr_metadata(&self.attribute)
+            }
+
+            /// Whether this shading attribute's composed `sdrMetadata`
+            /// dictionary contains `key`, regardless of the entry's value type.
+            /// An aggregate value has no text rendering, so a key holding one
+            /// reports here but reads back as absent from the value queries.
+            pub fn has_sdr_metadata_by_key(&self, key: impl AsRef<str>) -> ::anyhow::Result<bool> {
+                $crate::schemas::shade::node_def::attribute_has_sdr_metadata_by_key(&self.attribute, key.as_ref())
+            }
+
+            /// Author `sdrMetadata` entries on this shading attribute
+            /// (C++ `UsdShadeInput` / `UsdShadeOutput::SetSdrMetadata`).
+            ///
+            /// Entries merge into the dictionary the edit target already holds,
+            /// so keys this call does not name keep composing from wherever
+            /// they are authored.
+            pub fn set_sdr_metadata(
+                self,
+                metadata: &$crate::schemas::shade::SdrMetadata,
+            ) -> Result<Self, $crate::usd::StageAuthoringError> {
+                Ok(Self {
+                    attribute: $crate::schemas::shade::node_def::set_attribute_sdr_metadata(self.attribute, metadata)?,
+                })
+            }
+
+            /// Author one `sdrMetadata` entry on this shading attribute
+            /// (C++ `SetSdrMetadataByKey`).
+            pub fn set_sdr_metadata_by_key(
+                self,
+                key: impl Into<String>,
+                value: impl Into<String>,
+            ) -> Result<Self, $crate::usd::StageAuthoringError> {
+                Ok(Self {
+                    attribute: $crate::schemas::shade::node_def::set_attribute_sdr_metadata_by_key(
+                        self.attribute,
+                        key.into(),
+                        value.into(),
+                    )?,
+                })
+            }
+
+            /// Drop this shading attribute's whole `sdrMetadata` opinion on the
+            /// edit-target layer (C++ `ClearSdrMetadata`).
+            pub fn clear_sdr_metadata(self) -> Result<Self, $crate::usd::StageAuthoringError> {
+                Ok(Self {
+                    attribute: self
+                        .attribute
+                        .clear_metadata($crate::schemas::shade::tokens::META_SDR_METADATA)?,
+                })
+            }
+
+            /// Drop one `sdrMetadata` entry from this shading attribute's
+            /// opinion on the edit-target layer (C++ `ClearSdrMetadataByKey`).
+            pub fn clear_sdr_metadata_by_key(
+                self,
+                key: impl AsRef<str>,
+            ) -> Result<Self, $crate::usd::StageAuthoringError> {
+                Ok(Self {
+                    attribute: $crate::schemas::shade::node_def::clear_attribute_sdr_metadata_by_key(
+                        self.attribute,
+                        key.as_ref(),
                     )?,
                 })
             }

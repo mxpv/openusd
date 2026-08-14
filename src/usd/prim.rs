@@ -31,7 +31,9 @@
 //! routes invalidation through [`crate::pcp::Changes`], so only the prim
 //! indices observably affected by the write are dropped.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
+use std::error::Error;
 use std::sync::Arc;
 
 use super::{
@@ -217,6 +219,41 @@ impl Prim {
         Ok(())
     }
 
+    /// Composed value of a prim-level metadata field decoded to `T`, falling
+    /// back to what the prim's schemas declare. Mirrors C++
+    /// `UsdObject::GetMetadata(name, &value)` for a prim.
+    ///
+    /// The read counterpart of [`set_metadata`](Self::set_metadata), and the
+    /// prim-level sibling of [`Attribute::get_metadata`]. Decode to the field's
+    /// type (`get_metadata::<String>("documentation")`) or to [`sdf::Value`]
+    /// for the raw value. Dictionary-valued fields come back merged key-by-key
+    /// across layers, as value resolution composes them (spec 12.2.5).
+    ///
+    /// A field the accessors resolve by their own rule rather than plain
+    /// composition — `kind`, `specifier`, `typeName` — is better read through
+    /// that accessor ([`kind`](Self::kind) and friends), which tolerates an
+    /// authored value of the wrong type where a generic decode reports it.
+    ///
+    /// TODO: a schema-declared dictionary should compose *under* the authored
+    /// one (C++ `VtDictionaryOver`) rather than being shadowed by it; the same
+    /// generalization is missing from [`Attribute::get_metadata`].
+    pub fn get_metadata<T>(&self, key: &str) -> anyhow::Result<Option<T>>
+    where
+        T: TryFrom<sdf::Value>,
+        T::Error: Error + Send + Sync + 'static,
+    {
+        if let Some(authored) = self.stage.field::<T>(&self.path, key)? {
+            return Ok(Some(authored));
+        }
+        // Schema metadata parses untyped, so a declaration may hold a variant
+        // the caller did not ask for; that is "not declared", not an error.
+        let definition = self.prim_definition()?;
+        Ok(definition
+            .metadata(key)
+            .cloned()
+            .and_then(|value| T::try_from(value).ok()))
+    }
+
     /// Author a prim-level metadata field (e.g. `assetInfo`, `customData`,
     /// `kind`). Mirrors C++ `UsdObject::SetMetadata` for a prim.
     ///
@@ -225,12 +262,21 @@ impl Prim {
     /// a runtime-built string.
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        self.update_metadata(key, |_| value)
+        self.update_metadata(key, |_| Some(value))
+    }
+
+    /// Remove a prim-level metadata field's opinion from the edit-target layer.
+    /// Mirrors C++ `UsdObject::ClearMetadata` for a prim.
+    ///
+    /// Only the local opinion goes away; one on a weaker layer still composes.
+    pub fn clear_metadata(self, key: &'static str) -> Result<Self, StageAuthoringError> {
+        self.update_metadata(key, |_| None)
     }
 
     /// Read-modify-write a prim-level metadata field on the edit-target layer.
     /// `f` receives the field's current opinion on that layer (`None` when it
-    /// is unauthored locally) and returns the value to author.
+    /// is unauthored locally) and returns the value to author, or `None` to
+    /// remove the local opinion.
     ///
     /// Reading the local opinion rather than the composed value keeps opinions
     /// on weaker layers from being flattened into the edit target. This matters
@@ -242,16 +288,27 @@ impl Prim {
     /// [`set_metadata`](Self::set_metadata).
     pub fn update_metadata<F>(self, key: &'static str, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(Option<sdf::Value>) -> sdf::Value,
+        F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
     {
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            // Author an `over` for the prim (and any missing ancestors) when the
-            // edit target has no local spec, matching C++ `UsdObject::SetMetadata`
-            // creating the spec for editing. The layer records the ancestor
-            // adds and the metadata write.
-            let mut spec = sdf::PrimSpec::over(layer.data_mut(), path)?;
-            let value = f(spec.field(key).ok().flatten());
-            spec.set(key, value);
+            let local = layer.data_mut().try_field(&path, key)?.map(Cow::into_owned);
+            match f(local) {
+                // Author an `over` for the prim (and any missing ancestors) when
+                // the edit target has no local spec, matching C++
+                // `UsdObject::SetMetadata` creating the spec for editing. The
+                // layer records the ancestor adds and the metadata write.
+                Some(value) => sdf::PrimSpec::over(layer.data_mut(), path)?.set(key, value),
+                // Erasing reaches only a prim spec this layer already holds, so
+                // a prim it says nothing about stays absent from it — and the
+                // pseudo-root, whose fields are the layer's own metadata rather
+                // than any prim's, is no more clearable here than it is
+                // authorable.
+                None => {
+                    if let Some(mut spec) = sdf::PrimSpecMut::get(layer.data_mut(), path) {
+                        spec.erase(key);
+                    }
+                }
+            }
             Ok(())
         })?;
         Ok(self)
@@ -1880,7 +1937,7 @@ mod tests {
                 panic!("expected local customData dictionary");
             };
             d.insert("b".to_string(), sdf::Value::Int(2));
-            sdf::Value::Dictionary(d)
+            Some(sdf::Value::Dictionary(d))
         })?;
 
         let Some(sdf::Value::Dictionary(read)) = stage.field::<sdf::Value>("/World", "customData")? else {
@@ -1888,6 +1945,49 @@ mod tests {
         };
         assert_eq!(read.get("a"), Some(&sdf::Value::Int(1)));
         assert_eq!(read.get("b"), Some(&sdf::Value::Int(2)));
+        Ok(())
+    }
+
+    #[test]
+    fn clear_metadata_drops_local() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage
+            .define_prim("/World")?
+            .set_metadata("documentation", sdf::Value::String("x".into()))?;
+        assert_eq!(
+            stage
+                .prim("/World")?
+                .get_metadata::<String>("documentation")?
+                .as_deref(),
+            Some("x")
+        );
+
+        stage.prim("/World")?.clear_metadata("documentation")?;
+        assert_eq!(stage.prim("/World")?.get_metadata::<String>("documentation")?, None);
+        Ok(())
+    }
+
+    /// The pseudo-root's fields are layer metadata, not prim metadata, so
+    /// clearing prim metadata through it must leave them alone — the read
+    /// counterpart of `set_metadata` rejecting the pseudo-root outright.
+    #[test]
+    fn clear_metadata_pseudo_root() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.set_default_prim("World")?;
+
+        let _ = stage.prim("/")?.clear_metadata(sdf::FieldKey::DefaultPrim.as_str());
+
+        assert_eq!(stage.default_prim().as_deref(), Some("World"));
+        Ok(())
+    }
+
+    /// Clearing a field no layer authors locally leaves the layer untouched
+    /// rather than stamping an empty `over` to hold the absence.
+    #[test]
+    fn clear_metadata_authors_nothing() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.prim("/Absent")?.clear_metadata("documentation")?;
+        assert!(!stage.prim("/Absent")?.is_defined()?);
         Ok(())
     }
 

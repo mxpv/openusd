@@ -166,3 +166,38 @@ def Shader "Source"
     assert_eq!(asset.resolved_path(), Some(resolved.to_string_lossy().as_ref()));
     Ok(())
 }
+
+#[test]
+fn authors_node_def_source() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let scene_path = directory.path().join("scene.usda");
+    let scene = scene_path.to_string_lossy().into_owned();
+
+    let stage = usd::Stage::builder().in_memory("anon.usda")?;
+    let shader = Shader::define(&stage, "/Source")?;
+    shader.set_source_asset("./shader.mdl", "mdl")?;
+    shader.set_source_asset_subidentifier("Main", "mdl")?;
+    shader.set_sdr_metadata_by_key("role", "surface")?;
+    shader
+        .create_input("gain", "float")?
+        .set_sdr_metadata_by_key("widget", "slider")?;
+    stage.root_layer().export(&scene)?;
+
+    // Everything the setters chose survives a round trip through the text
+    // format, the implementation source they selected included.
+    let stage = usd::Stage::open(&scene)?;
+    let shader = Shader::get(&stage, "/Source")?.expect("Shader");
+    assert_eq!(shader.implementation_source()?, ImplementationSource::SourceAsset);
+    assert_eq!(shader.source_types()?, vec![tf::Token::from("mdl")]);
+    assert_eq!(
+        shader.source_asset("mdl")?.expect("MDL asset").authored_path,
+        "./shader.mdl"
+    );
+    assert_eq!(shader.source_asset_subidentifier("mdl")?.as_deref(), Some("Main"));
+    assert_eq!(shader.sdr_metadata_by_key("role")?.as_deref(), Some("surface"));
+
+    let gain = shader.inputs()?.pop().expect("gain input");
+    assert_eq!(gain.base_name(), "gain");
+    assert_eq!(gain.sdr_metadata_by_key("widget")?.as_deref(), Some("slider"));
+    Ok(())
+}
