@@ -371,13 +371,14 @@ impl IndexCache {
         ))
     }
 
-    /// Composes `instance`, registers it against its prototype, and materializes
-    /// the prototype's index on first use, returning the `(canonical instance,
-    /// prototype path)` pair. The first instance registered for a key becomes
-    /// canonical and seeds the prototype; later instances with the same key reuse
-    /// the already-materialized prototype, so its subtree is composed only once
-    /// (spec 11.3.3). Composing the index here (and computing its [`InstanceKey`])
-    /// is the cache's job; the dedup is the [`PrototypeRegistry`]'s.
+    /// Composes `instance`'s shared subtree, registers it against its prototype,
+    /// and materializes the prototype's index on first use, returning the
+    /// `(canonical instance, prototype path)` pair. The first instance registered
+    /// for a key becomes canonical and seeds the prototype; later instances with
+    /// the same key reuse the already-materialized prototype, so its subtree is
+    /// composed only once (spec 11.3.3). Composing the index here (and computing
+    /// its [`InstanceKey`]) is the cache's job; the dedup is the
+    /// [`PrototypeRegistry`]'s.
     fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<(Path, Path)> {
         // A nested instance can itself be an instance proxy. Its shared
         // composition lives at the corresponding prim inside the enclosing
@@ -385,6 +386,11 @@ impl IndexCache {
         // key and materialized root.
         let composed = self.effective_path(graph, instance)?;
         self.ensure_index(graph, &composed)?;
+        // Load rules are authored against the stage namespace, so they scope at
+        // the instance's own path. `scoped_load_rules` translates a path inside a
+        // prototype onto that prototype's stored relative rules — the ones its
+        // canonical instance produced — so the two routes to one nested instance,
+        // the proxy and the prototype-namespace path, scope to the same table.
         let relative_load_rules = {
             let (rules, relative_instance) = self.scoped_load_rules(instance);
             rules.make_relative_to(&relative_instance)
@@ -413,12 +419,15 @@ impl IndexCache {
     }
 
     /// Builds and caches the composed index for a freshly minted prototype root
-    /// (`/__Prototype_N`) from the canonical instance's shared subtree (spec
-    /// 11.3.3). The clone of the canonical index has its instance-local nodes
-    /// inerted at the instance root's own depth, so only the instanceable arc,
-    /// its descendants, and the implied classes contribute — the local root
-    /// override and the ancestral references above the instanceable arc drop out
-    /// — and its namespace is re-anchored onto the prototype root.
+    /// (`/__Prototype_N`) from the seeding instance's shared subtree (spec
+    /// 11.3.3). `composed` is the path whose cached index composes that instance:
+    /// its own path, or — when the instance is itself an instance proxy — its
+    /// prim inside the enclosing prototype. The clone of that index has its
+    /// instance-local nodes inerted at the instance root's own depth, so only the
+    /// instanceable arc, its descendants, and the implied classes contribute —
+    /// the local root override and the ancestral references above the
+    /// instanceable arc drop out — and its namespace is re-anchored onto the
+    /// prototype root.
     ///
     /// The prototype root's child context is seeded as a namespace root with
     /// `instance_depth` cleared — a prototype root is not an instance (see
@@ -433,14 +442,14 @@ impl IndexCache {
     // `Indexer` already takes only `&` references; this needs the cache to build
     // off the `&mut self` path first (compose into per-prototype results, then
     // insert) and the shared `LayerGraph` handed to workers as `&`/`Arc`.
-    fn materialize_prototype(&mut self, graph: &LayerGraph, canonical: &Path, prototype: &Path) {
-        let mut index = self.cached(canonical).clone();
-        let depth = canonical.prim_element_count() as u16;
+    fn materialize_prototype(&mut self, graph: &LayerGraph, composed: &Path, prototype: &Path) {
+        let mut index = self.cached(composed).clone();
+        let depth = composed.prim_element_count() as u16;
         index.mark_instance_local_inert(depth, depth);
         // Re-anchor the seeding instance's composed namespace onto the prototype
         // root so the root's own target translation lands in the prototype
-        // namespace, not the canonical instance's.
-        index.rebase_root(canonical, prototype);
+        // namespace, not the instance's.
+        index.rebase_root(composed, prototype);
 
         let (mut context, _) = index.context_for_children(graph, &self.root_parent_context());
         context.instance_depth = None;
