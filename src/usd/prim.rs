@@ -709,21 +709,13 @@ impl Prim {
 
     /// `true` if this prim is an instance (spec 11.3.3): `instanceable` resolves
     /// true and the prim has a composition arc. Mirrors C++ `UsdPrim::IsInstance`.
+    ///
+    /// A `/__Prototype_N` root is never an instance even when `instanceable`
+    /// composes true on it, which is routine for a published asset; the
+    /// composition cache resolves that rule.
     pub fn is_instance(&self) -> anyhow::Result<bool> {
-        if self.path == sdf::Path::abs_root()
-            || !self.stage.mask().includes(&self.path)
-            || !self.stage.has_spec(&self.path)?
-        {
-            return Ok(false);
-        }
-        if !self
-            .stage
-            .field::<bool>(&self.path, sdf::FieldKey::Instanceable)?
-            .unwrap_or(false)
-        {
-            return Ok(false);
-        }
-        self.has_composition_arc()
+        self.stage
+            .masked(&self.path, |g, cache| cache.is_instance(g, &self.path))
     }
 
     /// `true` if the prim is in the contiguous model hierarchy: its `kind` is
@@ -763,16 +755,20 @@ impl Prim {
     /// `/__Prototype_N` prim), sorted by namespace path and filtered to the
     /// population mask. Mirrors C++ `UsdPrim::GetInstances`.
     ///
+    /// Each instance is named by the path whose index composes it, so a nested
+    /// prototype reports its prim inside the enclosing prototype rather than the
+    /// proxies standing for it — as C++ does, resolving each registered prim
+    /// index into the prototype it belongs to.
+    ///
     /// The mask filters the *results* rather than gating the query (unlike the
     /// `self.path`-gated sibling queries such as [`is_instance`](Self::is_instance)):
     /// `self.path` here is the synthetic prototype root, which is never in a
     /// user population mask, so gating on it would always yield nothing.
     pub fn instances(&self) -> Vec<sdf::Path> {
-        let mask = self.stage.mask();
         let instances = self.stage.cache().instances_of(&self.path);
         instances
             .into_iter()
-            .filter(|instance| mask.includes(instance))
+            .filter(|instance| self.stage.mask_includes(instance))
             .collect()
     }
 

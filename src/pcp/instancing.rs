@@ -43,9 +43,11 @@ pub(super) struct PrototypeRegistry {
     /// lookup, while change invalidation can fan a touched path up to an
     /// enclosing root and down to nested roots without scanning every entry.
     by_root: sdf::PathTable<Prototype>,
-    /// Reverse index from each instance's stage path to its `/__Prototype_N`
+    /// Reverse index from each instance's composed path to its `/__Prototype_N`
     /// root, so a changed path resolves to the prototypes whose instances it
-    /// touches via bounded ancestor/subtree lookups rather than a full scan.
+    /// touches via bounded ancestor/subtree lookups rather than a full scan. A
+    /// nested instance is keyed by its prim inside the enclosing prototype, so
+    /// those lookups reach it through that prototype's namespace.
     by_instance: sdf::PathTable<Path>,
     /// Maps an instancing key to its prototype root, the lookup direction used
     /// only when registering an instance to dedup against an existing key.
@@ -74,14 +76,17 @@ struct Prototype {
     /// Registration order (the `N` in `/__Prototype_N`). Kept so prototypes can
     /// be returned in mint order without parsing the path.
     index: usize,
-    /// Instance whose composed subtree seeds this prototype's materialization.
-    canonical: Path,
-    /// Every instance sharing this prototype.
+    /// Every instance sharing this prototype, by composed path — so a nested
+    /// instance appears once, as its prim inside the enclosing prototype,
+    /// however many proxies stand for it. The first is the canonical instance,
+    /// whose composed subtree seeded the materialization.
     instances: Vec<Path>,
-    /// The canonical instance's load rules, re-rooted onto the instance's own
-    /// path (`LoadRules::make_relative_to`), so a `/__Prototype_N` descendant
+    /// The canonical instance's load rules, re-rooted onto the path it composes
+    /// at (`LoadRules::make_relative_to`), so a `/__Prototype_N` descendant
     /// build resolves its own payload-inclusion decision against the
-    /// instance's authored rules (see `IndexCache::scoped_load_rules`).
+    /// instance's authored rules (see `IndexCache::scoped_load_rules`). For a
+    /// nested instance that path lies inside the enclosing prototype, so the
+    /// rules are already that prototype's relative table.
     relative_load_rules: LoadRules,
 }
 
@@ -121,22 +126,30 @@ struct InstanceArc {
 }
 
 impl PrototypeRegistry {
-    /// Registers `instance` against its prototype: dedups by `key`, recording
+    /// Registers an instance against its prototype: dedups by `key`, recording
     /// the instance the first time a key is seen and minting `/__Prototype_N`.
-    /// Returns the canonical instance, the prototype path, and whether this call
-    /// minted a new prototype (so the caller knows to materialize its index).
-    /// `key.load_rules` is stored as the prototype's relative load rules only
-    /// on the minting call — a cache hit's existing entry is already
-    /// guaranteed identical, since it was part of the matched key.
-    fn register(&mut self, key: InstanceKey, instance: &Path) -> (Path, Path, bool) {
+    /// Returns the prototype path and whether this call minted it (so the caller
+    /// knows to materialize its index, seeding from the `composed` that minted
+    /// it — the prototype's canonical instance). `key.load_rules` is stored as
+    /// the prototype's relative load rules only on the minting call — a cache
+    /// hit's existing entry is already guaranteed identical, since it was part
+    /// of the matched key.
+    ///
+    /// `composed` is the path whose index composes the instance
+    /// ([`IndexCache::effective_path`]), which is the instance's identity here:
+    /// every proxy standing for one nested instance shares a single entry, in
+    /// the enclosing prototype's namespace.
+    fn register(&mut self, key: InstanceKey, composed: &Path) -> (Path, bool) {
         if let Some(root) = self.by_key.get(&key) {
             let root = root.clone();
-            let prototype = self.by_root.get_mut(&root).expect("key index points to a prototype");
-            if !prototype.instances.contains(instance) {
-                prototype.instances.push(instance.clone());
-                self.by_instance.insert(instance.clone(), root.clone());
+            // The reverse index answers "already registered here?" in one lookup,
+            // and the two are written together below.
+            if self.by_instance.get(composed) != Some(&root) {
+                let prototype = self.by_root.get_mut(&root).expect("key index points to a prototype");
+                prototype.instances.push(composed.clone());
+                self.by_instance.insert(composed.clone(), root.clone());
             }
-            return (prototype.canonical.clone(), root, false);
+            return (root, false);
         }
 
         let index = self.count;
@@ -148,33 +161,34 @@ impl PrototypeRegistry {
             path.clone(),
             Prototype {
                 index,
-                canonical: instance.clone(),
-                instances: vec![instance.clone()],
+                instances: vec![composed.clone()],
                 relative_load_rules,
             },
         );
-        self.by_instance.insert(instance.clone(), path.clone());
-        (instance.clone(), path, true)
+        self.by_instance.insert(composed.clone(), path.clone());
+        (path, true)
     }
 
-    /// The canonical instance's load rules, re-rooted onto the instance's own
-    /// path, for the prototype at `prototype`. `None` for an unknown path.
+    /// The canonical instance's load rules, re-rooted onto the path it composes
+    /// at, for the prototype at `prototype`. `None` for an unknown path.
     fn relative_load_rules(&self, prototype: &Path) -> Option<&LoadRules> {
         self.by_root.get(prototype).map(|p| &p.relative_load_rules)
     }
 
-    /// The canonical instance backing the prototype at `prototype`, or `None`
-    /// for an unknown path. Used by registry tests to assert a prototype's
-    /// presence; production composition reaches the prototype directly through
+    /// The canonical instance backing the prototype at `prototype` — the first
+    /// registered, which seeded its materialization — or `None` for an unknown
+    /// path. Used by registry tests to assert a prototype's presence; production
+    /// composition reaches the prototype directly through
     /// [`register`](Self::register)'s return.
     #[cfg(test)]
     fn canonical_of(&self, prototype: &Path) -> Option<Path> {
-        self.by_root.get(prototype).map(|p| p.canonical.clone())
+        self.by_root.get(prototype).and_then(|p| p.instances.first().cloned())
     }
 
     /// The instances sharing the prototype at `prototype` (a `/__Prototype_N`
-    /// path), sorted by namespace path so the result does not depend on the
-    /// order instances were queried. Empty for unknown paths.
+    /// path), by composed path and sorted by namespace path, so neither the
+    /// membership nor the order depends on how the instances were queried
+    /// ([`register`](Self::register)). Empty for unknown paths.
     fn instances_of(&self, prototype: &Path) -> Vec<Path> {
         let mut instances = self.instances_unsorted(prototype).to_vec();
         instances.sort();
@@ -235,14 +249,27 @@ impl PrototypeRegistry {
     /// [`by_instance`](Self::by_instance) reverse index, the prototypes whose
     /// instances it is nested with. The cost scales with the change set and the
     /// touched subtrees, not the total prototype count.
+    ///
+    /// A nested instance is registered inside its enclosing prototype's
+    /// namespace, so an affected root is itself a path to sweep: each newly
+    /// affected root rejoins the worklist and a whole nesting chain drops
+    /// together. A root is enqueued only on its first insertion into `affected`,
+    /// which both terminates the sweep and puts its scan count at the change set
+    /// plus the affected roots. The closure is computed in full before anything
+    /// is removed, since the table entries are the edges to the deeper
+    /// prototypes.
     fn remove_affected(&mut self, changed: &[Path]) -> Vec<Path> {
         let mut affected: HashSet<Path> = HashSet::new();
-        for p in changed {
-            for (root, _) in self.by_root.ancestors(p).chain(self.by_root.subtree(p)) {
-                affected.insert(root.clone());
-            }
-            for (_, root) in self.by_instance.ancestors(p).chain(self.by_instance.subtree(p)) {
-                affected.insert(root.clone());
+        let mut worklist: Vec<&Path> = changed.iter().collect();
+        while let Some(p) = worklist.pop() {
+            let roots = self.by_root.ancestors(p).chain(self.by_root.subtree(p));
+            let instances = self.by_instance.ancestors(p).chain(self.by_instance.subtree(p));
+            let touched = roots.map(|(root, _)| root).chain(instances.map(|(_, root)| root));
+            for root in touched {
+                if !affected.contains(root) {
+                    affected.insert(root.clone());
+                    worklist.push(root);
+                }
             }
         }
         for root in &affected {
@@ -253,7 +280,11 @@ impl PrototypeRegistry {
             }
         }
         self.by_key.retain(|_, root| !affected.contains(root));
-        affected.into_iter().collect()
+        // Sorted so a cascade returns its roots in a stable order, whatever the
+        // hash set's iteration happens to be.
+        let mut dropped: Vec<Path> = affected.into_iter().collect();
+        dropped.sort();
+        dropped
     }
 }
 
@@ -319,7 +350,9 @@ impl IndexCache {
         //
         // TODO(perf): `drop_index_subtree` is an O(n) cache scan per affected
         // root; batching the affected roots into one prefix-filtered pass (or an
-        // `SdfPathTable`-like trie) would bound it by the change set.
+        // `SdfPathTable`-like trie) would bound it by the change set. A change
+        // reaching a nested instance drops its whole prototype chain, so the
+        // per-root cost is paid once per level.
         for root in self.prototypes.remove_affected(changed) {
             self.drop_index_subtree(&root);
         }
@@ -373,26 +406,24 @@ impl IndexCache {
 
     /// Composes `instance`'s shared subtree, registers it against its prototype,
     /// and materializes the prototype's index on first use, returning the
-    /// `(canonical instance, prototype path)` pair. The first instance registered
-    /// for a key becomes canonical and seeds the prototype; later instances with
-    /// the same key reuse the already-materialized prototype, so its subtree is
-    /// composed only once (spec 11.3.3). Composing the index here (and computing
-    /// its [`InstanceKey`]) is the cache's job; the dedup is the
+    /// prototype path. The first instance registered for a key becomes canonical
+    /// and seeds the prototype; later instances with the same key reuse the
+    /// already-materialized prototype, so its subtree is composed only once
+    /// (spec 11.3.3). Composing the index here (and computing its
+    /// [`InstanceKey`]) is the cache's job; the dedup is the
     /// [`PrototypeRegistry`]'s.
-    fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<(Path, Path)> {
+    fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<Path> {
         // A nested instance can itself be an instance proxy. Its shared
         // composition lives at the corresponding prim inside the enclosing
-        // prototype, so that is the index that defines the nested prototype's
-        // key and materialized root.
+        // prototype, so that is the index defining the nested prototype's key
+        // and materialized root, and the identity it registers under.
         let composed = self.effective_path(graph, instance)?;
         self.ensure_index(graph, &composed)?;
         // Load rules are authored against the stage namespace, so they scope at
-        // the instance's own path. `scoped_load_rules` translates a path inside a
-        // prototype onto that prototype's stored relative rules — the ones its
-        // canonical instance produced — so the two routes to one nested instance,
-        // the proxy and the prototype-namespace path, scope to the same table.
+        // the path the instance composes at; `scoped_load_rules` translates a
+        // path inside a prototype onto that prototype's stored relative rules.
         let relative_load_rules = {
-            let (rules, relative_instance) = self.scoped_load_rules(instance);
+            let (rules, relative_instance) = self.scoped_load_rules(&composed);
             rules.make_relative_to(&relative_instance)
         };
         let key = instance_key(
@@ -400,7 +431,7 @@ impl IndexCache {
             composed.prim_element_count() as u16,
             relative_load_rules,
         );
-        let (canonical, prototype, minted) = self.prototypes.register(key, instance);
+        let (prototype, minted) = self.prototypes.register(key, &composed);
         // Materialize the prototype's index only when this call minted it. Before
         // it existed, a query on the deterministic `/__Prototype_N` namespace
         // composed the synthetic path in place (no prototype to redirect to), so
@@ -413,21 +444,20 @@ impl IndexCache {
         if minted {
             self.drop_index_subtree(&prototype);
             self.redirected_prims.retain(|path, _| !path.has_prefix(&prototype));
+            // The minting registration made `composed` this prototype's canonical
+            // instance, so its index is the one the prototype materializes from.
             self.materialize_prototype(graph, &composed, &prototype);
         }
-        Ok((canonical, prototype))
+        Ok(prototype)
     }
 
     /// Builds and caches the composed index for a freshly minted prototype root
-    /// (`/__Prototype_N`) from the seeding instance's shared subtree (spec
-    /// 11.3.3). `composed` is the path whose cached index composes that instance:
-    /// its own path, or — when the instance is itself an instance proxy — its
-    /// prim inside the enclosing prototype. The clone of that index has its
-    /// instance-local nodes inerted at the instance root's own depth, so only the
-    /// instanceable arc, its descendants, and the implied classes contribute —
-    /// the local root override and the ancestral references above the
-    /// instanceable arc drop out — and its namespace is re-anchored onto the
-    /// prototype root.
+    /// (`/__Prototype_N`) from the canonical instance's shared subtree (spec
+    /// 11.3.3). The clone of the canonical index has its instance-local nodes
+    /// inerted at the instance root's own depth, so only the instanceable arc,
+    /// its descendants, and the implied classes contribute — the local root
+    /// override and the ancestral references above the instanceable arc drop out
+    /// — and its namespace is re-anchored onto the prototype root.
     ///
     /// The prototype root's child context is seeded as a namespace root with
     /// `instance_depth` cleared — a prototype root is not an instance (see
@@ -442,14 +472,14 @@ impl IndexCache {
     // `Indexer` already takes only `&` references; this needs the cache to build
     // off the `&mut self` path first (compose into per-prototype results, then
     // insert) and the shared `LayerGraph` handed to workers as `&`/`Arc`.
-    fn materialize_prototype(&mut self, graph: &LayerGraph, composed: &Path, prototype: &Path) {
-        let mut index = self.cached(composed).clone();
-        let depth = composed.prim_element_count() as u16;
+    fn materialize_prototype(&mut self, graph: &LayerGraph, canonical: &Path, prototype: &Path) {
+        let mut index = self.cached(canonical).clone();
+        let depth = canonical.prim_element_count() as u16;
         index.mark_instance_local_inert(depth, depth);
         // Re-anchor the seeding instance's composed namespace onto the prototype
         // root so the root's own target translation lands in the prototype
-        // namespace, not the instance's.
-        index.rebase_root(composed, prototype);
+        // namespace, not the canonical instance's.
+        index.rebase_root(canonical, prototype);
 
         let (mut context, _) = index.context_for_children(graph, &self.root_parent_context());
         context.instance_depth = None;
@@ -464,11 +494,13 @@ impl IndexCache {
         if !self.is_instance(graph, instance)? {
             return Ok(None);
         }
-        Ok(Some(self.register_prototype(graph, instance)?.1))
+        Ok(Some(self.register_prototype(graph, instance)?))
     }
 
     /// The instances sharing the prototype at `prototype` (a `/__Prototype_N`
-    /// path), sorted by namespace path. Empty for unknown paths.
+    /// path), sorted by namespace path. Each is the path whose index composes
+    /// that instance, so a nested instance is reported once, as its prim inside
+    /// the enclosing prototype. Empty for unknown paths.
     pub(crate) fn instances_of(&self, prototype: &Path) -> Vec<Path> {
         self.prototypes.instances_of(prototype)
     }
@@ -497,18 +529,19 @@ impl IndexCache {
         self.prototypes.enclosing_root(Some(path))
     }
 
-    /// The canonical instance's load rules, re-rooted onto the instance's own
-    /// path, for the prototype at `root`. `None` when `root` is not a
-    /// registered prototype. Used by `IndexCache::scoped_load_rules` to
-    /// resolve a `/__Prototype_N` descendant's payload-inclusion decision
-    /// against the rules that governed its seeding instance.
+    /// The canonical instance's load rules, re-rooted onto the path it composes
+    /// at, for the prototype at `root`. `None` when `root` is not a registered
+    /// prototype. Used by `IndexCache::scoped_load_rules` to resolve a
+    /// `/__Prototype_N` descendant's payload-inclusion decision against the
+    /// rules that governed its seeding instance.
     pub(super) fn relative_load_rules_of(&self, root: &Path) -> Option<&LoadRules> {
         self.prototypes.relative_load_rules(root)
     }
 
     /// The instances sharing the prototype at `root`, borrowed in registration
-    /// order for membership checks (e.g. population-mask gating). Empty for a
-    /// path that is not a prototype root.
+    /// order for membership checks (e.g. population-mask gating). Each is a
+    /// composed path, so a nested prototype's instance lies inside the enclosing
+    /// prototype's namespace. Empty for a path that is not a prototype root.
     pub(crate) fn prototype_instances(&self, root: &Path) -> &[Path] {
         self.prototypes.instances_unsorted(root)
     }
@@ -547,7 +580,7 @@ impl IndexCache {
         let instance = self
             .enclosing_instance(graph, path)?
             .expect("an instance proxy has an enclosing instance");
-        let (_canonical, prototype) = self.register_prototype(graph, &instance)?;
+        let prototype = self.register_prototype(graph, &instance)?;
         Ok(path.replace_prefix(&instance, &prototype))
     }
 
@@ -606,7 +639,7 @@ impl IndexCache {
     /// deepening the materialized index), and every non-instanced prim.
     pub(super) fn redirect_anchor(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Option<(Path, Path)>> {
         if let Some(instance) = self.enclosing_instance(graph, prim)? {
-            let (_canonical, prototype) = self.register_prototype(graph, &instance)?;
+            let prototype = self.register_prototype(graph, &instance)?;
             return Ok(Some((instance, prototype)));
         }
         Ok(None)
@@ -674,9 +707,9 @@ mod tests {
     fn remove_affected_targets_touched() {
         let mut reg = PrototypeRegistry::default();
         // /A and /B share one prototype; /C has its own.
-        let (_, p0, minted0) = reg.register(key("p"), &path("/A"));
+        let (p0, minted0) = reg.register(key("p"), &path("/A"));
         reg.register(key("p"), &path("/B"));
-        let (_, p1, minted1) = reg.register(key("q"), &path("/C"));
+        let (p1, minted1) = reg.register(key("q"), &path("/C"));
         assert!(minted0 && minted1);
         assert_ne!(p0, p1);
 
@@ -687,17 +720,33 @@ mod tests {
         assert!(reg.canonical_of(&p1).is_none());
 
         // Re-registering /C mints a fresh identity (count stays monotonic).
-        let (_, p1b, minted) = reg.register(key("q"), &path("/C"));
+        let (p1b, minted) = reg.register(key("q"), &path("/C"));
         assert!(minted);
         assert_ne!(p1b, p1);
+    }
+
+    /// A nested prototype registers inside its enclosing prototype's namespace,
+    /// so a change at the outermost instance drops the whole dependent chain.
+    #[test]
+    fn remove_affected_cascades() {
+        let mut reg = PrototypeRegistry::default();
+        let (p0, _) = reg.register(key("outer"), &path("/A"));
+        let (p1, _) = reg.register(key("mid"), &path(&format!("{p0}/Inner")));
+        let (p2, _) = reg.register(key("inner"), &path(&format!("{p1}/Nested")));
+
+        let dropped = reg.remove_affected(&[path("/A")]);
+        for root in [&p0, &p1, &p2] {
+            assert!(dropped.contains(root), "{root} must be dropped");
+            assert!(reg.canonical_of(root).is_none(), "{root} must be unmapped");
+        }
     }
 
     /// An unrelated change leaves every prototype mapping intact.
     #[test]
     fn remove_affected_keeps_unrelated() {
         let mut reg = PrototypeRegistry::default();
-        let (_, p0, _) = reg.register(key("p"), &path("/A"));
-        let (_, p1, _) = reg.register(key("q"), &path("/C"));
+        let (p0, _) = reg.register(key("p"), &path("/A"));
+        let (p1, _) = reg.register(key("q"), &path("/C"));
 
         assert!(reg.remove_affected(&[path("/Extra")]).is_empty());
         assert!(reg.canonical_of(&p0).is_some());
@@ -709,13 +758,13 @@ mod tests {
     #[test]
     fn remove_affected_ancestor_and_root() {
         let mut reg = PrototypeRegistry::default();
-        let (_, p0, _) = reg.register(key("p"), &path("/Group/A"));
+        let (p0, _) = reg.register(key("p"), &path("/Group/A"));
 
         // The prototype root itself is on the chain.
         assert_eq!(reg.remove_affected(std::slice::from_ref(&p0)), vec![p0.clone()]);
 
         // Re-register, then touch an ancestor of the instance.
-        let (_, p0b, _) = reg.register(key("p"), &path("/Group/A"));
+        let (p0b, _) = reg.register(key("p"), &path("/Group/A"));
         assert_eq!(reg.remove_affected(&[path("/Group")]), vec![p0b]);
     }
 }

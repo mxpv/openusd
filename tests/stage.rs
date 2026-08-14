@@ -3427,6 +3427,53 @@ fn prototype_queries_masked() -> Result<()> {
     Ok(())
 }
 
+/// A prototype root is not an instance, whatever its composed `instanceable`
+/// opinion says (spec 11.3.3): the opinion describes the prims that share the
+/// prototype, not the prototype itself.
+#[test]
+fn prototype_root_not_instance() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_prototype_root_instanceable.usda"))?;
+    let proto = stage
+        .prim("/World/Place")?
+        .prototype()?
+        .expect("/World/Place is an instance");
+
+    assert!(stage.prim(proto.clone())?.is_prototype());
+    assert!(!stage.prim(proto.clone())?.is_instance()?);
+    assert_eq!(stage.prim(proto)?.prototype()?, None);
+    Ok(())
+}
+
+/// A nested prototype survives a mask naming only the outer instance: it is
+/// reported among the stage's prototypes, its instance is the prim in the
+/// enclosing prototype, and its content stays readable (spec 11.3.3).
+#[test]
+fn nested_prototype_masked() -> Result<()> {
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/A"])?)
+        .open(&fixture_path("instancing_nested_in_prototype.usda"))?;
+
+    let outer = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+    let nested_instance = outer.append_path("Nested")?;
+    let nested = stage
+        .prim(nested_instance.clone())?
+        .prototype()?
+        .expect("the nested prim is an instance");
+
+    assert!(
+        stage.prototypes().contains(&nested),
+        "the nested prototype is populated"
+    );
+    assert_eq!(stage.prim(nested.clone())?.instances(), vec![nested_instance]);
+    assert_eq!(
+        stage
+            .attribute(nested.append_path("Leaf")?.append_property("v")?)?
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(3.0))
+    );
+    Ok(())
+}
+
 /// A nested instance (an instance inside a prototype's subtree) is
 /// recognized, resolves values within the queried instance, and shares its
 /// own prototype across the outer instances (spec 11.3.3).

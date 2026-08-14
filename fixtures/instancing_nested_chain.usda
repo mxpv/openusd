@@ -1,0 +1,44 @@
+#usda 1.0
+(
+    doc = """Three levels of nested instancing (spec 11.3.3).
+
+    /A instances /Outer, whose child /Outer/Inner instances /Mid, whose child
+    /Mid/Nested instances /Deep. Each prototype is seeded from its prim inside
+    the enclosing prototype, so the three form one dependency chain: a change
+    at /A reaches every one of them."""
+)
+
+def Scope "Deep"
+{
+    def Scope "Leaf"
+    {
+        double v = 1.0
+    }
+}
+
+def Scope "Mid"
+{
+    def Scope "Nested" (
+        instanceable = true
+        references = </Deep>
+    )
+    {
+    }
+}
+
+def Scope "Outer"
+{
+    def Scope "Inner" (
+        instanceable = true
+        references = </Mid>
+    )
+    {
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Outer>
+)
+{
+}

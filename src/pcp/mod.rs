@@ -269,7 +269,9 @@
 //!   before any instance is touched reads the default. Reaching the prototype
 //!   through an instance (`Prim::prototype`, or any instance-proxy query) first
 //!   registers it, after which masked prototype-content queries (including those
-//!   behind a lazily-loaded payload) resolve correctly.
+//!   behind a lazily-loaded payload) resolve correctly. A nested prototype's
+//!   instance is a prim inside the enclosing prototype, so the mask check
+//!   resolves outward one prototype at a time until it reaches a stage path.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 

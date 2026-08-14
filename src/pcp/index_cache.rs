@@ -3365,6 +3365,76 @@ def "Anchor" (inherits = </Rig>) {}
         Ok(())
     }
 
+    /// A nested instance has one registry identity — its prim inside the
+    /// enclosing prototype — whatever route reached it (spec 11.3.3). Querying
+    /// through each outer instance's proxy and through the prototype namespace,
+    /// in any order and on a fresh cache each time, registers that one instance,
+    /// while the outer prototype keeps reporting both of its own.
+    #[test]
+    fn nested_identity_query_order() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_in_prototype.usda", manifest_dir());
+        let orders = [
+            ["/A/Nested", "/B/Nested", "/__Prototype_0/Nested"],
+            ["/B/Nested", "/__Prototype_0/Nested", "/A/Nested"],
+            ["/A/Nested", "/__Prototype_0/Nested", "/B/Nested"],
+        ];
+        for order in orders {
+            let (graph, mut cache) = single_layer_stack(&root);
+            for queried in order {
+                cache.prototype_of(&graph, &sdf::path(queried)?)?;
+            }
+            let outer = cache
+                .prototype_of(&graph, &sdf::path("/A")?)?
+                .expect("/A is an instance");
+            let nested = cache
+                .prototype_of(&graph, &sdf::path("/A/Nested")?)?
+                .expect("the nested proxy is an instance");
+            assert_eq!(
+                cache.instances_of(&nested),
+                vec![outer.append_path("Nested")?],
+                "nested identity for {order:?}"
+            );
+            assert_eq!(
+                cache.instances_of(&outer),
+                vec![sdf::path("/A")?, sdf::path("/B")?],
+                "outer instances for {order:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Prototypes nested three deep are each seeded from the prototype above,
+    /// so a change at the outermost instance drops the whole chain (spec
+    /// 11.3.3), not just the prototype the change path is registered under.
+    #[test]
+    fn nested_chain_invalidates() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_chain.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, 0.0, &interp)?,
+            Some(Value::Double(1.0))
+        );
+        assert_eq!(cache.prototypes().len(), 3, "one prototype per nesting level");
+
+        cache.invalidate_prototypes(&[sdf::path("/A")?]);
+        assert!(
+            cache.prototypes().is_empty(),
+            "every prototype in the chain drops: {:?}",
+            cache.prototypes()
+        );
+
+        // The chain re-registers from scratch and resolves again, so the drop
+        // left behind no stale index, redirection, or key.
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, 0.0, &interp)?,
+            Some(Value::Double(1.0))
+        );
+        assert_eq!(cache.prototypes().len(), 3);
+        Ok(())
+    }
+
     /// A nested instance whose reference targets a sub-root prim composes from
     /// its prim inside the enclosing prototype (spec 11.3.3): seeding the nested
     /// prototype from the outer proxy's own namespace instead leaves its

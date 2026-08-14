@@ -2758,18 +2758,48 @@ impl Stage {
     /// Ordinary paths defer to [`StagePopulationMask::includes`]; instance
     /// proxies are in their instance's namespace and so are covered by the
     /// instance's own mask entry.
+    ///
+    /// A nested prototype's instance is itself a prim inside the enclosing
+    /// prototype, so the walk continues outward through each enclosing
+    /// prototype until it reaches a stage path a user mask can name. Well-formed
+    /// nesting is finite, and the visited set bounds the walk whatever the
+    /// composition looks like.
+    //
+    // TODO(perf): this is the inverse of `IndexCache::effective_path` — composed
+    // path back to the stage paths standing for it — recomputed per call, while
+    // the inward direction is memoized in `redirected_prims`. It belongs beside
+    // that memo as a cache-side "mask anchors of a path" query, which would also
+    // serve the callers that hold the cache borrow and so cannot re-enter here
+    // (`Relationship::forwarded_targets` passes the raw mask for that reason).
     pub(crate) fn mask_includes(&self, prim: &sdf::Path) -> bool {
         if self.population_mask.includes(prim) {
             return true;
         }
         let cache = self.cache();
-        match cache.prototype_root_of(prim) {
-            Some(root) => cache
-                .prototype_instances(&root)
-                .iter()
-                .any(|instance| self.population_mask.includes(instance)),
-            None => false,
+        let Some(root) = cache.prototype_root_of(prim) else {
+            return false;
+        };
+        let instances = cache.prototype_instances(&root);
+        if instances.iter().any(|instance| self.population_mask.includes(instance)) {
+            return true;
         }
+        // Past here the instances are themselves inside prototypes, so the walk
+        // continues outward; a single level of instancing never allocates.
+        let mut pending: Vec<&sdf::Path> = instances.iter().collect();
+        let mut visited: HashSet<sdf::Path> = HashSet::from([root]);
+        while let Some(path) = pending.pop() {
+            if self.population_mask.includes(path) {
+                return true;
+            }
+            let Some(root) = cache.prototype_root_of(path) else {
+                continue;
+            };
+            let instances = cache.prototype_instances(&root);
+            if visited.insert(root) {
+                pending.extend(instances);
+            }
+        }
+        false
     }
 
     /// Returns a handle to a prim's composition index (C++
@@ -2812,15 +2842,13 @@ impl Stage {
     }
 
     /// Returns every registered prototype root (`/__Prototype_N`) with at least
-    /// one instance inside the population mask.
+    /// one instance inside the population mask. A prototype root is never named
+    /// in a user mask and encloses itself, so [`Self::mask_includes`] resolves it
+    /// through its own instances — outward through the enclosing prototypes of a
+    /// nested one.
     pub fn prototypes(&self) -> Vec<sdf::Path> {
-        let mask = &self.population_mask;
-        let cache = self.cache();
-        cache
-            .prototypes()
-            .into_iter()
-            .filter(|root| cache.instances_of(root).iter().any(|instance| mask.includes(instance)))
-            .collect()
+        let roots = self.cache().prototypes();
+        roots.into_iter().filter(|root| self.mask_includes(root)).collect()
     }
 
     /// Returns the resolved stage status bits for a prim.
