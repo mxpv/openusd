@@ -9,6 +9,7 @@ mod capture;
 mod clips;
 mod collection;
 mod collection_expr;
+mod composition;
 mod connections;
 mod diff;
 mod editor;

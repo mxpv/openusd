@@ -1285,6 +1285,14 @@ impl LayerGraph {
         self.nodes[&id].layer.identifier()
     }
 
+    /// The identifier of the layer with the given id, or `None` when the id
+    /// names no layer in this graph — the presence-checking counterpart of
+    /// [`identifier`](Self::identifier), for a caller holding an id that may
+    /// have outlived its layer.
+    pub(crate) fn try_identifier(&self, id: LayerId) -> Option<&str> {
+        self.nodes.get(&id).map(|node| node.layer.identifier())
+    }
+
     /// The resolved physical location of the layer with the given id — the
     /// anchor for the relative asset paths it authors (C++
     /// `SdfLayer::GetRealPath`). Equals the identifier except for a package,
@@ -1292,11 +1300,6 @@ impl LayerGraph {
     /// unknown.
     pub(crate) fn real_path(&self, id: LayerId) -> &str {
         self.nodes[&id].layer.real_path()
-    }
-
-    /// Whether a layer with this id is present.
-    pub(crate) fn contains(&self, id: LayerId) -> bool {
-        self.nodes.contains_key(&id)
     }
 
     /// The registry that opens reference/payload targets on demand.

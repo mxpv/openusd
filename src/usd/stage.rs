@@ -49,6 +49,8 @@ use bitflags::bitflags;
 use crate::tf::Token;
 use crate::{ar, pcp, sdf};
 
+use super::composition::{PendingEdit, StageComposition};
+
 use super::interp::{self, InterpolationType};
 use super::sink::{Payload, PendingChange, Provenance, StageSink, StageSinkId};
 use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry};
@@ -659,11 +661,6 @@ impl From<sdf::EditError> for StageAuthoringError {
     }
 }
 
-/// One committed layer edit queued in [`StageInner::pending`]: the transaction id
-/// it committed under (for grouping the drain), the edited layer, its change
-/// record, and the [`Provenance`] staged for it (`None` for a direct edit).
-type PendingEdit = (u64, pcp::LayerId, sdf::ChangeList, Option<Provenance>);
-
 /// Shared state behind a [`Stage`] handle.
 ///
 /// Owns the loaded layer stack and the composed-scene state. Composition
@@ -676,12 +673,10 @@ type PendingEdit = (u64, pcp::LayerId, sdf::ChangeList, Option<Provenance>);
 /// private and this type is not re-exported, so it is not externally
 /// nameable, and all its fields are private.
 pub struct StageInner {
-    /// The loaded layers and their sublayer DAG. Held separately from the
-    /// composition cache so layer data and the composed index can be borrowed
-    /// independently.
-    layers: RefCell<pcp::LayerGraph>,
-    /// Lazily-built composition cache of per-prim indices and contexts.
-    cache: RefCell<pcp::IndexCache>,
+    /// The composed state — layer graph, composition cache, and the queue of
+    /// edits awaiting a recompose — behind the operations that name which side
+    /// of the pending drain each access sits on.
+    composition: StageComposition,
     /// Initial payload loading behavior for this stage.
     initial_load_set: InitialLoadSet,
     /// Population mask limiting stage-visible prims.
@@ -707,39 +702,9 @@ pub struct StageInner {
     /// must not add or remove sinks from within a callback — that would borrow the
     /// set mutably while the fan-out holds it shared, and panic.
     sinks: RefCell<sdf::sink::Set<dyn StageSink>>,
-    /// Layer edits recorded by each layer's aggregator sink (installed by
-    /// [`add_layer`](Stage::add_layer)), awaiting composed processing by
-    /// [`process_pending`](Stage::process_pending). Each entry carries the
-    /// transaction id it committed under (so the drain groups a transaction's
-    /// layers together, from [`current_generation`](Self::current_generation)) and its
-    /// [`Provenance`], or `None` when no stage authoring method staged one — a
-    /// direct [`layer_mut`](Stage::layer_mut) edit, resolved against local-layer
-    /// membership when the queue drains.
-    ///
-    /// Recording an edit and recomposing for it are deliberately split across this
-    /// queue rather than recomposing straight from the aggregator callback,
-    /// because:
-    ///
-    /// - Borrows. The aggregator fires inside [`Layer::commit`](sdf::Layer::commit),
-    ///   which the stage reaches by holding [`layers`](Self::layers) borrowed
-    ///   mutably (the layer lives in the graph). Recomposing needs that same
-    ///   borrow, plus [`cache`](Self::cache) — so the callback can only append to
-    ///   this independent cell; [`process_pending`](Stage::process_pending) runs
-    ///   the recompose once the graph borrow is released. A layer cannot recompose
-    ///   the stage from the middle of its own mutation.
-    /// - Batching. A multi-layer edit (a namespace edit across the local stack)
-    ///   commits N layers, each firing its aggregator, so N records accumulate and
-    ///   [`process_pending`](Stage::process_pending) drives one recompose for the
-    ///   whole batch instead of N.
-    /// - One path for every editor. A direct edit through
-    ///   [`layer_mut`](Stage::layer_mut) fires the same aggregator with no stage
-    ///   borrow held; the callback can't tell, so it records uniformly and the
-    ///   recompose happens on the next composed read (drain-on-read). Stage-routed
-    ///   and raw layer edits flow through the identical path.
-    pending: RefCell<Vec<PendingEdit>>,
     /// The [`Provenance`] a stage authoring method publishes for the commit
     /// currently underway, read by the aggregator as it records into
-    /// [`pending`](Self::pending). `None` for a direct edit, which the drain
+    /// [`StageComposition`]'s queue. `None` for a direct edit, which the drain
     /// resolves from local-layer membership.
     edit_provenance: RefCell<Option<Provenance>>,
     /// The transaction id of the layer commit currently draining, cached from its
@@ -854,7 +819,7 @@ impl Drop for ClearEditProvenance<'_> {
 /// The [`sdf::LayerSink`] a [`Stage`] installs on every layer it owns (through
 /// [`add_layer`](Stage::add_layer)) to bridge the low tier of the change
 /// pipeline to the high tier: it records each commit into
-/// [`pending`](StageInner::pending) for a composed recompose, and forwards the
+/// [`StageComposition`]'s pending queue for a composed recompose, and forwards the
 /// staged pre-commit edit to the stage's [`StageSink`]s. It holds a
 /// [`WeakStage`] so it forms no reference cycle (the stage owns the layer, which
 /// owns this sink).
@@ -920,14 +885,15 @@ impl Stage {
     /// the diagnostic and unmuting restores it, without the one-shot error ever
     /// being discarded.
     pub fn composition_errors(&self) -> Vec<pcp::Error> {
-        // Drain pending edits once, then take both borrows directly: routing through
-        // the `layers()`/`cache()` accessors would each re-run `process_pending`, and
+        // Drain once, then read both together: routing through the
+        // `layers()`/`cache()` accessors would each re-run `process_pending`, and
         // holding the graph borrow across the second run risks a re-entrant
         // borrow-mut if a sink re-queues an edit during notification.
         self.process_pending();
-        let graph = self.layers.borrow();
+        let graph = self.composition.settled_graph();
+        let cache = self.composition.settled_cache();
         let mut errors = graph.errors();
-        let mut cache_errors = self.cache.borrow().composition_errors();
+        let mut cache_errors = cache.composition_errors();
         // A diagnostic the graph regenerates per stack can coexist with an
         // identical one-shot loader copy kept at open — a referrer the session
         // prefix reaches, or a branch muted at open and unmuted later; the
@@ -1302,8 +1268,8 @@ impl Stage {
     /// shared step of the stage-metadata and diff-replay authoring paths.
     pub(super) fn edit_target_layer_id(&self) -> Result<pcp::LayerId, StageAuthoringError> {
         let identifier = self.edit_target.borrow().layer_identifier.clone();
-        self.layers
-            .borrow()
+        self.composition
+            .unsettled_graph()
             .id_of(&identifier)
             .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })
     }
@@ -1391,7 +1357,7 @@ impl Stage {
             )
         };
         let edited = {
-            let mut layers = self.layers.borrow_mut();
+            let mut layers = self.composition.unsettled_graph_mut();
             let layer_id = layers
                 .id_of(&identifier)
                 .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
@@ -1413,8 +1379,8 @@ impl Stage {
         F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     {
         let layer_id = self
-            .layers
-            .borrow()
+            .composition
+            .unsettled_graph()
             .root_id()
             .ok_or(StageAuthoringError::OutsideEditTarget {
                 path: sdf::Path::abs_root(),
@@ -1437,7 +1403,7 @@ impl Stage {
     {
         let layer_id = self.edit_target_layer_id()?;
         {
-            let layers = self.layers.borrow();
+            let layers = self.composition.unsettled_graph();
             if layers.root_id() != Some(layer_id) && !layers.session_layers().contains(&layer_id) {
                 return Err(StageAuthoringError::StageMetadataTarget {
                     layer: layers.identifier(layer_id).to_string(),
@@ -1478,7 +1444,7 @@ impl Stage {
         E: From<sdf::sink::Error>,
     {
         let result = {
-            let mut graph = self.layers.borrow_mut();
+            let mut graph = self.composition.unsettled_graph_mut();
             let mut layers: Vec<(pcp::LayerId, &mut sdf::Layer)> = graph.layers_mut(layer_ids).into_iter().collect();
             // The realized ids, aligned with the edits below: `layers_mut` drops any
             // id with no live layer, so the closure keys on these rather than the
@@ -1533,7 +1499,7 @@ impl Stage {
         let authoring = self.edit_target.borrow().authoring_stack.clone();
         if let Some(identity) = authoring {
             loop {
-                let demand = match self.layers.borrow().resolve_stack_identity(&identity) {
+                let demand = match self.composition.unsettled_graph().resolve_stack_identity(&identity) {
                     Ok(id) => return Ok(id),
                     Err(demand) => demand,
                 };
@@ -1556,7 +1522,7 @@ impl Stage {
             }
         }
         let (id, demands) = {
-            let mut graph = self.layers.borrow_mut();
+            let mut graph = self.composition.unsettled_graph_mut();
             let id = graph.intern_external(target_layer, pcp::LayerStackId::ROOT).0;
             (id, graph.take_sublayer_demands())
         };
@@ -1591,7 +1557,7 @@ impl Stage {
     ///
     /// Committing fires the layer's sinks — including the stage's aggregator
     /// (installed by [`add_layer`](Self::add_layer)), which records the edit into
-    /// [`pending`](StageInner::pending) for [`process_pending`](Self::process_pending)
+    /// [`StageComposition`]'s pending queue for [`process_pending`](Self::process_pending)
     /// to recompose. A [`before_commit`](sdf::LayerSink::before_commit) rejection
     /// surfaces as [`StageAuthoringError::Rejected`]. `mapping` is the edit
     /// target's namespace mapping; a non-local target publishes
@@ -1633,13 +1599,13 @@ impl Stage {
     /// seam by which a layer joins the stage — both opening (`make_stage`) and
     /// [`insert_layer`](Self::insert_layer) go through it. A freshly-added layer
     /// gets the stage's change aggregator: a [`sdf::LayerSink`] that records the
-    /// layer's commits into [`pending`](StageInner::pending) for
+    /// layer's commits into [`StageComposition`]'s pending queue for
     /// [`process_pending`](Self::process_pending) to recompose, so every layer the
     /// stage owns reports its edits no matter who authors them. The sink holds a
     /// [`WeakStage`], so it does not form a reference cycle (the stage owns the
     /// layer, which owns the sink).
     fn add_layer(&self, layer: sdf::Layer) -> (pcp::LayerId, bool) {
-        let mut layers = self.layers.borrow_mut();
+        let mut layers = self.composition.unsettled_graph_mut();
         let (id, fresh) = layers.ensure_layer(layer);
         if fresh {
             let node = layers.get_mut(id).expect("just-interned layer is live");
@@ -1686,60 +1652,80 @@ impl Stage {
     /// edit). Called by the per-layer aggregator sink (installed by
     /// [`add_layer`](Self::add_layer)) as a layer commits — while the layer graph
     /// is borrowed for the edit, which is why it appends to the independent
-    /// [`pending`](StageInner::pending) cell rather than recomposing inline.
+    /// [`StageComposition`]'s pending queue rather than recomposing inline.
     pub(super) fn record_pending(&self, layer_id: pcp::LayerId, changes: sdf::ChangeList) {
         let provenance = self.edit_provenance.take();
-        self.pending
-            .borrow_mut()
-            .push((self.current_generation.get(), layer_id, changes, provenance));
+        self.composition
+            .record_pending((self.current_generation.get(), layer_id, changes, provenance));
     }
 
     /// Drain the layer edits recorded by the aggregators and drive one composition
-    /// recompose, delivering the composed [`CommittedChange`](super::CommittedChange)
-    /// to the stage sinks. The deferred counterpart to a layer commit: an
-    /// aggregator records the edit while the layer graph is borrowed, and this
-    /// runs once that borrow is released — after each authoring call, and before
-    /// any composed read. A no-op when nothing is pending, so a read on a clean
-    /// stage costs only the empty check.
+    /// recompose per snapshot, delivering the composed
+    /// [`CommittedChange`](super::CommittedChange) to the stage sinks. The
+    /// deferred counterpart to a layer commit: an aggregator records the edit
+    /// while the layer graph is borrowed, and this runs once that borrow is
+    /// released — after each authoring call, and before any composed read. A
+    /// no-op when nothing is pending, so a read on a clean stage costs only the
+    /// empty check.
+    ///
+    /// Runs to quiescence. A sink may author from `after_commit`, and a direct
+    /// [`layer_mut`](Self::layer_mut) commit there records onto a queue this
+    /// call has already snapshotted; without the repeat, that edit would sit
+    /// unprocessed and the read that triggered the drain would compose without
+    /// it. Each snapshot is one whole pass — failure clearing, its transaction
+    /// groups, reclamation, and the requeue all travel with it — so every group
+    /// in a snapshot completes before an edit its own notifications recorded is
+    /// processed, and events stay in commit order.
+    ///
+    /// A sink that authors on every notification never stops producing work, so
+    /// this never returns for it. Through a stage authoring method such a sink
+    /// already recurses without bound; through [`layer_mut`](Self::layer_mut) it
+    /// instead used to defer each edit to the following read, so this is the one
+    /// shape the loop turns from unbounded deferral into an unbounded spin.
+    //
+    // TODO: a re-entrant drain is still possible — a sink authoring through a
+    // stage method hits that method's own trailing `process_pending`, which
+    // processes the nested edit inside this one rather than after it, so
+    // notification order depends on which authoring route the sink took.
+    // `reconciling_layer_identifier` exists to keep this pass off that path. The
+    // generalization is a re-entrancy flag making a nested drain a no-op, which
+    // the loop above makes safe (the outer pass picks the work up); it needs a
+    // decision on what a sink reading composed state within itself should see.
     pub(crate) fn process_pending(&self) {
-        let mut drained = {
-            let mut queue = self.pending.borrow_mut();
-            if queue.is_empty() {
-                return;
+        while !self.composition.pending_is_empty() {
+            let mut drained = self.composition.take_pending();
+            // An edit changes the layers, so a target that previously failed to read
+            // may now be readable: forget recorded load failures and drop the indices
+            // that recorded one, so the next query re-demands and recomposes them.
+            let failures_cleared = self.composition.unsettled_graph_mut().clear_failed_loads();
+            if failures_cleared {
+                self.composition.unsettled_cache_mut().drop_load_failed_indices();
             }
-            std::mem::take(&mut *queue)
-        };
-        // An edit changes the layers, so a target that previously failed to read
-        // may now be readable: forget recorded load failures and drop the indices
-        // that recorded one, so the next query re-demands and recomposes them.
-        let failures_cleared = self.layers.borrow_mut().clear_failed_loads();
-        if failures_cleared {
-            self.cache.borrow_mut().drop_load_failed_indices();
-        }
-        // Entries committed under one transaction id are contiguous — a
-        // transaction's layers record together, and the id increases across
-        // transactions — so grouping by adjacent equal id carves the queue into
-        // per-transaction groups. Each group applies as its own composed change,
-        // so unrelated edits (a direct `layer_mut` commit sitting pending when the
-        // next stage edit lands) stay separate rather than merging into one event.
-        for group in drained.chunk_by_mut(|a, b| a.0 == b.0) {
-            let generation = group[0].0;
-            let provenance = self.resolve_group_provenance(group);
-            let edits: Vec<(pcp::LayerId, &sdf::ChangeList)> =
-                group.iter().map(|(_, id, changes, _)| (*id, changes)).collect();
-            self.apply_change_sets(generation, &edits, &provenance);
-        }
-        // Sweep before the requeue below: a sweep retires a reclaimed stack's
-        // failure diagnostics, so requeueing never re-derives a demand whose
-        // barrier would read a reclaimed stack's variables.
-        self.reclaim_stale_stacks();
-        // A cleared sublayer failure retries even when this round's edits
-        // rebuilt no stack: the failure diagnostics requeue as demands, so a
-        // repaired asset loads and a still-broken one re-records the same
-        // diagnostic.
-        if failures_cleared {
-            let requeued = self.layers.borrow().requeue_failed_sublayers();
-            self.resolve_sublayer_demands(requeued);
+            // Entries committed under one transaction id are contiguous — a
+            // transaction's layers record together, and the id increases across
+            // transactions — so grouping by adjacent equal id carves the queue into
+            // per-transaction groups. Each group applies as its own composed change,
+            // so unrelated edits (a direct `layer_mut` commit sitting pending when the
+            // next stage edit lands) stay separate rather than merging into one event.
+            for group in drained.chunk_by_mut(|a, b| a.0 == b.0) {
+                let generation = group[0].0;
+                let provenance = self.resolve_group_provenance(group);
+                let edits: Vec<(pcp::LayerId, &sdf::ChangeList)> =
+                    group.iter().map(|(_, id, changes, _)| (*id, changes)).collect();
+                self.apply_change_sets(generation, &edits, &provenance);
+            }
+            // Sweep before the requeue below: a sweep retires a reclaimed stack's
+            // failure diagnostics, so requeueing never re-derives a demand whose
+            // barrier would read a reclaimed stack's variables.
+            self.reclaim_stale_stacks();
+            // A cleared sublayer failure retries even when this round's edits
+            // rebuilt no stack: the failure diagnostics requeue as demands, so a
+            // repaired asset loads and a still-broken one re-records the same
+            // diagnostic.
+            if failures_cleared {
+                let requeued = self.composition.unsettled_graph().requeue_failed_sublayers();
+                self.resolve_sublayer_demands(requeued);
+            }
         }
     }
 
@@ -1760,15 +1746,15 @@ impl Stage {
     /// freshly resolved handles that no cached index references yet, which a
     /// sweep there would reclaim out from under them.
     fn reclaim_stale_stacks(&self) {
-        let mut graph = self.layers.borrow_mut();
-        let mut cache = self.cache.borrow_mut();
-        if !cache.ownership_lost() && !graph.sweep_ripe() {
-            return;
-        }
-        cache.reset_ownership_lost();
-        let mut marks = pcp::StackMarks::default();
-        cache.mark_live_stacks(&mut marks);
-        graph.sweep_stacks(marks);
+        self.composition.unsettled_update_pair(|graph, cache| {
+            if !cache.ownership_lost() && !graph.sweep_ripe() {
+                return;
+            }
+            cache.reset_ownership_lost();
+            let mut marks = pcp::StackMarks::default();
+            cache.mark_live_stacks(&mut marks);
+            graph.sweep_stacks(marks);
+        });
     }
 
     /// The [`Provenance`] for one transaction's group of recorded edits. A staged
@@ -1785,8 +1771,8 @@ impl Stage {
         match group {
             [(_, id, _, _)]
                 if !self
-                    .layers
-                    .borrow()
+                    .composition
+                    .unsettled_graph()
                     .root_layer_stack()
                     .iter()
                     .any(|&(lid, _)| lid == *id) =>
@@ -1811,7 +1797,7 @@ impl Stage {
     fn apply_change_sets(&self, generation: u64, edits: &[(pcp::LayerId, &sdf::ChangeList)], provenance: &Provenance) {
         let mut pcp_changes = pcp::Changes::new();
         {
-            let cache = self.cache.borrow();
+            let cache = self.composition.unsettled_cache();
             pcp_changes.did_change(&cache, edits);
         }
         // Snapshot the after-commit payload before `apply` consumes
@@ -1824,7 +1810,7 @@ impl Stage {
         let mut payload = (!self.sinks.borrow().is_empty()).then(|| {
             let layer_changes: Vec<(String, sdf::ChangeList)> = edits
                 .iter()
-                .map(|(id, changes)| (self.layer_identifier(*id).unwrap_or_default(), (*changes).clone()))
+                .map(|(id, changes)| (self.reconciling_layer_identifier(*id), (*changes).clone()))
                 .collect();
             let mut merged = sdf::ChangeList::new();
             for (_, changes) in edits {
@@ -1832,11 +1818,9 @@ impl Stage {
             }
             Payload::new(&pcp_changes, &merged, layer_changes, provenance)
         });
-        let root_resync = {
-            let mut graph = self.layers.borrow_mut();
-            let mut cache = self.cache.borrow_mut();
-            pcp_changes.apply(&mut cache, &mut graph)
-        };
+        let root_resync = self
+            .composition
+            .unsettled_update_pair(|graph, cache| pcp_changes.apply(cache, graph));
         // The stage-wide resync entry is known only after `apply` ran — a
         // vars-only edit publishes it exactly when the rebuild changed some
         // stack's composed variables — so it lands on the payload here rather
@@ -1847,19 +1831,32 @@ impl Stage {
         // The recompose may have demanded sublayers — a `${VAR}` entry the
         // edited variables newly select, or a just-authored literal naming an
         // unloaded layer; open them before observers read the settled stage.
-        let demands = self.layers.borrow_mut().take_sublayer_demands();
+        let demands = self.composition.unsettled_graph_mut().take_sublayer_demands();
         self.resolve_sublayer_demands(demands);
 
         if let Some(payload) = payload {
             let layer_identifier = edits
                 .first()
-                .and_then(|(id, _)| self.layer_identifier(*id))
+                .map(|(id, _)| self.reconciling_layer_identifier(*id))
                 .unwrap_or_default();
             let change = payload.committed_change(&layer_identifier, provenance, generation);
             for sink in self.sinks.borrow().iter() {
                 sink.after_commit(self, &change);
             }
         }
+    }
+
+    /// A layer's identifier read without draining, for the reconciliation pass:
+    /// a drain there would run against a part-applied snapshot, and — once an
+    /// earlier group's sink has authored — would process that edit ahead of the
+    /// snapshot's remaining groups, putting notifications out of commit order.
+    /// Empty for a layer no longer in the graph.
+    fn reconciling_layer_identifier(&self, id: pcp::LayerId) -> String {
+        self.composition
+            .unsettled_graph()
+            .try_identifier(id)
+            .unwrap_or_default()
+            .to_string()
     }
 
     /// Returns the number of layers loaded so far (including session layers).
@@ -2269,7 +2266,7 @@ impl Stage {
     /// mutation entry: `load`/`unload`/`load_and_unload` build on the existing
     /// table, and [`set_load_rules`](Self::set_load_rules) replaces it.
     fn install_load_rules(&self, edit: impl FnOnce(&mut pcp::LoadRules)) -> Vec<sdf::Path> {
-        let mut rules = self.cache.borrow().load_rules().clone();
+        let mut rules = self.load_rules();
         edit(&mut rules);
         let victims = self.replace_load_rules(rules);
         // An unload can leave payload-target stacks unreferenced for a long
@@ -2290,7 +2287,7 @@ impl Stage {
         // Drain pending edits first so the mutation recomposes against a
         // current graph and cache, matching `apply_mute`.
         self.process_pending();
-        self.cache.borrow_mut().set_load_rules(rules)
+        self.composition.settled_cache_mut().set_load_rules(rules)
     }
 
     /// Fires [`StageSink::load_rules_changed`] with the resynced paths, after
@@ -2324,10 +2321,8 @@ impl Stage {
         // Drain pending edits first so the mute recomposes against a current
         // graph and cache rather than stranding queued changes.
         self.process_pending();
-        let (changed, demands) = {
-            let mut graph = self.layers.borrow_mut();
-            let mut cache = self.cache.borrow_mut();
-            let change = mutate(&mut graph)?;
+        let (changed, demands) = self.composition.settled_update_pair(|graph, cache| {
+            let change = mutate(graph)?;
             // The mutation already rebuilt the graph's sublayer stacks, relocates, and
             // cycle diagnostics; only the cache needs work. Removing a session variable
             // drops the root `${VAR}` sublayer it selected — the graph re-resolves the
@@ -2336,8 +2331,8 @@ impl Stage {
             // referrer that skipped this target while it was muted-and-never-loaded, so
             // unmuting recomposes it and the load barrier finally opens the target.
             cache.invalidate_muting(&change.affected, &change.changed);
-            (change.changed, graph.take_sublayer_demands())
-        };
+            Some((change.changed, graph.take_sublayer_demands()))
+        })?;
         // A mute or unmute can newly select a `${VAR}` sublayer that was never
         // opened — the recompose recorded it as a demand; load it now, after
         // the graph and cache borrows are released.
@@ -2552,8 +2547,7 @@ impl Stage {
     /// [`AttributeQuery`](super::AttributeQuery) snapshots this and rebuilds its
     /// cached source when it advances.
     pub(crate) fn cache_revision(&self) -> u64 {
-        self.process_pending();
-        self.cache.borrow().revision()
+        self.cache().revision()
     }
 
     /// The schemas this stage resolves against (C++
@@ -2815,8 +2809,7 @@ impl Stage {
     /// Unlike [`Self::layer_stack`], this covers every loaded layer, including
     /// those reached across reference/payload arcs.
     pub fn layer_identifier(&self, id: pcp::LayerId) -> Option<String> {
-        let layers = self.layers();
-        layers.contains(id).then(|| layers.identifier(id).to_string())
+        self.layers().try_identifier(id).map(str::to_string)
     }
 
     /// The raw `(layer id, sublayer offset)` members of `node`'s layer stack, in
@@ -2909,7 +2902,7 @@ impl Stage {
     /// edits so the cache reflects every commit before it is read.
     pub(crate) fn cache(&self) -> Ref<'_, pcp::IndexCache> {
         self.process_pending();
-        self.cache.borrow()
+        self.composition.settled_cache()
     }
 
     /// Inserts `layer` as a sublayer of `parent` at `pos`. `parent` is matched
@@ -2943,7 +2936,7 @@ impl Stage {
         // this succeeds (the authored asset path is a plain string, so the node
         // need not exist yet — only the later rebuild's edge resolution needs it).
         let edited = {
-            let mut layers = self.layers.borrow_mut();
+            let mut layers = self.composition.unsettled_graph_mut();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
             })?;
@@ -2979,7 +2972,7 @@ impl Stage {
     /// `parent` is read-only.
     pub fn remove_layer(&self, parent: &str, child: &str) -> Result<bool, StageAuthoringError> {
         let edited = {
-            let mut layers = self.layers.borrow_mut();
+            let mut layers = self.composition.unsettled_graph_mut();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
             })?;
@@ -3015,20 +3008,13 @@ impl Stage {
         }
     }
 
-    // TODO: the drain-on-read invariant (a graph or cache read drains pending
-    // edits first) is enforced only by `layers`/`layers_mut`/`cache`; other
-    // methods reach `self.layers`/`self.cache` through a raw `borrow()` and
-    // hand-place `process_pending()`, so a new direct-borrow read path can
-    // silently observe stale state. Making the `layers`/`cache` cells private
-    // behind these draining accessors would fold "borrow the graph" and "graph is
-    // current" into one operation and drop the scattered manual drains.
     /// Borrows the stage's layer graph, first draining any pending layer edits so
     /// the graph reflects every commit before it is read — a structural edit
     /// (sublayers, offsets, relocates) leaves the topology stale until then. The
     /// drain is a no-op when nothing is pending.
     pub(crate) fn layers(&self) -> Ref<'_, pcp::LayerGraph> {
         self.process_pending();
-        self.layers.borrow()
+        self.composition.settled_graph()
     }
 
     /// Borrows the stage's layer graph mutably, for an authoring helper that
@@ -3038,7 +3024,7 @@ impl Stage {
     /// change lists through [`Self::process_pending`].
     pub(crate) fn layers_mut(&self) -> RefMut<'_, pcp::LayerGraph> {
         self.process_pending();
-        self.layers.borrow_mut()
+        self.composition.settled_graph_mut()
     }
 
     /// Runs a composed query that needs both the layer graph and the
@@ -3061,13 +3047,7 @@ impl Stage {
         // reallocates once warmed up.
         let mut pending: Vec<pcp::Demand> = Vec::new();
         loop {
-            let result = {
-                let graph = self.layers.borrow();
-                let mut cache = self.cache.borrow_mut();
-                let result = query(&graph, &mut cache);
-                cache.swap_pending_loads(&mut pending);
-                result
-            };
+            let result = self.composition.query_pass(&mut query, &mut pending);
             // The pass left a reference/payload arc uncomposed pending these
             // layers; open them and recompose. `load_demanded` reports false once a
             // pass neither loads a layer nor newly marks one failed, so the loop
@@ -3099,7 +3079,7 @@ impl Stage {
     /// newly marked failed — so the caller recomposes once more; a demanded path
     /// already loaded or already known unreadable is skipped.
     fn load_demanded(&self, pending: &[pcp::Demand]) -> bool {
-        let before = self.layers.borrow().len();
+        let before = self.composition.unsettled_graph().len();
         let mut newly_failed = false;
         let mut newly_interned = false;
         // Whether an open ran for each demand this pass: the mint loop below
@@ -3118,7 +3098,7 @@ impl Stage {
             // one that failed to resolve is retried only once the resolver can
             // find it — the asset has since appeared.
             let open = {
-                let graph = self.layers.borrow();
+                let graph = self.composition.unsettled_graph();
                 let retry_blocked = match graph.load_failure(asset_path) {
                     Some(pcp::LoadFailure::Unreadable(_)) => true,
                     Some(pcp::LoadFailure::Unresolved) => graph.layer_registry().resolve(asset_path).is_none(),
@@ -3142,7 +3122,7 @@ impl Stage {
                 // failures surface through the sublayer-demand pass below, which
                 // regenerates each one's diagnostic per stack.
                 let opened = {
-                    let graph = self.layers.borrow();
+                    let graph = self.composition.unsettled_graph();
                     graph.layer_registry().open_stack(
                         asset_path,
                         None,
@@ -3166,7 +3146,7 @@ impl Stage {
                     // retries a resolvable asset whose failure was
                     // `Unresolved` and would re-run this open every pass.
                     Ok(None) => {
-                        let graph = self.layers.borrow();
+                        let graph = self.composition.unsettled_graph();
                         Some(match graph.layer_registry().resolve(asset_path) {
                             None => pcp::LoadFailure::Unresolved,
                             Some(_) => {
@@ -3177,7 +3157,7 @@ impl Stage {
                     Err(err) => Some(pcp::LoadFailure::Unreadable(format!("{err:#}"))),
                 };
                 if let Some(failure) = failure {
-                    let mut graph = self.layers.borrow_mut();
+                    let mut graph = self.composition.unsettled_graph_mut();
                     // Only a first failure counts as progress: re-marking an
                     // asset that failed the same way on an earlier pass must
                     // not keep the caller recomposing forever.
@@ -3186,17 +3166,21 @@ impl Stage {
                 }
             }
         }
-        let grew = self.layers.borrow().len() != before;
+        let grew = self.composition.unsettled_graph().len() != before;
         // Newly joined layers need their plain sublayer edges (and relocates) wired
         // before any stack is composed against them.
         if grew {
             // TODO(perf): rebuild only the new subtrees rather than the whole DAG.
-            let relocated = self.layers.borrow_mut().recompute_sublayers(None).affected;
+            let relocated = self
+                .composition
+                .unsettled_graph_mut()
+                .recompute_sublayers(None)
+                .affected;
             // A demanded layer that introduces relocates restructures prims
             // composed against its stack; drop their cached indices so they
             // recompose with the relocates applied.
             if !relocated.is_empty() {
-                self.cache.borrow_mut().invalidate_layers(&relocated);
+                self.composition.unsettled_cache_mut().invalidate_layers(&relocated);
             }
         }
         // Mint each demand's layer stack now that the edges are wired. The layer
@@ -3213,7 +3197,7 @@ impl Stage {
         // next pass, which re-demands and reopens correctly. A failed target is
         // exempt (nothing further can load) and interns whatever is present.
         {
-            let mut graph = self.layers.borrow_mut();
+            let mut graph = self.composition.unsettled_graph_mut();
             for (demand, &was_opened) in pending.iter().zip(&opened_this_pass) {
                 let asset_path = demand.asset_path.as_str();
                 if let Some(root) = graph.id_of(asset_path) {
@@ -3231,7 +3215,7 @@ impl Stage {
         // `${VAR}` entry whose selected layer nothing has loaded, including a
         // target's own self-selected sublayer under an empty inherited context;
         // open them under each demanding stack's composed variables.
-        let demands = self.layers.borrow_mut().take_sublayer_demands();
+        let demands = self.composition.unsettled_graph_mut().take_sublayer_demands();
         let sublayers_loaded = self.resolve_sublayer_demands(demands);
         grew || newly_failed || newly_interned || sublayers_loaded
     }
@@ -3277,7 +3261,7 @@ impl Stage {
                 // the round's recompose resolves the entry the same way this
                 // check just did.
                 let open = {
-                    let mut graph = self.layers.borrow_mut();
+                    let mut graph = self.composition.unsettled_graph_mut();
                     graph
                         .refresh_demanded_sublayer(demand.parent, &demand.evaluated)
                         .err()
@@ -3298,7 +3282,7 @@ impl Stage {
                     // One diagnostic per (referrer, stack, canonical id): a
                     // second authored spelling of the same entry reports
                     // nothing more, matching open-time collection.
-                    let mut graph = self.layers.borrow_mut();
+                    let mut graph = self.composition.unsettled_graph_mut();
                     if let Some(failure) = graph.load_failure(&identifier) {
                         if reported.insert((identifier.clone(), demand.stack, demand.parent)) {
                             let error = failure.sublayer_error(&demand.evaluated, &parent_identifier);
@@ -3313,7 +3297,7 @@ impl Stage {
                 // The shared graph borrow is dropped before `add_layer` /
                 // `mark_load_failed` take a mutable one, as in `load_demanded`.
                 let opened = {
-                    let graph = self.layers.borrow();
+                    let graph = self.composition.unsettled_graph();
                     graph.layer_registry().open_sublayer_tree(
                         &identifier,
                         graph.stack_expression_variables(demand.stack),
@@ -3332,7 +3316,7 @@ impl Stage {
                     Err(err) => Some(pcp::LoadFailure::Unreadable(format!("{err:#}"))),
                 };
                 if let Some(load_failure) = failure {
-                    let mut graph = self.layers.borrow_mut();
+                    let mut graph = self.composition.unsettled_graph_mut();
                     reported.insert((identifier.clone(), demand.stack, demand.parent));
                     let error = load_failure.sublayer_error(&demand.evaluated, &parent_identifier);
                     graph.record_sublayer_error(demand.stack, error);
@@ -3349,12 +3333,12 @@ impl Stage {
             // extended members. The recompose re-derives the pending demand set
             // for the next round.
             let (affected, next) = {
-                let mut graph = self.layers.borrow_mut();
+                let mut graph = self.composition.unsettled_graph_mut();
                 let affected = graph.recompute_sublayers(Some(&opened_parents)).affected;
                 (affected, graph.take_sublayer_demands())
             };
             if !affected.is_empty() {
-                self.cache.borrow_mut().invalidate_layers(&affected);
+                self.composition.unsettled_cache_mut().invalidate_layers(&affected);
             }
             demands = next;
         }
@@ -3798,19 +3782,16 @@ impl StageBuilder {
         // invalid relocates); the cache holds only the one-shot collection errors.
         // `Stage::composition_errors` concatenates the two.
         let stage = Stage(Rc::new(StageInner {
-            layers: RefCell::new(pcp::LayerGraph::new(self.registry)),
-            cache: RefCell::new(pcp::IndexCache::new(
-                self.variant_fallbacks,
-                load_rules,
-                collection_errors,
-            )),
+            composition: StageComposition::new(
+                pcp::LayerGraph::new(self.registry),
+                pcp::IndexCache::new(self.variant_fallbacks, load_rules, collection_errors),
+            ),
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,
             interpolation_type: Cell::new(self.interpolation_type),
             edit_target: RefCell::new(edit_target),
             layer_stack_id,
             sinks: RefCell::default(),
-            pending: RefCell::new(Vec::new()),
             edit_provenance: RefCell::new(None),
             current_generation: Cell::new(0),
             schema_registry: self.schema_registry.unwrap_or_else(|| SchemaRegistry::global().clone()),
@@ -3833,7 +3814,7 @@ impl StageBuilder {
                 session_count += 1;
             }
         }
-        stage.layers.borrow_mut().finalize(session_count, root);
+        stage.composition.unsettled_graph_mut().finalize(session_count, root);
         if !self.muted.is_empty() {
             // Seed the graph's muted set (it drops any root-layer request and
             // re-resolves identifiers on each later rebuild). The cache is still
@@ -3842,10 +3823,13 @@ impl StageBuilder {
             // muted ones are filtered out at report time (`Stage::composition_errors`)
             // against the current composed state, so an unmute restores a diagnostic
             // a muted branch had hidden.
-            stage.layers.borrow_mut().set_muted_identifiers(self.muted);
+            stage
+                .composition
+                .unsettled_graph_mut()
+                .set_muted_identifiers(self.muted);
         }
         {
-            let mut graph = stage.layers.borrow_mut();
+            let mut graph = stage.composition.unsettled_graph_mut();
             for (asset_path, introduced_by, failure) in failure_seeds {
                 if let Some(parent) = graph.id_of(&introduced_by)
                     && let Err(identifier) = graph.resolve_relative(&asset_path, parent)
@@ -3859,7 +3843,7 @@ impl StageBuilder {
         // selected by its own variables, or a selection open-time muting
         // exposed; drain the demands the finalize recompose recorded so the
         // opened stage starts settled.
-        let demands = stage.layers.borrow_mut().take_sublayer_demands();
+        let demands = stage.composition.unsettled_graph_mut().take_sublayer_demands();
         stage.resolve_sublayer_demands(demands);
         // The drain re-derived the sublayer failures of every region — the
         // session region, the root region, and each target stack all re-resolve
@@ -3867,7 +3851,7 @@ impl StageBuilder {
         // one-shot copies of those would double-report and outlive a later fix,
         // so they are dropped.
         let superseded: Vec<pcp::Error> = {
-            let graph = stage.layers.borrow();
+            let graph = stage.composition.unsettled_graph();
             graph
                 .errors()
                 .into_iter()
@@ -3882,7 +3866,10 @@ impl StageBuilder {
                 .collect()
         };
         if !superseded.is_empty() {
-            stage.cache.borrow_mut().discard_collection_errors(&superseded);
+            stage
+                .composition
+                .unsettled_cache_mut()
+                .discard_collection_errors(&superseded);
         }
         stage
     }

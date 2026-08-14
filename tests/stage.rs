@@ -7205,6 +7205,45 @@ fn listener_reentrant_author() -> Result<()> {
     Ok(())
 }
 
+/// A sink authoring through `layer_mut` from `after_commit` records onto a queue
+/// the running drain has already snapshotted, so the drain repeats until the
+/// queue stays empty: the nested edit is composed and its notification fired
+/// before the authoring call that provoked it returns, in commit order.
+#[test]
+fn listener_reentrant_layer_edit() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let root_id = stage.root_layer().identifier().to_string();
+    let fired: Rc<RefCell<Vec<Vec<sdf::Path>>>> = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let (fired, root_id) = (fired.clone(), root_id.clone());
+        let done = Cell::new(false);
+        stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
+            fired.borrow_mut().push(change.resynced.to_vec());
+            if !done.replace(true) {
+                stage
+                    .layer_mut(&root_id)
+                    .expect("root layer is live")
+                    .edit(|e| {
+                        sdf::PrimSpec::new(e.data_mut(), "/Nested", sdf::Specifier::Def, "")?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+        })
+    };
+
+    stage.define_prim("/World")?;
+
+    // Read the record before touching the stage again: a later query would drain
+    // the queue itself and hide a missing repeat.
+    let fired = fired.borrow().clone();
+    assert_eq!(fired.len(), 2, "both edits notified: {fired:?}");
+    assert!(fired[0].iter().any(|p| p.as_str() == "/World"));
+    assert!(fired[1].iter().any(|p| p.as_str() == "/Nested"));
+    assert!(stage.prim("/Nested")?.is_valid()?);
+    Ok(())
+}
+
 /// An idempotent author records no change, so the sink does not fire.
 #[test]
 fn empty_edit_no_fire() -> Result<()> {
