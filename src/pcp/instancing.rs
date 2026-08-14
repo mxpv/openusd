@@ -379,14 +379,19 @@ impl IndexCache {
     /// (spec 11.3.3). Composing the index here (and computing its [`InstanceKey`])
     /// is the cache's job; the dedup is the [`PrototypeRegistry`]'s.
     fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<(Path, Path)> {
-        self.ensure_index(graph, instance)?;
+        // A nested instance can itself be an instance proxy. Its shared
+        // composition lives at the corresponding prim inside the enclosing
+        // prototype, so that is the index that defines the nested prototype's
+        // key and materialized root.
+        let composed = self.effective_path(graph, instance)?;
+        self.ensure_index(graph, &composed)?;
         let relative_load_rules = {
             let (rules, relative_instance) = self.scoped_load_rules(instance);
             rules.make_relative_to(&relative_instance)
         };
         let key = instance_key(
-            self.cached(instance),
-            instance.prim_element_count() as u16,
+            self.cached(&composed),
+            composed.prim_element_count() as u16,
             relative_load_rules,
         );
         let (canonical, prototype, minted) = self.prototypes.register(key, instance);
@@ -402,7 +407,7 @@ impl IndexCache {
         if minted {
             self.drop_index_subtree(&prototype);
             self.redirected_prims.retain(|path, _| !path.has_prefix(&prototype));
-            self.materialize_prototype(graph, &canonical, &prototype);
+            self.materialize_prototype(graph, &composed, &prototype);
         }
         Ok((canonical, prototype))
     }

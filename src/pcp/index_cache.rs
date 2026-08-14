@@ -3315,6 +3315,27 @@ def "Scope"
         Ok(())
     }
 
+    /// A nested instance introduced beneath a payload composes from its prim in
+    /// the outer prototype. Both arcs target sub-root prims in external layers,
+    /// matching production assets that keep reusable definitions below a shared
+    /// library namespace (spec 11.3.3).
+    #[test]
+    fn nested_payload_proxy() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_payload/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/Placed/Nested/Leaf.value")?, 0.0, &interp)?,
+            Some(Value::Double(7.0))
+        );
+        assert_eq!(
+            cache.prim_in_prototype(&graph, &sdf::path("/Placed/Nested/Leaf")?)?,
+            Some(sdf::path("/__Prototype_1/Leaf")?)
+        );
+        Ok(())
+    }
+
     /// A reference nested inside the prototype (below the instanceable arc) is
     /// shared (spec 11.3.3): its opinions reach the instance through the direct
     /// instanceable arc, so they survive in the instance's child names and

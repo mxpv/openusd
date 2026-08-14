@@ -1,0 +1,17 @@
+#usda 1.0
+
+def Scope "Root"
+{
+    def Scope "Library"
+    {
+        def Scope "Outer"
+        {
+            def Scope "Nested" (
+                instanceable = true
+                references = @inner.usda@</Root/Library/Inner>
+            )
+            {
+            }
+        }
+    }
+}
