@@ -175,6 +175,7 @@ impl UndoStage {
                 }
                 Ok(())
             })
+            .map(|_changed| ())
     }
 }
 

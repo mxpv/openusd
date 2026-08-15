@@ -7110,6 +7110,30 @@ fn namespace_edit_fires_sink() -> Result<()> {
     Ok(())
 }
 
+/// Planning composes an edit still sitting in the pending queue, so a dry run
+/// validates against it: deleting `/Queued` resolves rather than failing as a
+/// missing source. The dry run itself stages nothing, so the prim survives.
+#[test]
+fn can_apply_queued_edit() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let root = stage.root_layer().identifier().to_string();
+    // Author directly and take no composed read, so the edit is still queued.
+    stage.layer_mut(&root).expect("root layer").edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/Queued", sdf::Specifier::Def, "")?;
+        Ok(())
+    })?;
+
+    let mut editor = usd::NamespaceEditor::new(&stage);
+    editor.delete_prim("/Queued").unwrap();
+    editor.can_apply().expect("planning drains, so /Queued composes");
+
+    assert!(
+        stage.prim("/Queued")?.is_valid()?,
+        "the dry run staged nothing, so the queued prim survives"
+    );
+    Ok(())
+}
+
 /// A layer sink's veto on any layer aborts a multi-layer namespace edit
 /// wholesale: every layer rolls back, leaving the composed scene untouched.
 #[test]

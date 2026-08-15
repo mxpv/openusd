@@ -1467,14 +1467,24 @@ impl Stage {
     /// `layer_ids` with a live layer, dropping any that vanished) paired in order
     /// with their [`sdf::LayerEdit`]s. The closure's error type is free (any
     /// `E: From<sdf::sink::Error>`) so the caller can surface its own validation
-    /// errors through the same transaction.
+    /// errors through the same transaction. Returns whether the transaction
+    /// changed anything: the commit's change flag, or `false` for a dry run.
+    ///
+    /// A commit may enter with edits already queued, appends its own
+    /// transaction to that queue, and drains everything afterwards — including
+    /// when the transaction itself failed, so a failed commit can still deliver
+    /// the notifications its predecessors earned. A dry run neither queues nor
+    /// drains, so a caller whose validation reads composed state settles before
+    /// calling; and its rollback discards each layer's whole staged overlay, not
+    /// only what the dry run wrote, so the batch assumes its layers carry no
+    /// uncommitted direct edits.
     pub(super) fn author_layers_txn<E>(
         &self,
         layer_ids: &[pcp::LayerId],
         mapping: Option<&pcp::MapFunction>,
         commit: bool,
         f: impl FnOnce(&[pcp::LayerId], &mut [sdf::LayerEdit<'_>]) -> Result<(), E>,
-    ) -> Result<(), E>
+    ) -> Result<bool, E>
     where
         E: From<sdf::sink::Error>,
     {
@@ -1492,9 +1502,9 @@ impl Stage {
                     .map(|m| Provenance::EditTarget(m.clone()));
                 self.edit_provenance.replace(provenance);
                 let _clear = ClearEditProvenance(&self.edit_provenance);
-                sdf::edit_layers(&mut batch, |edits| f(&ids, edits)).map(|_| ())
+                sdf::edit_layers(&mut batch, |edits| f(&ids, edits))
             } else {
-                sdf::dry_run_layers(&mut batch, |edits| f(&ids, edits))
+                sdf::dry_run_layers(&mut batch, |edits| f(&ids, edits)).map(|()| false)
             }
         };
         if commit {
@@ -1546,8 +1556,12 @@ impl Stage {
         F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     {
         self.author_layers_txn(&[layer_id], mapping, true, |_ids, edits| {
-            f(&mut edits[0]).map_err(StageAuthoringError::from)
+            let edit = edits
+                .first_mut()
+                .expect("the caller resolved `layer_id` against this graph, so it is live");
+            f(edit).map_err(StageAuthoringError::from)
         })
+        .map(|_changed| ())
     }
 
     /// Run `f` as one atomic [`Layer::edit`](sdf::Layer::edit) on `layer`: commit
@@ -1786,21 +1800,12 @@ impl Stage {
                 ids.push(id);
             }
         }
-        // Open every named layer in `ids` order and edit them as one transaction;
-        // each commit feeds the stage's aggregator, so the recompose below folds
-        // the whole batch in one cycle.
-        //
-        // TODO: `NamespaceEditor::execute` open-codes this same
-        // `layers_mut` → `edit_layers` → `process_pending` transaction; it could
-        // share this path once the closure exposes each layer's id (for its
-        // per-layer relocate authoring) and a dry-run variant (for `can_apply`).
-        let changed = {
-            let mut graph = self.layers_mut();
-            let mut batch: Vec<&mut sdf::Layer> = graph.layers_mut(&ids).into_iter().map(|(_, layer)| layer).collect();
-            sdf::edit_layers(&mut batch, f)?
-        };
-        self.process_pending();
-        Ok(changed)
+        self.author_layers_txn(&ids, None, true, |realized, edits| {
+            // `edits[i]` authors `layers[i]` is this method's public contract, so
+            // the realized ids must still line up with the requested ones.
+            debug_assert_eq!(realized.len(), ids.len(), "batch_edit realized every layer");
+            f(edits)
+        })
     }
 
     /// The identifiers of the layers contributing to `parent`'s sublayer stack,
@@ -2745,12 +2750,11 @@ impl Stage {
         self.composition.settled_graph()
     }
 
-    /// Borrows the stage's layer graph mutably, for an authoring helper that
-    /// edits its layers directly — e.g. the namespace editor's batched, atomic
-    /// multi-layer edit. Drains pending edits first so the graph is current before
-    /// it is re-authored; the caller drives composition invalidation from the new
-    /// change lists through [`Self::process_pending`].
-    pub(crate) fn layers_mut(&self) -> RefMut<'_, pcp::LayerGraph> {
+    /// Borrows the stage's layer graph mutably, behind the guard
+    /// [`layer_mut`](Self::layer_mut) hands out for direct authoring. Drains
+    /// pending edits first so the graph is current before it is re-authored; the
+    /// commit's own aggregator records the new change list for the next drain.
+    fn layers_mut(&self) -> RefMut<'_, pcp::LayerGraph> {
         self.process_pending();
         self.composition.settled_graph_mut()
     }
@@ -5527,6 +5531,16 @@ def "T" {
             !stage.prim("/FromRoot")?.is_valid()?,
             "the staged root edit rolled back with the batch"
         );
+        Ok(())
+    }
+
+    /// A batch that authors nothing reports no change; the flag comes from the
+    /// transaction, not from the batch being non-empty.
+    #[test]
+    fn batch_edit_no_op() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let root = stage.root_layer().identifier().to_string();
+        assert!(!stage.batch_edit(&[&root], |_edits| Ok(()))?);
         Ok(())
     }
 

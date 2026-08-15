@@ -360,25 +360,10 @@ impl NamespaceEditor {
     ) -> Result<(), NamespaceEditError> {
         let resolved = relocate_plan.resolve(seeds)?;
 
-        // Stage the structural edits atomically across the layer
-        // stack. The whole batch commits through `edit_layers`: every layer's
-        // sinks veto first, then all commit, so a multi-layer namespace edit is
-        // all-or-nothing even under a rejecting sink, and each commit feeds the
-        // stage's aggregator for the recompose below. A dry run (`dry_run_layers`)
-        // stages the same way to prove the batch applies, then discards it. The
-        // batch assumes its layers carry no uncommitted direct edits — a discard
-        // drops the whole overlay.
-        {
-            let mut graph = self.stage.layers_mut();
-            let mut layers: Vec<(pcp::LayerId, &mut sdf::Layer)> = graph.layers_mut(&layer_ids).into_iter().collect();
-            let ids: Vec<pcp::LayerId> = layers.iter().map(|(id, _)| *id).collect();
-            let mut batch: Vec<&mut sdf::Layer> = layers.iter_mut().map(|(_, layer)| &mut **layer).collect();
-            let stage_edits = |edits: &mut [sdf::LayerEdit<'_>]| -> Result<(), NamespaceEditError> {
-                {
-                    let mut refs: Vec<&mut sdf::LayerEdit<'_>> = edits.iter_mut().collect();
-                    for (edit, plan) in self.edits.iter().zip(&plan) {
-                        apply_edit(&mut refs, edit, plan)?;
-                    }
+        self.stage
+            .author_layers_txn(&layer_ids, None, commit, |ids, edits| {
+                for (edit, plan) in self.edits.iter().zip(&plan) {
+                    apply_edit(edits, edit, plan)?;
                 }
                 for (id, layer) in ids.iter().zip(edits.iter_mut()) {
                     fixup_embedded_paths(layer, &self.edits)?;
@@ -389,17 +374,8 @@ impl NamespaceEditor {
                     }
                 }
                 Ok(())
-            };
-            if commit {
-                sdf::edit_layers(&mut batch, stage_edits)?;
-            } else {
-                // Dry run: stage to prove the batch applies cleanly, then discard.
-                // No sink sees a dry run.
-                return sdf::dry_run_layers(&mut batch, stage_edits);
-            }
-        }
-        self.stage.process_pending();
-        Ok(())
+            })
+            .map(|_changed| ())
     }
 
     /// Stage the batch into the layer a variant or cross-arc edit target writes
@@ -442,6 +418,7 @@ impl NamespaceEditor {
                 }
                 Ok(())
             })
+            .map(|_changed| ())
     }
 
     /// Resolve the current edit target into a [`BatchPlan`], the read-only first
@@ -630,7 +607,10 @@ impl NamespaceEditor {
         // builds and relocate analysis per edit — because the evolved relocates
         // decide which layers' `layerRelocates` change. A future fast path could
         // skip the composition projection when no edit is cross-arc and no layer
-        // authors relocates, leaving only the cheap per-layer spec scan.
+        // authors relocates, leaving only the cheap per-layer spec scan. Such a
+        // path must still settle the stage: `plan` reaches `root_stack_layer_ids`,
+        // whose drain is what lets a dry run validate against composed state
+        // (`Stage::author_layers_txn` does not drain for a dry run).
         match self.plan()? {
             BatchPlan::LocalStack {
                 layer_ids,
@@ -1423,7 +1403,7 @@ struct EditPlan {
 /// is an edit that moves or removes nothing in any layer and is not realized by
 /// a relocate (`plan.present`).
 fn apply_edit(
-    layers: &mut [&mut sdf::LayerEdit<'_>],
+    layers: &mut [sdf::LayerEdit<'_>],
     edit: &NamespaceEdit,
     plan: &EditPlan,
 ) -> Result<(), NamespaceEditError> {
@@ -1467,7 +1447,7 @@ fn validate_edit_shape(edit: &NamespaceEdit) -> Result<(), NamespaceEditError> {
 /// Errors with [`SourceNotFound`](NamespaceEditError::SourceNotFound) when no
 /// layer did and the source is not realized through a relocate (`present`).
 fn stage_across_layers(
-    layers: &mut [&mut sdf::LayerEdit<'_>],
+    layers: &mut [sdf::LayerEdit<'_>],
     path: &sdf::Path,
     present: bool,
     mut op: impl FnMut(&mut sdf::LayerEdit<'_>) -> Result<bool, sdf::AuthoringError>,
