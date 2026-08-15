@@ -758,7 +758,7 @@ impl LayerGraph {
                     &sub_path,
                     context,
                     ExpressionContext::Sublayer,
-                    &node.layer,
+                    node.layer.identifier(),
                     &root_path,
                     record.then_some(&mut expr_errors),
                     record.then_some(&mut expr_used),

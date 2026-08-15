@@ -942,11 +942,20 @@ impl AttributeQuery {
             AttributeValueSource::Static(value) => Ok(value.clone()),
             // Interpolate in the node's layer-time frame, mapping `time` back
             // through the inverse offset — matching `PrimIndex::resolve_value_at`.
-            AttributeValueSource::TimeSamples { samples, offset } => Ok(interp::evaluate(
-                samples,
-                offset.inverse().apply(time),
-                stage.interpolation_type(),
-            )),
+            AttributeValueSource::TimeSamples { samples, offset, site } => {
+                let value = interp::evaluate(samples, offset.inverse().apply(time), stage.interpolation_type());
+                // Only the interpolated result is anchored and evaluated, not
+                // the held map: resolving every sample here would report a
+                // malformed expression authored at a time this read never
+                // selected. A non-asset value skips the cache borrow entirely,
+                // which is what keeps an ordinary animated read off this path.
+                if !value.as_ref().is_some_and(sdf::Value::is_asset_valued) {
+                    return Ok(value);
+                }
+                // `with_cache` takes an `FnMut`, so the closure cannot consume
+                // `value`.
+                stage.with_cache(|g, c| Ok(c.resolve_asset_values(g, value.clone(), Some(site))))
+            }
             AttributeValueSource::Clips => stage.resolve_at(self.attr.path(), time),
         }
     }

@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::ar::ResolvedPath;
 use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Specifier, Value};
@@ -18,7 +19,7 @@ use super::clip;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
-use super::{LayerGraph, LayerId};
+use super::{LayerGraph, LayerId, LayerStackId};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
 ///
@@ -42,6 +43,57 @@ struct Opinion<'a> {
     /// (the node's arc offset with the layer's sublayer offset composed on
     /// top). Used to retime time samples and clip schedules.
     offset: LayerOffset,
+}
+
+impl Opinion<'_> {
+    /// Where this opinion was authored, for resolving an `asset` it holds.
+    fn asset_site(&self, stack: &LayerGraph) -> AssetSite {
+        AssetSite::in_graph(stack, self.node, self.layer, &self.query_path)
+    }
+}
+
+/// Where an `asset` value was authored: what to anchor a relative path against,
+/// whose `expressionVariables` are in scope, and the site to name in a
+/// diagnostic (C++ `Usd_AssetPathContext`).
+///
+/// Holds the source layer's resolved location and identifier rather than a
+/// [`LayerId`], so a source outside the composition graph can describe itself.
+/// A value clip's layer is owned by the clip cache and never interned, so it
+/// has no id — and its variables come from the node where the clips were
+/// introduced, not from the clip, which is why the stack is carried separately
+/// rather than derived from the layer.
+///
+/// [`query_path`](Self::query_path) is the path *in the source layer*, which
+/// under a reference or variant arc differs from the composed stage path the
+/// caller started from.
+#[derive(Debug)]
+pub(crate) struct AssetSite {
+    /// Resolved location of the source layer, the anchor for a relative path.
+    /// `None` for an anonymous layer, which anchors nothing.
+    pub(crate) anchor: Option<ResolvedPath>,
+    /// Identifier of the source layer, for [`Error::InvalidExpression`].
+    pub(crate) source_layer: String,
+    /// The layer stack whose composed variables an expression evaluates against.
+    pub(crate) stack: LayerStackId,
+    /// The path queried in the source layer.
+    pub(crate) query_path: Path,
+}
+
+impl AssetSite {
+    /// The site of an opinion authored in `layer` at `query_path`, contributed
+    /// by `node` — the graph-backed case, which resolves the anchor and
+    /// identifier through `stack`.
+    ///
+    /// Copies the layer's resolved location and identifier, so build it only for
+    /// a value that actually holds asset paths.
+    fn in_graph(stack: &LayerGraph, node: &Node, layer: LayerId, query_path: &Path) -> Self {
+        Self {
+            anchor: stack.anchor_location(Some(layer)),
+            source_layer: stack.identifier(layer).to_string(),
+            stack: node.layer_stack_id(),
+            query_path: query_path.clone(),
+        }
+    }
 }
 
 /// A live contributing spec site: a [`SpecSite`](super::prim_graph::SpecSite)
@@ -501,28 +553,28 @@ impl PrimIndex {
         })
     }
 
-    /// The strongest authored opinion for `field`: the contributing layer (the
-    /// anchor for a relative asset path, mirroring C++
-    /// `UsdStage::_MakeResolvedAssetPaths`) and the node it came from (the scope
-    /// for composing the `expressionVariables` an asset-path expression is
-    /// evaluated against). Returns `None` if nothing authors the field.
-    pub(crate) fn strongest_opinion<'a>(
-        &'a self,
+    /// The site of the strongest authored opinion for `field` — what an
+    /// `asset`-valued opinion needs to anchor, evaluate, and be diagnosed
+    /// (mirroring C++ `UsdStage::_GetAssetPathContext` for a default-sourced
+    /// value). `None` if nothing authors the field.
+    ///
+    /// The provenance is owned, so the caller is free to take `&mut self` on the
+    /// cache while it resolves.
+    pub(crate) fn strongest_opinion(
+        &self,
         field: &str,
         stack: &LayerGraph,
-        prop_suffix: Option<&'a str>,
-    ) -> Option<(LayerId, &'a Node)> {
+        prop_suffix: Option<&str>,
+    ) -> Option<AssetSite> {
         // Shares `contributing_sites` with `opinions`, so the node filter never
-        // drifts. The returned node borrows `self` (the spec stack and arena),
-        // not `stack`: `prop_suffix` is tied to `self` only to build the query
-        // path, leaving the node free to outlive the iteration.
+        // drifts.
         for site in self.contributing_sites(prop_suffix) {
             let Ok(site) = site else { continue };
             if matches!(
                 stack.layer(site.layer).data().try_field(&site.query_path, field),
                 Ok(Some(_))
             ) {
-                return Some((site.layer, site.node));
+                return Some(AssetSite::in_graph(stack, site.node, site.layer, &site.query_path));
             }
         }
         None
@@ -620,8 +672,8 @@ impl PrimIndex {
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
     ) -> Result<Option<sdf::TimeSampleMap>> {
-        self.first_time_samples(stack, prop_suffix, None, |map, offset| {
-            retime_samples(map.clone(), offset)
+        self.first_time_samples(stack, prop_suffix, None, |map, opinion| {
+            retime_samples(map.clone(), opinion.offset)
         })
     }
 
@@ -656,9 +708,14 @@ impl PrimIndex {
         local_layers: Option<&HashSet<LayerId>>,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Option<Value>>> {
-        self.first_time_samples(stack, prop_suffix, local_layers, |map, offset| {
-            interp(map, offset.inverse().apply(time))
+    ) -> Result<Option<(Option<Value>, Option<AssetSite>)>> {
+        self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
+            let value = interp(map, opinion.offset.inverse().apply(time));
+            let site = value
+                .as_ref()
+                .is_some_and(Value::is_asset_valued)
+                .then(|| opinion.asset_site(stack));
+            (value, site)
         })
     }
 
@@ -674,8 +731,10 @@ impl PrimIndex {
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
         local_layers: Option<&HashSet<LayerId>>,
-    ) -> Result<Option<(sdf::TimeSampleMap, LayerOffset)>> {
-        self.first_time_samples(stack, prop_suffix, local_layers, |map, offset| (map.clone(), offset))
+    ) -> Result<Option<(sdf::TimeSampleMap, LayerOffset, AssetSite)>> {
+        self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
+            (map.clone(), opinion.offset, opinion.asset_site(stack))
+        })
     }
 
     /// Resolves only the retimed sample times of the strongest authored
@@ -688,8 +747,8 @@ impl PrimIndex {
         prop_suffix: Option<&str>,
         local_layers: Option<&HashSet<LayerId>>,
     ) -> Result<Option<Vec<f64>>> {
-        self.first_time_samples(stack, prop_suffix, local_layers, |map, offset| {
-            map.iter().map(|(t, _)| offset.apply(*t)).collect()
+        self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
+            map.iter().map(|(t, _)| opinion.offset.apply(*t)).collect()
         })
     }
 
@@ -708,28 +767,33 @@ impl PrimIndex {
 
     /// Walks `timeSamples` opinions strongest-to-weakest and applies `extract`
     /// to the first authored map, borrowed rather than cloned, paired with its
-    /// layer `offset`. A `ValueBlock` blocks weaker layers and yields
-    /// `Ok(None)`, as does the absence of any opinion. When `local_layers` is
-    /// `Some`, opinions whose contributing layer is outside that set are
-    /// skipped so only root-layer-stack opinions contribute.
+    /// layer `offset` and the [`AssetSite`] it came from. A `ValueBlock` blocks
+    /// weaker layers and yields `Ok(None)`, as does the absence of any opinion.
+    /// When `local_layers` is `Some`, opinions whose contributing layer is
+    /// outside that set are skipped so only root-layer-stack opinions
+    /// contribute.
+    ///
+    /// The winning opinion is handed to `extract` whole so it can describe its
+    /// own [`AssetSite`] — which is what lets a sampled `asset` value be
+    /// anchored and evaluated like a default-sourced one. Building that site
+    /// copies two strings, so an extract that resolves no asset simply never
+    /// asks for it.
     fn first_time_samples<R>(
         &self,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
         local_layers: Option<&HashSet<LayerId>>,
-        extract: impl FnOnce(&sdf::TimeSampleMap, LayerOffset) -> R,
+        extract: impl FnOnce(&sdf::TimeSampleMap, &Opinion<'_>) -> R,
     ) -> Result<Option<R>> {
         let field = FieldKey::TimeSamples.as_str();
         for opinion in self.opinions(field, stack, prop_suffix) {
-            let Opinion {
-                layer, value, offset, ..
-            } = opinion?;
-            if local_layers.is_some_and(|local| !local.contains(&layer)) {
+            let opinion = opinion?;
+            if local_layers.is_some_and(|local| !local.contains(&opinion.layer)) {
                 continue;
             }
-            match value.as_ref() {
+            match &*opinion.value {
                 Value::ValueBlock => return Ok(None),
-                Value::TimeSamples(map) => return Ok(Some(extract(map, offset))),
+                Value::TimeSamples(map) => return Ok(Some(extract(map, &opinion))),
                 _ => {}
             }
         }

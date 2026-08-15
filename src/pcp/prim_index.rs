@@ -966,7 +966,7 @@ fn resolve_variant_selections_in<'a>(
                             &selection,
                             vars,
                             ExpressionContext::Variant,
-                            graph.layer(layer),
+                            graph.identifier(layer),
                             &node.path,
                             None,
                             Some(&mut used_vars),

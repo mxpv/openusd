@@ -233,17 +233,22 @@
 //!   cached indices (`TODO(rayon)`), but the shared `indices` map that
 //!   inherit/specialize targets read mid-build first needs a concurrent map or a
 //!   targets-first build order. [`PrimIndex`] is already `Send + Sync`.
-//! - Resolving `asset` values sourced from time samples or value clips:
-//!   `IndexCache::value_at` evaluates expressions and anchors only
-//!   default-sourced asset paths (filling their `evaluated_path` /
-//!   `resolved_path`); a time-sample or clip value is returned unresolved
-//!   because the resolvers do not surface the layer/node of the contributing
-//!   sample.
-//! - Surfacing asset-path expression failures during value resolution: a
-//!   malformed or non-string expression in an `asset` value is dropped silently
-//!   (`IndexCache::resolve_asset_path` returns it unevaluated), unlike a
-//!   reference/payload arc, which records [`Error::InvalidExpression`]. Value
-//!   resolution needs an error channel to report it.
+//! - Resolving `asset` values sourced from value clips: `IndexCache::value_at`
+//!   anchors and evaluates a `default` or `timeSamples` value through the
+//!   `AssetSite` its resolver carries out, but a clip value is returned
+//!   unresolved. A clip anchors against the *clip layer*, which never enters the
+//!   graph and so has no `LayerId`, while its variables come from the node where
+//!   the clips were introduced (C++ `UsdStage::_GetAssetPathContext`); the clip
+//!   cache owns that provenance and does not surface it.
+//! - Anchoring `asset` values that come from a schema fallback:
+//!   `Attribute::fallback_value` reads the prim definition directly, so a
+//!   fallback never reaches `IndexCache`'s resolution tail and keeps neither an
+//!   `evaluated_path` nor a `resolved_path`. A fallback is authored in a schema
+//!   layer, so its anchor is that layer rather than any composed opinion.
+//! - Evaluating expressions in `clips` metadata itself: `clipAssetPaths`,
+//!   `templateAssetPath`, and `manifestAssetPath` are read raw (`pcp::clip`
+//!   never consults `sdf::expr`), so a `${VAR}` in one is inert and a template
+//!   sequence keyed on a variable does not resolve.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -389,11 +394,17 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
     if rate.is_finite() && rate > 0.0 { rate } else { 24.0 }
 }
 
-/// The kind of authored field a composition-time variable expression came
-/// from (C++ `PcpErrorVariableExpressionError`'s context), carried by
+/// The kind of authored field a variable expression came from, carried by
 /// [`Error::InvalidExpression`] to name the failing site in diagnostics.
+///
+/// The composition-time kinds mirror C++ `PcpErrorVariableExpressionError`'s
+/// context. [`AssetValue`](Self::AssetValue) has no C++ counterpart there —
+/// value-time failures are reported from the Usd tier — and rides this channel
+/// because it is the crate's one diagnostic surface
+/// ([`Stage::composition_errors`](crate::usd::Stage::composition_errors)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 #[strum(serialize_all = "lowercase")]
+#[non_exhaustive]
 pub enum ExpressionContext {
     /// A reference's asset path.
     Reference,
@@ -403,6 +414,10 @@ pub enum ExpressionContext {
     Sublayer,
     /// A variant selection.
     Variant,
+    /// An `asset`-valued attribute or metadatum, evaluated at value-resolution
+    /// time rather than while composing the graph.
+    #[strum(serialize = "asset value")]
+    AssetValue,
 }
 
 /// An error encountered while building a [`PrimIndex`](prim_index::PrimIndex).

@@ -1894,7 +1894,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                         sel,
                         stack.stack_expression_variables(node_stack),
                         ExpressionContext::Variant,
-                        stack.layer(layer),
+                        stack.identifier(layer),
                         &site,
                         Some(&mut self.errors),
                         Some(&mut used_vars),

@@ -773,6 +773,12 @@ impl<'a> Parser<'a> {
                         .map(|v| v.try_as_int_64().unwrap_or_default())
                         .collect(),
                 ),
+                Some(sdf::Value::AssetPath(_)) => sdf::Value::AssetPathVec(
+                    values
+                        .into_iter()
+                        .map(|v| v.try_as_asset_path().unwrap_or_default())
+                        .collect(),
+                ),
                 _ => sdf::Value::StringVec(
                     values
                         .into_iter()
@@ -795,6 +801,7 @@ impl<'a> Parser<'a> {
         match token {
             Token::None => Ok(sdf::Value::ValueBlock),
             Token::String(value) => Ok(sdf::Value::String(value.to_owned())),
+            Token::AssetRef(asset_path) => Ok(sdf::Value::AssetPath(sdf::AssetPath::new(asset_path))),
             Token::Identifier(value) | Token::NamespacedIdentifier(value) => Ok(sdf::Value::token(value)),
             Token::Number(raw) => {
                 if let Ok(int) = raw.parse::<i64>() {
@@ -3020,6 +3027,49 @@ def Xform "root" {
                 .as_str(),
             "/root/Physics/PhysicsMaterial"
         );
+    }
+
+    /// An `asset` value inside `.timeSamples = { ... }` parses as an
+    /// `AssetPath`, scalar and array alike. The type-blind per-time parser had
+    /// no `@...@` arm, so an asset-valued sample failed to parse at all.
+    #[test]
+    fn parse_asset_time_samples() {
+        let mut parser = Parser::new(
+            r#"#usda 1.0
+def Material "M"
+{
+    asset inputs:file.timeSamples = {
+        0: @./a.png@,
+    }
+    asset[] inputs:files.timeSamples = {
+        0: [@./a.png@, @./b.png@],
+    }
+}
+"#,
+        );
+        let specs = parser.parse().expect("asset timeSamples parsed");
+
+        let sample = |path: &str| {
+            let value = specs
+                .get(&sdf::Path::new(path).unwrap())
+                .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
+                .expect("timeSamples present");
+            match value {
+                sdf::Value::TimeSamples(s) => s[0].1.clone(),
+                other => panic!("expected TimeSamples, got {other:?}"),
+            }
+        };
+        match sample("/M.inputs:file") {
+            sdf::Value::AssetPath(a) => assert_eq!(a.as_str(), "./a.png"),
+            other => panic!("expected AssetPath, got {other:?}"),
+        }
+        match sample("/M.inputs:files") {
+            sdf::Value::AssetPathVec(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[1].as_str(), "./b.png");
+            }
+            other => panic!("expected AssetPathVec, got {other:?}"),
+        }
     }
 
     /// Regression: per-time values inside `.timeSamples = { ... }` must be

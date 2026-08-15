@@ -336,6 +336,17 @@ impl Value {
         T::try_from(self).ok()
     }
 
+    /// Whether this value carries `asset` paths, and so needs anchoring and
+    /// expression evaluation before it is handed to a reader.
+    ///
+    /// The single source of truth for the asset-bearing variants, so a value
+    /// resolver and its callers cannot disagree about which values to resolve.
+    /// Asset paths nested inside a dictionary are not counted: resolution does
+    /// not recurse into one.
+    pub fn is_asset_valued(&self) -> bool {
+        matches!(self, Value::AssetPath(_) | Value::AssetPathVec(_))
+    }
+
     /// Whether this value embeds namespace paths that [`remap_paths`](Self::remap_paths)
     /// rewrites — `PathVec`, `PathListOp` (relationship targets, attribute
     /// connections, `inheritPaths`, `specializes`), `Relocates`,

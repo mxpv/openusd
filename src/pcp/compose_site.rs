@@ -258,7 +258,7 @@ fn resolve_arc_asset_path(
             asset_path,
             expr_vars,
             context,
-            graph.layer(authoring_layer),
+            graph.identifier(authoring_layer),
             site,
             Some(errors),
             Some(used_vars),
@@ -304,10 +304,19 @@ impl EvaluatedExpression {
     }
 }
 
-/// Evaluates a possibly-expression-valued composition field against a stack's
-/// composed variables (C++ `Pcp_EvaluateVariableExpression`), recording a
-/// failure as [`Error::InvalidExpression`] when an error sink is given — the
-/// indexing-time pass emits diagnostics, re-resolution passes stay silent.
+/// Evaluates a possibly-expression-valued field against a stack's composed
+/// variables (C++ `Pcp_EvaluateVariableExpression`), recording a failure as
+/// [`Error::InvalidExpression`] when an error sink is given — the indexing-time
+/// pass emits diagnostics, re-resolution passes stay silent.
+///
+/// Shared by both tiers that evaluate expressions: composing an arc's asset
+/// path or a variant selection, and resolving an `asset`-valued attribute or
+/// metadatum ([`IndexCache::resolve_asset_path`](super::IndexCache)). `context`
+/// says which, and `source_layer` is the identifier of the layer that authored
+/// the expression — an identifier rather than the layer itself because a value
+/// clip's layer is owned by the clip cache and never enters the graph.
+/// `site_path` is the path *in that layer*, which under a reference or variant
+/// arc differs from the composed stage path.
 ///
 /// `used_vars`, when given, collects every variable name the evaluation
 /// requested — on success and on failure alike, since an undefined name is a
@@ -315,12 +324,13 @@ impl EvaluatedExpression {
 /// a variable edit to the prims and stacks that recorded its name (C++
 /// `PcpExpressionVariablesDependencyData`); a pass that resolves against the
 /// deliberately empty context passes `None` so its universal failures record
-/// nothing.
+/// nothing. A value-time read records none: nothing caches the resulting value,
+/// so there is nothing a dependency would invalidate (see the module doc).
 pub(super) fn evaluate_expression(
     expression: &str,
     expr_vars: &HashMap<String, Value>,
     context: ExpressionContext,
-    authoring_layer: &sdf::Layer,
+    source_layer: &str,
     site_path: &Path,
     errors: Option<&mut Vec<Error>>,
     used_vars: Option<&mut HashSet<String>>,
@@ -337,7 +347,7 @@ pub(super) fn evaluate_expression(
                 let error = Error::InvalidExpression {
                     expression: expression.to_string(),
                     context,
-                    source_layer: authoring_layer.identifier().to_string(),
+                    source_layer: source_layer.to_string(),
                     site_path: site_path.clone(),
                     message: evaluated.errors.join("; "),
                 };
