@@ -1093,8 +1093,8 @@ impl LayerGraph {
 
     /// Drains the pending [`SublayerDemand`]s the last recompose or mint
     /// discovered. The stage's load barrier resolves them
-    /// (`Stage::resolve_sublayer_demands`), opening each demanded layer under
-    /// its stack's composed variables and recomposing.
+    /// (`StageComposition::resolve_sublayer_demands`), opening each demanded
+    /// layer under its stack's composed variables and recomposing.
     pub(crate) fn take_sublayer_demands(&mut self) -> Vec<SublayerDemand> {
         self.sublayers.take_demands()
     }

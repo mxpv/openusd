@@ -7205,20 +7205,56 @@ fn listener_reentrant_author() -> Result<()> {
     Ok(())
 }
 
-/// A sink authoring through `layer_mut` from `after_commit` records onto a queue
-/// the running drain has already snapshotted, so the drain repeats until the
-/// queue stays empty: the nested edit is composed and its notification fired
-/// before the authoring call that provoked it returns, in commit order.
+/// Two sinks, the first authoring once from `after_commit`, pin the delivery
+/// order of each authoring route. A stage-routed edit drains inside the outer
+/// fan-out, so the nested event reaches both sinks before the outer event
+/// reaches the second; a direct layer edit is picked up by the quiescence loop
+/// instead, so both sinks see the outer event first.
 #[test]
-fn listener_reentrant_layer_edit() -> Result<()> {
+fn two_sink_reentrant_order() -> Result<()> {
+    fn record(tag: &'static str, log: &Rc<RefCell<Vec<String>>>, change: &CommittedChange<'_>) {
+        let prim = change
+            .resynced
+            .iter()
+            .map(|p| p.as_str().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        log.borrow_mut().push(format!("{tag}:{prim}"));
+    }
+
+    // Stage-routed: the nested `define_prim` drains inside the fan-out.
     let stage = in_memory_stage()?;
-    let root_id = stage.root_layer().identifier().to_string();
-    let fired: Rc<RefCell<Vec<Vec<sdf::Path>>>> = Rc::new(RefCell::new(Vec::new()));
-    let _token = {
-        let (fired, root_id) = (fired.clone(), root_id.clone());
+    let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let _first = {
+        let log = log.clone();
         let done = Cell::new(false);
         stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
-            fired.borrow_mut().push(change.resynced.to_vec());
+            record("s1", &log, change);
+            if !done.replace(true) {
+                stage.define_prim("/Nested").unwrap();
+            }
+        })
+    };
+    let _second = {
+        let log = log.clone();
+        stage.add_sink(move |_: &Stage, change: &CommittedChange<'_>| record("s2", &log, change))
+    };
+    stage.define_prim("/World")?;
+    assert_eq!(
+        log.borrow().clone(),
+        vec!["s1:/World", "s1:/Nested", "s2:/Nested", "s2:/World"],
+        "a stage-routed re-entrant edit drains inside the outer fan-out"
+    );
+
+    // Direct: the nested edit waits for the quiescence loop.
+    let stage = in_memory_stage()?;
+    let root_id = stage.root_layer().identifier().to_string();
+    let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let _first = {
+        let (log, root_id) = (log.clone(), root_id.clone());
+        let done = Cell::new(false);
+        stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
+            record("s1", &log, change);
             if !done.replace(true) {
                 stage
                     .layer_mut(&root_id)
@@ -7231,16 +7267,107 @@ fn listener_reentrant_layer_edit() -> Result<()> {
             }
         })
     };
-
+    let _second = {
+        let log = log.clone();
+        stage.add_sink(move |_: &Stage, change: &CommittedChange<'_>| record("s2", &log, change))
+    };
     stage.define_prim("/World")?;
+    assert_eq!(
+        log.borrow().clone(),
+        vec!["s1:/World", "s2:/World", "s1:/Nested", "s2:/Nested"],
+        "a direct layer edit is picked up by the quiescence loop"
+    );
+    assert!(stage.prim("/Nested")?.is_valid()?, "the nested edit composed");
+    Ok(())
+}
 
-    // Read the record before touching the stage again: a later query would drain
-    // the queue itself and hide a missing repeat.
-    let fired = fired.borrow().clone();
-    assert_eq!(fired.len(), 2, "both edits notified: {fired:?}");
-    assert!(fired[0].iter().any(|p| p.as_str() == "/World"));
-    assert!(fired[1].iter().any(|p| p.as_str() == "/Nested"));
-    assert!(stage.prim("/Nested")?.is_valid()?);
+/// A layer that joins through the load barrier gets the stage's change
+/// aggregator, so editing it directly invalidates composition — the aggregator
+/// reaches the load path, not only construction.
+#[test]
+fn lazy_layer_aggregated() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0
+def \"A\" (
+    payload = @payload.usda@</P>
+)
+{
+}
+",
+    )?;
+    fs::write(
+        dir.path().join("payload.usda"),
+        "#usda 1.0
+def \"P\" {
+    custom double v = 1
+}
+",
+    )?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+
+    // Composing the payload arc is what loads the layer.
+    assert_eq!(stage.attribute("/A.v")?.get::<f64>()?, Some(1.0));
+
+    let payload_id = stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| FsPath::new(id).ends_with("payload.usda"))
+        .expect("the payload layer loaded");
+    stage.layer_mut(&payload_id).expect("payload layer is live").edit(|e| {
+        e.attribute_mut("/P.v")?
+            .expect("authored attribute")
+            .set_default(sdf::Value::Double(7.0));
+        Ok(())
+    })?;
+    assert_eq!(
+        stage.attribute("/A.v")?.get::<f64>()?,
+        Some(7.0),
+        "the demand-loaded layer's aggregator drove a recompose"
+    );
+    Ok(())
+}
+
+/// A composed query that needs no layer loading runs while a shared layer
+/// reference is alive: the graph and cache are separate cells, so a live `Ref`
+/// into the graph does not block the query's mutable cache borrow. A query that
+/// demands a layer needs the graph mutably to open it, so it must not be taken
+/// under such a reference.
+#[test]
+fn query_under_layer_ref() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A")?;
+
+    let root = stage.root_layer();
+    assert!(stage.prim("/A")?.is_valid()?, "composed query under a root_layer ref");
+    let named = stage.layer(root.identifier()).expect("layer by identifier");
+    assert!(stage.prim("/A")?.is_valid()?, "composed query under a layer ref");
+    drop(named);
+    drop(root);
+
+    let dir = tempfile::tempdir()?;
+    let session = dir.path().join("session.usda");
+    fs::write(
+        &session,
+        "#usda 1.0
+",
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0
+def \"B\" {}
+",
+    )?;
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(dir.path().join("root.usda").to_str().unwrap())?;
+    let session = stage.session_layer().expect("session layer");
+    assert!(
+        stage.prim("/B")?.is_valid()?,
+        "composed query under a session_layer ref"
+    );
+    drop(session);
     Ok(())
 }
 
