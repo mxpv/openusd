@@ -152,6 +152,17 @@
 //! clearing only the per-property resolved-target memo (keyed by path and
 //! target kind) so resolved targets recompute on next read.
 //!
+//! An `expressionVariables` edit invalidates on two channels, as C++ does. The
+//! prims whose composition read a changed value are dropped, the ordinary
+//! per-path tier. The apply phase separately collects every prim using a stack
+//! whose composed variables moved (`change::asset_path_victims`), covering what
+//! no dependency record could: a value-time `` `${VAR}` `` expression in an
+//! `asset` value is evaluated on every read against its opinion's layer stack
+//! (`IndexCache::resolve_asset_path`), and nothing caches the result, so there
+//! is nothing a recorded dependency would invalidate. The stage reports that
+//! set on its own notice channel, distinct from a resync — see
+//! [`usd::CommittedChange::asset_paths_resynced`](crate::usd::CommittedChange::asset_paths_resynced).
+//!
 //! Layer muting ([`Stage::mute_layer`](crate::usd::Stage::mute_layer) /
 //! [`unmute_layer`](crate::usd::Stage::unmute_layer)) recomposes incrementally
 //! rather than clearing the cache: the toggle drops only the indices whose
@@ -233,15 +244,6 @@
 //!   (`IndexCache::resolve_asset_path` returns it unevaluated), unlike a
 //!   reference/payload arc, which records [`Error::InvalidExpression`]. Value
 //!   resolution needs an error channel to report it.
-//! - Value-time `asset` expressions are not tracked as expression-variable
-//!   dependencies (matching C++): fine-grained invalidation records only the
-//!   composition-time reads — reference/payload asset paths, variant
-//!   selections, `${VAR}` sublayer entries — while a value-time expression is
-//!   re-evaluated on every access. The compensating behavior is the stage-root
-//!   resync *notification* an `expressionVariables` edit publishes whenever
-//!   some stack's composed variables actually changed (the notice
-//!   `Changes::apply` returns), telling observers to re-read values even when
-//!   no prim index dropped.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -298,7 +300,7 @@ mod relocates;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, Path, Value};
 
-pub(crate) use change::Changes;
+pub(crate) use change::{ApplyOutcome, Changes};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
 pub(crate) use layer_graph::{LayerGraph, LoadFailure, MuteChange, StackIdentity, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};

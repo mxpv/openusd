@@ -132,6 +132,44 @@ fn reports_unresolved_sublayer(stage: &Stage, asset_path: &str) -> bool {
     unresolved_sublayer_count(stage, asset_path) > 0
 }
 
+/// The composed-change path channels a [`CommittedChange`] reports, accumulated
+/// across every notice an edit publishes.
+#[derive(Default, Debug)]
+struct Notices {
+    resynced: Vec<sdf::Path>,
+    changed_info_only: Vec<sdf::Path>,
+    asset_paths_resynced: Vec<sdf::Path>,
+}
+
+/// Installs a sink recording all three channels, for tests asserting exactly
+/// what an edit publishes.
+fn capture_notices(stage: &Stage) -> Rc<RefCell<Notices>> {
+    let notices = Rc::new(RefCell::new(Notices::default()));
+    let sink = notices.clone();
+    stage.add_sink(move |_stage: &Stage, change: &CommittedChange<'_>| {
+        let mut n = sink.borrow_mut();
+        n.resynced.extend(change.resynced.iter().cloned());
+        n.changed_info_only.extend(change.changed_info_only.iter().cloned());
+        n.asset_paths_resynced
+            .extend(change.asset_paths_resynced.iter().cloned());
+    });
+    notices
+}
+
+/// Parses each of `paths`, for comparing a captured channel against literals.
+fn paths(paths: &[&str]) -> Vec<sdf::Path> {
+    paths.iter().map(|p| sdf::path(p).expect("valid path")).collect()
+}
+
+/// The identifier of the loaded layer whose file name is `leaf`.
+fn identifier_by_leaf(stage: &Stage, leaf: &str) -> String {
+    stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| FsPath::new(id).ends_with(leaf))
+        .expect("layer is loaded")
+}
+
 // --- Basic stage opening (vendor/usd-wg-assets) ---
 
 #[test]
@@ -810,39 +848,54 @@ fn target_var_edit_loads() -> Result<()> {
 }
 
 /// An `expressionVariables` edit that changes a composed variable no prim
-/// depends on drops no index, yet still publishes the stage-root resync
-/// notice to observers — the broad notice covering untracked value-time
-/// expression reads (the resync `pcp::Changes::apply` reports).
+/// depends on drops no index and resyncs nothing, yet still names the affected
+/// subtrees on the asset-path channel — the untracked value-time expression
+/// reads. The root stack's users are every composed prim, so that channel
+/// reports the pseudo-root.
 #[test]
-fn vars_edit_notifies_resync() -> Result<()> {
+fn vars_edit_notifies_assets() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     fs::write(
         &root,
-        "#usda 1.0\n(\n    expressionVariables = { string FREE = \"x\" }\n)\ndef \"Other\" {\n    custom double o = 1\n}\n",
+        r#"#usda 1.0
+(
+    expressionVariables = { string FREE = "x" }
+)
+def "Other" {
+    custom double o = 1
+}
+"#,
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(1.0));
     assert!(stage.is_indexed(&sdf::path("/Other")?));
 
-    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
-    let _token = {
-        let resynced = resynced.clone();
-        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
-            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-        })
-    };
+    let notices = capture_notices(&stage);
     stage.set_expression_variables(HashMap::from([(
         "FREE".to_string(),
         sdf::Value::String("y".to_string()),
     )]))?;
 
-    assert!(
-        resynced.borrow().contains(&sdf::Path::abs_root()),
-        "a vars-only edit publishes the stage-root resync notice, got {:?}",
-        resynced.borrow()
-    );
+    {
+        let notices = notices.borrow();
+        assert!(
+            notices.resynced.is_empty(),
+            "no prim recorded the variable, so nothing resynced, got {:?}",
+            notices.resynced
+        );
+        assert_eq!(
+            notices.asset_paths_resynced,
+            paths(&["/"]),
+            "the root stack's asset values may re-resolve stage-wide"
+        );
+        assert_eq!(
+            notices.changed_info_only,
+            paths(&["/"]),
+            "the edit is an ordinary layer-metadata info change on the pseudo-root"
+        );
+    }
     assert!(
         stage.is_indexed(&sdf::path("/Other")?),
         "no prim recorded the variable, so its index survives the edit"
@@ -851,11 +904,11 @@ fn vars_edit_notifies_resync() -> Result<()> {
 }
 
 /// Authoring `expressionVariables` on a sublayer changes no stack's composed
-/// set — only a stack root's variables contribute — so the edit publishes no
-/// stage-root resync notice and drops no index (the C++ five-step diff's
-/// step-1 no-op).
+/// set — only a stack root's variables contribute — so the edit publishes
+/// nothing on either the resync or the asset-path channel and drops no index
+/// (the C++ five-step diff's step-1 no-op).
 #[test]
-fn sublayer_vars_no_resync() -> Result<()> {
+fn sublayer_vars_no_notice() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     fs::write(&root, "#usda 1.0\n(\n    subLayers = [@sub.usda@]\n)\n")?;
@@ -868,18 +921,8 @@ fn sublayer_vars_no_resync() -> Result<()> {
     assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0));
     assert!(stage.is_indexed(&sdf::path("/P")?));
 
-    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
-    let _token = {
-        let resynced = resynced.clone();
-        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
-            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-        })
-    };
-    let sub_id = stage
-        .layer_identifiers()
-        .into_iter()
-        .find(|id| FsPath::new(id).ends_with("sub.usda"))
-        .expect("sub.usda is loaded");
+    let notices = capture_notices(&stage);
+    let sub_id = identifier_by_leaf(&stage, "sub.usda");
     stage.layer_mut(&sub_id).expect("sublayer is live").edit(|e| {
         e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("x".to_string()))]))
     })?;
@@ -889,11 +932,178 @@ fn sublayer_vars_no_resync() -> Result<()> {
         stage.is_indexed(&sdf::path("/P")?),
         "no composed variable changed, so the index survives"
     );
+    let notices = notices.borrow();
     assert!(
-        !resynced.borrow().contains(&sdf::Path::abs_root()),
-        "a vars edit that changed no composed set publishes no resync, got {:?}",
-        resynced.borrow()
+        notices.resynced.is_empty() && notices.asset_paths_resynced.is_empty(),
+        "a vars edit that changed no composed set publishes nothing, got {notices:?}"
     );
+    Ok(())
+}
+
+/// A referenced stack's own `expressionVariables` edit changes only that
+/// stack's composed set, so the asset-path channel names exactly the prims
+/// composing against it rather than the whole stage. Nothing resyncs — no prim
+/// read the variable during composition — and the channel is load-bearing: the
+/// value-time expression re-evaluates on the next read, so the prim the notice
+/// named really does resolve to a different asset.
+#[test]
+fn target_vars_notify_referrer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "Ref" (
+    references = @t.usda@
+) {}
+def "Other" {
+    custom double o = 1
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("t.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "P"
+    expressionVariables = { string NAME = "a" }
+)
+def "P" {
+    asset inputs:file = @`"./${NAME}.png"`@
+}
+"#,
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let evaluated = |stage: &Stage| -> Result<Option<String>> {
+        Ok(stage
+            .attribute("/Ref.inputs:file")?
+            .get::<sdf::AssetPath>()?
+            .and_then(|a| a.evaluated_path().map(str::to_string)))
+    };
+    assert_eq!(evaluated(&stage)?.as_deref(), Some("./a.png"));
+    assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(1.0));
+
+    let notices = capture_notices(&stage);
+    let target_id = identifier_by_leaf(&stage, "t.usda");
+    stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([(
+            "NAME".to_string(),
+            sdf::Value::String("b".to_string()),
+        )]))
+    })?;
+
+    assert_eq!(
+        evaluated(&stage)?.as_deref(),
+        Some("./b.png"),
+        "the value-time expression re-evaluates against the edited variables"
+    );
+    {
+        let notices = notices.borrow();
+        assert_eq!(
+            notices.asset_paths_resynced,
+            paths(&["/Ref"]),
+            "only the prims composing against the edited stack may re-resolve"
+        );
+        assert!(
+            notices.resynced.is_empty(),
+            "no prim read the variable during composition, got {:?}",
+            notices.resynced
+        );
+    }
+    Ok(())
+}
+
+/// Instancing: the channel names the composed cache keys, so two instances
+/// sharing a prototype contribute their own roots and the shared
+/// `/__Prototype_N` (C++ reports prototype paths the same way). A nested
+/// instance whose prototype composes no content from the edited stack is
+/// correctly absent, and so is any prototype no proxy query has materialized —
+/// it has produced no asset value to re-read.
+#[test]
+fn instance_vars_notify_prototype() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "A" (
+    references = @t.usda@
+    instanceable = true
+) {}
+def "B" (
+    references = @t.usda@
+    instanceable = true
+) {}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("t.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "P"
+    expressionVariables = { string NAME = "a" }
+)
+def "P" {
+    def "Inner" { custom double y = 2 }
+    def "Nested" (
+        references = @u.usda@
+        instanceable = true
+    ) {}
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("u.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "Q"
+)
+def "Q" {
+    custom double z = 3
+}
+"#,
+    )?;
+
+    // Set `NAME` on `t.usda`, whose stack both instances compose against.
+    let edit_target_vars = |stage: &Stage| -> Result<()> {
+        let target_id = identifier_by_leaf(stage, "t.usda");
+        stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
+            e.set_expression_variables(HashMap::from([(
+                "NAME".to_string(),
+                sdf::Value::String("b".to_string()),
+            )]))
+        })?;
+        Ok(())
+    };
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    // Query through both proxies so the shared prototype — and the nested
+    // instance's own prototype — materialize.
+    assert_eq!(stage.attribute("/A/Inner.y")?.get::<f64>()?, Some(2.0));
+    assert_eq!(stage.attribute("/B/Inner.y")?.get::<f64>()?, Some(2.0));
+    assert_eq!(stage.attribute("/A/Nested.z")?.get::<f64>()?, Some(3.0));
+
+    let notices = capture_notices(&stage);
+    edit_target_vars(&stage)?;
+    // Reading drains the pending edit, delivering the composed change notice.
+    assert!(stage.prim("/A")?.is_valid()?);
+    assert_eq!(
+        notices.borrow().asset_paths_resynced,
+        paths(&["/A", "/B", "/__Prototype_0"]),
+        "both instance roots and the shared prototype compose against the edited stack; \
+         the nested prototype holds only u.usda content, so it is untouched"
+    );
+
+    // A stage where no proxy was ever queried materializes no prototype, so the
+    // channel names only the instance roots that have composed.
+    let cold = Stage::open(root.to_str().unwrap())?;
+    assert!(cold.prim("/A")?.is_valid()?);
+    assert!(cold.prim("/B")?.is_valid()?);
+    let cold_notices = capture_notices(&cold);
+    edit_target_vars(&cold)?;
+    assert!(cold.prim("/A")?.is_valid()?);
+    assert_eq!(cold_notices.borrow().asset_paths_resynced, paths(&["/A", "/B"]));
     Ok(())
 }
 
@@ -7417,17 +7627,13 @@ fn remove_prim_drops_spec() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/A/B")?;
     assert!(stage.prim("/A/B")?.is_valid()?);
-    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
-    let _token = {
-        let resynced = resynced.clone();
-        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
-            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-        })
-    };
+    let notices = capture_notices(&stage);
     assert!(stage.remove_prim("/A/B")?);
     assert!(!stage.prim("/A/B")?.is_valid()?);
     assert!(!child_names(&stage, "/A")?.contains(&"B".to_string()));
-    assert!(resynced.borrow().contains(&sdf::path("/A/B")?));
+    // The removal drops `/A`'s index and its whole subtree, so the notice
+    // reports the ancestor and `/A/B` is subsumed by it.
+    assert_eq!(notices.borrow().resynced, paths(&["/A"]));
     // Nothing left to remove.
     assert!(!stage.remove_prim("/A/B")?);
     Ok(())
@@ -7469,5 +7675,53 @@ fn remove_rejects_wrong_path_kind() -> Result<()> {
     // The rejected calls left both specs intact.
     assert!(stage.prim("/A")?.is_valid()?);
     assert!(stage.prim("/A")?.property_names()?.iter().any(|t| t == "size"));
+    Ok(())
+}
+
+/// A resync only subsumes the paths beneath it when it actually dropped the
+/// subtree. Creating an attribute over a sublayer-defined prim adds inert
+/// `over` specs on the way down, which land on the spec tier — a `has_specs`
+/// refresh, not a subtree drop — so the attribute's own info entry survives.
+#[test]
+fn spec_tier_resync_keeps_info() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+(
+    subLayers = [@sub.usda@]
+)
+"#,
+    )?;
+    fs::write(
+        dir.path().join("sub.usda"),
+        r#"#usda 1.0
+def "A" {
+    def "B" {
+        custom double x = 1
+    }
+}
+"#,
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.attribute("/A/B.x")?.get::<f64>()?, Some(1.0));
+
+    let notices = capture_notices(&stage);
+    stage.create_attribute("/A/B.x", "double")?;
+    assert!(stage.prim("/A")?.is_valid()?);
+
+    let notices = notices.borrow();
+    assert!(
+        notices.changed_info_only.contains(&sdf::path("/A/B.x")?),
+        "the authored attribute must still be reported, got {:?}",
+        notices.changed_info_only
+    );
+    assert_eq!(
+        notices.resynced,
+        paths(&["/A", "/A/B"]),
+        "the spec tier reports both sites; neither stands for the other's subtree"
+    );
     Ok(())
 }

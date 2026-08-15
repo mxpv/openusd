@@ -4,9 +4,11 @@
 //! layer-stack edits. The change-record derivation itself
 //! (`sdf::ChangeList::from_overlay`) is unit-tested in `src/sdf/change.rs`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path as FsPath;
+use std::rc::Rc;
 
 use anyhow::Result;
 use openusd::{pcp, sdf, tf, usd};
@@ -47,6 +49,35 @@ fn child_names(stage: &usd::Stage, path: &str) -> Vec<String> {
         .into_iter()
         .map(String::from)
         .collect()
+}
+
+/// The composed-change path channels a [`usd::CommittedChange`] reports,
+/// accumulated across every notice an edit publishes.
+#[derive(Default, Debug)]
+struct Notices {
+    resynced: Vec<sdf::Path>,
+    changed_info_only: Vec<sdf::Path>,
+    asset_paths_resynced: Vec<sdf::Path>,
+}
+
+/// Installs a sink recording all three channels, so a test can pin what an
+/// `expressionVariables` edit publishes as well as what it invalidates.
+fn capture_notices(stage: &usd::Stage) -> Rc<RefCell<Notices>> {
+    let notices = Rc::new(RefCell::new(Notices::default()));
+    let sink = notices.clone();
+    stage.add_sink(move |_stage: &usd::Stage, change: &usd::CommittedChange<'_>| {
+        let mut n = sink.borrow_mut();
+        n.resynced.extend(change.resynced.iter().cloned());
+        n.changed_info_only.extend(change.changed_info_only.iter().cloned());
+        n.asset_paths_resynced
+            .extend(change.asset_paths_resynced.iter().cloned());
+    });
+    notices
+}
+
+/// Parses each of `paths`, for comparing a captured channel against literals.
+fn paths(paths: &[&str]) -> Vec<sdf::Path> {
+    paths.iter().map(|p| sdf::path(p).expect("valid path")).collect()
 }
 
 /// The identifier of the loaded layer whose file name is `leaf`.
@@ -346,12 +377,27 @@ def "Other" {
 fn unused_var_keeps_index() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let stage = open_variant_fixture(&dir)?;
+    let notices = capture_notices(&stage);
 
     stage.set_expression_variables(HashMap::from([
         ("SEL".to_string(), sdf::Value::String("x".to_string())),
         ("FREE".to_string(), sdf::Value::String("z".to_string())),
     ]))?;
 
+    {
+        let notices = notices.borrow();
+        assert!(
+            notices.resynced.is_empty(),
+            "no prim reads FREE, got {:?}",
+            notices.resynced
+        );
+        assert_eq!(
+            notices.asset_paths_resynced,
+            paths(&["/"]),
+            "the root stack's composed variables moved, so any asset value may re-resolve"
+        );
+        assert_eq!(notices.changed_info_only, paths(&["/"]));
+    }
     assert!(
         stage.is_indexed(&sdf::path("/User")?),
         "/User reads SEL, whose value is unchanged — its index survives"
@@ -370,12 +416,19 @@ fn unused_var_keeps_index() -> Result<()> {
 fn used_var_drops_user() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let stage = open_variant_fixture(&dir)?;
+    let notices = capture_notices(&stage);
 
     stage.set_expression_variables(HashMap::from([(
         "SEL".to_string(),
         sdf::Value::String("y".to_string()),
     )]))?;
 
+    {
+        let notices = notices.borrow();
+        assert_eq!(notices.resynced, paths(&["/User"]), "only the reader recomposes");
+        assert_eq!(notices.asset_paths_resynced, paths(&["/"]));
+        assert_eq!(notices.changed_info_only, paths(&["/"]));
+    }
     assert!(
         !stage.is_indexed(&sdf::path("/User")?),
         "/User recorded reading SEL, so its index drops"
@@ -432,6 +485,7 @@ def "B" {
     let stage = usd::Stage::open(root.to_str().unwrap())?;
     assert_eq!(stage.attribute("/A.x")?.get::<f64>()?, Some(1.0), "W=a at open");
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
+    let notices = capture_notices(&stage);
 
     stage.set_expression_variables(HashMap::from([("W".to_string(), sdf::Value::String("b".to_string()))]))?;
 
@@ -439,6 +493,19 @@ def "B" {
         !stage.is_indexed(&sdf::path("/Other")?),
         "W selects a root-stack sublayer, so the change is stack-significant"
     );
+    {
+        let notices = notices.borrow();
+        assert_eq!(notices.resynced, paths(&["/"]), "the whole root stack recomposes");
+        assert!(
+            notices.asset_paths_resynced.is_empty(),
+            "the stage-wide resync already covers every asset value, got {:?}",
+            notices.asset_paths_resynced
+        );
+        assert!(
+            notices.changed_info_only.is_empty(),
+            "the pseudo-root info change is subsumed by the pseudo-root resync"
+        );
+    }
     assert_eq!(
         stage.attribute("/B.y")?.get::<f64>()?,
         Some(2.0),
@@ -454,7 +521,9 @@ def "B" {
 
 /// Authoring a reference target's first `expressionVariables` flips the target
 /// stack's variable source (root → itself), which resyncs every prim using the
-/// stack even though no prim recorded reading a variable (C++ step 2).
+/// stack even though no prim recorded reading a variable (C++ step 2). Its
+/// composed set moved too — from empty to the authored pair — so the asset-path
+/// channel names the same prims, and the resync subsumes them.
 #[test]
 fn source_change_resyncs() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -486,6 +555,7 @@ def "P" {
     assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0));
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
 
+    let notices = capture_notices(&stage);
     let target_id = identifier_by_leaf(&stage, "t.usda");
     stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
         e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("x".to_string()))]))
@@ -495,6 +565,19 @@ def "P" {
         !stage.is_indexed(&sdf::path("/P")?),
         "the target stack's variable source flipped, so its user resyncs"
     );
+    {
+        let notices = notices.borrow();
+        assert_eq!(notices.resynced, paths(&["/P"]));
+        assert!(
+            notices.asset_paths_resynced.is_empty(),
+            "the /P resync already covers its asset values, got {:?}",
+            notices.asset_paths_resynced
+        );
+        // The edited layer is not local, so this is `Provenance::DirectLayerEdit`
+        // and the entry is `t.usda`'s own pseudo-root. It shares no namespace
+        // with the stage-namespace `/P` resync, so it survives untouched.
+        assert_eq!(notices.changed_info_only, paths(&["/"]));
+    }
     assert!(
         stage.is_indexed(&sdf::path("/Other")?),
         "/Other does not use the target stack — its index survives"
@@ -570,6 +653,7 @@ def "O" {
         "V=x reaches the referenced stack's `${{V}}` reference"
     );
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
+    let notices = capture_notices(&stage);
 
     stage.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("y".to_string()))]))?;
 
@@ -577,6 +661,16 @@ def "O" {
         !stage.is_indexed(&sdf::path("/P")?),
         "the delta cascades to the seeded target stack and finds /P's recorded read"
     );
+    {
+        let notices = notices.borrow();
+        assert_eq!(notices.resynced, paths(&["/P"]), "only the recorded reader recomposes");
+        assert_eq!(
+            notices.asset_paths_resynced,
+            paths(&["/"]),
+            "the root stack moved too, so its pseudo-root subsumes the cascaded stack's users"
+        );
+        assert_eq!(notices.changed_info_only, paths(&["/"]));
+    }
     assert!(
         stage.is_indexed(&sdf::path("/Other")?),
         "/Other reads no variable — its index survives"

@@ -346,13 +346,14 @@ impl StageComposition {
             }
             Payload::new(&pcp_changes, &merged, layer_changes, &provenance)
         });
-        let root_resync = self.update_pair(|graph, cache| pcp_changes.apply(cache, graph));
-        // The stage-wide resync entry is known only after `apply` ran — a
-        // vars-only edit publishes it exactly when the rebuild changed some
-        // stack's composed variables — so it lands on the payload here rather
+        let outcome = self.update_pair(|graph, cache| pcp_changes.apply(cache, graph));
+        // The layer-stack tier's paths are known only after `apply` ran — a
+        // vars-only edit resyncs its dependents, and names the subtrees whose
+        // asset values may re-resolve, exactly when the rebuild changed some
+        // stack's composed variables — so they land on the payload here rather
         // than at the snapshot above.
-        if root_resync && let Some(payload) = payload.as_mut() {
-            payload.record_root_resync();
+        if let Some(payload) = payload.as_mut() {
+            payload.finish(outcome, &provenance);
         }
         // The recompose may have demanded sublayers — a `${VAR}` entry the
         // edited variables newly select, or a just-authored literal naming an
@@ -799,6 +800,13 @@ impl StageComposition {
         // A mute can flip a stack's variable source (its authored variables
         // stop contributing), stranding the old-keyed instance — the mute path
         // discards variable deltas, so the sweep is what reclaims it.
+        //
+        // TODO: discarding those deltas also drops the asset-path channel a
+        // composed-variable move would publish (`change::asset_path_victims`).
+        // A mute reports through `StageSink::layer_muting_changed` and builds no
+        // `CommittedChange` at all, so surfacing it means giving this path a
+        // payload; C++ routes muting through the same pending-changes pass that
+        // collects `assetPathResyncChanges`.
         self.reclaim_stale_stacks();
         Some(changed)
     }

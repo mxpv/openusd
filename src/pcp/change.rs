@@ -134,6 +134,19 @@ impl CacheChanges {
             .chain(self.did_change_prims.iter())
             .chain(self.did_change_specs.iter().map(|(_, path)| path))
     }
+
+    /// The subset of [`resynced_paths`](Self::resynced_paths) that stands for a
+    /// whole subtree — the significant tier, whose entries drop the index and
+    /// every namespace descendant.
+    ///
+    /// Only these may subsume another reported path by prefix. The prim tier
+    /// drops one index, and the spec tier refreshes `has_specs` in place, so
+    /// neither says anything about the paths beneath it: an inert `over` added
+    /// at `/A` on the way to authoring `/A/B.x` must not swallow the attribute's
+    /// own report.
+    pub(crate) fn subtree_resynced_paths(&self) -> impl Iterator<Item = &Path> {
+        self.did_change_significantly.iter()
+    }
 }
 
 bitflags! {
@@ -173,6 +186,36 @@ bitflags! {
         /// table.
         const NEEDS_RELOCATES_REBUILD = Self::LAYERS.bits() | Self::RELOCATES.bits();
     }
+}
+
+/// What one [`Changes::apply`] must publish beyond the per-path entries the
+/// diff phase recorded — the facts only the apply phase can know, since they
+/// depend on which layer stacks the rebuild actually moved.
+///
+/// Every path is in composed stage namespace: each comes from a dependency-table
+/// lookup or is the pseudo-root. Both sets stand for whole subtrees, which is
+/// what lets a consumer prune its own path-sets by prefix against them.
+/// [`asset_paths_resynced`](Self::asset_paths_resynced) is unordered and may
+/// name a prim twice, since cascading deltas contribute overlapping victim sets,
+/// so a consumer that needs a minimal set normalizes it
+/// (`usd::sink::Payload::finish`).
+#[derive(Debug, Default)]
+pub(crate) struct ApplyOutcome {
+    /// Composed prim paths this apply resynced for a layer-stack reason: the
+    /// indices a `subLayers`/offset/`timeCodesPerSecond` change or an
+    /// `expressionVariables` delta dropped (C++ `DidChangeSignificantly` from
+    /// `_DidChangeLayerStackExpressionVariables`). Each drops its index and every
+    /// namespace descendant, so an entry stands for its whole subtree; a lone
+    /// [`Path::abs_root`] entry means the whole stage resynced. Sorted and
+    /// deduplicated, from the drop's own victim set.
+    pub(crate) resynced: Vec<Path>,
+    /// The subtrees whose `asset` values may now resolve elsewhere, from
+    /// [`asset_path_victims`] — the channel that covers what no dependency
+    /// record can. Costs a dependency lookup per stack whose composed variables
+    /// moved, paid whether or not an observer is installed, since `apply`
+    /// cannot see whether the stage wants a notice; C++ collects it
+    /// unconditionally too.
+    pub(crate) asset_paths_resynced: Vec<Path>,
 }
 
 impl Changes {
@@ -403,19 +446,17 @@ impl Changes {
 
     /// Apply phase: commit the planned invalidations to `cache`.
     ///
-    /// Returns whether observers must treat the whole stage as resynced (the
-    /// stage publishes it as a pseudo-root entry in the composed change
-    /// notice): a layer-stack [`SIGNIFICANT`](LayerStackChanges::SIGNIFICANT)
-    /// edit drops the affected indices wholesale, and an `expressionVariables`
-    /// edit that changed some stack's composed variables — the rebuild emitted
-    /// a delta — publishes the same broad notice even though it drops only the
-    /// recorded dependents: value-time asset-path expressions are re-resolved
-    /// on access and never tracked as dependencies, and C++ compensates for
-    /// those untracked reads with exactly this notification. A vars edit that
-    /// changed no composed set (an identical re-authoring, or variables on a
-    /// non-root member layer, which contribute to no stack) reports nothing,
-    /// matching the C++ five-step diff's step-1 no-op.
-    pub fn apply(mut self, cache: &mut IndexCache, graph: &mut LayerGraph) -> bool {
+    /// Returns the [`ApplyOutcome`] observers must be told on top of the
+    /// per-path entries the diff phase recorded. A layer-stack
+    /// [`SIGNIFICANT`](LayerStackChanges::SIGNIFICANT) edit drops the affected
+    /// indices wholesale and resyncs the whole stage; an `expressionVariables`
+    /// edit resyncs exactly the dependents it dropped and, on the separate
+    /// asset-path channel, names the subtrees whose `asset` values may now
+    /// resolve elsewhere. A vars edit that changed no composed set (an
+    /// identical re-authoring, or variables on a non-root member layer, which
+    /// contribute to no stack) reports nothing on either channel, matching the
+    /// C++ five-step diff's step-1 no-op.
+    pub fn apply(mut self, cache: &mut IndexCache, graph: &mut LayerGraph) -> ApplyOutcome {
         // Advance the composition revision so cached value views rebuild. This
         // is the single funnel for every authoring and layer-stack edit, so a
         // value-only change that drops no index still invalidates them.
@@ -453,13 +494,23 @@ impl Changes {
         // evicts those indices and the prototypes they touch and leaves the rest
         // warm. The blanket subsumes the vars deltas: a prim using a stack whose
         // variables cascaded from an edited layer composes that layer's stack
-        // somewhere on its arc chain, so the layer fanout already reaches it.
-        let root_resync = self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) || !vars_deltas.is_empty();
-        if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
+        // somewhere on its arc chain, so the layer fanout already reaches it. A
+        // membership change can also admit prims no cached index names yet, so the
+        // resync reported is the pseudo-root, not the evicted set.
+        //
+        // The asset-path channel is collected from the deltas whichever branch runs,
+        // matching C++, which records `didChangeExpressionVariables` on a
+        // composed-value change alone. It must be gathered before the drop below
+        // empties the registrations it reads. On the significant branch the
+        // pseudo-root resync stands for every asset value on the stage, so the
+        // notice discards what is collected here.
+        let asset_paths_resynced = asset_path_victims(cache, &vars_deltas);
+        let resynced = if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
             cache.invalidate_layers(&affected);
+            vec![Path::abs_root()]
         } else {
-            apply_vars_deltas(cache, graph, &vars_deltas);
-        }
+            apply_vars_deltas(cache, graph, &vars_deltas)
+        };
 
         // A prim-tier index invalidation can change which prims are instances or
         // how they compose, so affected entries in the shared-prototype registry
@@ -517,20 +568,50 @@ impl Changes {
             cache.clear_target_memos(stale);
         }
 
-        root_resync
+        ApplyOutcome {
+            resynced,
+            asset_paths_resynced,
+        }
     }
 }
 
+/// The composed paths whose `asset` values may re-resolve after `deltas`, for
+/// the notice's asset-path channel (C++ `assetPathResyncChanges`, gathered by
+/// `UsdStage::_HandleLayersDidChange` from each layer stack flagged
+/// `didChangeExpressionVariables`).
+///
+/// A value-time `` `${VAR}` `` expression in an `asset` value is re-evaluated on
+/// every access against its opinion's layer stack and never recorded as a
+/// dependency, so no index drop can stand in for it: every prim using a stack
+/// whose composed variables moved must be named. The gate is the composed
+/// *value*, matching C++ `expressionVarsChanged` — a delta that only moved the
+/// stack's variable source re-keys arcs without changing what an expression
+/// evaluates to.
+fn asset_path_victims(cache: &IndexCache, deltas: &[StackVarsDelta]) -> Vec<Path> {
+    let mut victims = Vec::new();
+    for delta in deltas.iter().filter(|delta| delta.old_expr != delta.new_expr) {
+        victims.extend(cache.dependencies().prims_for_stack(delta.stack));
+        // What the root stack answers with subsumes every path a later delta in
+        // the cascade could add. Every `Stage::set_expression_variables` moves
+        // it, so stopping here is the common case, not an edge one.
+        if delta.stack == LayerStackId::ROOT {
+            break;
+        }
+    }
+    victims
+}
+
 /// Consumes an `expressionVariables` rebuild's per-stack deltas, dropping their
-/// recorded dependents — the C++ five-step
-/// `_DidChangeLayerStackExpressionVariables` diff. Step 1 (composed variables
-/// and source unchanged) emits no delta, so an identical re-authoring costs
-/// only the rebuild and the revision bump; step 5 — propagation to stacks
-/// whose override source resolves through a changed one — is the rebuild's
-/// seed cascade, which emits those stacks' own deltas. Victims accumulate
-/// across deltas and drop once, since a cascade's victim sets overlap and each
-/// drop pays a per-victim prototype scan.
-fn apply_vars_deltas(cache: &mut IndexCache, graph: &LayerGraph, deltas: &[StackVarsDelta]) {
+/// recorded dependents and returning them as the resynced paths — the C++
+/// five-step `_DidChangeLayerStackExpressionVariables` diff, whose every victim
+/// is a `DidChangeSignificantly`. Step 1 (composed variables and source
+/// unchanged) emits no delta, so an identical re-authoring costs only the
+/// rebuild and the revision bump; step 5 — propagation to stacks whose override
+/// source resolves through a changed one — is the rebuild's seed cascade, which
+/// emits those stacks' own deltas. Victims accumulate across deltas and drop
+/// once, since a cascade's victim sets overlap and each drop pays a per-victim
+/// prototype scan.
+fn apply_vars_deltas(cache: &mut IndexCache, graph: &LayerGraph, deltas: &[StackVarsDelta]) -> Vec<Path> {
     let mut victims: BTreeSet<Path> = BTreeSet::new();
     for delta in deltas {
         if delta.old_source == delta.new_source {
@@ -550,22 +631,25 @@ fn apply_vars_deltas(cache: &mut IndexCache, graph: &LayerGraph, deltas: &[Stack
         // stack. The root stack's users are the whole cache, subsuming every
         // victim any delta could add, so drop it once and stop.
         if delta.stack == LayerStackId::ROOT {
-            cache.drop_index_victims(&[Path::abs_root()]);
-            return;
+            let root = vec![Path::abs_root()];
+            cache.drop_index_victims(&root);
+            return root;
         }
         victims.extend(cache.dependencies().prims_for_stack(delta.stack));
     }
-    if !victims.is_empty() {
-        let victims: Vec<Path> = victims.into_iter().collect();
-        cache.drop_index_victims(&victims);
-    }
+    let victims: Vec<Path> = victims.into_iter().collect();
+    cache.drop_index_victims(&victims);
+    victims
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+    use crate::pcp::layer_stack::{ExprVarId, ExprVarInterner, VarsSource};
     use crate::pcp::{LoadRules, VariantFallbackMap};
-    use crate::sdf::{ChangeFlags, ChangeList};
+    use crate::sdf::{ChangeFlags, ChangeList, Value};
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid path")
@@ -582,6 +666,42 @@ mod tests {
             graph,
             IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new()),
         )
+    }
+
+    /// An interned context holding `name = value`, for building the before/after
+    /// pair a [`StackVarsDelta`] carries.
+    fn intern(interner: &mut ExprVarInterner, name: &str, value: &str) -> ExprVarId {
+        interner.intern(&HashMap::from([(name.to_string(), Value::String(value.to_string()))]))
+    }
+
+    /// The asset-path channel is gated on the composed *value* moving (C++
+    /// `expressionVarsChanged`): a delta that only re-sourced a stack's
+    /// variables leaves every expression evaluating to what it did before.
+    #[test]
+    fn asset_victims_need_value() {
+        let (_graph, cache) = empty_cache();
+        let mut interner = ExprVarInterner::default();
+        let before = intern(&mut interner, "V", "a");
+        let after = intern(&mut interner, "V", "b");
+        assert_ne!(before, after);
+
+        let changed = StackVarsDelta {
+            stack: LayerStackId::ROOT,
+            old_expr: before,
+            new_expr: after,
+            old_source: VarsSource::Root,
+            new_source: VarsSource::Root,
+        };
+        assert_eq!(asset_path_victims(&cache, &[changed]), vec![Path::abs_root()]);
+
+        let source_only = StackVarsDelta {
+            stack: LayerStackId::ROOT,
+            old_expr: before,
+            new_expr: before,
+            old_source: VarsSource::Root,
+            new_source: VarsSource::Instance(LayerStackId::ROOT),
+        };
+        assert!(asset_path_victims(&cache, &[source_only]).is_empty());
     }
 
     #[test]

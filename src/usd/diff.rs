@@ -764,6 +764,7 @@ mod tests {
         let change = CommittedChange {
             resynced: &[],
             changed_info_only: std::slice::from_ref(&size),
+            asset_paths_resynced: &[],
             layer_identifier: &root,
             change_list: &change_list,
             layer_changes: &layer_changes,
@@ -1487,7 +1488,10 @@ mod tests {
         }
         let resynced = resynced.borrow();
         assert!(resynced.contains(&sdf::path("/Prim/child")?));
-        assert!(!resynced.contains(&sdf::path("/Prim{set=sel}child")?));
+        assert!(
+            !resynced.iter().any(|p| p.contains_prim_variant_selection()),
+            "the authored variant path must not leak into stage namespace"
+        );
         Ok(())
     }
 
