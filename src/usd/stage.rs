@@ -1489,7 +1489,15 @@ impl Stage {
         E: From<sdf::sink::Error>,
     {
         let result = {
-            let mut graph = self.composition.authoring_graph_mut();
+            // The borrow states the mode's drain contract: a commit may arrive
+            // with edits queued and appends to them, while a dry run validates
+            // against composed state and so takes the settled borrow, whose
+            // backstop catches a caller that stopped settling first.
+            let mut graph = if commit {
+                self.composition.authoring_graph_mut()
+            } else {
+                self.composition.settled_graph_mut()
+            };
             let mut layers: Vec<(pcp::LayerId, &mut sdf::Layer)> = graph.layers_mut(layer_ids).into_iter().collect();
             // The realized ids, aligned with the edits below: `layers_mut` drops any
             // id with no live layer, so the closure keys on these rather than the
@@ -5532,6 +5540,33 @@ def "T" {
             "the staged root edit rolled back with the batch"
         );
         Ok(())
+    }
+
+    /// A dry run validates against composed state, so the seam takes the settled
+    /// borrow: reaching it with an edit still queued trips the backstop rather
+    /// than validating against a stale graph.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "settled composition access")]
+    fn dry_run_requires_settled() {
+        let stage = in_memory_stage().expect("stage");
+        let root = stage.root_layer().identifier().to_string();
+        let root_id = stage.layers().id_of(&root).expect("root layer id");
+        stage
+            .layer_mut(&root)
+            .expect("root layer")
+            .edit(|e| {
+                sdf::PrimSpec::new(e.data_mut(), "/Queued", sdf::Specifier::Def, "")?;
+                Ok(())
+            })
+            .expect("direct edit commits");
+        // No composed read since that commit, so the edit is still queued.
+        let _ = stage.author_layers_txn(
+            &[root_id],
+            None,
+            false,
+            |_ids, _edits| Ok::<(), StageAuthoringError>(()),
+        );
     }
 
     /// A batch that authors nothing reports no change; the flag comes from the
