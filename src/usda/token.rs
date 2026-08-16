@@ -4,6 +4,10 @@
 //! It uses `logos` crate under the hood to provide efficient and
 //! robust tokenization.
 
+use std::borrow::Cow;
+use std::iter::Peekable;
+use std::str::Chars;
+
 use logos::Logos;
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash, strum::Display, strum::EnumIs, strum::EnumTryAs)]
@@ -22,17 +26,17 @@ pub enum Token<'source> {
 
     /// Double-quoted strings
     /// Example: "hello world" -> hello world
-    #[regex(r#""([^"\\]|\\.)*""#, |lex| trim_chars(lex.slice(), 1))]
+    #[regex(r#""([^"\\]|\\.)*""#, |lex| unquote(lex.slice(), 1))]
     /// Single-quoted strings
     /// Example: 'hello world' -> hello world
-    #[regex(r#"'([^'\\]|\\.)*'"#, |lex| trim_chars(lex.slice(), 1))]
+    #[regex(r#"'([^'\\]|\\.)*'"#, |lex| unquote(lex.slice(), 1))]
     /// Triple-quoted strings
     /// Example: """multi-line string""" -> multi-line string
-    #[regex(r#""""([^"]|"[^"]|""[^"])*""""#, |lex| trim_chars(lex.slice(), 3))]
+    #[regex(r#""""([^"]|"[^"]|""[^"])*""""#, |lex| unquote(lex.slice(), 3))]
     /// Triple-single-quoted strings
     /// Example: '''multi-line string''' -> multi-line string
-    #[regex(r"'''([^']|'[^']|''[^'])*'''", |lex| trim_chars(lex.slice(), 3))]
-    String(&'source str),
+    #[regex(r"'''([^']|'[^']|''[^'])*'''", |lex| unquote(lex.slice(), 3))]
+    String(Cow<'source, str>),
 
     // Keywords must come before Number to ensure "inf" is matched as a keyword, not an identifier
     #[token("add")]
@@ -206,6 +210,8 @@ impl Token<'_> {
     }
 }
 
+/// Strips `n` delimiter characters from each end of a token's text, for the
+/// delimited forms that carry no escapes — a path reference or an asset path.
 fn trim_chars(s: &str, n: usize) -> Option<&str> {
     if s.len() < 2 * n {
         // Handle cases where the string is too short to trim `n` characters from both ends.
@@ -213,6 +219,130 @@ fn trim_chars(s: &str, n: usize) -> Option<&str> {
         None
     } else {
         Some(&s[n..s.len() - n])
+    }
+}
+
+/// Strips `n` delimiter characters from each end of a quoted string and expands
+/// the escape sequences in what is left. Borrowed unless an escape was found.
+fn unquote(s: &str, n: usize) -> Option<Cow<'_, str>> {
+    if s.len() < 2 * n {
+        // Too short to carry its own delimiters: an unexpected input, or a regex
+        // that matched more loosely than it should.
+        return None;
+    }
+    Some(unescape(&s[n..s.len() - n]))
+}
+
+/// Expands a quoted string's escape sequences (C++ `TfEscapeString`, which the
+/// text parser applies to every quoted string).
+///
+/// `\a` `\b` `\f` `\n` `\r` `\t` `\v` are the C control characters, `\xNN` is up
+/// to two hex digits and `\NNN` up to three octal digits, and any other escape
+/// is the character itself — so `\"` is a quote and `\\` a backslash. A numeric
+/// escape names a Unicode scalar rather than C++'s raw byte, since a Rust `str`
+/// is UTF-8; the two agree over the ASCII range they are used in.
+fn unescape(body: &str) -> Cow<'_, str> {
+    if !body.contains('\\') {
+        return Cow::Borrowed(body);
+    }
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        // A single-quoted string's regex only forms a token from complete escape
+        // pairs; a triple-quoted one is not so constrained, and drops a trailing
+        // backslash.
+        let Some(escaped) = chars.next() else { break };
+        match escaped {
+            'a' => out.push('\u{7}'),
+            'b' => out.push('\u{8}'),
+            'f' => out.push('\u{c}'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'v' => out.push('\u{b}'),
+            'x' => push_numeric(&mut out, &mut chars, 16, 2, 0),
+            '0'..='7' => push_numeric(&mut out, &mut chars, 8, 3, escaped.to_digit(8).unwrap_or_default()),
+            other => out.push(other),
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Consumes up to `max` further digits of `radix`, folds them into `seed`, and
+/// pushes the character they name.
+///
+/// `\x` with no digit at all names nothing, so it yields a NUL and the character
+/// after it is read as ordinary text — C++ runs the same accumulator over zero
+/// digits and emits the zero it started with.
+fn push_numeric(out: &mut String, chars: &mut Peekable<Chars<'_>>, radix: u32, max: u32, seed: u32) {
+    let mut value = seed;
+    let mut digits = if radix == 8 { 1 } else { 0 };
+    while digits < max
+        && let Some(digit) = chars.peek().and_then(|c| c.to_digit(radix))
+    {
+        value = value * radix + digit;
+        chars.next();
+        digits += 1;
+    }
+    if let Some(c) = char::from_u32(value) {
+        out.push(c);
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::*;
+
+    /// Lexes `source` and returns the single string token's content.
+    fn lex_one(source: &str) -> String {
+        let mut lexer = Token::lexer(source);
+        match lexer.next().expect("a token").expect("lexes") {
+            Token::String(s) => s.into_owned(),
+            other => panic!("expected a string, got {other:?}"),
+        }
+    }
+
+    /// Every escape C++ `TfEscapeStringReplaceChar` expands, and the rule for
+    /// one it has no meaning for: the backslash goes, the character stays.
+    #[test]
+    fn expands_escapes() {
+        assert_eq!(lex_one(r#""a\nb""#), "a\nb");
+        assert_eq!(lex_one(r#""a\tb""#), "a\tb");
+        assert_eq!(lex_one(r#""a\rb""#), "a\rb");
+        assert_eq!(lex_one(r#""a\\b""#), "a\\b");
+        assert_eq!(lex_one(r#""a\"b""#), "a\"b", "an escaped delimiter is the delimiter");
+        assert_eq!(lex_one(r#""a\qb""#), "aqb", "an unknown escape drops the backslash");
+        assert_eq!(lex_one(r#""\x41""#), "A", "hex");
+        assert_eq!(
+            lex_one(r#""a\xzb""#),
+            "a\0zb",
+            "`\\x` with no digit names nothing; the next character is ordinary text"
+        );
+        assert_eq!(lex_one(r#""\101""#), "A", "octal");
+        assert_eq!(lex_one(r#""\a\b\f\v""#), "\u{7}\u{8}\u{c}\u{b}");
+    }
+
+    /// A string with no backslash is handed back borrowed, so the ordinary case
+    /// allocates nothing.
+    #[test]
+    fn plain_string_borrows() {
+        let source = r#""no escapes here""#;
+        let mut lexer = Token::lexer(source);
+        match lexer.next().expect("a token").expect("lexes") {
+            Token::String(Cow::Borrowed(_)) => {}
+            other => panic!("expected a borrowed string, got {other:?}"),
+        }
+    }
+
+    /// A triple-quoted string is expanded the same way (C++
+    /// `Sdf_EvalQuotedString` applies one rule to both forms).
+    #[test]
+    fn triple_quoted_expands() {
+        assert_eq!(lex_one(r#""""a\'b""""#), "a'b");
     }
 }
 
@@ -231,8 +361,10 @@ mod tests {
 
             // For string-bearing tokens, check the string content matches
             match &token {
+                Token::String(s) => {
+                    assert_eq!(s.as_ref(), *expected_str, "String content mismatch for token {token:?}");
+                }
                 Token::Magic(s)
-                | Token::String(s)
                 | Token::Number(s)
                 | Token::PathRef(s)
                 | Token::AssetRef(s)
@@ -283,7 +415,7 @@ mod tests {
             // MySphere1
             (Token::Def, "def"),
             (Token::Identifier("Sphere"), "Sphere"),
-            (Token::String("MySphere1"), "MySphere1"),
+            (Token::String("MySphere1".into()), "MySphere1"),
             (Token::Punctuation('('), "("),
             (Token::Payload, "payload"),
             (Token::Punctuation('='), "="),
@@ -295,7 +427,7 @@ mod tests {
             // MySphere2
             (Token::Def, "def"),
             (Token::Identifier("Sphere"), "Sphere"),
-            (Token::String("MySphere2"), "MySphere2"),
+            (Token::String("MySphere2".into()), "MySphere2"),
             (Token::Punctuation('('), "("),
             (Token::Prepend, "prepend"),
             (Token::Payload, "payload"),
@@ -319,7 +451,7 @@ mod tests {
             // def Material "boardMat"
             (Token::Def, "def"),
             (Token::Identifier("Material"), "Material"),
-            (Token::String("boardMat"), "boardMat"),
+            (Token::String("boardMat".into()), "boardMat"),
             (Token::Punctuation('{'), "{"),
             // token inputs:frame:stPrimvarName = "st"
             (Token::Identifier("token"), "token"),
@@ -328,7 +460,7 @@ mod tests {
                 "inputs:frame:stPrimvarName",
             ),
             (Token::Punctuation('='), "="),
-            (Token::String("st"), "st"),
+            (Token::String("st".into()), "st"),
             // token outputs:surface.connect = </TexModel/boardMat/PBRShader.outputs:surface>
             (Token::Identifier("token"), "token"),
             (Token::NamespacedIdentifier("outputs:surface"), "outputs:surface"),
@@ -354,7 +486,7 @@ mod tests {
             // doc = """test string"""
             (Token::Doc, "doc"),
             (Token::Punctuation('='), "="),
-            (Token::String("test string"), "test string"),
+            (Token::String("test string".into()), "test string"),
             // customLayerData = { string test = "Test string" }
             (Token::Identifier("customLayerData"), "customLayerData"),
             (Token::Punctuation('='), "="),
@@ -362,12 +494,12 @@ mod tests {
             (Token::Identifier("string"), "string"),
             (Token::Identifier("test"), "test"),
             (Token::Punctuation('='), "="),
-            (Token::String("Test string"), "Test string"),
+            (Token::String("Test string".into()), "Test string"),
             (Token::Punctuation('}'), "}"),
             // upAxis = "Y"
             (Token::Identifier("upAxis"), "upAxis"),
             (Token::Punctuation('='), "="),
-            (Token::String("Y"), "Y"),
+            (Token::String("Y".into()), "Y"),
             // metersPerUnit = 0.01
             (Token::Identifier("metersPerUnit"), "metersPerUnit"),
             (Token::Punctuation('='), "="),
@@ -457,7 +589,7 @@ mod tests {
     #[test]
     fn test_string_content_access() {
         // Test direct access to string content in tokens
-        let token = Token::String("test");
+        let token = Token::String("test".into());
         if let Token::String(s) = token {
             assert_eq!(s, "test");
         } else {
@@ -482,13 +614,13 @@ mod tests {
         let mut lexer = Token::lexer(input);
 
         let token = lexer.next().unwrap().unwrap();
-        assert_eq!(token, Token::String("test string"));
+        assert_eq!(token, Token::String("test string".into()));
 
         let token = lexer.next().unwrap().unwrap();
-        assert_eq!(token, Token::String("single"));
+        assert_eq!(token, Token::String("single".into()));
 
         let token = lexer.next().unwrap().unwrap();
-        assert_eq!(token, Token::String("triple quote"));
+        assert_eq!(token, Token::String("triple quote".into()));
 
         // Triple-@ is an asset reference, not a string.
         let token = lexer.next().unwrap().unwrap();

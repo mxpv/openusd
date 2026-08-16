@@ -1188,45 +1188,26 @@ fn format_layer_offset(s: &mut String, o: &LayerOffset) {
     s.push(')');
 }
 
+/// Writes `text` as a double-quoted USDA string, escaping what the delimiter and
+/// the line-oriented grammar cannot carry.
+///
+/// The reader expands escapes (C++ `TfEscapeStringReplaceChar`), so a backslash
+/// must be doubled or it would read back as whatever it precedes — a Windows
+/// path would return with `\t` as a tab. Escaping also means one delimiter
+/// always suffices, so no string is unquotable.
 fn write_quoted(s: &mut String, text: &str) -> Result<()> {
-    // The USDA lexer does not unescape string contents; it preserves the raw
-    // bytes between the delimiters. So we must NOT emit backslash-escapes for
-    // literal backslashes — we pick a delimiter the content can't close.
-    let has_newline = text.contains('\n');
-    let has_dq = text.contains('"');
-    let has_sq = text.contains('\'');
-    let has_triple_dq = text.contains("\"\"\"");
-    let has_triple_sq = text.contains("'''");
-
-    // A single-character delimiter works only if the text contains no newline
-    // and does not include that delimiter. Otherwise we need triple quotes.
-    if has_newline || (has_dq && has_sq) {
-        if !has_triple_dq {
-            s.push_str("\"\"\"");
-            s.push_str(text);
-            s.push_str("\"\"\"");
-            return Ok(());
+    s.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => s.push_str("\\\""),
+            '\\' => s.push_str("\\\\"),
+            '\n' => s.push_str("\\n"),
+            '\r' => s.push_str("\\r"),
+            '\t' => s.push_str("\\t"),
+            other => s.push(other),
         }
-        if !has_triple_sq {
-            s.push_str("'''");
-            s.push_str(text);
-            s.push_str("'''");
-            return Ok(());
-        }
-        bail!("cannot emit USDA string containing both \"\"\" and '''");
     }
-
-    // Single-line text with at most one kind of quote present: use the
-    // opposite single-character delimiter.
-    if has_dq {
-        s.push('\'');
-        s.push_str(text);
-        s.push('\'');
-    } else {
-        s.push('"');
-        s.push_str(text);
-        s.push('"');
-    }
+    s.push('"');
     Ok(())
 }
 
@@ -1533,7 +1514,7 @@ def "Mesh"
             "expected a single token, got trailing input: {out:?}"
         );
         match first {
-            Token::String(s) => s.to_owned(),
+            Token::String(s) => s.into_owned(),
             other => panic!("expected Token::String, got {other:?} for output {out:?}"),
         }
     }
@@ -1555,15 +1536,15 @@ def "Mesh"
         assert_eq!(write_quoted_and_reparse("pre\n\"\"\"post"), "pre\n\"\"\"post");
         // Contains a newline and `'''` — must use triple double-quote.
         assert_eq!(write_quoted_and_reparse("pre\n'''post"), "pre\n'''post");
-        // Worst case: newline plus both `"""` and `'''`. No USDA delimiter can wrap
-        // this losslessly; the writer must report an error rather than emit output
-        // the lexer will reject.
-        let worst = "line\n\"\"\"and'''both";
-        let mut out = String::new();
-        assert!(
-            write_quoted(&mut out, worst).is_err(),
-            "expected error for un-quotable string, got output {out:?}"
+        // Escaping leaves no unquotable string: the case that used to have no
+        // valid delimiter round-trips like any other.
+        assert_eq!(
+            write_quoted_and_reparse("line\n\"\"\"and'''both"),
+            "line\n\"\"\"and'''both"
         );
+        // A backslash survives, which delimiter choice alone could not manage —
+        // a Windows path would otherwise come back with `\t` as a tab.
+        assert_eq!(write_quoted_and_reparse(r"C:\temp\new"), r"C:\temp\new");
     }
 
     #[test]

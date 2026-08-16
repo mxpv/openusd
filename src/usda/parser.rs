@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use logos::Logos;
+use std::borrow::Cow;
 use std::iter::Peekable;
 use std::ops::Range;
 use std::{any::type_name, collections::HashMap, fmt::Debug, str::FromStr};
@@ -154,7 +155,7 @@ impl<'a> Parser<'a> {
             .context("Punctuation token expected")
     }
 
-    fn fetch_str(&mut self) -> Result<&'a str> {
+    fn fetch_str(&mut self) -> Result<Cow<'a, str>> {
         match self.fetch_next()? {
             Token::String(s) => Ok(s),
             other => bail!("Unexpected token {other:?} (want String)"),
@@ -277,12 +278,12 @@ impl<'a> Parser<'a> {
 
             match next {
                 Token::String(str) => {
-                    root.add(FieldKey::Comment, str);
+                    root.add(FieldKey::Comment, sdf::Value::String(str.into_owned()));
                 }
                 Token::Doc => {
                     this.ensure_pun('=')?;
                     let value = this.fetch_str()?;
-                    root.add(FieldKey::Documentation, value);
+                    root.add(FieldKey::Documentation, sdf::Value::String(value.into_owned()));
                 }
                 Token::SubLayers => {
                     this.ensure_pun('=')?;
@@ -346,7 +347,7 @@ impl<'a> Parser<'a> {
             bail!("Expected prim name string, got {name_token:?}");
         };
         parent_children.push(name.to_string());
-        let prim_path = current_path.append_path(name)?;
+        let prim_path = current_path.append_path(name.as_ref())?;
 
         let mut properties = Vec::new();
 
@@ -449,7 +450,7 @@ impl<'a> Parser<'a> {
 
         self.ensure_pun('=')?;
 
-        let names = self.one_or_list(|this| Ok(this.fetch_str()?.to_owned()))?;
+        let names = self.one_or_list(|this| Ok(this.fetch_str()?.into_owned()))?;
         owner_spec.add(field_key, sdf::Value::token_vec(names));
 
         Ok(())
@@ -706,7 +707,7 @@ impl<'a> Parser<'a> {
             let name = match name_token {
                 // Bare string in property metadata is a comment.
                 Token::String(s) => {
-                    spec.add(FieldKey::Comment, sdf::Value::String(s.to_owned()));
+                    spec.add(FieldKey::Comment, sdf::Value::String(s.into_owned()));
                     return Ok(());
                 }
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
@@ -800,7 +801,7 @@ impl<'a> Parser<'a> {
         let token = self.fetch_next()?;
         match token {
             Token::None => Ok(sdf::Value::ValueBlock),
-            Token::String(value) => Ok(sdf::Value::String(value.to_owned())),
+            Token::String(value) => Ok(sdf::Value::String(value.into_owned())),
             Token::AssetRef(asset_path) => Ok(sdf::Value::AssetPath(sdf::AssetPath::new(asset_path))),
             Token::Identifier(value) | Token::NamespacedIdentifier(value) => Ok(sdf::Value::token(value)),
             Token::Number(raw) => {
@@ -826,7 +827,8 @@ impl<'a> Parser<'a> {
 
             let key_token = this.fetch_next()?;
             let key = match key_token {
-                Token::Identifier(s) | Token::NamespacedIdentifier(s) | Token::String(s) => s.to_owned(),
+                Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
+                Token::String(s) => s.into_owned(),
                 other => other
                     .keyword_lexeme()
                     .map(str::to_owned)
@@ -915,7 +917,7 @@ impl<'a> Parser<'a> {
         let name = match name_token {
             // Bare string in metadata is a comment.
             Token::String(s) => {
-                spec.add(FieldKey::Comment, sdf::Value::String(s.to_owned()));
+                spec.add(FieldKey::Comment, sdf::Value::String(s.into_owned()));
                 return Ok(());
             }
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
@@ -1033,7 +1035,7 @@ impl<'a> Parser<'a> {
             "displayName" => {
                 ensure!(list_op.is_none(), "displayName does not support list ops");
                 let value = self.fetch_str().context("Unable to parse displayName")?;
-                spec.add("displayName", sdf::Value::String(value.to_owned()));
+                spec.add("displayName", sdf::Value::String(value.into_owned()));
             }
             n if n == FieldKey::Permission.as_str() => {
                 ensure!(list_op.is_none(), "permission does not support list ops");
@@ -1048,7 +1050,7 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::Prefix.as_str() => {
                 ensure!(list_op.is_none(), "prefix does not support list ops");
                 let value = self.fetch_str().context("Unable to parse prefix")?;
-                spec.add(FieldKey::Prefix, sdf::Value::String(value.to_owned()));
+                spec.add(FieldKey::Prefix, sdf::Value::String(value.into_owned()));
             }
             n if n == FieldKey::Clips.as_str() => {
                 ensure!(list_op.is_none(), "clips metadata does not support list ops");
@@ -1057,7 +1059,7 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::ClipSets.as_str() => {
                 let values = self
-                    .one_or_list(|this| Ok(this.fetch_str()?.to_owned()))
+                    .one_or_list(|this| Ok(this.fetch_str()?.into_owned()))
                     .context("Unable to parse clipSets list")?;
                 let list_op = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
                 spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
@@ -1494,11 +1496,13 @@ impl<'a> Parser<'a> {
             (Type::Quatf, true) => sdf::Value::QuatfVec(self.parse_gf_array::<f32, _, 4>()?),
             (Type::Quatd, true) => sdf::Value::QuatdVec(self.parse_gf_array::<f64, _, 4>()?),
 
-            (Type::String, false) => sdf::Value::String(self.fetch_str()?.to_owned()),
-            (Type::Token, false) => sdf::Value::token(self.fetch_str()?),
+            (Type::String, false) => sdf::Value::String(self.fetch_str()?.into_owned()),
+            (Type::Token, false) => sdf::Value::token(self.fetch_str()?.as_ref()),
             (Type::String | Type::Token, true) => sdf::Value::token_vec(self.parse_array::<String>()?),
 
-            (Type::PathExpression, false) => sdf::Value::PathExpression(sdf::PathExpression::parse(self.fetch_str()?)),
+            (Type::PathExpression, false) => {
+                sdf::Value::PathExpression(sdf::PathExpression::parse(self.fetch_str()?.as_ref()))
+            }
             (Type::PathExpression, true) => sdf::Value::PathExpressionVec(
                 self.parse_array::<String>()?
                     .iter()
@@ -1611,13 +1615,14 @@ impl<'a> Parser<'a> {
     {
         let token = self.fetch_next()?;
         let value_str = match token {
-            Token::Number(s) | Token::Identifier(s) | Token::String(s) | Token::NamespacedIdentifier(s) => s,
-            Token::Inf => "inf",
+            Token::Number(s) | Token::Identifier(s) | Token::NamespacedIdentifier(s) => Cow::Borrowed(s),
+            Token::String(s) => s,
+            Token::Inf => Cow::Borrowed("inf"),
             Token::Punctuation('-') => {
                 // Handle negative inf
                 let next = self.fetch_next()?;
                 if matches!(next, Token::Inf) {
-                    "-inf"
+                    Cow::Borrowed("-inf")
                 } else {
                     bail!("Expected number after '-', got {next:?}")
                 }
@@ -1626,32 +1631,27 @@ impl<'a> Parser<'a> {
                 // Handle positive inf
                 let next = self.fetch_next()?;
                 if matches!(next, Token::Inf) {
-                    "inf"
+                    Cow::Borrowed("inf")
                 } else {
                     bail!("Expected number after '+', got {next:?}")
                 }
             }
             _ => bail!("Expected a number, identifier, or string, got {token:?}"),
         };
-        let value = T::from_str(value_str)
+        let value = T::from_str(&value_str)
             .map_err(|err| anyhow!("Failed to parse {} from '{}': {:?}", type_name::<T>(), value_str, err))?;
 
         Ok(value)
     }
 
     /// Parse USD's flexible boolean literal forms (identifiers, numeric, or string).
+    /// A `true` / `false` word, however it was spelled — bare, namespaced, or
+    /// quoted.
     fn parse_bool(&mut self) -> Result<bool> {
         let token = self.fetch_next()?;
         match token {
-            Token::Identifier(value) | Token::NamespacedIdentifier(value) | Token::String(value) => {
-                if value.eq_ignore_ascii_case("true") {
-                    Ok(true)
-                } else if value.eq_ignore_ascii_case("false") {
-                    Ok(false)
-                } else {
-                    bail!("Unexpected value for bool literal: {value}")
-                }
-            }
+            Token::Identifier(value) | Token::NamespacedIdentifier(value) => parse_bool_word(value),
+            Token::String(value) => parse_bool_word(&value),
             Token::Number(value) => {
                 let parsed = value.parse::<f64>().context("Unable to parse numeric bool")?;
                 if parsed == 0.0 {
@@ -1969,6 +1969,17 @@ fn path_ref_to_path(text: &str) -> Result<sdf::Path> {
         return Ok(sdf::Path::default());
     }
     Ok(sdf::Path::new(text)?)
+}
+
+/// Whether `word` is the boolean `true` or `false`, case-insensitively.
+fn parse_bool_word(word: &str) -> Result<bool> {
+    if word.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if word.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        bail!("Unexpected value for bool literal: {word}")
+    }
 }
 
 #[cfg(test)]
