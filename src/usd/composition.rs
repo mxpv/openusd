@@ -353,7 +353,7 @@ impl StageComposition {
         // stack's composed variables — so they land on the payload here rather
         // than at the snapshot above.
         if let Some(payload) = payload.as_mut() {
-            payload.finish(outcome, &provenance);
+            payload.finish(outcome);
         }
         // The recompose may have demanded sublayers — a `${VAR}` entry the
         // edited variables newly select, or a just-authored literal naming an
@@ -799,14 +799,9 @@ impl StageComposition {
         self.resolve_sublayer_demands(demands, hooks);
         // A mute can flip a stack's variable source (its authored variables
         // stop contributing), stranding the old-keyed instance — the mute path
-        // discards variable deltas, so the sweep is what reclaims it.
-        //
-        // TODO: discarding those deltas also drops the asset-path channel a
-        // composed-variable move would publish (`change::asset_path_victims`).
-        // A mute reports through `StageSink::layer_muting_changed` and builds no
-        // `CommittedChange` at all, so surfacing it means giving this path a
-        // payload; C++ routes muting through the same pending-changes pass that
-        // collects `assetPathResyncChanges`.
+        // discards variable deltas, so the sweep is what reclaims it. Discarding
+        // them costs no notice; `LayerGraph::recompose_for_mute` carries the
+        // argument.
         self.reclaim_stale_stacks();
         Some(changed)
     }

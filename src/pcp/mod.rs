@@ -159,11 +159,13 @@
 //! whose composed variables moved (`change::asset_path_victims`), covering what
 //! no dependency record could: a value-time `` `${VAR}` `` expression in an
 //! `asset` value is evaluated on every read against its opinion's layer stack
-//! (`asset_resolve::resolve_path`), and nothing caches the result, so there is
-//! nothing a recorded dependency would invalidate. A clip-sourced value is
-//! covered by the same set, since the prim reading it composes the node that
-//! introduced the clips. The stage reports that set on its own notice channel,
-//! distinct from a resync — see
+//! (`asset_resolve::resolve_path`) outside any prim index build, so it records
+//! no per-variable dependency a targeted invalidation could follow — while the
+//! value it resolves to can well be cached, as an
+//! [`AttributeQuery`](crate::usd::AttributeQuery) replaying a static value
+//! source does. A clip-sourced value is covered by the same set, since the prim
+//! reading it composes the node that introduced the clips. The stage reports
+//! that set on its own notice channel, distinct from a resync — see
 //! [`usd::CommittedChange::asset_paths_resynced`](crate::usd::CommittedChange::asset_paths_resynced).
 //!
 //! Layer muting ([`Stage::mute_layer`](crate::usd::Stage::mute_layer) /
@@ -245,6 +247,15 @@
 //!   `templateAssetPath`, and `manifestAssetPath` are read raw (`pcp::clip`
 //!   never consults `sdf::expr`), so a `${VAR}` in one is inert and a template
 //!   sequence keyed on a variable does not resolve.
+//! - Dependency fanout for a `defaultPrim` edit: `change::Changes` answers one
+//!   with a significant resync at the stage root, dropping the whole cache. Only
+//!   a reference or payload that named no target prim resolves through the
+//!   layer's default, so fanning the old default prim's site out through the
+//!   dependency table would name just those dependents, as C++ does (it inserts
+//!   the old default prim path, falling back to the absolute root only when there
+//!   was none — and calls even that "a bit of heavy hammer"). The old value is
+//!   the missing input: [`sdf::ChangeEntry`](crate::sdf::ChangeEntry) records
+//!   which fields were touched, not what they held before.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.

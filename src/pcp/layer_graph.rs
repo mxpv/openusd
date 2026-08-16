@@ -2584,10 +2584,20 @@ impl LayerGraph {
         // refreshes the muted set and recomputes the root's session-seeded members,
         // so muting a session layer that supplies a root `${VAR}` sublayer's variable
         // re-resolves that sublayer out of (or into, among interned layers) the root
-        // stack. The vars deltas a mute can emit (a muted session root drops its
-        // variables) are discarded: the mute fanout's affected set already drops
-        // every index reading a stack whose members shifted, which covers any
-        // stack whose variables the toggle changed.
+        // stack. The vars deltas a mute can emit are discarded, and that costs
+        // neither invalidation nor notice.
+        //
+        // Only a session-layer toggle can move any stack's composed *values*: a
+        // stack's variables come from its own root layer overlaid by the
+        // referrer's (`expr::stack_expression_variables`), sublayers contribute
+        // none, and a muted root still feeds its own — so
+        // `session_expression_variables` is the single muting-sensitive input,
+        // and the stage root layer can never be muted. `mute_fanout` answers such
+        // a toggle with the root layer, which every prim composing against the
+        // root layer stack retains, and `drop_index_victims` retires the
+        // prototypes those drops touch. So the asset-path channel `Changes::apply`
+        // publishes for a composed-variable move could name only indices the mute
+        // has already dropped.
         let _ = self.rebuild_sublayer_stacks(None);
         self.recompute_cycle_errors();
         self.recompute_relocates()

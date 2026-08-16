@@ -75,8 +75,20 @@ pub(crate) struct Changes {
 /// Path-sets identifying which cached prim indices to invalidate.
 #[derive(Debug, Default)]
 pub struct CacheChanges {
-    /// Drop the index AND every namespace descendant.
+    /// Drop the index AND every namespace descendant, at a composed stage path —
+    /// a dependent the change fanned out to. The stage root joins them for a
+    /// `defaultPrim` edit, which is namespace-neutral and drops the whole cache.
     pub(crate) did_change_significantly: BTreeSet<Path>,
+    /// The same tier for a literal edited path expressed in the *edited layer's*
+    /// namespace, which under a variant or arc edit target is not a stage path
+    /// (`/Prim{set=sel}child` composes into `/Prim/child`).
+    ///
+    /// Invalidation reads the two halves together: an authored path can name a
+    /// cached index too, and dropping one it does not name costs only warmth.
+    /// They stay apart for the report, where a prefix comparison only means
+    /// something within one namespace and each half is named in the namespace it
+    /// belongs to (see [`usd::Provenance`](crate::usd::Provenance)).
+    pub(crate) authored_significant: BTreeSet<Path>,
     /// Drop only this index; descendants survive — for a change that reshapes
     /// this prim's own graph but cannot restructure its namespace children.
     ///
@@ -116,36 +128,66 @@ pub struct CacheChanges {
 }
 
 impl CacheChanges {
-    /// The composed prim paths whose cached composition was resynced — the union
-    /// of the significant, prim, and spec tiers. These are the paths a consumer
-    /// must re-resolve (C++ `PcpCacheChanges` resync set). The spec tier is
-    /// included so an inert spec add/remove (e.g. an `over`) is surfaced, not
-    /// silently dropped, even though it refreshes `has_specs` in place rather than
-    /// rebuilding the index.
+    /// The resynced prim paths that are already composed stage paths — the
+    /// significant tier's stage half and the prim tier. These are the paths a
+    /// consumer must re-resolve (C++ `PcpCacheChanges` resync set).
     ///
     /// The target tier is deliberately absent: a `targetPaths` / `connectionPaths`
     /// edit drops only a memo, leaving the prim graph intact, so it is a
     /// changed-info edit on the property, not a prim resync. The composed change
     /// notice reports it through the property entry's relationship/connection-
     /// target flag instead.
-    pub(crate) fn resynced_paths(&self) -> impl Iterator<Item = &Path> {
-        self.did_change_significantly
+    pub(crate) fn stage_resynced_paths(&self) -> impl Iterator<Item = &Path> {
+        self.did_change_significantly.iter().chain(self.did_change_prims.iter())
+    }
+
+    /// The resynced paths expressed in the edited layer's namespace — the
+    /// significant tier's authored half and the spec tier, which is authored by
+    /// construction (its sites are literal `(layer, path)` pairs).
+    ///
+    /// The spec tier is reported so an inert spec add/remove (e.g. an `over`) is
+    /// surfaced, not silently dropped, even though it refreshes `has_specs` in
+    /// place rather than rebuilding the index.
+    pub(crate) fn authored_resynced_paths(&self) -> impl Iterator<Item = &Path> {
+        self.authored_significant
             .iter()
-            .chain(self.did_change_prims.iter())
             .chain(self.did_change_specs.iter().map(|(_, path)| path))
     }
 
-    /// The subset of [`resynced_paths`](Self::resynced_paths) that stands for a
-    /// whole subtree — the significant tier, whose entries drop the index and
-    /// every namespace descendant.
+    /// The subset of [`stage_resynced_paths`](Self::stage_resynced_paths) that
+    /// stands for a whole subtree — the significant tier, whose entries drop the
+    /// index and every namespace descendant.
     ///
-    /// Only these may subsume another reported path by prefix. The prim tier
-    /// drops one index, and the spec tier refreshes `has_specs` in place, so
-    /// neither says anything about the paths beneath it: an inert `over` added
-    /// at `/A` on the way to authoring `/A/B.x` must not swallow the attribute's
-    /// own report.
-    pub(crate) fn subtree_resynced_paths(&self) -> impl Iterator<Item = &Path> {
+    /// Only these may subsume another reported stage path by prefix. The prim
+    /// tier drops one index, so it says nothing about the paths beneath it.
+    pub(crate) fn stage_subtree_paths(&self) -> impl Iterator<Item = &Path> {
         self.did_change_significantly.iter()
+    }
+
+    /// The covering subset of
+    /// [`authored_resynced_paths`](Self::authored_resynced_paths). The spec tier
+    /// is excluded for the same reason the prim tier is: refreshing `has_specs`
+    /// at `/A` says nothing about `/A/B`, so an inert `over` added on the way to
+    /// authoring `/A/B.x` must not swallow the attribute's own report.
+    pub(crate) fn authored_subtree_paths(&self) -> impl Iterator<Item = &Path> {
+        self.authored_significant.iter()
+    }
+
+    /// Both halves of the significant tier, for invalidation — which drops every
+    /// index either half names, whatever namespace the path came from. Dropping
+    /// a path no index is cached at costs nothing, so the union is the
+    /// conservative read.
+    ///
+    /// A path both halves hold is yielded once. An edit to a prim that already
+    /// has a cached index puts it in both, since the index self-registers at its
+    /// own path and the dependency lookup folds those registrations in, and each
+    /// yield costs a prototype-registry walk downstream.
+    fn all_significant(&self) -> impl Iterator<Item = &Path> {
+        self.did_change_significantly.iter().chain(
+            self.authored_significant
+                .iter()
+                .filter(|path| !self.did_change_significantly.contains(*path)),
+        )
     }
 }
 
@@ -259,10 +301,12 @@ impl Changes {
             self.fanout_significant(cache, layer, path);
             // An opinion authored inside a variant (`/Prim{set=sel}child`)
             // composes into the variant-stripped prim (`/Prim/child`). That
-            // composed cache key is not on the authored path's ancestor chain
+            // composed site is not on the authored path's ancestor chain
             // (`/Prim{set=sel}child` → `/Prim{set=sel}` → `/Prim` → `/`), so
             // fanning out from the variant path alone leaves a cached miss
-            // there stale; invalidate it too.
+            // there stale; invalidate it too. Stripping the selections keeps the
+            // path in the edited layer's namespace — under an arc it is the
+            // referenced layer's `/Source/child`, not the stage's.
             let stripped = path.strip_all_variant_selections();
             if stripped != *path {
                 self.fanout_significant(cache, layer, &stripped);
@@ -391,6 +435,11 @@ impl Changes {
                 self.layer_stack |= LayerStackChanges::EXPRESSION_VARS;
                 touches_stack = true;
             } else if *key == FieldKey::DefaultPrim.as_str() {
+                // TODO: only a reference or payload naming no target prim resolves
+                // through the layer's default, so fanning the old default prim's
+                // site out would name just those dependents; the stage root stands
+                // in until the change record carries the field's prior value (see
+                // the module's remaining-work list).
                 self.cache.did_change_significantly.insert(Path::abs_root());
             }
         }
@@ -403,6 +452,13 @@ impl Changes {
         }
     }
 
+    /// Drops every index depending on `(layer, path)`, plus the literal `path`
+    /// itself.
+    ///
+    /// The two land in different buckets: a dependency lookup answers in the
+    /// cache's composed namespace, while `path` comes from a change list and so
+    /// is spelled in `layer`'s namespace — which stripping variant selections
+    /// off it does not change.
     fn fanout_significant(&mut self, cache: &IndexCache, layer: LayerId, path: &Path) {
         for dep in cache.dependencies().lookup_with_ancestors(layer, path) {
             self.cache.did_change_significantly.insert(dep);
@@ -413,7 +469,7 @@ impl Changes {
         // Include the literal path even with no current dependent — a
         // first-time add will need its index built from scratch on next
         // access.
-        self.cache.did_change_significantly.insert(path.clone());
+        self.cache.authored_significant.insert(path.clone());
     }
 
     /// Authoring this field on a prim path forces a graph rebuild.
@@ -517,26 +573,24 @@ impl Changes {
         // (spec 11.3.3) are dropped rather than left stale and lazily recomposed
         // on the next instancing query. The layer-stack path evicted its
         // prototypes through `invalidate_layers` above.
-        if !self.cache.did_change_significantly.is_empty()
-            || !self.cache.did_change_prims.is_empty()
-            || !self.cache.did_change_specs.is_empty()
-        {
-            let changed: Vec<Path> = self
-                .cache
-                .did_change_significantly
-                .iter()
-                .chain(self.cache.did_change_prims.iter())
-                .map(Path::prim_path)
-                .chain(self.cache.did_change_specs.iter().map(|(_, path)| path.prim_path()))
-                .collect();
+        let changed: Vec<Path> = self
+            .cache
+            .all_significant()
+            .chain(self.cache.did_change_prims.iter())
+            .map(Path::prim_path)
+            .chain(self.cache.did_change_specs.iter().map(|(_, path)| path.prim_path()))
+            .collect();
+        if !changed.is_empty() {
             cache.invalidate_prototypes(&changed);
         }
 
-        for path in &self.cache.did_change_significantly {
+        for path in self.cache.all_significant() {
             cache.drop_index_subtree(path);
         }
         for path in &self.cache.did_change_prims {
-            // Subsumed by an ancestor in the significant set?
+            // Subsumed by an ancestor whose subtree just went? Only the stage half
+            // can answer: this tier holds composed paths, and a prefix test against
+            // an authored spelling could match by coincidence and skip a live drop.
             if self.cache.did_change_significantly.iter().any(|p| path.has_prefix(p)) {
                 continue;
             }
@@ -545,11 +599,14 @@ impl Changes {
         // Batch the spec-tier rescan: an index reached by several of this round's
         // changed sites refreshes its `has_specs` flags per site but finalizes its
         // spec stack once. Sites subsumed by an ancestor whose subtree was already
-        // dropped are skipped. The owned `did_change_specs` is the last read of
-        // `self`, so move its sites out rather than cloning each `Path`.
+        // dropped are skipped — against the authored half alone, the one sharing
+        // a spec site's namespace. A site a dependency-derived stage path covers is
+        // rescanned anyway and finds nothing: its registrations went with the drop.
+        // Nothing reads `did_change_specs` after this, so move its sites out rather
+        // than cloning each `Path`.
         let sites: Vec<(LayerId, Path)> = mem::take(&mut self.cache.did_change_specs)
             .into_iter()
-            .filter(|(_, path)| !self.cache.did_change_significantly.iter().any(|p| path.has_prefix(p)))
+            .filter(|(_, path)| !self.cache.authored_significant.iter().any(|p| path.has_prefix(p)))
             .collect();
         if !sites.is_empty() {
             cache.rescan_specs(graph, &sites);
@@ -557,16 +614,15 @@ impl Changes {
 
         // Property tier: a `targetPaths` / `connectionPaths` edit leaves the graph
         // intact, so drop only the edited property's resolved-target memo on each
-        // affected prim. A prim whose whole subtree was already dropped above lost
-        // its memo with the entry, so it is skipped.
-        if !self.cache.did_change_targets.is_empty() {
-            let stale = self
-                .cache
-                .did_change_targets
-                .iter()
-                .filter(|(prim, _)| !self.cache.did_change_significantly.iter().any(|s| prim.has_prefix(s)));
-            cache.clear_target_memos(stale);
-        }
+        // affected prim. Every entry is cleared; one naming a prim whose index the
+        // significant tier already dropped finds no memo left to clear.
+        //
+        // TODO: `fanout_targets` puts both namespaces in one set — a dependency
+        // result and the literal edited prim — so no prefix test over it is sound
+        // against either half of the significant tier. Splitting it on namespace
+        // the way that tier is split would let the already-dropped prims be
+        // skipped.
+        cache.clear_target_memos(self.cache.did_change_targets.iter());
 
         ApplyOutcome {
             resynced,
@@ -713,7 +769,7 @@ mod tests {
             .insert(FieldKey::References.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
-        assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
+        assert!(changes.cache.authored_significant.contains(&p("/Foo")));
     }
 
     #[test]
@@ -725,7 +781,30 @@ mod tests {
             .insert(FieldKey::VariantSelection.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
-        assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
+        assert!(changes.cache.authored_significant.contains(&p("/Foo")));
+    }
+
+    /// An opinion authored inside a variant is fanned out twice — from the
+    /// literal `/Foo{set=sel}Bar` and from the `/Foo/Bar` it composes into — and
+    /// both spellings stay in the edited layer's namespace, so an edit target
+    /// maps each before the stage names an object by it.
+    #[test]
+    fn variant_edit_stays_authored() {
+        let (graph, cache) = empty_cache();
+        let mut cl = ChangeList::new();
+        cl.entry_mut(&p("/Foo{set=sel}Bar"))
+            .info_changed
+            .insert(FieldKey::References.as_str().into());
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        assert_eq!(
+            changes.cache.authored_significant.iter().collect::<Vec<_>>(),
+            [&p("/Foo/Bar"), &p("/Foo{set=sel}Bar")]
+        );
+        assert!(
+            changes.cache.did_change_significantly.is_empty(),
+            "nothing depends on either site, so no stage path is derived"
+        );
     }
 
     /// `permission` is inert metadata for composition (C++ only enforces it for
@@ -741,7 +820,7 @@ mod tests {
             .insert(FieldKey::Permission.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
-        assert!(changes.cache.did_change_significantly.is_empty());
+        assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
     }
 
@@ -757,7 +836,7 @@ mod tests {
             .insert(FieldKey::Kind.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
-        assert!(changes.cache.did_change_significantly.is_empty());
+        assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
     }
 
@@ -775,7 +854,7 @@ mod tests {
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
 
-        assert!(changes.cache.did_change_significantly.contains(&p("/X")));
+        assert!(changes.cache.authored_significant.contains(&p("/X")));
     }
 
     #[test]
@@ -788,7 +867,7 @@ mod tests {
         changes.did_change(&cache, &[(layer, &cl)]);
         // An inert add reshapes no graph, so it stays out of the significant
         // tier and lands in the spec tier keyed by its authoring layer.
-        assert!(!changes.cache.did_change_significantly.contains(&p("/Foo")));
+        assert!(!changes.cache.all_significant().any(|path| *path == p("/Foo")));
         assert!(changes.cache.did_change_specs.contains(&(layer, p("/Foo"))));
     }
 
@@ -799,7 +878,7 @@ mod tests {
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_NON_INERT_PRIM;
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
-        assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
+        assert!(changes.cache.authored_significant.contains(&p("/Foo")));
     }
 
     #[test]
@@ -882,7 +961,7 @@ mod tests {
         cl.entry_mut(&p("/Foo.attr")).flags = ChangeFlags::ADD_PROPERTY;
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
-        assert!(changes.cache.did_change_significantly.is_empty());
+        assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }

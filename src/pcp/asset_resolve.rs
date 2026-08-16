@@ -136,9 +136,10 @@ fn resolve_path(
     // element in a mixed array must still skip evaluation.
     let identifier = if sdf::expr::is_expression(asset.as_str()) {
         let Some(site) = site else { return asset };
-        // No variable dependency is recorded: nothing caches the result, so
-        // there would be nothing to invalidate. `Changes::apply` covers these
-        // reads wholesale through its asset-path channel instead.
+        // No variable dependency is recorded: the read carries no prim index
+        // to register one against, so no per-variable invalidation could name
+        // it. `Changes::apply` covers these reads wholesale through its
+        // asset-path channel instead.
         let EvaluatedExpression::Value(evaluated) = compose_site::evaluate_expression(
             asset.as_str(),
             graph.stack_expression_variables(site.stack),

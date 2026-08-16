@@ -1257,7 +1257,15 @@ fn mute_exposes_selection_loads() -> Result<()> {
     assert_eq!(stage.attribute("/B.y")?.get::<f64>()?, None, "b.usda is not loaded");
 
     let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+    assert!(stage.is_indexed(&sdf::path("/A")?), "reading /A.x composed its index");
     stage.mute_layer(session_id);
+    // Muting a session layer is the one toggle that can move a stack's composed
+    // expression variables, and it reaches every index composing against the root
+    // layer stack — /A among them, though its own opinion comes from a sublayer.
+    // That blanket is what lets the mute path discard its variable deltas without
+    // losing the asset-path channel a composed-variable move would publish (see
+    // `LayerGraph::recompose_for_mute`).
+    assert!(!stage.is_indexed(&sdf::path("/A")?), "the mute dropped /A's index");
     assert_eq!(
         stage.attribute("/B.y")?.get::<f64>()?,
         Some(2.0),
@@ -7144,6 +7152,68 @@ fn listener_resync_under_variant_target() -> Result<()> {
 
     assert!(resynced.borrow().contains(&sdf::path("/Prim/child")?));
     assert!(!resynced.borrow().contains(&sdf::path("/Prim{set=sel}child")?));
+    Ok(())
+}
+
+/// A variant edit target composed over a reference authors into the *referenced*
+/// layer's namespace, so the literal `/Source{set=sel}New` and its
+/// variant-stripped form `/Source/New` are both layer paths, not stage paths.
+/// Only the mapped `/MyPrim/New` may reach `resynced`.
+#[test]
+fn listener_referenced_variant() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("src.usda");
+    fs::write(
+        &src,
+        "#usda 1.0
+
+def \"Source\" (
+    variants = { string set = \"sel\" }
+    prepend variantSets = \"set\"
+)
+{
+    variantSet \"set\" = {
+        \"sel\" {
+            def \"Kid\" {}
+        }
+    }
+}
+",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+
+def \"MyPrim\" (
+    references = @src.usda@</Source>
+)
+{
+}
+",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(
+        stage.prim("/MyPrim/Kid")?.is_valid()?,
+        "the variant composes through the reference"
+    );
+
+    let arc = stage.edit_target_for_node(&sdf::path("/MyPrim")?, EditTargetArc::Reference)?;
+    let variant = EditTarget::for_local_direct_variant(arc.layer_identifier(), sdf::path("/Source{set=sel}")?)?;
+    stage.set_edit_target(variant.compose_over(&arc))?;
+
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let resynced = resynced.clone();
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+        })
+    };
+    stage.define_prim("/MyPrim/New")?;
+
+    // Both authored spellings map to `/MyPrim/New`, which the `/MyPrim` resync
+    // then subsumes — so the whole report is the one composed path.
+    assert_eq!(*resynced.borrow(), vec![sdf::path("/MyPrim")?]);
     Ok(())
 }
 

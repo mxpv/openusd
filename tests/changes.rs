@@ -574,8 +574,9 @@ def "P" {
             notices.asset_paths_resynced
         );
         // The edited layer is not local, so this is `Provenance::DirectLayerEdit`
-        // and the entry is `t.usda`'s own pseudo-root. It shares no namespace
-        // with the stage-namespace `/P` resync, so it survives untouched.
+        // and the entry is `t.usda`'s own pseudo-root. Pruning compares it only
+        // against the resyncs in its own namespace, and the stage-namespace `/P`
+        // is not one of them, so it survives untouched.
         assert_eq!(notices.changed_info_only, paths(&["/"]));
     }
     assert!(

@@ -324,8 +324,9 @@ impl EvaluatedExpression {
 /// a variable edit to the prims and stacks that recorded its name (C++
 /// `PcpExpressionVariablesDependencyData`); a pass that resolves against the
 /// deliberately empty context passes `None` so its universal failures record
-/// nothing. A value-time read records none: nothing caches the resulting value,
-/// so there is nothing a dependency would invalidate (see the module doc).
+/// nothing. A value-time read records none either: it evaluates outside a prim
+/// index build, so there is nothing to register a variable dependency against
+/// (see the module doc).
 pub(super) fn evaluate_expression(
     expression: &str,
     expr_vars: &HashMap<String, Value>,
