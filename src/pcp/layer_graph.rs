@@ -1313,8 +1313,7 @@ impl LayerGraph {
     /// anonymous (no resolvable location, C++ `SdfLayer::GetRealPath` is
     /// empty).
     pub(crate) fn anchor_location(&self, anchor: Option<LayerId>) -> Option<ResolvedPath> {
-        let layer = &self.nodes[&anchor?].layer;
-        (!layer.is_anonymous()).then(|| ResolvedPath::new(layer.real_path()))
+        self.nodes[&anchor?].layer.anchor_location()
     }
 
     /// Records that an on-demand open of `asset_path` failed, so composition

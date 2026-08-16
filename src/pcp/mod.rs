@@ -55,6 +55,7 @@
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
 //! | `prim_graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. |
 //! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
+//! | `asset_resolve` | `Usd_AssetPathContext` | Value-time `asset` resolution: the `AssetSite` provenance every value source supplies, and the anchoring and expression evaluation it drives. Shared by the composed-opinion path and the clip cache, whose layers stand outside the graph. |
 //! | `clip` | `Usd_Clips` / `Usd_ClipSet` | Value clips (spec 12.3.4): the `ClipSet` metadata model with its stage-to-clip timing, and the `ClipCache` holding the clip and manifest layers that stay outside the composition graph. |
 //! | `clip_manifest` | `Usd_GenerateClipManifest` | Builds the manifest layer indexing which attributes a clip set's clips carry time samples for — generated on request through [`ClipsAPI`](crate::usd::ClipsAPI), and synthesized by `ClipCache` for a set that authors none. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
@@ -158,9 +159,11 @@
 //! whose composed variables moved (`change::asset_path_victims`), covering what
 //! no dependency record could: a value-time `` `${VAR}` `` expression in an
 //! `asset` value is evaluated on every read against its opinion's layer stack
-//! (`IndexCache::resolve_asset_path`), and nothing caches the result, so there
-//! is nothing a recorded dependency would invalidate. The stage reports that
-//! set on its own notice channel, distinct from a resync — see
+//! (`asset_resolve::resolve_path`), and nothing caches the result, so there is
+//! nothing a recorded dependency would invalidate. A clip-sourced value is
+//! covered by the same set, since the prim reading it composes the node that
+//! introduced the clips. The stage reports that set on its own notice channel,
+//! distinct from a resync — see
 //! [`usd::CommittedChange::asset_paths_resynced`](crate::usd::CommittedChange::asset_paths_resynced).
 //!
 //! Layer muting ([`Stage::mute_layer`](crate::usd::Stage::mute_layer) /
@@ -233,13 +236,6 @@
 //!   cached indices (`TODO(rayon)`), but the shared `indices` map that
 //!   inherit/specialize targets read mid-build first needs a concurrent map or a
 //!   targets-first build order. [`PrimIndex`] is already `Send + Sync`.
-//! - Resolving `asset` values sourced from value clips: `IndexCache::value_at`
-//!   anchors and evaluates a `default` or `timeSamples` value through the
-//!   `AssetSite` its resolver carries out, but a clip value is returned
-//!   unresolved. A clip anchors against the *clip layer*, which never enters the
-//!   graph and so has no `LayerId`, while its variables come from the node where
-//!   the clips were introduced (C++ `UsdStage::_GetAssetPathContext`); the clip
-//!   cache owns that provenance and does not surface it.
 //! - Anchoring `asset` values that come from a schema fallback:
 //!   `Attribute::fallback_value` reads the prim definition directly, so a
 //!   fallback never reaches `IndexCache`'s resolution tail and keeps neither an
@@ -284,6 +280,7 @@
 
 use std::collections::HashMap;
 
+pub(crate) mod asset_resolve;
 pub(crate) mod change;
 pub(crate) mod clip;
 pub(crate) mod clip_manifest;

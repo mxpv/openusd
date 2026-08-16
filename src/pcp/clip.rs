@@ -23,10 +23,11 @@ use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AssetPath, LayerOffset, Path, Value};
 
+use super::asset_resolve::{self, AssetSite};
 use super::clip_manifest::{self, ManifestKey};
 use super::index_cache::block_to_none;
 use super::layer_graph::LayerGraph;
-use super::{Error, LayerId};
+use super::{Error, LayerId, LayerStackId};
 
 /// Dictionary keys inside a single clip set's metadata (spec 12.3.4.1).
 pub(crate) mod keys {
@@ -85,11 +86,16 @@ pub(crate) struct ClipSet {
     pub interpolate_missing: bool,
 }
 
-/// A parsed clip set plus the layer provenance needed for asset resolution.
+/// A parsed clip set plus the layer and stack provenance asset resolution needs.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedClipSet {
     pub set: ClipSet,
     pub asset_layer: LayerId,
+    /// Layer stack of the node that introduced this set, whose composed
+    /// `expressionVariables` every value the set sources evaluates against —
+    /// the clips' and the manifest's alike, since one set has one introducing
+    /// node. Neither layer belongs to a stack of its own.
+    pub introducing_stack: LayerStackId,
     pub manifest_layer: Option<LayerId>,
     /// Offset of the node that authored `active`, already applied to the set's
     /// schedule. A manifest is read straight off its layer, so this maps its
@@ -653,16 +659,12 @@ impl ClipCache {
             let contributes = !set.interpolate_missing
                 || !self.manifest_blocks(resolved, manifest.as_deref(), &clip_path, activation);
             if contributes
-                && let Some(value) = self.clip_sample_at(
-                    graph,
-                    asset.as_str(),
-                    resolved.asset_layer,
-                    &clip_path,
-                    clip_time,
-                    interp,
-                )?
+                && let Some((clip_id, value)) =
+                    self.clip_sample_at(graph, resolved, asset.as_str(), &clip_path, clip_time, interp)?
             {
-                return Ok(Some(value));
+                return Ok(Some(
+                    self.resolve_asset_in(graph, &clip_id, resolved, &clip_path, value),
+                ));
             }
 
             // The active clip has no sample at `clip_time`, and this set owns
@@ -674,7 +676,9 @@ impl ClipCache {
             if let Some(manifest) = manifest.as_deref()
                 && let Some(value) = self.manifest_default(manifest, &clip_path)?
             {
-                return Ok(Some(value));
+                return Ok(Some(
+                    self.resolve_asset_in(graph, manifest, resolved, &clip_path, value),
+                ));
             }
 
             // (b) interpolateMissingClipValues: interpolate the gap across the
@@ -890,11 +894,16 @@ impl ClipCache {
     ) -> Result<Option<String>> {
         let clip_id = clip_identifier(graph, asset_path, anchor_layer);
         if !self.clip_layers.contains_key(&clip_id) {
-            let Some(data) = graph.layer_registry().open(&clip_id)? else {
+            let Some((resolved, data)) = graph.layer_registry().open(&clip_id)? else {
                 return Ok(None);
             };
-            self.clip_layers
-                .insert(clip_id.clone(), sdf::Layer::new(clip_id.clone(), data));
+            // Built with the location it resolved to, not just the identifier:
+            // that is what anchors the relative asset paths the clip authors, and
+            // for a package it is the package-relative default layer.
+            self.clip_layers.insert(
+                clip_id.clone(),
+                sdf::Layer::new_resolved(clip_id.clone(), &resolved, data),
+            );
         }
         Ok(Some(clip_id))
     }
@@ -902,18 +911,6 @@ impl ClipCache {
     /// A clip or manifest layer already held under `id`.
     fn layer(&self, id: &str) -> Option<&sdf::Layer> {
         self.clip_layers.get(id)
-    }
-
-    /// Loads the layer at `asset_path` and borrows it, `None` when the asset
-    /// path cannot be resolved.
-    fn clip_layer(
-        &mut self,
-        graph: &LayerGraph,
-        asset_path: &str,
-        anchor_layer: LayerId,
-    ) -> Result<Option<&sdf::Layer>> {
-        let id = self.ensure_clip_layer(graph, asset_path, anchor_layer)?;
-        Ok(id.and_then(|id| self.clip_layers.get(&id)))
     }
 
     /// Whether the resolved clip `set` participates in sourcing the attribute at
@@ -962,48 +959,94 @@ impl ClipCache {
     ) -> Result<Vec<f64>> {
         Ok(self
             .clip_time_samples(graph, asset, anchor_layer, clip_path)?
-            .map(|samples| samples.iter().map(|(t, _)| *t).collect())
+            .map(|(_, samples)| samples.iter().map(|(t, _)| *t).collect())
             .unwrap_or_default())
     }
 
     /// Reads the `timeSamples` map authored for `clip_path` in a single clip
-    /// layer, or `None` when the layer is unresolved or authors no samples
-    /// there. The shared read behind [`Self::clip_sample_at`] (which
-    /// interpolates) and [`Self::clip_in_clip_times`] (which lists the times).
+    /// layer, with the identifier the clip resolved to, or `None` when the layer
+    /// is unresolved or authors no samples there. The shared read behind
+    /// [`Self::clip_sample_at`] (which interpolates) and
+    /// [`Self::clip_in_clip_times`] (which lists the times).
+    ///
+    /// The identifier travels with the samples because resolving an `asset`
+    /// value out of them anchors on that same clip, and re-deriving it would
+    /// repeat the resolver's filesystem work.
     fn clip_time_samples(
         &mut self,
         graph: &LayerGraph,
         asset: &str,
         anchor_layer: LayerId,
         clip_path: &Path,
-    ) -> Result<Option<sdf::TimeSampleMap>> {
-        Ok(match self.clip_layer(graph, asset, anchor_layer)? {
-            Some(layer) => match layer.data().try_field(clip_path, FieldKey::TimeSamples.as_str())? {
+    ) -> Result<Option<(String, sdf::TimeSampleMap)>> {
+        let Some(id) = self.ensure_clip_layer(graph, asset, anchor_layer)? else {
+            return Ok(None);
+        };
+        let Some(layer) = self.layer(&id) else {
+            return Ok(None);
+        };
+        Ok(
+            match layer.data().try_field(clip_path, FieldKey::TimeSamples.as_str())? {
                 Some(value) => match value.into_owned() {
-                    Value::TimeSamples(samples) => Some(samples),
+                    Value::TimeSamples(samples) => Some((id, samples)),
                     _ => None,
                 },
                 None => None,
             },
-            None => None,
-        })
+        )
     }
 
     /// Reads the time samples for `clip_path` from a single clip layer and
-    /// interpolates at `clip_time`. Returns `None` when the layer is
-    /// unresolved or the attribute has no time samples there.
+    /// interpolates at `clip_time`, returning the value with the identifier of
+    /// the clip that sourced it. `None` when the layer is unresolved or the
+    /// attribute has no time samples there.
+    ///
+    /// The value comes back unresolved so the caller can resolve only what it
+    /// keeps: a gap fill reads both brackets but returns one, and resolving the
+    /// discarded one would report its expression failures for a value nobody
+    /// sees. The identifier is what anchors it once kept
+    /// ([`Self::resolve_asset_in`]).
     fn clip_sample_at(
         &mut self,
         graph: &LayerGraph,
+        resolved: &ResolvedClipSet,
         asset: &str,
-        anchor_layer: LayerId,
         clip_path: &Path,
         clip_time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
-        Ok(self
-            .clip_time_samples(graph, asset, anchor_layer, clip_path)?
-            .and_then(|samples| interp(&samples, clip_time)))
+    ) -> Result<Option<(String, Value)>> {
+        let Some((clip_id, samples)) = self.clip_time_samples(graph, asset, resolved.asset_layer, clip_path)? else {
+            return Ok(None);
+        };
+        Ok(interp(&samples, clip_time).map(|value| (clip_id, value)))
+    }
+
+    /// Anchors and evaluates an `asset` value read out of the clip or manifest
+    /// layer `identifier` (C++ `UsdStage::_GetAssetPathContext` takes the layer
+    /// from the active clip, or from the manifest when the clip has no authored
+    /// values).
+    ///
+    /// Called on each value the set returns, with the identifier of the layer
+    /// that sourced *that* value — never on one the set read but discarded, so a
+    /// failed expression is reported only for a value a caller sees.
+    fn resolve_asset_in(
+        &mut self,
+        graph: &LayerGraph,
+        identifier: &str,
+        resolved: &ResolvedClipSet,
+        clip_path: &Path,
+        value: Value,
+    ) -> Value {
+        // Checked before the site is built: that copies the layer's location and
+        // identifier, which an ordinary numeric clip sample has no use for.
+        if !value.is_asset_valued() {
+            return value;
+        }
+        let Some(layer) = self.layer(identifier) else {
+            return value;
+        };
+        let site = AssetSite::in_clip(layer, resolved.introducing_stack, clip_path);
+        asset_resolve::resolve_values(graph, value, Some(&site), &mut self.clip_errors)
     }
 
     /// Reads the authored `default` for `clip_path` from the manifest layer
@@ -1032,6 +1075,10 @@ impl ClipCache {
     /// one's, matching the C++ resolver. When only one side contributes, its
     /// value is held across the gap.
     ///
+    /// The value comes back resolved, anchored on whichever surrounding clip
+    /// supplied it — an `asset` path holds rather than blends, so a bracketed
+    /// gap keeps the earlier clip's value and its anchor.
+    ///
     /// A clip the manifest blocks at its activation time is skipped without
     /// being opened: the block is the author's statement that it carries no
     /// samples for the attribute (C++
@@ -1046,7 +1093,6 @@ impl ClipCache {
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>> {
         let set = &resolved.set;
-        let anchor = resolved.asset_layer;
         // Position of the active clip among the `active` entries at `time`.
         let active_pos = set.active.iter().rposition(|&(stage, _)| stage <= time).unwrap_or(0);
 
@@ -1058,8 +1104,10 @@ impl ClipCache {
             }
             if let Some(asset) = set.asset_paths.get(idx) {
                 let clip_time = set.map_stage_to_clip(stage);
-                if let Some(value) = self.clip_sample_at(graph, asset.as_str(), anchor, clip_path, clip_time, interp)? {
-                    upper = Some((stage, value));
+                if let Some(sample) =
+                    self.clip_sample_at(graph, resolved, asset.as_str(), clip_path, clip_time, interp)?
+                {
+                    upper = Some((stage, sample));
                     break;
                 }
             }
@@ -1073,16 +1121,34 @@ impl ClipCache {
             }
             if let Some(asset) = set.asset_paths.get(idx) {
                 let clip_time = set.map_stage_to_clip(stage);
-                if let Some(value) = self.clip_sample_at(graph, asset.as_str(), anchor, clip_path, clip_time, interp)? {
-                    lower = Some((stage, value));
+                if let Some(sample) =
+                    self.clip_sample_at(graph, resolved, asset.as_str(), clip_path, clip_time, interp)?
+                {
+                    lower = Some((stage, sample));
                     break;
                 }
             }
         }
 
+        // Only the bracket that survives is resolved: resolving the discarded one
+        // would report its expression failures for a value nobody sees.
+        //
+        // An `asset` path cannot be blended, so a bracketed gap holds the earlier
+        // clip's value. That is decided here rather than read back off `interp`'s
+        // result, because the anchor has to follow the value that survives and
+        // this layer stays free of whichever interpolation policy the caller
+        // injected.
         Ok(match (lower, upper) {
-            (Some((lt, lv)), Some((ut, uv))) => interp(&vec![(lt, lv), (ut, uv)], time),
-            (Some((_, value)), None) | (None, Some((_, value))) => Some(value),
+            (Some((lt, (lid, lv))), Some((ut, (_, uv)))) => {
+                if lv.is_asset_valued() || uv.is_asset_valued() {
+                    Some(self.resolve_asset_in(graph, &lid, resolved, clip_path, lv))
+                } else {
+                    interp(&vec![(lt, lv), (ut, uv)], time)
+                }
+            }
+            (Some((_, (id, value))), None) | (None, Some((_, (id, value)))) => {
+                Some(self.resolve_asset_in(graph, &id, resolved, clip_path, value))
+            }
             (None, None) => None,
         })
     }
@@ -1124,22 +1190,27 @@ mod tests {
         );
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
-        let data = registry.open(&root).expect("open root").expect("root resolves");
+        let (_, data) = registry.open(&root).expect("open root").expect("root resolves");
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 
         let mut clips = ClipCache::default();
+        let id = clips
+            .ensure_clip_layer(&graph, "./clip.usda", root_id)?
+            .expect("clip resolves");
         {
-            let clip = clips
-                .clip_layer(&graph, "./clip.usda", root_id)?
-                .expect("clip resolves");
+            let clip = clips.layer(&id).expect("the clip is held");
             assert!(clip.identifier.contains("clip.usda"));
             assert!(clip.data().has_spec(&sdf::path("/Model.size")?));
         }
 
         // Second lookup is a cache hit; a bogus path resolves to None.
-        assert!(clips.clip_layer(&graph, "./clip.usda", root_id)?.is_some());
-        assert!(clips.clip_layer(&graph, "./does_not_exist.usda", root_id)?.is_none());
+        assert!(clips.ensure_clip_layer(&graph, "./clip.usda", root_id)?.is_some());
+        assert!(
+            clips
+                .ensure_clip_layer(&graph, "./does_not_exist.usda", root_id)?
+                .is_none()
+        );
         Ok(())
     }
 
@@ -1154,7 +1225,7 @@ mod tests {
         );
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
-        let data = registry.open(&root).expect("open root").expect("root resolves");
+        let (_, data) = registry.open(&root).expect("open root").expect("root resolves");
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 
@@ -1170,6 +1241,7 @@ mod tests {
                 interpolate_missing: false,
             },
             asset_layer: root_id,
+            introducing_stack: LayerStackId::ROOT,
             manifest_layer: None,
             active_offset: LayerOffset::IDENTITY,
         };

@@ -23,6 +23,27 @@ fn asset_at(stage: &Stage, path: &str) -> sdf::AssetPath {
         .expect("asset value")
 }
 
+/// The composed `asset` value at `path` at `time`, which must be authored.
+fn asset_at_time(stage: &Stage, path: &str, time: f64) -> sdf::AssetPath {
+    stage
+        .attribute(path)
+        .expect("attribute")
+        .get_at::<sdf::AssetPath>(usd::TimeCode::from(time))
+        .expect("read")
+        .expect("asset value")
+}
+
+/// Asserts `asset` resolved to a location ending in `suffix`, compared with
+/// forward slashes so the check reads the same on Windows. `what` names the
+/// anchor the suffix is proving.
+fn assert_resolved_under(asset: &sdf::AssetPath, suffix: &str, what: &str) {
+    let resolved = asset.resolved_path().expect("the value resolves");
+    assert!(
+        resolved.replace('\\', "/").contains(suffix),
+        "expected {what} ({suffix}), got {resolved}"
+    );
+}
+
 /// The authored site of every reported invalid-expression diagnostic.
 fn expression_error_sites(stage: &Stage) -> Vec<sdf::Path> {
     stage
@@ -289,14 +310,10 @@ fn time_sampled_expression_resolved() {
             "}\n",
         ),
     );
-    let attr = stage.attribute("/M.inputs:file").expect("attribute");
     let query = stage.attribute_query("/M.inputs:file").expect("query");
 
     for (time, leaf) in [(0.0, "./a.png"), (10.0, "./b.png")] {
-        let direct = attr
-            .get_at::<sdf::AssetPath>(usd::TimeCode::from(time))
-            .expect("read")
-            .expect("asset value");
+        let direct = asset_at_time(&stage, "/M.inputs:file", time);
         assert_eq!(direct.evaluated_path(), Some(leaf), "direct read at {time}");
         assert!(direct.resolved_path().is_some(), "direct read resolves at {time}");
 
@@ -448,4 +465,283 @@ fn lazy_prototype_keeps_error() {
         1,
         "the diagnostic survives an unrelated prototype materialization"
     );
+}
+
+/// A clip-sourced `asset` anchors on the *clip's own layer*, not on the layer
+/// that authored the clip metadata, while its `${VAR}` resolves against the
+/// variables of the node that introduced the clips. The clips live in a
+/// subdirectory, so a relative path resolves only under the right anchor.
+#[test]
+fn clip_sample_anchor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).expect("mkdir");
+    fs::write(sub.join("texA.png"), b"a").expect("write asset");
+    fs::write(sub.join("fallback.png"), b"f").expect("write asset");
+    fs::write(
+        sub.join("clip0.usda"),
+        "#usda 1.0\ndef \"Model\" {\n    asset file.timeSamples = {\n        0: @`\"./tex${SUF}.png\"`@,\n    }\n}\n",
+    )
+    .expect("write clip0");
+    fs::write(sub.join("clip1.usda"), "#usda 1.0\ndef \"Model\" {\n}\n").expect("write clip1");
+    fs::write(
+        sub.join("manifest.usda"),
+        "#usda 1.0\ndef \"Model\" {\n    asset file = @./fallback.png@\n}\n",
+    )
+    .expect("write manifest");
+
+    let stage = open_scene(
+        &dir,
+        r#"#usda 1.0
+(
+    defaultPrim = "Model"
+    expressionVariables = { string SUF = "A" }
+)
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./sub/clip0.usda@, @./sub/clip1.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1)]
+            asset manifestAssetPath = @./sub/manifest.usda@
+        }
+    }
+)
+{
+    asset file
+}
+"#,
+    );
+
+    // The active clip's sample: evaluated against the introducing stack's
+    // variables and anchored on the clip layer.
+    let active = asset_at_time(&stage, "/Model.file", 0.0);
+    assert_eq!(active.evaluated_path(), Some("./texA.png"));
+    assert_resolved_under(&active, "/sub/texA.png", "the clip layer's anchor");
+
+    // A gap in the active clip falls to the manifest default, which anchors on
+    // the manifest layer rather than on either clip.
+    let fallback = asset_at_time(&stage, "/Model.file", 10.0);
+    assert_eq!(fallback.as_str(), "./fallback.png");
+    assert_resolved_under(&fallback, "/sub/fallback.png", "the manifest layer's anchor");
+}
+
+/// `interpolateMissingClipValues` fills a gap from the surrounding clips, and
+/// each contributing value is resolved against its own clip layer before
+/// anything combines them. An asset path does not interpolate, so the bracket
+/// holds the lower clip's value — which therefore carries the lower clip's
+/// anchor, not the active clip's.
+#[test]
+fn clip_gap_anchor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let lo = dir.path().join("lo");
+    let hi = dir.path().join("hi");
+    fs::create_dir(&lo).expect("mkdir");
+    fs::create_dir(&hi).expect("mkdir");
+    fs::write(lo.join("tex.png"), b"l").expect("write asset");
+    fs::write(hi.join("tex.png"), b"h").expect("write asset");
+    // The low and high clips each carry a sample naming the same relative path;
+    // only the anchor distinguishes them.
+    for at in [&lo, &hi] {
+        fs::write(
+            at.join("clip.usda"),
+            r#"#usda 1.0
+def "Model" {
+    asset file.timeSamples = {
+        0: @./tex.png@,
+    }
+}
+"#,
+        )
+        .expect("write clip");
+    }
+    // The middle clip declares nothing, so it is the gap.
+    fs::write(
+        dir.path().join("mid.usda"),
+        "#usda 1.0
+def \"Model\" {
+}
+",
+    )
+    .expect("write mid");
+    fs::write(
+        dir.path().join("manifest.usda"),
+        r#"#usda 1.0
+def "Model" {
+    asset file
+}
+"#,
+    )
+    .expect("write manifest");
+
+    let stage = open_scene(
+        &dir,
+        r#"#usda 1.0
+(
+    defaultPrim = "Model"
+)
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./lo/clip.usda@, @./mid.usda@, @./hi/clip.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1), (20, 2)]
+            asset manifestAssetPath = @./manifest.usda@
+            bool interpolateMissingClipValues = true
+        }
+    }
+)
+{
+    asset file
+}
+"#,
+    );
+
+    // Inside the middle clip's window both sides contribute; the hold picks the
+    // lower one, already anchored on the low clip.
+    let gap = asset_at_time(&stage, "/Model.file", 15.0);
+    assert_eq!(gap.as_str(), "./tex.png");
+    assert_resolved_under(&gap, "/lo/tex.png", "the lower clip's anchor, held through the gap");
+
+    // The high clip's own window anchors on the high clip, proving the two
+    // relative paths really do resolve differently.
+    let high = asset_at_time(&stage, "/Model.file", 20.0);
+    assert_resolved_under(&high, "/hi/tex.png", "the high clip's anchor");
+}
+
+/// A malformed expression in a clip-sourced `asset` reports through the clip
+/// cache's own diagnostics, which merge into the same query channel a composed
+/// opinion's failure uses.
+#[test]
+fn clip_bad_expression_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("clip.usda"),
+        "#usda 1.0\ndef \"Model\" {\n    asset file.timeSamples = {\n        0: @`\"./x.png\" +`@,\n    }\n}\n",
+    )
+    .expect("write clip");
+    fs::write(
+        dir.path().join("manifest.usda"),
+        "#usda 1.0\ndef \"Model\" {\n    asset file\n}\n",
+    )
+    .expect("write manifest");
+
+    let stage = open_scene(
+        &dir,
+        r#"#usda 1.0
+(
+    defaultPrim = "Model"
+)
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+            asset manifestAssetPath = @./manifest.usda@
+        }
+    }
+)
+{
+    asset file
+}
+"#,
+    );
+
+    let value = asset_at_time(&stage, "/Model.file", 0.0);
+    assert!(value.evaluated_path().is_none(), "a failed expression derives nothing");
+    assert_eq!(
+        expression_error_sites(&stage),
+        vec![sdf::path("/Model.file").unwrap()],
+        "the site is the attribute's path inside the clip"
+    );
+}
+
+/// A gap fill reads both brackets but returns only one, so a malformed
+/// expression in the discarded upper clip must not be reported for a value
+/// nobody sees — the same rule an unselected time sample follows.
+#[test]
+fn clip_gap_ignores_upper() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let lo = dir.path().join("lo");
+    fs::create_dir(&lo).expect("mkdir");
+    fs::write(lo.join("tex.png"), b"l").expect("write asset");
+    fs::write(
+        lo.join("clip.usda"),
+        r#"#usda 1.0
+def "Model" {
+    asset file.timeSamples = {
+        0: @./tex.png@,
+    }
+}
+"#,
+    )
+    .expect("write low clip");
+    // The later clip's sample is malformed; the hold never selects it.
+    fs::write(
+        dir.path().join("hi.usda"),
+        r#"#usda 1.0
+def "Model" {
+    asset file.timeSamples = {
+        0: @`"./x.png" +`@,
+    }
+}
+"#,
+    )
+    .expect("write high clip");
+    fs::write(
+        dir.path().join("mid.usda"),
+        "#usda 1.0
+def \"Model\" {
+}
+",
+    )
+    .expect("write mid");
+    fs::write(
+        dir.path().join("manifest.usda"),
+        r#"#usda 1.0
+def "Model" {
+    asset file
+}
+"#,
+    )
+    .expect("write manifest");
+
+    let stage = open_scene(
+        &dir,
+        r#"#usda 1.0
+(
+    defaultPrim = "Model"
+)
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./lo/clip.usda@, @./mid.usda@, @./hi.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1), (20, 2)]
+            asset manifestAssetPath = @./manifest.usda@
+            bool interpolateMissingClipValues = true
+        }
+    }
+)
+{
+    asset file
+}
+"#,
+    );
+
+    let gap = asset_at_time(&stage, "/Model.file", 15.0);
+    assert_resolved_under(&gap, "/lo/tex.png", "the lower clip's anchor");
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the discarded upper bracket must not report, got {:?}",
+        stage.composition_errors()
+    );
+
+    // Reading the high clip's own window does report it.
+    assert!(
+        asset_at_time(&stage, "/Model.file", 20.0).evaluated_path().is_none(),
+        "the malformed sample derives nothing when it is the one selected"
+    );
+    assert_eq!(expression_error_sites(&stage).len(), 1);
 }

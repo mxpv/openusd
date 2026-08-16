@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::ar::ResolvedPath;
 use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Specifier, Value};
 
+use super::asset_resolve::AssetSite;
 use super::clip;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
@@ -48,51 +48,7 @@ struct Opinion<'a> {
 impl Opinion<'_> {
     /// Where this opinion was authored, for resolving an `asset` it holds.
     fn asset_site(&self, stack: &LayerGraph) -> AssetSite {
-        AssetSite::in_graph(stack, self.node, self.layer, &self.query_path)
-    }
-}
-
-/// Where an `asset` value was authored: what to anchor a relative path against,
-/// whose `expressionVariables` are in scope, and the site to name in a
-/// diagnostic (C++ `Usd_AssetPathContext`).
-///
-/// Holds the source layer's resolved location and identifier rather than a
-/// [`LayerId`], so a source outside the composition graph can describe itself.
-/// A value clip's layer is owned by the clip cache and never interned, so it
-/// has no id — and its variables come from the node where the clips were
-/// introduced, not from the clip, which is why the stack is carried separately
-/// rather than derived from the layer.
-///
-/// [`query_path`](Self::query_path) is the path *in the source layer*, which
-/// under a reference or variant arc differs from the composed stage path the
-/// caller started from.
-#[derive(Debug)]
-pub(crate) struct AssetSite {
-    /// Resolved location of the source layer, the anchor for a relative path.
-    /// `None` for an anonymous layer, which anchors nothing.
-    pub(crate) anchor: Option<ResolvedPath>,
-    /// Identifier of the source layer, for [`Error::InvalidExpression`].
-    pub(crate) source_layer: String,
-    /// The layer stack whose composed variables an expression evaluates against.
-    pub(crate) stack: LayerStackId,
-    /// The path queried in the source layer.
-    pub(crate) query_path: Path,
-}
-
-impl AssetSite {
-    /// The site of an opinion authored in `layer` at `query_path`, contributed
-    /// by `node` — the graph-backed case, which resolves the anchor and
-    /// identifier through `stack`.
-    ///
-    /// Copies the layer's resolved location and identifier, so build it only for
-    /// a value that actually holds asset paths.
-    fn in_graph(stack: &LayerGraph, node: &Node, layer: LayerId, query_path: &Path) -> Self {
-        Self {
-            anchor: stack.anchor_location(Some(layer)),
-            source_layer: stack.identifier(layer).to_string(),
-            stack: node.layer_stack_id(),
-            query_path: query_path.clone(),
-        }
+        AssetSite::in_graph(stack, self.node.layer_stack_id(), self.layer, &self.query_path)
     }
 }
 
@@ -574,7 +530,12 @@ impl PrimIndex {
                 stack.layer(site.layer).data().try_field(&site.query_path, field),
                 Ok(Some(_))
             ) {
-                return Some(AssetSite::in_graph(stack, site.node, site.layer, &site.query_path));
+                return Some(AssetSite::in_graph(
+                    stack,
+                    site.node.layer_stack_id(),
+                    site.layer,
+                    &site.query_path,
+                ));
             }
         }
         None
@@ -874,7 +835,11 @@ impl PrimIndex {
     pub(crate) fn resolve_clip_sets(&self, stack: &LayerGraph) -> Result<Vec<clip::ResolvedClipSet>> {
         let mut sets: HashMap<String, HashMap<String, Value>> = HashMap::new();
         let mut blocked_sets: HashSet<String> = HashSet::new();
-        let mut asset_layers: HashMap<String, LayerId> = HashMap::new();
+        // The layer that authored a set's clip asset paths, paired with the stack
+        // of the node it came from — the variables a clip-sourced `asset`
+        // expression evaluates against, the clip layer itself belonging to no
+        // stack (C++ takes the node from where the clips were introduced).
+        let mut asset_sources: HashMap<String, (LayerId, LayerStackId)> = HashMap::new();
         let mut manifest_layers: HashMap<String, LayerId> = HashMap::new();
         // Sets with explicit `assetPaths` (whose `active`/`times` are retimed
         // as they compose) versus the offset of a template set's authoring
@@ -889,8 +854,13 @@ impl PrimIndex {
         // block on any layer stops every weaker opinion (spec 12.3.4).
         for opinion in self.opinions(FieldKey::Clips.as_str(), stack, None) {
             let Opinion {
-                layer, value, offset, ..
+                node,
+                layer,
+                value,
+                offset,
+                ..
             } = opinion?;
+            let node_stack = node.layer_stack_id();
             match value.into_owned() {
                 Value::ValueBlock => break,
                 Value::Dictionary(dict) => {
@@ -925,11 +895,11 @@ impl PrimIndex {
                                 active_offsets.insert(set_name.clone(), offset);
                             }
                             if field == clip::keys::ASSET_PATHS {
-                                asset_layers.insert(set_name.clone(), layer);
+                                asset_sources.insert(set_name.clone(), (layer, node_stack));
                                 explicit_sets.insert(set_name.clone());
                             } else if field == clip::keys::TEMPLATE_ASSET_PATH {
                                 if !explicit_sets.contains(&set_name) {
-                                    asset_layers.insert(set_name.clone(), layer);
+                                    asset_sources.insert(set_name.clone(), (layer, node_stack));
                                 }
                                 template_offsets.insert(set_name.clone(), offset);
                             } else if field == clip::keys::MANIFEST_ASSET_PATH {
@@ -953,7 +923,7 @@ impl PrimIndex {
         Ok(clip::ClipSet::parse(&clips, order.as_deref())
             .into_iter()
             .filter_map(|mut set| {
-                let asset_layer = asset_layers.get(&set.name).copied()?;
+                let (asset_layer, introducing_stack) = asset_sources.get(&set.name).copied()?;
                 let manifest_layer = manifest_layers.get(&set.name).copied();
                 // Explicit `active`/`times` were retimed as they composed. A
                 // template schedule is derived in clip time, so retime its
@@ -974,6 +944,7 @@ impl PrimIndex {
                 Some(clip::ResolvedClipSet {
                     set,
                     asset_layer,
+                    introducing_stack,
                     manifest_layer,
                     active_offset,
                 })

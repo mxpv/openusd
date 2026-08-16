@@ -311,7 +311,7 @@ impl EvaluatedExpression {
 ///
 /// Shared by both tiers that evaluate expressions: composing an arc's asset
 /// path or a variant selection, and resolving an `asset`-valued attribute or
-/// metadatum ([`IndexCache::resolve_asset_path`](super::IndexCache)). `context`
+/// metadatum ([`asset_resolve`](super::asset_resolve)). `context`
 /// says which, and `source_layer` is the identifier of the layer that authored
 /// the expression — an identifier rather than the layer itself because a value
 /// clip's layer is owned by the clip cache and never enters the graph.

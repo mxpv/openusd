@@ -287,6 +287,13 @@ impl Layer {
     pub(crate) fn real_path(&self) -> &str {
         self.real_path.as_deref().unwrap_or(&self.identifier)
     }
+
+    /// The location that anchors the relative asset paths this layer authors,
+    /// or `None` when it is anonymous and so has no resolvable location (C++
+    /// `SdfLayer::GetRealPath` is empty for one).
+    pub(crate) fn anchor_location(&self) -> Option<ar::ResolvedPath> {
+        (!self.is_anonymous()).then(|| ar::ResolvedPath::new(self.real_path()))
+    }
 }
 
 impl Layer {
@@ -1327,7 +1334,7 @@ mod tests {
         );
 
         // The registry's content-sniff must accept it as binary.
-        let round = sdf::LayerRegistry::default()
+        let (_, round) = sdf::LayerRegistry::default()
             .open(path.to_str().unwrap())?
             .expect("the layer opens");
         assert_eq!(round.spec_type(&bar), Some(SpecType::Prim));

@@ -15,15 +15,14 @@ use std::mem;
 
 use anyhow::Result;
 
-use crate::ar::ResolvedPath;
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerOffset, Path, SpecType, Value};
 use crate::tf::Token;
 
+use super::asset_resolve::{self, AssetSite};
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
-use super::compose_site::{self, EvaluatedExpression};
 use super::dependencies::Dependencies;
 use super::index_store::IndexStore;
 use super::instancing::PrototypeRegistry;
@@ -35,9 +34,9 @@ use super::prim_index::{
     AncestorArc, CompositionContext, Demand, PrimIndex, PropertyTargetKind, TargetMemo, TargetMemoKey,
 };
 use super::prim_indexer::ExprVarDeps;
-use super::prim_resolve::{AssetSite, InvalidTargetKind};
+use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
-use super::{Error, ExpressionContext, LayerId, MapFunction, StackIdentity, VariantFallbackMap};
+use super::{Error, LayerId, MapFunction, StackIdentity, VariantFallbackMap};
 
 /// What [`IndexCache::edit_target_node_info`] reports for an arc node: the target
 /// layer's identifier, the node's spec-to-scene mapping, and the value identity
@@ -362,12 +361,6 @@ impl IndexCache {
             return Ok(None);
         };
         let local_layers = graph.local_layers();
-
-        // TODO: a value from a clip (`resolve_clip_value`) is still returned with
-        // `evaluated_path` and `resolved_path` unset. Unlike the default and
-        // time-sample sources, a clip value anchors against the *clip layer*,
-        // which never enters the graph, so it needs provenance the clip cache
-        // owns rather than a host-stack `AssetSite`.
 
         // 1) Local time samples take precedence over clip data.
         if let Some((value, site)) =
@@ -1209,99 +1202,27 @@ impl IndexCache {
         self.resolve_asset_values(graph, value, site.as_ref())
     }
 
-    /// Fills the evaluated and resolved paths on an `asset` / `asset[]` value
-    /// authored at `site`, recording any expression failure in the cache's query
-    /// diagnostics. Non-asset values pass through.
+    /// Fills the evaluated and resolved paths on an `asset` value authored at
+    /// `site`, recording any expression failure in the cache's query
+    /// diagnostics — the error channel a value query has, since it answers
+    /// through a value rather than a diagnostic.
     ///
-    /// The shared tail of every value source: a `default` opinion reaches it
-    /// through [`Self::anchor_asset_paths`], a time-sampled one through the
+    /// The seam every composed value source shares: a `default` opinion reaches
+    /// it through [`Self::anchor_asset_paths`], a time-sampled one through the
     /// provenance its resolver carries out, and a value replayed from a cached
-    /// [`AttributeValueSource::TimeSamples`] through the stage. `site` is `None`
-    /// when nothing authors the field or the prim has no composed index; both
-    /// derived paths are then left unset, and an expression is dropped without a
-    /// diagnostic, since there is no layer or path to name in one.
-    ///
-    /// TODO(perf): each asset read re-runs `Resolver::resolve` (a filesystem
-    /// hit); a per-(layer, path) resolution cache would avoid repeating it.
+    /// [`AttributeValueSource::TimeSamples`] through the stage. A clip resolves
+    /// against its own layer inside the clip cache instead, and merges its
+    /// diagnostics here through [`Self::record_clip_errors`].
     pub(crate) fn resolve_asset_values(
         &mut self,
         graph: &LayerGraph,
         value: Option<Value>,
         site: Option<&AssetSite>,
     ) -> Option<Value> {
-        let value = value?;
-        if !value.is_asset_valued() {
-            return Some(value);
-        }
-        let anchor = site.and_then(|site| site.anchor.as_ref());
         let mut errors = Vec::new();
-        let resolved = match value {
-            Value::AssetPath(asset) => {
-                Value::AssetPath(Self::resolve_asset_path(graph, asset, anchor, site, &mut errors))
-            }
-            Value::AssetPathVec(assets) => Value::AssetPathVec(
-                assets
-                    .into_iter()
-                    .map(|asset| Self::resolve_asset_path(graph, asset, anchor, site, &mut errors))
-                    .collect(),
-            ),
-            other => other,
-        };
+        let resolved = asset_resolve::resolve_values(graph, value?, site, &mut errors);
         self.merge_query_errors(errors);
         Some(resolved)
-    }
-
-    /// Resolves `asset` against `anchor` (its source layer's resolved location)
-    /// and returns it with the evaluated and resolved paths recorded.
-    ///
-    /// A variable expression is evaluated against the composed variables in
-    /// scope at `site` to the path used as input to resolution (C++
-    /// `SdfAssetPath::GetAssetPath`). A malformed or non-string expression
-    /// records [`Error::InvalidExpression`] in `errors` and leaves both derived
-    /// paths unset, as a reference or payload arc's asset path does; one
-    /// evaluating to the expression-language `None` is left unset silently, and
-    /// so is any expression with no `site` to supply variables. Resolution owns
-    /// the derived paths: the result is rebuilt from the authored path so any
-    /// prior evaluated/resolved path is discarded.
-    fn resolve_asset_path(
-        graph: &LayerGraph,
-        asset: sdf::AssetPath,
-        anchor: Option<&ResolvedPath>,
-        site: Option<&AssetSite>,
-        errors: &mut Vec<Error>,
-    ) -> sdf::AssetPath {
-        let mut asset = sdf::AssetPath::new(asset.into_string());
-        if asset.is_empty() {
-            return asset;
-        }
-        // The per-element `is_expression` is load-bearing for `asset[]`: a plain
-        // element in a mixed array must still skip evaluation.
-        let identifier = if sdf::expr::is_expression(asset.as_str()) {
-            let Some(site) = site else { return asset };
-            // No variable dependency is recorded: nothing caches the result, so
-            // there would be nothing to invalidate. `Changes::apply` covers
-            // these reads wholesale through its asset-path channel instead.
-            let EvaluatedExpression::Value(evaluated) = compose_site::evaluate_expression(
-                asset.as_str(),
-                graph.stack_expression_variables(site.stack),
-                ExpressionContext::AssetValue,
-                &site.source_layer,
-                &site.query_path,
-                Some(errors),
-                None,
-            ) else {
-                return asset;
-            };
-            let identifier = graph.layer_registry().create_identifier(&evaluated, anchor);
-            asset.set_evaluated_path(evaluated);
-            identifier
-        } else {
-            graph.layer_registry().create_identifier(asset.as_str(), anchor)
-        };
-        if let Some(resolved) = graph.layer_registry().resolve(&identifier) {
-            asset.set_resolved_path(resolved.to_string_lossy().into_owned());
-        }
-        asset
     }
 
     /// Returns the composed `apiSchemas` list for a prim: the items of the
@@ -2417,7 +2338,7 @@ mod tests {
     fn single_layer_stack(path: &str) -> (LayerGraph, IndexCache) {
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(path, None);
-        let data = registry.open(path).expect("open root").expect("root resolves");
+        let (_, data) = registry.open(path).expect("open root").expect("root resolves");
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
         (
             graph,
@@ -2991,19 +2912,6 @@ def "Anchor" (inherits = </Rig>) {}
             "editing PICK re-resolves the reference to b.usda and recomposes the cached index"
         );
         Ok(())
-    }
-
-    /// An expression-valued asset with no site to supply variables (no composed
-    /// index or no authoring site for the field) stays unevaluated, and reports
-    /// nothing: without a site there is no layer or path to name.
-    #[test]
-    fn expr_asset_without_vars() {
-        let (graph, _) = in_memory_stack("#usda 1.0\n");
-        let mut errors = Vec::new();
-        let resolved = IndexCache::resolve_asset_path(&graph, sdf::AssetPath::new("`${A}`"), None, None, &mut errors);
-        assert_eq!(resolved.as_str(), "`${A}`", "the authored expression is kept");
-        assert!(resolved.evaluated_path().is_none(), "no evaluated path is derived");
-        assert!(errors.is_empty(), "no site means no diagnostic");
     }
 
     /// An asset attribute's `${VAR}` inside a referenced target resolves against

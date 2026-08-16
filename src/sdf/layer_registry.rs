@@ -199,12 +199,23 @@ impl LayerRegistry {
         DEFAULT_FORMATS.iter().copied().find(|f| f.format_id() == id)
     }
 
-    /// Resolves `identifier` and opens the layer there in its file format, or
-    /// `None` when it does not resolve. Used for value-clip and manifest layers,
-    /// which compose outside the layer graph (spec 12.3.4).
-    pub(crate) fn open(&self, identifier: &str) -> Result<Option<sdf::LayerData>> {
+    /// Resolves `identifier` and opens the layer there in its file format,
+    /// returning the location it resolved to alongside the data, or `None` when
+    /// it does not resolve. Used for value-clip and manifest layers, which
+    /// compose outside the layer graph (spec 12.3.4).
+    ///
+    /// The resolved location comes back with the data because it is what anchors
+    /// the relative asset paths the layer authors, and it is not always the
+    /// identifier: a package resolves to its package-relative default layer. A
+    /// caller building an [`sdf::Layer`] from this passes it to
+    /// [`Layer::new_resolved`](sdf::Layer::new_resolved) rather than letting
+    /// `real_path` fall back to the identifier.
+    pub(crate) fn open(&self, identifier: &str) -> Result<Option<(ar::ResolvedPath, sdf::LayerData)>> {
         match self.resolve_layer(identifier) {
-            Some(resolved) => self.read(&resolved).map(Some),
+            Some(resolved) => {
+                let data = self.read(&resolved)?;
+                Ok(Some((resolved, data)))
+            }
             None => Ok(None),
         }
     }
