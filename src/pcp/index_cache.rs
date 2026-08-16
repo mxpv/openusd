@@ -693,9 +693,17 @@ impl IndexCache {
     /// the shared preamble for the clip orchestration walks. Returns an owned
     /// list so the cached-index borrow is released before the per-anchor
     /// [`ClipCache`] query takes `&mut self.clip_cache`.
+    ///
+    /// TODO(perf): the sets are recomposed per query rather than memoized, so a
+    /// `${VAR}` in a set's asset paths is re-parsed and re-evaluated on every
+    /// clip read. A per-(prim, revision) cache of the returned `Vec` at this seam
+    /// would bound both.
     fn clip_sets_for(&mut self, graph: &LayerGraph, anchor: &Path) -> Result<Vec<ResolvedClipSet>> {
         self.ensure_index(graph, anchor)?;
-        self.cached(anchor).resolve_clip_sets(graph)
+        let mut errors = Vec::new();
+        let sets = self.cached(anchor).resolve_clip_sets(graph, &mut errors)?;
+        self.merge_query_errors(errors);
+        Ok(sets)
     }
 
     /// Generates a manifest layer for the clip set named `clip_set` composed on

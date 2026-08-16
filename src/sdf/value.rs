@@ -342,7 +342,9 @@ impl Value {
     /// The single source of truth for the asset-bearing variants, so a value
     /// resolver and its callers cannot disagree about which values to resolve.
     /// Asset paths nested inside a dictionary are not counted: resolution does
-    /// not recurse into one.
+    /// not recurse into one. The one dictionary whose asset paths are reached is
+    /// `clips`, which `pcp` walks field by field with the schema in hand rather
+    /// than by recursion — see `PrimIndex::resolve_clip_sets`.
     pub fn is_asset_valued(&self) -> bool {
         matches!(self, Value::AssetPath(_) | Value::AssetPathVec(_))
     }

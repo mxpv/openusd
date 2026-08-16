@@ -202,6 +202,25 @@
 //! `resolve_path_list_op_validated` drops each invalid contribution from its own
 //! node only, so a valid stronger opinion for the same path survives.
 //!
+//! # Expressions in `clips` metadata
+//!
+//! A `` `${VAR}` `` in a clip set's `assetPaths`, `templateAssetPath` or
+//! `manifestAssetPath` is evaluated before the set is parsed
+//! (`PrimIndex::resolve_clip_sets`), against the variables in scope at the
+//! opinion that supplied the field.
+//!
+//! This diverges from C++, deliberately: `clipSetDefinition.cpp` reads all
+//! three raw, and `UsdStage::_MakeResolvedAssetPaths` never descends into a
+//! `VtDictionary`, so an expression there is inert. The Sdf variable-expression
+//! documentation promises support in asset-valued metadata, which these are, and
+//! an expression in these fields resolves to nothing today — so nothing can
+//! depend on the old behaviour. A parity choice, not a gap.
+//!
+//! Only `asset`-typed fields are covered. A `templateAssetPath` authored as a
+//! `string` still reads through (`clip::asset_input`), but holds no evaluated
+//! path — `asset_resolve` walks the asset-bearing `Value` variants, which a
+//! string-typed field is not one of.
+//!
 //! # Permissions (`permission = private`)
 //!
 //! `permission` is `sdf`-level metadata only ([`sdf::Permission`]); composition
@@ -243,10 +262,6 @@
 //!   fallback never reaches `IndexCache`'s resolution tail and keeps neither an
 //!   `evaluated_path` nor a `resolved_path`. A fallback is authored in a schema
 //!   layer, so its anchor is that layer rather than any composed opinion.
-//! - Evaluating expressions in `clips` metadata itself: `clipAssetPaths`,
-//!   `templateAssetPath`, and `manifestAssetPath` are read raw (`pcp::clip`
-//!   never consults `sdf::expr`), so a `${VAR}` in one is inert and a template
-//!   sequence keyed on a variable does not resolve.
 //! - Dependency fanout for a `defaultPrim` edit: `change::Changes` answers one
 //!   with a significant resync at the stage root, dropping the whole cache. Only
 //!   a reference or payload that named no target prim resolves through the

@@ -1,8 +1,12 @@
 //! Value resolution anchors and resolves `asset` / `asset[]` paths against
 //! the layer of the strongest opinion, populating `AssetPath::resolved_path`.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
+use std::rc::Rc;
 
+use openusd::pcp;
 use openusd::sdf;
 use openusd::usd::{self, Stage};
 
@@ -44,13 +48,21 @@ fn assert_resolved_under(asset: &sdf::AssetPath, suffix: &str, what: &str) {
     );
 }
 
+/// Whether the stage reports a clip it could not read.
+fn reports_unreadable_clip(stage: &Stage) -> bool {
+    stage
+        .composition_errors()
+        .iter()
+        .any(|e| matches!(e, pcp::Error::UnreadableClip { .. }))
+}
+
 /// The authored site of every reported invalid-expression diagnostic.
 fn expression_error_sites(stage: &Stage) -> Vec<sdf::Path> {
     stage
         .composition_errors()
         .into_iter()
         .filter_map(|e| match e {
-            openusd::pcp::Error::InvalidExpression { site_path, .. } => Some(site_path),
+            pcp::Error::InvalidExpression { site_path, .. } => Some(site_path),
             _ => None,
         })
         .collect()
@@ -744,4 +756,493 @@ def "Model" (
         "the malformed sample derives nothing when it is the one selected"
     );
     assert_eq!(expression_error_sites(&stage).len(), 1);
+}
+
+/// Writes a clip layer under `dir` holding `v` time samples, one per entry.
+fn write_clip(dir: &tempfile::TempDir, name: &str, samples: &[(f64, f64)]) {
+    let entries: String = samples
+        .iter()
+        .map(|(t, v)| format!("            {t}: {v:?},\n"))
+        .collect();
+    fs::write(
+        dir.path().join(name),
+        format!("#usda 1.0\n\ndef \"P\"\n{{\n    double v.timeSamples = {{\n{entries}    }}\n}}\n"),
+    )
+    .expect("write clip");
+}
+
+/// The composed `double` at `path` and `time`.
+fn value_at(stage: &Stage, path: &str, time: f64) -> Option<f64> {
+    stage
+        .attribute(path)
+        .expect("attribute")
+        .get_at::<f64>(usd::TimeCode::from(time))
+        .expect("read")
+}
+
+/// A stage whose `clips` metadata is `fields`, with `SHOT` in scope.
+fn clip_scene(dir: &tempfile::TempDir, shot: &str, fields: &str) -> Stage {
+    open_scene(
+        dir,
+        &format!(
+            concat!(
+                "#usda 1.0\n",
+                "(\n",
+                "    expressionVariables = {{ string SHOT = \"{shot}\" }}\n",
+                ")\n",
+                "def \"P\" (\n",
+                "    clips = {{\n",
+                "        dictionary default = {{\n",
+                "{fields}",
+                "            string primPath = \"/P\"\n",
+                "        }}\n",
+                "    }}\n",
+                ")\n",
+                "{{\n",
+                "    double v\n",
+                "}}\n",
+            ),
+            shot = shot,
+            fields = fields,
+        ),
+    )
+}
+
+/// A `templateAssetPath` whose pattern comes from a variable expands to the
+/// sequence the evaluated pattern names, so the clips are found and sourced.
+/// The pattern must be evaluated before its `#` groups are read.
+#[test]
+fn clip_template_expression() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s010.1.usda", &[(1.0, 11.0)]);
+    write_clip(&dir, "s010.2.usda", &[(2.0, 22.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s010",
+        concat!(
+            "            asset templateAssetPath = @`\"./${SHOT}.#.usda\"`@\n",
+            "            double templateStartTime = 1\n",
+            "            double templateEndTime = 2\n",
+            "            double templateStride = 1\n",
+        ),
+    );
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(11.0));
+    assert_eq!(value_at(&stage, "/P.v", 2.0), Some(22.0));
+    assert!(stage.composition_errors().is_empty());
+}
+
+/// C++ authors `templateAssetPath` as a `string`, so the pattern arrives
+/// string-typed from any asset it wrote. An expression in it is evaluated just
+/// as the `asset`-typed spelling is.
+#[test]
+fn clip_string_template_expression() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s140.1.usda", &[(1.0, 140.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s140",
+        concat!(
+            "            string templateAssetPath = '`\"./${SHOT}.#.usda\"`'\n",
+            "            double templateStartTime = 1\n",
+            "            double templateEndTime = 1\n",
+            "            double templateStride = 1\n",
+        ),
+    );
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(140.0));
+    assert!(stage.composition_errors().is_empty());
+}
+
+/// An expression element of an explicit `assetPaths` is evaluated, so the clip
+/// it names is opened and sources the value.
+#[test]
+fn clip_asset_paths_expression() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s020.usda", &[(1.0, 33.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s020",
+        concat!(
+            "            asset[] assetPaths = [@`\"./${SHOT}.usda\"`@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(33.0));
+    assert!(stage.composition_errors().is_empty());
+}
+
+/// An expression `manifestAssetPath` is evaluated, so the manifest it names is
+/// the one that gates the set. The clip's `v` is declared only by that manifest,
+/// so a path left unevaluated gates the set out entirely.
+#[test]
+fn clip_manifest_expression() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s030.usda", &[(1.0, 44.0)]);
+    fs::write(
+        dir.path().join("s030_man.usda"),
+        "#usda 1.0\n\ndef \"P\"\n{\n    double v\n}\n",
+    )
+    .expect("write manifest");
+    let stage = clip_scene(
+        &dir,
+        "s030",
+        concat!(
+            "            asset[] assetPaths = [@./s030.usda@]\n",
+            "            asset manifestAssetPath = @`\"./${SHOT}_man.usda\"`@\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+
+    assert_eq!(
+        value_at(&stage, "/P.v", 1.0),
+        Some(44.0),
+        "the manifest the expression names is the one that gates the set"
+    );
+    assert!(stage.composition_errors().is_empty());
+}
+
+/// A `manifestAssetPath` authored as an array is not a scalar asset path, so
+/// the set ignores it and synthesizes a manifest instead. A malformed
+/// expression inside the field nobody reads must not drop the set.
+#[test]
+fn clip_array_manifest_ignored() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s150.usda", &[(1.0, 150.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s150",
+        concat!(
+            "            asset[] assetPaths = [@./s150.usda@]
+",
+            "            asset[] manifestAssetPath = [@`\"./m.usda\" +`@]
+",
+            "            double2[] active = [(1, 0)]
+",
+        ),
+    );
+
+    assert_eq!(
+        value_at(&stage, "/P.v", 1.0),
+        Some(150.0),
+        "the set resolves through a synthesized manifest"
+    );
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the unread field is not evaluated: {:?}",
+        stage.composition_errors()
+    );
+}
+
+/// The same rule for a `templateAssetPath` authored as an array: the set has no
+/// usable asset field either way, but the one it never reads is not evaluated,
+/// so no diagnostic blames the author for it.
+#[test]
+fn clip_array_template_ignored() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stage = clip_scene(
+        &dir,
+        "s160",
+        concat!(
+            "            asset[] templateAssetPath = [@`\"./${SHOT}.#.usda\" +`@]
+",
+            "            double templateStartTime = 1
+",
+            "            double templateEndTime = 1
+",
+            "            double templateStride = 1
+",
+        ),
+    );
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), None, "the set has no usable asset field");
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the unread field is not evaluated: {:?}",
+        stage.composition_errors()
+    );
+}
+
+/// A malformed expression in a clip asset path is reported once, at the site
+/// that authored it, and drops its set rather than reaching the resolver as a
+/// literal — which would report a second, misleading unreadable-clip error.
+#[test]
+fn clip_metadata_expression_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stage = clip_scene(
+        &dir,
+        "s040",
+        concat!(
+            "            asset[] assetPaths = [@`\"./${SHOT}.usda\" +`@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), None, "the set contributes nothing");
+    assert_eq!(expression_error_sites(&stage), vec![sdf::path("/P").expect("path")]);
+    assert!(
+        !reports_unreadable_clip(&stage),
+        "the failed expression is reported once, not twice: {:?}",
+        stage.composition_errors()
+    );
+}
+
+/// Editing the variable moves the set to the clips the new value names. Nothing
+/// records a per-variable dependency for a value-time read, so the revision bump
+/// every edit funnels through is what re-resolves the clips.
+#[test]
+fn clip_expression_reevaluated() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s050.usda", &[(1.0, 55.0)]);
+    write_clip(&dir, "s060.usda", &[(1.0, 66.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s050",
+        concat!(
+            "            asset[] assetPaths = [@`\"./${SHOT}.usda\"`@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(55.0));
+
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let resynced = resynced.clone();
+        stage.add_sink(move |_stage: &Stage, change: &usd::CommittedChange<'_>| {
+            resynced
+                .borrow_mut()
+                .extend(change.asset_paths_resynced.iter().cloned());
+        })
+    };
+
+    let root = stage.root_layer().identifier().to_string();
+    stage
+        .layer_mut(&root)
+        .expect("the root layer is live")
+        .edit(|e| {
+            e.set_expression_variables(HashMap::from([(
+                "SHOT".to_string(),
+                sdf::Value::String("s060".to_string()),
+            )]))
+        })
+        .expect("author variables");
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(66.0));
+    assert_eq!(
+        *resynced.borrow(),
+        vec![sdf::Path::abs_root()],
+        "the asset-path channel names what may re-resolve — the whole stage here, \
+         since the variables that moved are the root stack's"
+    );
+}
+
+/// Explicit `assetPaths` win over a `templateAssetPath`, so a malformed
+/// expression in the template nobody reads must neither drop the set nor be
+/// reported: only the fields a set actually uses are evaluated.
+#[test]
+fn clip_ignored_template_skipped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s070.usda", &[(1.0, 88.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s070",
+        concat!(
+            "            asset[] assetPaths = [@`\"./${SHOT}.usda\"`@]\n",
+            "            asset templateAssetPath = @`\"./${SHOT}.#.usda\" +`@\n",
+            "            double templateStartTime = 1\n",
+            "            double templateEndTime = 2\n",
+            "            double templateStride = 1\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+
+    assert_eq!(
+        value_at(&stage, "/P.v", 1.0),
+        Some(88.0),
+        "the explicit paths still win"
+    );
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the ignored template is never evaluated: {:?}",
+        stage.composition_errors()
+    );
+}
+
+/// Whether a set is explicit is the strict `asset[]` read, the same one
+/// `parse_set` uses to choose between explicit paths and a template. A
+/// wrongly-typed `assetPaths` is unauthored to both, so the template is read —
+/// and therefore must be evaluated.
+#[test]
+fn clip_mistyped_assets_template() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s100.1.usda", &[(1.0, 99.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s100",
+        concat!(
+            "            string[] assetPaths = [\"./ignored.usda\"]
+",
+            "            asset templateAssetPath = @`\"./${SHOT}.#.usda\"`@
+",
+            "            double templateStartTime = 1
+",
+            "            double templateEndTime = 1
+",
+            "            double templateStride = 1
+",
+        ),
+    );
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(99.0));
+    assert!(stage.composition_errors().is_empty());
+}
+
+/// A set whose `assetPaths` is wrongly typed reads its template instead, so the
+/// mistyped field is never evaluated — an expression that would not evaluate
+/// there must not drop a set that never reads it.
+#[test]
+fn clip_mistyped_assets_unevaluated() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s110.1.usda", &[(1.0, 111.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s110",
+        concat!(
+            "            asset assetPaths = @`\"./x.usda\" +`@\n",
+            "            asset templateAssetPath = @`\"./${SHOT}.#.usda\"`@\n",
+            "            double templateStartTime = 1\n",
+            "            double templateEndTime = 1\n",
+            "            double templateStride = 1\n",
+        ),
+    );
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(111.0));
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the unread field is not evaluated: {:?}",
+        stage.composition_errors()
+    );
+}
+
+/// A manifest synthesized from a set's clips is memoized on the set, whose
+/// identity is its authored paths — so moving the expression to different clips
+/// must not reuse a manifest generated from the old ones.
+#[test]
+fn clip_expression_remanifests() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("s120.usda"),
+        "#usda 1.0\n\ndef \"P\"\n{\n    double a.timeSamples = {\n        1: 7.0,\n    }\n}\n",
+    )
+    .expect("write clip");
+    fs::write(
+        dir.path().join("s130.usda"),
+        "#usda 1.0\n\ndef \"P\"\n{\n    double b.timeSamples = {\n        1: 8.0,\n    }\n}\n",
+    )
+    .expect("write clip");
+    let stage = open_scene(
+        &dir,
+        concat!(
+            "#usda 1.0\n",
+            "(\n",
+            "    expressionVariables = { string SHOT = \"s120\" }\n",
+            ")\n",
+            "def \"P\" (\n",
+            "    clips = {\n",
+            "        dictionary default = {\n",
+            "            asset[] assetPaths = [@`\"./${SHOT}.usda\"`@]\n",
+            "            double2[] active = [(1, 0)]\n",
+            "            string primPath = \"/P\"\n",
+            "        }\n",
+            "    }\n",
+            ")\n",
+            "{\n",
+            "    double a\n",
+            "    double b\n",
+            "}\n",
+        ),
+    );
+    assert_eq!(value_at(&stage, "/P.a", 1.0), Some(7.0));
+
+    let root = stage.root_layer().identifier().to_string();
+    stage
+        .layer_mut(&root)
+        .expect("the root layer is live")
+        .edit(|e| {
+            e.set_expression_variables(HashMap::from([(
+                "SHOT".to_string(),
+                sdf::Value::String("s130".to_string()),
+            )]))
+        })
+        .expect("author variables");
+
+    assert_eq!(
+        value_at(&stage, "/P.b", 1.0),
+        Some(8.0),
+        "the manifest is regenerated from the clips the expression now names"
+    );
+}
+
+/// The same malformed expression in two sets drops both. The diagnostic is
+/// recorded once, so a set cannot be judged by whether it grew the error list.
+#[test]
+fn clip_duplicate_bad_expression() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stage = open_scene(
+        &dir,
+        concat!(
+            "#usda 1.0\n",
+            "(\n",
+            "    expressionVariables = { string SHOT = \"s080\" }\n",
+            ")\n",
+            "def \"P\" (\n",
+            "    clips = {\n",
+            "        dictionary a = {\n",
+            "            asset[] assetPaths = [@`\"./${SHOT}.usda\" +`@]\n",
+            "            double2[] active = [(1, 0)]\n",
+            "            string primPath = \"/P\"\n",
+            "        }\n",
+            "        dictionary b = {\n",
+            "            asset[] assetPaths = [@`\"./${SHOT}.usda\" +`@]\n",
+            "            double2[] active = [(1, 0)]\n",
+            "            string primPath = \"/P\"\n",
+            "        }\n",
+            "    }\n",
+            ")\n",
+            "{\n",
+            "    double v\n",
+            "}\n",
+        ),
+    );
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), None, "neither set contributes");
+    assert!(
+        !reports_unreadable_clip(&stage),
+        "the second set's expression must not reach the resolver: {:?}",
+        stage.composition_errors()
+    );
+}
+
+/// An asset path evaluating to the expression-language `None` names no clip.
+/// It is accepted silently — but the authored expression must never be handed
+/// to resolution as though it were a file name.
+#[test]
+fn clip_expression_none_silent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stage = clip_scene(
+        &dir,
+        "s090",
+        concat!(
+            "            asset[] assetPaths = [@`None`@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+
+    assert_eq!(value_at(&stage, "/P.v", 1.0), None, "the set names no clip");
+    assert!(
+        stage.composition_errors().is_empty(),
+        "`None` is accepted silently, not attempted as a path: {:?}",
+        stage.composition_errors()
+    );
 }

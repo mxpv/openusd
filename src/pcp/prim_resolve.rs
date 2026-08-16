@@ -14,12 +14,12 @@ use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Specifier, Value};
 
-use super::asset_resolve::AssetSite;
+use super::asset_resolve::{self, AssetSite};
 use super::clip;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
-use super::{LayerGraph, LayerId, LayerStackId};
+use super::{Error, LayerGraph, LayerId, LayerStackId};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
 ///
@@ -832,7 +832,20 @@ impl PrimIndex {
     /// authored path-bearing fields. The top-level `clips` dictionary composes
     /// recursively, but relative clip assets must still be anchored to the
     /// layer that supplied `assetPaths`/`manifestAssetPath`.
-    pub(crate) fn resolve_clip_sets(&self, stack: &LayerGraph) -> Result<Vec<clip::ResolvedClipSet>> {
+    ///
+    /// The three asset-valued fields have any `` `${VAR}` `` evaluated against
+    /// the variables in scope at the opinion that supplied them, and a set whose
+    /// expression fails is dropped with [`Error::InvalidExpression`] in `errors`.
+    /// C++ diverges here: `clipSetDefinition.cpp` reads all three through plain
+    /// dictionary lookups, and `UsdStage::_MakeResolvedAssetPaths` never descends
+    /// into a `VtDictionary`, so an expression is inert there. The Sdf
+    /// variable-expression documentation promises support in "asset-valued
+    /// attributes and metadata", which these are, so the promise is kept here.
+    pub(crate) fn resolve_clip_sets(
+        &self,
+        stack: &LayerGraph,
+        errors: &mut Vec<Error>,
+    ) -> Result<Vec<clip::ResolvedClipSet>> {
         let mut sets: HashMap<String, HashMap<String, Value>> = HashMap::new();
         let mut blocked_sets: HashSet<String> = HashSet::new();
         // The layer that authored a set's clip asset paths, paired with the stack
@@ -845,6 +858,11 @@ impl PrimIndex {
         // as they compose) versus the offset of a template set's authoring
         // node (whose schedule is derived later and retimed afterwards).
         let mut explicit_sets: HashSet<String> = HashSet::new();
+        // Where each set's expression-valued asset fields were authored, for the
+        // evaluation pass below. Recorded per field: the three can come from
+        // different opinions, each with its own variables in scope and its own
+        // site to name in a diagnostic. Empty unless a `${VAR}` is authored.
+        let mut asset_sites: HashMap<String, ClipAssetSites> = HashMap::new();
         let mut template_offsets: HashMap<String, LayerOffset> = HashMap::new();
         // Offset of the node that supplied `active`, kept so a manifest's own
         // authored times can be mapped into the retimed schedule's frame.
@@ -856,9 +874,9 @@ impl PrimIndex {
             let Opinion {
                 node,
                 layer,
+                query_path,
                 value,
                 offset,
-                ..
             } = opinion?;
             let node_stack = node.layer_stack_id();
             match value.into_owned() {
@@ -881,8 +899,20 @@ impl PrimIndex {
                             }
                             let value = if field == clip::keys::ACTIVE || field == clip::keys::TIMES {
                                 retime_clip_stage_times(value, offset)
+                            } else if field == clip::keys::TEMPLATE_ASSET_PATH
+                                || field == clip::keys::MANIFEST_ASSET_PATH
+                            {
+                                clip::as_asset_field(value)
                             } else {
                                 value
+                            };
+                            // The site an expression in this field evaluates
+                            // against, kept for the pass that runs once the set
+                            // is whole. Built here because only the opinion walk
+                            // knows which layer won the field.
+                            let site = || {
+                                asset_resolve::holds_expression(&value)
+                                    .then(|| AssetSite::in_graph(stack, node_stack, layer, &query_path))
                             };
                             // Relative clip asset paths anchor on the layer that
                             // authored them. Explicit `assetPaths` win over a
@@ -897,13 +927,22 @@ impl PrimIndex {
                             if field == clip::keys::ASSET_PATHS {
                                 asset_sources.insert(set_name.clone(), (layer, node_stack));
                                 explicit_sets.insert(set_name.clone());
+                                if let Some(site) = site() {
+                                    asset_sites.entry(set_name.clone()).or_default().asset_paths = Some(site);
+                                }
                             } else if field == clip::keys::TEMPLATE_ASSET_PATH {
                                 if !explicit_sets.contains(&set_name) {
                                     asset_sources.insert(set_name.clone(), (layer, node_stack));
                                 }
                                 template_offsets.insert(set_name.clone(), offset);
+                                if let Some(site) = site() {
+                                    asset_sites.entry(set_name.clone()).or_default().template = Some(site);
+                                }
                             } else if field == clip::keys::MANIFEST_ASSET_PATH {
                                 manifest_layers.insert(set_name.clone(), layer);
+                                if let Some(site) = site() {
+                                    asset_sites.entry(set_name.clone()).or_default().manifest = Some(site);
+                                }
                             }
                             composed.insert(field, value);
                         }
@@ -913,12 +952,14 @@ impl PrimIndex {
             }
         }
 
+        let order = self.clip_sets_order(stack)?;
+        evaluate_clip_assets(stack, &mut sets, order.as_deref(), &asset_sites, errors);
+
         let clips = Value::Dictionary(
             sets.into_iter()
                 .map(|(name, fields)| (name, Value::Dictionary(fields)))
                 .collect(),
         );
-        let order = self.clip_sets_order(stack)?;
 
         Ok(clip::ClipSet::parse(&clips, order.as_deref())
             .into_iter()
@@ -1038,6 +1079,86 @@ impl PrimIndex {
         }
 
         Ok(Some(Value::Specifier(strongest)))
+    }
+}
+
+/// Where a clip set's expression-valued asset fields were authored, one site
+/// per field: the three compose independently and can come from different
+/// opinions. `None` where the field is absent or holds no expression.
+#[derive(Default)]
+struct ClipAssetSites {
+    asset_paths: Option<AssetSite>,
+    template: Option<AssetSite>,
+    manifest: Option<AssetSite>,
+}
+
+/// Evaluates the variable expressions in the asset-valued fields of every clip
+/// set that participates, in place, dropping a set whose paths do not come out.
+///
+/// Only the fields a set actually reads are evaluated: a set the composed
+/// `clipSets` ordering excludes contributes nothing, and a `templateAssetPath`
+/// goes unread when [`clip::has_explicit_assets`] answers. Reporting either
+/// would blame an author for a field the set ignores. Precedence is only settled
+/// once the set is whole, which is why this runs as its own pass.
+///
+/// A set is dropped when an asset path it reads fails to evaluate, as a
+/// reference arc with a bad asset path is dropped rather than attempted, and
+/// when one evaluates away to the expression-language `None`, which names no
+/// clip. A manifest that evaluates to `None` is merely unauthored, so its field
+/// is removed and the set falls back to a synthesized manifest.
+fn evaluate_clip_assets(
+    graph: &LayerGraph,
+    sets: &mut HashMap<String, HashMap<String, Value>>,
+    order: Option<&[String]>,
+    asset_sites: &HashMap<String, ClipAssetSites>,
+    errors: &mut Vec<Error>,
+) {
+    if asset_sites.is_empty() {
+        return;
+    }
+    let effective: Vec<String> = clip::effective_set_names(sets, order).into_iter().cloned().collect();
+    for name in effective {
+        let Some(sites) = asset_sites.get(&name) else { continue };
+        let Some(fields) = sets.get_mut(&name) else { continue };
+        // Whichever of the two asset-path forms the set does not read goes
+        // unevaluated: a wrongly-typed `assetPaths` is as unread as a template
+        // an explicit set overrides.
+        // Which fields this set reads, asked of the readers themselves: the two
+        // asset-path forms are alternatives, and each scalar one must be a shape
+        // `clip::asset_input` can consume — an array there is ignored, the way a
+        // wrongly-typed `assetPaths` is.
+        let explicit = clip::has_explicit_assets(fields);
+        let reads_template = !explicit && clip::asset_input(fields, clip::keys::TEMPLATE_ASSET_PATH).is_some();
+        let reads_manifest = clip::asset_input(fields, clip::keys::MANIFEST_ASSET_PATH).is_some();
+        let fields_and_sites = [
+            (clip::keys::ASSET_PATHS, explicit, sites.asset_paths.as_ref()),
+            (clip::keys::TEMPLATE_ASSET_PATH, reads_template, sites.template.as_ref()),
+            (clip::keys::MANIFEST_ASSET_PATH, reads_manifest, sites.manifest.as_ref()),
+        ];
+        let mut keep = true;
+        for (key, read, site) in fields_and_sites {
+            let (true, Some(site)) = (read, site) else { continue };
+            let Some((key, value)) = fields.remove_entry(key) else {
+                continue;
+            };
+            let (value, outcome) = asset_resolve::evaluate_values(graph, value, Some(site), errors);
+            match outcome {
+                asset_resolve::AssetOutcome::Evaluated => {
+                    fields.insert(key, value);
+                }
+                // An unauthored manifest is synthesized from the clips instead.
+                asset_resolve::AssetOutcome::None if key == clip::keys::MANIFEST_ASSET_PATH => {}
+                // The set is going; evaluating its remaining fields would only
+                // report a second cause for one failure.
+                _ => {
+                    keep = false;
+                    break;
+                }
+            }
+        }
+        if !keep {
+            sets.remove(&name);
+        }
     }
 }
 

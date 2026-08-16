@@ -132,6 +132,10 @@ impl ClipsAPI {
 
     /// Manifest layer asset path for `clip_set` (`manifestAssetPath`), an
     /// `asset` (C++ `SdfAssetPath`), if authored.
+    ///
+    /// Reported as authored, so a `` `${VAR}` `` comes back unevaluated — as it
+    /// does from C++. Value resolution evaluates it and sources the clip the
+    /// expression names (see the `pcp` module docs), so the two can differ.
     pub fn clip_manifest_asset_path(&self, clip_set: &str) -> anyhow::Result<Option<AssetPath>> {
         Ok(self
             .field(clip_set, keys::MANIFEST_ASSET_PATH)?
@@ -216,17 +220,19 @@ impl ClipsAPI {
         self.set_field(clip_set, keys::INTERPOLATE_MISSING, Value::Bool(interpolate))
     }
 
-    /// Author the template asset-path pattern for `clip_set` (`templateAssetPath`).
+    /// Author the template asset-path pattern for `clip_set`
+    /// (`templateAssetPath`).
+    ///
+    /// Authored as a `string`, matching C++
+    /// `UsdClipsAPI::SetClipTemplateAssetPath(const std::string&)` — unlike
+    /// `manifestAssetPath` and `assetPaths`, which are `asset`-typed there.
+    /// Resolution reads either spelling.
     pub fn set_clip_template_asset_path(
         &self,
         clip_set: &str,
         asset_path: impl Into<String>,
     ) -> Result<(), StageAuthoringError> {
-        self.set_field(
-            clip_set,
-            keys::TEMPLATE_ASSET_PATH,
-            Value::AssetPath(AssetPath::new(asset_path)),
-        )
+        self.set_field(clip_set, keys::TEMPLATE_ASSET_PATH, Value::String(asset_path.into()))
     }
 
     /// Author the template stride for `clip_set` (`templateStride`).
@@ -475,6 +481,17 @@ mod tests {
         clips.set_clip_template_start_time("tmpl", 0.0)?;
         clips.set_clip_template_end_time("tmpl", 10.0)?;
         clips.set_clip_template_active_offset("tmpl", 0.5)?;
+
+        // The template pattern is a `string`, the manifest an `asset`, matching
+        // the C++ setters' parameter types.
+        assert!(matches!(
+            clips.field("tmpl", keys::TEMPLATE_ASSET_PATH)?,
+            Some(Value::String(_))
+        ));
+        assert!(matches!(
+            clips.field("default", keys::MANIFEST_ASSET_PATH)?,
+            Some(Value::AssetPath(_))
+        ));
 
         assert_eq!(clips.clip_set_names()?, vec!["default".to_string(), "tmpl".to_string()]);
         assert_eq!(

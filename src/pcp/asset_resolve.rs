@@ -81,6 +81,24 @@ impl AssetSite {
     }
 }
 
+/// How the expressions in an `asset` / `asset[]` value came out.
+///
+/// Ordered worst first, so the outcome of a whole value is the minimum over its
+/// elements: one bad element makes the value untrustworthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum AssetOutcome {
+    /// An element's expression failed and the diagnostic was recorded.
+    Failed,
+    /// An element named nothing: it evaluated to the expression-language
+    /// `None`, or there was no site to supply variables. No diagnostic either
+    /// way — an author asking for nothing gets nothing, and a missing site is
+    /// the caller's own omission rather than the author's mistake.
+    None,
+    /// Every element yielded a path to resolve, whether or not it was authored
+    /// as an expression.
+    Evaluated,
+}
+
 /// Fills the evaluated and resolved paths on an `asset` / `asset[]` value
 /// authored at `site`, recording any expression failure in `errors`. A value
 /// holding no asset paths passes through untouched.
@@ -97,66 +115,136 @@ pub(super) fn resolve_values(
     site: Option<&AssetSite>,
     errors: &mut Vec<Error>,
 ) -> Value {
-    match value {
-        Value::AssetPath(asset) => Value::AssetPath(resolve_path(graph, asset, site, errors)),
+    map_paths(value, |asset| {
+        (resolve_path(graph, asset, site, errors), AssetOutcome::Evaluated)
+    })
+    .0
+}
+
+/// Fills the evaluated path on an `asset` / `asset[]` value authored at `site`,
+/// recording any expression failure in `errors`, without resolving it — and
+/// says how it came out.
+///
+/// For a caller that anchors the result itself, or one whose value is not a file
+/// name at all: a `templateAssetPath` is a `#`-pattern expanded into a sequence
+/// of clip paths, so resolving the pattern would name nothing.
+pub(super) fn evaluate_values(
+    graph: &LayerGraph,
+    value: Value,
+    site: Option<&AssetSite>,
+    errors: &mut Vec<Error>,
+) -> (Value, AssetOutcome) {
+    map_paths(value, |asset| evaluate_path(graph, asset, site, errors))
+}
+
+/// Rebuilds an `asset` / `asset[]` value through `f`, reporting the worst
+/// outcome over its elements. A value holding no asset paths passes through
+/// untouched, as [`Value::is_asset_valued`](Value::is_asset_valued) defines the
+/// set.
+fn map_paths(
+    value: Value,
+    mut f: impl FnMut(sdf::AssetPath) -> (sdf::AssetPath, AssetOutcome),
+) -> (Value, AssetOutcome) {
+    let mut outcome = AssetOutcome::Evaluated;
+    let value = match value {
+        Value::AssetPath(asset) => {
+            let (asset, element) = f(asset);
+            outcome = element;
+            Value::AssetPath(asset)
+        }
         Value::AssetPathVec(assets) => Value::AssetPathVec(
             assets
                 .into_iter()
-                .map(|asset| resolve_path(graph, asset, site, errors))
+                .map(|asset| {
+                    let (asset, element) = f(asset);
+                    outcome = outcome.min(element);
+                    asset
+                })
                 .collect(),
         ),
         other => other,
+    };
+    (value, outcome)
+}
+
+/// Whether `value` holds an asset path that needs evaluating, so a caller can
+/// skip building an [`AssetSite`] — which copies a layer location, an
+/// identifier and a path — for the ordinary literal case.
+pub(super) fn holds_expression(value: &Value) -> bool {
+    match value {
+        Value::AssetPath(asset) => sdf::expr::is_expression(asset.as_str()),
+        Value::AssetPathVec(assets) => assets.iter().any(|a| sdf::expr::is_expression(a.as_str())),
+        _ => false,
     }
 }
 
-/// Resolves `asset` against `anchor` (its source layer's resolved location) and
-/// returns it with the evaluated and resolved paths recorded.
+/// Evaluates a variable expression in `asset` and returns it with the evaluated
+/// path recorded, leaving the resolved path for a caller that anchors.
 ///
-/// A variable expression is evaluated against the composed variables in scope at
-/// `site` to the path used as input to resolution (C++
-/// `SdfAssetPath::GetAssetPath`). A malformed or non-string expression records
-/// [`Error::InvalidExpression`] and leaves both derived paths unset, as a
-/// reference or payload arc's asset path does; one evaluating to the
-/// expression-language `None` is left unset silently, and so is any expression
-/// with no `site` to supply variables. Resolution owns the derived paths: the
-/// result is rebuilt from the authored path so any prior evaluated/resolved path
-/// is discarded.
+/// The expression is evaluated against the composed variables in scope at `site`
+/// to the path used as input to resolution (C++ `SdfAssetPath::GetAssetPath`). A
+/// malformed or non-string expression records [`Error::InvalidExpression`] and
+/// leaves the evaluated path unset, as a reference or payload arc's asset path
+/// does; one evaluating to the expression-language `None` is left unset
+/// silently, and so is any expression with no `site` to supply variables.
+/// Evaluation owns the derived paths: the result is rebuilt from the authored
+/// path so any prior evaluated/resolved path is discarded.
+fn evaluate_path(
+    graph: &LayerGraph,
+    asset: sdf::AssetPath,
+    site: Option<&AssetSite>,
+    errors: &mut Vec<Error>,
+) -> (sdf::AssetPath, AssetOutcome) {
+    let mut asset = sdf::AssetPath::new(asset.into_string());
+    // The per-element `is_expression` is load-bearing for `asset[]`: a plain
+    // element in a mixed array must still skip evaluation.
+    if asset.is_empty() || !sdf::expr::is_expression(asset.as_str()) {
+        return (asset, AssetOutcome::Evaluated);
+    }
+    // Without a site there are no variables to evaluate against, which is not
+    // the author's fault and records nothing.
+    let Some(site) = site else {
+        return (asset, AssetOutcome::None);
+    };
+    // No variable dependency is recorded: the read carries no prim index to
+    // register one against, so no per-variable invalidation could name it.
+    // `Changes::apply` covers these reads wholesale through its asset-path
+    // channel instead.
+    let outcome = match compose_site::evaluate_expression(
+        asset.as_str(),
+        graph.stack_expression_variables(site.stack),
+        ExpressionContext::AssetValue,
+        &site.source_layer,
+        &site.query_path,
+        Some(errors),
+        None,
+    ) {
+        EvaluatedExpression::Value(evaluated) => {
+            asset.set_evaluated_path(evaluated);
+            AssetOutcome::Evaluated
+        }
+        EvaluatedExpression::None => AssetOutcome::None,
+        EvaluatedExpression::Failed => AssetOutcome::Failed,
+    };
+    (asset, outcome)
+}
+
+/// Evaluates `asset` as [`evaluate_path`] does, then anchors the result against
+/// `site`'s source layer and records the location it resolves to.
 fn resolve_path(
     graph: &LayerGraph,
     asset: sdf::AssetPath,
     site: Option<&AssetSite>,
     errors: &mut Vec<Error>,
 ) -> sdf::AssetPath {
-    let mut asset = sdf::AssetPath::new(asset.into_string());
-    if asset.is_empty() {
+    let (mut asset, outcome) = evaluate_path(graph, asset, site, errors);
+    // An expression that yielded no path has none to anchor: resolving the
+    // authored spelling would treat the expression itself as a file name.
+    if asset.is_empty() || outcome != AssetOutcome::Evaluated {
         return asset;
     }
     let anchor = site.and_then(|site| site.anchor.as_ref());
-    // The per-element `is_expression` is load-bearing for `asset[]`: a plain
-    // element in a mixed array must still skip evaluation.
-    let identifier = if sdf::expr::is_expression(asset.as_str()) {
-        let Some(site) = site else { return asset };
-        // No variable dependency is recorded: the read carries no prim index
-        // to register one against, so no per-variable invalidation could name
-        // it. `Changes::apply` covers these reads wholesale through its
-        // asset-path channel instead.
-        let EvaluatedExpression::Value(evaluated) = compose_site::evaluate_expression(
-            asset.as_str(),
-            graph.stack_expression_variables(site.stack),
-            ExpressionContext::AssetValue,
-            &site.source_layer,
-            &site.query_path,
-            Some(errors),
-            None,
-        ) else {
-            return asset;
-        };
-        let identifier = graph.layer_registry().create_identifier(&evaluated, anchor);
-        asset.set_evaluated_path(evaluated);
-        identifier
-    } else {
-        graph.layer_registry().create_identifier(asset.as_str(), anchor)
-    };
+    let identifier = graph.layer_registry().create_identifier(asset.asset_path(), anchor);
     if let Some(resolved) = graph.layer_registry().resolve(&identifier) {
         asset.set_resolved_path(resolved.to_string_lossy().into_owned());
     }

@@ -13,6 +13,15 @@
 //! 12.3.4.1.1.2). A set that authors no `manifestAssetPath` gets one
 //! synthesized from its clips by [`clip_manifest`](super::clip_manifest), so
 //! resolution has a single rule for every set.
+//!
+//! A `` `${VAR}` `` in `assetPaths`, `templateAssetPath` or `manifestAssetPath`
+//! is evaluated before a set is parsed, so those fields arrive carrying an
+//! evaluated path ([`sdf::AssetPath::asset_path`]). C++ does not do this —
+//! `clipSetDefinition.cpp` reads the three raw, and
+//! `UsdStage::_MakeResolvedAssetPaths` never descends into a `VtDictionary` —
+//! but the Sdf variable-expression documentation promises support in
+//! asset-valued metadata, which these are. `PrimIndex::resolve_clip_sets` runs
+//! the evaluation and carries the same note.
 
 use std::collections::HashMap;
 use std::mem;
@@ -104,6 +113,13 @@ pub(crate) struct ResolvedClipSet {
 }
 
 impl ClipSet {
+    /// The path each clip is opened through: the evaluated form where a
+    /// `` `${VAR}` `` was substituted, else the authored one. Distinct from the
+    /// set's `PartialEq`, which is authored identity.
+    pub(super) fn resolution_paths(&self) -> impl Iterator<Item = &str> {
+        self.asset_paths.iter().map(AssetPath::asset_path)
+    }
+
     /// Parses every explicit clip set from a composed `clips` dictionary value.
     ///
     /// `clip_sets_order` is the resolved `clipSets` field, when authored: it
@@ -115,15 +131,7 @@ impl ClipSet {
             return Vec::new();
         };
 
-        let ordered_names: Vec<&String> = if let Some(order) = clip_sets_order {
-            order.iter().filter(|name| sets.contains_key(*name)).collect()
-        } else {
-            let mut names: Vec<&String> = sets.keys().collect();
-            names.sort();
-            names
-        };
-
-        ordered_names
+        effective_set_names(sets, clip_sets_order)
             .into_iter()
             .filter_map(|name| match sets.get(name) {
                 Some(Value::Dictionary(set)) => Self::parse_set(name, set),
@@ -147,15 +155,12 @@ impl ClipSet {
             .get(keys::PRIM_PATH)
             .and_then(Value::as_str)
             .and_then(|s| Path::new(s).ok());
-        let manifest_asset = set
-            .get(keys::MANIFEST_ASSET_PATH)
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let manifest_asset = asset_input(set, keys::MANIFEST_ASSET_PATH).map(str::to_owned);
 
-        // Explicit form wins; otherwise expand a template set. `assetPaths` is
-        // a strict `asset[]`, and `active` / `times` a strict `double2[]`, so
-        // each extracts through `get` (exact `TryFrom`) rather than `cast`.
-        let (asset_paths, active, times) = match get::<Vec<AssetPath>>(set, keys::ASSET_PATHS) {
+        // Explicit form wins; otherwise expand a template set — see
+        // [`explicit_asset_paths`]. `active` / `times` are a strict `double2[]`,
+        // so each extracts through `get` (exact `TryFrom`) rather than `cast`.
+        let (asset_paths, active, times) = match explicit_asset_paths(set) {
             Some(asset_paths) => {
                 // A malformed activation makes the whole schedule untrustworthy,
                 // so the set is rejected rather than partly resolved (C++
@@ -406,10 +411,7 @@ type TemplateExpansion = (Vec<AssetPath>, Vec<(f64, usize)>, Vec<gf::Vec2d>);
 /// fractional `stride` accumulates without binary-float drift, matching
 /// C++ `Usd_ClipSetDefinition` template derivation.
 fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
-    let template = set
-        .get(keys::TEMPLATE_ASSET_PATH)
-        .and_then(Value::as_str)
-        .map(str::to_owned)?;
+    let template = asset_input(set, keys::TEMPLATE_ASSET_PATH).map(str::to_owned)?;
     // Template timing is `double`, read strictly like C++ `IsHolding<double>`.
     let start = get::<f64>(set, keys::TEMPLATE_START_TIME)?;
     let end = get::<f64>(set, keys::TEMPLATE_END_TIME)?;
@@ -660,7 +662,7 @@ impl ClipCache {
                 || !self.manifest_blocks(resolved, manifest.as_deref(), &clip_path, activation);
             if contributes
                 && let Some((clip_id, value)) =
-                    self.clip_sample_at(graph, resolved, asset.as_str(), &clip_path, clip_time, interp)?
+                    self.clip_sample_at(graph, resolved, asset.asset_path(), &clip_path, clip_time, interp)?
             {
                 return Ok(Some(
                     self.resolve_asset_in(graph, &clip_id, resolved, &clip_path, value),
@@ -749,7 +751,7 @@ impl ClipCache {
             let Some(asset) = resolved.set.asset_paths.get(index) else {
                 continue;
             };
-            let reason = match self.ensure_clip_layer(graph, asset.as_str(), resolved.asset_layer) {
+            let reason = match self.ensure_clip_layer(graph, asset.asset_path(), resolved.asset_layer) {
                 Ok(Some(id)) => {
                     scheduled.push((id, write_blocks.then_some(stage_time)));
                     continue;
@@ -758,7 +760,7 @@ impl ClipCache {
                 Err(error) => error.to_string(),
             };
             unread.push(Error::UnreadableClip {
-                asset_path: asset.as_str().to_owned(),
+                asset_path: asset.asset_path().to_owned(),
                 clip_set: resolved.set.name.clone(),
                 prim_path: prim.clone(),
                 reason,
@@ -800,9 +802,17 @@ impl ClipCache {
             prim: prim.clone(),
             clip_set: resolved.set.name.clone(),
         };
+        // `AssetPath` identity is the authored path alone, so two sets whose
+        // expressions evaluate to different clips compare equal; the paths the
+        // clips are actually opened through are compared separately.
         if let Some(entry) = self.manifests.get(&key)
             && entry.complete
             && entry.generated_from == *resolved
+            && entry
+                .generated_from
+                .set
+                .resolution_paths()
+                .eq(resolved.set.resolution_paths())
         {
             return Ok(Some(entry.layer.clone()));
         }
@@ -909,6 +919,11 @@ impl ClipCache {
     }
 
     /// A clip or manifest layer already held under `id`.
+    ///
+    /// TODO: `clip_layers` is only evicted when a synthesized manifest is
+    /// superseded, so a session that steps an expression variable through many
+    /// values retains one layer per value visited. Bounding it needs the cache
+    /// to drop layers no live set names.
     fn layer(&self, id: &str) -> Option<&sdf::Layer> {
         self.clip_layers.get(id)
     }
@@ -943,7 +958,7 @@ impl ClipCache {
         }
         let mut per_clip: Vec<Vec<f64>> = Vec::with_capacity(set.asset_paths.len());
         for asset in &set.asset_paths {
-            per_clip.push(self.clip_in_clip_times(graph, asset.as_str(), resolved.asset_layer, clip_path)?);
+            per_clip.push(self.clip_in_clip_times(graph, asset.asset_path(), resolved.asset_layer, clip_path)?);
         }
         Ok(Some(per_clip))
     }
@@ -1105,7 +1120,7 @@ impl ClipCache {
             if let Some(asset) = set.asset_paths.get(idx) {
                 let clip_time = set.map_stage_to_clip(stage);
                 if let Some(sample) =
-                    self.clip_sample_at(graph, resolved, asset.as_str(), clip_path, clip_time, interp)?
+                    self.clip_sample_at(graph, resolved, asset.asset_path(), clip_path, clip_time, interp)?
                 {
                     upper = Some((stage, sample));
                     break;
@@ -1122,7 +1137,7 @@ impl ClipCache {
             if let Some(asset) = set.asset_paths.get(idx) {
                 let clip_time = set.map_stage_to_clip(stage);
                 if let Some(sample) =
-                    self.clip_sample_at(graph, resolved, asset.as_str(), clip_path, clip_time, interp)?
+                    self.clip_sample_at(graph, resolved, asset.asset_path(), clip_path, clip_time, interp)?
                 {
                     lower = Some((stage, sample));
                     break;
@@ -1151,6 +1166,66 @@ impl ClipCache {
             }
             (None, None) => None,
         })
+    }
+}
+
+/// Whether a set authors explicit `assetPaths` as a strict `asset[]`, mirroring
+/// C++ `IsHolding<VtArray<SdfAssetPath>>` so a wrongly-typed opinion reads as
+/// unauthored.
+///
+/// The one authority on whether a set is explicit, and so on which of its asset
+/// fields are read at all: an explicit set never reads its `templateAssetPath`,
+/// and a template set never reads its `assetPaths`. The evaluation pass consults
+/// this for the same reason it must not evaluate a field nobody reads — an
+/// expression there is nobody's error.
+pub(crate) fn has_explicit_assets(set: &HashMap<String, Value>) -> bool {
+    matches!(set.get(keys::ASSET_PATHS), Some(Value::AssetPathVec(_)))
+}
+
+/// The explicit `assetPaths` of a set [`has_explicit_assets`] accepts.
+fn explicit_asset_paths(set: &HashMap<String, Value>) -> Option<Vec<AssetPath>> {
+    has_explicit_assets(set).then(|| get::<Vec<AssetPath>>(set, keys::ASSET_PATHS))?
+}
+
+/// The clip sets that participate, strongest first: those the composed
+/// `clipSets` ordering names, or every set sorted by name when it is unauthored.
+/// A name the ordering lists but no set defines contributes nothing. Shared
+/// with the pre-parse evaluation pass, so both exclude the same sets.
+pub(crate) fn effective_set_names<'a, T>(sets: &'a HashMap<String, T>, order: Option<&'a [String]>) -> Vec<&'a String> {
+    if let Some(order) = order {
+        return order.iter().filter(|name| sets.contains_key(*name)).collect();
+    }
+    let mut names: Vec<&String> = sets.keys().collect();
+    names.sort();
+    names
+}
+
+/// A scalar asset-valued `clips` field as an [`sdf::AssetPath`], whatever type
+/// the layer declared it.
+///
+/// C++ authors `templateAssetPath` as a `std::string`
+/// (`UsdClipsAPI::SetClipTemplateAssetPath`) and `manifestAssetPath` as an
+/// `SdfAssetPath`, so the two arrive differently typed from the same writer.
+/// Coercing here lets one rule cover both: the evaluation pass walks the
+/// asset-bearing `Value` variants, which a string-typed field is not one of, so
+/// a `` `${VAR}` `` in a C++-authored template would otherwise reach
+/// [`HashPattern::parse`](HashPattern::parse) unevaluated.
+pub(crate) fn as_asset_field(value: Value) -> Value {
+    match value {
+        Value::String(path) => Value::AssetPath(AssetPath::new(path)),
+        Value::Token(path) => Value::AssetPath(AssetPath::new(path.as_str())),
+        other => other,
+    }
+}
+
+/// An asset-valued clip field as the path to resolve: the evaluated form when a
+/// `` `${VAR}` `` was substituted, else the authored one (`AssetPath::asset_path`).
+/// A field authored as a plain string still reads through, since a dictionary
+/// value's type is whatever the layer declared.
+pub(crate) fn asset_input<'a>(set: &'a HashMap<String, Value>, field: &str) -> Option<&'a str> {
+    match set.get(field)? {
+        Value::AssetPath(asset) => Some(asset.asset_path()),
+        other => other.as_str(),
     }
 }
 
