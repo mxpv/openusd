@@ -947,6 +947,10 @@ impl IndexCache {
     /// layer-stack state is rebuilt by the mutation first, so the cache is all that
     /// remains. Drops exactly the cached indices whose composition reads an
     /// `affected` layer, leaving the rest warm.
+    ///
+    /// Reports nothing, unlike its siblings: no caller of this path publishes a
+    /// notice today. Widening it is the first half of the deferred demand-notice
+    /// work — see the `TODO` beside `Payload::finish` in `usd::composition`.
     pub(crate) fn invalidate_layers(&mut self, affected: &HashSet<LayerId>) {
         self.bump_revision();
         self.drop_indices_touching_layers(affected);
@@ -960,10 +964,13 @@ impl IndexCache {
     /// the target and recorded `canonical` because it interned no reachable layer.
     /// Unmuting such a target drops the referrer's stale index so it recomposes and
     /// the load barrier finally opens the now-unmuted target.
-    pub(crate) fn invalidate_muting(&mut self, affected: &HashSet<LayerId>, canonical: &str) {
+    ///
+    /// Returns everything the toggle dropped — the indices above and the
+    /// prototype roots retired with them — for a caller to report as-is.
+    pub(crate) fn invalidate_muting(&mut self, affected: &HashSet<LayerId>, canonical: &str) -> Vec<Path> {
         self.bump_revision();
         let victims = self.store.dependencies().indices_for_mute_toggle(affected, canonical);
-        self.drop_index_victims(&victims);
+        self.drop_index_victims(victims)
     }
 
     /// Drop every cached prim index whose composition reads one of the `affected`
@@ -977,7 +984,7 @@ impl IndexCache {
             return;
         }
         let victims = self.store.dependencies().indices_for_layers(affected);
-        self.drop_index_victims(&victims);
+        self.drop_index_victims(victims);
     }
 
     /// Drops each victim prim index and the prototypes its drop touches — the tail
@@ -985,16 +992,22 @@ impl IndexCache {
     /// [`invalidate_muting`](Self::invalidate_muting),
     /// [`set_load_rules`](Self::set_load_rules), and the `expressionVariables`
     /// delta path (`change::apply_vars_deltas`).
-    pub(super) fn drop_index_victims(&mut self, victims: &[Path]) {
+    ///
+    /// Returns everything the drop invalidated: `victims` and the prototype roots
+    /// retired with them, which no walk over `victims` could reach (see
+    /// [`invalidate_prototypes`](Self::invalidate_prototypes)).
+    pub(super) fn drop_index_victims(&mut self, mut victims: Vec<Path>) -> Vec<Path> {
         if victims.is_empty() {
-            return;
+            return victims;
         }
         // Evict prototypes whose instances or roots are among the victims, as the
         // prim-tier path in [`Changes::apply`](super::change::Changes::apply) does.
-        self.invalidate_prototypes(victims);
-        for path in victims {
+        let retired = self.invalidate_prototypes(&victims);
+        for path in &victims {
             self.drop_index_subtree(path);
         }
+        victims.extend(retired);
+        victims
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
@@ -3374,6 +3387,29 @@ def "Anchor" (inherits = </Rig>) {}
             Some(Value::Double(1.0))
         );
         assert_eq!(cache.prototypes().len(), 3);
+        Ok(())
+    }
+
+    /// The victim list a drop is given cannot name the prototypes it retires: the
+    /// cascade reaches them through the registry, and a `/__Prototype_N` root is
+    /// in a namespace no instance path prefixes. `drop_index_victims` hands them
+    /// back so a caller reporting the invalidation can name them.
+    #[test]
+    fn drop_victims_returns_retired() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_chain.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, 0.0, &interp)?;
+        let registered = cache.prototypes();
+        assert_eq!(registered.len(), 3, "one prototype per nesting level");
+
+        let mut expected = registered;
+        expected.push(sdf::path("/A")?);
+        expected.sort();
+        let mut reported = cache.drop_index_victims(vec![sdf::path("/A")?]);
+        reported.sort();
+        assert_eq!(reported, expected, "the victim and every root the cascade retired");
         Ok(())
     }
 

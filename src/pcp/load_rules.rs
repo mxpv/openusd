@@ -336,7 +336,8 @@ impl IndexCache {
     /// Installs `rules` wholesale, drops exactly the cached indices whose
     /// composition could have changed, and returns those paths — empty when
     /// the edit is a genuine no-op (`rules` resolves identically to the table
-    /// it replaced).
+    /// it replaced). The prototype roots retired with those indices are named
+    /// too, so the result is the complete set the install dropped.
     ///
     /// Any entry rooted inside a `/__Prototype_N` namespace is dropped first:
     /// load rules are always authored in real-namespace terms (a prototype's
@@ -384,8 +385,7 @@ impl IndexCache {
         }
         self.bump_revision();
         let victims = self.load_rule_victims(&touched);
-        self.drop_index_victims(&victims);
-        victims
+        self.drop_index_victims(victims)
     }
 
     /// The cached indices [`set_load_rules`](Self::set_load_rules) must drop

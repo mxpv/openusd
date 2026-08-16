@@ -355,6 +355,12 @@ impl StageComposition {
         if let Some(payload) = payload.as_mut() {
             payload.finish(outcome);
         }
+        // TODO: the demand resolution below can drop further indices, and the
+        // payload is already final, so those never reach
+        // `CommittedChange::resynced`. Closing this needs a seam that lets a
+        // finished payload take a late addition, and `IndexCache::invalidate_layers`
+        // widened to report what it dropped.
+
         // The recompose may have demanded sublayers — a `${VAR}` entry the
         // edited variables newly select, or a just-authored literal naming an
         // unloaded layer; open them before observers read the settled stage.
@@ -771,8 +777,8 @@ impl StageComposition {
     }
 
     /// Applies a muted-set mutation and recomposes when it reports a change,
-    /// returning the canonical identifier whose muted state toggled (`None`
-    /// when the set was unchanged).
+    /// returning the canonical identifier whose muted state toggled and the
+    /// paths the toggle invalidated (`None` when the set was unchanged).
     ///
     /// Drains first so the mute recomposes against a current graph and cache
     /// rather than stranding queued changes, then resolves any `${VAR}`
@@ -782,9 +788,9 @@ impl StageComposition {
         &self,
         mutate: impl FnOnce(&mut pcp::LayerGraph) -> Option<pcp::MuteChange>,
         hooks: &dyn CompositionHooks,
-    ) -> Option<String> {
+    ) -> Option<(String, Vec<sdf::Path>)> {
         self.process_pending(hooks);
-        let (changed, demands) = self.update_pair(|graph, cache| {
+        let (changed, resynced, demands) = self.update_pair(|graph, cache| {
             let change = mutate(graph)?;
             // The mutation already rebuilt the graph's sublayer stacks, relocates, and
             // cycle diagnostics; only the cache needs work. Removing a session variable
@@ -793,9 +799,15 @@ impl StageComposition {
             // both the toggled layer's fanout and its canonical identifier reaches a
             // referrer that skipped this target while it was muted-and-never-loaded, so
             // unmuting recomposes it and the load barrier finally opens the target.
-            cache.invalidate_muting(&change.affected, &change.changed);
-            Some((change.changed, graph.take_sublayer_demands()))
+            let resynced = cache.invalidate_muting(&change.affected, &change.changed);
+            Some((change.changed, resynced, graph.take_sublayer_demands()))
         })?;
+        // The set gathered above is the whole answer, though resolving the demands
+        // invalidates again: `mute_fanout` answers a session mute — the only kind
+        // that can move a stack's composed variables — with the root layer and so
+        // with every index, and a sublayer an unmute newly exposes joins only
+        // stacks that already held the unmuted layer. Either way the second pass
+        // reaches what the first already named.
         self.resolve_sublayer_demands(demands, hooks);
         // A mute can flip a stack's variable source (its authored variables
         // stop contributing), stranding the old-keyed instance — the mute path
@@ -803,7 +815,7 @@ impl StageComposition {
         // them costs no notice; `LayerGraph::recompose_for_mute` carries the
         // argument.
         self.reclaim_stale_stacks();
-        Some(changed)
+        Some((changed, resynced))
     }
 
     /// Resolves the layer stack an edit target authors into, loading whatever

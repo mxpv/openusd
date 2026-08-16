@@ -83,9 +83,16 @@ pub trait StageSink {
         let _ = stage;
     }
 
-    /// Observe a layer mute/unmute (C++ `UsdNotice::LayerMutingChanged`).
-    fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool) {
-        let _ = (stage, layer, muted);
+    /// Observe a layer mute/unmute (C++ `UsdNotice::LayerMutingChanged`, which
+    /// C++ pairs with the `ObjectsChanged` its recompose sends).
+    ///
+    /// `resynced` is what the toggle invalidated: the cached indices dropped and
+    /// the prototype roots retired with them, minimal in ancestors. Unlike
+    /// [`load_rules_changed`](Self::load_rules_changed) it may be empty, since
+    /// muting an identifier that resolves to nothing loaded still toggles the
+    /// muted set, and the toggle is reported either way.
+    fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool, resynced: &[sdf::Path]) {
+        let _ = (stage, layer, muted, resynced);
     }
 
     /// Observe a payload load/unload change (C++ `UsdNotice::ObjectsChanged`
@@ -94,7 +101,8 @@ pub trait StageSink {
     ///
     /// `resynced` is the bounded set of paths
     /// [`Stage::load`]/[`Stage::unload`]/[`Stage::load_and_unload`]/
-    /// [`Stage::set_load_rules`] used to invalidate the cache — never empty,
+    /// [`Stage::set_load_rules`] used to invalidate the cache, together with the
+    /// prototype roots retired with them, minimal in ancestors — never empty,
     /// since a no-op edit fires no notification at all.
     fn load_rules_changed(&self, stage: &Stage, resynced: &[sdf::Path]) {
         let _ = (stage, resynced);
@@ -354,7 +362,6 @@ impl NamespacedPaths {
     fn normalize(&mut self) {
         self.resynced.sort();
         self.resynced.dedup();
-        self.subtree.sort();
         keep_ancestors(&mut self.subtree);
         self.resynced.retain(|p| !is_covered_below(&self.subtree, p));
     }
@@ -364,6 +371,19 @@ impl NamespacedPaths {
     /// establishes, so it answers only after that has run.
     fn reports(&self, path: &sdf::Path) -> bool {
         is_covered(&self.subtree, path) || self.resynced.binary_search(path).is_ok()
+    }
+
+    /// Folds `other`'s resyncs in, restoring the ordering
+    /// [`reports`](Self::reports) reads. The covering projections stay apart:
+    /// they are only meaningful against paths in their own namespace, and this
+    /// runs once every such comparison is done.
+    fn absorb(&mut self, other: &mut Self) {
+        if other.resynced.is_empty() {
+            return;
+        }
+        self.resynced.append(&mut other.resynced);
+        self.resynced.sort();
+        self.resynced.dedup();
     }
 }
 
@@ -392,18 +412,22 @@ impl Payload {
         layer_changes: Vec<(String, sdf::ChangeList)>,
         provenance: &Provenance,
     ) -> Self {
-        let mapping = provenance.mapping();
-        // One rule carries an authored path to composed stage namespace: an edit
-        // target maps it through the arc it authors into, and every other
-        // provenance leaves it alone. A path outside the mapping's domain — one
-        // the arc target cannot reach, so it could not have been authored through
-        // it — names no composed object and drops out of the report; it still
-        // drives invalidation, which reads `CacheChanges` directly. Mapping also
-        // merges distinct layer paths onto one stage path, which the later
-        // dedup collapses.
-        let to_stage = |path: &sdf::Path| match mapping {
-            Some(m) => m.map_source_to_target(path),
-            None => Some(path.clone()),
+        // Each provenance carries an authored path to composed stage namespace its
+        // own way. An edit target maps it through the arc it authors into; a path
+        // outside that mapping's domain — one the arc target cannot reach, so it
+        // could not have been authored through it — names no composed object and
+        // drops out of the report, though it still drives invalidation, which
+        // reads `CacheChanges` directly. A local layer shares the stage's
+        // namespace except for the variant selections a spec path carries
+        // (`/Prim{set=sel}child` composes into `/Prim/child`), which is the whole
+        // of its translation. A direct edit to a non-local layer reports that
+        // layer's own paths, variant spellings included. Every one of these can
+        // merge distinct layer paths onto one stage path, which the later dedup
+        // collapses.
+        let to_stage = |path: &sdf::Path| match provenance {
+            Provenance::EditTarget(m) => m.map_source_to_target(path),
+            Provenance::LocalStack => Some(path.strip_all_variant_selections()),
+            Provenance::DirectLayerEdit => Some(path.clone()),
         };
         // The cache's stage half needs no translation: it is what a dependency
         // lookup answered, already in the composed namespace.
@@ -502,7 +526,6 @@ impl Payload {
         };
         self.changed_info_only.retain(|p| !reported.reports(p));
 
-        asset_paths_resynced.sort();
         keep_ancestors(&mut asset_paths_resynced);
         asset_paths_resynced.retain(|p| !is_covered(&self.stage.subtree, p));
         self.asset_paths_resynced = asset_paths_resynced;
@@ -512,11 +535,7 @@ impl Payload {
         // in, and nothing distinguishes them from here on. The authored bundle is
         // spent with it, covering projection included.
         let mut authored = mem::take(&mut self.authored);
-        if !authored.resynced.is_empty() {
-            self.stage.resynced.append(&mut authored.resynced);
-            self.stage.resynced.sort();
-            self.stage.resynced.dedup();
-        }
+        self.stage.absorb(&mut authored);
     }
 
     /// Borrow this payload as a [`CommittedChange`] for the `after_commit` call.
@@ -539,21 +558,24 @@ impl Payload {
     }
 }
 
-/// Reduces a sorted path set to its ancestors, dropping every entry a shallower
-/// entry already stands for (C++ `_RemoveDescendentEntries`). Duplicates fall
-/// out with them, since a path covers its own copy.
+/// Orders a path set and reduces it to its ancestors, dropping every entry a
+/// shallower entry already stands for (C++ `_RemoveDescendentEntries`).
+/// Duplicates fall out with them, since a path covers its own copy. The kept
+/// entries hold their relative order, so the result is sorted.
 ///
-/// A path that prefixes another sorts before it, so one forward pass testing
-/// each candidate against what has been kept so far settles the whole set. The
-/// scan cannot stop at the last kept entry: lexicographic order is not
-/// subtree-contiguous, because a sibling name can sort between an ancestor and
-/// a variant-selection descendant (`/A`, `/A0`, `/A{v=s}B`).
+/// A path that prefixes another sorts before it, so one forward pass over the
+/// ordered set, testing each candidate against what has been kept so far,
+/// settles the whole thing. The scan cannot stop at the last kept entry:
+/// lexicographic order is not subtree-contiguous, because a sibling name can
+/// sort between an ancestor and a variant-selection descendant (`/A`, `/A0`,
+/// `/A{v=s}B`).
 ///
 /// TODO(perf): the kept set is normally a handful of paths, but a stack-wide
 /// asset-path set is siblings all the way down, making this quadratic. An
 /// [`sdf::PathTable`] covering set would answer each test in O(depth); the same
 /// structure would bound [`is_covered`]'s scans.
-fn keep_ancestors(paths: &mut Vec<sdf::Path>) {
+pub(super) fn keep_ancestors(paths: &mut Vec<sdf::Path>) {
+    paths.sort();
     let mut kept = 0;
     for i in 0..paths.len() {
         if !is_covered(&paths[..kept], &paths[i]) {

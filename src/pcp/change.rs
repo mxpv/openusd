@@ -561,7 +561,7 @@ impl Changes {
         // pseudo-root resync stands for every asset value on the stage, so the
         // notice discards what is collected here.
         let asset_paths_resynced = asset_path_victims(cache, &vars_deltas);
-        let resynced = if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
+        let mut resynced = if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
             cache.invalidate_layers(&affected);
             vec![Path::abs_root()]
         } else {
@@ -581,7 +581,9 @@ impl Changes {
             .chain(self.cache.did_change_specs.iter().map(|(_, path)| path.prim_path()))
             .collect();
         if !changed.is_empty() {
-            cache.invalidate_prototypes(&changed);
+            // The tiers that named `changed` were snapshotted before this pass
+            // ran, so the roots it retires reach the notice only here.
+            resynced.extend(cache.invalidate_prototypes(&changed));
         }
 
         for path in self.cache.all_significant() {
@@ -658,7 +660,8 @@ fn asset_path_victims(cache: &IndexCache, deltas: &[StackVarsDelta]) -> Vec<Path
 }
 
 /// Consumes an `expressionVariables` rebuild's per-stack deltas, dropping their
-/// recorded dependents and returning them as the resynced paths — the C++
+/// recorded dependents and returning them, with the prototype roots retired
+/// alongside, as the resynced paths — the C++
 /// five-step `_DidChangeLayerStackExpressionVariables` diff, whose every victim
 /// is a `DidChangeSignificantly`. Step 1 (composed variables and source
 /// unchanged) emits no delta, so an identical re-authoring costs only the
@@ -685,17 +688,14 @@ fn apply_vars_deltas(cache: &mut IndexCache, graph: &LayerGraph, deltas: &[Stack
         // Step 2 (the variable source changed, so every arc out of the stack
         // keys its target differently) or step 3: resync every prim using the
         // stack. The root stack's users are the whole cache, subsuming every
-        // victim any delta could add, so drop it once and stop.
+        // victim any delta could add — prototype roots included, so the roots
+        // retired here need no separate mention — so drop it once and stop.
         if delta.stack == LayerStackId::ROOT {
-            let root = vec![Path::abs_root()];
-            cache.drop_index_victims(&root);
-            return root;
+            return cache.drop_index_victims(vec![Path::abs_root()]);
         }
         victims.extend(cache.dependencies().prims_for_stack(delta.stack));
     }
-    let victims: Vec<Path> = victims.into_iter().collect();
-    cache.drop_index_victims(&victims);
-    victims
+    cache.drop_index_victims(victims.into_iter().collect())
 }
 
 #[cfg(test)]

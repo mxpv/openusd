@@ -52,7 +52,7 @@ use crate::{ar, pcp, sdf};
 use super::composition::{self, PendingEdit, StageComposition};
 
 use super::interp::{self, InterpolationType};
-use super::sink::{PendingChange, Provenance, StageSink, StageSinkId};
+use super::sink::{PendingChange, Provenance, StageSink, StageSinkId, keep_ancestors};
 use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry};
 
 bitflags! {
@@ -1843,22 +1843,22 @@ impl Stage {
     /// (`SdfLayer::SetMuted`, a process-global data swap) is a separate feature
     /// and is not implemented.
     pub fn mute_layer(&self, identifier: impl Into<String>) {
-        if let Some(changed) = self
+        if let Some((changed, resynced)) = self
             .composition
             .apply_mute(|graph| graph.mute_layer(identifier.into()), self)
         {
-            self.notify_muting_changed(&changed, true);
+            self.notify_muting_changed(&changed, true, resynced);
         }
     }
 
     /// Unmutes the layer with the given identifier, restoring its opinions to
     /// composition (C++ `UsdStage::UnmuteLayer`).
     pub fn unmute_layer(&self, identifier: &str) {
-        if let Some(changed) = self
+        if let Some((changed, resynced)) = self
             .composition
             .apply_mute(|graph| graph.unmute_layer(identifier), self)
         {
-            self.notify_muting_changed(&changed, false);
+            self.notify_muting_changed(&changed, false, resynced);
         }
     }
 
@@ -1887,7 +1887,7 @@ impl Stage {
             },
             self,
         );
-        self.notify_load_rules_changed(&victims);
+        self.notify_load_rules_changed(victims);
         Ok(())
     }
 
@@ -1901,7 +1901,7 @@ impl Stage {
         let victims = self
             .composition
             .install_load_rules(|rules| rules.unload(path.clone()), self);
-        self.notify_load_rules_changed(&victims);
+        self.notify_load_rules_changed(victims);
         Ok(())
     }
 
@@ -1950,7 +1950,7 @@ impl Stage {
             },
             self,
         );
-        self.notify_load_rules_changed(&victims);
+        self.notify_load_rules_changed(victims);
         Ok(())
     }
 
@@ -1967,7 +1967,7 @@ impl Stage {
     /// provably sufficient (see [`pcp::LoadRules`]'s module documentation).
     pub fn set_load_rules(&self, rules: pcp::LoadRules) {
         let victims = self.composition.install_load_rules(|current| *current = rules, self);
-        self.notify_load_rules_changed(&victims);
+        self.notify_load_rules_changed(victims);
     }
 
     /// Every prim below `root` (inclusive) that carries a payload arc, loaded
@@ -2067,15 +2067,17 @@ impl Stage {
         Some(path)
     }
 
-    /// Fires [`StageSink::load_rules_changed`] with the resynced paths, after
-    /// the cache borrow is released — skipped entirely when `resynced` is
-    /// empty (a no-op edit invalidated nothing).
-    fn notify_load_rules_changed(&self, resynced: &[sdf::Path]) {
-        if resynced.is_empty() {
+    /// Fires [`StageSink::load_rules_changed`] with the paths the edit
+    /// invalidated, reduced to the subtrees they stand for, after the cache
+    /// borrow is released. A no-op edit invalidates nothing and reports nothing.
+    fn notify_load_rules_changed(&self, mut resynced: Vec<sdf::Path>) {
+        let sinks = self.sinks.borrow();
+        if resynced.is_empty() || sinks.is_empty() {
             return;
         }
-        for sink in self.sinks.borrow().iter() {
-            sink.load_rules_changed(self, resynced);
+        keep_ancestors(&mut resynced);
+        for sink in sinks.iter() {
+            sink.load_rules_changed(self, &resynced);
         }
     }
 
@@ -2085,11 +2087,23 @@ impl Stage {
         self.cache().is_loaded(path)
     }
 
-    /// Fires [`StageSink::layer_muting_changed`] for the toggled identifier, after
-    /// the graph and cache borrows are released.
-    fn notify_muting_changed(&self, changed: &str, muted: bool) {
-        for sink in self.sinks.borrow().iter() {
-            sink.layer_muting_changed(self, changed, muted);
+    /// Fires [`StageSink::layer_muting_changed`] for the toggled identifier and
+    /// the paths the toggle invalidated, reduced the same way, after the graph
+    /// and cache borrows are released. Unlike the load-rules notice an empty set
+    /// still fires: the muted set changed whether or not anything was cached
+    /// against the layer.
+    ///
+    /// TODO(perf): a mute that reaches the root layer hands over every cached
+    /// index, so this reduction is `keep_ancestors` at its worst case — see the
+    /// `sdf::PathTable` covering set noted there.
+    fn notify_muting_changed(&self, changed: &str, muted: bool, mut resynced: Vec<sdf::Path>) {
+        let sinks = self.sinks.borrow();
+        if sinks.is_empty() {
+            return;
+        }
+        keep_ancestors(&mut resynced);
+        for sink in sinks.iter() {
+            sink.layer_muting_changed(self, changed, muted, &resynced);
         }
     }
 

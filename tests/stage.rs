@@ -26,7 +26,7 @@ use openusd::{ar, gf, pcp, sdf, tf, usd};
 struct RecordingSink {
     after: Option<Box<dyn Fn(&Stage, &CommittedChange<'_>)>>,
     edit_target: Option<Box<dyn Fn(&Stage)>>,
-    muting: Option<Box<dyn Fn(&Stage, &str, bool)>>,
+    muting: Option<Box<dyn Fn(&Stage, &str, bool, &[sdf::Path])>>,
     load_rules: Option<Box<dyn Fn(&Stage, &[sdf::Path])>>,
 }
 
@@ -41,9 +41,9 @@ impl StageSink for RecordingSink {
             f(stage);
         }
     }
-    fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool) {
+    fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool, resynced: &[sdf::Path]) {
         if let Some(f) = &self.muting {
-            f(stage, layer, muted);
+            f(stage, layer, muted, resynced);
         }
     }
     fn load_rules_changed(&self, stage: &Stage, resynced: &[sdf::Path]) {
@@ -132,26 +132,41 @@ fn reports_unresolved_sublayer(stage: &Stage, asset_path: &str) -> bool {
     unresolved_sublayer_count(stage, asset_path) > 0
 }
 
-/// The composed-change path channels a [`CommittedChange`] reports, accumulated
-/// across every notice an edit publishes.
+/// Every path channel a stage publishes, accumulated across the notices one
+/// edit or toggle produces.
 #[derive(Default, Debug)]
 struct Notices {
     resynced: Vec<sdf::Path>,
     changed_info_only: Vec<sdf::Path>,
     asset_paths_resynced: Vec<sdf::Path>,
+    /// What a layer mute/unmute invalidated.
+    muting: Vec<sdf::Path>,
+    /// What a load-rules edit invalidated.
+    load_rules: Vec<sdf::Path>,
 }
 
-/// Installs a sink recording all three channels, for tests asserting exactly
-/// what an edit publishes.
+/// Installs a sink recording every channel, for tests asserting exactly what an
+/// edit or toggle publishes.
 fn capture_notices(stage: &Stage) -> Rc<RefCell<Notices>> {
     let notices = Rc::new(RefCell::new(Notices::default()));
-    let sink = notices.clone();
-    stage.add_sink(move |_stage: &Stage, change: &CommittedChange<'_>| {
-        let mut n = sink.borrow_mut();
-        n.resynced.extend(change.resynced.iter().cloned());
-        n.changed_info_only.extend(change.changed_info_only.iter().cloned());
-        n.asset_paths_resynced
-            .extend(change.asset_paths_resynced.iter().cloned());
+    let (commit, muting, load_rules) = (notices.clone(), notices.clone(), notices.clone());
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |_stage: &Stage, change: &CommittedChange<'_>| {
+            let mut n = commit.borrow_mut();
+            n.resynced.extend(change.resynced.iter().cloned());
+            n.changed_info_only.extend(change.changed_info_only.iter().cloned());
+            n.asset_paths_resynced
+                .extend(change.asset_paths_resynced.iter().cloned());
+        })),
+        muting: Some(Box::new(
+            move |_stage: &Stage, _layer: &str, _muted, resynced: &[sdf::Path]| {
+                muting.borrow_mut().muting.extend(resynced.iter().cloned());
+            },
+        )),
+        load_rules: Some(Box::new(move |_stage: &Stage, resynced: &[sdf::Path]| {
+            load_rules.borrow_mut().load_rules.extend(resynced.iter().cloned());
+        })),
+        ..Default::default()
     });
     notices
 }
@@ -1258,7 +1273,13 @@ fn mute_exposes_selection_loads() -> Result<()> {
 
     let session_id = stage.session_layer().expect("session layer").identifier().to_string();
     assert!(stage.is_indexed(&sdf::path("/A")?), "reading /A.x composed its index");
+    let notices = capture_notices(&stage);
     stage.mute_layer(session_id);
+    // A session mute reaches the root layer and so every cached index. It names
+    // each one rather than the pseudo-root: `/` stands for the whole cache only
+    // when it was itself composed, and nothing here queried it. `/B` is on the
+    // list because the miss above cached it.
+    assert_eq!(notices.borrow().muting, paths(&["/A", "/B"]));
     // Muting a session layer is the one toggle that can move a stack's composed
     // expression variables, and it reaches every index composing against the root
     // layer stack — /A among them, though its own opinion comes from a sublayer.
@@ -2018,7 +2039,7 @@ fn mute_alternate_spelling() -> Result<()> {
     let _token = {
         let (muted, unmuted) = (muted.clone(), unmuted.clone());
         stage.add_sink(RecordingSink {
-            muting: Some(Box::new(move |_stage, layer, is_muted| {
+            muting: Some(Box::new(move |_stage, layer, is_muted, _resynced: &[sdf::Path]| {
                 if is_muted {
                     muted.borrow_mut().push(layer.to_string());
                 } else {
@@ -7217,6 +7238,30 @@ def \"MyPrim\" (
     Ok(())
 }
 
+/// A local layer shares the stage's namespace only after variant selections are
+/// stripped: a spec authored straight into `/Prim{set=sel}child` composes into
+/// `/Prim/child`, and only that composed path may be reported.
+#[test]
+fn local_variant_resync_stripped() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/Prim")?;
+    let root = stage.root_layer().identifier().to_string();
+    let notices = capture_notices(&stage);
+    stage.layer_mut(&root).expect("the root layer is live").edit(|e| {
+        sdf::PrimSpec::new(
+            e.data_mut(),
+            sdf::path("/Prim{set=sel}child").expect("valid path"),
+            sdf::Specifier::Def,
+            "",
+        )?;
+        Ok(())
+    })?;
+    stage.prim("/Prim")?.is_valid()?;
+
+    assert_eq!(notices.borrow().resynced, paths(&["/Prim/child"]));
+    Ok(())
+}
+
 /// Switching the edit target delivers `EditTargetChanged`; re-setting the same
 /// target is a no-op and fires nothing.
 #[test]
@@ -7276,7 +7321,10 @@ fn listener_layer_muting() -> Result<()> {
     let _token = {
         let (muted, unmuted) = (muted.clone(), unmuted.clone());
         stage.add_sink(RecordingSink {
-            muting: Some(Box::new(move |_stage, layer, is_muted| {
+            muting: Some(Box::new(move |_stage, layer, is_muted, resynced: &[sdf::Path]| {
+                // No such layer is loaded, so the toggle invalidates nothing —
+                // and is still reported, unlike a no-op load-rules edit.
+                assert!(resynced.is_empty(), "nothing was cached against {layer}");
                 if is_muted {
                     muted.borrow_mut().push(layer.to_string());
                 } else {
@@ -7292,6 +7340,127 @@ fn listener_layer_muting() -> Result<()> {
     stage.unmute_layer("weak.usda"); // already unmuted — no notice
     assert_eq!(*muted.borrow(), vec!["weak.usda".to_string()]);
     assert_eq!(*unmuted.borrow(), vec!["weak.usda".to_string()]);
+    Ok(())
+}
+
+/// Opens a two-level nested-instancing stage, returning it with both prototype
+/// roots composed (and the temp dir that must outlive it).
+///
+/// `/A` instances `Model` from `model.usda`, whose own child instances `Inner`
+/// from `inner.usda`; `model.usda` sublayers `detail.usda`. Every `instanceable`
+/// opinion sits in the layer that introduces the prim, so it is instance-local
+/// to the prototype it produces and a prototype registers only the stack its
+/// shared content composes — never its referrer's. That keeps the nested
+/// prototype off the victim lists below, so a test that sees its root saw the
+/// cascade report it rather than a victim covering it.
+fn nested_instancing_stage() -> Result<(tempfile::TempDir, Stage, sdf::Path, sdf::Path)> {
+    let dir = tempfile::tempdir()?;
+    let root = write_nested_instancing_scene(dir.path())?;
+    let stage = Stage::open(&root)?;
+    let outer = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+    let nested = stage
+        .prim(outer.append_path("Nested")?)?
+        .prototype()?
+        .expect("the nested prim is an instance");
+    Ok((dir, stage, outer, nested))
+}
+
+/// Writes the scene [`nested_instancing_stage`] opens, returning the root
+/// layer's path.
+fn write_nested_instancing_scene(dir: &FsPath) -> Result<String> {
+    fs::write(
+        dir.join("inner.usda"),
+        "#usda 1.0\n\ndef \"Inner\"\n{\n    def \"Leaf\"\n    {\n        custom double v = 1\n    }\n}\n",
+    )?;
+    fs::write(
+        dir.join("detail.usda"),
+        "#usda 1.0\n\nover \"Model\"\n{\n    custom double d = 2\n}\n",
+    )?;
+    fs::write(
+        dir.join("model.usda"),
+        "#usda 1.0\n(\n    subLayers = [@detail.usda@]\n)\n\ndef \"Model\"\n{\n    def \"Nested\" (\n        instanceable = true\n        references = @inner.usda@</Inner>\n    )\n    {\n    }\n}\n",
+    )?;
+    let root = dir.join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n\ndef \"A\" (\n    instanceable = true\n    references = @model.usda@</Model>\n)\n{\n}\n",
+    )?;
+    Ok(root.to_str().expect("utf-8 path").to_string())
+}
+
+/// A mute reports what it invalidated, prototypes included. `detail.usda`
+/// reaches only the outer prototype's stack, so the nested root is on no
+/// victim's ancestor chain and appears solely because the cascade named it.
+#[test]
+fn mute_reports_prototypes() -> Result<()> {
+    let (_dir, stage, outer, nested) = nested_instancing_stage()?;
+    let notices = capture_notices(&stage);
+    stage.mute_layer(identifier_by_leaf(&stage, "detail.usda"));
+
+    let reported = &notices.borrow().muting;
+    assert!(reported.contains(&sdf::path("/A")?), "the instance: {reported:?}");
+    assert!(reported.contains(&outer), "the outer prototype: {reported:?}");
+    assert!(reported.contains(&nested), "the nested prototype: {reported:?}");
+    Ok(())
+}
+
+/// An unload reports the prototypes it retired. Its victim list is `/A` alone —
+/// the ancestor walk stops at the root's `Rule::All` — so neither root can
+/// arrive any other way.
+#[test]
+fn unload_reports_prototypes() -> Result<()> {
+    let (_dir, stage, outer, nested) = nested_instancing_stage()?;
+    let notices = capture_notices(&stage);
+    stage.unload("/A")?;
+
+    let reported = &notices.borrow().load_rules;
+    assert!(reported.contains(&outer), "the outer prototype: {reported:?}");
+    assert!(reported.contains(&nested), "the nested prototype: {reported:?}");
+    Ok(())
+}
+
+/// An `expressionVariables` edit on a *referenced* layer flips that stack's
+/// variable source, resyncing its users. The stack is not the root's, so the
+/// resync is the affected prims rather than a blanket `/`, and the nested
+/// prototype — whose shared content composes `inner.usda`, not this stack — is
+/// named only by the cascade.
+#[test]
+fn vars_edit_reports_prototypes() -> Result<()> {
+    let (_dir, stage, outer, nested) = nested_instancing_stage()?;
+    let notices = capture_notices(&stage);
+    let model = identifier_by_leaf(&stage, "model.usda");
+    stage
+        .layer_mut(&model)
+        .expect("the referenced layer is live")
+        .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("x".into()))])))?;
+    // A direct layer edit is queued; the composed notice lands on the next drain.
+    stage.prim("/A")?.is_valid()?;
+
+    let reported = &notices.borrow().resynced;
+    assert!(
+        !reported.contains(&sdf::path("/")?),
+        "a non-root stack resyncs no blanket"
+    );
+    assert!(reported.contains(&outer), "the outer prototype: {reported:?}");
+    assert!(reported.contains(&nested), "the nested prototype: {reported:?}");
+    Ok(())
+}
+
+/// An ordinary significant edit retires the prototypes its prim shared, and
+/// those roots reach the notice only through the apply phase: the tiers naming
+/// `/A` were classified before it ran.
+#[test]
+fn significant_edit_reports_prototypes() -> Result<()> {
+    let (_dir, stage, outer, nested) = nested_instancing_stage()?;
+    let notices = capture_notices(&stage);
+    stage
+        .prim("/A")?
+        .set_metadata(sdf::FieldKey::Instanceable.as_str(), sdf::Value::Bool(false))?;
+
+    let reported = &notices.borrow().resynced;
+    assert!(reported.contains(&sdf::path("/A")?), "the edited prim: {reported:?}");
+    assert!(reported.contains(&outer), "the outer prototype: {reported:?}");
+    assert!(reported.contains(&nested), "the nested prototype: {reported:?}");
     Ok(())
 }
 

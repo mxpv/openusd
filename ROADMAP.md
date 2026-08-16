@@ -198,7 +198,7 @@ Features from the C++ reference implementation not covered by the core specifica
 | [Stage cache](https://openusd.org/release/api/class_usd_utils_stage_cache.html) | :thinking: | | Avoid redundant stage loading |
 | [Kind registry](https://openusd.org/release/api/class_kind_registry.html) | :thinking: | | Model/group/assembly/component taxonomy |
 | [Edit targets](https://openusd.org/release/api/class_usd_edit_target.html) | :white_check_mark: | `0.6.0` | Fully supported, see `usd::EditTarget` |
-| [Change notification](https://openusd.org/release/api/class_usd_notice.html) | :white_check_mark: | `main` | `sdf::LayerSink` (layer commit seam) and `usd::StageSink` (composed changes); transferable `Diff` via `usd::UndoStage` / `usd::ReplayStage` and `Stage::apply_diff`<br>`CommittedChange::asset_paths_resynced` (C++ `GetResolvedAssetPathsResyncedPaths`) |
+| [Change notification](https://openusd.org/release/api/class_usd_notice.html) | :white_check_mark: | `main` | `sdf::LayerSink` (layer commit seam) and `usd::StageSink` (composed changes, incl. `layer_muting_changed` / `load_rules_changed`); transferable `Diff` via `usd::UndoStage` / `usd::ReplayStage` and `Stage::apply_diff`<br>`CommittedChange::asset_paths_resynced` (C++ `GetResolvedAssetPathsResyncedPaths`) |
 | [Property stack queries](https://openusd.org/release/api/class_usd_resolve_info.html) | :thinking: | | Inspect all contributing opinions across layers |
 
 ## Tooling

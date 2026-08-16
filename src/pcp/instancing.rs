@@ -342,7 +342,13 @@ impl IndexCache {
     /// rayon-friendly: see [`PrototypeRegistry::remove_affected`]. A layer-stack
     /// edit instead drops the affected prototypes through
     /// [`Self::invalidate_layers`].
-    pub(crate) fn invalidate_prototypes(&mut self, changed: &[Path]) {
+    ///
+    /// Returns the roots it retired, sorted. A caller reporting what an edit
+    /// invalidated must name them in their own right: the retirement cascades
+    /// through a worklist, so a nested root goes without any `changed` path
+    /// covering it, and a `/__Prototype_N` root stands in its own namespace where
+    /// no instance path could subsume it.
+    pub(crate) fn invalidate_prototypes(&mut self, changed: &[Path]) -> Vec<Path> {
         // A prototype's whole namespace composes in place now (the root from its
         // materialized index, descendants by deepening it; see
         // [`Self::redirect_anchor`]), so each affected root's entire subtree must
@@ -353,13 +359,15 @@ impl IndexCache {
         // `SdfPathTable`-like trie) would bound it by the change set. A change
         // reaching a nested instance drops its whole prototype chain, so the
         // per-root cost is paid once per level.
-        for root in self.prototypes.remove_affected(changed) {
-            self.drop_index_subtree(&root);
+        let retired = self.prototypes.remove_affected(changed);
+        for root in &retired {
+            self.drop_index_subtree(root);
         }
         // The redirection memo is keyed on instance/prototype structure that the
         // dropped prototypes may have defined, so clear it wholesale; it is
         // repopulated lazily on the next descendant query.
         self.redirected_prims.clear();
+        retired
     }
 
     /// Returns `true` if `path` resolves as an instance prim (spec 11.3.3):
