@@ -309,14 +309,12 @@ impl EvaluatedExpression {
 /// [`Error::InvalidExpression`] when an error sink is given — the indexing-time
 /// pass emits diagnostics, re-resolution passes stay silent.
 ///
-/// Shared by both tiers that evaluate expressions: composing an arc's asset
-/// path or a variant selection, and resolving an `asset`-valued attribute or
-/// metadatum ([`asset_resolve`](super::asset_resolve)). `context`
-/// says which, and `source_layer` is the identifier of the layer that authored
-/// the expression — an identifier rather than the layer itself because a value
-/// clip's layer is owned by the clip cache and never enters the graph.
-/// `site_path` is the path *in that layer*, which under a reference or variant
-/// arc differs from the composed stage path.
+/// Composing an arc's asset path and composing a variant selection both come
+/// through here; `context` says which, and `source_layer` is the identifier of
+/// the layer that authored the expression — an identifier rather than the layer
+/// itself because a value clip's layer is owned by the clip cache and never
+/// enters the graph. `site_path` is the path *in that layer*, which under a
+/// reference or variant arc differs from the composed stage path.
 ///
 /// `used_vars`, when given, collects every variable name the evaluation
 /// requested — on success and on failure alike, since an undefined name is a
@@ -324,9 +322,7 @@ impl EvaluatedExpression {
 /// a variable edit to the prims and stacks that recorded its name (C++
 /// `PcpExpressionVariablesDependencyData`); a pass that resolves against the
 /// deliberately empty context passes `None` so its universal failures record
-/// nothing. A value-time read records none either: it evaluates outside a prim
-/// index build, so there is nothing to register a variable dependency against
-/// (see the module doc).
+/// nothing.
 pub(super) fn evaluate_expression(
     expression: &str,
     expr_vars: &HashMap<String, Value>,
@@ -345,20 +341,14 @@ pub(super) fn evaluate_expression(
         None if evaluated.errors.is_empty() => EvaluatedExpression::None,
         None => {
             if let Some(errors) = errors {
-                let error = Error::InvalidExpression {
+                Error::InvalidExpression {
                     expression: expression.to_string(),
                     context,
                     source_layer: source_layer.to_string(),
                     site_path: site_path.clone(),
                     message: evaluated.errors.join("; "),
-                };
-                // The same failing opinion can be evaluated more than once —
-                // the variant-selection search re-runs per declaring node and
-                // on task retry — so an identical, already-recorded
-                // diagnostic is not repeated.
-                if !errors.contains(&error) {
-                    errors.push(error);
                 }
+                .record(errors);
             }
             EvaluatedExpression::Failed
         }

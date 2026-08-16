@@ -49,6 +49,11 @@ pub struct DefProperty<'a> {
 #[derive(Debug, Clone)]
 struct LayerAndPath {
     store: DefStore,
+    /// The schematics whose class prim this entry's value came from, kept even
+    /// when the value was copied into the composed store, so a fallback can say
+    /// where it was authored. Which contribution a composed entry names is
+    /// [`value_origin`]'s decision.
+    schematics: Arc<Schematics>,
     path: sdf::Path,
 }
 
@@ -56,11 +61,20 @@ struct LayerAndPath {
 #[derive(Debug, Clone)]
 enum DefStore {
     /// A registered family's schematics, shared with the registry.
-    Schematics(Arc<Schematics>),
+    Schematics,
     /// The owning definition's own [`PrimDefinition::composed`] store. Cloning
     /// a definition clones that store with it, so the clone's entries resolve
     /// against the clone's own copy.
     Composed,
+}
+
+/// One schema's contribution to a composed property.
+#[derive(Debug, Clone, Copy)]
+struct Contribution<'a> {
+    /// The spec that schema declares for the property.
+    spec: &'a sdf::SpecData,
+    /// The schematics the spec was read from.
+    origin: &'a Arc<Schematics>,
 }
 
 /// One version per (schema family, instance name) composed so far. Applying two
@@ -126,11 +140,7 @@ impl PrimDefinition {
     /// authored as a value block all read back `None` — a schema cannot block
     /// a value that has no weaker opinion to block.
     pub fn attribute_fallback(&self, name: &tf::Token) -> Option<sdf::Value> {
-        let property = self.property(name)?;
-        if property.spec_type() != sdf::SpecType::Attribute {
-            return None;
-        }
-        property.fallback()
+        self.property(name)?.attribute_fallback()
     }
 
     /// Looks up an entry by name, including the class prim under
@@ -180,7 +190,8 @@ impl PrimDefinition {
 
         if contributes_metadata {
             let entry = LayerAndPath {
-                store: DefStore::Schematics(schematics.clone()),
+                store: DefStore::Schematics,
+                schematics: schematics.clone(),
                 path: path.clone(),
             };
             definition.prop_map.insert(PRIM_METADATA, entry);
@@ -192,7 +203,8 @@ impl PrimDefinition {
                 continue;
             }
             let entry = LayerAndPath {
-                store: DefStore::Schematics(schematics.clone()),
+                store: DefStore::Schematics,
+                schematics: schematics.clone(),
                 path: path.append_property(name.as_str())?,
             };
             definition.prop_map.insert(name.clone(), entry);
@@ -297,19 +309,26 @@ impl PrimDefinition {
         // only ever a fill-in.
         let is_metadata = name == PRIM_METADATA;
         if is_metadata && !self.prop_map.contains_key(&PRIM_METADATA) {
-            if let Some(composed) = self.materialize(&name, None, &weaker.snapshot(entry)) {
+            let weak = weaker.snapshot(entry);
+            let weak = Contribution {
+                spec: &weak,
+                origin: &entry.schematics,
+            };
+            if let Some(composed) = self.materialize(&name, None, weak) {
                 self.prop_map.insert(PRIM_METADATA, composed);
             }
             return;
         }
 
         let Some(existing) = self.prop_map.get(&name) else {
-            let installed = match &entry.store {
-                DefStore::Schematics(_) => entry.clone(),
-                DefStore::Composed => match self.write_composed(&name, &weaker.snapshot(entry)) {
-                    Some(installed) => installed,
-                    None => return,
-                },
+            let installed = match entry.store {
+                DefStore::Schematics => entry.clone(),
+                DefStore::Composed => {
+                    match self.write_composed(&name, &weaker.snapshot(entry), entry.schematics.clone()) {
+                        Some(installed) => installed,
+                        None => return,
+                    }
+                }
             };
             self.prop_map.insert(name.clone(), installed);
             if !is_metadata {
@@ -318,8 +337,20 @@ impl PrimDefinition {
             return;
         };
 
-        let strong = self.snapshot(existing);
-        if let Some(composed) = self.materialize(&name, Some(&strong), &weaker.snapshot(entry)) {
+        // The existing entry borrows `self`, which `materialize` takes
+        // mutably, so its origin is taken by value here.
+        let strong_origin = existing.schematics.clone();
+        let strong_spec = self.snapshot(existing);
+        let weak_spec = weaker.snapshot(entry);
+        let strong = Contribution {
+            spec: &strong_spec,
+            origin: &strong_origin,
+        };
+        let weak = Contribution {
+            spec: &weak_spec,
+            origin: &entry.schematics,
+        };
+        if let Some(composed) = self.materialize(&name, Some(strong), weak) {
             self.prop_map.insert(name, composed);
         }
     }
@@ -345,6 +376,16 @@ impl PrimDefinition {
         if !types_match(&composed, &defined) {
             return;
         }
+        let origin = value_origin(
+            Some(Contribution {
+                spec: &composed,
+                origin: schematics,
+            }),
+            Contribution {
+                spec: &defined,
+                origin: &existing.schematics,
+            },
+        );
 
         let variability = defined
             .get(sdf::FieldKey::Variability.as_str())
@@ -358,7 +399,7 @@ impl PrimDefinition {
         }
         composed.add(sdf::FieldKey::Variability, variability);
 
-        if let Some(installed) = self.write_composed(name, &composed) {
+        if let Some(installed) = self.write_composed(name, &composed, origin) {
             self.prop_map.insert(name.clone(), installed);
         }
     }
@@ -367,35 +408,48 @@ impl PrimDefinition {
     /// materializing the result when there is anything to add
     /// (C++ `_CreateComposedPrimOrPropertyIfNeeded`).
     ///
+    /// Each contribution arrives with the schematics that authored it, so the
+    /// materialized spec can still say where its value was declared.
+    ///
     /// Returns `None` when the weaker spec contributes nothing, leaving the
     /// existing entry untouched.
     fn materialize(
         &mut self,
         name: &tf::Token,
-        strong: Option<&sdf::SpecData>,
-        weak: &sdf::SpecData,
+        strong: Option<Contribution<'_>>,
+        weak: Contribution<'_>,
     ) -> Option<LayerAndPath> {
-        let merged = compose_fields(strong, weak)?;
+        let merged = compose_fields(strong.map(|strong| strong.spec), weak.spec)?;
+        let origin = value_origin(strong, weak);
 
         let mut composed = match strong {
-            Some(strong) => strong.clone(),
-            None => sdf::SpecData::new(weak.ty),
+            Some(strong) => strong.spec.clone(),
+            None => sdf::SpecData::new(weak.spec.ty),
         };
         for (field, value) in merged {
             composed.add(field, value);
         }
-        self.write_composed(name, &composed)
+        self.write_composed(name, &composed, origin)
     }
 
     /// Writes a spec into this definition's composed store, creating the store
     /// on first use, and returns the entry that reaches it.
-    fn write_composed(&mut self, name: &tf::Token, spec: &sdf::SpecData) -> Option<LayerAndPath> {
+    ///
+    /// `origin` is the schematics the written spec stands for, which
+    /// [`value_origin`] picks from the contributors that made it.
+    fn write_composed(
+        &mut self,
+        name: &tf::Token,
+        spec: &sdf::SpecData,
+        origin: Arc<Schematics>,
+    ) -> Option<LayerAndPath> {
         let path = composed_path(name)?;
         let composed = self.composed.get_or_insert_with(sdf::Data::default);
         *composed.create_spec(path.clone(), spec.ty) = spec.clone();
 
         Some(LayerAndPath {
             store: DefStore::Composed,
+            schematics: origin,
             path,
         })
     }
@@ -410,8 +464,8 @@ impl PrimDefinition {
 
     /// The store one of this definition's entries resolves against.
     fn store_of<'a>(&'a self, entry: &'a LayerAndPath) -> Option<&'a sdf::Data> {
-        match &entry.store {
-            DefStore::Schematics(schematics) => Some(schematics.data()),
+        match entry.store {
+            DefStore::Schematics => Some(entry.schematics.data()),
             DefStore::Composed => self.composed.as_ref(),
         }
     }
@@ -480,6 +534,17 @@ impl<'a> DefProperty<'a> {
         }
     }
 
+    /// This property's fallback value when it is an attribute
+    /// (C++ `UsdPrimDefinition::GetAttributeFallbackValue`).
+    ///
+    /// A relationship reads back `None`: only an attribute carries a value.
+    pub fn attribute_fallback(&self) -> Option<sdf::Value> {
+        if self.spec_type() != sdf::SpecType::Attribute {
+            return None;
+        }
+        self.fallback()
+    }
+
     /// The property's fallback value, with a value block read as no value.
     pub fn fallback(&self) -> Option<sdf::Value> {
         match self.field(sdf::FieldKey::Default)?.clone() {
@@ -488,9 +553,42 @@ impl<'a> DefProperty<'a> {
         }
     }
 
+    /// The schematics that authored this property's fallback value — where a
+    /// relative asset path in it is anchored.
+    ///
+    /// Named for the fallback alone because that is all it answers for: a
+    /// property composed from more than one schema can take another field from
+    /// another family, which this does not report — and where no contributor
+    /// authored a fallback at all, it names one arbitrarily.
+    pub fn fallback_source(&self) -> &'a Schematics {
+        &self.entry.schematics
+    }
+
     /// The store this property's fields live in.
     fn store(&self) -> Option<&'a sdf::Data> {
         self.definition.store_of(self.entry)
+    }
+}
+
+/// Which contribution a composed spec stands for: the one that authored its
+/// `default`, since that is the one field a fallback value read returns and so
+/// the only one whose anchor is observable.
+///
+/// With neither side authoring a `default` there is no value to anchor, and the
+/// stronger contributor stands for the spec — or the weaker one when it is the
+/// sole contribution, as it is for a prim-metadata fill-in.
+///
+/// TODO: per-field provenance. One origin per spec can answer for one field, so
+/// a composed spec taking its `default` from one family and an asset-valued
+/// metadatum from another cannot anchor both; an origin recorded per field in
+/// the composed store would, and would let a schema metadatum anchor too.
+fn value_origin(strong: Option<Contribution<'_>>, weak: Contribution<'_>) -> Arc<Schematics> {
+    let authors_default = |spec: &sdf::SpecData| spec.contains(sdf::FieldKey::Default.as_str());
+    match strong {
+        Some(strong) if authors_default(strong.spec) => strong.origin.clone(),
+        _ if authors_default(weak.spec) => weak.origin.clone(),
+        Some(strong) => strong.origin.clone(),
+        None => weak.origin.clone(),
     }
 }
 

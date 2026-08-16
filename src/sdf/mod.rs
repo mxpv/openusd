@@ -29,6 +29,9 @@ mod spec;
 mod value;
 
 pub use asset_path::AssetPath;
+pub(crate) use asset_path::{
+    AssetExpressionFailure, AssetOutcome, evaluate_asset_paths, holds_asset_expression, resolve_asset_paths,
+};
 pub use change::{ChangeEntry, ChangeFlags, ChangeList};
 pub use copy::{
     CopyChildren, CopyChildrenArgs, CopyValue, CopyValueArgs, copy_spec, copy_spec_with, copy_spec_within,

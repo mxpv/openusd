@@ -18,6 +18,7 @@ fn registry(manifest: &str, schematics: &str) -> Arc<SchemaRegistry> {
             name: "test",
             manifest,
             schematics,
+            resolved_location: None,
         })
         .expect("family registers")
         .build()
@@ -849,12 +850,14 @@ def "MarkerAPI"
             name: "core",
             manifest: core_manifest,
             schematics: "#usda 1.0\n\nclass Widget \"Widget\"\n{\n}\n",
+            resolved_location: None,
         })
         .expect("core registers")
         .family(FamilySource {
             name: "ext",
             manifest: ext_manifest,
             schematics: "#usda 1.0\n\nclass \"MarkerAPI\"\n{\n    float marker:size = 2\n}\n",
+            resolved_location: None,
         })
         .expect("ext registers")
         .build()
@@ -910,6 +913,7 @@ class Gadget "Gadget"
             name: "test",
             manifest,
             schematics,
+            resolved_location: None,
         })
         .expect("family registers")
         .build()
@@ -958,6 +962,7 @@ def "Foo_01"
             name: "test",
             manifest,
             schematics: "#usda 1.0\n",
+            resolved_location: None,
         })
         .expect_err("a non-canonical identifier is rejected");
     assert!(format!("{error:#}").contains("not a valid identifier"), "{error:#}");
@@ -1024,6 +1029,7 @@ fn unknown_kind_rejected() {
             name: "test",
             manifest,
             schematics: "#usda 1.0\n",
+            resolved_location: None,
         })
         .expect_err("unknown kind is rejected");
     assert!(format!("{error:#}").contains("Unknown schemaKind"), "{error:#}");
@@ -1037,6 +1043,7 @@ fn missing_kind_rejected() {
             name: "test",
             manifest,
             schematics: "#usda 1.0\n",
+            resolved_location: None,
         })
         .expect_err("missing kind is rejected");
     assert!(format!("{error:#}").contains("schemaKind is required"), "{error:#}");
@@ -1049,6 +1056,7 @@ fn duplicate_identifier_rejected() {
         name: "test",
         manifest,
         schematics: "#usda 1.0\n",
+        resolved_location: None,
     };
     let error = SchemaRegistry::builder()
         .family(source)

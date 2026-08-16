@@ -15,6 +15,11 @@
 //! its base schemas. C++ keeps that in `plugInfo.json`; see
 //! [`SchemaRegistryBuilder::family`] for the format.
 //!
+//! A family may also say where its schematics was resolved from
+//! ([`FamilySource::resolved_location`]), which is what lets
+//! [`Attribute::get`](super::Attribute::get) hand back a resolved path for an
+//! `asset` fallback.
+//!
 //! [`SchemaRegistry::global`] is the lazily built process registry every
 //! [`Stage`](super::Stage) uses by default. It currently registers no families
 //! — the machinery is here, the OpenUSD schema data is not vendored yet — so
@@ -30,7 +35,7 @@ use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use anyhow::{Context, Result, bail};
 
-use crate::{sdf, tf, usda};
+use crate::{ar, sdf, tf, usda};
 
 use super::prim_definition::{self, FamilyVersions};
 use super::{PrimDefinition, PrimTypeId, PrimTypeInfo, SchemaKind};
@@ -102,6 +107,8 @@ pub struct SchemaInfo {
 #[derive(Debug)]
 pub struct Schematics {
     family: tf::Token,
+    /// Taken verbatim from [`FamilySource::resolved_location`].
+    resolved_location: Option<ar::ResolvedPath>,
     data: sdf::Data,
 }
 
@@ -119,6 +126,21 @@ pub struct FamilySource<'a> {
     pub manifest: &'a str,
     /// Schematics text, in `generatedSchema.usda` form.
     pub schematics: &'a str,
+    /// Where that text was resolved from — the anchor for the relative asset
+    /// paths its fallback values author, and the one thing that lets
+    /// [`Attribute::get`](super::Attribute::get) resolve such a fallback.
+    ///
+    /// It must be non-empty, and it must be what the resolver applicable to
+    /// stages using this registry returns for the schematics; the registry
+    /// stores it verbatim and never canonicalizes or re-resolves it. A
+    /// [`ResolvedPath`](crate::ar::ResolvedPath) is an opaque resolver result,
+    /// so filesystem absoluteness is neither required nor checked.
+    ///
+    /// `None` for a family with no location, such as one compiled into a
+    /// binary; its fallbacks then read back exactly as authored, with no
+    /// resolved path, which is what C++ produces for every family (see the
+    /// module documentation).
+    pub resolved_location: Option<&'a ar::ResolvedPath>,
 }
 
 /// Accumulates schema families into a [`SchemaRegistry`].
@@ -706,6 +728,12 @@ impl Schematics {
         &self.family
     }
 
+    /// Where these class prims were resolved from, as
+    /// [`FamilySource::resolved_location`] gave it.
+    pub fn resolved_location(&self) -> Option<&ar::ResolvedPath> {
+        self.resolved_location.as_ref()
+    }
+
     /// The parsed class prims, keyed by `/<SchemaIdentifier>`.
     pub fn data(&self) -> &sdf::Data {
         &self.data
@@ -758,13 +786,24 @@ impl SchemaRegistryBuilder {
     /// `apiSchemaAutoApplyTo` auto-applies the declaring API schema to the
     /// named target schemas, under the same rules as a declaration registered
     /// through [`auto_apply`](Self::auto_apply).
+    ///
+    /// Errors when [`resolved_location`](FamilySource::resolved_location) is
+    /// present but empty, which is a resolver's way of saying it found nothing.
     // TODO: take the schematics through `sdf::FileFormat` so a family can ship
     // a binary `generatedSchema.usdc`, as C++ does by opening it as a layer.
+    // Opening it as a layer also subsumes `FamilySource::resolved_location`:
+    // the layer carries its own `anchor_location`, so no caller has to supply
+    // one and none can supply a wrong one.
     pub fn family(mut self, source: FamilySource<'_>) -> Result<Self> {
         let family = tf::Token::from(source.name);
 
+        if source.resolved_location.is_some_and(|location| location.is_empty()) {
+            bail!("Schema family {family} was registered with an empty resolved location");
+        }
+
         let schematics = Arc::new(Schematics {
             family: family.clone(),
+            resolved_location: source.resolved_location.cloned(),
             data: usda::parse(source.schematics)
                 .with_context(|| format!("Unable to parse schematics for schema family {family}"))?,
         });
@@ -1513,6 +1552,7 @@ class DomeLight_1 "DomeLight_1"
                 name: "test",
                 manifest,
                 schematics,
+                resolved_location: None,
             })
             .expect("test family registers")
             .build()

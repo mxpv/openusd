@@ -506,11 +506,26 @@ impl Attribute {
     /// [`SchemaRegistry`](super::SchemaRegistry), from the owning
     /// prim's composed `typeName` and `apiSchemas`. `None` when no schema
     /// declares this attribute, or declares it without a fallback.
+    ///
+    /// An `asset` fallback is anchored against the schematics that declared it,
+    /// on the terms
+    /// [`resolved_location`](super::FamilySource::resolved_location) states.
     pub fn fallback_value(&self) -> anyhow::Result<Option<sdf::Value>> {
         let Some((info, name)) = self.declaring_definition()? else {
             return Ok(None);
         };
-        Ok(info.prim_definition().attribute_fallback(&name))
+        let Some(property) = info.prim_definition().property(&name) else {
+            return Ok(None);
+        };
+        let Some(value) = property.attribute_fallback() else {
+            return Ok(None);
+        };
+        // Anchoring passes a non-asset value through untouched, so this gates
+        // only to keep the ordinary read off the composition borrow it takes.
+        if !value.is_asset_valued() {
+            return Ok(Some(value));
+        }
+        Ok(Some(self.stage.resolve_schema_asset(property.fallback_source(), value)))
     }
 
     /// Reads one field from the schema declaration of this attribute, if a

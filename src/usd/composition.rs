@@ -134,6 +134,14 @@ impl StageComposition {
         }
     }
 
+    // Edit-invariant operations: nothing a pending edit can change, so neither
+    // a drain nor the index cache is involved.
+
+    /// The registry every asset path resolves through.
+    pub(super) fn layer_registry(&self) -> Ref<'_, sdf::LayerRegistry> {
+        Ref::map(self.layers.borrow(), pcp::LayerGraph::layer_registry)
+    }
+
     // Settled operations: the caller has already drained.
 
     /// The layer graph, for a caller that has completed `process_pending`.

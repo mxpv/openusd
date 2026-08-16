@@ -911,7 +911,7 @@ impl PrimIndex {
                             // is whole. Built here because only the opinion walk
                             // knows which layer won the field.
                             let site = || {
-                                asset_resolve::holds_expression(&value)
+                                sdf::holds_asset_expression(&value)
                                     .then(|| AssetSite::in_graph(stack, node_stack, layer, &query_path))
                             };
                             // Relative clip asset paths anchor on the layer that
@@ -1143,11 +1143,11 @@ fn evaluate_clip_assets(
             };
             let (value, outcome) = asset_resolve::evaluate_values(graph, value, Some(site), errors);
             match outcome {
-                asset_resolve::AssetOutcome::Evaluated => {
+                sdf::AssetOutcome::Evaluated => {
                     fields.insert(key, value);
                 }
                 // An unauthored manifest is synthesized from the clips instead.
-                asset_resolve::AssetOutcome::None if key == clip::keys::MANIFEST_ASSET_PATH => {}
+                sdf::AssetOutcome::None if key == clip::keys::MANIFEST_ASSET_PATH => {}
                 // The set is going; evaluating its remaining fields would only
                 // report a second cause for one failure.
                 _ => {

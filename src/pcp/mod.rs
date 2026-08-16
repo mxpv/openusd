@@ -55,7 +55,7 @@
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
 //! | `prim_graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. |
 //! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
-//! | `asset_resolve` | `Usd_AssetPathContext` | Value-time `asset` resolution: the `AssetSite` provenance every value source supplies, and the anchoring and expression evaluation it drives. Shared by the composed-opinion path and the clip cache, whose layers stand outside the graph. |
+//! | `asset_resolve` | `Usd_AssetPathContext` | Value-time `asset` provenance: the `AssetSite` every value source supplies, projected onto the anchor and variable scope the `sdf` resolution tail takes. Shared by the composed-opinion path and the clip cache, whose layers stand outside the graph. |
 //! | `clip` | `Usd_Clips` / `Usd_ClipSet` | Value clips (spec 12.3.4): the `ClipSet` metadata model with its stage-to-clip timing, and the `ClipCache` holding the clip and manifest layers that stay outside the composition graph. |
 //! | `clip_manifest` | `Usd_GenerateClipManifest` | Builds the manifest layer indexing which attributes a clip set's clips carry time samples for — generated on request through [`ClipsAPI`](crate::usd::ClipsAPI), and synthesized by `ClipCache` for a set that authors none. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
@@ -159,8 +159,9 @@
 //! whose composed variables moved (`change::asset_path_victims`), covering what
 //! no dependency record could: a value-time `` `${VAR}` `` expression in an
 //! `asset` value is evaluated on every read against its opinion's layer stack
-//! (`asset_resolve::resolve_path`) outside any prim index build, so it records
-//! no per-variable dependency a targeted invalidation could follow — while the
+//! (`asset_resolve::resolve_values`) outside any prim index build, so it
+//! records no per-variable dependency a targeted invalidation could follow —
+//! while the
 //! value it resolves to can well be cached, as an
 //! [`AttributeQuery`](crate::usd::AttributeQuery) replaying a static value
 //! source does. A clip-sourced value is covered by the same set, since the prim
@@ -221,6 +222,16 @@
 //! path — `asset_resolve` walks the asset-bearing `Value` variants, which a
 //! string-typed field is not one of.
 //!
+//! # `asset` values a schema declares
+//!
+//! A schema fallback is authored outside every layer stack, so it never reaches
+//! this module's resolution tail; the schema tier anchors its `default` against
+//! the schematics instead, on the terms
+//! [`resolved_location`](crate::usd::FamilySource::resolved_location) states.
+//! A schema-declared *metadatum* is anchored by neither tier, matching C++,
+//! where `ConsumeUsdFallback` applies none of the layer-to-stage
+//! transformation `ConsumeAuthored` applies.
+//!
 //! # Permissions (`permission = private`)
 //!
 //! `permission` is `sdf`-level metadata only ([`sdf::Permission`]); composition
@@ -257,11 +268,6 @@
 //!   cached indices (`TODO(rayon)`), but the shared `indices` map that
 //!   inherit/specialize targets read mid-build first needs a concurrent map or a
 //!   targets-first build order. [`PrimIndex`] is already `Send + Sync`.
-//! - Anchoring `asset` values that come from a schema fallback:
-//!   `Attribute::fallback_value` reads the prim definition directly, so a
-//!   fallback never reaches `IndexCache`'s resolution tail and keeps neither an
-//!   `evaluated_path` nor a `resolved_path`. A fallback is authored in a schema
-//!   layer, so its anchor is that layer rather than any composed opinion.
 //! - Dependency fanout for a `defaultPrim` edit: `change::Changes` answers one
 //!   with a significant resync at the stage root, dropping the whole cache. Only
 //!   a reference or payload that named no target prim resolves through the
@@ -802,6 +808,21 @@ pub enum Error {
         /// The structural rule the relocate violates.
         reason: InvalidRelocateReason,
     },
+}
+
+impl Error {
+    /// Records this diagnostic in `errors` unless an identical one is already
+    /// there.
+    ///
+    /// The same failing opinion can be evaluated more than once — the
+    /// variant-selection search re-runs per declaring node and on task retry,
+    /// and a value-time read re-evaluates on every read — so a repeat says
+    /// nothing new.
+    pub(crate) fn record(self, errors: &mut Vec<Error>) {
+        if !errors.contains(&self) {
+            errors.push(self);
+        }
+    }
 }
 
 impl From<sdf::layer_registry::Error> for Error {

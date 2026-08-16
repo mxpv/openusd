@@ -4,17 +4,31 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
+use std::io;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use openusd::ar;
 use openusd::pcp;
 use openusd::sdf;
 use openusd::usd::{self, Stage};
+use openusd::usdz::ArchiveWriter;
 
-/// Writes `source` as `scene.usda` under `dir` and opens it.
+/// Writes `source` as `scene.usda` under `dir` and opens it against the
+/// process-wide schemas.
 fn open_scene(dir: &tempfile::TempDir, source: &str) -> Stage {
+    open_scene_with(dir, source, usd::SchemaRegistry::global().clone())
+}
+
+/// Writes `source` as `scene.usda` under `dir` and opens it against `registry`.
+fn open_scene_with(dir: &tempfile::TempDir, source: &str, registry: Arc<usd::SchemaRegistry>) -> Stage {
     let usda = dir.path().join("scene.usda");
     fs::write(&usda, source).expect("write layer");
-    Stage::open(usda.to_str().unwrap()).expect("open stage")
+    Stage::builder()
+        .schema_registry(registry)
+        .open(usda.to_str().unwrap())
+        .expect("open stage")
 }
 
 /// The composed `asset` value at `path`, which must be authored.
@@ -1244,5 +1258,469 @@ fn clip_expression_none_silent() {
         stage.composition_errors().is_empty(),
         "`None` is accepted silently, not attempted as a path: {:?}",
         stage.composition_errors()
+    );
+}
+
+// Schema-declared `asset` fallbacks. A fallback is authored in a schematics
+// layer that belongs to no layer stack, so the schema tier anchors it rather
+// than composition — and only when the family said where it resolved from.
+
+/// Manifest for the family declaring the concrete type `Widget`.
+const WIDGET_MANIFEST: &str = r#"#usda 1.0
+
+def "Typed"
+{
+    uniform token schemaKind = "abstractBase"
+}
+
+def "APISchemaBase"
+{
+    uniform token schemaKind = "abstractBase"
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Typed"]
+}
+"#;
+
+/// Manifest for a second family, so a composed property's two contributors can
+/// come from schematics at different locations.
+const FILE_API_MANIFEST: &str = r#"#usda 1.0
+
+def "FileAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] bases = ["APISchemaBase"]
+}
+"#;
+
+/// A resolver that echoes the anchor it was handed back into the identifier,
+/// so a test can prove the registry passed a location through untouched. Its
+/// identifiers are not filesystem paths, which is the point: canonicalizing one
+/// would destroy it.
+struct EchoAnchorResolver;
+
+impl ar::Resolver for EchoAnchorResolver {
+    fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+        match anchor {
+            Some(anchor) => format!("{}|{asset_path}", anchor.to_string_lossy()),
+            None => asset_path.to_string(),
+        }
+    }
+
+    fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+        Some(ar::ResolvedPath::new(asset_path))
+    }
+
+    fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+        self.resolve(asset_path)
+    }
+
+    fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+        Err(io::Error::other("this resolver opens nothing"))
+    }
+}
+
+/// Class-prim schematics declaring `Widget.inputs:file` with `default` as its
+/// authored fallback.
+fn widget_schematics(default: &str) -> String {
+    format!("#usda 1.0\n\nclass Widget \"Widget\"\n{{\n    asset inputs:file = {default}\n}}\n")
+}
+
+/// A registry declaring the concrete type `Widget` from `schematics`, said to
+/// have resolved from `location`.
+fn widget_registry(schematics: &str, location: Option<&ar::ResolvedPath>) -> Arc<usd::SchemaRegistry> {
+    usd::SchemaRegistry::builder()
+        .family(usd::FamilySource {
+            name: "widget",
+            manifest: WIDGET_MANIFEST,
+            schematics,
+            resolved_location: location,
+        })
+        .expect("family registers")
+        .build()
+        .expect("registry builds")
+}
+
+/// A registry whose two families sit at different locations, so which one
+/// anchored a composed fallback is visible in the resolved path.
+fn two_family_registry(
+    core_schematics: &str,
+    core_location: &ar::ResolvedPath,
+    ext_schematics: &str,
+    ext_location: &ar::ResolvedPath,
+) -> Arc<usd::SchemaRegistry> {
+    usd::SchemaRegistry::builder()
+        .family(usd::FamilySource {
+            name: "core",
+            manifest: WIDGET_MANIFEST,
+            schematics: core_schematics,
+            resolved_location: Some(core_location),
+        })
+        .expect("core registers")
+        .family(usd::FamilySource {
+            name: "ext",
+            manifest: FILE_API_MANIFEST,
+            schematics: ext_schematics,
+            resolved_location: Some(ext_location),
+        })
+        .expect("ext registers")
+        .build()
+        .expect("registry builds")
+}
+
+/// An in-memory stage over `registry` holding one `Widget`, so every read of
+/// `/W.inputs:file` comes from the schema alone.
+fn widget_stage(registry: Arc<usd::SchemaRegistry>) -> Stage {
+    widget_stage_from(Stage::builder(), registry)
+}
+
+/// [`widget_stage`] over an already-configured builder, for a stage that also
+/// needs its own resolver.
+fn widget_stage_from(builder: usd::StageBuilder, registry: Arc<usd::SchemaRegistry>) -> Stage {
+    let stage = builder
+        .schema_registry(registry)
+        .in_memory("anon.usda")
+        .expect("open stage");
+    stage
+        .define_prim("/W")
+        .expect("define prim")
+        .set_type_name("Widget")
+        .expect("set type");
+    stage
+}
+
+/// Creates `dir/<name>` and returns it with the location a family whose
+/// schematics sits there registers under.
+fn schema_dir(dir: &tempfile::TempDir, name: &str) -> (PathBuf, ar::ResolvedPath) {
+    let schemas = dir.path().join(name);
+    fs::create_dir(&schemas).expect("create schema directory");
+    let location = ar::ResolvedPath::new(schemas.join("generatedSchema.usda"));
+    (schemas, location)
+}
+
+/// A stage whose `Widget` class prim declares `core_property` and overrides the
+/// `FileAPI` built-in that declares `inputs:file` too, with the two families
+/// registered in sibling directories so the resolved path names which one the
+/// value came from.
+fn composed_widget(core_property: &str) -> (tempfile::TempDir, Stage) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (core, core_location) = schema_dir(&dir, "core");
+    let (ext, ext_location) = schema_dir(&dir, "ext");
+    fs::write(core.join("core.png"), b"png").expect("write core texture");
+    fs::write(core.join("ext.png"), b"png").expect("write core decoy");
+    fs::write(ext.join("ext.png"), b"png").expect("write ext texture");
+
+    let core_schematics = format!(
+        r#"#usda 1.0
+
+class Widget "Widget" (
+    apiSchemas = ["FileAPI"]
+    customData = {{
+        token[] apiSchemaOverridePropertyNames = ["inputs:file"]
+    }}
+)
+{{
+    {core_property}
+}}
+"#
+    );
+    let ext_schematics = "#usda 1.0\n\nclass \"FileAPI\"\n{\n    asset inputs:file = @./ext.png@\n}\n";
+
+    let registry = two_family_registry(&core_schematics, &core_location, ext_schematics, &ext_location);
+    (dir, widget_stage(registry))
+}
+
+/// A stage whose `Widget.inputs:file` falls back to `default`, declared by
+/// schematics registered as resolving from a `schemas` directory that holds
+/// `tex.png`. The directory is returned so it outlives the stage.
+fn located_widget(default: &str) -> (tempfile::TempDir, Stage) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (schemas, location) = schema_dir(&dir, "schemas");
+    fs::write(schemas.join("tex.png"), b"png").expect("write texture");
+
+    let stage = widget_stage(widget_registry(&widget_schematics(default), Some(&location)));
+    (dir, stage)
+}
+
+/// A family registered with no location anchors nothing, which is the position
+/// C++ is always in — `UsdSchemaRegistry` opens every `generatedSchema.usda`
+/// anonymously. The authored path names a file that really does exist in the
+/// process working directory, so an unanchored resolve would find it.
+#[test]
+fn unlocated_schema_keeps_relative() {
+    // Whatever the working directory happens to be, an unanchored relative path
+    // resolves against it — so the fixture is a file that is really there.
+    let present = fs::read_dir(".")
+        .expect("the working directory is readable")
+        .flatten()
+        .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .expect("the working directory holds a file to name");
+    let authored = format!("./{}", present.file_name().to_string_lossy());
+
+    let stage = widget_stage(widget_registry(&widget_schematics(&format!("@{authored}@")), None));
+    let asset = asset_at(&stage, "/W.inputs:file");
+
+    assert_eq!(asset.as_str(), authored);
+    assert_eq!(asset.resolved_path(), None, "an unlocated schema anchors nothing");
+}
+
+/// The same boundary for a path that needs no anchor at all: an absolute
+/// fallback from an unlocated family is still left exactly as authored.
+#[test]
+fn unlocated_schema_keeps_absolute() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let texture = dir.path().join("tex.png");
+    fs::write(&texture, b"png").expect("write texture");
+    let authored = texture.to_string_lossy().replace('\\', "/");
+
+    let schematics = widget_schematics(&format!("@{authored}@"));
+    let stage = widget_stage(widget_registry(&schematics, None));
+    let asset = asset_at(&stage, "/W.inputs:file");
+
+    assert_eq!(
+        asset.resolved_path(),
+        None,
+        "an unlocated schema anchors nothing, absolute or not"
+    );
+}
+
+/// An empty resolved path is how a resolver reports that it found nothing, so
+/// registering one is an error rather than a location that anchors nowhere.
+#[test]
+fn empty_schema_location_rejected() {
+    let nowhere = ar::ResolvedPath::new("");
+    let registered = usd::SchemaRegistry::builder().family(usd::FamilySource {
+        name: "widget",
+        manifest: WIDGET_MANIFEST,
+        schematics: &widget_schematics("@./tex.png@"),
+        resolved_location: Some(&nowhere),
+    });
+
+    assert!(
+        registered.is_err(),
+        "an empty location is a failed resolution, not a location"
+    );
+}
+
+/// A fallback anchors on the schematics that declared it, not on the stage's
+/// root layer: both directories hold a `tex.png` and the schema's one wins.
+#[test]
+fn fallback_anchors_on_schema() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (schemas, location) = schema_dir(&dir, "schemas");
+    fs::write(schemas.join("tex.png"), b"png").expect("write schema texture");
+    fs::write(dir.path().join("tex.png"), b"png").expect("write scene texture");
+
+    let registry = widget_registry(&widget_schematics("@./tex.png@"), Some(&location));
+    let stage = open_scene_with(&dir, "#usda 1.0\n\ndef Widget \"W\"\n{\n}\n", registry);
+
+    let asset = asset_at(&stage, "/W.inputs:file");
+    assert_resolved_under(&asset, "/schemas/tex.png", "the schematics directory");
+}
+
+/// An authored opinion still wins over the fallback, and still anchors on its
+/// own layer rather than on the schema.
+#[test]
+fn authored_beats_schema_anchor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (schemas, location) = schema_dir(&dir, "schemas");
+    fs::write(schemas.join("tex.png"), b"png").expect("write schema texture");
+    fs::write(dir.path().join("scene.png"), b"png").expect("write scene texture");
+
+    let registry = widget_registry(&widget_schematics("@./tex.png@"), Some(&location));
+    let source = "#usda 1.0\n\ndef Widget \"W\"\n{\n    asset inputs:file = @./scene.png@\n}\n";
+    let stage = open_scene_with(&dir, source, registry);
+
+    let asset = asset_at(&stage, "/W.inputs:file");
+    assert_eq!(asset.as_str(), "./scene.png");
+    assert_resolved_under(&asset, "/scene.png", "the layer that authored the opinion");
+}
+
+/// The location a family was registered with reaches the resolver verbatim:
+/// the registry neither canonicalizes nor re-resolves it, so a resolver whose
+/// locations are not filesystem paths keeps working.
+#[test]
+fn schema_location_used_verbatim() {
+    let location = ar::ResolvedPath::new("vault://schemas/generatedSchema.usda");
+    let registry = widget_registry(&widget_schematics("@./tex.png@"), Some(&location));
+    let stage = widget_stage_from(Stage::builder().resolver(EchoAnchorResolver), registry);
+
+    let asset = asset_at(&stage, "/W.inputs:file");
+    assert_eq!(
+        asset.resolved_path(),
+        Some("vault://schemas/generatedSchema.usda|./tex.png"),
+        "the registered location reached the resolver unchanged",
+    );
+}
+
+/// A schematics inside a package anchors its fallbacks in that package, the
+/// way a layer read out of one does.
+#[test]
+fn packaged_schema_anchors_inside() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schemas.usdz");
+    {
+        let mut writer = ArchiveWriter::create(&package).expect("create archive");
+        writer
+            .add_layer("gen/generatedSchema.usda", b"#usda 1.0\n")
+            .expect("add schematics");
+        writer.add_layer("gen/tex.png", b"png").expect("add texture");
+        writer.finish().expect("finish archive");
+    }
+
+    let package = package.to_string_lossy().replace('\\', "/");
+    let location = ar::ResolvedPath::new(format!("{package}[gen/generatedSchema.usda]"));
+    let stage = widget_stage(widget_registry(&widget_schematics("@./tex.png@"), Some(&location)));
+
+    let asset = asset_at(&stage, "/W.inputs:file");
+    assert_resolved_under(&asset, "[gen/tex.png]", "the package holding the schematics");
+}
+
+/// Every element of an `asset[]` fallback is anchored on its own terms: a
+/// relative one against the schematics, an absolute one on itself, and an empty
+/// one names nothing.
+#[test]
+fn mixed_asset_array_fallback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (schemas, location) = schema_dir(&dir, "schemas");
+    fs::write(schemas.join("near.png"), b"png").expect("write near texture");
+    let far = dir.path().join("far.png");
+    fs::write(&far, b"png").expect("write far texture");
+    let far = far.to_string_lossy().replace('\\', "/");
+
+    let schematics = format!(
+        "#usda 1.0\n\nclass Widget \"Widget\"\n{{\n    asset[] inputs:files = [@./near.png@, @@, @{far}@]\n}}\n"
+    );
+    let stage = widget_stage(widget_registry(&schematics, Some(&location)));
+
+    let values = stage
+        .attribute("/W.inputs:files")
+        .expect("attribute")
+        .get::<sdf::Value>()
+        .expect("read")
+        .expect("asset array value")
+        .try_as_asset_path_vec()
+        .expect("the fallback is asset-array-typed");
+
+    assert_resolved_under(&values[0], "/schemas/near.png", "the schematics directory");
+    assert!(values[1].is_empty(), "the empty element stays empty");
+    assert_eq!(
+        values[1].resolved_path(),
+        None,
+        "an element naming nothing resolves to nothing"
+    );
+    assert_resolved_under(&values[2], "/far.png", "the absolute path it was authored with");
+}
+
+/// A located family whose fallback names a file that is not there resolves to
+/// nothing — the same empty resolved path an unlocated family gives, reached by
+/// a different route, so neither state can stand in for the other.
+#[test]
+fn located_schema_missing_asset() {
+    let (_dir, stage) = located_widget("@./absent.png@");
+
+    let asset = asset_at(&stage, "/W.inputs:file");
+    assert_eq!(asset.as_str(), "./absent.png", "the authored path is kept");
+    assert_eq!(asset.resolved_path(), None, "the anchor resolved to nothing");
+
+    // The anchoring itself still ran: a sibling that does exist resolves.
+    let (_dir, stage) = located_widget("@./tex.png@");
+    assert!(asset_at(&stage, "/W.inputs:file").resolved_path().is_some());
+}
+
+/// An expression in a fallback is left exactly as authored and reports nothing:
+/// a schematics layer is in no layer stack, so there are no variables in scope
+/// for the author to have been wrong about.
+#[test]
+fn expression_fallback_unevaluated() {
+    let (_dir, stage) = located_widget("@`\"./${NAME}.png\"`@");
+
+    let asset = asset_at(&stage, "/W.inputs:file");
+    assert_eq!(asset.evaluated_path(), None, "no scope means no evaluation");
+    assert_eq!(
+        asset.resolved_path(),
+        None,
+        "an unevaluated expression is not a file name"
+    );
+    assert!(
+        expression_error_sites(&stage).is_empty(),
+        "no scope means no diagnostic"
+    );
+}
+
+/// A timed read reaches the fallback through the same anchoring as an untimed
+/// one, so `AttributeQuery` and `Attribute` agree.
+#[test]
+fn fallback_asset_timed_read() {
+    let (_dir, stage) = located_widget("@./tex.png@");
+    let attribute = stage.attribute("/W.inputs:file").expect("attribute");
+
+    let untimed = asset_at(&stage, "/W.inputs:file");
+    let timed = usd::AttributeQuery::new(&attribute)
+        .get_at::<sdf::AssetPath>(usd::TimeCode::from(0.0))
+        .expect("read")
+        .expect("asset value");
+
+    assert_eq!(untimed.resolved_path(), timed.resolved_path());
+    assert!(
+        untimed.resolved_path().is_some(),
+        "the located schema anchors both reads"
+    );
+}
+
+/// A composed property anchors on the contributor that authored its `default`:
+/// here the class prim's own override does, so the override's family wins over
+/// the API schema it composes with.
+#[test]
+fn composed_default_from_override() {
+    let (_dir, stage) = composed_widget("asset inputs:file = @./core.png@");
+
+    let asset = asset_at(&stage, "/W.inputs:file");
+    assert_eq!(asset.as_str(), "./core.png", "the override supplies the value");
+    assert_resolved_under(
+        &asset,
+        "/core/core.png",
+        "the family whose override authored the default",
+    );
+}
+
+/// The other direction: the class prim overrides the declaration but authors no
+/// `default`, so the value — and therefore the anchor — comes from the weaker
+/// API schema's own family.
+#[test]
+fn composed_default_from_weaker() {
+    let (_dir, stage) = composed_widget("asset inputs:file");
+
+    let asset = asset_at(&stage, "/W.inputs:file");
+    assert_eq!(asset.as_str(), "./ext.png", "the API schema supplies the value");
+    assert_resolved_under(&asset, "/ext/ext.png", "the family that authored the default");
+}
+
+/// The parity boundary: only the fallback *value* is anchored. The same schema
+/// declaration read as metadata comes back exactly as authored, as it does in
+/// C++, where a fallback metadatum is taken straight off the prim definition.
+#[test]
+fn schema_metadatum_stays_unanchored() {
+    let (_dir, stage) = located_widget("@./tex.png@");
+    let attribute = stage.attribute("/W.inputs:file").expect("attribute");
+
+    assert!(
+        asset_at(&stage, "/W.inputs:file").resolved_path().is_some(),
+        "the value read is anchored",
+    );
+
+    let declared = attribute
+        .get_metadata::<sdf::Value>("default")
+        .expect("read metadata")
+        .expect("the schema declares a default")
+        .try_as_asset_path()
+        .expect("the declaration is asset-typed");
+    assert_eq!(
+        declared.resolved_path(),
+        None,
+        "a schema value read as metadata is not anchored"
     );
 }

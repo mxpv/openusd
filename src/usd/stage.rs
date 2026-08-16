@@ -53,7 +53,7 @@ use super::composition::{self, PendingEdit, StageComposition};
 
 use super::interp::{self, InterpolationType};
 use super::sink::{PendingChange, Provenance, StageSink, StageSinkId, keep_ancestors};
-use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry};
+use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry, Schematics};
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -2790,6 +2790,42 @@ impl Stage {
     ) -> Result<T> {
         self.process_pending();
         self.composition.query(query, self)
+    }
+
+    /// Anchors an `asset` an attribute's schema fallback supplied, against the
+    /// location the schematics that authored it was resolved from.
+    ///
+    /// This has no C++ counterpart, and is a deliberate extension rather than a
+    /// gap being closed: `UsdStage::_GetAssetPathContext` yields no context for
+    /// a fallback-sourced value, and `UsdSchemaRegistry` opens each
+    /// `generatedSchema.usda` with `SdfLayer::OpenAsAnonymous`, so C++ has no
+    /// location to anchor against in the first place. It stays opt-in — a
+    /// family registered without a
+    /// [`resolved_location`](super::FamilySource::resolved_location) reads back
+    /// exactly as C++ leaves it, since resolving an unanchored relative path
+    /// would canonicalize it against the process working directory and invent a
+    /// location the author never named.
+    ///
+    /// No variable scope is supplied: a schema layer belongs to no layer stack,
+    /// so an expression-valued fallback is left unevaluated and unresolved, and
+    /// reports nothing — there are no variables in scope for it to be wrong
+    /// about. With nothing to evaluate, nothing can fail either, so the error
+    /// sink has nothing to collect.
+    ///
+    /// A value holding no asset paths passes through untouched, so the caller
+    /// need only gate on the type when it has its own reason to.
+    pub(crate) fn resolve_schema_asset(&self, source: &Schematics, value: sdf::Value) -> sdf::Value {
+        let Some(anchor) = source.resolved_location() else {
+            return value;
+        };
+        let registry = self.composition.layer_registry();
+        let mut failures = Vec::new();
+        let value = sdf::resolve_asset_paths(&registry, Some(anchor), None, value, &mut failures);
+        debug_assert!(
+            failures.is_empty(),
+            "a schema fallback evaluates nothing, so nothing can fail"
+        );
+        value
     }
 
     /// Whether the composed prim at `path` satisfies `predicate`.
