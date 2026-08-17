@@ -250,6 +250,39 @@ impl Path {
         self.path.ends_with('}')
     }
 
+    /// Returns `true` if this path names a prim.
+    ///
+    /// Mirrors C++ `SdfPath::IsPrimPath`: true for an absolute or relative prim
+    /// path and for the relative anchors `.` and `..`, which C++ builds as prim
+    /// nodes; false for the pseudo-root, a variant selection, and every path
+    /// carrying a property tail — a property, a relationship target, a
+    /// relational attribute, a mapper.
+    ///
+    /// Decided by the final [`PathComponent`], so a tail the simpler predicates
+    /// do not model still classifies correctly: `/A.rel[/Target]` leaves a
+    /// remainder the prim-chain grammar cannot consume, and so is not a prim
+    /// path.
+    pub fn is_prim_path(&self) -> bool {
+        // The relative anchors: `.`, and a `..(/..)*` run with nothing after it.
+        if self.path == "." || (!self.path.is_empty() && self.path.split('/').all(|seg| seg == "..")) {
+            return true;
+        }
+        // Strip the anchor the grammar allows ahead of the prim chain, then ask
+        // the prim-chain iterator what the last component was. A non-empty
+        // remainder means a property tail the chain could not consume.
+        let mut rest = self.path.as_str();
+        if let Some(after) = rest.strip_prefix('/') {
+            rest = after;
+        } else {
+            while let Some(after) = rest.strip_prefix("../") {
+                rest = after;
+            }
+        }
+        let mut components = PathComponents::over(rest);
+        let last = components.by_ref().last();
+        components.remainder().is_empty() && matches!(last, Some(PathComponent::Prim(_)))
+    }
+
     /// Returns the variant set name of the deepest `{set=sel}` (or `{set=}`)
     /// selection in this path — `"set"` for both `/Prim{set=sel}` and the bare
     /// variant-set path `/Prim{set=}`. `None` when the path carries no variant
@@ -587,11 +620,7 @@ impl Path {
     /// "/A.attr"  -> [Prim("A")]  (remainder ".attr")
     /// ```
     pub fn components(&self) -> PathComponents<'_> {
-        PathComponents {
-            rest: self.path.strip_prefix('/').unwrap_or(&self.path),
-            expect_slash: false,
-            emitted: false,
-        }
+        PathComponents::over(self.path.strip_prefix('/').unwrap_or(&self.path))
     }
 
     /// Counts the prim-name components of this path, skipping variant
@@ -986,6 +1015,17 @@ pub struct PathComponents<'a> {
 }
 
 impl<'a> PathComponents<'a> {
+    /// Iterates the prim chain of `rest`, the path text with its leading `/`
+    /// already stripped. A relative path's `..` run is not part of the chain
+    /// grammar, so a caller that must parse past one strips it too.
+    fn over(rest: &'a str) -> Self {
+        Self {
+            rest,
+            expect_slash: false,
+            emitted: false,
+        }
+    }
+
     /// The unparsed tail left after iteration: empty for a well-formed prim
     /// path, otherwise the property suffix or the malformed segment at which
     /// parsing stopped.
@@ -1130,11 +1170,7 @@ fn validate_path(full: &str, s: &str, depth: u8) -> Result<(), (usize, &'static 
 
     // The prim chain, through the same iterator `Path::components` exposes;
     // per-character identifier checks layer on its structural grammar.
-    let mut components = PathComponents {
-        rest,
-        expect_slash: false,
-        emitted: false,
-    };
+    let mut components = PathComponents::over(rest);
     for component in components.by_ref() {
         match component {
             PathComponent::Prim(name) => validate_identifier(full, name)?,
@@ -1282,6 +1318,31 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
+
+    /// `is_prim_path` classifies by the path's final element, so every tail
+    /// shape lands where C++ `SdfPath::IsPrimPath` puts it — including `.` and
+    /// `..`, which C++ builds as prim nodes, and `/A.rel[/T]`, which the
+    /// simpler `is_property_path` predicate cannot recognize as non-prim.
+    #[test]
+    fn is_prim_path_forms() {
+        for text in ["/A", "/A/B", "/A{x=y}B", "../foo", "..", "../..", "."] {
+            assert!(raw(text).is_prim_path(), "{text} names a prim");
+        }
+        for text in [
+            "",
+            "/",
+            "/A{x=y}",
+            "/A{x=}",
+            "/A.attr",
+            "/A.primvars:displayColor",
+            "/A.rel[/T]",
+            "/A.rel[/T].attr",
+            "/A.attr.mapper[/T]",
+            "/A.attr.expression",
+        ] {
+            assert!(!raw(text).is_prim_path(), "{text} does not name a prim");
+        }
+    }
 
     /// Builds a `Path` directly from `path`, skipping validation — for
     /// exercising lenient read-side behavior on malformed input.

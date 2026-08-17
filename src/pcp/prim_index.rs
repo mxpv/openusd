@@ -210,9 +210,9 @@ impl PrimIndex {
     /// resolved to but skipped because they were muted. Their arcs grafted no
     /// node, so these are the dependency on a muted target that toggling the mute
     /// must fan out to (see
-    /// [`PrimIndexGraph::muted_external_targets`](super::prim_graph::PrimIndexGraph)).
+    /// [`NonSiteDeps::muted_external`](super::prim_graph::NonSiteDeps)).
     pub(crate) fn muted_external_targets(&self) -> &[LayerId] {
-        &self.graph.muted_external_targets
+        self.graph.non_site_deps().map_or(&[][..], |d| &d.muted_external)
     }
 
     /// Canonical identifiers of reference/payload targets this prim's composition
@@ -221,9 +221,18 @@ impl PrimIndex {
     /// [`muted_external_targets`](Self::muted_external_targets) — there is no
     /// [`LayerId`] to fan an unmute out by; the change machinery keys the fanout on
     /// these identifiers instead (see
-    /// [`PrimIndexGraph::muted_unloaded_targets`](super::prim_graph::PrimIndexGraph)).
+    /// [`NonSiteDeps::muted_unloaded`](super::prim_graph::NonSiteDeps)).
     pub(crate) fn muted_unloaded_targets(&self) -> &[String] {
-        &self.graph.muted_unloaded_targets
+        self.graph.non_site_deps().map_or(&[][..], |d| &d.muted_unloaded)
+    }
+
+    /// Layers whose `defaultPrim` this prim's composition consulted, because a
+    /// reference or payload named no target prim. Editing that field on one of
+    /// them must recompose this prim, and when the layer had no default the arc
+    /// grafted no node, so this is the dependency's only trace (see
+    /// [`NonSiteDeps::default_prim`](super::prim_graph::NonSiteDeps)).
+    pub(crate) fn default_prim_layers(&self) -> &[LayerId] {
+        self.graph.non_site_deps().map_or(&[][..], |d| &d.default_prim)
     }
 
     /// Iterates the spec stack's live contributing sites — those whose node is
@@ -1032,6 +1041,15 @@ fn resolve_variant_selections_in<'a>(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+impl PrimIndex {
+    /// Records `layer` as one whose `defaultPrim` this index's composition
+    /// consulted, so a test can set the dependency up without a real build.
+    pub(crate) fn record_default_prim(&mut self, layer: LayerId) {
+        self.graph.non_site_deps_mut().default_prim.push(layer);
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -1986,7 +2004,7 @@ def "Prim" (
     }
 
     /// A reference to a layer without `defaultPrim` (and no explicit prim path)
-    /// is recorded as a recoverable `MissingDefaultPrim` error and skipped.
+    /// is recorded as a recoverable `UnresolvedDefaultPrim` error and skipped.
     #[test]
     fn missing_default_prim_recorded() -> Result<()> {
         let root = parse_usda(
@@ -2014,8 +2032,8 @@ def "Prim" (
             true,
         )?;
         assert!(
-            errors.iter().any(|e| matches!(e, Error::MissingDefaultPrim { .. })),
-            "expected a recorded MissingDefaultPrim error, got {errors:?}"
+            errors.iter().any(|e| matches!(e, Error::UnresolvedDefaultPrim { .. })),
+            "expected a recorded UnresolvedDefaultPrim error, got {errors:?}"
         );
         assert!(
             !index.is_empty(),

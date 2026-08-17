@@ -775,6 +775,7 @@ impl composition::CompositionHooks for Stage {
         layer.add_sink(StageAggregator {
             stage: self.downgrade(),
             layer_id: id,
+            prior_default_prim: Cell::new(None),
         });
     }
 
@@ -862,10 +863,35 @@ impl Drop for ClearEditProvenance<'_> {
 struct StageAggregator {
     stage: WeakStage,
     layer_id: pcp::LayerId,
+    /// The layer's `defaultPrim` token as `before_commit` saw it, for the
+    /// matching `after_commit` to hand to the composition queue.
+    ///
+    /// Composition classification runs after the commit, by which point the
+    /// pre-edit values are gone, and it needs this one to fan a `defaultPrim`
+    /// edit out the way C++ `PcpChanges` does. One sink is installed per layer,
+    /// and `sdf::edit_layers` runs every `before_commit` ahead of any
+    /// `after_commit`, so sink-local scratch stays correct across a multi-layer
+    /// transaction — and a vetoed commit simply leaves a value the next
+    /// `before_commit` overwrites.
+    prior_default_prim: Cell<Option<Token>>,
 }
 
 impl sdf::LayerSink for StageAggregator {
     fn before_commit(&self, change: &sdf::PendingLayerChange<'_>) -> Result<(), sdf::sink::Error> {
+        // Only a commit that staged something on the pseudo-root can have touched
+        // the field, and the overlay answers that in one probe — the change list
+        // is a flat vector, so scanning it would cost a walk per commit. A
+        // pseudo-root edit that left `defaultPrim` alone reads a value nothing
+        // consumes, which is cheaper than finding out. An absent field, an
+        // unreadable one, and a non-token value all record `None`: no prior prim,
+        // the conservative fanout.
+        let prior = change
+            .overlay
+            .keys()
+            .any(sdf::Path::is_abs_root)
+            .then(|| sdf::PseudoRootSpecRef::get(change.base)?.default_prim())
+            .flatten();
+        self.prior_default_prim.set(prior);
         if let Some(stage) = self.stage.upgrade() {
             // Cache this transaction's id (minted by `sdf::edit_layers`) for the
             // matching `after_commit`'s `record_pending` to read; `before_commit`
@@ -878,8 +904,9 @@ impl sdf::LayerSink for StageAggregator {
     }
 
     fn after_commit(&self, _layer: &str, changes: &sdf::ChangeList) {
+        let prior = self.prior_default_prim.take();
         if let Some(stage) = self.stage.upgrade() {
-            stage.record_pending(self.layer_id, changes.clone());
+            stage.record_pending(self.layer_id, changes.clone(), prior);
         }
     }
 }
@@ -1232,8 +1259,8 @@ impl Stage {
     /// layer regardless of the current [`EditTarget`]. Mirrors C++
     /// `UsdStage::SetDefaultPrim` which routes through `GetRootLayer()`.
     ///
-    /// `name` must be a valid USD identifier or nested prim path — see
-    /// [`sdf::LayerEdit::set_default_prim`].
+    /// `name` must name a prim, in either spelling — `"World"`, `"World/Char"`,
+    /// or `"/World/Char"`. See [`sdf::LayerEdit::set_default_prim`].
     pub fn set_default_prim(&self, name: impl Into<String>) -> Result<(), StageAuthoringError> {
         let name = name.into();
         self.with_root_layer(|layer| {
@@ -1651,13 +1678,19 @@ impl Stage {
     /// installed when its layer interned) as a layer commits — while the layer graph
     /// is borrowed for the edit, which is why it appends to the independent
     /// [`StageComposition`]'s pending queue rather than recomposing inline.
-    pub(super) fn record_pending(&self, layer_id: pcp::LayerId, changes: sdf::ChangeList) {
+    pub(super) fn record_pending(
+        &self,
+        layer_id: pcp::LayerId,
+        changes: sdf::ChangeList,
+        prior_default_prim: Option<Token>,
+    ) {
         let provenance = self.edit_provenance.take();
         self.composition.record_pending(PendingEdit {
             generation: self.current_generation.get(),
             layer: layer_id,
             changes,
             provenance,
+            prior_default_prim,
         });
     }
 

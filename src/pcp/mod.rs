@@ -132,10 +132,15 @@
 //!      stack and keeps the index.
 //!
 //!    Layer-stack-tier flags (`subLayers`, sublayer offsets,
-//!    `timeCodesPerSecond`, `expressionVariables`, `layerRelocates`,
-//!    `defaultPrim`) recompose the affected layer stacks and drop only the
-//!    indices that read them (`IndexCache::invalidate_layers`), not the whole
-//!    cache.
+//!    `timeCodesPerSecond`, `expressionVariables`, `layerRelocates`) recompose
+//!    the affected layer stacks and drop only the indices that read them
+//!    (`IndexCache::invalidate_layers`), not the whole cache.
+//!
+//!    `defaultPrim` has a channel of its own. Only a reference or payload that
+//!    named no target prim resolves through it, and each such build records the
+//!    layer it consulted, so the edit evicts exactly those indices. What it
+//!    *reports* is the C++ set, derived from the field's prior value — see the
+//!    parity notes below.
 //!
 //! 3. [`Changes::apply`] surgically removes the affected entries from the
 //!    cache. Indices rebuild lazily on next access.
@@ -261,6 +266,31 @@
 //! `finalize_strength_order`'s plain DFS already places the globally-weak band
 //! last and orders it with the C++ `PcpCompareSiblingNodeStrength` comparison.
 //!
+//! # `defaultPrim` parity
+//!
+//! A reference or payload naming no target prim resolves through the target
+//! layer's `defaultPrim` (`prim_indexer`'s `resolve_default_prim`, C++
+//! `_GetDefaultPrimPath`). C++ tracks that dependency with a culled placeholder
+//! arc grafted at the target's pseudo-root when the field names no prim, so its
+//! site table can find the referrer later. This port records the consultation
+//! directly on the index instead
+//! ([`NonSiteDeps::default_prim`](prim_graph::NonSiteDeps)) and skips the arc,
+//! which keeps the composed graph free of a node that contributes nothing.
+//!
+//! Two consequences, both deliberate:
+//!
+//! - An edit evicts only the indices that recorded consulting the field. C++
+//!   fans out from the prim path the field used to name — reaching prims that
+//!   referenced that path explicitly and compose identically either way — and
+//!   from the pseudo-root site when there was no prior value, which sweeps in
+//!   every dependent of the layer. The composed results are the same; the set
+//!   recomputed is smaller.
+//! - The resync notice follows C++ where C++ is precise: with a prior value it
+//!   is that site's fanout, over-reporting exactly as C++ does. With none it is
+//!   the recorded consumers rather than every dependent of the layer, since the
+//!   breadth there only compensates for the placeholder this port does not
+//!   create.
+//!
 //! # Remaining work
 //!
 //! - Cross-prim parallelism: `IndexCache::ensure_index` composes prims serially.
@@ -268,15 +298,6 @@
 //!   cached indices (`TODO(rayon)`), but the shared `indices` map that
 //!   inherit/specialize targets read mid-build first needs a concurrent map or a
 //!   targets-first build order. [`PrimIndex`] is already `Send + Sync`.
-//! - Dependency fanout for a `defaultPrim` edit: `change::Changes` answers one
-//!   with a significant resync at the stage root, dropping the whole cache. Only
-//!   a reference or payload that named no target prim resolves through the
-//!   layer's default, so fanning the old default prim's site out through the
-//!   dependency table would name just those dependents, as C++ does (it inserts
-//!   the old default prim path, falling back to the absolute root only when there
-//!   was none — and calls even that "a bit of heavy hammer"). The old value is
-//!   the missing input: [`sdf::ChangeEntry`](crate::sdf::ChangeEntry) records
-//!   which fields were touched, not what they held before.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -334,7 +355,7 @@ mod relocates;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, Path, Value};
 
-pub(crate) use change::{ApplyOutcome, Changes};
+pub(crate) use change::{ApplyOutcome, Changes, LayerChanges};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
 pub(crate) use layer_graph::{LayerGraph, LoadFailure, MuteChange, StackIdentity, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
@@ -572,22 +593,17 @@ pub enum Error {
         site_path: Path,
     },
 
-    /// An external reference/payload targets a layer without specifying a prim
-    /// path, but the target layer has no `defaultPrim` metadata.
-    #[error("{arc:?} target @{layer_id}@ has no defaultPrim (at {site_path})")]
-    MissingDefaultPrim {
-        /// Identifier of the target layer.
-        layer_id: String,
-        /// The composition arc type.
-        arc: ArcType,
-        /// The prim path where the arc was authored.
-        site_path: Path,
-    },
-
-    /// The `defaultPrim` metadata on a target layer has an invalid or
-    /// unexpected value.
-    #[error("{arc:?} target @{layer_id}@ has invalid defaultPrim (at {site_path})")]
-    InvalidDefaultPrim {
+    /// A reference/payload targets a layer without specifying a prim path, and
+    /// the layer's `defaultPrim` names no prim — it is absent, holds a non-token
+    /// value, or is not a prim path. C++ reports all three as one
+    /// `PcpErrorUnresolvedPrimPath` naming `./defaultPrim`.
+    ///
+    /// One error rather than three because composition treats the three states
+    /// identically — the arc is skipped and the prim composes without it — so a
+    /// finer diagnostic would draw a distinction nothing downstream acts on. For
+    /// the same reason the message does not quote the offending value.
+    #[error("{arc:?} target @{layer_id}@ defaultPrim does not resolve to a prim (at {site_path})")]
+    UnresolvedDefaultPrim {
         /// Identifier of the target layer.
         layer_id: String,
         /// The composition arc type.

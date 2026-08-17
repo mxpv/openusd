@@ -14,6 +14,7 @@
 //! `layer_index` rather than a layer-stack reference.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 use crate::sdf::{self, Path};
 
@@ -65,6 +66,16 @@ pub(super) struct Dependencies {
     /// The canonical identifiers `prim_index_path` registered under in
     /// `by_muted_canonical`, for O(1) retraction on removal.
     by_prim_muted: HashMap<Path, HashSet<String>>,
+    /// Reverse `layer → prim-index-paths` map for `defaultPrim` consultation:
+    /// which indices resolved a reference or payload target through this layer's
+    /// default because the arc named no prim. Registered whether or not the layer
+    /// named one — an unresolved default grafts no node, so no site records it —
+    /// and read by [`prims_using_default_prim`](Self::prims_using_default_prim)
+    /// to evict exactly those indices when the field is edited.
+    by_default_prim: HashMap<LayerId, HashSet<Path>>,
+    /// The layers `prim_index_path` registered under in `by_default_prim`, for
+    /// O(1) retraction on removal.
+    by_prim_default_prim: HashMap<Path, HashSet<LayerId>>,
     /// Reverse `layer stack → prim-index-paths` map over the stacks each index's
     /// dependency nodes compose against. An `expressionVariables` edit whose
     /// stack delta demands a full resync — the variable source changed, or a
@@ -175,10 +186,11 @@ impl Dependencies {
 
         // A reference/payload target this index depends on the mute state of but has
         // no live site for: one muted before loading (never interned — its canonical
-        // identifier is in `muted_unloaded_targets`), or one muted after loading (its
-        // stack emptied, so it grafted no node — the interned target root, whose
-        // identifier is that same canonical). Register both by canonical identifier
-        // so unmuting the target fans back here, without counting it as reached.
+        // identifier is in `NonSiteDeps::muted_unloaded`), or one muted after
+        // loading (its stack emptied, so it grafted no node — the interned target
+        // root, whose identifier is that same canonical). Register both by
+        // canonical identifier so unmuting the target fans back here, without
+        // counting it as reached.
         let muted: HashSet<String> = index
             .muted_unloaded_targets()
             .iter()
@@ -197,6 +209,17 @@ impl Dependencies {
                 .insert(prim_index_path.clone());
         }
 
+        // Layers whose `defaultPrim` this index's composition consulted. Collected
+        // through a set because one target reached by both a `references` and a
+        // `payload` arc records twice.
+        let defaults: HashSet<LayerId> = index.default_prim_layers().iter().copied().collect();
+        for &layer in &defaults {
+            self.by_default_prim
+                .entry(layer)
+                .or_default()
+                .insert(prim_index_path.clone());
+        }
+
         self.by_prim.insert(prim_index_path.clone(), registered);
         self.by_prim_layers.insert(prim_index_path.clone(), layers);
         // The common arc-free, expression-free index registers under no stack
@@ -207,6 +230,10 @@ impl Dependencies {
         // The common unmuted index depends on no muted target, so skip an empty entry.
         if !muted.is_empty() {
             self.by_prim_muted.insert(prim_index_path.clone(), muted);
+        }
+        // Likewise the common index resolves no `defaultPrim`.
+        if !defaults.is_empty() {
+            self.by_prim_default_prim.insert(prim_index_path.clone(), defaults);
         }
 
         // Register the prim's own path once, independent of layer. Without
@@ -224,28 +251,16 @@ impl Dependencies {
         // Drop the prim's layer-agnostic self-registration so an eviction or
         // rebuild leaves no stale `by_path` entry.
         self.by_path.remove(prim_index_path);
-        // Retract the `layer → index` registrations.
-        if let Some(layers) = self.by_prim_layers.remove(prim_index_path) {
-            for li in layers {
-                if let Some(set) = self.by_layer.get_mut(&li) {
-                    set.remove(prim_index_path);
-                    if set.is_empty() {
-                        self.by_layer.remove(&li);
-                    }
-                }
-            }
-        }
-        // Retract the `muted canonical identifier → index` registrations.
-        if let Some(canonicals) = self.by_prim_muted.remove(prim_index_path) {
-            for canonical in canonicals {
-                if let Some(set) = self.by_muted_canonical.get_mut(&canonical) {
-                    set.remove(prim_index_path);
-                    if set.is_empty() {
-                        self.by_muted_canonical.remove(&canonical);
-                    }
-                }
-            }
-        }
+        // Retract the three reverse-keyed registrations: the layers this index
+        // reached, the muted targets it depends on the state of, and the layers
+        // whose `defaultPrim` it consulted.
+        retract(&mut self.by_layer, &mut self.by_prim_layers, prim_index_path);
+        retract(&mut self.by_muted_canonical, &mut self.by_prim_muted, prim_index_path);
+        retract(
+            &mut self.by_default_prim,
+            &mut self.by_prim_default_prim,
+            prim_index_path,
+        );
         // Retract both stack-keyed registrations — the `by_stack` users and the
         // per-stack variable names — through the one per-prim stack set.
         if let Some(stacks) = self.by_prim_stacks.remove(prim_index_path) {
@@ -287,16 +302,37 @@ impl Dependencies {
     /// transitively on opinions at `/Foo`, so a change at `/Foo` invalidates
     /// `/Foo/Bar` too.
     pub(super) fn lookup_with_ancestors(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
-        let per_layer = self
-            .per_layer
-            .get(&layer_id)
-            .into_iter()
-            .flat_map(|map| map.ancestors(site_path).map(|(_, deps)| deps.as_slice()));
         // The layer-agnostic self-registrations are findable on every layer, so
         // an ancestor that observes its own path invalidates `site_path` even on
         // a layer its graph does not touch.
         let by_path = site_path.ancestors().map(|anc| self.path_dependents(&anc));
-        Self::dedup_paths(per_layer.chain(by_path).flatten())
+        Self::dedup_paths(self.graph_site_ancestors(layer_id, site_path).chain(by_path.flatten()))
+    }
+
+    /// Prim indices whose graph reads `(layer_id, site_path)` or an ancestor of
+    /// it, without the layer-agnostic [`by_path`](Self::by_path) fold — the half
+    /// [`lookup_with_ancestors`](Self::lookup_with_ancestors) and
+    /// [`graph_ancestor_lookup`](Self::graph_ancestor_lookup) share.
+    fn graph_site_ancestors<'a>(&'a self, layer_id: LayerId, site_path: &'a Path) -> impl Iterator<Item = &'a Path> {
+        self.per_layer
+            .get(&layer_id)
+            .into_iter()
+            .flat_map(move |map| map.ancestors(site_path).map(|(_, deps)| deps.as_slice()))
+            .flatten()
+    }
+
+    /// Find prim indices whose graph reads `(layer_id, site_path)` or an
+    /// ancestor of it.
+    ///
+    /// The graph-site half of
+    /// [`lookup_with_ancestors`](Self::lookup_with_ancestors), without the
+    /// layer-agnostic [`by_path`](Self::by_path) self-registrations. Those exist
+    /// so a cached prim stays findable on every layer, including ones its graph
+    /// never touched, which is right for invalidation and wrong for a report
+    /// about one layer's site: a prim merely cached at `/Source` would answer a
+    /// question about `/Source` in a layer it does not read.
+    pub(super) fn graph_ancestor_lookup(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+        Self::dedup_paths(self.graph_site_ancestors(layer_id, site_path))
     }
 
     /// Find prim indices whose graph reads exactly `(layer_id, site_path)`,
@@ -360,7 +396,19 @@ impl Dependencies {
         if stack == LayerStackId::ROOT {
             return vec![Path::abs_root()];
         }
-        self.by_stack.get(&stack).into_iter().flatten().cloned().collect()
+        keyed_prims(&self.by_stack, &stack)
+    }
+
+    /// Prim indices whose composition resolved a reference or payload target
+    /// through `layer`'s `defaultPrim`, because the arc named no prim — the
+    /// victim set for an edit to that field.
+    ///
+    /// Layer-keyed with no ancestor or subtree walk: what was read is layer
+    /// metadata, not a site, and a namespace descendant of a consumer inherits
+    /// the record through its ancestral seed, so it registers here in its own
+    /// right.
+    pub(super) fn prims_using_default_prim(&self, layer: LayerId) -> Vec<Path> {
+        keyed_prims(&self.by_default_prim, &layer)
     }
 
     /// Prim indices that recorded reading one of `changed` from `stack`'s
@@ -414,6 +462,28 @@ impl Dependencies {
     }
 }
 
+/// The prim indices registered under `key`, as an invalidation victim list.
+fn keyed_prims<K: Eq + Hash>(map: &HashMap<K, HashSet<Path>>, key: &K) -> Vec<Path> {
+    map.get(key).into_iter().flatten().cloned().collect()
+}
+
+/// Drops `prim`'s registrations from a `key → prims` map and its `prim → keys`
+/// reverse, leaving no empty entry behind in either.
+fn retract<K: Eq + Hash>(
+    forward: &mut HashMap<K, HashSet<Path>>,
+    reverse: &mut HashMap<Path, HashSet<K>>,
+    prim: &Path,
+) {
+    for key in reverse.remove(prim).into_iter().flatten() {
+        if let Some(set) = forward.get_mut(&key) {
+            set.remove(prim);
+            if set.is_empty() {
+                forward.remove(&key);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +521,53 @@ mod tests {
             idx.push_node(Node::new(stack, layer_id, node_path, arc, map.clone(), map, false));
         }
         idx
+    }
+
+    /// A recorded `defaultPrim` consultation registers under the layer it named
+    /// and retracts cleanly, and a layer recorded twice — one target reached by
+    /// both a `references` and a `payload` arc — answers once.
+    #[test]
+    fn default_prim_register_remove() {
+        let g = graph(2);
+        let (l0, l1) = (g.all_ids()[0], g.all_ids()[1]);
+        let mut deps = Dependencies::default();
+        let foo = p("/Foo");
+        let mut index = make_index(&g, &foo, vec![(ArcType::Root, l0, foo.clone())]);
+        index.record_default_prim(l1);
+        index.record_default_prim(l1);
+        deps.add(&foo, &index, &g, ExprVarDeps::default());
+
+        assert_eq!(deps.prims_using_default_prim(l1), vec![foo.clone()]);
+        assert!(deps.prims_using_default_prim(l0).is_empty(), "only the layer consulted");
+
+        deps.remove(&foo);
+        assert!(deps.prims_using_default_prim(l1).is_empty());
+        assert!(deps.by_default_prim.is_empty(), "the forward map keeps no empty entry");
+        assert!(deps.by_prim_default_prim.is_empty(), "nor the reverse one");
+    }
+
+    /// The report a `defaultPrim` edit publishes must not fold in the
+    /// layer-agnostic self-registrations: a prim cached at `/Source` that never
+    /// reads the edited layer is not a dependent of that layer's `/Source`.
+    #[test]
+    fn ancestor_lookup_skips_by_path() {
+        let g = graph(2);
+        let (l0, l1) = (g.all_ids()[0], g.all_ids()[1]);
+        let mut deps = Dependencies::default();
+        let source = p("/Source");
+        // A prim whose only registration is its own path, on no particular layer.
+        let bystander = make_index(&g, &source, vec![(ArcType::Root, l0, source.clone())]);
+        deps.add(&source, &bystander, &g, ExprVarDeps::default());
+        // A prim whose graph genuinely reads `/Source` on `l1`.
+        let user = p("/User");
+        let reader = make_index(&g, &user, vec![(ArcType::Reference, l1, source.clone())]);
+        deps.add(&user, &reader, &g, ExprVarDeps::default());
+
+        assert_eq!(deps.graph_ancestor_lookup(l1, &source), vec![user.clone()]);
+        assert!(
+            deps.lookup_with_ancestors(l1, &source).contains(&source),
+            "the invalidation lookup does fold `by_path` in"
+        );
     }
 
     #[test]

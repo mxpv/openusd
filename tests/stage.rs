@@ -4511,13 +4511,19 @@ fn author_default_prim() -> Result<()> {
 }
 
 #[test]
-fn default_prim_rejects_path() -> Result<()> {
+fn default_prim_rejects_non_prim() -> Result<()> {
     let stage = in_memory_stage()?;
-    let err = stage.set_default_prim("/World").unwrap_err();
-    assert!(matches!(
-        err,
-        StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. })
-    ));
+    for name in ["World.attr", "/", ""] {
+        let err = stage.set_default_prim(name).unwrap_err();
+        assert!(
+            matches!(err, StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. })),
+            "{name} names no prim"
+        );
+    }
+    // An absolute spelling is accepted: it is how C++ writes a nested default
+    // prim, so rejecting it would make a C++-authored value unwritable here.
+    stage.set_default_prim("/World/Char")?;
+    assert_eq!(stage.default_prim().as_deref(), Some("/World/Char"));
     Ok(())
 }
 

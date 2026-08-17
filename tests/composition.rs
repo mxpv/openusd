@@ -534,7 +534,7 @@ mod pcp_txt {
     /// section per prim, in first-seen (composition) order; layer-stack errors
     /// (sublayer cycles, invalid authored relocates) follow under a single
     /// `Errors while computing Layer Stack` section. Other kinds (e.g.
-    /// `MissingDefaultPrim`) fall through the wildcard and are omitted, matching
+    /// `UnresolvedDefaultPrim`) fall through the wildcard and are omitted, matching
     /// the baselines. A new error kind opts in by adding an arm below. When any
     /// error is rendered, the dump ends with the framework's `ERROR:` footer.
     pub fn error_trailer(name: &str, errors: &[pcp::Error], base: Option<&Path>, order: &[sdf::Path]) -> String {

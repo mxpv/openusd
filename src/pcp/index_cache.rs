@@ -2267,7 +2267,9 @@ fn target_prim_inherits_class(
 
 #[cfg(test)]
 mod tests {
-    use super::super::ExpressionContext;
+    use std::sync::Arc;
+
+    use super::super::{Changes, ExpressionContext, LayerChanges};
     use super::*;
 
     fn manifest_dir() -> String {
@@ -2923,14 +2925,396 @@ def "Anchor" (inherits = </Rig>) {}
         let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |e| {
             e.set_expression_variables(HashMap::from([("PICK".to_string(), Value::String("b".into()))]))
         })?;
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
             Some(Value::Double(2.0)),
             "editing PICK re-resolves the reference to b.usda and recomposes the cached index"
+        );
+        Ok(())
+    }
+
+    /// Builds a root layer whose `/User` references `@t.usda@` with no prim path,
+    /// so the arc resolves through the target's `defaultPrim`; `/Explicit` names
+    /// the same target prim outright, and `/Other` references nothing. Returns
+    /// the target layer, the one an edit under test authors.
+    fn default_prim_stack(target: &str) -> (LayerGraph, IndexCache, LayerId) {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"User\" (\n    references = @t.usda@\n) {}\n\
+             def \"Explicit\" (\n    references = @t.usda@</Source>\n) {}\n\
+             def \"Other\" { custom double y = 7 }\n",
+        );
+        let t = parse_named_layer("t.usda", target);
+        let graph = LayerGraph::from_layers(vec![root, t], 0, sdf::LayerRegistry::default());
+        let cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let target_id = graph.id_of("t.usda").expect("the target layer is interned");
+        (graph, cache, target_id)
+    }
+
+    /// Authors `token` (or clears the field when `None`) as `layer`'s
+    /// `defaultPrim` through the unvalidated spec-tier setter, and runs one
+    /// change cycle, returning what it resynced. The prior value travels the way
+    /// the stage's layer sink captures it, read before the edit lands.
+    fn edit_default_prim(
+        graph: &mut LayerGraph,
+        cache: &mut IndexCache,
+        layer: LayerId,
+        token: Option<&str>,
+    ) -> Result<Vec<Path>> {
+        let prior = graph.default_prim_token(layer);
+        let cl = edit_layer(&mut graph.get_mut(layer).unwrap().layer, |e| match token {
+            Some(name) => {
+                e.pseudo_root_mut()?.set_default_prim(name);
+                Ok(())
+            }
+            None => e.clear_default_prim(),
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(
+            cache,
+            &[LayerChanges {
+                layer,
+                changes: &cl,
+                prior_default_prim: prior,
+            }],
+        );
+        Ok(changes.apply(cache, graph).resynced)
+    }
+
+    /// A target with a `defaultPrim`, plus a second prim to repoint it at.
+    const TWO_SOURCE_TARGET: &str = "#usda 1.0\n(\n    defaultPrim = \"Source\"\n)\n\
+         def \"Source\" { custom double y = 1 }\ndef \"Second\" { custom double y = 2 }\n";
+
+    /// Repointing a target's `defaultPrim` evicts the prim that resolved its
+    /// reference through the field, and the arc recomposes against the new
+    /// source — the stale-read guard.
+    #[test]
+    fn default_prim_resyncs_referrer() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert!(!cache.is_indexed(&sdf::path("/User")?), "the consumer is evicted");
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(2.0)),
+            "the reference recomposes against the new default"
+        );
+        Ok(())
+    }
+
+    /// A prim naming the target prim explicitly does not resolve through the
+    /// field, so it keeps its cached index — where C++, fanning out from the old
+    /// default prim's site, resyncs it.
+    #[test]
+    fn explicit_target_kept() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User.y")?, 0.0)?;
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/Explicit.y")?, 0.0)?;
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert!(!cache.is_indexed(&sdf::path("/User")?), "the consumer is evicted");
+        assert!(
+            cache.is_indexed(&sdf::path("/Explicit")?),
+            "an explicit target does not read the default, so it stays cached"
+        );
+        Ok(())
+    }
+
+    /// Clearing the field evicts the consumer, whose arc then resolves to
+    /// nothing rather than silently keeping its old composition.
+    #[test]
+    fn default_prim_cleared_resyncs() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, None)?;
+
+        assert_eq!(settled_value_at(&mut graph, &mut cache, &y, 0.0)?, None);
+        assert!(
+            cache
+                .composition_errors()
+                .iter()
+                .any(|e| matches!(e, Error::UnresolvedDefaultPrim { .. })),
+            "the unresolved arc is reported"
+        );
+        Ok(())
+    }
+
+    /// The reverse, and the case C++ reaches only through the placeholder arc it
+    /// grafts: with no default the arc grafts no node at all, so the recorded
+    /// consultation is the only trace that authoring the field must recompose.
+    #[test]
+    fn absent_default_authored() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack("#usda 1.0\ndef \"Source\" { custom double y = 1 }\n");
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            None,
+            "no default to resolve"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Source"))?;
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0)),
+            "authoring the default recomposes the arc that had none"
+        );
+        Ok(())
+    }
+
+    /// Re-spelling the same prim leaves the composed default where it was, so
+    /// the edit evicts nothing and reports nothing — C++'s equality skip.
+    #[test]
+    fn default_prim_respelling_inert() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User.y")?, 0.0)?;
+        let pre = cache.indexed_count();
+
+        let resynced = edit_default_prim(&mut graph, &mut cache, target, Some("/Source"))?;
+
+        assert!(resynced.is_empty(), "nothing resynced: {resynced:?}");
+        assert_eq!(cache.indexed_count(), pre, "and nothing evicted");
+        Ok(())
+    }
+
+    /// A malformed value reports the same unresolved error an absent field does,
+    /// so the absent-to-malformed edit the equality skip drops leaves behind no
+    /// diagnostic that contradicts the cached index.
+    #[test]
+    fn malformed_default_unresolved() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack("#usda 1.0\ndef \"Source\" { custom double y = 1 }\n");
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User.y")?, 0.0)?;
+        let absent: Vec<String> = cache.composition_errors().iter().map(|e| e.to_string()).collect();
+
+        let resynced = edit_default_prim(&mut graph, &mut cache, target, Some("Source.attr"))?;
+
+        assert!(resynced.is_empty(), "absent and malformed name the same prim: none");
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User.y")?, 0.0)?;
+        let malformed: Vec<String> = cache.composition_errors().iter().map(|e| e.to_string()).collect();
+        assert_eq!(
+            absent, malformed,
+            "one error covers both states, so neither can go stale"
+        );
+        Ok(())
+    }
+
+    /// A namespace child of the consumer inherits the record through the clone
+    /// its ancestral seed makes of the parent's graph, so it carries the
+    /// dependency in its own right.
+    #[test]
+    fn child_inherits_default_dep() -> Result<()> {
+        let target = "#usda 1.0\n(\n    defaultPrim = \"Source\"\n)\n\
+             def \"Source\" { def \"Child\" { custom double y = 1 } }\n\
+             def \"Second\" { def \"Child\" { custom double y = 2 } }\n";
+        let (mut graph, mut cache, target_id) = default_prim_stack(target);
+        let child_y = sdf::path("/User/Child.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &child_y, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+        assert!(
+            cache
+                .cached(&sdf::path("/User/Child")?)
+                .default_prim_layers()
+                .contains(&target_id),
+            "the seed clone carries the parent's record down"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target_id, Some("Second"))?;
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &child_y, 0.0)?,
+            Some(Value::Double(2.0))
+        );
+        Ok(())
+    }
+
+    /// Every descendant beneath a consumer inherits one `NonSiteDeps` allocation
+    /// rather than copying it. Finalization deduplicates only what a build owns,
+    /// so a descendant that records nothing of its own keeps sharing its
+    /// ancestor's value — without that, the copy-on-write buys nothing and the
+    /// allocation count grows with subtree depth.
+    #[test]
+    fn deep_subtree_shares_deps() -> Result<()> {
+        let target = "#usda 1.0
+(
+    defaultPrim = \"Source\"
+)
+             def \"Source\" { def \"A\" { def \"B\" { def \"C\" { custom double y = 1 } } } }
+";
+        let (mut graph, mut cache, target_id) = default_prim_stack(target);
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User/A/B/C.y")?, 0.0)?;
+
+        let root = cache
+            .cached(&sdf::path("/User")?)
+            .graph()
+            .non_site_deps_shared()
+            .cloned();
+        let root = root.expect("the consumer records the consultation");
+        assert_eq!(root.default_prim, [target_id]);
+        for path in ["/User/A", "/User/A/B", "/User/A/B/C"] {
+            let deps = cache.cached(&sdf::path(path)?).graph().non_site_deps_shared();
+            let deps = deps.expect("the seed clone carries the record down");
+            assert!(Arc::ptr_eq(&root, deps), "{path} shares its ancestor's allocation");
+        }
+        Ok(())
+    }
+
+    /// A sub-root reference target composes as its own sub-index and is grafted,
+    /// so a consultation inside it must merge up into the grafting graph.
+    #[test]
+    fn grafted_subindex_default_dep() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"User\" (\n    references = @mid.usda@</Group/Inner>\n) {}\n",
+        );
+        let mid = parse_named_layer(
+            "mid.usda",
+            "#usda 1.0\ndef \"Group\" {\n    def \"Inner\" (\n        references = @t.usda@\n    ) {}\n}\n",
+        );
+        let t = parse_named_layer("t.usda", TWO_SOURCE_TARGET);
+        let mut graph = LayerGraph::from_layers(vec![root, mid, t], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let target = graph.id_of("t.usda").expect("the target layer is interned");
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+        assert!(
+            cache
+                .cached(&sdf::path("/User")?)
+                .default_prim_layers()
+                .contains(&target),
+            "the sub-build's record merges into the grafting graph"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(2.0)),
+            "a consultation two arcs deep still recomposes"
+        );
+        Ok(())
+    }
+
+    /// A materialized prototype is a clone of its canonical instance's index, so
+    /// the record has to ride on the graph to survive: the build-output channel
+    /// a prototype is cached with is empty by construction.
+    #[test]
+    fn prototype_carries_default_dep() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    instanceable = true\n    references = @t.usda@\n) {}\n\
+             def \"B\" (\n    instanceable = true\n    references = @t.usda@\n) {}\n",
+        );
+        let t = parse_named_layer("t.usda", TWO_SOURCE_TARGET);
+        let mut graph = LayerGraph::from_layers(vec![root, t], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let target = graph.id_of("t.usda").expect("the target layer is interned");
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/A.y")?, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+        // Materializing the shared prototype is what clones the canonical
+        // instance's index; a value read alone leaves the registry cold.
+        cache
+            .prototype_of(&graph, &sdf::path("/A")?)?
+            .expect("an instance shares a prototype");
+        let prototype = cache.prototypes().first().cloned().expect("one shared prototype");
+        assert!(
+            cache.cached(&prototype).default_prim_layers().contains(&target),
+            "the clone carries the canonical instance's record"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/A.y")?, 0.0)?,
+            Some(Value::Double(2.0)),
+            "the shared prototype recomposes"
+        );
+        Ok(())
+    }
+
+    /// A `defaultPrim` edit on a layer no cached index depends on reports nothing
+    /// and evicts nothing: the record answers per layer, so a layer that is
+    /// interned but reached by no composition has no registrations to find.
+    #[test]
+    fn unused_layer_no_resync() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        // Compose only the prim that references nothing, so the target layer is
+        // interned but no index reads it.
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/Other.y")?, 0.0)?;
+        let pre = cache.indexed_count();
+        assert!(pre > 0);
+
+        let resynced = edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert!(resynced.is_empty(), "no index depends on the layer: {resynced:?}");
+        assert_eq!(cache.indexed_count(), pre);
+        Ok(())
+    }
+
+    /// An internal reference naming no prim resolves through the *root* layer's
+    /// `defaultPrim`, not the session layer's, even though the session layer is
+    /// the root layer stack's strongest member. Editing the session layer's copy
+    /// of the field therefore changes nothing, and editing the root layer's
+    /// recomposes — the pair that pins which layer the record names.
+    #[test]
+    fn session_default_prim_inert() -> Result<()> {
+        let session = parse_named_layer("session.usda", "#usda 1.0\n(\n    defaultPrim = \"Ignored\"\n)\n");
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\n(\n    defaultPrim = \"Source\"\n)\n\
+             def \"Source\" { custom double y = 1 }\ndef \"Second\" { custom double y = 2 }\n\
+             def \"Ignored\" { custom double y = 99 }\n\
+             def \"User\" (\n    references = <>\n) {}\n",
+        );
+        let mut graph = LayerGraph::from_layers(vec![session, root], 1, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let root_id = graph.root_id().unwrap();
+        let session_id = graph.id_of("session.usda").expect("the session layer is interned");
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0)),
+            "the internal reference resolves through the root layer's default"
+        );
+
+        let resynced = edit_default_prim(&mut graph, &mut cache, session_id, Some("Second"))?;
+        assert!(
+            resynced.is_empty(),
+            "no index reads the session layer's default: {resynced:?}"
+        );
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0)),
+            "and the composition is unchanged"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, root_id, Some("Second"))?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(2.0)),
+            "editing the layer actually consulted recomposes"
         );
         Ok(())
     }
@@ -2986,8 +3370,8 @@ def "Anchor" (inherits = </Rig>) {}
         let cl = edit_layer(&mut graph.get_mut(base_id).unwrap().layer, |e| {
             e.set_expression_variables(HashMap::from([("V".to_string(), Value::String("x".into()))]))
         })?;
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(base_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(base_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert!(
@@ -3030,8 +3414,8 @@ def "Anchor" (inherits = </Rig>) {}
                 .unwrap();
             Ok(())
         })?;
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert!(
@@ -3618,8 +4002,8 @@ def "Anchor" (inherits = </Rig>) {}
         cl.entry_mut(&sdf::path("/A")?)
             .info_changed
             .insert(sdf::FieldKey::Instanceable.as_str().into());
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert!(cache.prototypes().is_empty());
@@ -3648,8 +4032,8 @@ def "Anchor" (inherits = </Rig>) {}
         // Drive the inert add through the change pipeline.
         let mut cl = sdf::ChangeList::new();
         cl.entry_mut(&sdf::path("/Foo")?).flags = sdf::ChangeFlags::ADD_INERT_PRIM;
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The spec-tier rescan made the new opinion visible.
@@ -3687,8 +4071,8 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The reference is composed, not skipped by an in-place spec refresh.
@@ -3715,8 +4099,8 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The arc is gone, not left dangling by an in-place spec refresh.
@@ -3746,8 +4130,8 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         assert!(
             changes.cache.did_change_specs.contains(&(root_id, a.clone())),
             "an inert over add routes through the spec tier"
@@ -3804,8 +4188,14 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl_root), (mid_id, &cl_mid)]);
+        let mut changes = Changes::new();
+        changes.did_change(
+            &cache,
+            &[
+                LayerChanges::plain(root_id, &cl_root),
+                LayerChanges::plain(mid_id, &cl_mid),
+            ],
+        );
         assert!(changes.cache.did_change_specs.contains(&(root_id, a.clone())));
         assert!(changes.cache.did_change_specs.contains(&(mid_id, a.clone())));
         changes.apply(&mut cache, &mut graph);
@@ -3863,8 +4253,8 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(base_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(base_id, &cl)]);
         // The inert add routes through the spec tier (not a significant fanout),
         // so the rescan's un-cull path is what recomposes /A.
         assert!(
@@ -3903,8 +4293,8 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         assert!(
             changes
                 .cache
@@ -3936,8 +4326,8 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         assert!(
             changes
                 .cache
@@ -4003,8 +4393,8 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         assert!(
             changes
                 .cache
@@ -4050,8 +4440,8 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(base_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(base_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // /A now composes the reference.
@@ -4099,8 +4489,8 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })
         .unwrap();
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &[(strong_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(strong_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The active=false opinion is gone — the prim reactivates by default —
@@ -4382,8 +4772,8 @@ def "Anchor" (inherits = </Rig>) {}
         cl.entry_mut(&Path::abs_root())
             .info_changed
             .insert(sdf::FieldKey::LayerRelocates.as_str().into());
-        let mut changes = crate::pcp::Changes::new();
-        changes.did_change(cache, &[(root_id, &cl)]);
+        let mut changes = Changes::new();
+        changes.did_change(cache, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(cache, graph);
         graph.errors()
     }

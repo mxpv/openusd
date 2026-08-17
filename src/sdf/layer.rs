@@ -714,16 +714,23 @@ impl LayerEdit<'_> {
         Ok(PseudoRootSpecMut::get(self.data_mut()).expect("just ensured a pseudo-root spec"))
     }
 
-    /// Set the layer's `defaultPrim` metadata to `name`, a USD identifier or
-    /// nested prim path without a leading `/` (e.g. `"World/Char"`). Mirrors C++
-    /// `SdfLayer::SetDefaultPrim`, validating the name; the spec-tier
-    /// [`PseudoRootSpecMut::set_default_prim`] is the unvalidated escape hatch.
+    /// Set the layer's `defaultPrim` metadata to `name` — a prim identifier, a
+    /// nested prim path, or either spelled absolutely (`"World"`,
+    /// `"World/Char"`, `"/World/Char"`). The token is stored as given;
+    /// [`default_prim_path`] reads both spellings.
+    ///
+    /// This is a checked authoring API, which is a deliberate divergence: C++
+    /// `SdfLayer::SetDefaultPrim` stores any token and defers every check to
+    /// `GetDefaultPrimAsPath`. Rejecting here keeps a value that names no prim
+    /// out of the layer in the first place; the spec-tier
+    /// [`PseudoRootSpecMut::set_default_prim`] remains the unvalidated escape
+    /// hatch for round-tripping data verbatim.
     pub fn set_default_prim(&mut self, name: impl Into<String>) -> Result<(), AuthoringError> {
         let name = name.into();
-        if name.is_empty() || name.starts_with('/') || Path::new(&format!("/{name}")).is_err() {
+        if default_prim_path(&name).is_none() {
             return Err(AuthoringError::InvalidPath {
                 path: Path::abs_root(),
-                reason: "defaultPrim must be a relative prim identifier or nested prim path",
+                reason: "defaultPrim must name a prim",
             });
         }
         self.pseudo_root_mut()?.set_default_prim(name);
@@ -832,6 +839,38 @@ impl std::fmt::Debug for Layer {
             .field("identifier", &self.identifier)
             .finish_non_exhaustive()
     }
+}
+
+/// The prim path a `defaultPrim` token names, or `None` when it names no prim.
+///
+/// Mirrors C++ `SdfLayer::ConvertDefaultPrimTokenToPath`: the token may be
+/// absolute or relative, a relative one is anchored at the pseudo-root, and it
+/// must name a prim. C++ writes a nested default prim absolutely
+/// (`ConvertDefaultPrimPathToToken` emits a bare name only for a root prim), so
+/// accepting both spellings is what lets this port read a C++-authored layer.
+///
+/// ```text
+/// "World"       -> Some("/World")
+/// "World/Char"  -> Some("/World/Char")
+/// "/World/Char" -> Some("/World/Char")
+/// "World.attr"  -> None
+/// "/"           -> None
+/// ""            -> None
+/// ```
+///
+/// The relative anchors `.` and `..` yield `None`. For `..` that matches C++,
+/// which anchors it past the root to an empty path. For `.` it does not: C++
+/// anchors it to `/` and composes a pseudo-root arc that contributes nothing.
+/// The composed result is the same either way, so this port reports the
+/// unusable value instead of resolving it to a target no reference can use.
+pub fn default_prim_path(token: &str) -> Option<Path> {
+    let path = Path::new(token).ok()?;
+    // No identifier may begin with `.`, so the only prim paths whose text starts
+    // with one are the relative anchors `.`, `..`, and `../…`.
+    if !path.is_prim_path() || path.as_str().starts_with('.') {
+        return None;
+    }
+    Some(Path::abs_root().make_absolute(&path))
 }
 
 /// Author across several layers as one atomic transaction: run `f` to stage
@@ -1165,6 +1204,41 @@ mod tests {
             layer.prim(Path::new("/World").unwrap()).unwrap().is_some(),
             "the authored content survives"
         );
+    }
+
+    /// The C++ `ConvertDefaultPrimTokenToPath` contract
+    /// (`pxr/usd/sdf/testenv/testSdfLayer.py`), plus the one documented
+    /// difference: `.` resolves to `/` there and to nothing here.
+    #[test]
+    fn default_prim_path_forms() {
+        for (token, want) in [
+            ("/foo", "/foo"),
+            ("/foo/bar", "/foo/bar"),
+            ("foo", "/foo"),
+            ("foo/bar", "/foo/bar"),
+        ] {
+            assert_eq!(default_prim_path(token).as_ref().map(Path::as_str), Some(want));
+        }
+        for token in ["/foo.prop", "/", "//", "", "..", "."] {
+            assert_eq!(default_prim_path(token), None, "{token} names no prim");
+        }
+    }
+
+    /// The setter accepts either spelling of a prim path and rejects a value
+    /// that names no prim, matching what `default_prim_path` will read back.
+    #[test]
+    fn set_default_prim_forms() {
+        let mut layer = Layer::new_anonymous("anon.usda");
+        for name in ["World", "World/Char", "/World/Char"] {
+            edit_layer(&mut layer, |e| {
+                e.set_default_prim(name).expect("names a prim");
+            });
+            assert_eq!(layer.pseudo_root().unwrap().default_prim().as_deref(), Some(name));
+        }
+        edit_layer(&mut layer, |e| {
+            assert!(e.set_default_prim("World.attr").is_err(), "a property names no prim");
+            assert!(e.set_default_prim("/").is_err(), "the pseudo-root names no prim");
+        });
     }
 
     /// Authoring layer metadata on a backend that lacks a pseudo-root spec

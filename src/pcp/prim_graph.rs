@@ -6,6 +6,7 @@
 //! [`PrimIndex`](crate::pcp::PrimIndex) for value resolution over the graph.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use bitflags::bitflags;
 
@@ -378,28 +379,106 @@ pub(crate) struct PrimIndexGraph {
     pub(crate) nodes: Vec<Node>,
     pub(crate) strength_order: Vec<NodeId>,
     pub(crate) root: NodeId,
+    /// This index's dependencies that no `(layer, site)` registration can
+    /// express, or `None` when it has none — the common case, which the single
+    /// pointer keeps to one machine word.
+    ///
+    /// Shared, not owned: a child prim seeds from a clone of its parent's graph
+    /// ([`Indexer::seed`](super::prim_indexer::Indexer)), so a referenced
+    /// asset's whole subtree inherits one non-empty value. Copy-on-write through
+    /// [`non_site_deps_mut`](Self::non_site_deps_mut) means only a descendant
+    /// that records a dependency of its own pays for a copy.
+    non_site_deps: Option<Arc<NonSiteDeps>>,
+}
+
+/// Dependencies of a prim index that no `(layer, site)` registration can
+/// express, because the arc that created them grafted no node or because what
+/// was read is layer metadata rather than a site.
+///
+/// [`Dependencies`](super::dependencies::Dependencies) registers all three so a
+/// later edit can still find the index to recompose; each skipped arc is
+/// separately surfaced as its own [`Error`](super::Error).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NonSiteDeps {
     /// Layer ids of reference/payload target roots a composition arc resolved to
     /// but skipped because the target layer was muted (its sublayer stack came
     /// out empty). A muted target contributes no node, so without this the index
     /// keeps no trace of the dependency and unmuting the target could not find it
-    /// to recompose; the change machinery reads it to fan a mute toggle out to
-    /// such an index (see [`IndexCache`](super::index_cache::IndexCache)'s
-    /// layer-muting drop). This serves the recomposition fanout; the skipped arc is
-    /// separately surfaced as an [`Error::MutedAssetPath`](super::Error::MutedAssetPath).
-    pub(crate) muted_external_targets: Vec<LayerId>,
+    /// to recompose.
+    pub(crate) muted_external: Vec<LayerId>,
     /// Canonical identifiers of reference/payload targets a composition arc
     /// resolved to but skipped because the target was muted *before it was ever
     /// loaded* — the target has no interned [`LayerId`], so
-    /// [`muted_external_targets`](Self::muted_external_targets) cannot record it.
-    /// The identifier is the one the muted set matched (C++ `Pcp_MutedLayers`), so
-    /// unmuting that same canonical identifier fans the invalidation back to this
-    /// index even though its arc grafted no node and its target was never interned.
-    /// Like `muted_external_targets`, the skipped arc is separately surfaced as an
-    /// [`Error::MutedAssetPath`](super::Error::MutedAssetPath).
-    pub(crate) muted_unloaded_targets: Vec<String>,
+    /// [`muted_external`](Self::muted_external) cannot record it. The identifier
+    /// is the one the muted set matched (C++ `Pcp_MutedLayers`), so unmuting that
+    /// same canonical identifier fans the invalidation back to this index.
+    pub(crate) muted_unloaded: Vec<String>,
+    /// Layers whose `defaultPrim` a reference or payload consulted because the
+    /// arc named no target prim.
+    ///
+    /// Recorded whether or not a default was found: when there is none the arc
+    /// grafts no node at all, so this is the only trace that authoring the field
+    /// later must recompose this prim. Held as a layer id because that is what
+    /// the field is keyed by: the ancestral seed deepens every node path
+    /// ([`append_child_name_to_all_sites`](PrimIndexGraph::append_child_name_to_all_sites)),
+    /// which a site-shaped record would not survive.
+    pub(crate) default_prim: Vec<LayerId>,
+}
+
+impl NonSiteDeps {
+    /// Sorts and deduplicates every vector. One target reached through both a
+    /// `references` and a `payload` arc, or through several sub-builds, records
+    /// once.
+    fn dedup(&mut self) {
+        self.muted_external.sort_unstable();
+        self.muted_external.dedup();
+        self.muted_unloaded.sort_unstable();
+        self.muted_unloaded.dedup();
+        self.default_prim.sort_unstable();
+        self.default_prim.dedup();
+    }
 }
 
 impl PrimIndexGraph {
+    /// The recorded [`NonSiteDeps`], or `None` when this index has none.
+    pub(crate) fn non_site_deps(&self) -> Option<&NonSiteDeps> {
+        self.non_site_deps.as_deref()
+    }
+
+    /// The recorded [`NonSiteDeps`] as the shared handle, so a graph with none
+    /// of its own can adopt another's without copying.
+    pub(crate) fn non_site_deps_shared(&self) -> Option<&Arc<NonSiteDeps>> {
+        self.non_site_deps.as_ref()
+    }
+
+    /// Takes `deps` as this graph's own, sharing the allocation. Only valid
+    /// when it has none — [`non_site_deps_mut`](Self::non_site_deps_mut) is the
+    /// copy-on-write path for merging into an existing value.
+    pub(crate) fn adopt_non_site_deps(&mut self, deps: Arc<NonSiteDeps>) {
+        debug_assert!(self.non_site_deps.is_none(), "adopting over recorded deps");
+        self.non_site_deps = Some(deps);
+    }
+
+    /// The recorded [`NonSiteDeps`] for writing, materializing them on first use
+    /// and taking a private copy if they are still shared with the ancestor this
+    /// graph was seeded from.
+    pub(crate) fn non_site_deps_mut(&mut self) -> &mut NonSiteDeps {
+        Arc::make_mut(self.non_site_deps.get_or_insert_default())
+    }
+
+    /// Sorts and deduplicates the recorded [`NonSiteDeps`]. Called once per
+    /// built graph.
+    ///
+    /// Deduplicates only what this build owns. A value still shared with the
+    /// ancestor graph this one was seeded from was already finalized there, and
+    /// taking a copy of it just to re-sort would defeat the sharing — the cost
+    /// would land on every descendant of a prim with a non-site dependency.
+    pub(crate) fn finalize_non_site_deps(&mut self) {
+        if let Some(owned) = self.non_site_deps.as_mut().and_then(Arc::get_mut) {
+            owned.dedup();
+        }
+    }
+
     /// Returns the prim's local root node — the `Root`-arc child of the
     /// synthetic inert root, carrying the prim's own (sublayer) opinions. An
     /// implied class anchors here so it ranks among the prim's direct arcs (C++

@@ -199,23 +199,26 @@ fn kind_change_no_op_for_cache() {
     assert_eq!(stage.prim("/A").unwrap().kind().unwrap().as_deref(), Some("group"));
 }
 
-/// `set_default_prim` is significant-at-root — every cached index drops.
+/// A `defaultPrim` edit evicts only the prims whose composition resolved a
+/// reference or payload through the field. Prims that never consulted it — here,
+/// every prim on the stage — keep their cached indices.
 #[test]
-fn default_prim_clears_root_cache() {
+fn default_prim_keeps_unrelated() {
     let stage = open_in_memory();
     stage.define_prim("/World").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Other").unwrap().set_type_name("Xform").unwrap();
 
     let _ = stage.prim("/World").unwrap().type_name().unwrap();
     let _ = stage.prim("/Other").unwrap().type_name().unwrap();
-    assert!(stage.indexed_count() >= 2);
+    let pre = stage.indexed_count();
+    assert!(pre >= 2);
 
     stage.set_default_prim("World").unwrap();
 
     assert_eq!(
         stage.indexed_count(),
-        0,
-        "defaultPrim is significant-at-root; all indices must drop",
+        pre,
+        "no prim resolves an arc through the default, so none is evicted",
     );
     assert_eq!(stage.default_prim().as_deref(), Some("World"));
 }
@@ -334,6 +337,186 @@ fn idempotent_default_prim_preserves_cache() {
         pre,
         "redundant set_default_prim must not clear cached indices"
     );
+}
+
+/// Writes a stage whose `/Empty` references `@t.usda@` with no prim path (so the
+/// arc resolves through the target's `defaultPrim`), `/Explicit` names the same
+/// target prim outright, and `/Source` is an unrelated local prim that merely
+/// shares the default prim's path. `t.usda`'s `defaultPrim` is `default_prim`.
+fn open_default_prim_fixture(dir: &tempfile::TempDir, default_prim: Option<&str>) -> Result<usd::Stage> {
+    let header = match default_prim {
+        Some(name) => format!("#usda 1.0\n(\n    defaultPrim = \"{name}\"\n)\n"),
+        None => "#usda 1.0\n".to_string(),
+    };
+    fs::write(
+        dir.path().join("t.usda"),
+        format!("{header}def \"Source\" {{ custom double y = 1 }}\ndef \"Second\" {{ custom double y = 2 }}\n"),
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "Empty" (
+    references = @./t.usda@
+)
+{
+}
+def "Explicit" (
+    references = @./t.usda@</Source>
+)
+{
+}
+def "Source" {
+    custom double local = 3
+}
+"#,
+    )?;
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    // Warm every index, including the bystander cached at `/Source`.
+    stage.attribute("/Empty.y")?.get::<f64>()?;
+    assert_eq!(stage.attribute("/Explicit.y")?.get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/Source.local")?.get::<f64>()?, Some(3.0));
+    Ok(stage)
+}
+
+/// Authors `name` as the referenced `t.usda`'s `defaultPrim`, the edit every
+/// test over [`open_default_prim_fixture`] performs.
+fn set_target_default_prim(stage: &usd::Stage, name: &str) -> Result<()> {
+    let target = identifier_by_leaf(stage, "t.usda");
+    stage
+        .layer_mut(&target)
+        .expect("target layer is live")
+        .edit(|e| e.set_default_prim(name))?;
+    Ok(())
+}
+
+/// Repointing a referenced layer's `defaultPrim` reports the C++ set: the
+/// dependents of the prim path it used to name. That reaches the prim that
+/// resolved through the field and the one that named the same path explicitly —
+/// which C++ resyncs too — but not a stage prim that merely happens to be cached
+/// at that path and never reads the edited layer.
+#[test]
+fn default_prim_resync_notice() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_default_prim_fixture(&dir, Some("Source"))?;
+    let notices = capture_notices(&stage);
+
+    set_target_default_prim(&stage, "Second")?;
+
+    assert!(!stage.is_indexed(&sdf::path("/Empty")?), "the consumer is evicted");
+    assert!(
+        stage.is_indexed(&sdf::path("/Explicit")?),
+        "an explicit target composes the same, so it is reported but not evicted"
+    );
+    assert_eq!(stage.attribute("/Empty.y")?.get::<f64>()?, Some(2.0));
+    let notices = notices.borrow();
+    assert_eq!(notices.resynced, paths(&["/Empty", "/Explicit"]));
+    assert_eq!(
+        notices.changed_info_only,
+        paths(&["/"]),
+        "the layer's own metadata changed, and no resync covers its pseudo-root"
+    );
+    Ok(())
+}
+
+/// Authoring a `defaultPrim` where there was none reports the prims that
+/// recorded consulting the field. C++ reaches them by fanning out from the
+/// pseudo-root site on the layer, which also sweeps in every other dependent of
+/// it; the record names exactly the consumers, so `/Explicit` stays out.
+#[test]
+fn absent_default_notice() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_default_prim_fixture(&dir, None)?;
+    let notices = capture_notices(&stage);
+    assert_eq!(
+        stage.attribute("/Empty.y")?.get::<f64>()?,
+        None,
+        "nothing to resolve yet"
+    );
+
+    set_target_default_prim(&stage, "Source")?;
+
+    assert_eq!(
+        stage.attribute("/Empty.y")?.get::<f64>()?,
+        Some(1.0),
+        "the arc that had no default recomposes"
+    );
+    let notices = notices.borrow();
+    assert_eq!(notices.resynced, paths(&["/Empty"]));
+    assert_eq!(
+        notices.changed_info_only,
+        paths(&["/"]),
+        "no resync covers the pseudo-root, so the metadata change is still reported"
+    );
+    Ok(())
+}
+
+/// The same edit on the stage's own root layer — what `Stage::set_default_prim`
+/// always writes — reports only the internal reference that consults it, not
+/// every prim reading the root layer.
+#[test]
+fn root_layer_default_notice() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "Source" {
+    custom double y = 1
+}
+def "Empty" (
+    references = <>
+)
+{
+}
+def "Other" {
+    custom double o = 3
+}
+"#,
+    )?;
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/Empty.y")?.get::<f64>()?,
+        None,
+        "no default to resolve"
+    );
+    assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
+    let notices = capture_notices(&stage);
+
+    stage.set_default_prim("Source")?;
+
+    assert_eq!(
+        notices.borrow().resynced,
+        paths(&["/Empty"]),
+        "only the internal reference consults the field, though every prim reads this layer"
+    );
+    assert_eq!(
+        stage.attribute("/Empty.y")?.get::<f64>()?,
+        Some(1.0),
+        "and it recomposes against the new default"
+    );
+    Ok(())
+}
+
+/// Re-spelling the same prim leaves the composed default where it was, so
+/// nothing resyncs and nothing is evicted — but the authored token did change,
+/// so the pseudo-root is still reported as changed info.
+#[test]
+fn respelling_info_only_notice() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_default_prim_fixture(&dir, Some("Source"))?;
+    let pre = stage.indexed_count();
+    let notices = capture_notices(&stage);
+
+    set_target_default_prim(&stage, "/Source")?;
+
+    // Read through the stage before borrowing the sink's slot: a composed read
+    // drains any pending edit, which fires the sink.
+    assert_eq!(stage.indexed_count(), pre, "nothing is evicted");
+    let notices = notices.borrow();
+    assert!(notices.resynced.is_empty(), "nothing resyncs: {:?}", notices.resynced);
+    assert_eq!(notices.changed_info_only, paths(&["/"]));
+    Ok(())
 }
 
 /// Writes a stage whose `/User` selects a variant through `${SEL}` while

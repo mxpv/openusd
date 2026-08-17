@@ -30,8 +30,12 @@
 //!   mechanisms).
 //! - an inert `over` add or remove carrying no significant field → spec tier.
 //! - `subLayers`, `subLayerOffsets`, `layerRelocates`, `timeCodesPerSecond` /
-//!   `framesPerSecond`, `expressionVariables` on the root → layer-stack tier;
-//!   `defaultPrim` on the root → significant at the root.
+//!   `framesPerSecond`, `expressionVariables` on the root → layer-stack tier.
+//! - `defaultPrim` on the root → its own channel: the prims whose builds recorded
+//!   consulting the field are evicted, and the dependents of the prim path it used
+//!   to name are reported (`apply_default_prim_edits`). Neither half is the
+//!   layer-stack tier, and the report is not C++-identical — see the parity notes
+//!   in the module docs.
 //! - `clips` / `clipSets`, and non-composition metadata (`kind`,
 //!   `colorConfiguration`, `customData`, …) → no index drop. Clips resolve
 //!   live through the cached index's spec sites, and every value view rebuilds
@@ -46,6 +50,7 @@ use bitflags::bitflags;
 use crate::sdf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{ChangeEntry, ChangeList, Path};
+use crate::tf;
 
 use super::layer_graph::LayerGraph;
 use super::layer_stack::StackVarsDelta;
@@ -63,6 +68,14 @@ pub(crate) struct Changes {
     pub cache: CacheChanges,
     /// Per-layer-stack flags.
     pub layer_stack: LayerStackChanges,
+    /// The `defaultPrim` edits this round, each paired with the field's value
+    /// before the commit ([`LayerChanges::prior_default_prim`]).
+    ///
+    /// Deferred to [`apply`](Changes::apply) rather than classified here: both
+    /// the eviction and the report need the field's *current* value to skip an
+    /// edit that leaves the composed default where it was, and only the apply
+    /// phase holds the [`LayerGraph`] to read it from.
+    default_prim_edits: Vec<(LayerId, Option<tf::Token>)>,
     /// The layers whose root metadata edit set a [`LayerStackChanges`] flag. A
     /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables` edit
     /// keeps its layer a member of every stack the layer participates in, so
@@ -70,6 +83,38 @@ pub(crate) struct Changes {
     /// ([`IndexCache::invalidate_layers`]) scopes the layer-stack invalidation to
     /// exactly the affected stacks.
     layer_stack_layers: HashSet<LayerId>,
+}
+
+/// One edited layer's committed record, with the prior field values the record
+/// itself does not carry.
+///
+/// [`ChangeList`] names the fields a commit touched, not what they held before
+/// (`sdf` reconstructs old values from the pre-edit base at the commit seam
+/// instead of snapshotting them). Classification runs after that seam, so the one
+/// prior value it needs travels here, captured by the stage's layer sink.
+pub(crate) struct LayerChanges<'a> {
+    /// The edited layer.
+    pub layer: LayerId,
+    /// What the commit recorded.
+    pub changes: &'a ChangeList,
+    /// The layer's `defaultPrim` token before this commit, when the commit
+    /// edited that field. `None` means the field named no prim beforehand —
+    /// unauthored, or a value that resolves to nothing — which is also the
+    /// conservative answer if the value could not be read.
+    pub prior_default_prim: Option<tf::Token>,
+}
+
+#[cfg(test)]
+impl<'a> LayerChanges<'a> {
+    /// One layer's record with no prior `defaultPrim` — what a classifier test
+    /// needs unless it is exercising that field.
+    pub(crate) fn plain(layer: LayerId, changes: &'a ChangeList) -> Self {
+        Self {
+            layer,
+            changes,
+            prior_default_prim: None,
+        }
+    }
 }
 
 /// Path-sets identifying which cached prim indices to invalidate.
@@ -249,7 +294,12 @@ pub(crate) struct ApplyOutcome {
     /// `_DidChangeLayerStackExpressionVariables`). Each drops its index and every
     /// namespace descendant, so an entry stands for its whole subtree; a lone
     /// [`Path::abs_root`] entry means the whole stage resynced. Sorted and
-    /// deduplicated, from the drop's own victim set.
+    /// deduplicated.
+    ///
+    /// An entry is a subtree a consumer must re-resolve, which is not always one
+    /// this apply evicted: a `defaultPrim` edit reports C++'s wider fanout while
+    /// evicting only the indices that actually compose differently, so a prim
+    /// named here may still hold a valid cached index.
     pub(crate) resynced: Vec<Path>,
     /// The subtrees whose `asset` values may now resolve elsewhere, from
     /// [`asset_path_victims`] — the channel that covers what no dependency
@@ -276,15 +326,15 @@ impl Changes {
     /// relationship/connection targets, so it routes through
     /// [`classify_property_entry`](Self::classify_property_entry) to the
     /// [`did_change_targets`](CacheChanges::did_change_targets) set.
-    pub fn did_change(&mut self, cache: &IndexCache, changes: &[(LayerId, &ChangeList)]) {
-        for (layer_index, cl) in changes {
-            for (path, entry) in cl.entries() {
+    pub fn did_change(&mut self, cache: &IndexCache, changes: &[LayerChanges<'_>]) {
+        for edit in changes {
+            for (path, entry) in edit.changes.entries() {
                 if path.is_abs_root() {
-                    self.classify_root_entry(cache, *layer_index, entry);
+                    self.classify_root_entry(edit, entry);
                 } else if path.is_property_path() {
-                    self.classify_property_entry(cache, *layer_index, path, entry);
+                    self.classify_property_entry(cache, edit.layer, path, entry);
                 } else {
-                    self.classify_prim_entry(cache, *layer_index, path, entry);
+                    self.classify_prim_entry(cache, edit.layer, path, entry);
                 }
             }
         }
@@ -400,7 +450,8 @@ impl Changes {
         self.cache.did_change_targets.insert((prim, last.clone()));
     }
 
-    fn classify_root_entry(&mut self, _cache: &IndexCache, layer: LayerId, entry: &ChangeEntry) {
+    fn classify_root_entry(&mut self, edit: &LayerChanges<'_>, entry: &ChangeEntry) {
+        let layer = edit.layer;
         let mut touches_stack = false;
         for key in &entry.info_changed {
             if *key == FieldKey::SubLayers.as_str() {
@@ -435,12 +486,12 @@ impl Changes {
                 self.layer_stack |= LayerStackChanges::EXPRESSION_VARS;
                 touches_stack = true;
             } else if *key == FieldKey::DefaultPrim.as_str() {
-                // TODO: only a reference or payload naming no target prim resolves
-                // through the layer's default, so fanning the old default prim's
-                // site out would name just those dependents; the stage root stands
-                // in until the change record carries the field's prior value (see
-                // the module's remaining-work list).
-                self.cache.did_change_significantly.insert(Path::abs_root());
+                // Only a reference or payload naming no target prim resolves
+                // through the layer's default, and each such build records the
+                // layer it consulted, so nothing here needs the layer-stack tier.
+                // Queued for `apply`, which can compare the field's prior value
+                // against what it now holds (`apply_default_prim_edits`).
+                self.default_prim_edits.push((layer, edit.prior_default_prim.clone()));
             }
         }
         // Record the layer behind any layer-stack-tier flag so `apply` can scope the
@@ -568,6 +619,10 @@ impl Changes {
             apply_vars_deltas(cache, graph, &vars_deltas)
         };
 
+        // `defaultPrim` edits: each evicts the prims that recorded consulting the
+        // field and reports the dependents of the prim path it used to name.
+        resynced.extend(apply_default_prim_edits(cache, graph, &self.default_prim_edits));
+
         // A prim-tier index invalidation can change which prims are instances or
         // how they compose, so affected entries in the shared-prototype registry
         // (spec 11.3.3) are dropped rather than left stale and lazily recomposed
@@ -657,6 +712,70 @@ fn asset_path_victims(cache: &IndexCache, deltas: &[StackVarsDelta]) -> Vec<Path
         }
     }
     victims
+}
+
+/// Applies this round's `defaultPrim` edits, returning the composed prim paths
+/// to report as resynced.
+///
+/// Two different sets, deliberately. The eviction is exactly the prims whose
+/// builds recorded consulting the field
+/// ([`prims_using_default_prim`](super::dependencies::Dependencies::prims_using_default_prim)),
+/// since nothing else composes differently. The report follows C++ `PcpChanges`,
+/// which fans out from the prim path the field used to name (`changes.cpp`):
+/// that also reaches prims referencing the old path explicitly, which do not
+/// need recomposing but which C++ resyncs.
+///
+/// It reaches them through graph sites only, so it stops one short of C++ in a
+/// case C++ answers through `PcpDependencyTypeRoot`: the prim *at* the old
+/// default path does not register its own site
+/// ([`Dependencies::add`](super::dependencies::Dependencies::add) skips the
+/// self-Root edge), so an edit on the layer that owns it leaves it unreported.
+/// Its composition is unaffected either way — this is the over-report shrinking,
+/// not a missed recompose.
+///
+/// With no prior prim path the report is the recorded consumers instead. C++ fans
+/// out from the pseudo-root site on the layer there, reaching the placeholder arcs
+/// it grafts for an unresolved default; this port grafts none and records the
+/// dependency directly, so the record names exactly what those placeholders stand
+/// for, without the collateral a `/`-site subtree walk would sweep in.
+///
+/// Both sets are gathered before the drop, which retires the registrations they
+/// read.
+fn apply_default_prim_edits(
+    cache: &mut IndexCache,
+    graph: &LayerGraph,
+    edits: &[(LayerId, Option<tf::Token>)],
+) -> Vec<Path> {
+    let mut reported: BTreeSet<Path> = BTreeSet::new();
+    let mut victims: BTreeSet<Path> = BTreeSet::new();
+    for (layer, prior) in edits {
+        let old = prior.as_deref().and_then(sdf::default_prim_path);
+        let current = graph
+            .default_prim_token(*layer)
+            .as_deref()
+            .and_then(sdf::default_prim_path);
+        // The composed default did not move, so no index composes differently and
+        // no dependent resyncs — C++'s equality skip. The value-diff in
+        // `ChangeList` already suppresses an identical re-author, so what reaches
+        // here is a re-spelling (`"Source"` for `"/Source"`).
+        if old == current {
+            continue;
+        }
+        let deps = cache.dependencies();
+        // With a prior prim path, C++ fans out from its site; the consumers this
+        // evicts are a subset of that, so they need no separate mention.
+        if let Some(path) = &old {
+            reported.extend(deps.graph_ancestor_lookup(*layer, path));
+            reported.extend(deps.subtree_lookup(*layer, path));
+        }
+        victims.extend(deps.prims_using_default_prim(*layer));
+    }
+    // One drop for the round, as the expression-variable path batches for the
+    // same reason: each pays a prototype scan per victim. It hands back the
+    // prototype roots it retired alongside the prims it evicted, and both
+    // resynced, so both are reported.
+    reported.extend(cache.drop_index_victims(victims.into_iter().collect()));
+    reported.into_iter().collect()
 }
 
 /// Consumes an `expressionVariables` rebuild's per-stack deltas, dropping their
@@ -768,7 +887,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::References.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
     }
 
@@ -780,7 +899,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::VariantSelection.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
     }
 
@@ -796,7 +915,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::References.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert_eq!(
             changes.cache.authored_significant.iter().collect::<Vec<_>>(),
             [&p("/Foo/Bar"), &p("/Foo{set=sel}Bar")]
@@ -819,7 +938,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::Permission.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
     }
@@ -835,7 +954,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::Kind.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
     }
@@ -852,7 +971,7 @@ mod tests {
         entry.flags = ChangeFlags::ADD_INERT_PRIM;
         entry.info_changed.insert(FieldKey::Instanceable.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
 
         assert!(changes.cache.authored_significant.contains(&p("/X")));
     }
@@ -864,7 +983,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(layer, &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(layer, &cl)]);
         // An inert add reshapes no graph, so it stays out of the significant
         // tier and lands in the spec tier keyed by its authoring layer.
         assert!(!changes.cache.all_significant().any(|path| *path == p("/Foo")));
@@ -877,7 +996,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_NON_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
     }
 
@@ -889,21 +1008,35 @@ mod tests {
             .info_changed
             .insert(FieldKey::SubLayers.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
         assert!(changes.layer_stack.contains(LayerStackChanges::LAYERS));
     }
 
     #[test]
-    fn default_prim_change_is_significant_at_root() {
+    fn default_prim_records_edit() {
         let (graph, cache) = empty_cache();
+        let layer = first_layer(&graph);
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
             .info_changed
             .insert(FieldKey::DefaultPrim.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
-        assert!(changes.cache.did_change_significantly.contains(&Path::abs_root()));
+        changes.did_change(
+            &cache,
+            &[LayerChanges {
+                layer,
+                changes: &cl,
+                prior_default_prim: Some(tf::Token::from("Source")),
+            }],
+        );
+
+        // The edit is queued with its prior value for `apply` to act on, and
+        // decides nothing here: no tier is touched, and in particular the whole
+        // cache is not marked for a drop.
+        assert_eq!(changes.default_prim_edits, [(layer, Some(tf::Token::from("Source")))]);
+        assert!(changes.cache.did_change_significantly.is_empty());
+        assert!(changes.cache.authored_significant.is_empty());
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
 
@@ -919,7 +1052,7 @@ mod tests {
                 .info_changed
                 .insert(field.as_str().into());
             let mut changes = Changes::new();
-            changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+            changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
             assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
         }
     }
@@ -936,7 +1069,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::ExpressionVariables.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::EXPRESSION_VARS));
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
@@ -949,7 +1082,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::LayerRelocates.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::RELOCATES));
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
@@ -960,7 +1093,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo.attr")).flags = ChangeFlags::ADD_PROPERTY;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
@@ -977,7 +1110,7 @@ mod tests {
         entry.flags = ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
         entry.info_changed.insert(FieldKey::TargetPaths.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         let key = TargetMemoKey {
             kind: PropertyTargetKind::Relationship,
             property_suffix: ".r".to_owned(),
@@ -998,7 +1131,7 @@ mod tests {
         entry.info_changed.insert(FieldKey::TargetPaths.as_str().into());
         entry.info_changed.insert(FieldKey::ConnectionPaths.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         let key = |kind| TargetMemoKey {
             kind,
             property_suffix: ".x".to_owned(),

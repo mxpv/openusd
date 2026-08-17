@@ -32,7 +32,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::{pcp, sdf};
+use crate::{pcp, sdf, tf};
 
 use super::sink::{Payload, Provenance};
 
@@ -49,6 +49,10 @@ pub(super) struct PendingEdit {
     /// `None` for a direct edit, which resolves against local-layer membership
     /// when the queue drains.
     pub(super) provenance: Option<Provenance>,
+    /// The layer's `defaultPrim` before this commit, captured at the commit seam
+    /// because the change record carries field names, not prior values. See
+    /// [`pcp::LayerChanges::prior_default_prim`].
+    pub(super) prior_default_prim: Option<tf::Token>,
 }
 
 /// One reconciled transaction, handed to [`CompositionHooks::notify`] with every
@@ -294,8 +298,14 @@ impl StageComposition {
             for group in drained.chunk_by_mut(|a, b| a.generation == b.generation) {
                 let generation = group[0].generation;
                 let provenance = self.resolve_group_provenance(group);
-                let edits: Vec<(pcp::LayerId, &sdf::ChangeList)> =
-                    group.iter().map(|edit| (edit.layer, &edit.changes)).collect();
+                let edits: Vec<pcp::LayerChanges<'_>> = group
+                    .iter()
+                    .map(|edit| pcp::LayerChanges {
+                        layer: edit.layer,
+                        changes: &edit.changes,
+                        prior_default_prim: edit.prior_default_prim.clone(),
+                    })
+                    .collect();
                 self.apply_change_sets(generation, &edits, provenance, hooks);
             }
             // Sweep before the requeue below: a sweep retires a reclaimed stack's
@@ -327,7 +337,7 @@ impl StageComposition {
     fn apply_change_sets(
         &self,
         generation: u64,
-        edits: &[(pcp::LayerId, &sdf::ChangeList)],
+        edits: &[pcp::LayerChanges<'_>],
         provenance: Provenance,
         hooks: &dyn CompositionHooks,
     ) {
@@ -346,11 +356,11 @@ impl StageComposition {
         let mut payload = hooks.wants_notice().then(|| {
             let layer_changes: Vec<(String, sdf::ChangeList)> = edits
                 .iter()
-                .map(|(id, changes)| (self.layer_identifier(*id), (*changes).clone()))
+                .map(|edit| (self.layer_identifier(edit.layer), edit.changes.clone()))
                 .collect();
             let mut merged = sdf::ChangeList::new();
-            for (_, changes) in edits {
-                merged.merge_from(changes);
+            for edit in edits {
+                merged.merge_from(edit.changes);
             }
             Payload::new(&pcp_changes, &merged, layer_changes, &provenance)
         });
@@ -377,7 +387,7 @@ impl StageComposition {
         if let Some(payload) = payload {
             let layer_identifier = edits
                 .first()
-                .map(|(id, _)| self.layer_identifier(*id))
+                .map(|edit| self.layer_identifier(edit.layer))
                 .unwrap_or_default();
             hooks.notify(CompositionNotice {
                 payload,
@@ -1034,6 +1044,7 @@ mod tests {
             layer: pcp::LayerId::from_raw(0),
             changes: sdf::ChangeList::new(),
             provenance: None,
+            prior_default_prim: None,
         }
     }
 

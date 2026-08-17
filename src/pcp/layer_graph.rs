@@ -66,6 +66,11 @@ impl LayerId {
     pub(crate) const fn from_raw(raw: u32) -> Self {
         Self(raw)
     }
+
+    /// Whether this names a real layer rather than [`INVALID`](Self::INVALID).
+    pub(crate) const fn is_valid(self) -> bool {
+        self.0 != Self::INVALID.0
+    }
 }
 
 /// Stable identity of a stage's root layer stack, by composition input.
@@ -1865,18 +1870,22 @@ impl LayerGraph {
         Ok(Some(value.into_owned()))
     }
 
+    /// The `defaultPrim` token authored on `layer`, if any. Raw metadata: the
+    /// caller decides which layer to ask and what the token means (see
+    /// [`sdf::default_prim_path`](crate::sdf::default_prim_path)).
+    /// `None` for an id naming no layer here, like
+    /// [`try_identifier`](Self::try_identifier): a queued edit reaches this
+    /// holding an id that may have outlived its layer.
+    pub(crate) fn default_prim_token(&self, layer: LayerId) -> Option<tf::Token> {
+        self.nodes.get(&layer)?.layer.pseudo_root()?.default_prim()
+    }
+
     /// The `defaultPrim` metadata from the root layer, if set.
     ///
     /// When session layers are present, `defaultPrim` is read from the first
     /// non-session layer (the root layer), matching C++ behavior.
     pub(crate) fn default_prim(&self) -> Option<tf::Token> {
-        let root = Path::abs_root();
-        let value = self
-            .root_layer()?
-            .data()
-            .get_field(&root, FieldKey::DefaultPrim.as_str())
-            .ok()?;
-        value.into_owned().try_as_token()
+        self.default_prim_token(self.root_id()?)
     }
 
     /// Layer identifiers in collection order (root-stack first).

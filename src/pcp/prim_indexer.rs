@@ -564,7 +564,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Packages the build's accumulated outputs around its own composed graph.
     fn finish_built(mut self) -> BuildOutput {
-        let graph = mem::take(&mut self.output);
+        let mut graph = mem::take(&mut self.output);
+        graph.finalize_non_site_deps();
         self.finish(Some(graph))
     }
 
@@ -862,17 +863,21 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // dependency: editing it must resync this prim, whose cached entry is
         // where the merged map registers.
         self.expr_var_deps.merge(out.expr_var_deps);
-        // A muted target reached only inside the sub-build is still a dependency
-        // of this prim, so carry its trace up before the graph is grafted — both
-        // the loaded-but-empty targets (by `LayerId`) and the never-loaded ones (by
-        // canonical identifier).
-        if let Some(graph) = &out.graph {
-            self.output
-                .muted_external_targets
-                .extend(graph.muted_external_targets.iter().copied());
-            self.output
-                .muted_unloaded_targets
-                .extend(graph.muted_unloaded_targets.iter().cloned());
+        // A dependency the sub-build recorded is still this prim's, so carry it up
+        // before the graph is grafted: a muted target it skipped (loaded-but-empty
+        // by `LayerId`, never-loaded by canonical identifier) and any layer whose
+        // `defaultPrim` it consulted. Adopting the sub-build's handle when this
+        // graph has none keeps the two sharing one allocation — the seed path
+        // takes that branch and then adopts the graph itself.
+        if let Some(sub) = out.graph.as_ref().and_then(PrimIndexGraph::non_site_deps_shared) {
+            if self.output.non_site_deps_shared().is_some() {
+                let merged = self.output.non_site_deps_mut();
+                merged.muted_external.extend(sub.muted_external.iter().copied());
+                merged.muted_unloaded.extend(sub.muted_unloaded.iter().cloned());
+                merged.default_prim.extend(sub.default_prim.iter().copied());
+            } else {
+                self.output.adopt_non_site_deps(sub.clone());
+            }
         }
         out.graph
     }
@@ -2691,7 +2696,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 // Checked before the load demand so a muted target's file is not
                 // read.
                 if let Some(canonical) = self.arc_target_muted(parent, asset_path) {
-                    self.output.muted_unloaded_targets.push(canonical);
+                    self.output.non_site_deps_mut().muted_unloaded.push(canonical);
                     self.errors.push(Error::MutedAssetPath {
                         asset_path: asset_path.to_string(),
                         arc,
@@ -2773,7 +2778,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // of the dependency) and the diagnostic.
         let Some(rep) = self.inputs.stack.layer_stack(target_stack).first().map(|&(li, _)| li) else {
             if let Some(layer_index) = external_target {
-                self.output.muted_external_targets.push(layer_index);
+                self.output.non_site_deps_mut().muted_external.push(layer_index);
                 self.errors.push(Error::MutedAssetPath {
                     asset_path: asset_path.to_string(),
                     arc,
@@ -2787,11 +2792,18 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // Resolve the source prim path, falling back to the target layer's
         // `defaultPrim` when the arc names no prim (C++ `_GetDefaultPrimPath`).
         let source = if prim_path.is_empty() {
-            let Some(p) = self.resolve_default_prim(target_stack)? else {
-                // Missing target `defaultPrim` is likewise recoverable: record it
-                // and skip the arc; the prim's other opinions still compose.
-                self.errors.push(Error::MissingDefaultPrim {
-                    layer_id: self.inputs.stack.layer(rep).identifier.clone(),
+            // Record the consultation before resolving it: whether or not the
+            // layer names a prim, editing its `defaultPrim` must recompose this
+            // index, and an unresolved default grafts no node to find it by.
+            let default_layer = self.default_prim_layer(target_stack);
+            if default_layer.is_valid() {
+                self.output.non_site_deps_mut().default_prim.push(default_layer);
+            }
+            let Some(p) = self.resolve_default_prim(default_layer)? else {
+                // An unusable target `defaultPrim` is recoverable: record it and
+                // skip the arc; the prim's other opinions still compose.
+                self.errors.push(Error::UnresolvedDefaultPrim {
+                    layer_id: self.inputs.stack.layer(default_layer).identifier.clone(),
                     arc,
                     site_path: parent_path,
                 });
@@ -2904,25 +2916,37 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Ok(())
     }
 
-    /// Resolves the `defaultPrim` of a layer stack's root layer to a root-prim
-    /// path (C++ `_GetDefaultPrimPath`), or `None` when it is absent or invalid.
+    /// The layer whose `defaultPrim` a reference or payload into `target_stack`
+    /// resolves through, or [`LayerId::INVALID`] for an empty stack.
     ///
     /// `defaultPrim` is root-layer metadata (spec 12.2.7) and does not compose
     /// with sublayers or session layers. The stage root layer stack carries its
     /// session region ahead of the root layer — which an internal reference's
     /// `target_stack[0]` would wrongly name — so for that stack the lookup uses
     /// the graph's root layer; any other stack's strongest member is its root.
-    fn resolve_default_prim(&self, target_stack: LayerStackId) -> BuildResult<Option<Path>> {
-        let members = self.inputs.stack.layer_stack(target_stack);
-        let root_layer = (target_stack == LayerStackId::ROOT)
+    ///
+    /// Returned rather than recomputed by each caller so the arc's dependency
+    /// record, its diagnostic, and the value it reads all name the same layer.
+    fn default_prim_layer(&self, target_stack: LayerStackId) -> LayerId {
+        (target_stack == LayerStackId::ROOT)
             .then(|| self.inputs.stack.root_id())
             .flatten()
-            .or_else(|| members.first().map(|&(li, _)| li))
-            .unwrap_or(LayerId::INVALID);
+            .unwrap_or_else(|| self.inputs.stack.layer_stack_root(target_stack))
+    }
+
+    /// Resolves `layer`'s `defaultPrim` to the prim path an arc naming no target
+    /// prim composes against (C++ `_GetDefaultPrimPath`), or `None` when the
+    /// field is absent, holds a non-token value, or names no prim.
+    ///
+    /// The three cases share one answer deliberately. A caller cannot tell them
+    /// apart from the result, and neither can the change machinery, which
+    /// compares the field's converted prim path across an edit: distinguishing
+    /// them here would leave a cached index reporting whichever it saw first.
+    fn resolve_default_prim(&self, layer: LayerId) -> BuildResult<Option<Path>> {
         let Some(value) = self
             .inputs
             .stack
-            .layer(root_layer)
+            .layer(layer)
             .data()
             .try_field(&Path::abs_root(), FieldKey::DefaultPrim.as_str())?
         else {
@@ -2931,7 +2955,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Ok(value
             .into_owned()
             .try_as_token()
-            .and_then(|name| Path::new(&format!("/{name}")).ok()))
+            .and_then(|name| sdf::default_prim_path(name.as_str())))
     }
 
     /// Identifier of the layer that authored an arc on `node` — its
@@ -2953,7 +2977,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// the common unmuted stage does no anchoring work.
     ///
     /// The returned identifier is the muted-set entry an unmute toggles, so a
-    /// not-yet-loaded target records it (`muted_unloaded_targets`) as the trace an
+    /// not-yet-loaded target records it (`NonSiteDeps::muted_unloaded`) as the trace an
     /// unmute fans out through — it never interns, so there is no `LayerId` to key on.
     ///
     /// TODO(perf): on a muted stage this resolves each member's anchor and

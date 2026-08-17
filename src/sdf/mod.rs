@@ -41,7 +41,9 @@ pub(crate) use copy::{author_spec, is_children_field};
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub use expr::{Evaluation, EvaluationValue, Expr, StringEvaluation, StringSegment};
 pub use file_format::{FileFormat, FileFormatCaps, WriteSeek};
-pub use layer::{AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSinkId, PendingLayerChange};
+pub use layer::{
+    AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSinkId, PendingLayerChange, default_prim_path,
+};
 pub(crate) use layer::{dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
 pub use ordering::{apply_ordering, element_cmp};
