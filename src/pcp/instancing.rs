@@ -15,6 +15,7 @@
 //! Materializing the root independently keeps its shared content addressable
 //! without the seeding instance's root-level overrides leaking in.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
@@ -22,11 +23,13 @@ use anyhow::Result;
 use crate::sdf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{Path, PathElement, Value};
+use crate::tf::Token;
 
 use super::LayerId;
 use super::index_cache::IndexCache;
 use super::layer_graph::LayerGraph;
 use super::load_rules::LoadRules;
+use super::population_mask::PopulationMask;
 use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
 use super::prim_indexer::ExprVarDeps;
@@ -53,8 +56,9 @@ pub(super) struct PrototypeRegistry {
     /// only when registering an instance to dedup against an existing key.
     by_key: HashMap<InstanceKey, Path>,
     /// Counter for minting `/__Prototype_N` identities in registration order.
-    /// Stays monotonic across [`clear`](Self::clear) so a `/__Prototype_N`
-    /// identity is never reused for a different composition within a session.
+    /// Never rewound — [`remove_affected`](Self::remove_affected) leaves it
+    /// alone — so a `/__Prototype_N` identity is never reused for a different
+    /// composition within a session.
     count: usize,
 }
 
@@ -72,7 +76,7 @@ pub(super) struct PrototypeRegistry {
 /// query on `/__Prototype_N` itself free of the seeding instance's root-level
 /// overrides (spec 11.3.3 permits overriding property values at an instance
 /// root).
-struct Prototype {
+pub(super) struct Prototype {
     /// Registration order (the `N` in `/__Prototype_N`). Kept so prototypes can
     /// be returned in mint order without parsing the path.
     index: usize,
@@ -87,7 +91,14 @@ struct Prototype {
     /// instance's authored rules (see `IndexCache::scoped_load_rules`). For a
     /// nested instance that path lies inside the enclosing prototype, so the
     /// rules are already that prototype's relative table.
-    relative_load_rules: LoadRules,
+    pub(super) relative_load_rules: LoadRules,
+    /// The canonical instance's population mask, re-rooted onto the path it
+    /// composes at (`PopulationMask::make_relative_to`), so a query inside this
+    /// prototype's namespace resolves against the mask in the instance
+    /// namespace its author wrote it in (see `IndexCache::scoped_mask`). Every
+    /// instance sharing this prototype has the same one, because it is part of
+    /// the [`InstanceKey`].
+    pub(super) relative_mask: PopulationMask,
 }
 
 /// Identity of an instance prim's shared composition (spec 11.3.3): the
@@ -112,6 +123,15 @@ pub(super) struct InstanceKey {
     /// `Usd_InstanceKey`), since a shared prototype's descendants must
     /// resolve one consistent payload-inclusion decision.
     load_rules: LoadRules,
+    /// The instance's population mask, re-rooted onto its own path
+    /// (`PopulationMask::make_relative_to`). Two otherwise-identical instances
+    /// the mask exposes differently mint separate prototypes (C++
+    /// `Usd_InstanceKey`), since a shared prototype composes one subtree and
+    /// that subtree is filtered by the mask.
+    ///
+    /// C++ also folds each instance's value-clip definitions into the key; this
+    /// port does not, so the key is not yet fully `Usd_InstanceKey`-equivalent.
+    mask: PopulationMask,
 }
 
 /// One arc contribution in an [`InstanceKey`]. Floats are stored as bit
@@ -130,10 +150,10 @@ impl PrototypeRegistry {
     /// the instance the first time a key is seen and minting `/__Prototype_N`.
     /// Returns the prototype path and whether this call minted it (so the caller
     /// knows to materialize its index, seeding from the `composed` that minted
-    /// it — the prototype's canonical instance). `key.load_rules` is stored as
-    /// the prototype's relative load rules only on the minting call — a cache
-    /// hit's existing entry is already guaranteed identical, since it was part
-    /// of the matched key.
+    /// it — the prototype's canonical instance). `key.load_rules` and
+    /// `key.mask` are stored as the prototype's relative load rules and mask
+    /// only on the minting call — a cache hit's existing entry is already
+    /// guaranteed identical, since both were part of the matched key.
     ///
     /// `composed` is the path whose index composes the instance
     /// ([`IndexCache::effective_path`]), which is the instance's identity here:
@@ -153,9 +173,10 @@ impl PrototypeRegistry {
         }
 
         let index = self.count;
-        let path = Path::new(&format!("/__Prototype_{index}")).expect("synthetic prototype path is valid");
+        let path = Path::new(&format!("/{PROTOTYPE_PREFIX}{index}")).expect("synthetic prototype path is valid");
         self.count += 1;
         let relative_load_rules = key.load_rules.clone();
+        let relative_mask = key.mask.clone();
         self.by_key.insert(key, path.clone());
         self.by_root.insert(
             path.clone(),
@@ -163,16 +184,18 @@ impl PrototypeRegistry {
                 index,
                 instances: vec![composed.clone()],
                 relative_load_rules,
+                relative_mask,
             },
         );
         self.by_instance.insert(composed.clone(), path.clone());
         (path, true)
     }
 
-    /// The canonical instance's load rules, re-rooted onto the path it composes
-    /// at, for the prototype at `prototype`. `None` for an unknown path.
-    fn relative_load_rules(&self, prototype: &Path) -> Option<&LoadRules> {
-        self.by_root.get(prototype).map(|p| &p.relative_load_rules)
+    /// The prototype registered at `prototype`, holding the canonical
+    /// instance's load rules and population mask re-rooted onto the path it
+    /// composes at. `None` for an unknown path.
+    fn get(&self, prototype: &Path) -> Option<&Prototype> {
+        self.by_root.get(prototype)
     }
 
     /// The canonical instance backing the prototype at `prototype` — the first
@@ -190,17 +213,12 @@ impl PrototypeRegistry {
     /// membership nor the order depends on how the instances were queried
     /// ([`register`](Self::register)). Empty for unknown paths.
     fn instances_of(&self, prototype: &Path) -> Vec<Path> {
-        let mut instances = self.instances_unsorted(prototype).to_vec();
+        let mut instances = self
+            .by_root
+            .get(prototype)
+            .map_or_else(Vec::new, |p| p.instances.clone());
         instances.sort();
         instances
-    }
-
-    /// The instances sharing the prototype at `prototype`, in registration
-    /// order, borrowed without the clone-and-sort of [`instances_of`](Self::instances_of).
-    /// Used for membership checks (e.g. population-mask gating) where order is
-    /// irrelevant. Empty for unknown paths.
-    fn instances_unsorted(&self, prototype: &Path) -> &[Path] {
-        self.by_root.get(prototype).map_or(&[], |p| &p.instances)
     }
 
     /// The registered `/__Prototype_N` roots, in registration order.
@@ -215,20 +233,11 @@ impl PrototypeRegistry {
         self.by_root.contains_key(path)
     }
 
-    /// Whether `path` lies within a prototype's namespace — i.e. it has a
-    /// `/__Prototype_N` ancestor (spec 11.3.3).
-    fn is_in_prototype(&self, path: &Path) -> bool {
-        let Some(parent) = path.parent() else {
-            return false;
-        };
-        self.enclosing_root(Some(&parent)).is_some()
-    }
-
-    /// Returns the nearest `/__Prototype_N` root at or above `start`, or `None`.
-    /// Passing the queried prim starts the walk inclusively; passing its parent
-    /// excludes the prim itself.
-    fn enclosing_root(&self, start: Option<&Path>) -> Option<Path> {
-        self.by_root.nearest_ancestor(start?).map(|(root, _)| root.clone())
+    /// Returns the nearest registered `/__Prototype_N` root at or above `path`,
+    /// inclusive of `path` itself, or `None` when it is outside every
+    /// registered prototype namespace.
+    fn enclosing_root(&self, path: &Path) -> Option<Path> {
+        self.by_root.nearest_ancestor(path).map(|(root, _)| root.clone())
     }
 
     /// Removes every prototype the change set could have invalidated, returning
@@ -288,6 +297,27 @@ impl PrototypeRegistry {
     }
 }
 
+/// The reserved name every synthetic prototype root starts with. The mint
+/// ([`PrototypeRegistry::register`]) writes it and
+/// [`is_prototype_namespace`] recognizes it, so the spelling has one owner.
+const PROTOTYPE_PREFIX: &str = "__Prototype_";
+
+/// Whether `path` lies in the reserved prototype namespace *syntactically* — it
+/// is a synthetic root or a descendant of one — whether or not any prototype is
+/// registered there (C++ `Usd_InstanceCache::IsPathInPrototype`).
+///
+/// This is the predicate for namespace *policy*, which must not depend on how
+/// much has been composed: a load rule naming `/__Prototype_9` is meaningless
+/// before that root exists just as much as after. Whether a live prototype
+/// stands at a path is [`IndexCache::is_prototype`]; whether a path is inside
+/// one is [`IndexCache::is_in_prototype`].
+pub(crate) fn is_prototype_namespace(path: &Path) -> bool {
+    path.is_abs()
+        && path
+            .root_prim_name()
+            .is_some_and(|name| name.starts_with(PROTOTYPE_PREFIX))
+}
+
 /// Computes the instancing key for an already-built instance index: the
 /// arc-introduced (shared) opinions that define the prototype subtree,
 /// independent of the instance's own stage path (spec 11.3.3).
@@ -298,10 +328,12 @@ impl PrototypeRegistry {
 /// Each contributing arc's path is stripped of variant selections, and the
 /// resolved selection set is folded into the key explicitly (see
 /// [`InstanceKey`]), so two instances of one reference share a prototype iff
-/// their variant selections also match. `load_rules` is the instance's load
-/// rules, already re-rooted onto its own path (`LoadRules::make_relative_to`),
-/// so two instances also only share a prototype when their load state agrees.
-fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules) -> InstanceKey {
+/// their variant selections also match. `load_rules` and `mask` are the
+/// instance's load rules and population mask, already re-rooted onto its own
+/// path (`LoadRules::make_relative_to`, `PopulationMask::make_relative_to`), so
+/// two instances also only share a prototype when their load state and their
+/// exposure agree.
+fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules, mask: PopulationMask) -> InstanceKey {
     let local = index.instance_local_nodes(instance_depth, instance_depth);
     let mut arcs = Vec::new();
     let mut selections = Vec::new();
@@ -327,6 +359,7 @@ fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules) -
         arcs,
         selections,
         load_rules,
+        mask,
     }
 }
 
@@ -359,15 +392,86 @@ impl IndexCache {
         // `SdfPathTable`-like trie) would bound it by the change set. A change
         // reaching a nested instance drops its whole prototype chain, so the
         // per-root cost is paid once per level.
+        // The dropped roots owned redirections and eligibility answers of their
+        // own, so those memos go with them.
+        self.clear_population_memos();
         let retired = self.prototypes.remove_affected(changed);
         for root in &retired {
             self.drop_index_subtree(root);
         }
-        // The redirection memo is keyed on instance/prototype structure that the
-        // dropped prototypes may have defined, so clear it wholesale; it is
-        // repopulated lazily on the next descendant query.
-        self.redirected_prims.clear();
         retired
+    }
+
+    /// Whether the stage's population admits `path` — the mask exposes it, it
+    /// exists, and it and every ancestor are active. C++'s `_NameChildrenPred`
+    /// gate, which decides both whether to descend past a prim and whether its
+    /// index may register as an instance.
+    ///
+    /// This is eligibility for population traversal and instance registration,
+    /// **not** prim existence: an inactive prim still exists and still composes,
+    /// and C++ instantiates it too — what it suppresses is that prim's
+    /// descendants and its instance registration. So the only two callers are
+    /// [`Self::is_instance`] and the stage's discovery walk; it must never gate
+    /// [`Self::has_spec`], `Prim::is_valid`, or any ordinary read.
+    ///
+    /// The steps are ordered so nothing below an excluded or inactive ancestor
+    /// is ever composed or loaded: the mask test is pure, the parent is settled
+    /// before the prim itself, and only then does `path` compose.
+    ///
+    /// Memoized in `populated_prims`, which makes the recursion O(1) amortized
+    /// rather than an ancestor walk per query — the ancestors settle first, so
+    /// each is a hit by the time a deeper query asks. As in
+    /// [`Self::effective_path`], a result reached while a build demanded a
+    /// not-yet-loaded layer is provisional and left unmemoized, and a path in an
+    /// unregistered synthetic prototype namespace is never memoized at all,
+    /// since registering that prototype changes the answer without an edit.
+    ///
+    /// Terminates because every step moves to a strictly shorter path: the
+    /// parent recursion by construction, and the existence check only through
+    /// [`Self::enclosing_instance`], which walks strict ancestors (see
+    /// [`Self::is_instance`]).
+    pub(crate) fn is_populated(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+        if path.is_abs_root() {
+            return Ok(true);
+        }
+        if let Some(hit) = self.populated_prims.get(path) {
+            return Ok(*hit);
+        }
+        let pending_before = self.pending_loads.len();
+        let parent = path.parent().expect("a non-root path has a parent");
+        // Short-circuiting is what orders the steps: the mask test composes
+        // nothing, and neither the prim nor its own `active` is reached until
+        // its parent is settled. The redirect is resolved once and both reads
+        // take it, rather than each finding it again.
+        let populated = self.mask_includes(path) && self.is_populated(graph, &parent)? && {
+            let composed = self.effective_path(graph, path)?;
+            self.has_spec_at(graph, &composed)? && self.active_at(graph, &composed)?
+        };
+        if !self.provisional(path, pending_before) {
+            self.populated_prims.insert(path.clone(), populated);
+        }
+        Ok(populated)
+    }
+
+    /// Whether an answer just computed for `path` may change with no edit to
+    /// notice, and so must not be memoized. Two ways it can, and every memo in
+    /// this cache has to respect both:
+    ///
+    /// - The work demanded a layer that was not yet loaded (`pending_loads`
+    ///   grew since `pending_before`), so it read the empty-on-miss index; the
+    ///   stage's load loop recomputes it once the layer is in.
+    /// - It names an unregistered synthetic prototype namespace, where minting
+    ///   the root turns "composes nothing" into shared content
+    ///   ([`Self::in_unregistered_prototype`]).
+    pub(super) fn provisional(&self, path: &Path, pending_before: usize) -> bool {
+        self.pending_loads.len() != pending_before || self.in_unregistered_prototype(path)
+    }
+
+    /// Whether `path` sits in the reserved prototype namespace with no
+    /// prototype registered there — a path that composes to nothing today and
+    /// to shared content once some instance mints its root.
+    pub(super) fn in_unregistered_prototype(&self, path: &Path) -> bool {
+        is_prototype_namespace(path) && self.prototype_root_of(path).is_none()
     }
 
     /// Returns `true` if `path` resolves as an instance prim (spec 11.3.3):
@@ -398,6 +502,12 @@ impl IndexCache {
     /// terminates.
     pub(crate) fn is_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
         if path.is_abs_root() || self.is_prototype(path) {
+            return Ok(false);
+        }
+        // The stage populates no prim the mask excludes or an inactive ancestor
+        // buries, and C++ composes the instance flag only for the prims it
+        // populated — so nothing else can register a prototype either.
+        if !self.is_populated(graph, path)? {
             return Ok(false);
         }
         let composed = self.effective_path(graph, path)?;
@@ -434,26 +544,26 @@ impl IndexCache {
             let (rules, relative_instance) = self.scoped_load_rules(&composed);
             rules.make_relative_to(&relative_instance)
         };
+        // The mask scopes the same way and for the same reason: it names stage
+        // paths, so a nested instance resolves it through the enclosing
+        // prototype's stored relative mask.
+        let relative_mask = {
+            let (mask, relative_instance) = self.scoped_mask(&composed);
+            mask.make_relative_to(&relative_instance)
+        };
         let key = instance_key(
             self.cached(&composed),
             composed.prim_element_count() as u16,
             relative_load_rules,
+            relative_mask,
         );
         let (prototype, minted) = self.prototypes.register(key, &composed);
-        // Materialize the prototype's index only when this call minted it. Before
-        // it existed, a query on the deterministic `/__Prototype_N` namespace
-        // composed the synthetic path in place (no prototype to redirect to), so
-        // an earlier query may have cached stale empty indices and identity
-        // redirections anywhere under `/__Prototype_N`. Evict both so descendant
-        // queries now redirect to the canonical instance; `materialize_prototype`
-        // re-caches the root below. Keying off the mint signal (not
-        // `indices.contains_key`) is what makes a stale synthetic index a miss
-        // rather than a mistaken hit.
+        // Materialize the prototype's index only when this call minted it: the
+        // minting registration made `composed` this prototype's canonical
+        // instance, so its index is the one the prototype materializes from.
+        // The namespace it fills is empty, since an unregistered synthetic path
+        // composes and memoizes nothing (`IndexCache::in_unregistered_prototype`).
         if minted {
-            self.drop_index_subtree(&prototype);
-            self.redirected_prims.retain(|path, _| !path.has_prefix(&prototype));
-            // The minting registration made `composed` this prototype's canonical
-            // instance, so its index is the one the prototype materializes from.
             self.materialize_prototype(graph, &composed, &prototype);
         }
         Ok(prototype)
@@ -523,35 +633,110 @@ impl IndexCache {
         self.prototypes.is_root(path)
     }
 
-    /// Returns `true` if `path` lies within a prototype's namespace — i.e. it
-    /// has a `/__Prototype_N` ancestor (spec 11.3.3).
+    /// Returns `true` if `path` is inside a registered prototype's namespace —
+    /// the `/__Prototype_N` root itself or any descendant of it (spec 11.3.3).
+    ///
+    /// Inclusive of the root, as in C++, where `UsdPrim::IsPrototype()` is
+    /// defined as `IsInPrototype() && GetPath().IsRootPrimPath()`. It asserts
+    /// only namespace membership: a path under a registered root that composes
+    /// to no prim still answers `true` here, so a caller reporting prim state
+    /// (`Prim::is_in_prototype`) checks existence itself.
     pub(crate) fn is_in_prototype(&self, path: &Path) -> bool {
-        self.prototypes.is_in_prototype(path)
+        self.prototypes.enclosing_root(path).is_some()
     }
 
-    /// Returns the `/__Prototype_N` root enclosing `path` (inclusive of `path`
-    /// when it is itself a root), or `None` when `path` is not in a prototype
-    /// namespace (spec 11.3.3). Used to gate prototype content against the
-    /// population mask through its instances.
+    /// Returns the registered `/__Prototype_N` root enclosing `path` (inclusive
+    /// of `path` when it is itself a root), or `None` when `path` is outside
+    /// every registered prototype namespace (spec 11.3.3). The lookup that
+    /// scopes load rules and the population mask onto a prototype's stored,
+    /// instance-relative tables.
     pub(crate) fn prototype_root_of(&self, path: &Path) -> Option<Path> {
-        self.prototypes.enclosing_root(Some(path))
+        // Every registered root is `/__Prototype_N`, so a path the syntactic
+        // test rejects can match nothing — and skipping the walk keeps this off
+        // the cost of every ordinary query, which reaches it through
+        // [`Self::scoped_mask`] and `scoped_load_rules`.
+        if is_prototype_namespace(path) {
+            self.prototypes.enclosing_root(path)
+        } else {
+            None
+        }
     }
 
-    /// The canonical instance's load rules, re-rooted onto the path it composes
-    /// at, for the prototype at `root`. `None` when `root` is not a registered
-    /// prototype. Used by `IndexCache::scoped_load_rules` to resolve a
-    /// `/__Prototype_N` descendant's payload-inclusion decision against the
-    /// rules that governed its seeding instance.
-    pub(super) fn relative_load_rules_of(&self, root: &Path) -> Option<&LoadRules> {
-        self.prototypes.relative_load_rules(root)
+    /// The stage-namespace policy governing `path`, and `path` translated into
+    /// its coordinate space.
+    ///
+    /// Load rules and the population mask are both authored against stage
+    /// paths, while a `/__Prototype_N` descendant composes at a synthetic path
+    /// no author could have written — so each prototype stores its canonical
+    /// instance's table, and a path inside one resolves against that with the
+    /// synthetic root replaced by the absolute root. Outside a prototype
+    /// namespace `global` and `path` pass through untouched. Nesting needs no
+    /// walk: a nested prototype's stored tables were themselves derived from
+    /// its enclosing prototype's when it was minted.
+    pub(super) fn scoped<'a, T>(
+        &'a self,
+        path: &'a Path,
+        global: &'a T,
+        stored: impl FnOnce(&'a Prototype) -> &'a T,
+    ) -> (&'a T, Cow<'a, Path>) {
+        let Some(root) = self.prototype_root_of(path) else {
+            return (global, Cow::Borrowed(path));
+        };
+        let relative = path
+            .replace_prefix(&root, &Path::abs_root())
+            .unwrap_or_else(Path::abs_root);
+        let prototype = self
+            .prototypes
+            .get(&root)
+            .expect("a registered prototype root has stored tables");
+        (stored(prototype), Cow::Owned(relative))
     }
 
-    /// The instances sharing the prototype at `root`, borrowed in registration
-    /// order for membership checks (e.g. population-mask gating). Each is a
-    /// composed path, so a nested prototype's instance lies inside the enclosing
-    /// prototype's namespace. Empty for a path that is not a prototype root.
-    pub(crate) fn prototype_instances(&self, root: &Path) -> &[Path] {
-        self.prototypes.instances_unsorted(root)
+    /// The population mask governing `path`, in `path`'s scope — see
+    /// [`Self::scoped`].
+    pub(super) fn scoped_mask<'a>(&'a self, path: &'a Path) -> (&'a PopulationMask, Cow<'a, Path>) {
+        self.scoped(path, &self.population_mask, |p| &p.relative_mask)
+    }
+
+    /// Whether the stage's population exposes `path` (the mask test C++ makes
+    /// in `_ComposeChildren`). Prototype content resolves through
+    /// [`Self::scoped_mask`], so the question is always asked in the instance
+    /// namespace the mask names — where C++ asks it of the prototype's source
+    /// prim index path, which is the same place.
+    ///
+    /// A pure registry read: it composes nothing and takes `&self`, so a caller
+    /// already holding the cache can use it.
+    pub(crate) fn mask_includes(&self, path: &Path) -> bool {
+        let (mask, relative) = self.scoped_mask(path);
+        mask.includes(&relative)
+    }
+
+    /// The stage's population mask, as opened.
+    pub(crate) fn population_mask(&self) -> &PopulationMask {
+        &self.population_mask
+    }
+
+    /// Filters a composed child-name list to the prims the population mask
+    /// exposes (C++ `_ComposeChildren`).
+    ///
+    /// A `parent` whose whole subtree the mask includes admits every child
+    /// without a per-name test — C++'s short-circuit, and the one an
+    /// all-inclusive mask takes too, since it holds the absolute root. `parent`
+    /// is scoped once, so a prototype's children are tested in the instance
+    /// namespace the mask names.
+    pub(crate) fn filter_child_names(&self, parent: &Path, children: Vec<Token>) -> Vec<Token> {
+        let (mask, relative) = self.scoped_mask(parent);
+        if mask.includes_subtree(&relative) {
+            return children;
+        }
+        children
+            .into_iter()
+            .filter(|name| {
+                relative
+                    .append_path(name.as_str())
+                    .is_ok_and(|child| mask.includes(&child))
+            })
+            .collect()
     }
 
     /// Returns `true` if `path` is an instance proxy — a strict descendant of an
@@ -670,13 +855,7 @@ impl IndexCache {
         } else {
             let pending_before = self.pending_loads.len();
             let redirected = self.redirect_prim(graph, &prim)?;
-            // Only memoize a redirect resolved against fully-loaded indices.
-            // If finding the enclosing instance demanded a not-yet-loaded
-            // layer, that ancestor read as a non-instance (its index is the
-            // empty-on-miss one), so this identity result is provisional;
-            // leave it unmemoized for the stage's load loop to recompute once
-            // the layer loads and the instance composes.
-            if self.pending_loads.len() == pending_before {
+            if !self.provisional(&prim, pending_before) {
                 self.redirected_prims.insert(prim.clone(), redirected.clone());
             }
             redirected
@@ -705,6 +884,7 @@ mod tests {
             arcs: Vec::new(),
             selections: vec![(tag.to_string(), tag.to_string())],
             load_rules: LoadRules::default(),
+            mask: PopulationMask::all(),
         }
     }
 

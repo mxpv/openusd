@@ -294,31 +294,72 @@ impl Dependencies {
         }
     }
 
-    /// Find prim indices that depend on `(layer_id, site_path)` or on any
-    /// ancestor of `site_path`.
+    /// The composed prim paths a change at `(layer_id, site_path)` affects,
+    /// through a dependency on that site or on an ancestor of it.
     ///
     /// The ancestor walk matches C++ `Pcp_DidChangeDependents` (changes.cpp):
     /// an arc introduced at `/Foo` makes `/Foo/Bar`'s composed index depend
-    /// transitively on opinions at `/Foo`, so a change at `/Foo` invalidates
+    /// transitively on opinions at `/Foo`, so a change at `/Foo` reaches
     /// `/Foo/Bar` too.
     pub(super) fn lookup_with_ancestors(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
-        // The layer-agnostic self-registrations are findable on every layer, so
-        // an ancestor that observes its own path invalidates `site_path` even on
-        // a layer its graph does not touch.
-        let by_path = site_path.ancestors().map(|anc| self.path_dependents(&anc));
-        Self::dedup_paths(self.graph_site_ancestors(layer_id, site_path).chain(by_path.flatten()))
+        // A self-registration observes exactly its own path, and is findable on
+        // every layer, so an ancestor holding one says only that the changed
+        // path itself is affected — which is what it translates to, at any
+        // depth.
+        let by_path = site_path
+            .ancestors()
+            .any(|anc| !self.path_dependents(&anc).is_empty())
+            .then(|| site_path.clone());
+        Self::dedup_owned(self.translated_ancestors(layer_id, site_path).chain(by_path))
     }
 
-    /// Prim indices whose graph reads `(layer_id, site_path)` or an ancestor of
-    /// it, without the layer-agnostic [`by_path`](Self::by_path) fold — the half
+    /// The composed paths reached through a graph site at or above `site_path`,
+    /// each translated onto the dependent's namespace — the half
     /// [`lookup_with_ancestors`](Self::lookup_with_ancestors) and
     /// [`graph_ancestor_lookup`](Self::graph_ancestor_lookup) share.
-    fn graph_site_ancestors<'a>(&'a self, layer_id: LayerId, site_path: &'a Path) -> impl Iterator<Item = &'a Path> {
+    ///
+    /// A dependent whose site is a *strict* ancestor is affected at the path the
+    /// change translates to, not at the dependent's own root: an index at `/Ref`
+    /// reading site `/Src` is affected at `/Ref/Child` by a change at
+    /// `/Src/Child`, its own composition being untouched. C++ translates the
+    /// same way, through the node's map function
+    /// (`_ProcessDependentNode`, cache.cpp); the identity map used here agrees
+    /// with it wherever an arc does not rename its namespace.
+    //
+    // TODO: carry each site's `MapFunction` (available on the `Node` that
+    // registered it, `Dependencies::add`) and translate with
+    // `MapFunction::map_source_to_target`, as C++ does. The identity map here
+    // reports the wrong path for an arc that renames namespace below its own
+    // site — a relocate inside a referenced subtree, an implied-class graft —
+    // where the site-level rename case works because the site is registered at
+    // its renamed path. Carrying the map also retires the variant strip below,
+    // which only exists because the translation is reassembled from an authored
+    // spelling.
+    ///
+    fn translated_ancestors<'a>(&'a self, layer_id: LayerId, site_path: &'a Path) -> impl Iterator<Item = Path> {
         self.per_layer
             .get(&layer_id)
             .into_iter()
-            .flat_map(move |map| map.ancestors(site_path).map(|(_, deps)| deps.as_slice()))
-            .flatten()
+            .flat_map(move |map| map.ancestors(site_path))
+            .flat_map(move |(site, deps)| {
+                deps.iter().map(move |dep| {
+                    let translated = site_path
+                        .replace_prefix(site, dep)
+                        .expect("an ancestor site prefixes the changed path");
+                    // The suffix comes from the site's authored spelling, so a
+                    // `{set=sel}` segment inside it has to go: a dependent's
+                    // namespace is composed, where a variant is part of its
+                    // prim rather than a level of its own. C++'s map functions
+                    // drop selections for the same reason. The scan is free
+                    // where the strip copies, so only pay it when there is
+                    // something to strip.
+                    if translated.contains_prim_variant_selection() {
+                        translated.strip_all_variant_selections()
+                    } else {
+                        translated
+                    }
+                })
+            })
     }
 
     /// Find prim indices whose graph reads `(layer_id, site_path)` or an
@@ -332,7 +373,7 @@ impl Dependencies {
     /// about one layer's site: a prim merely cached at `/Source` would answer a
     /// question about `/Source` in a layer it does not read.
     pub(super) fn graph_ancestor_lookup(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
-        Self::dedup_paths(self.graph_site_ancestors(layer_id, site_path))
+        Self::dedup_owned(self.translated_ancestors(layer_id, site_path))
     }
 
     /// Find prim indices whose graph reads exactly `(layer_id, site_path)`,
@@ -456,6 +497,23 @@ impl Dependencies {
         for d in deps {
             if seen.insert(d) {
                 out.push(d.clone());
+            }
+        }
+        out
+    }
+
+    /// [`dedup_paths`](Self::dedup_paths) for a stream that already owns its
+    /// paths — the translated lookups, which derive a path per dependent rather
+    /// than handing back one the table holds. Keeping the borrowed form for
+    /// everything else is what stops the whole-cache scans
+    /// ([`indices_for_layers`](Self::indices_for_layers) and friends) from
+    /// cloning a path they were only going to discard.
+    fn dedup_owned(deps: impl Iterator<Item = Path>) -> Vec<Path> {
+        let mut out: Vec<Path> = Vec::new();
+        let mut seen: HashSet<Path> = HashSet::new();
+        for d in deps {
+            if seen.insert(d.clone()) {
+                out.push(d);
             }
         }
         out
@@ -652,8 +710,12 @@ mod tests {
         assert_eq!(deps.indices_for_layers(&HashSet::from([l0])), vec![local]);
     }
 
+    /// A change below an arc's site reaches the dependent, translated onto its
+    /// namespace: `/A/B` inheriting `/X/Y` composes `/X/Y/Child` at
+    /// `/A/B/Child`, and it is that path — not `/A/B`, whose own composition
+    /// the change leaves alone — that must recompose.
     #[test]
-    fn ancestor_walk_finds_dep() {
+    fn ancestor_walk_translates() {
         let g = graph(1);
         let l0 = g.all_ids()[0];
         let mut deps = Dependencies::default();
@@ -668,9 +730,9 @@ mod tests {
             ],
         );
         deps.add(&here, &index, &g, ExprVarDeps::default());
-        // A change at /X/Y/Child should still invalidate /A/B (it depends
-        // transitively on /X/Y).
-        assert_eq!(deps.lookup_with_ancestors(l0, &p("/X/Y/Child")), vec![here.clone()]);
+        assert_eq!(deps.lookup_with_ancestors(l0, &p("/X/Y/Child")), vec![p("/A/B/Child")]);
+        // The site itself still reaches the dependent unchanged.
+        assert_eq!(deps.lookup_with_ancestors(l0, &arc_site), vec![here]);
     }
 
     #[test]

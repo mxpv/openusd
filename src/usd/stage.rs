@@ -53,7 +53,7 @@ use super::composition::{self, PendingEdit, StageComposition};
 
 use super::interp::{self, InterpolationType};
 use super::sink::{PendingChange, Provenance, StageSink, StageSinkId, keep_ancestors};
-use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry, Schematics};
+use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry, Schematics, StagePopulationMask};
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -202,95 +202,6 @@ pub enum LoadPolicy {
     /// Load only the requested prim (and its ancestors); a descendant with
     /// no rule of its own is excluded. C++ `UsdLoadWithoutDescendants`.
     WithoutDescendants,
-}
-
-/// Population mask limiting which prim paths are exposed by a [`Stage`].
-///
-/// A mask path includes that prim's subtree. Ancestors of masked paths are
-/// also included so traversal can reach the requested working set.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StagePopulationMask {
-    paths: Vec<sdf::Path>,
-}
-
-impl StagePopulationMask {
-    /// Creates a mask that includes the full stage.
-    pub fn all() -> Self {
-        Self {
-            paths: vec![sdf::Path::abs_root()],
-        }
-    }
-
-    /// Creates an empty mask.
-    pub fn empty() -> Self {
-        Self { paths: Vec::new() }
-    }
-
-    /// Creates a mask from prim paths.
-    pub fn new(paths: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, sdf::PathParseError> {
-        let mut mask = Self::empty();
-        for path in paths {
-            mask.add_path(path)?;
-        }
-        Ok(mask)
-    }
-
-    /// Returns a copy of this mask with `path` added.
-    pub fn with_path(mut self, path: impl sdf::IntoPath) -> Result<Self, sdf::PathParseError> {
-        self.add_path(path)?;
-        Ok(self)
-    }
-
-    /// Adds a prim path to the mask.
-    pub fn add_path(&mut self, path: impl sdf::IntoPath) -> Result<&mut Self, sdf::PathParseError> {
-        let path = sdf::Path::abs_root().make_absolute(&sdf::try_into_path(path)?.prim_path());
-        if path == sdf::Path::abs_root() {
-            self.paths.clear();
-            self.paths.push(path);
-        } else if !self.is_all() && !self.paths.contains(&path) {
-            self.paths.push(path);
-        }
-        Ok(self)
-    }
-
-    /// Returns the authored mask paths.
-    pub fn paths(&self) -> &[sdf::Path] {
-        &self.paths
-    }
-
-    /// Returns `true` if the mask contains no paths.
-    pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
-    }
-
-    /// Returns `true` if the mask includes the full stage.
-    ///
-    /// `add_path` clears `paths` to `[abs_root]` whenever the root is added,
-    /// so a single front-position check captures the invariant.
-    pub fn is_all(&self) -> bool {
-        self.paths.first() == Some(&sdf::Path::abs_root())
-    }
-
-    /// Returns `true` if `path` is inside the population mask.
-    ///
-    /// Variant selection segments in `path` are stripped before matching so a
-    /// mask of `/Prim/Child` still includes opinions authored under
-    /// `/Prim{set=sel}Child`.
-    pub fn includes(&self, path: &sdf::Path) -> bool {
-        if self.is_all() {
-            return true;
-        }
-        let path = path.prim_path().strip_all_variant_selections();
-        self.paths
-            .iter()
-            .any(|mask_path| path.has_prefix(mask_path) || mask_path.has_prefix(&path))
-    }
-}
-
-impl Default for StagePopulationMask {
-    fn default() -> Self {
-        Self::all()
-    }
 }
 
 /// Identifies which layer in a [`Stage`] receives authored opinions, and how
@@ -679,8 +590,12 @@ pub struct StageInner {
     composition: StageComposition,
     /// Initial payload loading behavior for this stage.
     initial_load_set: InitialLoadSet,
-    /// Population mask limiting stage-visible prims.
-    population_mask: StagePopulationMask,
+    /// The population epoch of the last completed prototype-discovery pass, or
+    /// `None` when none has completed. Stage population is what fills the
+    /// prototype registry, so a query addressing the `/__Prototype_N` namespace
+    /// runs [`Stage::discover_prototypes`] whenever this no longer matches the
+    /// cache's epoch. See [`Stage::resolve_prototype_path`].
+    prototypes_discovered: Cell<Option<u64>>,
     /// Stage-level interpolation mode for time-sampled attributes
     /// (AOUSD §12.5). Defaults to [`InterpolationType::Linear`] per
     /// spec.
@@ -1910,7 +1825,7 @@ impl Stage {
     /// inactive subtree never composes regardless of its load rule, so a rule
     /// authored there is inert but harmless.
     pub fn load(&self, path: impl sdf::IntoPath, policy: LoadPolicy) -> Result<(), sdf::PathParseError> {
-        let Some(path) = self.normalize_load_target(sdf::try_into_path(path)?) else {
+        let Some(path) = Self::normalize_load_target(sdf::try_into_path(path)?) else {
             return Ok(());
         };
         let victims = self.composition.install_load_rules(
@@ -1928,7 +1843,7 @@ impl Stage {
     /// `UsdStage::Unload`). Same leniency as [`load`](Self::load) for a
     /// prototype-namespace path.
     pub fn unload(&self, path: impl sdf::IntoPath) -> Result<(), sdf::PathParseError> {
-        let Some(path) = self.normalize_load_target(sdf::try_into_path(path)?) else {
+        let Some(path) = Self::normalize_load_target(sdf::try_into_path(path)?) else {
             return Ok(());
         };
         let victims = self
@@ -1957,16 +1872,12 @@ impl Stage {
         // either set leaves the stage untouched.
         let to_unload: Vec<sdf::Path> = to_unload
             .into_iter()
-            .map(|path| Ok(self.normalize_load_target(sdf::try_into_path(path)?)))
+            .map(|path| Ok(Self::normalize_load_target(sdf::try_into_path(path)?)))
             .filter_map(Result::transpose)
             .collect::<Result<_, sdf::PathParseError>>()?;
         let to_load: Vec<(sdf::Path, LoadPolicy)> = to_load
             .into_iter()
-            .map(|(path, policy)| {
-                Ok(self
-                    .normalize_load_target(sdf::try_into_path(path)?)
-                    .map(|path| (path, policy)))
-            })
+            .map(|(path, policy)| Ok(Self::normalize_load_target(sdf::try_into_path(path)?).map(|path| (path, policy))))
             .filter_map(Result::transpose)
             .collect::<Result<_, sdf::PathParseError>>()?;
         let victims = self.composition.install_load_rules(
@@ -2084,20 +1995,19 @@ impl Stage {
     /// Reduces `path` to an absolute prim path (`prim_path` strips a property
     /// suffix and `strip_all_variant_selections` collapses any variant
     /// segment — [`pcp::LoadRules`]' table requires genuinely prim-only
-    /// paths), then rejects a path inside a `/__Prototype_N` namespace, where
-    /// load rules are never consulted (see [`pcp::LoadRules`]'s instancing
-    /// notes). A cheap early exit for `load`/`unload`/`load_and_unload` — the
-    /// real enforcement of the same invariant lives in
-    /// `IndexCache::set_load_rules`, the single choke point every mutation
-    /// (including a caller-supplied [`set_load_rules`](Self::set_load_rules)
-    /// table this normalization never sees) passes through.
-    fn normalize_load_target(&self, path: sdf::Path) -> Option<sdf::Path> {
+    /// paths), then drops a path in the reserved `/__Prototype_N` namespace,
+    /// where load rules are never consulted (see [`pcp::LoadRules`]'s
+    /// instancing notes) — silently, as C++ does. The test is syntactic, so it
+    /// does not depend on whether that prototype has been registered yet.
+    ///
+    /// A cheap early exit for `load`/`unload`/`load_and_unload` — the real
+    /// enforcement of the same invariant lives in `IndexCache::set_load_rules`,
+    /// the single choke point every mutation (including a caller-supplied
+    /// [`set_load_rules`](Self::set_load_rules) table this normalization never
+    /// sees) passes through.
+    fn normalize_load_target(path: sdf::Path) -> Option<sdf::Path> {
         let path = sdf::Path::abs_root().make_absolute(&path.prim_path().strip_all_variant_selections());
-        let cache = self.cache();
-        if cache.is_prototype(&path) || cache.is_in_prototype(&path) {
-            return None;
-        }
-        Some(path)
+        (!pcp::is_prototype_namespace(&path)).then_some(path)
     }
 
     /// Fires [`StageSink::load_rules_changed`] with the paths the edit
@@ -2157,9 +2067,14 @@ impl Stage {
         self.initial_load_set
     }
 
-    /// Returns the population mask used by this stage.
-    pub fn mask(&self) -> &StagePopulationMask {
-        &self.population_mask
+    /// Returns the population mask this stage was opened with (C++
+    /// `UsdStage::GetPopulationMask`, which likewise returns by value).
+    ///
+    /// The mask lives on the composition cache, where it also keys instancing
+    /// (see [`StagePopulationMask`]), so this hands back a copy rather than a
+    /// borrow into it.
+    pub fn mask(&self) -> StagePopulationMask {
+        self.cache().population_mask().clone()
     }
 
     /// Borrows the stage's strongest session layer, if one was provided (C++
@@ -2311,12 +2226,9 @@ impl Stage {
     /// is excluded by the stage's population mask.
     pub(crate) fn resolve_at(&self, attr_path: impl sdf::IntoPath, time: f64) -> Result<Option<sdf::Value>> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        if !self.mask_includes(&attr_path.prim_path()) {
-            return Ok(None);
-        }
         let interp_type = self.interpolation_type.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        self.with_cache(|g, c| c.value_at(g, &attr_path, time, &interp))
+        self.masked(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp))
     }
 
     /// Resolves the cacheable value source for an attribute, the source half of
@@ -2325,10 +2237,7 @@ impl Stage {
     /// [`AttributeValueSource::Static`](pcp::AttributeValueSource::Static)
     /// `None` when the attribute's prim is outside the population mask.
     pub(crate) fn resolve_value_source(&self, attr_path: &sdf::Path) -> Result<pcp::AttributeValueSource> {
-        if !self.mask_includes(&attr_path.prim_path()) {
-            return Ok(pcp::AttributeValueSource::Static(None));
-        }
-        self.with_cache(|g, c| c.resolve_value_source(g, attr_path))
+        self.masked(attr_path, |g, c| c.resolve_value_source(g, attr_path))
     }
 
     /// The current composition revision, advanced once per applied edit batch.
@@ -2365,14 +2274,8 @@ impl Stage {
         if let Some(mapped) = self.fallback_prim_type(id.type_name())? {
             id = id.with_mapped_type_name(mapped);
         }
-        // A prototype can be materialized lazily, gaining a type without an
-        // edit to notice, so an empty identity is re-derived every time rather
-        // than remembered.
-        let empty = id.is_empty();
         let info = self.schema_registry.prim_type_info(id);
-        if !empty {
-            self.prim_types.borrow_mut().remember(revision, path, info.clone());
-        }
+        self.prim_types.borrow_mut().remember(revision, path, info.clone());
         Ok(info)
     }
 
@@ -2438,8 +2341,7 @@ impl Stage {
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<Token>> {
         let root = sdf::Path::abs_root();
-        let children = self.with_cache(|g, c| c.prim_children(g, &root))?;
-        Ok(self.filter_child_names(&root, children))
+        self.with_cache(|g, c| c.prim_children(g, &root))
     }
 
     // `has_spec` / `spec_type` below are low-level composed-spec infrastructure
@@ -2449,27 +2351,21 @@ impl Stage {
     // children / property names on `Prim` (`GetChildren` / `GetPropertyNames`),
     // targets / connections on `Relationship` / `Attribute` (`GetTargets` /
     // `GetConnections`). The handles reach the cache through [`Self::cache`]
-    // and [`Self::masked`], with population filtering supplied by
-    // [`Self::filter_child_names`] and [`Self::mask`].
+    // and [`Self::masked`], which applies the population mask; child lists come
+    // back filtered from [`pcp::IndexCache::prim_children`].
 
     /// Returns `true` if any layer has a spec at the given composed path.
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
     pub(crate) fn has_spec(&self, path: &sdf::Path) -> Result<bool> {
-        if !self.mask_includes(&path.prim_path()) {
-            return Ok(false);
-        }
-        self.with_cache(|g, c| c.has_spec(g, path))
+        self.masked(path, |g, c| c.has_spec(g, path))
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
     pub(crate) fn spec_type(&self, path: impl sdf::IntoPath) -> Result<Option<sdf::SpecType>> {
         let path = sdf::try_into_path(path)?;
-        if !self.mask_includes(&path.prim_path()) {
-            return Ok(None);
-        }
-        self.with_cache(|g, c| c.spec_type(g, &path))
+        self.masked(&path, |g, c| c.spec_type(g, &path))
     }
 
     /// Resolves a composed field value by walking the prim index from strongest
@@ -2505,10 +2401,7 @@ impl Stage {
         T::Error: std::error::Error + Send + Sync + 'static,
     {
         let path = sdf::try_into_path(path)?;
-        if !self.mask_includes(&path.prim_path()) {
-            return Ok(None);
-        }
-        let raw = self.with_cache(|g, c| c.resolve_field(g, &path, field.as_ref()))?;
+        let raw = self.masked(&path, |g, c| c.resolve_field(g, &path, field.as_ref()))?;
         match raw {
             Some(value) => Ok(Some(T::try_from(value)?)),
             None => Ok(None),
@@ -2524,64 +2417,146 @@ impl Stage {
     pub(crate) fn masked<T: Default>(
         &self,
         path: &sdf::Path,
-        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
+        mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
     ) -> Result<T> {
-        if !self.mask_includes(&path.prim_path()) {
-            return Ok(T::default());
-        }
-        self.with_cache(query)
+        let prim = path.prim_path();
+        // Before the borrow, not inside it: a prototype path is unanswerable
+        // until stage population has registered its root, and completing that
+        // is itself a composed walk.
+        self.resolve_prototype_path(&prim)?;
+        self.with_cache(move |g, c| {
+            if c.mask_includes(&prim) {
+                query(g, c)
+            } else {
+                Ok(T::default())
+            }
+        })
     }
 
-    /// Whether `prim` is exposed by the population mask, accounting for
-    /// prototype content (spec 11.3.3). A `/__Prototype_N[/...]` path carries no
-    /// instance of its own and is never named in a user mask, so it is included
-    /// when any instance sharing that prototype is in the mask — mirroring C++,
-    /// where a prototype is populated iff at least one of its instances is.
-    /// Ordinary paths defer to [`StagePopulationMask::includes`]; instance
-    /// proxies are in their instance's namespace and so are covered by the
-    /// instance's own mask entry.
+    /// Completes stage population before a query on `prim` is answered, when
+    /// `prim` addresses the reserved `/__Prototype_N` namespace.
     ///
-    /// A nested prototype's instance is itself a prim inside the enclosing
-    /// prototype, so the walk continues outward through each enclosing
-    /// prototype until it reaches a stage path a user mask can name. Well-formed
-    /// nesting is finite, and the visited set bounds the walk whatever the
-    /// composition looks like.
+    /// The registry that namespace belongs to is filled by composing
+    /// instances, so a prototype path is unanswerable until the prims that
+    /// share it have been populated — C++ has already done that by the time
+    /// `Open` returns, while composition here is demand-driven. Whether the
+    /// queried root happens to be registered decides the *result*, never
+    /// whether discovery runs: an edit that adds an instance to a prototype
+    /// that already exists advances the epoch while leaving the root looking
+    /// known.
+    ///
+    /// Nothing happens for an ordinary stage path, which is every path on a
+    /// stage that never asks about a prototype.
+    pub(super) fn resolve_prototype_path(&self, prim: &sdf::Path) -> Result<()> {
+        if !pcp::is_prototype_namespace(prim) {
+            return Ok(());
+        }
+        self.ensure_prototypes_discovered()
+    }
+
+    /// Completes stage population unless it is already current for the live
+    /// population epoch.
+    fn ensure_prototypes_discovered(&self) -> Result<()> {
+        if self.prototypes_discovered.get() == Some(self.cache().population_epoch()) {
+            return Ok(());
+        }
+        self.discover_prototypes()
+    }
+
+    /// Registers every prototype the stage's population contains (C++'s
+    /// open-time `_ComposePrimIndexesInParallel` plus `Usd_InstanceChanges`,
+    /// paid on demand instead).
+    ///
+    /// The walk is the same shape as [`Self::walk_loadable`] and is built from
+    /// the same primitives [`Self::traverse`] uses, so mask, activeness, and
+    /// the stop at instances cannot drift from ordinary traversal. It descends
+    /// only into populated prims — [`Prim::children`](super::Prim::children)
+    /// does not prune on activeness, so without that test the walk would
+    /// compose and load whole inactive subtrees — stops at each instance, whose
+    /// subtree belongs to its prototype, and then walks each newly registered
+    /// prototype's namespace the same way to reach nested instances.
+    ///
+    /// The pass must be *epoch-stable*. It runs through many separate
+    /// [`Self::with_cache`] calls; each settles its own layer loading, but the
+    /// traversal as a whole does not, so a demand raised late can install a
+    /// layer whose invalidation drops prototypes and child names the walk
+    /// already consumed — a demanded layer that introduces relocates, or one
+    /// whose own `${VAR}` sublayer resolves afterwards, both reach
+    /// `IndexCache::invalidate_layers`. Restarting whenever the epoch moved is
+    /// what keeps the stamped result a snapshot of one coherent population.
+    /// That terminates for the same reason the loader's own fixpoints do: a
+    /// restart means a demanded layer was installed, and each pass settles at
+    /// least one previously unsettled target, of which there are finitely many.
     //
-    // TODO(perf): this is the inverse of `IndexCache::effective_path` — composed
-    // path back to the stage paths standing for it — recomputed per call, while
-    // the inward direction is memoized in `redirected_prims`. It belongs beside
-    // that memo as a cache-side "mask anchors of a path" query, which would also
-    // serve the callers that hold the cache borrow and so cannot re-enter here
-    // (`Relationship::forwarded_targets` passes the raw mask for that reason).
-    pub(crate) fn mask_includes(&self, prim: &sdf::Path) -> bool {
-        if self.population_mask.includes(prim) {
-            return true;
-        }
-        let cache = self.cache();
-        let Some(root) = cache.prototype_root_of(prim) else {
-            return false;
-        };
-        let instances = cache.prototype_instances(&root);
-        if instances.iter().any(|instance| self.population_mask.includes(instance)) {
-            return true;
-        }
-        // Past here the instances are themselves inside prototypes, so the walk
-        // continues outward; a single level of instancing never allocates.
-        let mut pending: Vec<&sdf::Path> = instances.iter().collect();
-        let mut visited: HashSet<sdf::Path> = HashSet::from([root]);
-        while let Some(path) = pending.pop() {
-            if self.population_mask.includes(path) {
-                return true;
+    // TODO(perf): the walk composes — and, under `InitialLoadSet::LoadAll`,
+    // loads — the whole populated namespace, so one cheap read of a
+    // `/__Prototype_N` path pays for the entire stage; any structural edit
+    // advances the epoch and re-arms it. C++ pays the same cost, but eagerly
+    // and once per recompose; the generalization here is an incremental pass
+    // keyed on the change set, registering only the subtrees an edit could have
+    // made instanceable.
+    // TODO(rayon): distinct prototype namespaces in the fixpoint are
+    // independent subtrees, so their passes can run concurrently once
+    // materialization does (see `IndexCache::materialize_prototype`).
+    fn discover_prototypes(&self) -> Result<()> {
+        loop {
+            let epoch = self.cache().population_epoch();
+            let mut roots: Vec<sdf::Path> = Vec::new();
+            let mut visited: HashSet<sdf::Path> = HashSet::new();
+            self.register_instances_below(&sdf::Path::abs_root(), &mut roots)?;
+            // A prototype's own namespace can hold further instances, and each
+            // of those mints a prototype to walk in turn. The visited set
+            // bounds the fixpoint however the composition nests.
+            while let Some(root) = roots.pop() {
+                if visited.insert(root.clone()) {
+                    self.register_instances_below(&root, &mut roots)?;
+                }
             }
-            let Some(root) = cache.prototype_root_of(path) else {
-                continue;
-            };
-            let instances = cache.prototype_instances(&root);
-            if visited.insert(root) {
-                pending.extend(instances);
+            if self.cache().population_epoch() == epoch {
+                self.prototypes_discovered.set(Some(epoch));
+                return Ok(());
             }
         }
-        false
+    }
+
+    /// Registers every instance in the subtree below `root`, collecting the
+    /// prototype roots they resolve to into `roots`. One pass of
+    /// [`Self::discover_prototypes`]'s walk.
+    fn register_instances_below(&self, root: &sdf::Path, roots: &mut Vec<sdf::Path>) -> Result<()> {
+        let mut stack = vec![root.clone()];
+        while let Some(path) = stack.pop() {
+            // One settled pass per prim, straight against the cache. Going
+            // through the composed handles instead would re-enter
+            // [`Self::resolve_prototype_path`] the moment the walk reached a
+            // prototype namespace, so the walk sits below that gate rather than
+            // guarding against itself.
+            let step = self.with_cache(|g, c| {
+                if path != *root && !c.is_populated(g, &path)? {
+                    return Ok(None);
+                }
+                if let Some(prototype) = c.prototype_of(g, &path)? {
+                    return Ok(Some(Err(prototype)));
+                }
+                Ok(Some(Ok(c.prim_children(g, &path)?)))
+            })?;
+            match step {
+                // An instance's subtree belongs to its prototype, so stop here
+                // and walk that namespace in its own right.
+                Some(Err(prototype)) => roots.push(prototype),
+                // Reversed, as `traverse` does, so the walk visits children in
+                // namespace order and prototypes mint in stage order.
+                Some(Ok(children)) => {
+                    for name in children.iter().rev() {
+                        if let Ok(child) = path.append_path(name.as_str()) {
+                            stack.push(child);
+                        }
+                    }
+                }
+                // Not populated: nothing below it composes either.
+                None => {}
+            }
+        }
+        Ok(())
     }
 
     /// Returns a handle to a prim's composition index (C++
@@ -2622,14 +2597,16 @@ impl Stage {
         self.field::<sdf::Value>(sdf::Path::abs_root(), sdf::FieldKey::CustomLayerData)
     }
 
-    /// Returns every registered prototype root (`/__Prototype_N`) with at least
-    /// one instance inside the population mask. A prototype root is never named
-    /// in a user mask and encloses itself, so [`Self::mask_includes`] resolves it
-    /// through its own instances — outward through the enclosing prototypes of a
-    /// nested one.
-    pub fn prototypes(&self) -> Vec<sdf::Path> {
-        let roots = self.cache().prototypes();
-        roots.into_iter().filter(|root| self.mask_includes(root)).collect()
+    /// Returns every prototype root (`/__Prototype_N`) this stage's population
+    /// contains, in registration order (C++ `UsdStage::GetPrototypes`).
+    ///
+    /// Completing the population is what makes the answer whole: the registry
+    /// fills as instances compose, so a stage that has composed nothing knows
+    /// no prototypes until this call has walked it. Only a prim the mask
+    /// exposes can register, so no filtering is applied here.
+    pub fn prototypes(&self) -> Result<Vec<sdf::Path>> {
+        self.ensure_prototypes_discovered()?;
+        Ok(self.cache().prototypes())
     }
 
     /// Returns the resolved stage status bits for a prim.
@@ -2662,28 +2639,9 @@ impl Stage {
             status.set(PrimStatus::MODEL, prim.is_model()?);
         }
         if mask.contains(PrimStatus::IN_PROTOTYPE) {
-            status.set(PrimStatus::IN_PROTOTYPE, prim.is_in_prototype());
+            status.set(PrimStatus::IN_PROTOTYPE, prim.is_in_prototype()?);
         }
         Ok(status)
-    }
-
-    /// Filters a child-name list to the prims the population mask includes.
-    /// Population-mask infrastructure shared by [`Prim::children`](super::Prim::children)
-    /// and the stage's own [`traverse`](Self::traverse) walk. Prototype children
-    /// are gated through [`Self::mask_includes`], so a prototype populated by a
-    /// masked instance stays traversable (spec 11.3.3).
-    pub(crate) fn filter_child_names(&self, parent: &sdf::Path, children: Vec<Token>) -> Vec<Token> {
-        if self.population_mask.is_all() {
-            return children;
-        }
-        children
-            .into_iter()
-            .filter(|name| {
-                parent
-                    .append_path(name.as_str())
-                    .is_ok_and(|child| self.mask_includes(&child))
-            })
-            .collect()
     }
 
     /// Borrows the stage's composition cache, first draining any pending layer
@@ -2900,8 +2858,7 @@ impl Stage {
                 }
             }
 
-            let names = self.masked(&path, |g, cache| cache.prim_children(g, &path))?;
-            let children = self.filter_child_names(&path, names);
+            let children = self.masked(&path, |g, cache| cache.prim_children(g, &path))?;
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
                 if let Ok(child) = path.append_path(name.as_str()) {
@@ -3302,10 +3259,15 @@ impl StageBuilder {
         let stage = Stage(Rc::new(StageInner {
             composition: StageComposition::new(
                 pcp::LayerGraph::new(self.registry),
-                pcp::IndexCache::new(self.variant_fallbacks, load_rules, collection_errors),
+                pcp::IndexCache::new(
+                    self.variant_fallbacks,
+                    load_rules,
+                    self.population_mask,
+                    collection_errors,
+                ),
             ),
             initial_load_set: self.initial_load_set,
-            population_mask: self.population_mask,
+            prototypes_discovered: Cell::new(None),
             interpolation_type: Cell::new(self.interpolation_type),
             edit_target: RefCell::new(edit_target),
             layer_stack_id,

@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::sdf::{self, Path, PathComponent, RelocateList, element_cmp};
+use crate::sdf::{self, Path, RelocateList, element_cmp};
 use crate::tf::Token;
 
 use super::layer_graph::LayerGraph;
@@ -78,15 +78,6 @@ pub(crate) fn chain_through_relocates(path: &Path, relocates: &[(Path, Path)], s
         }
     }
     current
-}
-
-/// The name of a path's topmost prim (its root prim), or `None` for the
-/// absolute root. Groups cached prims by the root subtree they live under.
-fn root_prim_name(path: &Path) -> Option<&str> {
-    match path.components().next() {
-        Some(PathComponent::Prim(name)) => Some(name),
-        _ => None,
-    }
 }
 
 /// Shifts an endpoint through the single nearest ancestor rename in `renames`.
@@ -626,14 +617,14 @@ fn collect_stack_maps(
         .copied()
         .filter(|&id| graph.get(id).is_some_and(|node| !node.relocates.is_empty()))
         .collect();
-    let root_name = root_prim_name(path);
+    let root_name = path.root_prim_name();
 
     // Sort for deterministic iteration: the collected layer-map order feeds
     // downstream relocate composition, so it must not depend on hash order.
     let mut entries: Vec<(&Path, &PrimEntry)> = indices.iter().collect();
     entries.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (cached_path, cached_index) in entries {
-        if root_prim_name(cached_path) != root_name {
+        if cached_path.root_prim_name() != root_name {
             continue;
         }
         for node in cached_index.index.all_nodes() {

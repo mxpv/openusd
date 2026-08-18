@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path as FsPath;
 use std::rc::Rc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use openusd::ar::Resolver as _;
 use openusd::usd::{
     CommittedChange, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus, Stage,
@@ -169,6 +169,18 @@ fn capture_notices(stage: &Stage) -> Rc<RefCell<Notices>> {
         ..Default::default()
     });
     notices
+}
+
+/// The stage's first prototype in registration order, which discovery makes
+/// the first instance in stage order. Instancing tests ask the stage for it
+/// rather than naming `/__Prototype_0`, whose number depends on which instance
+/// registered first.
+fn first_prototype(stage: &Stage) -> Result<sdf::Path> {
+    stage
+        .prototypes()?
+        .first()
+        .cloned()
+        .context("the scene instances no prim")
 }
 
 /// Parses each of `paths`, for comparing a captured channel against literals.
@@ -3623,7 +3635,7 @@ fn prototype_queries() -> Result<()> {
     // Returned sorted by path, so callers need not sort themselves.
     let instances: Vec<String> = stage
         .prim(proto.clone())?
-        .instances()
+        .instances()?
         .iter()
         .map(|p| p.to_string())
         .collect();
@@ -3631,9 +3643,9 @@ fn prototype_queries() -> Result<()> {
 
     // The prototype namespace is addressable and resolves to the shared
     // (arc-only) subtree.
-    assert!(stage.prim(proto.clone())?.is_prototype());
+    assert!(stage.prim(proto.clone())?.is_prototype()?);
     let child = sdf::path(format!("{proto}/Child"))?;
-    assert!(stage.prim(child.clone())?.is_in_prototype());
+    assert!(stage.prim(child.clone())?.is_in_prototype()?);
     assert_eq!(
         stage
             .attribute(child.append_property("size")?)?
@@ -3661,8 +3673,594 @@ fn prototype_queries_masked() -> Result<()> {
 
     // The masked-out /B is excluded from the prototype's instance list.
     let proto = proto.unwrap();
-    assert_eq!(stage.prim(proto.clone())?.instances(), vec![sdf::path("/A")?]);
-    assert_eq!(stage.prototypes(), vec![proto]);
+    assert_eq!(stage.prim(proto.clone())?.instances()?, vec![sdf::path("/A")?]);
+    assert_eq!(stage.prototypes()?, vec![proto]);
+    Ok(())
+}
+
+/// The instance-relative population mask is part of the instancing key (C++
+/// `Usd_InstanceKey`), so two otherwise-identical instances share a prototype
+/// only when the mask reaches them the same way — and the prototype exposes
+/// just the children that mask admits (spec 11.3.3).
+///
+/// Ported from OpenUSD `testUsdStagePopulationMasks.py::test_Bug152904`.
+#[test]
+fn mask_keys_prototype() -> Result<()> {
+    let fixture = fixture_path("instancing_mask_split.usda");
+
+    // Symmetric: both instances are reached through their `geom` child alone,
+    // so one prototype serves both and `shading` is not populated.
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/Instance_1/geom", "/Instance_2/geom"])?)
+        .open(&fixture)?;
+    let one = stage.prim("/Instance_1")?.prototype()?.expect("an instance");
+    assert_eq!(stage.prim("/Instance_2")?.prototype()?, Some(one.clone()));
+    assert_eq!(child_names(&stage, one)?, vec!["geom".to_string()]);
+
+    // Asymmetric: `/Instance_2` is included whole, `/Instance_1` only through
+    // `geom`, so the two cannot share one composed subtree.
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/Instance_1/geom", "/Instance_2"])?)
+        .open(&fixture)?;
+    let one = stage.prim("/Instance_1")?.prototype()?.expect("an instance");
+    let two = stage.prim("/Instance_2")?.prototype()?.expect("an instance");
+    assert_ne!(one, two, "instances the mask reaches differently split");
+    assert_eq!(child_names(&stage, one)?, vec!["geom".to_string()]);
+    assert_eq!(
+        child_names(&stage, two)?,
+        vec!["geom".to_string(), "shading".to_string()]
+    );
+    Ok(())
+}
+
+/// An instance the mask covers whole keys the same however it was reached, so
+/// two fully-included instances still share; one the mask excludes is not
+/// populated and registers nothing at all (spec 11.3.3).
+#[test]
+fn mask_relative_sharing() -> Result<()> {
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/Instance_1", "/Instance_2"])?)
+        .open(&fixture_path("instancing_mask_split.usda"))?;
+    let one = stage.prim("/Instance_1")?.prototype()?.expect("an instance");
+    assert_eq!(stage.prim("/Instance_2")?.prototype()?, Some(one.clone()));
+    assert_eq!(stage.prototypes()?, vec![one.clone()]);
+    assert_eq!(
+        stage.prim(one)?.instances()?,
+        paths(&["/Instance_1", "/Instance_2"]),
+        "both instances registered"
+    );
+
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/Instance_1"])?)
+        .open(&fixture_path("instancing_mask_split.usda"))?;
+    let one = stage.prim("/Instance_1")?.prototype()?.expect("an instance");
+    assert!(!stage.prim("/Instance_2")?.is_instance()?, "excluded, so not populated");
+    assert_eq!(stage.prim("/Instance_2")?.prototype()?, None);
+    assert_eq!(stage.prim(one)?.instances()?, paths(&["/Instance_1"]));
+    Ok(())
+}
+
+/// The prototype namespace is addressable on a masked stage without first
+/// reaching it through an instance: the query completes stage population, and
+/// the prototype then resolves the content the mask admits (spec 11.3.3).
+#[test]
+fn masked_cold_prototype_query() -> Result<()> {
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/Instance_1/geom"])?)
+        .open(&fixture_path("instancing_mask_split.usda"))?;
+
+    // Nothing has touched an instance yet.
+    let proto = first_prototype(&stage)?;
+    assert_eq!(child_names(&stage, proto.clone())?, vec!["geom".to_string()]);
+    assert_eq!(
+        stage
+            .attribute(proto.append_path("geom")?.append_property("size")?)?
+            .get_at::<f64>(usd::TimeCode::new(0.0))?,
+        Some(1.0)
+    );
+    assert_eq!(
+        stage
+            .attribute(proto.append_path("shading")?.append_property("size")?)?
+            .get_at::<f64>(usd::TimeCode::new(0.0))?,
+        None,
+        "the mask does not name shading, so the prototype does not compose it"
+    );
+    Ok(())
+}
+
+/// A nested prototype resolves cold under a mask naming only the outer
+/// instance: discovery walks each prototype namespace it registers, so the
+/// inner one is reachable without any proxy query (spec 11.3.3).
+#[test]
+fn nested_prototype_cold_query() -> Result<()> {
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/A"])?)
+        .open(&fixture_path("instancing_nested_in_prototype.usda"))?;
+
+    let roots = stage.prototypes()?;
+    assert_eq!(roots.len(), 2, "an outer and a nested prototype: {roots:?}");
+    let outer = roots[0].clone();
+    let nested = roots[1].clone();
+    assert_eq!(
+        stage.prim(nested)?.instances()?,
+        vec![outer.append_path("Nested")?],
+        "the nested prototype's instance is the prim inside the enclosing one"
+    );
+    Ok(())
+}
+
+/// Population gates registration, not just the mask: an inactive instance — or
+/// one under an inactive ancestor — is no instance at all, so it mints no
+/// prototype, and reactivating restores both (C++ `_NameChildrenPred`).
+#[test]
+fn inactive_instance_not_populated() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+    assert!(stage.prim("/A")?.is_instance()?);
+
+    stage.prim("/A")?.set_active(false)?;
+    assert!(!stage.prim("/A")?.is_instance()?, "an inactive prim is not populated");
+    assert_eq!(stage.prim("/A")?.prototype()?, None);
+    let a = sdf::path("/A")?;
+    for root in stage.prototypes()? {
+        assert!(
+            !stage.prim(root.clone())?.instances()?.contains(&a),
+            "{root} still lists the deactivated instance"
+        );
+    }
+
+    stage.prim("/A")?.set_active(true)?;
+    assert!(stage.prim("/A")?.is_instance()?, "reactivating restores the instance");
+    assert!(stage.prim("/A")?.prototype()?.is_some());
+    Ok(())
+}
+
+/// Deactivating the last instance of a prototype retires it: the `active` edit
+/// is significant, so the registry drops the root its instance chain named.
+#[test]
+fn deactivating_retires_prototype() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+    let solo = stage.prim("/C")?.prototype()?.expect("/C is an instance");
+    assert!(stage.prototypes()?.contains(&solo));
+
+    stage.prim("/C")?.set_active(false)?;
+    assert!(
+        !stage.prototypes()?.contains(&solo),
+        "the prototype went with its only instance"
+    );
+    Ok(())
+}
+
+/// Discovery runs whenever the population epoch has moved, not only when the
+/// queried root is unknown: an edit that adds an instance to a prototype that
+/// already exists leaves the root looking registered while its instance list
+/// is short one entry.
+#[test]
+fn rediscovery_on_known_root() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/Proto/Child")?;
+    let instance = |path: &str| -> Result<()> {
+        stage.define_prim(path)?.set_metadata(
+            sdf::FieldKey::References.as_str(),
+            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                prim_path: sdf::path("/Proto")?,
+                ..Default::default()
+            }])),
+        )?;
+        stage
+            .prim(path)?
+            .set_metadata(sdf::FieldKey::Instanceable.as_str(), sdf::Value::Bool(true))?;
+        Ok(())
+    };
+
+    instance("/A")?;
+    let proto = first_prototype(&stage)?;
+    assert_eq!(stage.prim(proto.clone())?.instances()?, paths(&["/A"]));
+
+    // A second instance of the same composition joins the prototype that
+    // already exists, so the root stays registered while its membership grows.
+    instance("/B")?;
+    assert_eq!(
+        stage.prim(proto)?.instances()?,
+        paths(&["/A", "/B"]),
+        "the new instance is found without touching it"
+    );
+    Ok(())
+}
+
+/// `is_in_prototype` is namespace membership *and* existence: the registered
+/// root answers `true` as C++ does, an existing descendant does too, a missing
+/// one does not, and an ordinary instance proxy — which lives in its
+/// instance's namespace — is outside it (spec 11.3.3).
+#[test]
+fn in_prototype_is_inclusive() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+    let proto = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+
+    assert!(stage.prim(proto.clone())?.is_in_prototype()?, "the root itself");
+    assert!(stage.prim(proto.append_path("Child")?)?.is_in_prototype()?);
+    assert!(
+        !stage.prim(proto.append_path("Missing")?)?.is_in_prototype()?,
+        "a path that composes to no prim"
+    );
+    assert!(!stage.prim("/A/Child")?.is_in_prototype()?, "an instance proxy");
+    Ok(())
+}
+
+/// A load target in the reserved prototype namespace is a silent no-op — the
+/// test is syntactic, so it holds before any prototype is registered there.
+#[test]
+fn synthetic_load_target_ignored() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+    let before = stage.load_rules();
+
+    stage.unload("/__Prototype_99")?;
+    stage.load("/__Prototype_99/Child", usd::LoadPolicy::WithDescendants)?;
+    assert_eq!(stage.load_rules(), before, "no rule was recorded either way");
+    Ok(())
+}
+
+/// A prototype path resolves its schema type without a prior instance query,
+/// and the identity is remembered rather than re-derived: population completes
+/// before the query is answered, so nothing composes into that namespace
+/// afterwards.
+#[test]
+fn prototype_type_resolves_cold() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+    let proto = first_prototype(&stage)?;
+
+    let child = stage.prim(proto.append_path("Child")?)?;
+    let scope = Some(tf::Token::from("Scope"));
+    assert_eq!(child.type_name()?, scope);
+    assert_eq!(child.type_name()?, scope, "the memoized identity agrees");
+    Ok(())
+}
+
+/// A repaired target can reveal an instance the failed one hid, so dropping
+/// the failed indices advances the population epoch: `Stage::prototypes` then
+/// rediscovers without the repaired prim being touched first.
+#[test]
+fn epoch_covers_failure_recovery() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let target = dir.path().join("target.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+def \"P\" (
+    references = @target.usda@
+) {}
+",
+    )?;
+    fs::write(
+        &target,
+        "#usda 1.0
+def Broken {{{ not valid
+",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(
+        stage.prototypes()?.is_empty(),
+        "the unreadable target hides the instance"
+    );
+
+    // The repaired target makes `/P` instanceable. An unrelated edit clears the
+    // recorded failure; nothing queries `/P`.
+    fs::write(
+        &target,
+        "#usda 1.0
+(
+    defaultPrim = \"P\"
+)
+def \"P\" (
+    instanceable = true
+)
+{
+    def \"Child\" {
+        custom double x = 7
+    }
+}
+",
+    )?;
+    stage.define_prim("/Trigger")?;
+
+    let roots = stage.prototypes()?;
+    assert_eq!(roots.len(), 1, "the newly revealed prototype is found: {roots:?}");
+    assert_eq!(stage.prim(roots[0].clone())?.instances()?, paths(&["/P"]));
+    Ok(())
+}
+
+/// Discovery stops at an inactive prim rather than descending: its subtree is
+/// not populated, so nothing under it composes — and a payload down there is
+/// never demanded.
+#[test]
+fn discovery_skips_inactive_subtree() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+def \"Live\" (
+    instanceable = true
+    references = </Proto>
+) {}
+def \"Proto\" {
+    def \"Child\" {}
+}
+def \"Off\" (
+    active = false
+)
+{
+    def \"Deep\" (
+        payload = @missing.usda@
+    ) {}
+}
+",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.prototypes()?.len(), 1, "only the live instance registers");
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the payload under an inactive prim was never demanded: {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// Discovery spans branches that pull in different layers, each settling its
+/// own loading, and must still stamp one coherent population: `/A`'s prototype
+/// survives `/B` demanding a target of its own, whose `${VAR}` sublayer
+/// resolves later still.
+#[test]
+fn discovery_spans_branches() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+(
+    expressionVariables = {
+        string WHICH = \"pick\"
+    }
+)
+def \"A\" (
+    instanceable = true
+    references = @early.usda@
+) {}
+def \"B\" (
+    references = @holder.usda@
+) {}
+",
+    )?;
+    fs::write(
+        dir.path().join("early.usda"),
+        "#usda 1.0
+(
+    defaultPrim = \"Early\"
+)
+def \"Early\" {
+    def \"Child\" {}
+}
+",
+    )?;
+    fs::write(
+        dir.path().join("holder.usda"),
+        "#usda 1.0
+(
+    defaultPrim = \"Holder\"
+    subLayers = [@`\"${WHICH}.usda\"`@]
+)
+def \"Holder\" {}
+",
+    )?;
+    fs::write(
+        dir.path().join("pick.usda"),
+        "#usda 1.0
+
+over \"Holder\" {}
+",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let roots = stage.prototypes()?;
+    assert_eq!(roots.len(), 1, "the earlier branch's prototype survives: {roots:?}");
+    assert_eq!(stage.prim(roots[0].clone())?.instances()?, paths(&["/A"]));
+    assert_eq!(child_names(&stage, roots[0].clone())?, vec!["Child".to_string()]);
+    Ok(())
+}
+
+/// A mask naming a path *inside* an instance populates the prototype through
+/// it, and does so across nesting and deferred payload loading: the mask reads
+/// the same before and after `load`, because it is anchored on the instance
+/// namespace its author wrote rather than the synthetic prototype path.
+///
+/// Ported from OpenUSD `testUsdBugs.py::test_USD_5709`.
+#[test]
+fn masked_instance_payload() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+def \"Outer\" (
+    instanceable = true
+    references = @model.usda@
+) {}
+",
+    )?;
+    fs::write(
+        dir.path().join("model.usda"),
+        "#usda 1.0
+(
+    defaultPrim = \"Model\"
+)
+def \"Model\" {
+    def \"geom\" {
+        custom double size = 1
+    }
+    def \"shading\" {}
+    def \"Inner\" (
+        instanceable = true
+        payload = @inner.usda@
+    ) {}
+}
+",
+    )?;
+    fs::write(
+        dir.path().join("inner.usda"),
+        "#usda 1.0
+(
+    defaultPrim = \"Inner\"
+)
+def \"Inner\" {
+    def \"Leaf\" {
+        custom double size = 2
+    }
+}
+",
+    )?;
+
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/Outer/geom", "/Outer/Inner"])?)
+        .load(usd::InitialLoadSet::LoadNone)
+        .open(root.to_str().unwrap())?;
+
+    // Cold, with the payload unloaded: the outer prototype exposes the masked
+    // children and nothing else.
+    let outer = first_prototype(&stage)?;
+    assert_eq!(
+        child_names(&stage, outer.clone())?,
+        vec!["geom".to_string(), "Inner".to_string()],
+        "shading is outside the mask"
+    );
+    assert_eq!(
+        stage
+            .attribute(outer.append_path("geom")?.append_property("size")?)?
+            .get_at::<f64>(usd::TimeCode::new(0.0))?,
+        Some(1.0)
+    );
+
+    // Loading the payload exposes the nested instance's own prototype, still
+    // resolved against the same mask. The load state is part of the instancing
+    // key, so `/Outer` re-keys onto a fresh prototype rather than mutating the
+    // one composed without the payload.
+    stage.load("/Outer/Inner", usd::LoadPolicy::WithDescendants)?;
+    let outer = stage.prim("/Outer")?.prototype()?.expect("/Outer is still an instance");
+    let nested = stage
+        .prim(outer.append_path("Inner")?)?
+        .prototype()?
+        .expect("the nested prim is an instance");
+    assert_eq!(
+        stage
+            .attribute(nested.append_path("Leaf")?.append_property("size")?)?
+            .get_at::<f64>(usd::TimeCode::new(0.0))?,
+        Some(2.0),
+        "the nested prototype composes the loaded payload"
+    );
+    assert!(
+        stage.prototypes()?.contains(&nested),
+        "the nested prototype joins the stage's set"
+    );
+    Ok(())
+}
+
+/// A prim whose index was cached while it had no spec must recompose when one
+/// is first authored beneath it on a layer its graph never touched — the
+/// self-registration that keeps an empty index findable.
+#[test]
+fn empty_index_sees_child() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let extra = dir.path().join("extra.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+(
+    subLayers = [@extra.usda@]
+)
+def \"A\" {}
+",
+    )?;
+    fs::write(
+        &extra,
+        "#usda 1.0
+",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(child_names(&stage, "/A")?.is_empty(), "nothing below /A yet");
+
+    let extra_id = identifier_by_leaf(&stage, "extra.usda");
+    stage.layer_mut(&extra_id).expect("the sublayer is live").edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Over, "")?;
+        sdf::PrimSpec::new(e.data_mut(), "/A/B", sdf::Specifier::Def, "")?;
+        Ok(())
+    })?;
+
+    assert_eq!(
+        child_names(&stage, "/A")?,
+        vec!["B".to_string()],
+        "the first spec authored below /A reaches its cached index"
+    );
+    Ok(())
+}
+
+/// A demanded layer that introduces relocates invalidates the stacks that read
+/// it, so a branch discovery visited *earlier* is dropped mid-walk. The pass
+/// restarts until the population epoch holds still, and the stamped result is
+/// one coherent population rather than a mixture of two.
+#[test]
+fn discovery_restarts_on_late_load() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    // `/A` is walked first and registers its prototype; `/B` is walked after and
+    // only then demands `late.usda`, whose relocates restale the graph.
+    fs::write(
+        &root,
+        "#usda 1.0
+def \"A\" (
+    instanceable = true
+    references = @early.usda@
+) {}
+def \"B\" (
+    references = @late.usda@
+) {}
+",
+    )?;
+    fs::write(
+        dir.path().join("early.usda"),
+        "#usda 1.0
+(
+    defaultPrim = \"Early\"
+)
+def \"Early\" {
+    def \"Child\" {}
+}
+",
+    )?;
+    fs::write(
+        dir.path().join("late.usda"),
+        "#usda 1.0
+(
+    defaultPrim = \"Late\"
+    relocates = {
+        </Late/Old>: </Late/New>
+    }
+)
+def \"Late\" {
+    def \"Old\" {}
+}
+",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let roots = stage.prototypes()?;
+    assert_eq!(roots.len(), 1, "the earlier branch's prototype survives: {roots:?}");
+    assert_eq!(stage.prim(roots[0].clone())?.instances()?, paths(&["/A"]));
+    assert_eq!(child_names(&stage, roots[0].clone())?, vec!["Child".to_string()]);
+    // The late layer really did compose, relocates and all.
+    assert!(stage.prim("/B")?.is_valid()?, "the late branch composed");
     Ok(())
 }
 
@@ -3677,7 +4275,7 @@ fn prototype_root_not_instance() -> Result<()> {
         .prototype()?
         .expect("/World/Place is an instance");
 
-    assert!(stage.prim(proto.clone())?.is_prototype());
+    assert!(stage.prim(proto.clone())?.is_prototype()?);
     assert!(!stage.prim(proto.clone())?.is_instance()?);
     assert_eq!(stage.prim(proto)?.prototype()?, None);
     Ok(())
@@ -3700,10 +4298,10 @@ fn nested_prototype_masked() -> Result<()> {
         .expect("the nested prim is an instance");
 
     assert!(
-        stage.prototypes().contains(&nested),
+        stage.prototypes()?.contains(&nested),
         "the nested prototype is populated"
     );
-    assert_eq!(stage.prim(nested.clone())?.instances(), vec![nested_instance]);
+    assert_eq!(stage.prim(nested.clone())?.instances()?, vec![nested_instance]);
     assert_eq!(
         stage
             .attribute(nested.append_path("Leaf")?.append_property("v")?)?
@@ -3932,92 +4530,83 @@ fn prototype_root_drops_instance_overrides() -> Result<()> {
     Ok(())
 }
 
-/// A query on the deterministic synthetic prototype path before any instance
-/// composes must not leave the prototype root empty: materialization keys off
-/// the registry's mint signal, so it overwrites any stale empty index cached
-/// at `/__Prototype_N` (spec 11.3.3).
+/// The prototype namespace is addressable without ever touching an instance:
+/// stage population registers every prototype the first time a
+/// `/__Prototype_N` path is queried, so the root composes its shared content
+/// straight away (spec 11.3.3).
 #[test]
-fn prototype_root_survives_early_query() -> Result<()> {
+fn prototype_survives_early_query() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_root_override.usda"))?;
 
-    // Touch the deterministic synthetic path before any instance registers;
-    // this caches an empty index at /__Prototype_0.
-    assert_eq!(
-        stage
-            .attribute("/__Prototype_0.shared")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        None
-    );
-
-    // Composing the instance mints and materializes /__Prototype_0.
-    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
-    assert_eq!(proto.as_str(), "/__Prototype_0");
-
-    // The prototype root now holds the real composition, not the stale empty
-    // index that the guard would otherwise have mistaken for it.
+    // Discovery, not an instance query, is what makes this resolve — the
+    // prototype path comes from the stage, since its number depends on nothing
+    // a caller can predict.
+    let proto = first_prototype(&stage)?;
     assert_eq!(
         stage
             .attribute(proto.append_property("shared")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
+
+    // Reaching the same prototype through its instance agrees.
+    assert_eq!(stage.prim("/A")?.prototype()?, Some(proto));
     Ok(())
 }
 
-/// A query on a synthetic prototype *descendant* before any instance
-/// registers caches a stale empty index and an identity redirection; minting
-/// the prototype must evict both so the descendant resolves the shared
-/// content rather than the stale synthetic composition (spec 11.3.3).
+/// A prototype *descendant* resolves on the same terms as its root: the shared
+/// content, not the empty composition the synthetic path would have in its own
+/// right (spec 11.3.3).
 #[test]
-fn prototype_descendant_survives_early_query() -> Result<()> {
+fn descendant_survives_early_query() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
 
-    // Touch the synthetic descendant before any instance registers; this
-    // caches an empty index at /__Prototype_0/Child and memoizes its path as
-    // an identity (non-redirected) mapping.
+    let proto = first_prototype(&stage)?;
+    let child = proto.append_path("Child")?;
     assert_eq!(
         stage
-            .attribute("/__Prototype_0/Child.size")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        None
-    );
-
-    // Composing the instance mints and materializes /__Prototype_0.
-    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
-    assert_eq!(proto.as_str(), "/__Prototype_0");
-
-    // The descendant now resolves the shared content: minting evicted the
-    // stale empty index and identity redirection under /__Prototype_0, so the
-    // query recomposes it in place from the materialized prototype root.
-    assert_eq!(
-        stage
-            .attribute(proto.append_path("Child")?.append_property("size")?)?
+            .attribute(child.append_property("size")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
+    assert!(stage.prim(child)?.is_in_prototype()?);
     Ok(())
 }
 
-/// An `AttributeQuery` built on a synthetic prototype descendant before any
-/// instance registers must self-heal once the prototype materializes: the
-/// empty source is not memoized, so a later read picks up the shared content
-/// even though materialization is lazy and does not advance the cache revision
-/// (spec 11.3.3).
+/// A path in the reserved prototype namespace that names no registered
+/// prototype composes to nothing, as C++ hands back an invalid prim — and
+/// says so without claiming to be prototype content.
 #[test]
-fn query_self_heals_prototype_materialization() -> Result<()> {
+fn unknown_prototype_is_empty() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+    let unknown = sdf::path("/__Prototype_99")?;
+
+    assert!(!stage.prim(unknown.clone())?.is_valid()?);
+    assert!(!stage.prim(unknown.clone())?.is_prototype()?);
+    assert!(!stage.prim(unknown.clone())?.is_in_prototype()?);
+    assert_eq!(
+        stage
+            .attribute(unknown.append_path("Child")?.append_property("size")?)?
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        None
+    );
+    Ok(())
+}
+
+/// An `AttributeQuery` built on a prototype descendant resolves on its first
+/// read and stays resolved: the prototype is registered before the query is
+/// answered, so there is no empty source to heal from (spec 11.3.3).
+#[test]
+fn query_heals_materialization() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
 
-    // Use the query before any instance registers: the synthetic path resolves
-    // to nothing yet, and the empty source must not be cached.
-    let q = stage.attribute_query("/__Prototype_0/Child.size")?;
-    assert_eq!(q.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?, None);
+    let proto = first_prototype(&stage)?;
+    let q = stage.attribute_query(proto.append_path("Child")?.append_property("size")?)?;
+    assert_eq!(q.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(5.0));
 
-    // Composing an instance mints and materializes /__Prototype_0 — a lazy step
-    // that does not bump the cache revision.
-    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
-    assert_eq!(proto.as_str(), "/__Prototype_0");
-
-    // The same query now resolves the shared content rather than the stale None.
+    // Composing the instance changes nothing: it resolves to the prototype the
+    // query already read.
+    assert_eq!(stage.prim("/A")?.prototype()?, Some(proto));
     assert_eq!(q.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(5.0));
     Ok(())
 }
@@ -4346,7 +4935,7 @@ fn instance_proxy_api() -> Result<()> {
         .prim_in_prototype()?
         .expect("Child is an instance proxy");
     assert_eq!(in_proto.path(), &proto.append_path("Child")?);
-    assert!(in_proto.is_in_prototype());
+    assert!(in_proto.is_in_prototype()?);
 
     // A prim in the prototype namespace is in a prototype, not a proxy.
     assert!(!in_proto.is_instance_proxy()?);
@@ -7238,9 +7827,10 @@ def \"MyPrim\" (
     };
     stage.define_prim("/MyPrim/New")?;
 
-    // Both authored spellings map to `/MyPrim/New`, which the `/MyPrim` resync
-    // then subsumes — so the whole report is the one composed path.
-    assert_eq!(*resynced.borrow(), vec![sdf::path("/MyPrim")?]);
+    // Both authored spellings — `/Source{set=sel}New` through the variant node
+    // and `/Source` through the reference — translate onto the one composed
+    // path the new prim occupies.
+    assert_eq!(*resynced.borrow(), vec![sdf::path("/MyPrim/New")?]);
     Ok(())
 }
 
@@ -7876,9 +8466,9 @@ fn remove_prim_drops_spec() -> Result<()> {
     assert!(stage.remove_prim("/A/B")?);
     assert!(!stage.prim("/A/B")?.is_valid()?);
     assert!(!child_names(&stage, "/A")?.contains(&"B".to_string()));
-    // The removal drops `/A`'s index and its whole subtree, so the notice
-    // reports the ancestor and `/A/B` is subsumed by it.
-    assert_eq!(notices.borrow().resynced, paths(&["/A"]));
+    // `/A`'s own composition is untouched by its child's removal, so the notice
+    // names the prim that went away rather than the surviving parent.
+    assert_eq!(notices.borrow().resynced, paths(&["/A/B"]));
     // Nothing left to remove.
     assert!(!stage.remove_prim("/A/B")?);
     Ok(())

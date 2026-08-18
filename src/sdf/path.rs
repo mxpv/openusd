@@ -576,6 +576,22 @@ impl Path {
         self.ancestors().take_while(|p| !p.is_abs_root())
     }
 
+    /// Returns the name of this path's root prim — the first prim component,
+    /// whatever the depth — or `None` for the pseudo-root, the empty path, and
+    /// a relative path that opens with an anchor rather than a name.
+    ///
+    /// ```text
+    /// "/A/B/C" -> Some("A")
+    /// "/A{x=y}B" -> Some("A")
+    /// "/"      -> None
+    /// ```
+    pub fn root_prim_name(&self) -> Option<&str> {
+        match self.components().next() {
+            Some(PathComponent::Prim(name)) => Some(name),
+            _ => None,
+        }
+    }
+
     /// Returns the final component name, or `None` for the pseudo-root and empty paths.
     ///
     /// ```text

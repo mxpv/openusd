@@ -19,6 +19,7 @@ use crate::sdf::Path;
 #[cfg(test)]
 use super::VariantFallbackMap;
 use super::index_cache::IndexCache;
+use super::instancing::is_prototype_namespace;
 
 /// A payload-inclusion policy authored at one path (C++
 /// `UsdStageLoadRules::Rule`).
@@ -374,7 +375,7 @@ impl IndexCache {
         let real: Vec<(Path, Rule)> = rules
             .rules()
             .into_iter()
-            .filter(|(p, _)| !self.is_prototype(p) && !self.is_in_prototype(p))
+            .filter(|(p, _)| !is_prototype_namespace(p))
             .collect();
         rules.set_rules(real);
         rules.minimize();
@@ -384,6 +385,8 @@ impl IndexCache {
             return Vec::new();
         }
         self.bump_revision();
+        // A rule change can expose or hide a payload's whole subtree.
+        self.invalidate_population();
         let victims = self.load_rule_victims(&touched);
         self.drop_index_victims(victims)
     }
@@ -420,35 +423,17 @@ impl IndexCache {
         victims
     }
 
-    /// The load rules governing `path`, and `path` translated into their
-    /// coordinate space: the global table with `path` unchanged outside any
-    /// prototype's namespace, or a prototype's stored relative load rules
-    /// with `path` translated relative to the prototype's root when `path`
-    /// lies inside one — since a `/__Prototype_N/child` build composes at
-    /// that literal synthetic path (see the `pcp::instancing` module doc),
-    /// not the real instance path the rule was authored against.
-    ///
-    /// Borrows `path` outside a prototype's namespace — the common case,
-    /// hit once per composed prim.
+    /// The load rules governing `path`, in `path`'s scope — see
+    /// [`IndexCache::scoped`](Self::scoped).
     pub(super) fn scoped_load_rules<'a>(&'a self, path: &'a Path) -> (&'a LoadRules, Cow<'a, Path>) {
-        match self.prototype_root_of(path) {
-            Some(root) => {
-                let relative = path
-                    .replace_prefix(&root, &Path::abs_root())
-                    .unwrap_or_else(Path::abs_root);
-                let rules = self
-                    .relative_load_rules_of(&root)
-                    .expect("a registered prototype root has stored relative load rules");
-                (rules, Cow::Owned(relative))
-            }
-            None => (&self.load_rules, Cow::Borrowed(path)),
-        }
+        self.scoped(path, &self.load_rules, |p| &p.relative_load_rules)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pcp::PopulationMask;
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid test path")
@@ -641,7 +626,12 @@ mod tests {
 
     #[test]
     fn set_load_rules_reports_bounded_victims() {
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let mut rules = cache.load_rules().clone();
         rules.unload(p("/A"));
         assert_eq!(cache.set_load_rules(rules), vec![p("/A")]);
@@ -649,7 +639,12 @@ mod tests {
 
     #[test]
     fn set_load_rules_noop_reports_nothing() {
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let rules = cache.load_rules().clone();
         assert!(cache.set_load_rules(rules).is_empty());
     }
@@ -661,7 +656,12 @@ mod tests {
     /// diffing, so this reports no victims.
     #[test]
     fn set_load_rules_noop_on_equivalent_table() {
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let mut explicit_all = LoadRules::all();
         explicit_all.add_rule(p("/"), Rule::All);
         assert!(cache.set_load_rules(explicit_all).is_empty());
@@ -670,7 +670,12 @@ mod tests {
 
     #[test]
     fn set_load_rules_stops_ancestor_walk_at_all() {
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let mut rules = cache.load_rules().clone();
         rules.load_with_descendants(p("/World"));
         cache.set_load_rules(rules.clone());
@@ -690,7 +695,12 @@ mod tests {
     /// an unrelated prototype sharing its subtree) for an edit elsewhere.
     #[test]
     fn set_load_rules_stops_ancestor_walk_at_self_only() {
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let mut rules = cache.load_rules().clone();
         rules.load_without_descendants(p("/World"));
         cache.set_load_rules(rules.clone());

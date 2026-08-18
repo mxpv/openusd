@@ -1,0 +1,38 @@
+#usda 1.0
+(
+    doc = """Population mask as an instancing key ingredient (spec 11.3.3).
+
+    /Instance_1 and /Instance_2 reference one prototype and are identical in
+    every other respect, so whether they share a composed prototype depends
+    only on how the stage's population mask reaches each of them. The two
+    children exist so a mask naming one of them leaves the other out.
+
+    Ported from OpenUSD testUsdStagePopulationMasks.py::test_Bug152904."""
+)
+
+def Scope "Prototype"
+{
+    def Scope "geom"
+    {
+        double size = 1.0
+    }
+
+    def Scope "shading"
+    {
+        double size = 2.0
+    }
+}
+
+def Scope "Instance_1" (
+    instanceable = true
+    references = </Prototype>
+)
+{
+}
+
+def Scope "Instance_2" (
+    instanceable = true
+    references = </Prototype>
+)
+{
+}

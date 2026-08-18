@@ -47,8 +47,17 @@ pub use schema_registry::{
 pub use sink::{CommittedChange, PendingChange, Provenance, StageSink, StageSinkId};
 pub use stage::{
     EditContext, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus, Stage,
-    StageAuthoringError, StageBuilder, StagePopulationMask, WeakStage,
+    StageAuthoringError, StageBuilder, WeakStage,
 };
+
+/// The population mask limiting which prims a [`Stage`] exposes, under its C++
+/// name. The type lives in [`pcp`](crate::pcp) because an instance-relative
+/// mask is part of a prototype's instancing key, but C++ defines it as
+/// `UsdStagePopulationMask` and reaches it through `UsdStage`, so that is the
+/// spelling this crate publishes.
+pub use crate::pcp::PopulationMask as StagePopulationMask;
+/// Why a path was rejected from a [`StagePopulationMask`].
+pub use crate::pcp::PopulationMaskError as StagePopulationMaskError;
 pub use timecode::TimeCode;
 
 use crate::sdf;

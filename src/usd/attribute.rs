@@ -930,23 +930,21 @@ impl AttributeQuery {
             return self.evaluate(&cached.source, time);
         }
 
-        // Miss: resolve the source once and evaluate it. Snapshot the revision
-        // *after* resolving, so a prototype materialized lazily during the
-        // resolve (which advances the revision) is captured rather than leaving
-        // the entry instantly stale.
+        // Miss: resolve the source once and evaluate it. An empty source is as
+        // final as any other — a query on a `/__Prototype_N` path completes
+        // stage population before it is answered
+        // (`Stage::resolve_prototype_path`), so nothing composes into that
+        // namespace afterwards without an edit.
         let source = stage.resolve_value_source(self.attr.path())?;
         let value = self.evaluate(&source, time)?;
-        // Don't memoize an empty source. A synthetic `/__Prototype_N` path
-        // resolves to `Static(None)` until its prototype materializes — a lazy
-        // composition step that does not bump the revision — and then gains a
-        // value. Re-resolving each call lets the query self-heal; a real source
-        // only changes on an edit, which does bump the revision.
-        if !matches!(source, AttributeValueSource::Static(None)) {
-            self.cached.replace(Some(CachedSource {
-                revision: stage.cache_revision(),
-                source,
-            }));
-        }
+        // Stamped with the revision as it stands *after* resolving: resolving
+        // drains the pending edits, and a sink authoring during that drain
+        // advances the revision, which would leave the entry stale the moment
+        // it was written.
+        self.cached.replace(Some(CachedSource {
+            revision: stage.cache_revision(),
+            source,
+        }));
         Ok(value)
     }
 

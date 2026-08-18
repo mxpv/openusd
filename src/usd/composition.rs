@@ -1034,7 +1034,12 @@ mod tests {
     fn composition() -> StageComposition {
         StageComposition::new(
             pcp::LayerGraph::new(sdf::LayerRegistry::default()),
-            pcp::IndexCache::new(pcp::VariantFallbackMap::new(), pcp::LoadRules::all(), Vec::new()),
+            pcp::IndexCache::new(
+                pcp::VariantFallbackMap::new(),
+                pcp::LoadRules::all(),
+                pcp::PopulationMask::all(),
+                Vec::new(),
+            ),
         )
     }
 

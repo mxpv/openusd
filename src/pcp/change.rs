@@ -563,11 +563,34 @@ impl Changes {
     /// identical re-authoring, or variables on a non-root member layer, which
     /// contribute to no stack) reports nothing on either channel, matching the
     /// C++ five-step diff's step-1 no-op.
+    /// Whether this pass can change which prims exist, how they are named, or
+    /// whether they are active — the question
+    /// [`IndexCache::invalidate_population`] answers for. Every tier but the
+    /// property one qualifies: a layer-stack edit can swap a stack's members, a
+    /// `defaultPrim` edit can move where an arc lands, and the prim and spec
+    /// tiers name prims outright. A pass carrying only attribute values, or
+    /// only relationship targets, changes none of that.
+    fn touches_population(&self) -> bool {
+        !self.layer_stack.is_empty()
+            || !self.default_prim_edits.is_empty()
+            || self.cache.all_significant().next().is_some()
+            || !self.cache.did_change_prims.is_empty()
+            || !self.cache.did_change_specs.is_empty()
+    }
+
     pub fn apply(mut self, cache: &mut IndexCache, graph: &mut LayerGraph) -> ApplyOutcome {
         // Advance the composition revision so cached value views rebuild. This
         // is the single funnel for every authoring and layer-stack edit, so a
         // value-only change that drops no index still invalidates them.
         cache.bump_revision();
+        // The population epoch moves only for a pass that can change which
+        // prims exist. Stamped here, before anything is dropped, so it does not
+        // depend on the invalidation finding a victim: a structural edit whose
+        // victim set comes back empty — nothing cached reads the edited layer
+        // yet — still retires the memos that recorded a prim's absence.
+        if self.touches_population() {
+            cache.invalidate_population();
+        }
 
         // Rebuild the graph's layer-stack precomputed state before the scoped drop
         // below reads it, and collect the affected layer set the drop evicts
@@ -823,7 +846,7 @@ mod tests {
 
     use super::*;
     use crate::pcp::layer_stack::{ExprVarId, ExprVarInterner, VarsSource};
-    use crate::pcp::{LoadRules, VariantFallbackMap};
+    use crate::pcp::{LoadRules, PopulationMask, VariantFallbackMap};
     use crate::sdf::{ChangeFlags, ChangeList, Value};
 
     fn p(s: &str) -> Path {
@@ -839,7 +862,12 @@ mod tests {
         let graph = LayerGraph::from_layers(Vec::new(), 0, sdf::LayerRegistry::default());
         (
             graph,
-            IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new()),
+            IndexCache::new(
+                VariantFallbackMap::new(),
+                LoadRules::all(),
+                PopulationMask::all(),
+                Vec::new(),
+            ),
         )
     }
 
@@ -998,6 +1026,36 @@ mod tests {
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
+    }
+
+    /// The population epoch tracks what can change which prims exist, not every
+    /// edit: a value-only change must leave a completed population walk — and
+    /// the redirection and eligibility memos derived from it — standing, while
+    /// a structural one retires them.
+    #[test]
+    fn epoch_tracks_structure_only() {
+        // A value edit records its property entry with no structural flag; a
+        // new `def` spec records one.
+        for (path, flags, advances) in [
+            ("/Foo.attr", ChangeFlags::empty(), false),
+            ("/Foo", ChangeFlags::ADD_NON_INERT_PRIM, true),
+        ] {
+            let (mut graph, mut cache) = empty_cache();
+            let before = cache.population_epoch();
+            let revision = cache.revision();
+            let mut cl = ChangeList::new();
+            cl.entry_mut(&p(path)).flags = flags;
+            let mut changes = Changes::new();
+            changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+            changes.apply(&mut cache, &mut graph);
+            assert_ne!(cache.revision(), revision, "every edit advances the revision");
+            assert_eq!(
+                cache.population_epoch() != before,
+                advances,
+                "a change at {path} must {} the population epoch",
+                if advances { "advance" } else { "leave" }
+            );
+        }
     }
 
     #[test]

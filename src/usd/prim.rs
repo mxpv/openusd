@@ -640,12 +640,13 @@ impl Prim {
     }
 
     /// `true` if the prim and all ancestors are active. Missing `active`
-    /// opinions default to `true`; a non-existent prim is inactive. Mirrors C++
-    /// `UsdPrim::IsActive`.
+    /// opinions default to `true` and a non-existent prim is inactive, mirroring
+    /// C++ `UsdPrim::IsActive`. A prim the population mask excludes is not on
+    /// this stage at all, and reads back as the gate's "no answer" value, which
+    /// for a `bool` query is `false` — ask [`is_valid`](Self::is_valid) to tell
+    /// the two apart.
     pub fn is_active(&self) -> anyhow::Result<bool> {
-        // `active` defaults to true, so an ancestor blocks only when it
-        // explicitly authors `false`.
-        self.all_ancestors(|stage, path| Ok(stage.field::<bool>(path, sdf::FieldKey::Active)?.unwrap_or(true)))
+        self.stage.masked(&self.path, |g, cache| cache.is_active(g, &self.path))
     }
 
     /// Composed `instanceable` flag (spec 11.3.1). Mirrors C++
@@ -681,10 +682,8 @@ impl Prim {
     /// `class`). `over`, missing specs, and missing specifier opinions are not
     /// defining. Mirrors C++ `UsdPrim::IsDefined`.
     pub fn is_defined(&self) -> anyhow::Result<bool> {
-        self.all_ancestors(|stage, path| {
-            let specifier = stage.field::<sdf::Specifier>(path, sdf::FieldKey::Specifier)?;
-            Ok(matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class)))
-        })
+        self.stage
+            .masked(&self.path, |g, cache| cache.is_defined(g, &self.path))
     }
 
     /// `true` if the prim or any ancestor resolves to `class`. Mirrors C++
@@ -752,36 +751,41 @@ impl Prim {
     }
 
     /// Returns the instance prims sharing this prototype root (a
-    /// `/__Prototype_N` prim), sorted by namespace path and filtered to the
-    /// population mask. Mirrors C++ `UsdPrim::GetInstances`.
+    /// `/__Prototype_N` prim), sorted by namespace path. Mirrors C++
+    /// `UsdPrim::GetInstances`.
     ///
     /// Each instance is named by the path whose index composes it, so a nested
     /// prototype reports its prim inside the enclosing prototype rather than the
     /// proxies standing for it — as C++ does, resolving each registered prim
     /// index into the prototype it belongs to.
     ///
-    /// The mask filters the *results* rather than gating the query (unlike the
-    /// `self.path`-gated sibling queries such as [`is_instance`](Self::is_instance)):
-    /// `self.path` here is the synthetic prototype root, which is never in a
-    /// user population mask, so gating on it would always yield nothing.
-    pub fn instances(&self) -> Vec<sdf::Path> {
-        let instances = self.stage.cache().instances_of(&self.path);
-        instances
-            .into_iter()
-            .filter(|instance| self.stage.mask_includes(instance))
-            .collect()
+    /// No population filtering is applied to the results: only a prim the stage
+    /// populated can register (see `IndexCache::is_populated`), so every
+    /// instance here is one the mask exposes.
+    pub fn instances(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        self.stage.resolve_prototype_path(&self.path)?;
+        Ok(self.stage.cache().instances_of(&self.path))
     }
 
     /// Returns `true` if this prim is a prototype root (`/__Prototype_N`).
     /// Mirrors C++ `UsdPrim::IsPrototype`.
-    pub fn is_prototype(&self) -> bool {
-        self.stage.cache().is_prototype(&self.path)
+    pub fn is_prototype(&self) -> anyhow::Result<bool> {
+        self.stage.resolve_prototype_path(&self.path)?;
+        Ok(self.stage.cache().is_prototype(&self.path))
     }
 
-    /// Returns `true` if this prim lies within a prototype's namespace.
+    /// Returns `true` if this prim lies within a prototype's namespace — the
+    /// `/__Prototype_N` root itself included, as in C++, where
+    /// `UsdPrim::IsPrototype` is `IsInPrototype` narrowed to a root prim.
     /// Mirrors C++ `UsdPrim::IsInPrototype`.
-    pub fn is_in_prototype(&self) -> bool {
-        self.stage.cache().is_in_prototype(&self.path)
+    ///
+    /// A composed prim is required, not just a path in the namespace: C++ can
+    /// only ask this of a prim it instantiated, so a path under a registered
+    /// root that composes to nothing answers `false`.
+    pub fn is_in_prototype(&self) -> anyhow::Result<bool> {
+        self.stage.resolve_prototype_path(&self.path)?;
+        let in_namespace = self.stage.cache().is_in_prototype(&self.path);
+        Ok(in_namespace && self.is_valid()?)
     }
 
     /// `true` if this prim is an instance proxy — a descendant of an instance
@@ -830,28 +834,6 @@ impl Prim {
         Ok(Some(leaf))
     }
 
-    /// `true` when every ancestor (self included, up to but excluding the
-    /// pseudo-root) satisfies `keep`. The pseudo-root is vacuously true; a prim
-    /// with no composed spec is false. Shared skeleton of
-    /// [`is_active`](Self::is_active) and [`is_defined`](Self::is_defined).
-    fn all_ancestors<F>(&self, keep: F) -> anyhow::Result<bool>
-    where
-        F: Fn(&Stage, &sdf::Path) -> anyhow::Result<bool>,
-    {
-        if self.path == sdf::Path::abs_root() {
-            return Ok(true);
-        }
-        if !self.stage.has_spec(&self.path)? {
-            return Ok(false);
-        }
-        for path in self.path.ancestors_below_root() {
-            if !keep(&self.stage, &path)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     /// Returns the prim stack: each `(layer identifier, spec path)` site that
     /// contributes a prim spec to this prim, strongest first. Mirrors C++
     /// `UsdPrim::GetPrimStack`.
@@ -887,10 +869,8 @@ impl Prim {
     /// filtered by the stage's population mask. The name-only counterpart of
     /// [`children`](Self::children).
     pub fn child_names(&self) -> anyhow::Result<Vec<Token>> {
-        let names = self
-            .stage
-            .masked(&self.path, |g, cache| cache.prim_children(g, &self.path))?;
-        Ok(self.stage.filter_child_names(&self.path, names))
+        self.stage
+            .masked(&self.path, |g, cache| cache.prim_children(g, &self.path))
     }
 
     /// Returns the composed child prims, in strongest-layer order and filtered
@@ -1804,7 +1784,7 @@ mod tests {
         let a = super::Prim::new(&stage, sdf::path("/A")?);
         assert!(a.is_instance()?);
         assert!(a.prototype()?.is_some());
-        assert!(!a.is_in_prototype());
+        assert!(!a.is_in_prototype()?);
 
         let proto = super::Prim::new(&stage, sdf::path("/Proto")?);
         assert!(!proto.is_instance()?);

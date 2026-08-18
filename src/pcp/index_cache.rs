@@ -29,6 +29,7 @@ use super::instancing::PrototypeRegistry;
 use super::layer_graph::LayerGraph;
 use super::layer_stack::StackMarks;
 use super::load_rules::LoadRules;
+use super::population_mask::PopulationMask;
 use super::prim_graph::ArcType;
 use super::prim_index::{
     AncestorArc, CompositionContext, Demand, PrimIndex, PropertyTargetKind, TargetMemo, TargetMemoKey,
@@ -72,6 +73,12 @@ pub struct IndexCache {
     /// through [`Self::set_load_rules`]. `IndexCache::build_index` consults it
     /// per path, via [`Self::is_loaded`].
     pub(super) load_rules: LoadRules,
+    /// The prims this stage exposes (C++ `UsdStagePopulationMask`), fixed when
+    /// the stage opens. Index building never consults it — it gates queries
+    /// through [`Self::mask_includes`] and keys instancing through
+    /// [`Self::scoped_mask`], so a build stays a pure function of its
+    /// `&`-inputs.
+    pub(super) population_mask: PopulationMask,
     /// Value-clip resolution and its layer cache ([`ClipCache`], spec 12.3.4) —
     /// an independently-owned entity that the clip orchestration methods
     /// ([`resolve_clip_value`](Self::resolve_clip_value) and friends) delegate
@@ -103,6 +110,19 @@ pub struct IndexCache {
     // concurrent reader needs only a shared snapshot rather than a lock on the
     // hot path. Keep population off the critical section when that lands.
     pub(super) redirected_prims: HashMap<Path, Path>,
+    /// Memoized population eligibility (see [`Self::is_populated`]): whether the
+    /// mask exposes a prim, it exists, and it and every ancestor are active.
+    /// Defined recursively over the parent, so the memo turns a per-query
+    /// O(depth) ancestor walk into O(1) amortized. Retired alongside
+    /// `redirected_prims` by [`Self::invalidate_population`].
+    pub(super) populated_prims: HashMap<Path, bool>,
+    /// Advanced whenever the composed population may differ — see
+    /// [`Self::invalidate_population`]. Distinct from
+    /// [`revision`](Self::revision), which every edit batch advances: a
+    /// value-only edit changes what an attribute resolves to but cannot change
+    /// which prims exist, so it must not retire the memos above or a completed
+    /// population walk.
+    population_epoch: u64,
     /// One-shot errors from layer collection that the [`LayerGraph`](super::layer_graph::LayerGraph)
     /// cannot regenerate (e.g. `UnresolvedSublayer`). Set once at construction;
     /// never cleared, since nothing recomputes them.
@@ -155,12 +175,6 @@ pub struct IndexCache {
     /// this and rebuild when it advances, so an edit to any opinion — even a
     /// value-only edit that leaves the prim index intact — invalidates them.
     ///
-    /// It does not capture lazy prototype materialization, which can change what
-    /// resolves under a synthetic `/__Prototype_N` path without an edit (see
-    /// [`register_prototype`](Self::register_prototype)). A cached view must not
-    /// rely on this counter alone for paths that may be empty pending such
-    /// materialization.
-    ///
     /// A single stage-wide counter is deliberately coarse: every edit rebuilds
     /// every cached value view, even unaffected ones. A per-prim revision would
     /// let an unrelated prim's view survive, but value-only edits skip change
@@ -187,6 +201,10 @@ pub(crate) enum AttributeValueSource {
     /// A time-independent value: a `default` opinion (local or fallback), or
     /// `None` when the attribute is unauthored, masked out, or blocked. The
     /// same value resolves at every time code.
+    ///
+    /// `Static(None)` is the default source — "this attribute resolves to
+    /// nothing" — which is what a query gated out by the population mask
+    /// returns.
     Static(Option<Value>),
     /// A time-sampled source — the matched map, its node's layer offset, and
     /// where it was authored. Interpolated per query in layer time via
@@ -215,6 +233,12 @@ pub(crate) enum AttributeValueSource {
     Clips,
 }
 
+impl Default for AttributeValueSource {
+    fn default() -> Self {
+        Self::Static(None)
+    }
+}
+
 /// Collapses the spec sentinels for "no value" ([`Value::ValueBlock`] and
 /// [`Value::None`]) to `None`, passing any real value through as `Some`. An
 /// authored block stops fall-through to weaker sources yet presents as absent.
@@ -236,15 +260,19 @@ impl IndexCache {
     pub(crate) fn new(
         variant_fallbacks: VariantFallbackMap,
         load_rules: LoadRules,
+        population_mask: PopulationMask,
         collection_errors: Vec<Error>,
     ) -> Self {
         Self {
             store: IndexStore::default(),
             variant_fallbacks,
             load_rules,
+            population_mask,
             clip_cache: ClipCache::default(),
             prototypes: PrototypeRegistry::default(),
             redirected_prims: HashMap::new(),
+            populated_prims: HashMap::new(),
+            population_epoch: 0,
             collection_errors,
             query_errors: Vec::new(),
             in_progress: HashSet::new(),
@@ -303,6 +331,47 @@ impl IndexCache {
     pub(super) fn bump_revision(&mut self) {
         self.revision += 1;
         self.query_errors.clear();
+    }
+
+    /// The current population epoch. A caller that completed a walk over the
+    /// populated namespace stamps this and re-runs when it no longer matches
+    /// (`Stage::discover_prototypes`).
+    pub(crate) fn population_epoch(&self) -> u64 {
+        self.population_epoch
+    }
+
+    /// Records that the composed population may now differ — a prim may have
+    /// appeared or vanished, changed activeness, or moved in namespace — by
+    /// advancing [`population_epoch`](Self::population_epoch) and retiring the
+    /// memos derived from it.
+    ///
+    /// Its own seam, separate from [`Self::bump_revision`], because the two
+    /// cover different equivalence classes: an edit that changes only a value
+    /// leaves every prim, its ancestry, and its activeness exactly where they
+    /// were, so the redirection and eligibility memos — and a completed
+    /// population walk — all stay good.
+    ///
+    /// Called by each operation that can change population, before it drops
+    /// anything: `Changes::apply` for a pass that touches any tier but the
+    /// property one, [`Self::invalidate_layers`], [`Self::invalidate_muting`],
+    /// `set_load_rules`, and [`Self::drop_load_failed_indices`], where a
+    /// repaired target can reveal scene the failed one hid. Deliberately not
+    /// hung off the invalidation's victim set, which can be empty for an edit
+    /// that still changes what would compose — nothing cached reads the edited
+    /// layer yet, while a memo recording a prim's absence very much does.
+    pub(super) fn invalidate_population(&mut self) {
+        self.population_epoch += 1;
+        self.clear_population_memos();
+    }
+
+    /// Retires the memos that record where a prim composes and whether the
+    /// population admits it. Separate from the epoch because dropping a
+    /// prototype invalidates exactly these — every redirection into the
+    /// namespace it owned — without saying anything about the stage's
+    /// population having moved.
+    pub(super) fn clear_population_memos(&mut self) {
+        self.populated_prims.clear();
+        self.redirected_prims.clear();
     }
 
     /// Returns the recoverable composition errors encountered so far: the
@@ -896,6 +965,10 @@ impl IndexCache {
             self.store.remove(&path);
         }
         self.bump_revision();
+        // A target that failed to read hid whatever it would have composed, so
+        // repairing it can reveal prims — and instances — the population never
+        // saw.
+        self.invalidate_population();
     }
 
     /// Spec-tier change consumer (C++ `Pcp_RescanForSpecs`) for one change round's
@@ -907,6 +980,11 @@ impl IndexCache {
     /// sites reached it. The transient query errors are retired by
     /// [`Self::bump_revision`] at the edit seam; they may
     /// reference a dropped prim.
+    ///
+    /// An added or removed spec can change whether a prim exists, so the caller
+    /// must already have advanced the population epoch for these sites.
+    /// `Changes::apply` has: the same `did_change_specs` paths reach
+    /// [`Self::invalidate_prototypes`] in its change set, which owns the seam.
     pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, sites: &[(LayerId, Path)]) {
         let mut refreshed: HashSet<Path> = HashSet::new();
         let mut rebuild: HashSet<Path> = HashSet::new();
@@ -961,6 +1039,7 @@ impl IndexCache {
     /// work — see the `TODO` beside `Payload::finish` in `usd::composition`.
     pub(crate) fn invalidate_layers(&mut self, affected: &HashSet<LayerId>) {
         self.bump_revision();
+        self.invalidate_population();
         self.drop_indices_touching_layers(affected);
     }
 
@@ -977,6 +1056,7 @@ impl IndexCache {
     /// prototype roots retired with them — for a caller to report as-is.
     pub(crate) fn invalidate_muting(&mut self, affected: &HashSet<LayerId>, canonical: &str) -> Vec<Path> {
         self.bump_revision();
+        self.invalidate_population();
         let victims = self.store.dependencies().indices_for_mute_toggle(affected, canonical);
         self.drop_index_victims(victims)
     }
@@ -1027,6 +1107,73 @@ impl IndexCache {
         self.has_spec_at(graph, path)
     }
 
+    /// Whether `path` and every ancestor below the pseudo-root resolve active
+    /// (C++ `UsdPrim::IsActive`). An unauthored `active` defaults to `true`, so
+    /// an ancestor blocks only by authoring `false`; a prim with no composed
+    /// spec is inactive, since nothing exists to be active.
+    ///
+    /// Mask-independent — the population mask is the stage's policy, applied by
+    /// the query gate before this is ever reached — and existence-aware, which
+    /// is what separates it from [`Self::is_populated`].
+    pub(crate) fn is_active(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+        if path.is_abs_root() {
+            return Ok(true);
+        }
+        if !self.has_spec(graph, path)? {
+            return Ok(false);
+        }
+        for ancestor in path.ancestors_below_root() {
+            if !self.active_locally(graph, &ancestor)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether `path` and every ancestor below the pseudo-root carry a defining
+    /// specifier — `def` or `class` (C++ `UsdPrim::IsDefined`). An `over`, a
+    /// missing specifier opinion, and a prim with no composed spec are all
+    /// undefined.
+    ///
+    /// The specifier twin of [`Self::is_active`], and resolved the same way:
+    /// one cache borrow for the whole ancestor chain, rather than a stage
+    /// round-trip per level.
+    pub(crate) fn is_defined(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+        if path.is_abs_root() {
+            return Ok(true);
+        }
+        if !self.has_spec(graph, path)? {
+            return Ok(false);
+        }
+        for ancestor in path.ancestors_below_root() {
+            let specifier = self
+                .resolve_field(graph, &ancestor, FieldKey::Specifier.as_str())?
+                .map(sdf::Specifier::try_from)
+                .transpose()?;
+            if !matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// This prim's own composed `active` opinion, defaulting to `true`. The
+    /// per-prim read [`Self::is_active`] walks and [`Self::is_populated`] takes
+    /// for the prim it is deciding, its ancestors having been decided already.
+    fn active_locally(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+        let path = &self.effective_path(graph, path)?;
+        self.active_at(graph, path)
+    }
+
+    /// [`active_locally`](Self::active_locally) for a path already redirected
+    /// onto the index that composes it, for a caller holding that redirection.
+    pub(super) fn active_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+        match self.resolve_field_at(graph, path, FieldKey::Active.as_str())? {
+            Some(value) => Ok(bool::try_from(value)?),
+            None => Ok(true),
+        }
+    }
+
     /// Resolves a value over the composition nodes of a property's owning prim,
     /// strongest first, reading each contributing layer live. `path` must be a
     /// property path: it is re-anchored onto each node's prim (crossing the
@@ -1064,7 +1211,7 @@ impl IndexCache {
     /// Like [`Self::has_spec`], but assumes `path` has already been redirected
     /// through [`Self::effective_path`]. Callers that redirected the path
     /// themselves (e.g. [`Self::value_at`]) use this to avoid redirecting twice.
-    fn has_spec_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub(super) fn has_spec_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
         if path.is_property_path() {
             return Ok(self
                 .find_property_node(graph, path, |layer, p| layer.data().has_spec(p).then_some(()))?
@@ -1183,6 +1330,13 @@ impl IndexCache {
     /// handled by normal composition.
     pub fn resolve_field(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>> {
         let path = &self.effective_path(graph, path)?;
+        self.resolve_field_at(graph, path, field)
+    }
+
+    /// [`resolve_field`](Self::resolve_field) for a path already redirected onto
+    /// the index that composes it — the half a caller holding that redirection
+    /// reuses rather than resolving it again.
+    fn resolve_field_at(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>> {
         if path.is_abs_root() && field != ChildrenKey::PrimChildren.as_str() {
             return graph.root_layer_field(field);
         }
@@ -1300,17 +1454,11 @@ impl IndexCache {
     /// [`crate::usd::ConnectionGraph::resolve_chain`]) so a deep relationship
     /// chain cannot overflow the call stack.
     ///
-    /// `is_populated` reports whether a prim is inside the stage's working set.
-    /// A target relationship on a prim outside the set is not followed — its
-    /// raw targets would be empty under the population mask anyway — so the
+    /// A target relationship on a prim the population mask excludes is not
+    /// followed — its raw targets would be empty under the mask anyway — so the
     /// forwarded result never leaks scene the mask excludes (it stays
     /// consistent with [`Self::relationship_targets`] on that path).
-    pub fn forwarded_relationship_targets(
-        &mut self,
-        graph: &LayerGraph,
-        path: &Path,
-        is_populated: &dyn Fn(&Path) -> bool,
-    ) -> Result<Vec<Path>> {
+    pub fn forwarded_relationship_targets(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>> {
         let mut out = Vec::new();
         let mut emitted = HashSet::new();
         let mut followed = HashSet::new();
@@ -1328,7 +1476,7 @@ impl IndexCache {
             if is_relationship {
                 // Don't follow a relationship the mask excludes; a masked-out
                 // prim contributes no composed targets.
-                if !is_populated(&target.prim_path()) {
+                if !self.mask_includes(&target.prim_path()) {
                     continue;
                 }
                 if !followed.insert(target.clone()) {
@@ -1630,7 +1778,11 @@ impl IndexCache {
     /// Returns the composed list of child names for a prim path (C++
     /// `PcpPrimIndex::ComputePrimChildNames`'s `nameOrder` out-param).
     pub fn prim_children(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
-        Ok(self.compute_prim_child_names(graph, path)?.0)
+        let names = self.compute_prim_child_names(graph, path)?.0;
+        // Filtered here, where the list is produced, so no caller can compose a
+        // child list the population mask has not been applied to — C++ masks
+        // inside `_ComposeChildren` for the same reason.
+        Ok(self.filter_child_names(path, names))
     }
 
     /// Composes a prim's child names alongside the names prohibited at it (C++
@@ -1988,8 +2140,16 @@ impl IndexCache {
     /// spec at the composed path), parent composition nodes are checked for
     /// child specs at their respective paths. This handles prims that only
     /// exist through ancestor inherit, specialize, or reference arcs.
+    ///
+    /// Two paths are deliberately left uncached, so an absent entry means
+    /// either: a build that demanded a not-yet-loaded layer (the stage's load
+    /// loop recomposes it), and a path in the reserved `/__Prototype_N`
+    /// namespace with no prototype registered there. The latter names no scene
+    /// — C++ hands back an invalid prim for it — and composing the synthetic
+    /// path in place would cache an empty index that a later mint would have to
+    /// evict.
     pub(super) fn ensure_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<()> {
-        if self.is_indexed(path) {
+        if self.is_indexed(path) || self.in_unregistered_prototype(path) {
             return Ok(());
         }
         // Composing a prim whose ancestor is still mid-build cannot seed from that
@@ -2286,7 +2446,12 @@ mod tests {
         let graph = LayerGraph::from_layers(layers, 0, registry);
         (
             graph,
-            IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new()),
+            IndexCache::new(
+                VariantFallbackMap::new(),
+                LoadRules::all(),
+                PopulationMask::all(),
+                Vec::new(),
+            ),
         )
     }
 
@@ -2308,7 +2473,12 @@ mod tests {
         let graph = LayerGraph::from_layers(vec![parse_layer(text)], 0, sdf::LayerRegistry::default());
         (
             graph,
-            IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new()),
+            IndexCache::new(
+                VariantFallbackMap::new(),
+                LoadRules::all(),
+                PopulationMask::all(),
+                Vec::new(),
+            ),
         )
     }
 
@@ -2365,7 +2535,12 @@ mod tests {
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
         (
             graph,
-            IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new()),
+            IndexCache::new(
+                VariantFallbackMap::new(),
+                LoadRules::all(),
+                PopulationMask::all(),
+                Vec::new(),
+            ),
         )
     }
 
@@ -2565,7 +2740,12 @@ def "A" (
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
         let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
 
         let child = sdf::path("/A/B")?;
         cache.ensure_index(&graph, &child)?;
@@ -2639,7 +2819,12 @@ def "A" (
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
         let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
 
         let a = sdf::path("/A")?;
         cache.ensure_index(&graph, &a)?;
@@ -2732,7 +2917,12 @@ def "T" (
             0,
             sdf::LayerRegistry::default(),
         );
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.x")?, 0.0)?,
             Some(Value::Double(1.0)),
@@ -2912,7 +3102,12 @@ def "Anchor" (inherits = </Rig>) {}
         let a = parse_named_layer("a.usda", "#usda 1.0\ndef \"X\" { custom double y = 1 }\n");
         let b = parse_named_layer("b.usda", "#usda 1.0\ndef \"X\" { custom double y = 2 }\n");
         let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let root_id = graph.root_id().unwrap();
         let y = sdf::path("/R.y")?;
 
@@ -2950,7 +3145,12 @@ def "Anchor" (inherits = </Rig>) {}
         );
         let t = parse_named_layer("t.usda", target);
         let graph = LayerGraph::from_layers(vec![root, t], 0, sdf::LayerRegistry::default());
-        let cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let target_id = graph.id_of("t.usda").expect("the target layer is interned");
         (graph, cache, target_id)
     }
@@ -3190,7 +3390,12 @@ def "Anchor" (inherits = </Rig>) {}
         );
         let t = parse_named_layer("t.usda", TWO_SOURCE_TARGET);
         let mut graph = LayerGraph::from_layers(vec![root, mid, t], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let target = graph.id_of("t.usda").expect("the target layer is interned");
         let y = sdf::path("/User.y")?;
         assert_eq!(
@@ -3227,7 +3432,12 @@ def "Anchor" (inherits = </Rig>) {}
         );
         let t = parse_named_layer("t.usda", TWO_SOURCE_TARGET);
         let mut graph = LayerGraph::from_layers(vec![root, t], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let target = graph.id_of("t.usda").expect("the target layer is interned");
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/A.y")?, 0.0)?,
@@ -3289,7 +3499,12 @@ def "Anchor" (inherits = </Rig>) {}
              def \"User\" (\n    references = <>\n) {}\n",
         );
         let mut graph = LayerGraph::from_layers(vec![session, root], 1, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let root_id = graph.root_id().unwrap();
         let session_id = graph.id_of("session.usda").expect("the session layer is interned");
         let y = sdf::path("/User.y")?;
@@ -3334,7 +3549,12 @@ def "Anchor" (inherits = </Rig>) {}
             "#usda 1.0\ndef \"B\" {\n    custom asset tex = @`${A}`@\n}\n",
         );
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let value = settled_value_at(&mut graph, &mut cache, &sdf::path("/M.tex")?, 0.0)?.expect("tex resolves");
         let asset = value.try_as_asset_path().expect("attribute is asset-typed");
         assert_eq!(
@@ -3357,7 +3577,12 @@ def "Anchor" (inherits = </Rig>) {}
         );
         let base = parse_named_layer("base.usda", "#usda 1.0\ndef \"Base\" {}\n");
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let base_id = graph.id_of("base.usda").unwrap();
         let local = sdf::path("/Local")?;
         let refp = sdf::path("/Ref")?;
@@ -4118,7 +4343,12 @@ def "Anchor" (inherits = </Rig>) {}
         let weak = parse_named_layer("weak.usd", "#usda 1.0\ndef \"A\" { custom int x = 1 }\n");
         let mut graph = LayerGraph::from_layers(vec![root, weak], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let a = sdf::path("/A")?;
 
         // Before the edit only the weak sublayer authors /A.
@@ -4146,7 +4376,12 @@ def "Anchor" (inherits = </Rig>) {}
             vec![("root.usd".into(), a.clone()), ("weak.usd".into(), a.clone())],
             "the spec-tier refresh adds the new strong site to the prim stack"
         );
-        let mut fresh = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut fresh = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         assert_eq!(
             refreshed,
             fresh.prim_stack(&graph, &a)?,
@@ -4170,7 +4405,12 @@ def "Anchor" (inherits = </Rig>) {}
         let mut graph = LayerGraph::from_layers(vec![root, mid, weak], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
         let mid_id = graph.id_of("mid.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let a = sdf::path("/A")?;
 
         // Only the weakest sublayer authors /A before the edit.
@@ -4212,7 +4452,12 @@ def "Anchor" (inherits = </Rig>) {}
             ],
             "the batched spec-tier refresh adds both new strong sites"
         );
-        let mut fresh = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut fresh = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         assert_eq!(
             refreshed,
             fresh.prim_stack(&graph, &a)?,
@@ -4235,7 +4480,12 @@ def "Anchor" (inherits = </Rig>) {}
         let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
         let base_id = graph.id_of("base.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let a = sdf::path("/A")?;
 
         // The empty target makes /A's reference culled — no composition arc.
@@ -4281,7 +4531,12 @@ def "Anchor" (inherits = </Rig>) {}
         let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( inherits = </_class_Foo> ) {}\n");
         let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let a = sdf::path("/A")?;
 
         // The empty class makes /A's inherit culled — no composition arc.
@@ -4316,7 +4571,12 @@ def "Anchor" (inherits = </Rig>) {}
         let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( specializes = </_class_Foo> ) {}\n");
         let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let a = sdf::path("/A")?;
 
         assert!(!cache.has_composition_arc(&graph, &a)?);
@@ -4427,7 +4687,12 @@ def "Anchor" (inherits = </Rig>) {}
         let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
         let base_id = graph.id_of("base.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let a = sdf::path("/A")?;
 
         // The missing nested target makes /A's reference contribute nothing.
@@ -4465,7 +4730,12 @@ def "Anchor" (inherits = </Rig>) {}
         let weak = parse_named_layer("weak.usda", "#usda 1.0\ndef \"World\" {\n  def \"Child\" {}\n}\n");
         let mut graph = LayerGraph::from_layers(vec![strong, weak], 0, sdf::LayerRegistry::default());
         let strong_id = graph.root_id().unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
 
         let world = sdf::path("/World")?;
         let has_child = |cache: &mut IndexCache, graph: &LayerGraph| -> Result<bool> {
@@ -4530,7 +4800,12 @@ def "Anchor" (inherits = </Rig>) {}
         }
 
         let graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         cache.resolve_field(&graph, &world, field)
     }
 
@@ -4621,7 +4896,12 @@ def "Anchor" (inherits = </Rig>) {}
         .unwrap();
 
         let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         assert_eq!(
             cache.resolve_field(&graph, &sdf::path("/Inst")?, "expr")?,
             Some(Value::PathExpression(sdf::PathExpression::parse(
@@ -4672,7 +4952,12 @@ def "Anchor" (inherits = </Rig>) {}
         .unwrap();
 
         let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         assert_eq!(
             cache.resolve_field(&graph, &sdf::path("/Inst")?, "exprs")?,
             Some(Value::PathExpressionVec(vec![
@@ -4697,7 +4982,12 @@ def "Anchor" (inherits = </Rig>) {}
             "#usda 1.0\ndef \"Class\"\n{\n    custom pathExpression e = \"/Class/child//\"\n}\n",
         );
         let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
             cache.value_at(&graph, &sdf::path("/Inst.e")?, 0.0, &interp)?,

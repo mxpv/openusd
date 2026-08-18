@@ -61,6 +61,7 @@
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
 //! | `load_rules` | `UsdStageLoadRules` | Per-path payload-inclusion policy ([`LoadRules`]/[`Rule`]): nearest-ancestor-with-lookahead rule resolution, plus the `IndexCache` glue that turns a rule change into per-build payload-expansion decisions and bounded cache invalidation. |
+//! | `population_mask` | `UsdStagePopulationMask` | The prim paths a stage exposes ([`PopulationMask`]), as a sorted antichain. Sits here, like `load_rules`, because an instance-relative mask is part of a prototype's instancing key, so two instances the mask reaches differently share no prototype; `usd` re-exports it under its C++ name. |
 //! | `relocates` | — | Stateless relocate free functions (effective relocates, transitive chaining, child-name folding). Layer-authored pairs and stack-effective queries are read from `LayerGraph`; all data is passed through parameters. |
 //! | `dependencies` | `Pcp_Dependencies` | Reverse `(LayerId, site) → prim-index paths` map (`Dependencies`) driving surgical change fanout. |
 //!
@@ -316,18 +317,6 @@
 //!   same edit seam, so a target severed from composition (its only arc muted,
 //!   unloaded, or deleted) stops reporting promptly — and recomposition
 //!   re-derives them if the problem still exists.
-//! - Masked cold prototype queries: a query on a `/__Prototype_N` path under a
-//!   non-default population mask resolves to empty until an instance sharing
-//!   that prototype has been composed (which registers the prototype). The
-//!   registry is populated lazily as instances compose, and `Stage::mask_includes`
-//!   cannot map a synthetic prototype path back to an instance to compose before
-//!   the registry knows it, so a query that addresses the prototype namespace
-//!   before any instance is touched reads the default. Reaching the prototype
-//!   through an instance (`Prim::prototype`, or any instance-proxy query) first
-//!   registers it, after which masked prototype-content queries (including those
-//!   behind a lazily-loaded payload) resolve correctly. A nested prototype's
-//!   instance is a prim inside the enclosing prototype, so the mask check
-//!   resolves outward one prototype at a time until it reaches a stage path.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
@@ -346,6 +335,7 @@ pub(crate) mod layer_graph;
 pub(crate) mod layer_stack;
 pub(crate) mod load_rules;
 mod mapping;
+pub(crate) mod population_mask;
 pub(crate) mod prim_graph;
 pub(crate) mod prim_index;
 pub(crate) mod prim_indexer;
@@ -357,11 +347,13 @@ use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::{ApplyOutcome, Changes, LayerChanges};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
+pub(crate) use instancing::is_prototype_namespace;
 pub(crate) use layer_graph::{LayerGraph, LoadFailure, MuteChange, StackIdentity, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::{LayerStackId, StackMarks};
 pub use load_rules::{LoadRules, Rule};
 pub use mapping::MapFunction;
+pub use population_mask::{PopulationMask, PopulationMaskError};
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
 pub(crate) use prim_index::Demand;
 pub use prim_index::PrimIndex;
