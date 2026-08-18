@@ -1,8 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use logos::Logos;
 use std::borrow::Cow;
-use std::iter::Peekable;
-use std::ops::Range;
 use std::{any::type_name, collections::HashMap, fmt::Debug, str::FromStr};
 
 use crate::gf;
@@ -12,178 +9,28 @@ use crate::sdf::{
 };
 use crate::tf;
 
+use super::cursor::Cursor;
+use super::error::ParseError;
 use super::token::Token;
-
-type LexResult<'source> = std::result::Result<Token<'source>, ()>;
 
 /// Parser translates a list of tokens into structured data.
 pub struct Parser<'a> {
-    iter: Peekable<logos::SpannedIter<'a, Token<'a>>>,
-    source: &'a str,
-    last_span: Option<Range<usize>>,
-}
-
-/// Captures the line context for the most recent token consumed by the parser.
-#[derive(Debug, Clone)]
-pub struct ErrorHighlight {
-    pub line: usize,
-    pub column: usize,
-    pub line_text: String,
-    pub pointer_line: String,
-}
-
-impl ErrorHighlight {
-    /// Renders a human-readable representation of the highlighted line.
-    pub fn render(&self) -> String {
-        format!(
-            "line {} column {}\n{}\n{}",
-            self.line, self.column, self.line_text, self.pointer_line
-        )
-    }
+    cursor: Cursor<'a>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(data: &'a str) -> Self {
         Self {
-            iter: Token::lexer(data).spanned().peekable(),
-            source: data,
-            last_span: None,
-        }
-    }
-
-    /// Returns a highlight for the most recent token span processed by the parser.
-    pub fn last_error_highlight(&self) -> Option<ErrorHighlight> {
-        self.last_span.clone().and_then(|span| self.highlight_for_span(span))
-    }
-
-    fn highlight_for_span(&self, span: Range<usize>) -> Option<ErrorHighlight> {
-        if self.source.is_empty() {
-            return None;
-        }
-        let source = self.source;
-
-        let mut offset = span.start.min(source.len());
-        if offset == source.len() && offset > 0 {
-            offset -= 1;
-        }
-
-        // Calculate line and column by counting newlines up to the offset
-        let mut line = 1;
-        let mut line_start = 0;
-
-        for (idx, ch) in source[..offset].char_indices() {
-            if ch == '\n' {
-                line += 1;
-                line_start = idx + ch.len_utf8();
-            }
-        }
-
-        // Find the end of the current line
-        let line_end = source[line_start..]
-            .find('\n')
-            .map_or(source.len(), |pos| line_start + pos);
-
-        let line_text = source[line_start..line_end].trim_end_matches(['\r', '\n']).to_string();
-
-        // Calculate column (character count from line start to offset)
-        let mut column = 1;
-        for ch in source[line_start..offset].chars() {
-            if ch == '\n' || ch == '\r' {
-                break;
-            }
-            column += 1;
-        }
-
-        // Build pointer line
-        let mut pointer_line = String::new();
-        for ch in source[line_start..offset].chars() {
-            if ch == '\n' || ch == '\r' {
-                break;
-            }
-            pointer_line.push(if ch == '\t' { '\t' } else { ' ' });
-        }
-        pointer_line.push('^');
-
-        Some(ErrorHighlight {
-            line,
-            column,
-            line_text,
-            pointer_line,
-        })
-    }
-
-    #[inline]
-    fn fetch_next(&mut self) -> Result<Token<'a>> {
-        let (token, span) = self.iter.next().context("Unexpected end of tokens")?;
-        self.last_span = Some(span);
-        token.map_err(|e| anyhow!("Logos error: {e:?}"))
-    }
-
-    #[inline]
-    fn peek_next(&mut self) -> Option<&LexResult<'a>> {
-        self.iter.peek().map(|(token, _)| token)
-    }
-
-    #[inline]
-    fn is_next(&mut self, expected: Token<'_>) -> bool {
-        matches!(self.peek_next(), Some(Ok(t)) if *t == expected)
-    }
-
-    /// Consume the next token if it matches, returning whether it was consumed.
-    #[inline]
-    fn try_consume(&mut self, expected: Token<'_>) -> bool {
-        if self.is_next(expected) {
-            let _ = self.fetch_next();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn ensure_next(&mut self, expected_token: Token<'_>) -> Result<()> {
-        let token = self.fetch_next()?;
-        ensure!(
-            token == expected_token,
-            "Unexpected token (want: {expected_token:?}, got {token:?})"
-        );
-        Ok(())
-    }
-
-    #[inline]
-    fn ensure_pun(&mut self, value: char) -> Result<()> {
-        self.ensure_next(Token::Punctuation(value))
-            .context("Punctuation token expected")
-    }
-
-    fn fetch_str(&mut self) -> Result<Cow<'a, str>> {
-        match self.fetch_next()? {
-            Token::String(s) => Ok(s),
-            other => bail!("Unexpected token {other:?} (want String)"),
-        }
-    }
-
-    /// Consumes and returns a path reference (`<...>`) token, or errors.
-    fn fetch_path_ref(&mut self) -> Result<&'a str> {
-        match self.fetch_next()? {
-            Token::PathRef(s) => Ok(s),
-            other => bail!("Path reference expected, got {other:?}"),
-        }
-    }
-
-    /// Consumes and returns an identifier token, or errors.
-    fn expect_identifier(&mut self) -> Result<&'a str> {
-        match self.fetch_next()? {
-            Token::Identifier(s) | Token::NamespacedIdentifier(s) => Ok(s),
-            other => bail!("expected identifier, got {other:?}"),
+            cursor: Cursor::new(data),
         }
     }
 
     /// Consumes and returns an identifier or keyword-as-name token.
     ///
-    /// Unlike `expect_identifier`, this also accepts keyword tokens (e.g. `rel`, `kind`)
-    /// via `keyword_lexeme`, allowing them to be used as property or relationship names.
+    /// Keyword tokens (e.g. `rel`, `kind`) are accepted through
+    /// `keyword_lexeme`, so they may be used as property or relationship names.
     fn expect_name(&mut self) -> Result<&'a str> {
-        let token = self.fetch_next()?;
+        let token = self.cursor.bump()?;
         match token {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => Ok(s),
             other => other
@@ -193,21 +40,22 @@ impl<'a> Parser<'a> {
     }
 
     /// Tries to consume a list-op keyword (`add`, `append`, `prepend`, `delete`, `reorder`).
-    fn try_list_op(&mut self) -> Option<Token<'a>> {
-        match self.peek_next() {
-            Some(Ok(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)) => {
-                self.fetch_next().ok()
-            }
-            _ => None,
+    fn try_list_op(&mut self) -> Result<Option<Token<'a>>> {
+        if matches!(
+            self.cursor.peek()?,
+            Some(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)
+        ) {
+            return Ok(Some(self.cursor.bump()?));
         }
+        Ok(None)
     }
 
     /// Parses a single item or a bracketed array of items.
     fn one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
-        if self.try_consume(Token::None) {
+        if self.cursor.eat(&Token::None)? {
             return Ok(Vec::new());
         }
-        if self.is_next(Token::Punctuation('[')) {
+        if self.cursor.at_punctuation('[')? {
             let mut out = Vec::new();
             self.parse_block('[', ']', |this| {
                 out.push(parse(this)?);
@@ -219,9 +67,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse tokens to specs.
+    /// Parse tokens to specs, locating any failure in the source text.
+    pub fn parse(&mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>, ParseError> {
+        self.parse_impl()
+            .map_err(|cause| ParseError::new(cause, self.cursor.source(), self.cursor.diagnostic_span()))
+    }
+
     /// Walks the entire token stream, seeding the pseudo root and recursing through every prim.
-    pub fn parse(&mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>> {
+    fn parse_impl(&mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>> {
         let mut data = HashMap::new();
         let current_path = sdf::Path::abs_root();
 
@@ -230,8 +83,8 @@ impl<'a> Parser<'a> {
         let mut root_children = Vec::new();
 
         // Read root defs and any layer-level `reorder rootPrims` statements.
-        while let Some(token) = self.peek_next() {
-            if matches!(token, Ok(Token::Reorder)) {
+        while let Some(token) = self.cursor.peek()? {
+            if matches!(token, Token::Reorder) {
                 self.read_reorder(&mut pseudo_root_spec)?;
             } else {
                 self.read_prim(&current_path, &mut root_children, &mut data)?;
@@ -248,15 +101,15 @@ impl<'a> Parser<'a> {
     /// Parse the file header/pseudo-root to populate layer-level metadata before prim traversal.
     fn read_pseudo_root(&mut self) -> Result<sdf::SpecData> {
         // Make sure text file starts with #usda...
-        let version = self
-            .fetch_next()?
-            .try_as_magic()
-            .ok_or_else(|| anyhow!("Text file must start with magic token, got {:?}", self.peek_next()))?;
+        let version = match self.cursor.bump()? {
+            Token::Magic(version) => version,
+            other => bail!("Text file must start with magic token, got {other:?}"),
+        };
         ensure!(version.starts_with("1.0"), "Unsupported USDA version: {version:?}");
 
         let mut root = sdf::SpecData::new(sdf::SpecType::PseudoRoot);
 
-        if !self.is_next(Token::Punctuation('(')) {
+        if !self.cursor.at_punctuation('(')? {
             return Ok(root);
         }
 
@@ -274,30 +127,33 @@ impl<'a> Parser<'a> {
         ];
 
         self.parse_block('(', ')', |this| {
-            let next = this.fetch_next().context("Unable to fetch next pseudo root property")?;
+            let next = this
+                .cursor
+                .bump()
+                .context("Unable to fetch next pseudo root property")?;
 
             match next {
                 Token::String(str) => {
                     root.add(FieldKey::Comment, sdf::Value::String(str.into_owned()));
                 }
                 Token::Doc => {
-                    this.ensure_pun('=')?;
-                    let value = this.fetch_str()?;
+                    this.cursor.expect_punctuation('=')?;
+                    let value = this.cursor.expect_string()?;
                     root.add(FieldKey::Documentation, sdf::Value::String(value.into_owned()));
                 }
                 Token::SubLayers => {
-                    this.ensure_pun('=')?;
+                    this.cursor.expect_punctuation('=')?;
                     let (sublayers, sublayer_offsets) = this.parse_sublayers().context("Unable to parse subLayers")?;
                     root.add(FieldKey::SubLayers, sublayers);
                     root.add(FieldKey::SubLayerOffsets, sublayer_offsets);
                 }
                 Token::Relocates => {
-                    this.ensure_pun('=')?;
+                    this.cursor.expect_punctuation('=')?;
                     let pairs = this.parse_relocates_dict().context("Unable to parse relocates")?;
                     root.add(FieldKey::LayerRelocates, sdf::Value::Relocates(pairs));
                 }
                 Token::Identifier(name) => {
-                    this.ensure_pun('=')?;
+                    this.cursor.expect_punctuation('=')?;
                     if let Some(&(known_name, info)) = KNOWN_PROPS.iter().find(|(n, _)| *n == name) {
                         let value = this
                             .parse_value(info)
@@ -328,7 +184,7 @@ impl<'a> Parser<'a> {
         let mut spec = sdf::SpecData::new(sdf::SpecType::Prim);
 
         let specifier = {
-            let specifier_token = self.fetch_next().context("Unable to read prim specifier")?;
+            let specifier_token = self.cursor.bump().context("Unable to read prim specifier")?;
             match specifier_token {
                 Token::Def => sdf::Specifier::Def,
                 Token::Over => sdf::Specifier::Over,
@@ -337,10 +193,10 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let mut name_token = self.fetch_next()?;
+        let mut name_token = self.cursor.bump()?;
         if let Token::Identifier(prim_type) = name_token {
             spec.add(FieldKey::TypeName, sdf::Value::token(prim_type));
-            name_token = self.fetch_next()?;
+            name_token = self.cursor.bump()?;
         }
 
         let Token::String(name) = name_token else {
@@ -352,7 +208,7 @@ impl<'a> Parser<'a> {
         let mut properties = Vec::new();
 
         // Optional metadata block.
-        if self.is_next(Token::Punctuation('(')) {
+        if self.cursor.at_punctuation('(')? {
             self.parse_block('(', ')', |this| {
                 this.read_prim_metadata_entry(&mut spec)
                     .context("Unable to parse prim metadata entry")
@@ -394,12 +250,7 @@ impl<'a> Parser<'a> {
         let mut variant_sets = Vec::new();
 
         self.parse_block('{', '}', |this| {
-            match this
-                .peek_next()
-                .context("Unexpected end of prim body")?
-                .as_ref()
-                .map_err(|e| anyhow!("{e:?}"))?
-            {
+            match this.cursor.peek()?.context("Unexpected end of prim body")? {
                 Token::Def | Token::Over | Token::Class => {
                     this.read_prim(path, &mut children, data)?;
                 }
@@ -408,7 +259,7 @@ impl<'a> Parser<'a> {
                     variant_sets.push(name);
                 }
                 Token::Rel => {
-                    this.fetch_next()?;
+                    this.cursor.bump()?;
                     this.read_relationship(path, false, sdf::Variability::Uniform, &mut properties, data, None)?;
                 }
                 Token::Reorder => {
@@ -437,10 +288,11 @@ impl<'a> Parser<'a> {
     /// owning prim/variant spec, controlling child/property display order;
     /// `rootPrims` sets `primOrder` on the pseudo-root.
     fn read_reorder(&mut self, owner_spec: &mut sdf::SpecData) -> Result<()> {
-        self.fetch_next()?; // consume `reorder`
+        self.cursor.bump()?; // consume `reorder`
 
         let token = self
-            .fetch_next()
+            .cursor
+            .bump()
             .context("Expected 'nameChildren' or 'properties' after 'reorder'")?;
         let field_key = match token {
             Token::NameChildren | Token::RootPrims => FieldKey::PrimOrder,
@@ -448,9 +300,9 @@ impl<'a> Parser<'a> {
             other => bail!("Unsupported reorder target: {other:?}"),
         };
 
-        self.ensure_pun('=')?;
+        self.cursor.expect_punctuation('=')?;
 
-        let names = self.one_or_list(|this| Ok(this.fetch_str()?.into_owned()))?;
+        let names = self.one_or_list(|this| Ok(this.cursor.expect_string()?.into_owned()))?;
         owner_spec.add(field_key, sdf::Value::token_vec(names));
 
         Ok(())
@@ -465,10 +317,14 @@ impl<'a> Parser<'a> {
         prim_path: &sdf::Path,
         data: &mut HashMap<sdf::Path, sdf::SpecData>,
     ) -> Result<String> {
-        self.fetch_next()?; // consume `variantSet`
+        self.cursor.bump()?; // consume `variantSet`
 
-        let name = self.fetch_str().context("Expected variant set name")?.to_string();
-        self.ensure_pun('=')?;
+        let name = self
+            .cursor
+            .expect_string()
+            .context("Expected variant set name")?
+            .to_string();
+        self.cursor.expect_punctuation('=')?;
 
         // Create the variant set spec.
         let vset_path = prim_path.append_variant_selection(&name, "")?;
@@ -477,7 +333,11 @@ impl<'a> Parser<'a> {
 
         // Parse each variant: "VariantName" (...) { ... }
         self.parse_block('{', '}', |this| {
-            let variant_name = this.fetch_str().context("Expected variant name")?.to_string();
+            let variant_name = this
+                .cursor
+                .expect_string()
+                .context("Expected variant name")?
+                .to_string();
 
             variant_children.push(variant_name.clone());
 
@@ -485,7 +345,7 @@ impl<'a> Parser<'a> {
             let mut variant_spec = sdf::SpecData::new(sdf::SpecType::Variant);
 
             // Optional metadata block.
-            if this.is_next(Token::Punctuation('(')) {
+            if this.cursor.at_punctuation('(')? {
                 this.parse_block('(', ')', |this| {
                     this.read_prim_metadata_entry(&mut variant_spec)
                         .context("Unable to parse variant metadata entry")
@@ -546,16 +406,16 @@ impl<'a> Parser<'a> {
         data: &mut HashMap<sdf::Path, sdf::SpecData>,
     ) -> Result<()> {
         let mut custom = false;
-        let list_op = self.try_list_op();
+        let list_op = self.try_list_op()?;
 
-        if self.try_consume(Token::Custom) {
+        if self.cursor.eat(&Token::Custom)? {
             custom = true;
         }
 
         // `varying` precedes `rel` for a varying relationship, and precedes the
         // type name for an attribute, so it is consumed before either.
-        let varying = self.try_consume(Token::Varying);
-        if self.try_consume(Token::Rel) {
+        let varying = self.cursor.eat(&Token::Varying)?;
+        if self.cursor.eat(&Token::Rel)? {
             let variability = match varying {
                 true => sdf::Variability::Varying,
                 false => sdf::Variability::Uniform,
@@ -565,7 +425,7 @@ impl<'a> Parser<'a> {
 
         let mut spec = sdf::SpecData::new(sdf::SpecType::Attribute);
         let mut variability = sdf::Variability::Varying;
-        if !varying && self.try_consume(Token::Uniform) {
+        if !varying && self.cursor.eat(&Token::Uniform)? {
             variability = sdf::Variability::Uniform;
         }
 
@@ -574,22 +434,25 @@ impl<'a> Parser<'a> {
         let name = self.expect_name().context("attribute name expected")?;
 
         // Read optional `.suffix` (e.g. `.connect`, `.timeSamples`, `.spline`).
-        let suffix = if self.try_consume(Token::Punctuation('.')) {
-            Some(self.fetch_next()?)
+        let suffix = if self.cursor.eat_punctuation('.')? {
+            Some(self.cursor.bump()?)
         } else {
             None
         };
 
         // Check for metadata before checking for assignment
-        if self.is_next(Token::Punctuation('(')) {
+        if self.cursor.at_punctuation('(')? {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse attribute metadata")?;
         }
 
         if matches!(suffix, Some(Token::Connect)) {
             push_unique(suffixed_properties, name);
-            if self.try_consume(Token::Punctuation('=')) {
-                let list_op = list_op.or(self.try_list_op());
+            if self.cursor.eat_punctuation('=')? {
+                let list_op = match list_op {
+                    Some(op) => Some(op),
+                    None => self.try_list_op()?,
+                };
                 // Connection targets are anchored to the owning prim, like
                 // relationship targets, so a relative path (`<../sibling>`) is
                 // stored absolute.
@@ -613,7 +476,7 @@ impl<'a> Parser<'a> {
 
         if matches!(suffix, Some(Token::TimeSamples)) {
             push_unique(suffixed_properties, name);
-            self.ensure_pun('=')?;
+            self.cursor.expect_punctuation('=')?;
             let samples = self.parse_time_samples(type_info)?;
             let path = current_path.append_property(name)?;
 
@@ -626,7 +489,7 @@ impl<'a> Parser<'a> {
 
         if matches!(suffix, Some(Token::Spline)) {
             push_unique(suffixed_properties, name);
-            self.ensure_pun('=')?;
+            self.cursor.expect_punctuation('=')?;
             let spline = self.parse_spline()?;
             let path = current_path.append_property(name)?;
 
@@ -642,7 +505,7 @@ impl<'a> Parser<'a> {
         }
 
         // Check if there's an assignment
-        if !self.is_next(Token::Punctuation('=')) {
+        if !self.cursor.at_punctuation('=')? {
             let path = current_path.append_property(name)?;
             push_unique(properties, name);
 
@@ -652,11 +515,11 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
 
-        self.ensure_pun('=')?;
+        self.cursor.expect_punctuation('=')?;
         let value = self.parse_value(type_info)?;
         let path = current_path.append_property(name)?;
 
-        if self.is_next(Token::Punctuation('(')) {
+        if self.cursor.at_punctuation('(')? {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse attribute metadata")?;
         }
@@ -677,17 +540,18 @@ impl<'a> Parser<'a> {
 
     /// Parses a single `<...>` path reference token into an `sdf::Path`.
     fn parse_path_reference(&mut self) -> Result<sdf::Path> {
-        path_ref_to_path(self.fetch_path_ref()?)
+        path_ref_to_path(self.cursor.expect_path_ref()?)
     }
 
     /// Parses a relocates dictionary: `{ <source>: <target>, ... }`.
     fn parse_relocates_dict(&mut self) -> Result<Vec<(sdf::Path, sdf::Path)>> {
         let mut pairs = Vec::new();
         self.parse_block('{', '}', |this| {
-            let src = this.fetch_path_ref().context("Expected relocate source path")?;
-            this.ensure_pun(':')
+            let src = this.cursor.expect_path_ref().context("Expected relocate source path")?;
+            this.cursor
+                .expect_punctuation(':')
                 .context("Expected ':' between relocate source and target")?;
-            let tgt = this.fetch_path_ref().context("Expected relocate target path")?;
+            let tgt = this.cursor.expect_path_ref().context("Expected relocate target path")?;
             let src_path = sdf::Path::new(src)?;
             let tgt_path = path_ref_to_path(tgt)?;
             reject_variant_selection_in_path(&src_path, "Relocate source")?;
@@ -701,9 +565,9 @@ impl<'a> Parser<'a> {
     /// Parse the metadata block attached to a property and stash entries on the spec.
     fn parse_property_metadata(&mut self, spec: &mut sdf::SpecData) -> Result<()> {
         self.parse_block('(', ')', |this| {
-            let list_op = this.try_list_op();
+            let list_op = this.try_list_op()?;
 
-            let name_token = this.fetch_next()?;
+            let name_token = this.cursor.bump()?;
             let name = match name_token {
                 // Bare string in property metadata is a comment.
                 Token::String(s) => {
@@ -719,7 +583,7 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| anyhow!("Unexpected attribute metadata name token: {other:?}"))?,
             };
 
-            this.ensure_pun('=')?;
+            this.cursor.expect_punctuation('=')?;
             let value = this
                 .parse_property_metadata_value()
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
@@ -753,7 +617,7 @@ impl<'a> Parser<'a> {
     fn parse_property_metadata_value(&mut self) -> Result<sdf::Value> {
         // Handle array case: parse each element as a typed scalar, then collect
         // into the most specific Vec variant that fits all elements.
-        if self.is_next(Token::Punctuation('[')) {
+        if self.cursor.at_punctuation('[')? {
             let mut values = Vec::new();
             self.parse_block('[', ']', |this| {
                 values.push(this.parse_property_metadata_value()?);
@@ -794,11 +658,11 @@ impl<'a> Parser<'a> {
         }
 
         // Handle dictionary case by peeking, so parse_dictionary can consume the '{'
-        if self.is_next(Token::Punctuation('{')) {
+        if self.cursor.at_punctuation('{')? {
             return self.parse_dictionary();
         }
 
-        let token = self.fetch_next()?;
+        let token = self.cursor.bump()?;
         match token {
             Token::None => Ok(sdf::Value::ValueBlock),
             Token::String(value) => Ok(sdf::Value::String(value.into_owned())),
@@ -825,7 +689,7 @@ impl<'a> Parser<'a> {
             // Try optional type hint, then read the key.
             let type_hint = this.try_parse_type()?;
 
-            let key_token = this.fetch_next()?;
+            let key_token = this.cursor.bump()?;
             let key = match key_token {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
                 Token::String(s) => s.into_owned(),
@@ -835,7 +699,7 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| anyhow!("Expected identifier as dictionary key, got: {other:?}"))?,
             };
 
-            this.ensure_pun('=')?;
+            this.cursor.expect_punctuation('=')?;
 
             let value = if let Some(info) = type_hint {
                 this.parse_value(info)?
@@ -871,7 +735,7 @@ impl<'a> Parser<'a> {
         }
 
         // Check for metadata before or instead of assignment
-        if self.is_next(Token::Punctuation('(')) {
+        if self.cursor.at_punctuation('(')? {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse relationship metadata")?;
         }
@@ -880,13 +744,16 @@ impl<'a> Parser<'a> {
         push_unique(properties, name);
 
         // Check if there's an assignment
-        if !self.is_next(Token::Punctuation('=')) {
+        if !self.cursor.at_punctuation('=')? {
             Self::merge_spec(data, path, spec);
             return Ok(());
         }
 
-        self.ensure_pun('=')?;
-        let list_op = outer_list_op.or(self.try_list_op());
+        self.cursor.expect_punctuation('=')?;
+        let list_op = match outer_list_op {
+            Some(op) => Some(op),
+            None => self.try_list_op()?,
+        };
         let targets: Vec<sdf::Path> = self
             .one_or_list(Self::parse_path_reference)
             .context("Unable to parse relationship targets")?
@@ -898,7 +765,7 @@ impl<'a> Parser<'a> {
         let list_op = apply_list_op(list_op, targets).context("Unable to build relationship targets listOp")?;
         spec.add_list_op(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
 
-        if self.is_next(Token::Punctuation('(')) {
+        if self.cursor.at_punctuation('(')? {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse relationship metadata")?;
         }
@@ -911,8 +778,8 @@ impl<'a> Parser<'a> {
     /// declaration (until `{` is encountered).
     /// Parse a single prim metadata assignment, honoring list ops for supported fields.
     fn read_prim_metadata_entry(&mut self, spec: &mut sdf::SpecData) -> Result<()> {
-        let list_op = self.try_list_op();
-        let name_token = self.fetch_next()?;
+        let list_op = self.try_list_op()?;
+        let name_token = self.cursor.bump()?;
 
         let name = match name_token {
             // Bare string in metadata is a comment.
@@ -935,7 +802,7 @@ impl<'a> Parser<'a> {
             other => bail!("Unexpected metadata name token: {other:?}"),
         };
 
-        self.ensure_pun('=')?;
+        self.cursor.expect_punctuation('=')?;
 
         match name {
             n if n == FieldKey::Active.as_str() => {
@@ -1034,12 +901,12 @@ impl<'a> Parser<'a> {
             }
             "displayName" => {
                 ensure!(list_op.is_none(), "displayName does not support list ops");
-                let value = self.fetch_str().context("Unable to parse displayName")?;
+                let value = self.cursor.expect_string().context("Unable to parse displayName")?;
                 spec.add("displayName", sdf::Value::String(value.into_owned()));
             }
             n if n == FieldKey::Permission.as_str() => {
                 ensure!(list_op.is_none(), "permission does not support list ops");
-                let value = self.expect_identifier().context("Unable to parse permission")?;
+                let value = self.cursor.expect_identifier().context("Unable to parse permission")?;
                 let perm = match value {
                     "public" => sdf::Permission::Public,
                     "private" => sdf::Permission::Private,
@@ -1049,7 +916,7 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::Prefix.as_str() => {
                 ensure!(list_op.is_none(), "prefix does not support list ops");
-                let value = self.fetch_str().context("Unable to parse prefix")?;
+                let value = self.cursor.expect_string().context("Unable to parse prefix")?;
                 spec.add(FieldKey::Prefix, sdf::Value::String(value.into_owned()));
             }
             n if n == FieldKey::Clips.as_str() => {
@@ -1059,7 +926,7 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::ClipSets.as_str() => {
                 let values = self
-                    .one_or_list(|this| Ok(this.fetch_str()?.into_owned()))
+                    .one_or_list(|this| Ok(this.cursor.expect_string()?.into_owned()))
                     .context("Unable to parse clipSets list")?;
                 let list_op = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
                 spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
@@ -1086,14 +953,14 @@ impl<'a> Parser<'a> {
 
     /// Parse an extrapolation mode: `mode [(slope)]`.
     fn parse_extrapolation(&mut self) -> Result<sdf::Value> {
-        let mode = self.expect_identifier()?;
+        let mode = self.cursor.expect_identifier()?;
         if mode == "none" {
             return Ok(sdf::Value::ValueBlock);
         }
-        let slope = if self.is_next(Token::Punctuation('(')) {
-            self.ensure_pun('(')?;
+        let slope = if self.cursor.at_punctuation('(')? {
+            self.cursor.expect_punctuation('(')?;
             let v = self.parse_token::<f64>()?;
-            self.ensure_pun(')')?;
+            self.cursor.expect_punctuation(')')?;
             v
         } else {
             0.0
@@ -1117,17 +984,19 @@ impl<'a> Parser<'a> {
         let mut knot_custom_data: HashMap<String, sdf::Value> = HashMap::new();
 
         self.parse_block('{', '}', |this| {
-            let token = this.fetch_next()?;
+            let token = this.cursor.bump()?;
+            // `pre`, `post`, and `loop` introduce a keyed entry (`pre : mode`); a
+            // bare identifier with no `:` after it names the curve type.
+            let keyed = matches!(token, Token::Identifier(_)) && this.cursor.at_punctuation(':')?;
             match token {
                 // Curve type: `bezier`, `hermite`, etc.
-                Token::Identifier(name)
-                    if !matches!(name, "pre" | "post" | "loop") && !this.is_next(Token::Punctuation(':')) =>
-                {
+                Token::Identifier(name) if !keyed && !matches!(name, "pre" | "post" | "loop") => {
                     curve_type = Some(name.to_owned());
                 }
                 // Extrapolation: `pre : mode` or `post: mode [(slope)]`
                 // With no space, the tokenizer produces `NamespacedIdentifier("pre:")`.
-                Token::Identifier(dir @ ("pre" | "post")) if this.try_consume(Token::Punctuation(':')) => {
+                Token::Identifier(dir @ ("pre" | "post")) if keyed => {
+                    this.cursor.expect_punctuation(':')?;
                     let extrap = this.parse_extrapolation()?;
                     if dir == "pre" {
                         pre_extrapolation = extrap;
@@ -1144,7 +1013,7 @@ impl<'a> Parser<'a> {
                 // Loop parameters
                 Token::Identifier("loop") | Token::NamespacedIdentifier("loop:") => {
                     if matches!(token, Token::Identifier(_)) {
-                        this.ensure_pun(':')?;
+                        this.cursor.expect_punctuation(':')?;
                     }
                     let vals = this.parse_tuple::<f64, 5>()?;
                     loop_params = sdf::Value::Dictionary(HashMap::from([
@@ -1158,7 +1027,7 @@ impl<'a> Parser<'a> {
                 // Knot: `time : value [& preValue] [; pre (...)] [; post mode [...]] [; { customData }]`
                 Token::Number(time_str) => {
                     let time: f64 = time_str.parse()?;
-                    this.ensure_pun(':')?;
+                    this.cursor.expect_punctuation(':')?;
                     let first: f64 = this.parse_token()?;
 
                     let mut pre_slope = 0.0;
@@ -1168,7 +1037,7 @@ impl<'a> Parser<'a> {
                     let mut interp_mode = "held".to_owned();
 
                     // `time : value` or `time : preValue & value`
-                    let (pre_value, value) = if this.try_consume(Token::Punctuation('&')) {
+                    let (pre_value, value) = if this.cursor.eat_punctuation('&')? {
                         let actual: f64 = this.parse_token()?;
                         (first, actual)
                     } else {
@@ -1176,8 +1045,8 @@ impl<'a> Parser<'a> {
                     };
 
                     // Optional semicolon-separated knot attributes
-                    while this.try_consume(Token::Punctuation(';')) {
-                        if this.is_next(Token::Punctuation('{')) {
+                    while this.cursor.eat_punctuation(';')? {
+                        if this.cursor.at_punctuation('{')? {
                             // Per-knot custom data
                             let sdf::Value::Dictionary(dict) = this.parse_dictionary()? else {
                                 unreachable!();
@@ -1191,7 +1060,7 @@ impl<'a> Parser<'a> {
                             continue;
                         }
 
-                        let dir = this.expect_identifier()?;
+                        let dir = this.cursor.expect_identifier()?;
                         match dir {
                             "pre" => {
                                 let vals = this.parse_tuple::<f64, 2>()?;
@@ -1200,9 +1069,9 @@ impl<'a> Parser<'a> {
                             }
                             "post" => {
                                 // `post mode` or `post mode (slope, width)`
-                                let mode = this.expect_identifier()?;
+                                let mode = this.cursor.expect_identifier()?;
                                 interp_mode = mode.to_owned();
-                                if this.is_next(Token::Punctuation('(')) {
+                                if this.cursor.at_punctuation('(')? {
                                     let vals = this.parse_tuple::<f64, 2>()?;
                                     post_slope = vals[0];
                                     post_width = vals[1];
@@ -1260,13 +1129,13 @@ impl<'a> Parser<'a> {
     fn parse_time_samples(&mut self, info: TypeInfo<'_>) -> Result<sdf::TimeSampleMap> {
         let mut samples = Vec::new();
         self.parse_block('{', '}', |this| {
-            let time_str = this.fetch_next()?;
+            let time_str = this.cursor.bump()?;
             let time: f64 = match time_str {
                 Token::Number(s) => s.parse()?,
                 other => bail!("Expected time value, got {other:?}"),
             };
-            this.ensure_pun(':')?;
-            let value = if this.next_is_typed_value(info) {
+            this.cursor.expect_punctuation(':')?;
+            let value = if this.next_is_typed_value(info)? {
                 this.parse_value(info)?
             } else {
                 this.parse_property_metadata_value()?
@@ -1294,7 +1163,7 @@ impl<'a> Parser<'a> {
     /// Anything else (scalar literal, `None`, identifier) flows
     /// through the type-blind path so the spec corpus's lenient
     /// `vector3f`-with-bare-scalar samples keep parsing.
-    fn next_is_typed_value(&mut self, info: TypeInfo<'_>) -> bool {
+    fn next_is_typed_value(&mut self, info: TypeInfo<'_>) -> Result<bool> {
         let is_tuple_type = matches!(
             info.ty,
             Type::Int2
@@ -1316,24 +1185,23 @@ impl<'a> Parser<'a> {
                 | Type::Matrix3d
                 | Type::Matrix4d
         );
-        match self.peek_next() {
-            Some(Ok(Token::Punctuation('('))) => is_tuple_type,
-            Some(Ok(Token::Punctuation('['))) => is_tuple_type || info.is_array,
-            Some(Ok(Token::Number(_))) => info.ty == Type::TimeCode && !info.is_array,
+        Ok(match self.cursor.peek()? {
+            Some(Token::Punctuation('(')) => is_tuple_type,
+            Some(Token::Punctuation('[')) => is_tuple_type || info.is_array,
+            Some(Token::Number(_)) => info.ty == Type::TimeCode && !info.is_array,
             _ => false,
-        }
+        })
     }
 
     /// Parse one reference entry, including optional target prim path and layer offset.
     fn parse_reference(&mut self) -> Result<sdf::Reference> {
         let mut reference = sdf::Reference::default();
 
-        match self.fetch_next()? {
+        match self.cursor.bump()? {
             Token::AssetRef(asset_path) => {
                 reference.asset_path = asset_path.to_string();
-                if let Some(Ok(Token::PathRef(path))) = self.peek_next() {
-                    reference.prim_path = path_ref_to_path(path)?;
-                    self.fetch_next()?;
+                if matches!(self.cursor.peek()?, Some(Token::PathRef(_))) {
+                    reference.prim_path = path_ref_to_path(self.cursor.expect_path_ref()?)?;
                 }
             }
             Token::PathRef(path) => {
@@ -1343,8 +1211,9 @@ impl<'a> Parser<'a> {
                 bail!("Expected asset reference (@...@) or path reference (<...>), got {token:?}");
             }
         }
+        reject_variant_selection_in_path(&reference.prim_path, "Reference")?;
 
-        if self.is_next(Token::Punctuation('(')) {
+        if self.cursor.at_punctuation('(')? {
             let (offset, custom_data) = self
                 .parse_reference_layer_offset()
                 .context("Unable to parse reference layer offset")?;
@@ -1352,7 +1221,6 @@ impl<'a> Parser<'a> {
             reference.custom_data = custom_data;
         }
 
-        reject_variant_selection_in_path(&reference.prim_path, "Reference")?;
         Ok(reference)
     }
 
@@ -1363,8 +1231,8 @@ impl<'a> Parser<'a> {
         let mut custom_data = HashMap::new();
 
         self.parse_block('(', ')', |this| {
-            let token = this.fetch_next()?;
-            this.ensure_pun('=')?;
+            let token = this.cursor.bump()?;
+            this.cursor.expect_punctuation('=')?;
 
             match token {
                 Token::Offset => {
@@ -1394,12 +1262,11 @@ impl<'a> Parser<'a> {
     fn parse_payload(&mut self) -> Result<sdf::Payload> {
         let mut payload = sdf::Payload::default();
 
-        match self.fetch_next()? {
+        match self.cursor.bump()? {
             Token::AssetRef(asset_path) => {
                 payload.asset_path = asset_path.to_string();
-                if let Some(Ok(Token::PathRef(path))) = self.peek_next() {
-                    payload.prim_path = path_ref_to_path(path)?;
-                    self.fetch_next()?;
+                if matches!(self.cursor.peek()?, Some(Token::PathRef(_))) {
+                    payload.prim_path = path_ref_to_path(self.cursor.expect_path_ref()?)?;
                 }
             }
             Token::PathRef(path) => {
@@ -1409,22 +1276,22 @@ impl<'a> Parser<'a> {
                 bail!("Expected asset reference (@...@) or path reference (<...>), got {token:?}");
             }
         }
+        reject_variant_selection_in_path(&payload.prim_path, "Payload")?;
 
-        if self.is_next(Token::Punctuation('(')) {
+        if self.cursor.at_punctuation('(')? {
             let (offset, _custom_data) = self
                 .parse_reference_layer_offset()
                 .context("Unable to parse payload layer offset")?;
             payload.layer_offset = Some(offset);
         }
 
-        reject_variant_selection_in_path(&payload.prim_path, "Payload")?;
         Ok(payload)
     }
 
     /// Decode a typed value based on USD's scalar/array/role type tables.
     fn parse_value(&mut self, info: TypeInfo<'_>) -> Result<sdf::Value> {
         // None means "value block" (explicitly unset) regardless of type.
-        if self.try_consume(Token::None) {
+        if self.cursor.eat(&Token::None)? {
             return Ok(sdf::Value::ValueBlock);
         }
 
@@ -1496,12 +1363,12 @@ impl<'a> Parser<'a> {
             (Type::Quatf, true) => sdf::Value::QuatfVec(self.parse_gf_array::<f32, _, 4>()?),
             (Type::Quatd, true) => sdf::Value::QuatdVec(self.parse_gf_array::<f64, _, 4>()?),
 
-            (Type::String, false) => sdf::Value::String(self.fetch_str()?.into_owned()),
-            (Type::Token, false) => sdf::Value::token(self.fetch_str()?.as_ref()),
+            (Type::String, false) => sdf::Value::String(self.cursor.expect_string()?.into_owned()),
+            (Type::Token, false) => sdf::Value::token(self.cursor.expect_string()?.as_ref()),
             (Type::String | Type::Token, true) => sdf::Value::token_vec(self.parse_array::<String>()?),
 
             (Type::PathExpression, false) => {
-                sdf::Value::PathExpression(sdf::PathExpression::parse(self.fetch_str()?.as_ref()))
+                sdf::Value::PathExpression(sdf::PathExpression::parse(self.cursor.expect_string()?.as_ref()))
             }
             (Type::PathExpression, true) => sdf::Value::PathExpressionVec(
                 self.parse_array::<String>()?
@@ -1585,19 +1452,19 @@ impl<'a> Parser<'a> {
     ///
     /// Returns `Ok(None)` if the next token is not a known type (without consuming it).
     fn try_parse_type(&mut self) -> Result<Option<TypeInfo<'a>>> {
-        let base = match self.peek_next() {
-            Some(Ok(Token::Identifier(name))) => *name,
-            Some(Ok(Token::Dictionary)) => "dictionary",
+        let base = match self.cursor.peek()? {
+            Some(Token::Identifier(name)) => *name,
+            Some(Token::Dictionary) => "dictionary",
             _ => return Ok(None),
         };
 
         let ty = Self::parse_base_type(base).unwrap_or(Type::Custom);
-        self.fetch_next()?;
+        self.cursor.bump()?;
 
         let mut is_array = false;
-        if self.is_next(Token::Punctuation('[')) {
-            self.fetch_next()?;
-            self.ensure_pun(']')?;
+        if self.cursor.at_punctuation('[')? {
+            self.cursor.bump()?;
+            self.cursor.expect_punctuation(']')?;
             is_array = true;
         }
 
@@ -1611,16 +1478,16 @@ impl<'a> Parser<'a> {
     /// Parse single token as `T` which can be deserialized from string (such as `int`, `float`, etc).
     fn parse_token<T: FromStr>(&mut self) -> Result<T>
     where
-        <T as FromStr>::Err: std::fmt::Debug,
+        <T as FromStr>::Err: Debug,
     {
-        let token = self.fetch_next()?;
+        let token = self.cursor.bump()?;
         let value_str = match token {
             Token::Number(s) | Token::Identifier(s) | Token::NamespacedIdentifier(s) => Cow::Borrowed(s),
             Token::String(s) => s,
             Token::Inf => Cow::Borrowed("inf"),
             Token::Punctuation('-') => {
                 // Handle negative inf
-                let next = self.fetch_next()?;
+                let next = self.cursor.bump()?;
                 if matches!(next, Token::Inf) {
                     Cow::Borrowed("-inf")
                 } else {
@@ -1629,7 +1496,7 @@ impl<'a> Parser<'a> {
             }
             Token::Punctuation('+') => {
                 // Handle positive inf
-                let next = self.fetch_next()?;
+                let next = self.cursor.bump()?;
                 if matches!(next, Token::Inf) {
                     Cow::Borrowed("inf")
                 } else {
@@ -1648,7 +1515,7 @@ impl<'a> Parser<'a> {
     /// A `true` / `false` word, however it was spelled — bare, namespaced, or
     /// quoted.
     fn parse_bool(&mut self) -> Result<bool> {
-        let token = self.fetch_next()?;
+        let token = self.cursor.bump()?;
         match token {
             Token::Identifier(value) | Token::NamespacedIdentifier(value) => parse_bool_word(value),
             Token::String(value) => parse_bool_word(&value),
@@ -1677,11 +1544,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_asset_path(&mut self) -> Result<String> {
-        let token = self.fetch_next()?;
-        token
-            .try_as_asset_ref()
-            .map(|value| value.to_owned())
-            .ok_or_else(|| anyhow!("Asset reference expected"))
+        Ok(self.cursor.expect_asset_ref()?.to_owned())
     }
 
     fn parse_asset_path_array(&mut self) -> Result<Vec<String>> {
@@ -1699,20 +1562,16 @@ impl<'a> Parser<'a> {
         let mut sublayer_offsets = Vec::new();
 
         self.parse_block('[', ']', |this| {
-            let asset_path = this
-                .fetch_next()?
-                .try_as_asset_ref()
-                .ok_or_else(|| anyhow!("Asset ref expected, got {:?}", this.peek_next()))?;
-            sublayers.push(asset_path.to_string());
+            sublayers.push(this.cursor.expect_asset_ref()?.to_string());
 
             let mut layer_offset = sdf::LayerOffset::default();
-            if this.is_next(Token::Punctuation('(')) {
+            if this.cursor.at_punctuation('(')? {
                 let mut offset = None;
                 let mut scale = None;
 
                 this.parse_block('(', ')', |this| {
-                    let token = this.fetch_next()?;
-                    this.ensure_pun('=')?;
+                    let token = this.cursor.bump()?;
+                    this.cursor.expect_punctuation('=')?;
                     let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
                     match token {
                         Token::Offset => {
@@ -1751,13 +1610,13 @@ impl<'a> Parser<'a> {
     /// Calls `entry` for each item. Commas between entries are consumed automatically.
     /// Handles empty blocks and trailing commas.
     fn parse_block(&mut self, open: char, close: char, mut entry: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
-        self.ensure_pun(open)?;
+        self.cursor.expect_punctuation(open)?;
         loop {
-            if self.try_consume(Token::Punctuation(close)) {
+            if self.cursor.eat_punctuation(close)? {
                 break;
             }
             entry(self)?;
-            while self.try_consume(Token::Punctuation(',')) || self.try_consume(Token::Punctuation(';')) {}
+            while self.cursor.eat_punctuation(',')? || self.cursor.eat_punctuation(';')? {}
         }
         Ok(())
     }
@@ -1811,7 +1670,7 @@ impl<'a> Parser<'a> {
     ///
     /// Handles both bare `(row), (row), ...` and bracket-wrapped `[ (row), ... ]` forms.
     fn parse_matrix<const N: usize, const M: usize>(&mut self) -> Result<[f64; M]> {
-        if self.is_next(Token::Punctuation('[')) {
+        if self.cursor.at_punctuation('[')? {
             let mut arr = self.parse_matrix_array::<N, M>()?;
             ensure!(arr.len() == 1, "expected a single matrix value");
             return Ok(arr.remove(0));
@@ -1985,6 +1844,7 @@ fn parse_bool_word(word: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Error;
     use std::fs;
     use std::path::PathBuf;
 
@@ -2594,35 +2454,114 @@ def Scope "Root"
     }
 
     #[test]
-    fn parse_reports_error_span_for_invalid_pseudo_root() {
+    fn error_span_pseudo_root() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let fixture_path = manifest_dir.join("fixtures/invalid_pseudo_root.usda");
         let data = fs::read_to_string(&fixture_path).expect("read invalid pseudo-root fixture content");
 
-        let mut parser = Parser::new(&data);
-        let err = parser
+        let error = Parser::new(&data)
             .parse()
             .expect_err("parser should fail for malformed pseudo-root");
-        let highlight = parser
-            .last_error_highlight()
-            .expect("parser should record error highlight");
 
-        let message = format!("{err:#}");
+        assert_eq!(error.line(), 4, "unexpected error line");
+        assert_eq!(error.column(), 5, "unexpected error column");
+        assert!(
+            error.snippet().trim_start().starts_with('='),
+            "snippet should hold the offending line, got: {:?}",
+            error.snippet()
+        );
+
+        let message = error.to_string();
         assert!(
             message.contains("Unable to parse pseudo root"),
             "error should mention pseudo-root parse failure, got: {message}"
         );
-        assert_eq!(highlight.line, 4, "unexpected error line");
-        assert_eq!(highlight.column, 5, "unexpected error column");
+        assert!(message.contains(" --> 4:5"), "got: {message}");
         assert!(
-            highlight.line_text.trim_start().starts_with('='),
-            "line text should contain '=' token, got: {:?}",
-            highlight.line_text
+            message.ends_with("4 |     =\n  |     ^"),
+            "caret should align with the offending token, got: {message}"
         );
-        assert_eq!(
-            highlight.pointer_line, "    ^",
-            "caret should align with offending token"
+    }
+
+    #[test]
+    fn error_renders_caret() {
+        let error = Parser::new("#usda 1.0\ndef Scope \"A\"\n{\n    float x = =\n}\n")
+            .parse()
+            .expect_err("`=` is not a value");
+
+        assert!(
+            error
+                .to_string()
+                .ends_with("  |\n4 |     float x = =\n  |               ^"),
+            "caret should sit under the offending token, got: {error}"
         );
+    }
+
+    #[test]
+    fn error_chain_exposes_cause() {
+        let error = Parser::new(
+            "#usda 1.0
+def Scope \"A\"
+{
+    rel r = </Bad..Path>
+}
+",
+        )
+        .parse()
+        .expect_err("malformed target path");
+
+        // The wrapper must not truncate the chain: the typed root error stays
+        // reachable through `std::error::Error::source`.
+        let wrapped = Error::new(error);
+        assert!(
+            wrapped
+                .chain()
+                .any(|link| link.downcast_ref::<sdf::PathParseError>().is_some()),
+            "typed path error should survive the wrapper, got: {wrapped:#}"
+        );
+    }
+
+    #[test]
+    fn error_names_source() {
+        let error = Parser::new("nope\n")
+            .parse()
+            .expect_err("missing magic token")
+            .with_source_name("scene.usda");
+
+        assert!(error.to_string().contains(" --> scene.usda:1:1"), "got: {error}");
+    }
+
+    #[test]
+    fn error_at_eof() {
+        // The prim body is never closed, so the failure lands at end of input.
+        let input = "#usda 1.0\ndef Scope \"A\"\n{\n";
+        let error = Parser::new(input).parse().expect_err("unterminated prim body");
+
+        // The last line of the file, not the empty one past its final newline.
+        assert_eq!(error.line(), 3);
+        assert_eq!(error.snippet(), "{");
+    }
+
+    #[test]
+    fn error_at_lex_failure() {
+        let error = Parser::new("#usda 1.0\ndef Scope \"A\"\n{\n    float x = %\n}\n")
+            .parse()
+            .expect_err("`%` does not lex");
+
+        // The location points at the invalid lexeme.
+        assert_eq!(error.line(), 4);
+        assert_eq!(error.column(), 15);
+    }
+
+    #[test]
+    fn error_tab_alignment() {
+        let error = Parser::new("#usda 1.0\ndef Scope \"A\"\n{\n\tfloat x = =\n}\n")
+            .parse()
+            .expect_err("`=` is not a value");
+
+        let rendered = error.to_string();
+        let caret = rendered.lines().last().expect("caret line");
+        assert!(caret.starts_with("  | \t"), "tabs must be preserved, got: {caret:?}");
     }
 
     #[test]

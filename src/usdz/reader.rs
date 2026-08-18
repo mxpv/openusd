@@ -108,8 +108,7 @@ impl<R: Read + Seek> Archive<R> {
         } else {
             let content =
                 String::from_utf8(buffer).with_context(|| format!("File '{}' is not valid UTF-8", file_path))?;
-            let data =
-                usda::parse(&content).with_context(|| format!("Failed to parse USDA data from '{}'", file_path))?;
+            let data = usda::parse(&content).map_err(|error| error.with_source_name(file_path))?;
             Ok(Box::new(data))
         }
     }

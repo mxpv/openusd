@@ -5,20 +5,22 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+mod cursor;
+mod error;
 pub mod parser;
 pub mod token;
 mod writer;
 
 use parser::Parser;
 
+pub use error::ParseError;
 pub use writer::TextWriter;
 
 use crate::{ar, sdf, tf};
 
 /// Parse `usda` text into an in-memory [`sdf::Data`] store.
-pub fn parse(text: &str) -> Result<sdf::Data> {
-    let mut parser = Parser::new(text);
-    let specs = parser.parse()?;
+pub fn parse(text: &str) -> Result<sdf::Data, ParseError> {
+    let specs = Parser::new(text).parse()?;
     Ok(sdf::Data::from_specs(specs))
 }
 
@@ -27,12 +29,7 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<sdf::Data> {
     let path = path.as_ref();
     let text = fs::read_to_string(path).with_context(|| format!("Unable to read file: {}", path.display()))?;
 
-    let mut parser = Parser::new(&text);
-    let specs = parser.parse().map_err(|e| match parser.last_error_highlight() {
-        Some(h) => e.context(format!("{}:{}: {}", path.display(), h.line, h.column)),
-        None => e.context(format!("{}: parse error", path.display())),
-    })?;
-    Ok(sdf::Data::from_specs(specs))
+    Ok(parse(&text).map_err(|error| error.with_source_name(path.display().to_string()))?)
 }
 
 /// Text format (`.usda`) as an [`sdf::FileFormat`], wrapping [`parse`] and
@@ -51,7 +48,8 @@ impl sdf::FileFormat for UsdaFileFormat {
     fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
         let bytes = resolver.open_asset(resolved)?.read_all()?;
         let text = String::from_utf8(bytes).context("layer is not valid UTF-8")?;
-        Ok(Box::new(parse(&text).context("failed to parse USDA layer")?))
+        let data = parse(&text).map_err(|error| error.with_source_name(resolved.to_string()))?;
+        Ok(Box::new(data))
     }
 
     fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<()> {
