@@ -1,8 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use std::borrow::Cow;
-use std::{any::type_name, collections::HashMap, fmt::Debug, str::FromStr};
+use std::collections::HashMap;
 
-use crate::gf;
 use crate::sdf::{
     self,
     schema::{ChildrenKey, FieldKey},
@@ -12,6 +10,7 @@ use crate::tf;
 use super::cursor::Cursor;
 use super::error::ParseError;
 use super::token::Token;
+use super::types::{self, Type, TypeInfo};
 
 /// Parser translates a list of tokens into structured data.
 pub struct Parser<'a> {
@@ -51,24 +50,32 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a single item or a bracketed array of items.
-    fn one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
+    fn parse_one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Cursor<'a>) -> Result<T>) -> Result<Vec<T>> {
         if self.cursor.eat(&Token::None)? {
             return Ok(Vec::new());
         }
         if self.cursor.at_punctuation('[')? {
-            let mut out = Vec::new();
-            self.parse_block('[', ']', |this| {
-                out.push(parse(this)?);
-                Ok(())
-            })?;
-            Ok(out)
-        } else {
-            Ok(vec![parse(self)?])
+            return types::parse_array_with(&mut self.cursor, parse);
         }
+        Ok(vec![parse(&mut self.cursor)?])
+    }
+
+    /// Runs `entry` over each item of a delimited block, tolerating `,` and `;`
+    /// separators between items.
+    fn parse_block(&mut self, open: char, close: char, mut entry: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
+        self.cursor.expect_punctuation(open)?;
+        loop {
+            if self.cursor.eat_punctuation(close)? {
+                break;
+            }
+            entry(self)?;
+            while self.cursor.eat_punctuation(',')? || self.cursor.eat_punctuation(';')? {}
+        }
+        Ok(())
     }
 
     /// Parse tokens to specs, locating any failure in the source text.
-    pub fn parse(&mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>, ParseError> {
+    pub fn parse(mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>, ParseError> {
         self.parse_impl()
             .map_err(|cause| ParseError::new(cause, self.cursor.source(), self.cursor.diagnostic_span()))
     }
@@ -143,25 +150,24 @@ impl<'a> Parser<'a> {
                 }
                 Token::SubLayers => {
                     this.cursor.expect_punctuation('=')?;
-                    let (sublayers, sublayer_offsets) = this.parse_sublayers().context("Unable to parse subLayers")?;
-                    root.add(FieldKey::SubLayers, sublayers);
-                    root.add(FieldKey::SubLayerOffsets, sublayer_offsets);
+                    let (sublayers, offsets) =
+                        types::parse_sublayers(&mut this.cursor).context("Unable to parse subLayers")?;
+                    root.add(FieldKey::SubLayers, sdf::Value::StringVec(sublayers));
+                    root.add(FieldKey::SubLayerOffsets, sdf::Value::LayerOffsetVec(offsets));
                 }
                 Token::Relocates => {
                     this.cursor.expect_punctuation('=')?;
-                    let pairs = this.parse_relocates_dict().context("Unable to parse relocates")?;
+                    let pairs = types::parse_relocates(&mut this.cursor).context("Unable to parse relocates")?;
                     root.add(FieldKey::LayerRelocates, sdf::Value::Relocates(pairs));
                 }
                 Token::Identifier(name) => {
                     this.cursor.expect_punctuation('=')?;
                     if let Some(&(known_name, info)) = KNOWN_PROPS.iter().find(|(n, _)| *n == name) {
-                        let value = this
-                            .parse_value(info)
+                        let value = types::parse_value(&mut this.cursor, info)
                             .with_context(|| format!("Unable to parse value for {known_name}"))?;
                         root.add(known_name, value);
                     } else {
-                        let value = this
-                            .parse_property_metadata_value()
+                        let value = types::parse_untyped_value(&mut this.cursor)
                             .with_context(|| format!("Unable to parse pseudo root metadata value for {name}"))?;
                         root.add(name, value);
                     }
@@ -302,7 +308,7 @@ impl<'a> Parser<'a> {
 
         self.cursor.expect_punctuation('=')?;
 
-        let names = self.one_or_list(|this| Ok(this.cursor.expect_string()?.into_owned()))?;
+        let names = self.parse_one_or_list(|c| Ok(c.expect_string()?.into_owned()))?;
         owner_spec.add(field_key, sdf::Value::token_vec(names));
 
         Ok(())
@@ -429,7 +435,7 @@ impl<'a> Parser<'a> {
             variability = sdf::Variability::Uniform;
         }
 
-        let type_info = self.try_parse_type()?.context("attribute type expected")?;
+        let type_info = types::parse_type(&mut self.cursor)?.context("attribute type expected")?;
 
         let name = self.expect_name().context("attribute name expected")?;
 
@@ -457,7 +463,7 @@ impl<'a> Parser<'a> {
                 // relationship targets, so a relative path (`<../sibling>`) is
                 // stored absolute.
                 let targets: Vec<sdf::Path> = self
-                    .parse_connection_targets()
+                    .parse_one_or_list(|c| types::parse_path_reference(c).context("Connection path expected"))
                     .context("Unable to parse connection targets")?
                     .into_iter()
                     .map(|p| current_path.make_absolute(&p))
@@ -477,7 +483,7 @@ impl<'a> Parser<'a> {
         if matches!(suffix, Some(Token::TimeSamples)) {
             push_unique(suffixed_properties, name);
             self.cursor.expect_punctuation('=')?;
-            let samples = self.parse_time_samples(type_info)?;
+            let samples = types::parse_time_samples(&mut self.cursor, type_info)?;
             let path = current_path.append_property(name)?;
 
             let spec = data
@@ -490,7 +496,7 @@ impl<'a> Parser<'a> {
         if matches!(suffix, Some(Token::Spline)) {
             push_unique(suffixed_properties, name);
             self.cursor.expect_punctuation('=')?;
-            let spline = self.parse_spline()?;
+            let spline = types::parse_spline(&mut self.cursor)?;
             let path = current_path.append_property(name)?;
 
             let spec = data
@@ -516,7 +522,7 @@ impl<'a> Parser<'a> {
         }
 
         self.cursor.expect_punctuation('=')?;
-        let value = self.parse_value(type_info)?;
+        let value = types::parse_value(&mut self.cursor, type_info)?;
         let path = current_path.append_property(name)?;
 
         if self.cursor.at_punctuation('(')? {
@@ -532,34 +538,6 @@ impl<'a> Parser<'a> {
         Self::merge_spec(data, path, base);
 
         Ok(())
-    }
-    /// Parses a connection target list into USD paths.
-    fn parse_connection_targets(&mut self) -> Result<Vec<sdf::Path>> {
-        self.one_or_list(|this| this.parse_path_reference().context("Connection path expected"))
-    }
-
-    /// Parses a single `<...>` path reference token into an `sdf::Path`.
-    fn parse_path_reference(&mut self) -> Result<sdf::Path> {
-        path_ref_to_path(self.cursor.expect_path_ref()?)
-    }
-
-    /// Parses a relocates dictionary: `{ <source>: <target>, ... }`.
-    fn parse_relocates_dict(&mut self) -> Result<Vec<(sdf::Path, sdf::Path)>> {
-        let mut pairs = Vec::new();
-        self.parse_block('{', '}', |this| {
-            let src = this.cursor.expect_path_ref().context("Expected relocate source path")?;
-            this.cursor
-                .expect_punctuation(':')
-                .context("Expected ':' between relocate source and target")?;
-            let tgt = this.cursor.expect_path_ref().context("Expected relocate target path")?;
-            let src_path = sdf::Path::new(src)?;
-            let tgt_path = path_ref_to_path(tgt)?;
-            reject_variant_selection_in_path(&src_path, "Relocate source")?;
-            reject_variant_selection_in_path(&tgt_path, "Relocate target")?;
-            pairs.push((src_path, tgt_path));
-            Ok(())
-        })?;
-        Ok(pairs)
     }
 
     /// Parse the metadata block attached to a property and stash entries on the spec.
@@ -584,8 +562,7 @@ impl<'a> Parser<'a> {
             };
 
             this.cursor.expect_punctuation('=')?;
-            let value = this
-                .parse_property_metadata_value()
+            let value = types::parse_untyped_value(&mut this.cursor)
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
 
             // Some attribute metadata fields are registered as `token` in their
@@ -611,106 +588,6 @@ impl<'a> Parser<'a> {
         })?;
 
         Ok(())
-    }
-
-    /// Parse a single attribute metadata value (scalar or array) from within a metadata block.
-    fn parse_property_metadata_value(&mut self) -> Result<sdf::Value> {
-        // Handle array case: parse each element as a typed scalar, then collect
-        // into the most specific Vec variant that fits all elements.
-        if self.cursor.at_punctuation('[')? {
-            let mut values = Vec::new();
-            self.parse_block('[', ']', |this| {
-                values.push(this.parse_property_metadata_value()?);
-                Ok(())
-            })?;
-
-            // Infer the array type from the first element.
-            return Ok(match values.first() {
-                Some(sdf::Value::Double(_)) => sdf::Value::DoubleVec(
-                    values
-                        .into_iter()
-                        .map(|v| v.try_as_double().unwrap_or_default())
-                        .collect(),
-                ),
-                Some(sdf::Value::Int64(_)) => sdf::Value::Int64Vec(
-                    values
-                        .into_iter()
-                        .map(|v| v.try_as_int_64().unwrap_or_default())
-                        .collect(),
-                ),
-                Some(sdf::Value::AssetPath(_)) => sdf::Value::AssetPathVec(
-                    values
-                        .into_iter()
-                        .map(|v| v.try_as_asset_path().unwrap_or_default())
-                        .collect(),
-                ),
-                _ => sdf::Value::StringVec(
-                    values
-                        .into_iter()
-                        .map(|v| match v {
-                            sdf::Value::String(s) => s,
-                            sdf::Value::Token(s) => s.into(),
-                            other => format!("{other:?}"),
-                        })
-                        .collect(),
-                ),
-            });
-        }
-
-        // Handle dictionary case by peeking, so parse_dictionary can consume the '{'
-        if self.cursor.at_punctuation('{')? {
-            return self.parse_dictionary();
-        }
-
-        let token = self.cursor.bump()?;
-        match token {
-            Token::None => Ok(sdf::Value::ValueBlock),
-            Token::String(value) => Ok(sdf::Value::String(value.into_owned())),
-            Token::AssetRef(asset_path) => Ok(sdf::Value::AssetPath(sdf::AssetPath::new(asset_path))),
-            Token::Identifier(value) | Token::NamespacedIdentifier(value) => Ok(sdf::Value::token(value)),
-            Token::Number(raw) => {
-                if let Ok(int) = raw.parse::<i64>() {
-                    Ok(sdf::Value::Int64(int))
-                } else if let Ok(float) = raw.parse::<f64>() {
-                    Ok(sdf::Value::Double(float))
-                } else {
-                    bail!("Unable to parse numeric metadata value: {raw}");
-                }
-            }
-            other => bail!("Unsupported property metadata value token: {other:?}"),
-        }
-    }
-
-    /// Parse a dictionary value from `{` to `}`.
-    fn parse_dictionary(&mut self) -> Result<sdf::Value> {
-        let mut dict = HashMap::new();
-
-        self.parse_block('{', '}', |this| {
-            // Try optional type hint, then read the key.
-            let type_hint = this.try_parse_type()?;
-
-            let key_token = this.cursor.bump()?;
-            let key = match key_token {
-                Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
-                Token::String(s) => s.into_owned(),
-                other => other
-                    .keyword_lexeme()
-                    .map(str::to_owned)
-                    .ok_or_else(|| anyhow!("Expected identifier as dictionary key, got: {other:?}"))?,
-            };
-
-            this.cursor.expect_punctuation('=')?;
-
-            let value = if let Some(info) = type_hint {
-                this.parse_value(info)?
-            } else {
-                this.parse_property_metadata_value()?
-            };
-            dict.insert(key, value);
-            Ok(())
-        })?;
-
-        Ok(sdf::Value::Dictionary(dict))
     }
 
     fn read_relationship(
@@ -755,7 +632,7 @@ impl<'a> Parser<'a> {
             None => self.try_list_op()?,
         };
         let targets: Vec<sdf::Path> = self
-            .one_or_list(Self::parse_path_reference)
+            .parse_one_or_list(types::parse_path_reference)
             .context("Unable to parse relationship targets")?
             .into_iter()
             .filter(|p| !p.is_empty())
@@ -806,66 +683,65 @@ impl<'a> Parser<'a> {
 
         match name {
             n if n == FieldKey::Active.as_str() => {
-                let value = self.parse_token::<bool>().context("Unable to parse active flag")?;
+                let value = types::parse_token::<bool>(&mut self.cursor).context("Unable to parse active flag")?;
                 spec.add(FieldKey::Active, sdf::Value::Bool(value));
             }
             "apiSchemas" => {
                 let values = self
-                    .one_or_list(|this| this.parse_token::<tf::Token>())
+                    .parse_one_or_list(types::parse_token::<tf::Token>)
                     .context("Unable to parse apiSchemas list")?;
                 let list_op = apply_list_op(list_op, values).context("Unable to build apiSchemas listOp")?;
                 spec.add_list_op("apiSchemas", sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::References.as_str() => {
                 let references = self
-                    .one_or_list(Self::parse_reference)
+                    .parse_one_or_list(types::parse_reference)
                     .context("Unable to parse references")?;
                 let list_op = apply_list_op(list_op, references).context("Unable to build references listOp")?;
                 spec.add_list_op(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
             }
             n if n == FieldKey::Payload.as_str() => {
                 let payloads = self
-                    .one_or_list(Self::parse_payload)
+                    .parse_one_or_list(types::parse_payload)
                     .context("Unable to parse payloads")?;
                 let list_op = apply_list_op(list_op, payloads).context("Unable to build payload listOp")?;
                 spec.add_list_op(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
-                let paths = self.one_or_list(Self::parse_path_reference)?;
-                // Validated here, not in `parse_path_reference`, which is shared
-                // with relationship-target and connection paths where a variant
-                // selection is allowed.
+                let paths = self.parse_one_or_list(types::parse_path_reference)?;
+                // Arc targets address prims. Relationship-target and connection
+                // paths share this production and do allow a variant selection,
+                // so the restriction is applied here rather than in the parse.
                 for p in &paths {
-                    reject_variant_selection_in_path(p, "Inherit")?;
+                    types::reject_variant_selection_in_path(p, "Inherit")?;
                 }
                 let list_op = apply_list_op(list_op, paths).context("Unable to build inherits listOp")?;
                 spec.add_list_op(FieldKey::InheritPaths, sdf::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Kind.as_str() => {
                 ensure!(list_op.is_none(), "kind metadata does not support list ops");
-                let value = self.parse_token::<String>().context("Unable to parse kind metadata")?;
+                let value = types::parse_token::<String>(&mut self.cursor).context("Unable to parse kind metadata")?;
                 spec.add(FieldKey::Kind, sdf::Value::token(value));
             }
             "customData" => {
                 ensure!(list_op.is_none(), "customData metadata does not support list ops");
-                let value = self
-                    .parse_property_metadata_value()
-                    .context("Unable to parse customData dictionary")?;
+                let value =
+                    types::parse_untyped_value(&mut self.cursor).context("Unable to parse customData dictionary")?;
                 spec.add("customData", value);
             }
             n if n == FieldKey::Documentation.as_str() => {
                 ensure!(list_op.is_none(), "doc metadata does not support list ops");
-                let value = self.parse_token::<String>().context("Unable to parse doc metadata")?;
+                let value = types::parse_token::<String>(&mut self.cursor).context("Unable to parse doc metadata")?;
                 spec.add(FieldKey::Documentation, sdf::Value::String(value));
             }
             n if n == FieldKey::AssetInfo.as_str() => {
                 ensure!(list_op.is_none(), "assetInfo does not support list ops");
-                let value = self.parse_dictionary().context("Unable to parse assetInfo")?;
+                let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse assetInfo")?;
                 spec.add(FieldKey::AssetInfo, value);
             }
             n if n == FieldKey::VariantSelection.as_str() => {
                 ensure!(list_op.is_none(), "variants does not support list ops");
-                let dict = self.parse_dictionary().context("Unable to parse variants")?;
+                let dict = types::parse_dictionary(&mut self.cursor).context("Unable to parse variants")?;
                 if let sdf::Value::Dictionary(map) = dict {
                     let selections: HashMap<String, String> = map
                         .into_iter()
@@ -876,27 +752,27 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::VariantSetNames.as_str() => {
                 let values = self
-                    .one_or_list(|this| this.parse_token::<tf::Token>())
+                    .parse_one_or_list(types::parse_token::<tf::Token>)
                     .context("Unable to parse variantSets")?;
                 let list_op = apply_list_op(list_op, values).context("Unable to build variantSets listOp")?;
                 spec.add_list_op(FieldKey::VariantSetNames, sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::Specializes.as_str() => {
-                let paths = self.one_or_list(Self::parse_path_reference)?;
+                let paths = self.parse_one_or_list(types::parse_path_reference)?;
                 for p in &paths {
-                    reject_variant_selection_in_path(p, "Specializes")?;
+                    types::reject_variant_selection_in_path(p, "Specializes")?;
                 }
                 let list_op = apply_list_op(list_op, paths).context("Unable to build specializes listOp")?;
                 spec.add_list_op(FieldKey::Specializes, sdf::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Instanceable.as_str() => {
                 ensure!(list_op.is_none(), "instanceable metadata does not support list ops");
-                let value = self.parse_bool().context("Unable to parse instanceable flag")?;
+                let value = types::parse_bool(&mut self.cursor).context("Unable to parse instanceable flag")?;
                 spec.add(FieldKey::Instanceable, sdf::Value::Bool(value));
             }
             n if n == FieldKey::Relocates.as_str() => {
                 ensure!(list_op.is_none(), "relocates does not support list ops");
-                let pairs = self.parse_relocates_dict().context("Unable to parse relocates")?;
+                let pairs = types::parse_relocates(&mut self.cursor).context("Unable to parse relocates")?;
                 spec.add(FieldKey::Relocates, sdf::Value::Relocates(pairs));
             }
             "displayName" => {
@@ -921,12 +797,12 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::Clips.as_str() => {
                 ensure!(list_op.is_none(), "clips metadata does not support list ops");
-                let value = self.parse_dictionary().context("Unable to parse clips dictionary")?;
+                let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse clips dictionary")?;
                 spec.add(FieldKey::Clips, value);
             }
             n if n == FieldKey::ClipSets.as_str() => {
                 let values = self
-                    .one_or_list(|this| Ok(this.cursor.expect_string()?.into_owned()))
+                    .parse_one_or_list(|c| Ok(c.expect_string()?.into_owned()))
                     .context("Unable to parse clipSets list")?;
                 let list_op = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
                 spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
@@ -941,779 +817,13 @@ impl<'a> Parser<'a> {
                     list_op.is_none(),
                     "list ops are not supported for unknown prim metadata: {other}"
                 );
-                let value = self
-                    .parse_property_metadata_value()
+                let value = types::parse_untyped_value(&mut self.cursor)
                     .with_context(|| format!("Unable to parse prim metadata value for {other}"))?;
                 spec.add(other, value);
             }
         }
 
         Ok(())
-    }
-
-    /// Parse an extrapolation mode: `mode [(slope)]`.
-    fn parse_extrapolation(&mut self) -> Result<sdf::Value> {
-        let mode = self.cursor.expect_identifier()?;
-        if mode == "none" {
-            return Ok(sdf::Value::ValueBlock);
-        }
-        let slope = if self.cursor.at_punctuation('(')? {
-            self.cursor.expect_punctuation('(')?;
-            let v = self.parse_token::<f64>()?;
-            self.cursor.expect_punctuation(')')?;
-            v
-        } else {
-            0.0
-        };
-        Ok(sdf::Value::Dictionary(HashMap::from([
-            ("mode".to_owned(), sdf::Value::token(mode)),
-            ("slope".to_owned(), sdf::Value::Double(slope)),
-        ])))
-    }
-
-    /// Parse a spline value: `{ curveType, knots... }`.
-    ///
-    /// The result is stored as a `Dictionary` matching the baseline JSON structure:
-    /// `{ curveType, preExtrapolation, postExtrapolation, loopParameters, knots, knotCustomData }`.
-    fn parse_spline(&mut self) -> Result<sdf::Value> {
-        let mut curve_type: Option<String> = None;
-        let mut pre_extrapolation = sdf::Value::ValueBlock;
-        let mut post_extrapolation = sdf::Value::ValueBlock;
-        let mut loop_params = sdf::Value::ValueBlock;
-        let mut knots = Vec::new();
-        let mut knot_custom_data: HashMap<String, sdf::Value> = HashMap::new();
-
-        self.parse_block('{', '}', |this| {
-            let token = this.cursor.bump()?;
-            // `pre`, `post`, and `loop` introduce a keyed entry (`pre : mode`); a
-            // bare identifier with no `:` after it names the curve type.
-            let keyed = matches!(token, Token::Identifier(_)) && this.cursor.at_punctuation(':')?;
-            match token {
-                // Curve type: `bezier`, `hermite`, etc.
-                Token::Identifier(name) if !keyed && !matches!(name, "pre" | "post" | "loop") => {
-                    curve_type = Some(name.to_owned());
-                }
-                // Extrapolation: `pre : mode` or `post: mode [(slope)]`
-                // With no space, the tokenizer produces `NamespacedIdentifier("pre:")`.
-                Token::Identifier(dir @ ("pre" | "post")) if keyed => {
-                    this.cursor.expect_punctuation(':')?;
-                    let extrap = this.parse_extrapolation()?;
-                    if dir == "pre" {
-                        pre_extrapolation = extrap;
-                    } else {
-                        post_extrapolation = extrap;
-                    }
-                }
-                Token::NamespacedIdentifier("pre:") => {
-                    pre_extrapolation = this.parse_extrapolation()?;
-                }
-                Token::NamespacedIdentifier("post:") => {
-                    post_extrapolation = this.parse_extrapolation()?;
-                }
-                // Loop parameters
-                Token::Identifier("loop") | Token::NamespacedIdentifier("loop:") => {
-                    if matches!(token, Token::Identifier(_)) {
-                        this.cursor.expect_punctuation(':')?;
-                    }
-                    let vals = this.parse_tuple::<f64, 5>()?;
-                    loop_params = sdf::Value::Dictionary(HashMap::from([
-                        ("protoStart".to_owned(), sdf::Value::Double(vals[0])),
-                        ("protoEnd".to_owned(), sdf::Value::Double(vals[1])),
-                        ("numPreLoops".to_owned(), sdf::Value::Double(vals[2])),
-                        ("numPostLoops".to_owned(), sdf::Value::Double(vals[3])),
-                        ("valueOffset".to_owned(), sdf::Value::Double(vals[4])),
-                    ]));
-                }
-                // Knot: `time : value [& preValue] [; pre (...)] [; post mode [...]] [; { customData }]`
-                Token::Number(time_str) => {
-                    let time: f64 = time_str.parse()?;
-                    this.cursor.expect_punctuation(':')?;
-                    let first: f64 = this.parse_token()?;
-
-                    let mut pre_slope = 0.0;
-                    let mut pre_width = 0.0;
-                    let mut post_slope = 0.0;
-                    let mut post_width = 0.0;
-                    let mut interp_mode = "held".to_owned();
-
-                    // `time : value` or `time : preValue & value`
-                    let (pre_value, value) = if this.cursor.eat_punctuation('&')? {
-                        let actual: f64 = this.parse_token()?;
-                        (first, actual)
-                    } else {
-                        (0.0, first)
-                    };
-
-                    // Optional semicolon-separated knot attributes
-                    while this.cursor.eat_punctuation(';')? {
-                        if this.cursor.at_punctuation('{')? {
-                            // Per-knot custom data
-                            let sdf::Value::Dictionary(dict) = this.parse_dictionary()? else {
-                                unreachable!();
-                            };
-                            let time_key = if time.fract() == 0.0 && time.is_finite() {
-                                format!("{}", time as i64)
-                            } else {
-                                format!("{time}")
-                            };
-                            knot_custom_data.insert(time_key, sdf::Value::Dictionary(dict));
-                            continue;
-                        }
-
-                        let dir = this.cursor.expect_identifier()?;
-                        match dir {
-                            "pre" => {
-                                let vals = this.parse_tuple::<f64, 2>()?;
-                                pre_slope = vals[0];
-                                pre_width = vals[1];
-                            }
-                            "post" => {
-                                // `post mode` or `post mode (slope, width)`
-                                let mode = this.cursor.expect_identifier()?;
-                                interp_mode = mode.to_owned();
-                                if this.cursor.at_punctuation('(')? {
-                                    let vals = this.parse_tuple::<f64, 2>()?;
-                                    post_slope = vals[0];
-                                    post_width = vals[1];
-                                }
-                            }
-                            other => bail!("Unexpected knot attribute: {other}"),
-                        }
-                    }
-
-                    knots.push(sdf::Value::Dictionary(HashMap::from([
-                        ("time".to_owned(), sdf::Value::Double(time)),
-                        ("value".to_owned(), sdf::Value::Double(value)),
-                        ("preValue".to_owned(), sdf::Value::Double(pre_value)),
-                        ("preTangentSlope".to_owned(), sdf::Value::Double(pre_slope)),
-                        ("preTangentWidth".to_owned(), sdf::Value::Double(pre_width)),
-                        ("postTangentSlope".to_owned(), sdf::Value::Double(post_slope)),
-                        ("postTangentWidth".to_owned(), sdf::Value::Double(post_width)),
-                        ("nextInterpolationMode".to_owned(), sdf::Value::token(interp_mode)),
-                    ])));
-                }
-                other => bail!("Unexpected spline token: {other:?}"),
-            }
-            Ok(())
-        })?;
-
-        Ok(sdf::Value::Dictionary(HashMap::from([
-            (
-                "curveType".to_owned(),
-                sdf::Value::token(curve_type.unwrap_or_else(|| "bezier".to_owned())),
-            ),
-            ("preExtrapolation".to_owned(), pre_extrapolation),
-            ("postExtrapolation".to_owned(), post_extrapolation),
-            ("loopParameters".to_owned(), loop_params),
-            ("knots".to_owned(), sdf::Value::ValueVec(knots)),
-            ("knotCustomData".to_owned(), sdf::Value::Dictionary(knot_custom_data)),
-        ])))
-    }
-
-    /// Parse a time sample map: `{ time : value, time : value, ... }`.
-    ///
-    /// Per-time values are dispatched two ways:
-    ///
-    /// - When the property's declared type and the next token agree
-    ///   on shape (a tuple type opening with `(` or `[`, or any
-    ///   array type opening with `[`), route through [`parse_value`]
-    ///   so the value lands in the matching typed variant
-    ///   (`gf::Vec3f` / `QuatfVec` / `gf::Matrix4d` / `IntVec` / `FloatVec` /
-    ///   `TokenVec` / …).
-    ///
-    /// - Otherwise fall through to [`parse_property_metadata_value`]
-    ///   so malformed-but-historically-accepted samples still load
-    ///   — the spec corpus's `attributes.usda` deliberately authors
-    ///   bare scalars (`5.67`, `-7`) and `None` against typed
-    ///   `vector3f` properties to verify the parser's tolerance.
-    fn parse_time_samples(&mut self, info: TypeInfo<'_>) -> Result<sdf::TimeSampleMap> {
-        let mut samples = Vec::new();
-        self.parse_block('{', '}', |this| {
-            let time_str = this.cursor.bump()?;
-            let time: f64 = match time_str {
-                Token::Number(s) => s.parse()?,
-                other => bail!("Expected time value, got {other:?}"),
-            };
-            this.cursor.expect_punctuation(':')?;
-            let value = if this.next_is_typed_value(info)? {
-                this.parse_value(info)?
-            } else {
-                this.parse_property_metadata_value()?
-            };
-            samples.push((time, value));
-            Ok(())
-        })?;
-        Ok(samples)
-    }
-
-    /// Heuristic: should the next token be parsed under [`parse_value`]
-    /// for `info`, or is the type-blind metadata-value path safer?
-    ///
-    /// Returns `true` when the next token opens a literal whose shape
-    /// matches the declared type:
-    ///
-    /// - `(` for a tuple type (vector / quat / matrix row / matrix).
-    /// - `[` for any array type (scalar arrays like `int[]`,
-    ///   `float[]`, `token[]`, as well as arrays of tuples like
-    ///   `quatf[]` or `matrix4d[]`).
-    /// - a bare number for a scalar `timecode`, so a sample like
-    ///   `1: 24` resolves to [`sdf::Value::TimeCode`] rather than the
-    ///   type-blind path's `Int64` / `Double`.
-    ///
-    /// Anything else (scalar literal, `None`, identifier) flows
-    /// through the type-blind path so the spec corpus's lenient
-    /// `vector3f`-with-bare-scalar samples keep parsing.
-    fn next_is_typed_value(&mut self, info: TypeInfo<'_>) -> Result<bool> {
-        let is_tuple_type = matches!(
-            info.ty,
-            Type::Int2
-                | Type::Int3
-                | Type::Int4
-                | Type::Half2
-                | Type::Half3
-                | Type::Half4
-                | Type::Float2
-                | Type::Float3
-                | Type::Float4
-                | Type::Double2
-                | Type::Double3
-                | Type::Double4
-                | Type::Quath
-                | Type::Quatf
-                | Type::Quatd
-                | Type::Matrix2d
-                | Type::Matrix3d
-                | Type::Matrix4d
-        );
-        Ok(match self.cursor.peek()? {
-            Some(Token::Punctuation('(')) => is_tuple_type,
-            Some(Token::Punctuation('[')) => is_tuple_type || info.is_array,
-            Some(Token::Number(_)) => info.ty == Type::TimeCode && !info.is_array,
-            _ => false,
-        })
-    }
-
-    /// Parse one reference entry, including optional target prim path and layer offset.
-    fn parse_reference(&mut self) -> Result<sdf::Reference> {
-        let mut reference = sdf::Reference::default();
-
-        match self.cursor.bump()? {
-            Token::AssetRef(asset_path) => {
-                reference.asset_path = asset_path.to_string();
-                if matches!(self.cursor.peek()?, Some(Token::PathRef(_))) {
-                    reference.prim_path = path_ref_to_path(self.cursor.expect_path_ref()?)?;
-                }
-            }
-            Token::PathRef(path) => {
-                reference.prim_path = path_ref_to_path(path)?;
-            }
-            token => {
-                bail!("Expected asset reference (@...@) or path reference (<...>), got {token:?}");
-            }
-        }
-        reject_variant_selection_in_path(&reference.prim_path, "Reference")?;
-
-        if self.cursor.at_punctuation('(')? {
-            let (offset, custom_data) = self
-                .parse_reference_layer_offset()
-                .context("Unable to parse reference layer offset")?;
-            reference.layer_offset = offset;
-            reference.custom_data = custom_data;
-        }
-
-        Ok(reference)
-    }
-
-    /// Parse `(offset = ...; scale = ...; customData = {...})` blocks attached to
-    /// references or sublayers.
-    fn parse_reference_layer_offset(&mut self) -> Result<(sdf::LayerOffset, HashMap<String, sdf::Value>)> {
-        let mut layer_offset = sdf::LayerOffset::default();
-        let mut custom_data = HashMap::new();
-
-        self.parse_block('(', ')', |this| {
-            let token = this.cursor.bump()?;
-            this.cursor.expect_punctuation('=')?;
-
-            match token {
-                Token::Offset => {
-                    let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
-                    layer_offset.offset = value.try_as_double().context("Expected double for offset")?;
-                }
-                Token::Scale => {
-                    let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
-                    layer_offset.scale = value.try_as_double().context("Expected double for scale")?;
-                }
-                Token::CustomData => {
-                    let sdf::Value::Dictionary(dict) = this.parse_dictionary()? else {
-                        unreachable!("parse_dictionary always returns Dictionary");
-                    };
-                    custom_data = dict;
-                }
-                unexpected => bail!("Unexpected token in layer offset: {unexpected:?}"),
-            }
-
-            Ok(())
-        })?;
-
-        Ok((layer_offset, custom_data))
-    }
-
-    /// Parse one payload entry, including optional target prim path and layer offset.
-    fn parse_payload(&mut self) -> Result<sdf::Payload> {
-        let mut payload = sdf::Payload::default();
-
-        match self.cursor.bump()? {
-            Token::AssetRef(asset_path) => {
-                payload.asset_path = asset_path.to_string();
-                if matches!(self.cursor.peek()?, Some(Token::PathRef(_))) {
-                    payload.prim_path = path_ref_to_path(self.cursor.expect_path_ref()?)?;
-                }
-            }
-            Token::PathRef(path) => {
-                payload.prim_path = path_ref_to_path(path)?;
-            }
-            token => {
-                bail!("Expected asset reference (@...@) or path reference (<...>), got {token:?}");
-            }
-        }
-        reject_variant_selection_in_path(&payload.prim_path, "Payload")?;
-
-        if self.cursor.at_punctuation('(')? {
-            let (offset, _custom_data) = self
-                .parse_reference_layer_offset()
-                .context("Unable to parse payload layer offset")?;
-            payload.layer_offset = Some(offset);
-        }
-
-        Ok(payload)
-    }
-
-    /// Decode a typed value based on USD's scalar/array/role type tables.
-    fn parse_value(&mut self, info: TypeInfo<'_>) -> Result<sdf::Value> {
-        // None means "value block" (explicitly unset) regardless of type.
-        if self.cursor.eat(&Token::None)? {
-            return Ok(sdf::Value::ValueBlock);
-        }
-
-        let value = match (info.ty, info.is_array) {
-            (Type::Bool, false) => sdf::Value::Bool(self.parse_bool()?),
-            (Type::Bool, true) => sdf::Value::BoolVec(self.parse_bool_array()?),
-
-            (Type::Asset, false) => sdf::Value::AssetPath(self.parse_asset_path()?.into()),
-            (Type::Asset, true) => {
-                sdf::Value::AssetPathVec(self.parse_asset_path_array()?.into_iter().map(Into::into).collect())
-            }
-
-            (Type::TimeCode, false) => sdf::Value::TimeCode(self.parse_token::<f64>()?.into()),
-            (Type::TimeCode, true) => sdf::Value::TimeCodeVec(
-                self.parse_array::<f64>()?
-                    .into_iter()
-                    .map(sdf::TimeCode::from)
-                    .collect(),
-            ),
-
-            (Type::Uchar, false) => sdf::Value::Uchar(self.parse_token()?),
-            (Type::Uchar, true) => sdf::Value::UcharVec(self.parse_array()?),
-
-            (Type::Int, false) => sdf::Value::Int(self.parse_token()?),
-            (Type::Int, true) => sdf::Value::IntVec(self.parse_array()?),
-            (Type::Int2, false) => sdf::Value::Vec2i(self.parse_gf::<i32, _, 2>()?),
-            (Type::Int2, true) => sdf::Value::Vec2iVec(self.parse_gf_array::<i32, _, 2>()?),
-            (Type::Int3, false) => sdf::Value::Vec3i(self.parse_gf::<i32, _, 3>()?),
-            (Type::Int3, true) => sdf::Value::Vec3iVec(self.parse_gf_array::<i32, _, 3>()?),
-            (Type::Int4, false) => sdf::Value::Vec4i(self.parse_gf::<i32, _, 4>()?),
-            (Type::Int4, true) => sdf::Value::Vec4iVec(self.parse_gf_array::<i32, _, 4>()?),
-            (Type::Uint, false) => sdf::Value::Uint(self.parse_token()?),
-            (Type::Int64, false) => sdf::Value::Int64(self.parse_token()?),
-            (Type::Int64, true) => sdf::Value::Int64Vec(self.parse_array()?),
-            (Type::Uint64, false) => sdf::Value::Uint64(self.parse_token()?),
-
-            (Type::Half, false) => sdf::Value::Half(self.parse_token()?),
-            (Type::Half, true) => sdf::Value::HalfVec(self.parse_array()?),
-            (Type::Half2, false) => sdf::Value::Vec2h(self.parse_gf::<crate::gf::f16, _, 2>()?),
-            (Type::Half2, true) => sdf::Value::Vec2hVec(self.parse_gf_array::<crate::gf::f16, _, 2>()?),
-            (Type::Half3, false) => sdf::Value::Vec3h(self.parse_gf::<crate::gf::f16, _, 3>()?),
-            (Type::Half3, true) => sdf::Value::Vec3hVec(self.parse_gf_array::<crate::gf::f16, _, 3>()?),
-            (Type::Half4, false) => sdf::Value::Vec4h(self.parse_gf::<crate::gf::f16, _, 4>()?),
-            (Type::Half4, true) => sdf::Value::Vec4hVec(self.parse_gf_array::<crate::gf::f16, _, 4>()?),
-
-            (Type::Float, false) => sdf::Value::Float(self.parse_token()?),
-            (Type::Float, true) => sdf::Value::FloatVec(self.parse_array()?),
-            (Type::Float2, false) => sdf::Value::Vec2f(self.parse_gf::<f32, _, 2>()?),
-            (Type::Float2, true) => sdf::Value::Vec2fVec(self.parse_gf_array::<f32, _, 2>()?),
-            (Type::Float3, false) => sdf::Value::Vec3f(self.parse_gf::<f32, _, 3>()?),
-            (Type::Float3, true) => sdf::Value::Vec3fVec(self.parse_gf_array::<f32, _, 3>()?),
-            (Type::Float4, false) => sdf::Value::Vec4f(self.parse_gf::<f32, _, 4>()?),
-            (Type::Float4, true) => sdf::Value::Vec4fVec(self.parse_gf_array::<f32, _, 4>()?),
-
-            (Type::Double, false) => sdf::Value::Double(self.parse_token()?),
-            (Type::Double, true) => sdf::Value::DoubleVec(self.parse_array()?),
-            (Type::Double2, false) => sdf::Value::Vec2d(self.parse_gf::<f64, _, 2>()?),
-            (Type::Double2, true) => sdf::Value::Vec2dVec(self.parse_gf_array::<f64, _, 2>()?),
-            (Type::Double3, false) => sdf::Value::Vec3d(self.parse_gf::<f64, _, 3>()?),
-            (Type::Double3, true) => sdf::Value::Vec3dVec(self.parse_gf_array::<f64, _, 3>()?),
-            (Type::Double4, false) => sdf::Value::Vec4d(self.parse_gf::<f64, _, 4>()?),
-            (Type::Double4, true) => sdf::Value::Vec4dVec(self.parse_gf_array::<f64, _, 4>()?),
-
-            // Quaternion fields in USDA are (w, x, y, z) — same as gf::Quat* field order.
-            (Type::Quath, false) => sdf::Value::Quath(self.parse_gf::<crate::gf::f16, _, 4>()?),
-            (Type::Quatf, false) => sdf::Value::Quatf(self.parse_gf::<f32, _, 4>()?),
-            (Type::Quatd, false) => sdf::Value::Quatd(self.parse_gf::<f64, _, 4>()?),
-            (Type::Quath, true) => sdf::Value::QuathVec(self.parse_gf_array::<crate::gf::f16, _, 4>()?),
-            (Type::Quatf, true) => sdf::Value::QuatfVec(self.parse_gf_array::<f32, _, 4>()?),
-            (Type::Quatd, true) => sdf::Value::QuatdVec(self.parse_gf_array::<f64, _, 4>()?),
-
-            (Type::String, false) => sdf::Value::String(self.cursor.expect_string()?.into_owned()),
-            (Type::Token, false) => sdf::Value::token(self.cursor.expect_string()?.as_ref()),
-            (Type::String | Type::Token, true) => sdf::Value::token_vec(self.parse_array::<String>()?),
-
-            (Type::PathExpression, false) => {
-                sdf::Value::PathExpression(sdf::PathExpression::parse(self.cursor.expect_string()?.as_ref()))
-            }
-            (Type::PathExpression, true) => sdf::Value::PathExpressionVec(
-                self.parse_array::<String>()?
-                    .iter()
-                    .map(|text| sdf::PathExpression::parse(text))
-                    .collect(),
-            ),
-
-            (Type::Matrix2d, false) => sdf::Value::Matrix2d(gf::Mat2d(self.parse_matrix::<2, 4>()?)),
-            (Type::Matrix3d, false) => sdf::Value::Matrix3d(gf::Mat3d(self.parse_matrix::<3, 9>()?)),
-            (Type::Matrix4d, false) => sdf::Value::Matrix4d(gf::Matrix4d(self.parse_matrix::<4, 16>()?)),
-            (Type::Matrix2d, true) => {
-                sdf::Value::Matrix2dVec(self.parse_matrix_array::<2, 4>()?.into_iter().map(gf::Mat2d).collect())
-            }
-            (Type::Matrix3d, true) => {
-                sdf::Value::Matrix3dVec(self.parse_matrix_array::<3, 9>()?.into_iter().map(gf::Mat3d).collect())
-            }
-            (Type::Matrix4d, true) => sdf::Value::Matrix4dVec(
-                self.parse_matrix_array::<4, 16>()?
-                    .into_iter()
-                    .map(gf::Matrix4d)
-                    .collect(),
-            ),
-
-            (Type::Dictionary, _) => self.parse_dictionary()?,
-
-            (Type::Custom, _) => bail!("Cannot parse value for unrecognized type: {}", info.type_name),
-
-            (ty, true) => bail!("Array of {ty:?} is not supported"),
-        };
-
-        Ok(value)
-    }
-
-    /// Parses a scalar type name into a `Type`. Does not handle arrays.
-    ///
-    /// See
-    /// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Basic_Datatypes>
-    /// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Roles>
-    fn parse_base_type(name: &str) -> Result<Type> {
-        let ty = match name {
-            "bool" => Type::Bool,
-            "uchar" => Type::Uchar,
-            "int" => Type::Int,
-            "int2" => Type::Int2,
-            "int3" => Type::Int3,
-            "int4" => Type::Int4,
-            "uint" => Type::Uint,
-            "int64" => Type::Int64,
-            "uint64" => Type::Uint64,
-            "half" => Type::Half,
-            "half2" | "texCoord2h" => Type::Half2,
-            "half3" | "point3h" | "normal3h" | "vector3h" | "color3h" | "texCoord3h" => Type::Half3,
-            "half4" | "color4h" => Type::Half4,
-            "float" => Type::Float,
-            "float2" | "texCoord2f" => Type::Float2,
-            "float3" | "point3f" | "normal3f" | "vector3f" | "color3f" | "texCoord3f" => Type::Float3,
-            "float4" | "color4f" => Type::Float4,
-            "double" => Type::Double,
-            "double2" | "texCoord2d" => Type::Double2,
-            "double3" | "point3d" | "normal3d" | "vector3d" | "color3d" | "texCoord3d" => Type::Double3,
-            "double4" | "color4d" => Type::Double4,
-            "matrix2d" => Type::Matrix2d,
-            "matrix3d" => Type::Matrix3d,
-            "matrix4d" | "frame4d" => Type::Matrix4d,
-            "quatd" => Type::Quatd,
-            "quatf" => Type::Quatf,
-            "quath" => Type::Quath,
-            "string" => Type::String,
-            "token" => Type::Token,
-            "asset" => Type::Asset,
-            "timecode" => Type::TimeCode,
-            "pathExpression" => Type::PathExpression,
-            "dictionary" => Type::Dictionary,
-            _ => bail!("Unsupported type: {name}"),
-        };
-        Ok(ty)
-    }
-
-    /// Tries to parse a type declaration: a recognized type name optionally followed by `[]`.
-    ///
-    /// Returns `Ok(None)` if the next token is not a known type (without consuming it).
-    fn try_parse_type(&mut self) -> Result<Option<TypeInfo<'a>>> {
-        let base = match self.cursor.peek()? {
-            Some(Token::Identifier(name)) => *name,
-            Some(Token::Dictionary) => "dictionary",
-            _ => return Ok(None),
-        };
-
-        let ty = Self::parse_base_type(base).unwrap_or(Type::Custom);
-        self.cursor.bump()?;
-
-        let mut is_array = false;
-        if self.cursor.at_punctuation('[')? {
-            self.cursor.bump()?;
-            self.cursor.expect_punctuation(']')?;
-            is_array = true;
-        }
-
-        Ok(Some(TypeInfo {
-            ty,
-            type_name: base,
-            is_array,
-        }))
-    }
-
-    /// Parse single token as `T` which can be deserialized from string (such as `int`, `float`, etc).
-    fn parse_token<T: FromStr>(&mut self) -> Result<T>
-    where
-        <T as FromStr>::Err: Debug,
-    {
-        let token = self.cursor.bump()?;
-        let value_str = match token {
-            Token::Number(s) | Token::Identifier(s) | Token::NamespacedIdentifier(s) => Cow::Borrowed(s),
-            Token::String(s) => s,
-            Token::Inf => Cow::Borrowed("inf"),
-            Token::Punctuation('-') => {
-                // Handle negative inf
-                let next = self.cursor.bump()?;
-                if matches!(next, Token::Inf) {
-                    Cow::Borrowed("-inf")
-                } else {
-                    bail!("Expected number after '-', got {next:?}")
-                }
-            }
-            Token::Punctuation('+') => {
-                // Handle positive inf
-                let next = self.cursor.bump()?;
-                if matches!(next, Token::Inf) {
-                    Cow::Borrowed("inf")
-                } else {
-                    bail!("Expected number after '+', got {next:?}")
-                }
-            }
-            _ => bail!("Expected a number, identifier, or string, got {token:?}"),
-        };
-        let value = T::from_str(&value_str)
-            .map_err(|err| anyhow!("Failed to parse {} from '{}': {:?}", type_name::<T>(), value_str, err))?;
-
-        Ok(value)
-    }
-
-    /// Parse USD's flexible boolean literal forms (identifiers, numeric, or string).
-    /// A `true` / `false` word, however it was spelled — bare, namespaced, or
-    /// quoted.
-    fn parse_bool(&mut self) -> Result<bool> {
-        let token = self.cursor.bump()?;
-        match token {
-            Token::Identifier(value) | Token::NamespacedIdentifier(value) => parse_bool_word(value),
-            Token::String(value) => parse_bool_word(&value),
-            Token::Number(value) => {
-                let parsed = value.parse::<f64>().context("Unable to parse numeric bool")?;
-                if parsed == 0.0 {
-                    Ok(false)
-                } else if parsed == 1.0 {
-                    Ok(true)
-                } else {
-                    bail!("Numeric bool literals must be 0 or 1, got {value}");
-                }
-            }
-            other => bail!("Unexpected token for bool literal: {other:?}"),
-        }
-    }
-
-    /// Parse an array of booleans, reusing the permissive literal parsing rules.
-    fn parse_bool_array(&mut self) -> Result<Vec<bool>> {
-        let mut out = Vec::new();
-        self.parse_block('[', ']', |this| {
-            out.push(this.parse_bool()?);
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    fn parse_asset_path(&mut self) -> Result<String> {
-        Ok(self.cursor.expect_asset_ref()?.to_owned())
-    }
-
-    fn parse_asset_path_array(&mut self) -> Result<Vec<String>> {
-        let mut result = Vec::new();
-        self.parse_block('[', ']', |this| {
-            result.push(this.parse_asset_path()?);
-            Ok(())
-        })?;
-        Ok(result)
-    }
-
-    /// Parse `subLayers` entries along with their optional `(offset/scale)` metadata.
-    fn parse_sublayers(&mut self) -> Result<(sdf::Value, sdf::Value)> {
-        let mut sublayers = Vec::new();
-        let mut sublayer_offsets = Vec::new();
-
-        self.parse_block('[', ']', |this| {
-            sublayers.push(this.cursor.expect_asset_ref()?.to_string());
-
-            let mut layer_offset = sdf::LayerOffset::default();
-            if this.cursor.at_punctuation('(')? {
-                let mut offset = None;
-                let mut scale = None;
-
-                this.parse_block('(', ')', |this| {
-                    let token = this.cursor.bump()?;
-                    this.cursor.expect_punctuation('=')?;
-                    let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
-                    match token {
-                        Token::Offset => {
-                            offset = Some(value);
-                        }
-                        Token::Scale => {
-                            scale = Some(value);
-                        }
-                        _ => bail!("Unexpected token type: {token:?}"),
-                    }
-                    Ok(())
-                })?;
-
-                if let Some(offset) = offset {
-                    layer_offset.offset = offset.try_as_double().context("Unexpected offset type, want double")?;
-                }
-                if let Some(scale) = scale {
-                    layer_offset.scale = scale.try_as_double().context("Unexpected scale type, want double")?;
-                }
-            }
-            sublayer_offsets.push(layer_offset);
-            Ok(())
-        })?;
-
-        debug_assert_eq!(sublayers.len(), sublayer_offsets.len());
-
-        Ok((
-            sdf::Value::StringVec(sublayers),
-            sdf::Value::LayerOffsetVec(sublayer_offsets),
-        ))
-    }
-
-    /// Generic array parser that delegates element parsing while handling delimiters.
-    /// Parses a delimited block: `open` ... entries ... `close`.
-    ///
-    /// Calls `entry` for each item. Commas between entries are consumed automatically.
-    /// Handles empty blocks and trailing commas.
-    fn parse_block(&mut self, open: char, close: char, mut entry: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
-        self.cursor.expect_punctuation(open)?;
-        loop {
-            if self.cursor.eat_punctuation(close)? {
-                break;
-            }
-            entry(self)?;
-            while self.cursor.eat_punctuation(',')? || self.cursor.eat_punctuation(';')? {}
-        }
-        Ok(())
-    }
-
-    /// Parse fixed-size tuples, preserving order and surfacing contextual errors.
-    fn parse_tuple<T, const N: usize>(&mut self) -> Result<[T; N]>
-    where
-        T: FromStr,
-        <T as FromStr>::Err: Debug,
-    {
-        let mut values = Vec::with_capacity(N);
-        self.parse_block('(', ')', |this| {
-            ensure!(values.len() < N, "tuple has too many elements (expected {N})");
-            values.push(this.parse_token::<T>()?);
-            Ok(())
-        })?;
-        values
-            .try_into()
-            .map_err(|v: Vec<T>| anyhow!("tuple has too few elements (expected {N}, got {})", v.len()))
-    }
-
-    /// Parse a `[...]` array, using `parse_element` for each item.
-    fn parse_array_with<T>(&mut self, mut parse_element: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
-        let mut out = Vec::new();
-        self.parse_block('[', ']', |this| {
-            out.push(parse_element(this)?);
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    /// Parse a `[scalar, ...]` array of `FromStr` values.
-    fn parse_array<T>(&mut self) -> Result<Vec<T>>
-    where
-        T: FromStr + Default,
-        <T as FromStr>::Err: Debug,
-    {
-        self.parse_array_with(Self::parse_token)
-    }
-
-    /// Parse a `[(tuple), ...]` array of fixed-size tuples.
-    fn parse_array_of_tuples<T, const N: usize>(&mut self) -> Result<Vec<[T; N]>>
-    where
-        T: FromStr,
-        <T as FromStr>::Err: Debug,
-    {
-        self.parse_array_with(Self::parse_tuple)
-    }
-
-    /// Parse a single matrix literal, flattening rows in row-major order.
-    ///
-    /// Handles both bare `(row), (row), ...` and bracket-wrapped `[ (row), ... ]` forms.
-    fn parse_matrix<const N: usize, const M: usize>(&mut self) -> Result<[f64; M]> {
-        if self.cursor.at_punctuation('[')? {
-            let mut arr = self.parse_matrix_array::<N, M>()?;
-            ensure!(arr.len() == 1, "expected a single matrix value");
-            return Ok(arr.remove(0));
-        }
-
-        let mut values = [0_f64; M];
-        let mut idx = 0;
-        self.parse_block('(', ')', |this| {
-            let row = this.parse_tuple::<f64, N>()?;
-            for v in row {
-                ensure!(idx < M, "matrix{N}d literal has too many elements");
-                values[idx] = v;
-                idx += 1;
-            }
-            Ok(())
-        })?;
-        ensure!(idx == M, "matrix{N}d literal must contain {N} rows");
-        Ok(values)
-    }
-
-    /// Parse `[ matrix, matrix, ... ]`.
-    fn parse_matrix_array<const N: usize, const M: usize>(&mut self) -> Result<Vec<[f64; M]>> {
-        self.parse_array_with(Self::parse_matrix::<N, M>)
-    }
-
-    // Parse a tuple and convert it to a gf type via `From<[E; N]>`.
-    fn parse_gf<E, T, const N: usize>(&mut self) -> Result<T>
-    where
-        E: FromStr,
-        <E as FromStr>::Err: Debug,
-        T: From<[E; N]>,
-    {
-        Ok(T::from(self.parse_tuple::<E, N>()?))
-    }
-
-    // Parse an array of tuples and convert each element to a gf type via `From<[E; N]>`.
-    fn parse_gf_array<E, T, const N: usize>(&mut self) -> Result<Vec<T>>
-    where
-        E: FromStr,
-        <E as FromStr>::Err: Debug,
-        T: From<[E; N]>,
-    {
-        Ok(self.parse_array_of_tuples::<E, N>()?.into_iter().map(T::from).collect())
     }
 }
 
@@ -1738,112 +848,10 @@ fn push_unique(vec: &mut Vec<String>, name: &str) {
     }
 }
 
-/// Rejects a composition-arc target path that contains a variant selection.
-/// Inherit, specialize, reference, payload, and relocate paths address prims,
-/// not variant selections, so a `{set=sel}` element anywhere in the path is a
-/// parse error (C++ `Sdf_TextFileFormatParser` raises the same error, e.g.
-/// "Inherit paths cannot contain variant selections"). `arc` names the field.
-fn reject_variant_selection_in_path(path: &sdf::Path, arc: &str) -> Result<()> {
-    ensure!(
-        !path.contains_prim_variant_selection(),
-        "{arc} paths cannot contain variant selections: <{path}>"
-    );
-    Ok(())
-}
-
-/// Result of parsing a type declaration, holding the parsed base type,
-/// the original token text, and whether `[]` was present.
-#[derive(Debug, Clone, Copy)]
-struct TypeInfo<'a> {
-    ty: Type,
-    type_name: &'a str,
-    is_array: bool,
-}
-
-impl<'a> TypeInfo<'a> {
-    const fn scalar(ty: Type) -> TypeInfo<'a> {
-        TypeInfo {
-            ty,
-            type_name: "",
-            is_array: false,
-        }
-    }
-}
-
-impl std::fmt::Display for TypeInfo<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_array {
-            write!(f, "{}[]", self.type_name)
-        } else {
-            write!(f, "{}", self.type_name)
-        }
-    }
-}
-
-/// Base data type without array semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Type {
-    Bool,
-    Uchar,
-    Int,
-    Int2,
-    Int3,
-    Int4,
-    Uint,
-    Int64,
-    Uint64,
-    Half,
-    Half2,
-    Half3,
-    Half4,
-    Float,
-    Float2,
-    Float3,
-    Float4,
-    Double,
-    Double2,
-    Double3,
-    Double4,
-    Quath,
-    Quatf,
-    Quatd,
-    String,
-    Token,
-    Asset,
-    TimeCode,
-    PathExpression,
-    Matrix2d,
-    Matrix3d,
-    Matrix4d,
-    Dictionary,
-    /// Unrecognized type name; the raw name is preserved in `TypeInfo::type_name`.
-    Custom,
-}
-
-/// Converts the text of a `<...>` path-reference token into a path. `<>`
-/// carries the empty path (e.g. a reference resolving to the target layer's
-/// defaultPrim), as in C++.
-fn path_ref_to_path(text: &str) -> Result<sdf::Path> {
-    if text.is_empty() {
-        return Ok(sdf::Path::default());
-    }
-    Ok(sdf::Path::new(text)?)
-}
-
-/// Whether `word` is the boolean `true` or `false`, case-insensitively.
-fn parse_bool_word(word: &str) -> Result<bool> {
-    if word.eq_ignore_ascii_case("true") {
-        Ok(true)
-    } else if word.eq_ignore_ascii_case("false") {
-        Ok(false)
-    } else {
-        bail!("Unexpected value for bool literal: {word}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gf;
     use anyhow::Error;
     use std::fs;
     use std::path::PathBuf;
@@ -1879,34 +887,6 @@ def "Mesh"
         assert_eq!(variability("/Mesh.owned"), uniform);
         assert_eq!(variability("/Mesh.moving"), None);
         assert_eq!(variability("/Mesh.both"), None);
-    }
-
-    #[test]
-    fn parse_empty_array() {
-        let mut parser = Parser::new("[]");
-        let array = parser.parse_array::<u32>().unwrap();
-        assert!(array.is_empty());
-    }
-
-    #[test]
-    fn parse_tuple() {
-        let mut parser = Parser::new("(1, 2, 3)");
-        let result = parser.parse_tuple::<u32, 3>().unwrap();
-        assert_eq!(result, [1_u32, 2, 3]);
-    }
-
-    #[test]
-    fn parse_array() {
-        let mut parser = Parser::new("[1, 2, 3]");
-        let result = parser.parse_array::<u32>().unwrap();
-        assert_eq!(result, vec![1_u32, 2, 3]);
-    }
-
-    #[test]
-    fn parse_array_of_tuples() {
-        let mut parser = Parser::new("[(1, 2), (3, 4)]");
-        let result = parser.parse_array_of_tuples::<u32, 2>().unwrap();
-        assert_eq!(result, vec![[1_u32, 2], [3, 4]]);
     }
 
     #[test]
@@ -2159,7 +1139,7 @@ def "Mesh"
     #[test]
     // Confirms nested prim traversal builds the expected child hierarchy.
     fn parse_nested_prims() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2214,7 +1194,7 @@ def Xform "Forest_set"
     #[test]
     // Ensures attribute metadata blocks are captured on the owning spec.
     fn parse_attribute_metadata_interpolation() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2243,7 +1223,7 @@ def Mesh "M"
     #[test]
     // Verifies the parser tolerates custom/asset/connect syntax and records connection props.
     fn parse_unsanitized_attributes() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2312,7 +1292,7 @@ def Shader "Image_Texture"
     #[test]
     // Ensures matrix4d scalar attributes parse into row-major data.
     fn parse_matrix4d_attribute() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2345,7 +1325,7 @@ def Xform "X" {
     #[test]
     // Ensures matrix4d array attributes parse into contiguous row-major data.
     fn parse_matrix4d_array_attribute() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2381,7 +1361,7 @@ def Scope "Root" {
     #[test]
     // Validates output declarations and connection attributes produce specs with connection paths.
     fn parse_material_output_connections() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2430,7 +1410,7 @@ def Material "Mat"
     #[test]
     // Verifies relationships are parsed with targets in the raw spec map.
     fn parse_relationship_specs() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2568,7 +1548,7 @@ def Scope \"A\"
     fn parse_crlf_line_endings() {
         // Simulate Windows line endings (\r\n) throughout the file.
         let input = "#usda 1.0\r\n(\r\n    defaultPrim = \"World\"\r\n)\r\n\r\ndef Scope \"World\"\r\n{\r\n}\r\n";
-        let mut parser = Parser::new(input);
+        let parser = Parser::new(input);
         let data = parser.parse().unwrap();
 
         let root = data.get(&sdf::Path::abs_root()).unwrap();
@@ -2578,7 +1558,7 @@ def Scope \"A\"
     #[test]
     // Exercises a wide set of attribute types to validate scalar/array decoding.
     fn parse_attributes() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2675,39 +1655,9 @@ def Xform "World"
     }
 
     #[test]
-    // Validates sublayer parsing captures offsets, scales, and defaults when missing.
-    fn test_parse_layer_offsets() {
-        let mut parser = Parser::new(
-            r#"
-[
-    @./someAnimation.usd@ (offset = 10; scale = 0.5),
-    @./another.usd@
-]
-            "#,
-        );
-
-        let (sublayers, offsets) = parser.parse_sublayers().unwrap();
-
-        let sublayers = sublayers.try_as_string_vec().unwrap();
-        assert_eq!(
-            sublayers,
-            vec!["./someAnimation.usd".to_string(), "./another.usd".to_string()]
-        );
-
-        let offsets = offsets.try_as_layer_offset_vec().unwrap();
-
-        assert_eq!(offsets[0].offset, 10.0);
-        assert_eq!(offsets[0].scale, 0.5);
-
-        // Default one
-        assert_eq!(offsets[1].offset, 0.0);
-        assert_eq!(offsets[1].scale, 1.0);
-    }
-
-    #[test]
     // Ensures pseudo-root parsing records sublayer paths and their offsets.
     fn test_parse_sublayers_in_pseudo_root() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 (
@@ -2751,7 +1701,7 @@ def Xform "World"
     #[test]
     // Checks prim metadata list ops for apiSchemas and the active flag.
     fn parse_prim_metadata_api_schemas() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2789,7 +1739,7 @@ def Mesh "Mesh_001" (
     #[test]
     // Ensures prim reference metadata is parsed with asset/prim path and default offsets.
     fn parse_prim_metadata_references() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2823,7 +1773,7 @@ def Mesh "visual" (
 
     #[test]
     fn prim_metadata_inherits_merge_operators() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -2858,7 +1808,7 @@ def "Test" {
     float value = -inf
 }
 "#;
-        let mut parser = Parser::new(data);
+        let parser = Parser::new(data);
         let result = parser.parse();
         assert!(result.is_ok(), "Parse failed: {:?}", result.err());
     }
@@ -2875,7 +1825,7 @@ over "GLOBAL" (
 {
 }
 "#;
-        let mut parser = Parser::new(data);
+        let parser = Parser::new(data);
         let result = parser.parse();
         assert!(result.is_ok(), "Parse failed: {:?}", result.err());
         let data = result.unwrap();
@@ -2885,7 +1835,7 @@ over "GLOBAL" (
     #[test]
     fn parse_schema_issue14() {
         let data = std::fs::read_to_string("fixtures/usdPhysics_schema.usda").unwrap();
-        let mut parser = Parser::new(&data);
+        let parser = Parser::new(&data);
 
         let specs = parser.parse().unwrap();
 
@@ -2893,14 +1843,14 @@ over "GLOBAL" (
         assert_ne!(specs.len(), 0, "Should have parsed some specs");
 
         // Check that GLOBAL prim exists and has customData
-        let global_path = sdf::Path::from_str("/GLOBAL").unwrap();
+        let global_path = sdf::Path::new("/GLOBAL").unwrap();
         assert!(specs.contains_key(&global_path), "Should have /GLOBAL prim");
 
         let global_spec = &specs[&global_path];
         assert!(global_spec.contains("customData"), "GLOBAL should have customData");
 
         // Check that PhysicsScene class exists
-        let physics_scene_path = sdf::Path::from_str("/PhysicsScene").unwrap();
+        let physics_scene_path = sdf::Path::new("/PhysicsScene").unwrap();
         assert!(
             specs.contains_key(&physics_scene_path),
             "Should have /PhysicsScene class"
@@ -2913,7 +1863,7 @@ over "GLOBAL" (
         );
 
         // Check that attributes were parsed (e.g., physics:gravityDirection)
-        let gravity_attr_path = sdf::Path::from_str("/PhysicsScene.physics:gravityDirection").unwrap();
+        let gravity_attr_path = sdf::Path::new("/PhysicsScene.physics:gravityDirection").unwrap();
         assert!(
             specs.contains_key(&gravity_attr_path),
             "Should have physics:gravityDirection attribute"
@@ -2932,7 +1882,7 @@ over "GLOBAL" (
     #[test]
     // Ensures relationship metadata is parsed correctly.
     fn parse_relationship_metadata() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 def Xform "root" {
@@ -2984,7 +1934,7 @@ def Xform "root" {
     /// no `@...@` arm, so an asset-valued sample failed to parse at all.
     #[test]
     fn parse_asset_time_samples() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 def Material "M"
 {
@@ -3033,7 +1983,7 @@ def Material "M"
     /// before the type-aware dispatch landed.
     #[test]
     fn parse_typed_tuple_time_samples() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 def Xform "Anim"
 {
@@ -3107,11 +2057,11 @@ def Xform "Anim"
     /// Regression: per-time values authored as scalar arrays against a
     /// typed `T[]` property must land in the precise typed `Vec`
     /// variant, not the type-blind `Int64Vec` / `DoubleVec` /
-    /// `StringVec` fallbacks that `parse_property_metadata_value`
+    /// `StringVec` fallbacks that `types::parse_untyped_value`
     /// produces.
     #[test]
     fn parse_typed_scalar_array_time_samples() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 def Xform "Anim"
 {
@@ -3172,7 +2122,7 @@ def Xform "Anim"
     /// that.
     #[test]
     fn parse_lenient_time_samples_keep_scalar_and_none() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 def Xform "X"
 {
@@ -3195,36 +2145,6 @@ def Xform "X"
         };
         assert_eq!(samples.len(), 3);
         assert!(matches!(samples[1].1, sdf::Value::ValueBlock));
-    }
-
-    #[test]
-    fn parse_reference_asset_only() {
-        let mut parser = Parser::new("@./model.usda@");
-        let reference = parser.parse_reference().unwrap();
-        assert_eq!(reference.asset_path, "./model.usda");
-        assert_eq!(reference.prim_path, sdf::Path::default());
-    }
-
-    #[test]
-    fn parse_reference_asset_with_prim_path() {
-        let mut parser = Parser::new("@./model.usda@</Root>");
-        let reference = parser.parse_reference().unwrap();
-        assert_eq!(reference.asset_path, "./model.usda");
-        assert_eq!(reference.prim_path.as_str(), "/Root");
-    }
-
-    #[test]
-    fn parse_reference_path_only() {
-        let mut parser = Parser::new("</Foo>");
-        let reference = parser.parse_reference().unwrap();
-        assert!(reference.asset_path.is_empty());
-        assert_eq!(reference.prim_path.as_str(), "/Foo");
-    }
-
-    #[test]
-    fn parse_reference_invalid_token() {
-        let mut parser = Parser::new("123");
-        assert!(parser.parse_reference().is_err());
     }
 
     /// A composition-arc target path containing a variant selection is rejected
@@ -3281,74 +2201,10 @@ def Xform "X"
         );
     }
 
-    #[test]
-    fn try_parse_type_scalar() {
-        let mut parser = Parser::new("float x");
-        let info = parser.try_parse_type().unwrap().unwrap();
-        assert_eq!(info.ty, Type::Float);
-        assert_eq!(info.type_name, "float");
-        assert!(!info.is_array);
-        assert_eq!(info.to_string(), "float");
-    }
-
-    #[test]
-    fn try_parse_type_array_no_space() {
-        // After tokenizer change, `float[]` is three tokens: float [ ]
-        let mut parser = Parser::new("float[] x");
-        let info = parser.try_parse_type().unwrap().unwrap();
-        assert_eq!(info.ty, Type::Float);
-        assert_eq!(info.type_name, "float");
-        assert!(info.is_array);
-        assert_eq!(info.to_string(), "float[]");
-    }
-
-    #[test]
-    fn try_parse_type_array_with_space() {
-        let mut parser = Parser::new("int [] x");
-        let info = parser.try_parse_type().unwrap().unwrap();
-        assert_eq!(info.ty, Type::Int);
-        assert!(info.is_array);
-        assert_eq!(info.to_string(), "int[]");
-    }
-
-    #[test]
-    fn try_parse_type_alias() {
-        let mut parser = Parser::new("point3f x");
-        let info = parser.try_parse_type().unwrap().unwrap();
-        assert_eq!(info.ty, Type::Float3);
-        assert_eq!(info.type_name, "point3f");
-        assert_eq!(info.to_string(), "point3f");
-    }
-
-    #[test]
-    fn try_parse_type_dictionary() {
-        let mut parser = Parser::new("dictionary x");
-        let info = parser.try_parse_type().unwrap().unwrap();
-        assert_eq!(info.ty, Type::Dictionary);
-        assert!(!info.is_array);
-    }
-
-    #[test]
-    fn try_parse_type_not_a_type() {
-        let mut parser = Parser::new("foobar x");
-        let info = parser.try_parse_type().unwrap().unwrap();
-        assert_eq!(info.ty, Type::Custom);
-        assert_eq!(info.type_name, "foobar");
-    }
-
-    #[test]
-    fn try_parse_type_matrix_array() {
-        let mut parser = Parser::new("matrix4d[] x");
-        let info = parser.try_parse_type().unwrap().unwrap();
-        assert_eq!(info.ty, Type::Matrix4d);
-        assert!(info.is_array);
-        assert_eq!(info.to_string(), "matrix4d[]");
-    }
-
     /// Array type with space between type name and `[]` parses correctly in a full attribute.
     #[test]
     fn parse_attribute_array_type_with_space() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -3370,7 +2226,7 @@ def Scope "Root" {
     /// `over` with a type name should parse the type and prim name.
     #[test]
     fn parse_over_with_type_name() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -3395,7 +2251,7 @@ over MfScope "TestOver"
     /// `timecode` / `timecode[]` attributes parse to `Value::TimeCode(Vec)`.
     #[test]
     fn parse_timecode_attribute() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 def "P" {
     uniform timecode startTime = 24
@@ -3422,7 +2278,7 @@ def "P" {
     /// sample rather than the type-blind path's `Int64` / `Double`.
     #[test]
     fn parse_timecode_time_samples() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 def "P" {
     timecode cue.timeSamples = {
@@ -3446,7 +2302,7 @@ def "P" {
     /// Prim metadata `displayName` should be parsed as a string.
     #[test]
     fn parse_prim_display_name() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"
 #usda 1.0
 
@@ -3467,7 +2323,7 @@ def Scope "Root" (
     fn parse_tolerates_unknown_prim_metadata() {
         // DCC / Omniverse author non-standard prim metadata; the parser must
         // not choke on it, and should stash the fields on the spec.
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 
 def Xform "Root" (
@@ -3494,7 +2350,7 @@ def Xform "Root" (
     #[test]
     fn parse_prim_display_name_utf8() {
         let input = "#usda 1.0\ndef Scope \"R\" (\n    displayName = \"\u{1F680}\"\n)\n{\n}\n";
-        let mut parser = Parser::new(input);
+        let parser = Parser::new(input);
         let data = parser.parse().unwrap();
         let spec = data.get(&sdf::path("/R").unwrap()).unwrap();
         assert_eq!(spec.get("displayName"), Some(&sdf::Value::String("\u{1F680}".into())));
@@ -3502,7 +2358,7 @@ def Xform "Root" (
 
     #[test]
     fn parse_spline_empty() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 def "p" { double x.spline = {} }
 "#,
@@ -3522,7 +2378,7 @@ def "p" { double x.spline = {} }
 
     #[test]
     fn parse_spline_knot_with_tangents() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 def "p" {
     float x.spline = {
@@ -3560,7 +2416,7 @@ def "p" {
 
     #[test]
     fn parse_spline_extrapolation_and_loop() {
-        let mut parser = Parser::new(
+        let parser = Parser::new(
             r#"#usda 1.0
 def "p" {
     double x.spline = {

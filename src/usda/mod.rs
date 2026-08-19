@@ -9,6 +9,7 @@ mod cursor;
 mod error;
 pub mod parser;
 pub mod token;
+mod types;
 mod writer;
 
 use parser::Parser;
