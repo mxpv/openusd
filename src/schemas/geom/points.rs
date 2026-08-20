@@ -5,7 +5,7 @@
 //! point pool. Each is a concrete view over a [`Prim`] mirroring the matching
 //! C++ `UsdGeom` class.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, Stage};
@@ -121,6 +121,8 @@ impl_geom_schema!(pointbased TetMesh);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
 
     #[test]
     fn points_widths_and_ids() -> Result<()> {

@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path as FsPath;
 use std::rc::Rc;
 
-use anyhow::Result;
+use openusd::Result;
 use openusd::{pcp, sdf, tf, usd};
 
 #[test]
@@ -908,7 +908,7 @@ def "P" {
         stage
             .composition_errors()
             .iter()
-            .any(|e| matches!(e, pcp::Error::InvalidExpression { .. })),
+            .any(|e| matches!(e, pcp::CompositionError::InvalidExpression { .. })),
         "the undefined reference expression is diagnosed"
     );
     assert!(stage.is_indexed(&sdf::path("/P")?));

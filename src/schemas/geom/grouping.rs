@@ -1,6 +1,6 @@
 //! Grouping prims — `Xform` and `Scope`.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Prim, SchemaBase, Stage};
@@ -53,6 +53,8 @@ impl_geom_schema!(imageable Scope);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
 
     #[test]
     fn xform_and_scope_are_pure_typed_prims() -> Result<()> {

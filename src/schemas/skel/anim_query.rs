@@ -11,7 +11,7 @@
 //! components match Pixar's reference: identity translation, identity
 //! quaternion, unit scale, zero blend-shape weight.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::gf;
 use crate::sdf::{self, Path, Value};

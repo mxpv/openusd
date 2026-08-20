@@ -43,11 +43,10 @@ use std::mem;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use bitflags::bitflags;
 
 use crate::tf::Token;
-use crate::{ar, pcp, sdf};
+use crate::{Result, ar, pcp, sdf};
 
 use super::composition::{self, PendingEdit, StageComposition};
 
@@ -439,7 +438,7 @@ impl EditTarget {
 ///
 /// ```no_run
 /// # use openusd::usd::{Stage, EditTarget};
-/// # fn f(stage: &Stage) -> anyhow::Result<()> {
+/// # fn f(stage: &Stage) -> openusd::Result<()> {
 /// let root = stage.root_layer().identifier().to_string();
 /// {
 ///     let _ctx = stage.edit_context(EditTarget::for_layer(root))?;
@@ -488,11 +487,20 @@ pub enum StageAuthoringError {
 
     /// A composed-stage query needed to route or validate the authoring call failed.
     #[error(transparent)]
-    Composition(#[from] anyhow::Error),
+    Composition(#[from] pcp::QueryError),
 
     /// The prim's schemas reject the API schema being applied.
     #[error(transparent)]
     Schema(#[from] super::ApplyApiError),
+
+    /// A name argument is not a legal identifier for what it names.
+    #[error("invalid {what} {name:?}: must be a valid identifier")]
+    InvalidIdentifier {
+        /// The offending name.
+        name: String,
+        /// What the name was for.
+        what: &'static str,
+    },
 
     /// The named layer is not present in this stage's layer graph.
     #[error("layer {layer:?} is not in the stage")]
@@ -862,7 +870,7 @@ impl Stage {
     /// contributes nothing, or the sublayer itself is muted — so muting suppresses
     /// the diagnostic and unmuting restores it, without the one-shot error ever
     /// being discarded.
-    pub fn composition_errors(&self) -> Vec<pcp::Error> {
+    pub fn composition_errors(&self) -> Vec<pcp::CompositionError> {
         // Drain once, then read both together: routing through the
         // `layers()`/`cache()` accessors would each re-run `process_pending`, and
         // holding the graph borrow across the second run risks a re-entrant
@@ -1943,7 +1951,7 @@ impl Stage {
     // `InitialLoadSet::LoadNone` pays two full-store recomposes per call. A
     // scratch cache the walk composes into, left uncommitted, would avoid
     // this, but is a larger change than this method currently needs.
-    pub fn find_loadable(&self, root: impl sdf::IntoPath) -> anyhow::Result<Vec<sdf::Path>> {
+    pub fn find_loadable(&self, root: impl sdf::IntoPath) -> Result<Vec<sdf::Path>> {
         let root = sdf::try_into_path(root)?.prim_path();
         let _guard = LoadRulesGuard {
             stage: self,
@@ -1961,7 +1969,7 @@ impl Stage {
     /// payload arc whose own rule currently resolves loaded (C++
     /// `UsdStage::GetLoadSet`). Unlike [`load_rules`](Self::load_rules), this
     /// reports the actual composed state, not the raw authored rules.
-    pub fn load_set(&self) -> anyhow::Result<Vec<sdf::Path>> {
+    pub fn load_set(&self) -> Result<Vec<sdf::Path>> {
         Ok(self
             .find_loadable(sdf::Path::abs_root())?
             .into_iter()
@@ -1975,7 +1983,7 @@ impl Stage {
     /// prim hierarchy cannot overflow the call stack — matching
     /// [`traverse`](Self::traverse)'s own approach to the same style of
     /// whole-tree walk.
-    fn walk_loadable(&self, path: &sdf::Path, found: &mut Vec<sdf::Path>) -> anyhow::Result<()> {
+    fn walk_loadable(&self, path: &sdf::Path, found: &mut Vec<sdf::Path>) -> Result<()> {
         let mut stack = vec![path.clone()];
         while let Some(path) = stack.pop() {
             let prim = super::Prim::new(self, path.clone());
@@ -2106,7 +2114,7 @@ impl Stage {
     /// root-layer-only metadata for the spec 12.2.7 fields like `defaultPrim`.
     /// Returns the raw [`sdf::Value`]; the caller coerces it.
     pub fn stage_metadata(&self, field: impl AsRef<str>) -> Result<Option<sdf::Value>> {
-        self.with_cache(|g, _| g.stage_metadata(field.as_ref()))
+        Ok(self.with_cache(|g, _| Ok(g.stage_metadata(field.as_ref())?))?)
     }
 
     /// The stage's `startTimeCode`, or `0.0` when unauthored. The session
@@ -2189,14 +2197,14 @@ impl Stage {
     /// [`Self::time_samples`].
     pub fn time_sample_times(&self, attr_path: impl sdf::IntoPath) -> Result<Option<Vec<f64>>> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        self.masked(&attr_path, |g, c| c.time_sample_times(g, &attr_path))
+        Ok(self.masked(&attr_path, |g, c| c.time_sample_times(g, &attr_path))?)
     }
 
     /// Returns the number of composed `timeSamples` for an attribute, zero when
     /// none are authored. Resolves the count without cloning the sample values.
     pub fn num_time_samples(&self, attr_path: impl sdf::IntoPath) -> Result<usize> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        self.masked(&attr_path, |g, c| c.num_time_samples(g, &attr_path))
+        Ok(self.masked(&attr_path, |g, c| c.num_time_samples(g, &attr_path))?)
     }
 
     /// Whether an attribute's value may vary over time, the introspection behind
@@ -2207,7 +2215,7 @@ impl Stage {
     /// even where the discrete sample count collapses to one (spec 12.3.4).
     pub fn value_might_be_time_varying(&self, attr_path: impl sdf::IntoPath) -> Result<bool> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        self.masked(&attr_path, |g, c| c.value_might_be_time_varying(g, &attr_path))
+        Ok(self.masked(&attr_path, |g, c| c.value_might_be_time_varying(g, &attr_path))?)
     }
 
     /// Evaluate an attribute's value at `time` under the stage's current
@@ -2228,7 +2236,7 @@ impl Stage {
         let attr_path = sdf::try_into_path(attr_path)?;
         let interp_type = self.interpolation_type.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        self.masked(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp))
+        Ok(self.masked(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp))?)
     }
 
     /// Resolves the cacheable value source for an attribute, the source half of
@@ -2237,7 +2245,7 @@ impl Stage {
     /// [`AttributeValueSource::Static`](pcp::AttributeValueSource::Static)
     /// `None` when the attribute's prim is outside the population mask.
     pub(crate) fn resolve_value_source(&self, attr_path: &sdf::Path) -> Result<pcp::AttributeValueSource> {
-        self.masked(attr_path, |g, c| c.resolve_value_source(g, attr_path))
+        Ok(self.masked(attr_path, |g, c| c.resolve_value_source(g, attr_path))?)
     }
 
     /// The current composition revision, advanced once per applied edit batch.
@@ -2260,6 +2268,16 @@ impl Stage {
     /// including one the population mask excludes — gets the registry's empty
     /// type.
     pub fn prim_type_info(&self, path: impl sdf::IntoPath) -> Result<Arc<PrimTypeInfo>> {
+        Ok(self.prim_type_info_composed(path)?)
+    }
+
+    /// [`prim_type_info`](Self::prim_type_info) at the composition tier, for
+    /// the internal readers and authoring routers that fold the failure into
+    /// their own error.
+    pub(crate) fn prim_type_info_composed(
+        &self,
+        path: impl sdf::IntoPath,
+    ) -> Result<Arc<PrimTypeInfo>, pcp::QueryError> {
         let path = sdf::try_into_path(path)?;
         let revision = self.cache_revision();
         if let Some(info) = self.prim_types.borrow().lookup(revision, &path) {
@@ -2270,7 +2288,7 @@ impl Stage {
         // is what the definition this identity selects reports back
         // (C++ `_ComposeAuthoredAppliedSchemas`).
         let prim = super::Prim::new(self, path.prim_path());
-        let mut id = PrimTypeId::new(prim.type_name()?, prim.authored_api_schemas()?);
+        let mut id = PrimTypeId::new(prim.type_name_composed()?, prim.authored_api_schemas_composed()?);
         if let Some(mapped) = self.fallback_prim_type(id.type_name())? {
             id = id.with_mapped_type_name(mapped);
         }
@@ -2286,7 +2304,7 @@ impl Stage {
     /// `fallbackPrimTypes` maps each such type to an ordered list of
     /// substitutes; the first the registry knows wins, so an asset written
     /// against a newer schema still resolves against what this build has.
-    fn fallback_prim_type(&self, type_name: &Token) -> Result<Option<Token>> {
+    fn fallback_prim_type(&self, type_name: &Token) -> Result<Option<Token>, pcp::QueryError> {
         const FALLBACK_PRIM_TYPES: &str = "fallbackPrimTypes";
 
         if type_name.as_str().is_empty() || self.schema_registry.is_concrete_type(type_name) {
@@ -2341,7 +2359,7 @@ impl Stage {
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<Token>> {
         let root = sdf::Path::abs_root();
-        self.with_cache(|g, c| c.prim_children(g, &root))
+        Ok(self.with_cache(|g, c| c.prim_children(g, &root))?)
     }
 
     // `has_spec` / `spec_type` below are low-level composed-spec infrastructure
@@ -2358,12 +2376,12 @@ impl Stage {
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
-    pub(crate) fn has_spec(&self, path: &sdf::Path) -> Result<bool> {
+    pub(crate) fn has_spec(&self, path: &sdf::Path) -> Result<bool, pcp::QueryError> {
         self.masked(path, |g, c| c.has_spec(g, path))
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
-    pub(crate) fn spec_type(&self, path: impl sdf::IntoPath) -> Result<Option<sdf::SpecType>> {
+    pub(crate) fn spec_type(&self, path: impl sdf::IntoPath) -> Result<Option<sdf::SpecType>, pcp::QueryError> {
         let path = sdf::try_into_path(path)?;
         self.masked(&path, |g, c| c.spec_type(g, &path))
     }
@@ -2395,17 +2413,18 @@ impl Stage {
     /// Accepts both [`sdf::FieldKey`] and `&str` as the field name.
     ///
     /// [`Attribute::get`]: super::Attribute::get
-    pub(crate) fn field<T>(&self, path: impl sdf::IntoPath, field: impl AsRef<str>) -> Result<Option<T>>
+    pub(crate) fn field<T>(
+        &self,
+        path: impl sdf::IntoPath,
+        field: impl AsRef<str>,
+    ) -> Result<Option<T>, pcp::QueryError>
     where
         T: TryFrom<sdf::Value>,
-        T::Error: std::error::Error + Send + Sync + 'static,
+        T::Error: Into<pcp::QueryError>,
     {
         let path = sdf::try_into_path(path)?;
         let raw = self.masked(&path, |g, c| c.resolve_field(g, &path, field.as_ref()))?;
-        match raw {
-            Some(value) => Ok(Some(T::try_from(value)?)),
-            None => Ok(None),
-        }
+        super::decode_value(raw)
     }
 
     /// Runs a composed query at `path` under the population mask: when the
@@ -2417,8 +2436,8 @@ impl Stage {
     pub(crate) fn masked<T: Default>(
         &self,
         path: &sdf::Path,
-        mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
-    ) -> Result<T> {
+        mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+    ) -> Result<T, pcp::QueryError> {
         let prim = path.prim_path();
         // Before the borrow, not inside it: a prototype path is unanswerable
         // until stage population has registered its root, and completing that
@@ -2447,7 +2466,7 @@ impl Stage {
     ///
     /// Nothing happens for an ordinary stage path, which is every path on a
     /// stage that never asks about a prototype.
-    pub(super) fn resolve_prototype_path(&self, prim: &sdf::Path) -> Result<()> {
+    pub(super) fn resolve_prototype_path(&self, prim: &sdf::Path) -> Result<(), pcp::QueryError> {
         if !pcp::is_prototype_namespace(prim) {
             return Ok(());
         }
@@ -2456,7 +2475,7 @@ impl Stage {
 
     /// Completes stage population unless it is already current for the live
     /// population epoch.
-    fn ensure_prototypes_discovered(&self) -> Result<()> {
+    fn ensure_prototypes_discovered(&self) -> Result<(), pcp::QueryError> {
         if self.prototypes_discovered.get() == Some(self.cache().population_epoch()) {
             return Ok(());
         }
@@ -2498,7 +2517,7 @@ impl Stage {
     // TODO(rayon): distinct prototype namespaces in the fixpoint are
     // independent subtrees, so their passes can run concurrently once
     // materialization does (see `IndexCache::materialize_prototype`).
-    fn discover_prototypes(&self) -> Result<()> {
+    fn discover_prototypes(&self) -> Result<(), pcp::QueryError> {
         loop {
             let epoch = self.cache().population_epoch();
             let mut roots: Vec<sdf::Path> = Vec::new();
@@ -2522,7 +2541,7 @@ impl Stage {
     /// Registers every instance in the subtree below `root`, collecting the
     /// prototype roots they resolve to into `roots`. One pass of
     /// [`Self::discover_prototypes`]'s walk.
-    fn register_instances_below(&self, root: &sdf::Path, roots: &mut Vec<sdf::Path>) -> Result<()> {
+    fn register_instances_below(&self, root: &sdf::Path, roots: &mut Vec<sdf::Path>) -> Result<(), pcp::QueryError> {
         let mut stack = vec![root.clone()];
         while let Some(path) = stack.pop() {
             // One settled pass per prim, straight against the cache. Going
@@ -2594,7 +2613,7 @@ impl Stage {
     /// metadata is read from the root layer alone, not composed across the
     /// layer stack.
     pub fn custom_layer_data(&self) -> Result<Option<sdf::Value>> {
-        self.field::<sdf::Value>(sdf::Path::abs_root(), sdf::FieldKey::CustomLayerData)
+        Ok(self.field::<sdf::Value>(sdf::Path::abs_root(), sdf::FieldKey::CustomLayerData)?)
     }
 
     /// Returns every prototype root (`/__Prototype_N`) this stage's population
@@ -2668,7 +2687,7 @@ impl Stage {
     /// If `layer` authors its own `subLayers` naming layers not yet loaded,
     /// the recompose records them as sublayer demands and the load barrier
     /// opens them from disk, with one that fails to resolve surfacing as an
-    /// [`UnresolvedSublayer`](pcp::Error::UnresolvedSublayer) diagnostic — the
+    /// [`UnresolvedSublayer`](pcp::CompositionError::UnresolvedSublayer) diagnostic — the
     /// same treatment the root layer's sublayers get at open.
     pub fn insert_layer(
         &self,
@@ -2777,8 +2796,8 @@ impl Stage {
     /// owns the query/load fixpoint.
     pub(crate) fn with_cache<T>(
         &self,
-        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
-    ) -> Result<T> {
+        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+    ) -> Result<T, pcp::QueryError> {
         self.process_pending();
         self.composition.query(query, self)
     }
@@ -2906,15 +2925,15 @@ pub struct StageBuilder {
 #[derive(Default)]
 struct CollectedLayers {
     layers: Vec<sdf::Layer>,
-    errors: Vec<pcp::Error>,
+    errors: Vec<pcp::CompositionError>,
 }
 
 /// Whether a composition error is a sublayer load diagnostic — the only kind
 /// [`Stage::composition_errors`] filters against the muted-aware effective set.
-fn is_sublayer_error(error: &pcp::Error) -> bool {
+fn is_sublayer_error(error: &pcp::CompositionError) -> bool {
     matches!(
         error,
-        pcp::Error::UnresolvedSublayer { .. } | pcp::Error::MalformedSublayer { .. }
+        pcp::CompositionError::UnresolvedSublayer { .. } | pcp::CompositionError::MalformedSublayer { .. }
     )
 }
 
@@ -3112,7 +3131,7 @@ impl StageBuilder {
     /// target layers on demand (see [`Stage::with_cache`]), so the population
     /// mask prunes them naturally: a culled prim is never composed, so its arc
     /// targets are never demanded. A missing sublayer is recorded as an
-    /// [`UnresolvedSublayer`](pcp::Error::UnresolvedSublayer) collection error
+    /// [`UnresolvedSublayer`](pcp::CompositionError::UnresolvedSublayer) collection error
     /// rather than aborting the open; one under a muted branch is filtered out
     /// later, once the muted-aware graph exists (see
     /// [`StageBuilder::make_stage`](Self::make_stage)).
@@ -3134,7 +3153,9 @@ impl StageBuilder {
                 },
                 &|_| false,
             )?
-            .with_context(|| format!("failed to resolve asset path: {path}"))?;
+            .ok_or_else(|| sdf::LoadError::Unresolved {
+                asset_path: path.to_owned(),
+            })?;
         Ok(CollectedLayers {
             layers,
             errors: errors.into_inner(),
@@ -3206,7 +3227,7 @@ impl StageBuilder {
         self,
         layers: Vec<sdf::Layer>,
         session_layer_count: usize,
-        collection_errors: Vec<pcp::Error>,
+        collection_errors: Vec<pcp::CompositionError>,
     ) -> Stage {
         let load_rules = match self.initial_load_set {
             InitialLoadSet::LoadAll => pcp::LoadRules::all(),
@@ -3237,11 +3258,11 @@ impl StageBuilder {
         let failure_seeds: Vec<(String, String, pcp::LoadFailure)> = collection_errors
             .iter()
             .filter_map(|error| match error {
-                pcp::Error::UnresolvedSublayer {
+                pcp::CompositionError::UnresolvedSublayer {
                     asset_path,
                     introduced_by,
                 } => Some((asset_path.clone(), introduced_by.clone(), pcp::LoadFailure::Unresolved)),
-                pcp::Error::MalformedSublayer {
+                pcp::CompositionError::MalformedSublayer {
                     asset_path,
                     introduced_by,
                     reason,

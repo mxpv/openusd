@@ -1,8 +1,7 @@
 //! Binary file format (`usdc`) implementation.
 
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, io, mem, path::Path};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, fs, io, mem, path::Path, str};
 
-use anyhow::{Context, Result};
 use layout::ValueRep;
 
 mod coding;
@@ -18,6 +17,105 @@ use crate::{ar, sdf, tf};
 
 /// USDC binary format magic bytes (`PXR-USDC`).
 pub const MAGIC: &[u8] = b"PXR-USDC";
+
+/// Error reading crate data: [`CrateFile::open`], [`CrateData::open`], and the
+/// value decoder.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReadError {
+    /// Byte I/O against the underlying reader failed.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+
+    /// The bytes violate the crate format (bad magic, an out-of-range index, a
+    /// truncated or oversized section, invalid value-rep flags, …).
+    #[error("corrupt crate data: {reason}")]
+    Corrupt {
+        /// The violated invariant.
+        reason: Box<str>,
+    },
+
+    /// The bytes are well-formed but not supported (a newer file version, an
+    /// unimplemented encoding).
+    #[error("unsupported crate data: {reason}")]
+    Unsupported {
+        /// What is not supported.
+        reason: Box<str>,
+    },
+
+    /// A token in the crate is not valid UTF-8.
+    #[error("invalid UTF-8 in crate data")]
+    Utf8(#[from] str::Utf8Error),
+
+    /// A path decoded from the crate's PATHS section does not form a valid
+    /// `sdf` path. Boxed to keep the enum small, like the assertion below
+    /// pins: this error rides the innermost per-value decode loops.
+    #[error("invalid path in crate data")]
+    Path(#[source] Box<sdf::PathParseError>),
+
+    /// An LZ4-compressed block failed to decompress.
+    #[error("failed to decompress crate data")]
+    Decompress(#[from] lz4_flex::block::DecompressError),
+
+    /// Locates a failure within a named section or decode operation, keeping
+    /// the underlying error as the source.
+    #[error(transparent)]
+    Context(Box<ReadContext>),
+}
+
+/// A failure located within a named section or decode operation
+/// ([`ReadError::Context`]). Its own boxed type so the enum stays small — the
+/// assertion below pins it, since this error rides the innermost per-value
+/// decode loops.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to read {context}")]
+pub struct ReadContext {
+    /// The section or operation being read.
+    context: Cow<'static, str>,
+    /// The underlying failure.
+    #[source]
+    source: ReadError,
+}
+
+const _: () = assert!(mem::size_of::<ReadError>() <= 24);
+
+impl From<sdf::PathParseError> for ReadError {
+    fn from(error: sdf::PathParseError) -> Self {
+        Self::Path(Box::new(error))
+    }
+}
+
+impl ReadError {
+    /// Wraps a format-violation message.
+    pub(crate) fn corrupt(reason: impl Into<Box<str>>) -> Self {
+        Self::Corrupt { reason: reason.into() }
+    }
+
+    /// Wraps an unsupported-encoding message.
+    pub(crate) fn unsupported(reason: impl Into<Box<str>>) -> Self {
+        Self::Unsupported { reason: reason.into() }
+    }
+
+    /// Wraps this error with the section or operation being read.
+    pub(crate) fn in_context(self, context: impl Into<Cow<'static, str>>) -> Self {
+        Self::Context(Box::new(ReadContext {
+            context: context.into(),
+            source: self,
+        }))
+    }
+}
+
+/// Extension adding [`ReadError::in_context`] wrapping to `Result`.
+pub(crate) trait ReadResultExt<T> {
+    /// Wraps the error with the section or operation being read.
+    fn ctx(self, context: impl Into<Cow<'static, str>>) -> Result<T, ReadError>;
+}
+
+impl<T, E: Into<ReadError>> ReadResultExt<T> for Result<T, E> {
+    fn ctx(self, context: impl Into<Cow<'static, str>>) -> Result<T, ReadError> {
+        self.map_err(|error| error.into().in_context(context))
+    }
+}
 
 /// A spec's type plus where its fields live. The crate stores fields
 /// deduplicated and shared across specs, so a spec read from the file keeps only
@@ -73,7 +171,7 @@ where
     R: io::Read + io::Seek,
 {
     /// Read binary data from any reader.
-    pub fn open(reader: R, safe: bool) -> Result<Self> {
+    pub fn open(reader: R, safe: bool) -> Result<Self, ReadError> {
         let mut file = CrateFile::open(reader)?;
 
         if safe {
@@ -148,12 +246,12 @@ where
         let Some(rep) = rep else {
             return Ok(None);
         };
-        // The crate value decoder still reports failures as `anyhow`; box it as
-        // the typed `DataError`'s source at this trait boundary.
+        // The decoder's typed `ReadError` is boxed as the `DataError`'s source:
+        // the box is the layering seam that keeps `sdf` below this format.
         let value = self.file.borrow_mut().value(rep).map_err(|e| sdf::DataError::Decode {
             path: path.clone(),
             field: field.to_owned(),
-            source: e.into(),
+            source: Box::new(e),
         })?;
         Ok(Some(Cow::Owned(value)))
     }
@@ -252,8 +350,10 @@ fn field_name<R>(file: &CrateFile<R>, token_index: usize) -> &str {
 }
 
 /// Read `usdc` data from a file on disk.
-pub fn read_file(path: impl AsRef<Path>) -> Result<Box<dyn sdf::AbstractData>> {
-    let file = std::fs::File::open(path)?;
+pub fn read_file(path: impl AsRef<Path>) -> crate::Result<Box<dyn sdf::AbstractData>> {
+    let path = path.as_ref();
+    let file = fs::File::open(path)
+        .map_err(|error| io::Error::new(error.kind(), format!("unable to open {}: {error}", path.display())))?;
     let data = CrateData::open(file, true)?;
 
     Ok(Box::new(data))
@@ -273,9 +373,14 @@ impl sdf::FileFormat for UsdcFileFormat {
         &["usdc", "usd"]
     }
 
-    fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
+    fn read(
+        &self,
+        resolver: &dyn ar::Resolver,
+        resolved: &ar::ResolvedPath,
+    ) -> Result<sdf::LayerData, sdf::FormatError> {
         let bytes = resolver.open_asset(resolved)?.read_all()?;
-        let data = CrateData::open(io::Cursor::new(bytes), true).context("failed to parse USDC layer")?;
+        let data =
+            CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
         Ok(Box::new(data))
     }
 
@@ -283,7 +388,7 @@ impl sdf::FileFormat for UsdcFileFormat {
         prefix.starts_with(MAGIC)
     }
 
-    fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<()> {
+    fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
         CrateWriter::write(data, &mut sink)
     }
 }
@@ -297,6 +402,8 @@ const CRATE_PROPERTY_CHILDREN: &str = "properties";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Result;
+
     use crate::gf;
     use crate::gf::f16;
     use std::path::Path;

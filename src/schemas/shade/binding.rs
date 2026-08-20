@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf::{self, Path, Value};
 use crate::usd::{Collection, MembershipQuery, Prim, Relationship, Stage, is_collection_api_path};
@@ -312,6 +312,8 @@ fn purpose_fallbacks(purpose: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::sdf;
 
     #[test]

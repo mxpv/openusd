@@ -1,7 +1,6 @@
 //! The located error type for `usda` text parsing.
 
-use anyhow::Error;
-
+use std::borrow::Cow;
 use std::error::Error as StdError;
 use std::fmt;
 use std::ops::Range;
@@ -20,7 +19,7 @@ const ELLIPSIS: &str = "...";
 /// generates the caret line from the stored snippet and marker.
 #[derive(Debug)]
 pub struct ParseError {
-    cause: Error,
+    cause: RawError,
     line: usize,
     column: usize,
     snippet: Box<str>,
@@ -31,7 +30,7 @@ pub struct ParseError {
 
 impl ParseError {
     /// Locates `span` within `source`, keeping only the offending line.
-    pub(super) fn new(cause: Error, source: &str, span: Range<usize>) -> Self {
+    pub(super) fn new(cause: RawError, source: &str, span: Range<usize>) -> Self {
         // An end-of-input span starts one past the last byte, which belongs to
         // no line; step back onto the final character so the location lands on
         // real text. The walk stops at 0, which is always a char boundary.
@@ -118,7 +117,126 @@ impl fmt::Display for ParseError {
 
 impl StdError for ParseError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        Some(self.cause.as_ref())
+        self.cause.0.source.as_deref().map(|source| source as _)
+    }
+}
+
+/// The parser-internal failure behind a [`ParseError`]: the innermost message,
+/// the breadcrumb trail of grammar productions above it, and the typed failure
+/// that started it when one exists (a path or number that failed to parse).
+///
+/// One pointer wide, so the cursor and parser hot paths return a cheap
+/// `Result`; the located, user-facing [`ParseError`] is built from this once,
+/// at the parser's public entry point.
+pub(crate) struct RawError(Box<Inner>);
+
+/// Heap payload of [`RawError`].
+struct Inner {
+    /// The innermost failure message.
+    message: Cow<'static, str>,
+    /// Breadcrumbs naming the grammar productions the failure surfaced
+    /// through, pushed innermost-first.
+    trail: Vec<Cow<'static, str>>,
+    /// The typed failure that started it, when one exists.
+    source: Option<Box<dyn StdError + Send + Sync>>,
+}
+
+impl RawError {
+    /// Wraps a failure message.
+    pub(crate) fn new(message: impl Into<Cow<'static, str>>) -> Self {
+        Self(Box::new(Inner {
+            message: message.into(),
+            trail: Vec::new(),
+            source: None,
+        }))
+    }
+
+    /// Pushes a breadcrumb naming the grammar production the failure is
+    /// surfacing through.
+    fn push(mut self, crumb: impl Into<Cow<'static, str>>) -> Self {
+        self.0.trail.push(crumb.into());
+        self
+    }
+}
+
+impl fmt::Display for RawError {
+    /// Renders the trail outermost-first, ending with the innermost message.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for crumb in self.0.trail.iter().rev() {
+            write!(f, "{crumb}: ")?;
+        }
+        write!(f, "{}", self.0.message)
+    }
+}
+
+impl fmt::Debug for RawError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawError")
+            .field("message", &self.0.message)
+            .field("trail", &self.0.trail)
+            .field("source", &self.0.source)
+            .finish()
+    }
+}
+
+/// Every typed error converts by keeping its rendered message and itself as
+/// the source, so `?` works throughout the parser and the original error stays
+/// reachable through [`StdError::source`] on [`ParseError`].
+impl<E: StdError + Send + Sync + 'static> From<E> for RawError {
+    fn from(error: E) -> Self {
+        Self(Box::new(Inner {
+            message: error.to_string().into(),
+            trail: Vec::new(),
+            source: Some(Box::new(error)),
+        }))
+    }
+}
+
+/// Returns `Err(RawError)` built from a format string.
+macro_rules! bail {
+    ($($arg:tt)*) => {
+        return Err($crate::usda::error::RawError::new(format!($($arg)*)))
+    };
+}
+
+/// Returns a failure built from a format string unless `cond` holds.
+macro_rules! ensure {
+    ($cond:expr, $($arg:tt)*) => {
+        if !$cond {
+            bail!($($arg)*);
+        }
+    };
+}
+
+pub(crate) use {bail, ensure};
+
+/// Breadcrumb wrapping for parser `Result`s and `Option`s.
+pub(crate) trait Ctx<T> {
+    /// Wraps the failure with a breadcrumb naming the enclosing production.
+    fn context(self, crumb: impl Into<Cow<'static, str>>) -> Result<T, RawError>;
+
+    /// Like [`context`](Self::context), but builds the breadcrumb lazily.
+    fn with_context<C: Into<Cow<'static, str>>>(self, f: impl FnOnce() -> C) -> Result<T, RawError>;
+}
+
+impl<T, E: Into<RawError>> Ctx<T> for Result<T, E> {
+    fn context(self, crumb: impl Into<Cow<'static, str>>) -> Result<T, RawError> {
+        self.map_err(|error| error.into().push(crumb))
+    }
+
+    fn with_context<C: Into<Cow<'static, str>>>(self, f: impl FnOnce() -> C) -> Result<T, RawError> {
+        self.map_err(|error| error.into().push(f()))
+    }
+}
+
+impl<T> Ctx<T> for Option<T> {
+    /// A missing value reports the breadcrumb itself as the failure.
+    fn context(self, crumb: impl Into<Cow<'static, str>>) -> Result<T, RawError> {
+        self.ok_or_else(|| RawError::new(crumb))
+    }
+
+    fn with_context<C: Into<Cow<'static, str>>>(self, f: impl FnOnce() -> C) -> Result<T, RawError> {
+        self.ok_or_else(|| RawError::new(f()))
     }
 }
 
@@ -152,10 +270,9 @@ fn window(line: &str, marker: Range<usize>) -> (Box<str>, Range<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::anyhow;
 
     fn locate(source: &str, span: Range<usize>) -> ParseError {
-        ParseError::new(anyhow!("boom"), source, span)
+        ParseError::new(RawError::new("boom"), source, span)
     }
 
     #[test]

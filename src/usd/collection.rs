@@ -26,8 +26,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use anyhow::Result;
-
+use crate::Result;
 use crate::sdf::{self, FieldKey, Path, Value, Variability};
 use crate::usd::{Prim, PrimPredicate, Relationship, Stage};
 
@@ -434,7 +433,11 @@ pub fn apply_collection(stage: &Stage, prim: impl sdf::IntoPath, name: impl Into
     // reject anything that isn't a valid identifier before it produces an
     // ambiguous `collection:<name>:...` namespace.
     if !Path::is_valid_identifier(&name) {
-        anyhow::bail!("invalid collection name {name:?}: must be a valid identifier");
+        return Err(super::StageAuthoringError::InvalidIdentifier {
+            name,
+            what: "collection name",
+        }
+        .into());
     }
     // Author an `over` when the prim has no spec on the edit-target layer yet,
     // mirroring C++ `UsdCollectionAPI::Apply` (which authors the spec as
@@ -875,6 +878,8 @@ fn rule_includes(rule: PathRule, on_self: bool, is_property: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::sdf;
     use crate::sdf::Variability;
 

@@ -89,7 +89,7 @@ that broader spec behavior can be considered fully covered.
 | Arc permissions (`permission = private`) | `10.3.3` | :white_check_mark: | `0.6.0` | `sdf::Permission` is data-only — never enforced by composition, matching C++'s `Usd`-mode caches |
 | [LIVERPS strength ordering](https://openusd.org/release/glossary.html#livrps-strength-ordering) | `10.4` | :white_check_mark: | `0.3.0` | `ArcType` with `Ord` derived from discriminant |
 | [Namespace mappings](https://openusd.org/release/api/class_pcp_map_function.html) (MapFunction) | `10.5` | :white_check_mark: | `0.3.0` | Compose, inverse, longest-prefix matching |
-| Composition errors (non-fatal) | `10.6` | :white_check_mark: | `0.3.0` | `pcp::Error` with `StageBuilder::on_error` callback; missing/unreadable sublayers report raw from the loader and are filtered by `Stage::composition_errors` against the composed-stack effective set, so muting a branch suppresses its diagnostic and unmuting restores it<br>Remaining — precise target-diagnostic liveness (an orphaned interned target over-reports; see `pcp` module docs) |
+| Composition errors (non-fatal) | `10.6` | :white_check_mark: | `0.3.0` | `pcp::CompositionError` with `StageBuilder::on_error` callback; missing/unreadable sublayers report raw from the loader and are filtered by `Stage::composition_errors` against the composed-stack effective set, so muting a branch suppresses its diagnostic and unmuting restores it<br>Remaining — precise target-diagnostic liveness (an orphaned interned target over-reports; see `pcp` module docs) |
 | List op arc computation | `10.3.2` | :white_check_mark: | `0.2.0` | Weakest-to-strongest list-op chaining |
 
 ## Stage Population (Spec 11)

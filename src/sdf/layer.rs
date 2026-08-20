@@ -41,18 +41,18 @@
 //! payloads) lives in [`crate::pcp`].
 
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::fs;
+use std::io::{self, Cursor};
+use std::path::Path as FsPath;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{Context, Result};
-
-use crate::ar;
+use crate::{ar, tf};
 
 use super::schema::FieldKey;
 use super::{
-    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, IntoPath, LayerData, Patch,
-    Path, PathParseError, PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut,
-    RelationshipSpecRef, RelocateList, SpecError, SpecType, Value, sink, try_into_path,
+    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, FormatError, IntoPath,
+    LayerData, Patch, Path, PathParseError, PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef,
+    RelationshipSpecMut, RelationshipSpecRef, RelocateList, SpecError, SpecType, Value, sink, try_into_path,
 };
 
 /// A [`sink::Id`] for a [`LayerSink`] installed on a [`Layer`].
@@ -306,21 +306,30 @@ impl Layer {
     /// `.usdz` writes an archive wrapping one crate-encoded layer. The reader
     /// auto-detects the format regardless of extension, so text written to a
     /// `.usd` path still reads back correctly.
-    pub fn export(&self, filename: impl AsRef<str>) -> Result<()> {
+    pub fn export(&self, filename: impl AsRef<str>) -> Result<(), ExportError> {
         let filename = filename.as_ref();
-        let ext = std::path::Path::new(filename)
+        let ext = FsPath::new(filename)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or_default();
         let format = super::LayerRegistry::find_by_extension(ext).ok_or_else(|| match ext {
-            "" => anyhow::anyhow!("layer path {filename} has no extension; cannot choose format"),
-            other => anyhow::anyhow!("unsupported layer extension {other:?} (expected usda/usdc/usd/usdz)"),
+            "" => ExportError::NoExtension {
+                filename: filename.to_owned(),
+            },
+            other => ExportError::UnsupportedExtension {
+                extension: other.to_owned(),
+            },
         })?;
         if !format.caps().can_write() {
-            anyhow::bail!("file format {} does not support writing", format.format_id());
+            return Err(ExportError::NotWritable {
+                format: format.format_id(),
+            });
         }
-        let mut file = std::fs::File::create(filename).with_context(|| format!("failed to create {filename}"))?;
-        format.write(self.data(), &mut file)
+        let mut file = fs::File::create(filename).map_err(|source| ExportError::Create {
+            filename: filename.to_owned(),
+            source,
+        })?;
+        Ok(format.write(self.data(), &mut file)?)
     }
 
     /// Serialize this layer to a `usda` text string (C++ `ExportToString`).
@@ -328,11 +337,11 @@ impl Layer {
     /// Always emits text, the canonical human-readable form, regardless of the
     /// layer's on-disk format. Named to avoid confusion with the infallible
     /// [`ToString::to_string`].
-    pub fn export_to_string(&self) -> Result<String> {
+    pub fn export_to_string(&self) -> Result<String, ExportError> {
         let format = super::LayerRegistry::find_by_id("usda").expect("usda is a built-in format");
         let mut buf = Cursor::new(Vec::new());
         format.write(self.data(), &mut buf)?;
-        String::from_utf8(buf.into_inner()).context("usda writer produced invalid UTF-8")
+        Ok(String::from_utf8(buf.into_inner()).expect("the usda writer emits UTF-8 text"))
     }
 
     /// Write this layer to its own [`identifier`](Self::identifier), choosing
@@ -344,14 +353,18 @@ impl Layer {
     /// identifier is a relative path or a non-filesystem asset identifier (e.g.
     /// `scheme://…`) have no persistent location here; save them with
     /// [`export`](Self::export) and an explicit destination instead.
-    pub fn save(&self) -> Result<()> {
-        anyhow::ensure!(!self.is_anonymous(), "cannot save anonymous layer {}", self.identifier);
-        let path = std::path::Path::new(&self.identifier);
-        anyhow::ensure!(
-            path.is_absolute(),
-            "cannot save layer {}: identifier is not an absolute file path; use Layer::export(path) to choose a destination",
-            self.identifier
-        );
+    pub fn save(&self) -> Result<(), ExportError> {
+        if self.is_anonymous() {
+            return Err(ExportError::Anonymous {
+                identifier: self.identifier.clone(),
+            });
+        }
+        let path = FsPath::new(&self.identifier);
+        if !path.is_absolute() {
+            return Err(ExportError::NotAFilePath {
+                identifier: self.identifier.clone(),
+            });
+        }
         // Saving overwrites the layer's own file in place, so the format must
         // support in-place editing — unlike `export`, which only writes a copy.
         // A package format (usdz) is writable as a fresh archive but not
@@ -359,13 +372,13 @@ impl Layer {
         // layers) are not held by the layer, so saving over it would discard
         // them. An unknown extension is left for `export` to reject.
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-        if let Some(format) = super::LayerRegistry::find_by_extension(ext) {
-            anyhow::ensure!(
-                format.caps().can_edit(),
-                "cannot save layer {} in place: the {} format is not editable; use Layer::export(path) to write a new copy",
-                self.identifier,
-                format.format_id()
-            );
+        if let Some(format) = super::LayerRegistry::find_by_extension(ext)
+            && !format.caps().can_edit()
+        {
+            return Err(ExportError::NotEditable {
+                identifier: self.identifier.clone(),
+                format: format.format_id(),
+            });
         }
         // TODO(layer-registry): save writes to `identifier` as a literal
         // filesystem path. A layer loaded through a custom resolver may carry a
@@ -378,6 +391,79 @@ impl Layer {
         // `_fileFormat`), save should reuse it to preserve the original encoding.
         self.export(&self.identifier)
     }
+}
+
+/// Error returned by [`Layer::export`], [`Layer::export_to_string`], and
+/// [`Layer::save`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExportError {
+    /// The destination path has no extension to choose a format from.
+    #[error("layer path {filename} has no extension; cannot choose format")]
+    NoExtension {
+        /// The destination path.
+        filename: String,
+    },
+
+    /// The destination path's extension names no registered format.
+    #[error("unsupported layer extension {extension:?} (expected usda/usdc/usd/usdz)")]
+    UnsupportedExtension {
+        /// The unrecognized extension.
+        extension: String,
+    },
+
+    /// The chosen format cannot serialize layer data at all.
+    #[error("file format {format} does not support writing")]
+    NotWritable {
+        /// The format's identifier token.
+        format: tf::Token,
+    },
+
+    /// [`Layer::save`] on an anonymous layer, which has no persistent
+    /// location.
+    #[error("cannot save anonymous layer {identifier}")]
+    Anonymous {
+        /// The layer's identifier.
+        identifier: String,
+    },
+
+    /// [`Layer::save`] on a layer whose identifier is not an absolute
+    /// filesystem path, so it names no writable location.
+    #[error(
+        "cannot save layer {identifier}: identifier is not an absolute file path; \
+         use Layer::export(path) to choose a destination"
+    )]
+    NotAFilePath {
+        /// The layer's identifier.
+        identifier: String,
+    },
+
+    /// [`Layer::save`] would overwrite the layer in place, but its format does
+    /// not support in-place editing.
+    #[error(
+        "cannot save layer {identifier} in place: the {format} format is not editable; \
+         use Layer::export(path) to write a new copy"
+    )]
+    NotEditable {
+        /// The layer's identifier.
+        identifier: String,
+        /// The format's identifier token.
+        format: tf::Token,
+    },
+
+    /// The destination file could not be created.
+    #[error("failed to create {filename}")]
+    Create {
+        /// The destination path.
+        filename: String,
+        /// The filesystem failure.
+        #[source]
+        source: io::Error,
+    },
+
+    /// The format failed to serialize the layer's data.
+    #[error(transparent)]
+    Format(#[from] FormatError),
 }
 
 /// Errors raised by [`Layer`]'s authoring methods.
@@ -964,6 +1050,8 @@ impl Drop for GroupEditGuard<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Result;
+
     use crate::sdf;
     use crate::usda;
 

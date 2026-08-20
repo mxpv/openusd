@@ -11,14 +11,12 @@
 //! prefix subtree is constant `false`, a match under a trailing stretch is
 //! constant `true`, and everything else may vary over descendants.
 
-use anyhow::{Result, ensure};
-
 use crate::sdf::Path;
 
 use super::glob::GlobPattern;
 use super::pattern::PathPattern;
 use super::predicate::{PredResult, PredicateLibrary, PredicateProgram, link_predicate_expression};
-use super::{ExprNode, PathExpression, SetOp};
+use super::{EvalError, ExprNode, PathExpression, SetOp};
 
 /// A compiled path expression over predicate domain `D` (C++
 /// `SdfPathExpressionEval`).
@@ -119,12 +117,13 @@ enum ObjectKind {
 
 impl<D> PathExpressionEval<D> {
     /// Compiles `expr` against `library`, binding every embedded predicate.
-    pub fn build(expr: &PathExpression, library: &PredicateLibrary<D>) -> Result<Self> {
-        ensure!(
-            expr.is_complete() || expr.is_empty(),
-            "Cannot build an evaluator for an incomplete path expression; resolve references \
-             and anchor relative paths first: <{expr}>"
-        );
+    pub fn build(expr: &PathExpression, library: &PredicateLibrary<D>) -> Result<Self, EvalError> {
+        if !(expr.is_complete() || expr.is_empty()) {
+            return Err(EvalError::new(format!(
+                "Cannot build an evaluator for an incomplete path expression; resolve references \
+                 and anchor relative paths first: <{expr}>"
+            )));
+        }
         let mut eval = PathExpressionEval {
             ops: Vec::new(),
             patterns: Vec::new(),
@@ -222,7 +221,7 @@ impl<D> PathExpressionEval<D> {
     /// postfix, and each binary operator between its operands with the right
     /// operand fenced — a difference becomes `And` with a complemented right
     /// side.
-    fn compile_node(&mut self, node: &ExprNode, library: &PredicateLibrary<D>) -> Result<()> {
+    fn compile_node(&mut self, node: &ExprNode, library: &PredicateLibrary<D>) -> Result<(), EvalError> {
         match node {
             ExprNode::Pattern(pattern) => {
                 self.patterns.push(PatternImpl::compile(pattern, library)?);
@@ -351,7 +350,7 @@ struct Visit<'a> {
 }
 
 impl<D> PatternImpl<D> {
-    fn compile(pattern: &PathPattern, library: &PredicateLibrary<D>) -> Result<Self> {
+    fn compile(pattern: &PathPattern, library: &PredicateLibrary<D>) -> Result<Self, EvalError> {
         let mut compiled = PatternImpl {
             prefix: pattern.prefix().clone(),
             prefix_depth: path_depth(pattern.prefix()),

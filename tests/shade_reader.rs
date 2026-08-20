@@ -4,7 +4,8 @@
 
 use std::fs;
 
-use anyhow::Result;
+use openusd::Result;
+use openusd::schemas::SchemaError;
 use openusd::schemas::shade::{self, Channel, Connectable, ImplementationSource, Material, MaterialBindingAPI, Shader};
 use openusd::{sdf, tf, usd};
 
@@ -47,7 +48,7 @@ fn finds_every_shade_prim() -> Result<()> {
 }
 
 #[test]
-fn resolves_surface_terminal_to_shader() -> Result<()> {
+fn resolves_surface_terminal_to_shader() -> Result<(), SchemaError> {
     let stage = open()?;
     let mat = Material::get(&stage, "/World/Looks/BrickMat")?.expect("Material");
     let terminal = mat.compute_surface_source(&[])?.expect("surface terminal");
@@ -60,7 +61,7 @@ fn resolves_surface_terminal_to_shader() -> Result<()> {
 }
 
 #[test]
-fn reads_preview_surface_channels_from_fixture() -> Result<()> {
+fn reads_preview_surface_channels_from_fixture() -> Result<(), SchemaError> {
     let stage = open()?;
     let ps = shade::read_preview_surface(&stage, &sdf::path("/World/Looks/BrickMat")?)?.expect("UsdPreviewSurface");
 
@@ -91,7 +92,7 @@ fn reads_material_bindings_from_fixture() -> Result<()> {
 }
 
 #[test]
-fn author_then_read_back_roundtrip() -> Result<()> {
+fn author_then_read_back_roundtrip() -> Result<(), SchemaError> {
     let stage = usd::Stage::builder().in_memory("anon.usda")?;
     stage.define_prim("/World")?.set_type_name("Xform")?;
     stage.define_prim("/World/Looks")?.set_type_name("Scope")?;

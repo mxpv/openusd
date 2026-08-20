@@ -10,14 +10,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
-
 use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
 use super::prim_graph::Node;
-use super::{Error, ExpressionContext, LayerGraph, LayerId};
+use super::{CompositionError, ExpressionContext, LayerGraph, LayerId, QueryError};
 
 /// Composes the `references` list-op, folding each authoring sublayer's offset
 /// into its references' layer offsets (C++ `PcpComposeSiteReferences`). A
@@ -31,9 +29,9 @@ pub(super) fn compose_references_in(
     graph: &LayerGraph,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
-    errors: &mut Vec<Error>,
+    errors: &mut Vec<CompositionError>,
     used_vars: &mut HashSet<String>,
-) -> Result<Vec<Reference>> {
+) -> Result<Vec<Reference>, QueryError> {
     let mut refs = compose_list_op_in(
         nodes,
         FieldKey::References.as_str(),
@@ -78,9 +76,9 @@ pub(super) fn collect_payloads_in(
     graph: &LayerGraph,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
-    errors: &mut Vec<Error>,
+    errors: &mut Vec<CompositionError>,
     used_vars: &mut HashSet<String>,
-) -> Result<Vec<Payload>> {
+) -> Result<Vec<Payload>, QueryError> {
     let mut payloads = compose_list_op_in(
         nodes,
         FieldKey::Payload.as_str(),
@@ -134,7 +132,7 @@ pub(super) fn compose_arc_list_in<T: Default + Clone + PartialEq>(
     nodes: &[Node],
     field: FieldKey,
     graph: &LayerGraph,
-) -> Result<Vec<T>>
+) -> Result<Vec<T>, QueryError>
 where
     Value: TryInto<ListOp<T>>,
 {
@@ -163,7 +161,7 @@ fn compose_list_op_in<T, D, R, A>(
     decode: D,
     mut retime: R,
     mut anchor: A,
-) -> Result<Vec<T>>
+) -> Result<Vec<T>, QueryError>
 where
     T: Default + Clone + PartialEq,
     D: Fn(Value) -> Option<ListOp<T>>,
@@ -250,7 +248,7 @@ fn resolve_arc_asset_path(
     expr_vars: &HashMap<String, Value>,
     context: ExpressionContext,
     site: &Path,
-    errors: &mut Vec<Error>,
+    errors: &mut Vec<CompositionError>,
     used_vars: &mut HashSet<String>,
 ) -> Option<f64> {
     if expr::is_expression(asset_path) {
@@ -306,7 +304,7 @@ impl EvaluatedExpression {
 
 /// Evaluates a possibly-expression-valued field against a stack's composed
 /// variables (C++ `Pcp_EvaluateVariableExpression`), recording a failure as
-/// [`Error::InvalidExpression`] when an error sink is given — the indexing-time
+/// [`CompositionError::InvalidExpression`] when an error sink is given — the indexing-time
 /// pass emits diagnostics, re-resolution passes stay silent.
 ///
 /// Composing an arc's asset path and composing a variant selection both come
@@ -329,7 +327,7 @@ pub(super) fn evaluate_expression(
     context: ExpressionContext,
     source_layer: &str,
     site_path: &Path,
-    errors: Option<&mut Vec<Error>>,
+    errors: Option<&mut Vec<CompositionError>>,
     used_vars: Option<&mut HashSet<String>>,
 ) -> EvaluatedExpression {
     let evaluated = expr::evaluate_string(expression, expr_vars);
@@ -341,7 +339,7 @@ pub(super) fn evaluate_expression(
         None if evaluated.errors.is_empty() => EvaluatedExpression::None,
         None => {
             if let Some(errors) = errors {
-                Error::InvalidExpression {
+                CompositionError::InvalidExpression {
                     expression: expression.to_string(),
                     context,
                     source_layer: source_layer.to_string(),

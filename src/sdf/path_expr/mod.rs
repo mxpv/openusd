@@ -35,6 +35,24 @@ pub use predicate::{
     PredicateLibrary, PredicateProgram, link_predicate_expression,
 };
 
+/// A path expression that cannot be compiled into an evaluator: incomplete
+/// (unresolved references or unanchored relative paths), or naming a
+/// predicate function the library does not register.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct EvalError {
+    message: String,
+}
+
+impl EvalError {
+    /// Wraps a compilation-failure message.
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 /// A parsed path expression; see the [module docs](self) for the syntax.
 ///
 /// The empty expression ([`nothing`](Self::nothing)) matches no paths.

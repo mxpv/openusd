@@ -1,6 +1,6 @@
 //! Integration tests for the UsdMedia schema views against a fixture.
 
-use anyhow::Result;
+use openusd::Result;
 
 use openusd::schemas::media::{AssetPreviewsAPI, AuralMode, PlaybackMode, SpatialAudio};
 use openusd::sdf;

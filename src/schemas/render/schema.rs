@@ -1,7 +1,7 @@
 //! The UsdRender prim views: [`RenderSettings`], [`RenderProduct`],
 //! [`RenderVar`], [`RenderPass`], and [`RenderDenoisePass`].
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf::{self, Value, Variability};
 use crate::usd::{Attribute, Prim, Relationship, Stage};
@@ -405,6 +405,8 @@ impl_render_schema!(typed RenderDenoisePass);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::gf;
     use crate::schemas::render::{AspectRatioConformPolicy, ProductType, RenderSettingsBase, SourceType};
     use crate::tf::Token;

@@ -1,6 +1,6 @@
 //! `UsdProcGenerativeProcedural` — runtime-generated procedural geometry.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, Stage};
@@ -57,6 +57,8 @@ impl_proc_schema!(boundable GenerativeProcedural);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::geom::Boundable;
 
     #[test]

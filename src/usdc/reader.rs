@@ -8,7 +8,6 @@ use std::{
 };
 
 use crate::gf::f16;
-use anyhow::{Context, Result, bail, ensure};
 use bytemuck::{AnyBitPattern, NoUninit, Pod, bytes_of, bytes_of_mut, cast_slice_mut};
 use num_traits::{AsPrimitive, Float, PrimInt};
 
@@ -20,6 +19,20 @@ use crate::{
 };
 
 use super::layout::*;
+use super::{ReadError, ReadResultExt};
+
+/// Returns a [`ReadError::Corrupt`] unless `cond` holds. Without a message the
+/// failed condition itself is the reason.
+macro_rules! corrupt {
+    ($cond:expr) => {
+        corrupt!($cond, "{}", stringify!($cond))
+    };
+    ($cond:expr, $($arg:tt)*) => {
+        if !$cond {
+            return Err(ReadError::corrupt(format!($($arg)*)));
+        }
+    };
+}
 
 // Maximum supported USDC crate version.
 // See USD Core Specification v1.0.1 §16.3.8.2 for version history:
@@ -62,7 +75,7 @@ impl<R> CrateFile<R> {
 
 impl<R: io::Read + io::Seek> CrateFile<R> {
     /// Read structural sections of a crate file.
-    pub fn open(mut reader: R) -> Result<Self> {
+    pub fn open(mut reader: R) -> Result<Self, ReadError> {
         let bootstrap = Self::read_header(&mut reader)?;
 
         let mut file = CrateFile {
@@ -77,56 +90,63 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             specs: Vec::new(),
         };
 
-        file.read_sections().context("Unable to read sections")?;
-        file.read_tokens().context("Unable to read TOKENS section")?;
-        file.read_strings().context("Unable to read STRINGS section")?;
-        file.read_fields().context("Unable to read FIELDS section")?;
-        file.read_fieldsets().context("Unable to read FIELDSETS section")?;
-        file.read_paths().context("Unable to read PATHS section")?;
-        file.read_specs().context("Unable to read SPECS section")?;
+        file.read_sections().ctx("sections")?;
+        file.read_tokens().ctx("TOKENS section")?;
+        file.read_strings().ctx("STRINGS section")?;
+        file.read_fields().ctx("FIELDS section")?;
+        file.read_fieldsets().ctx("FIELDSETS section")?;
+        file.read_paths().ctx("PATHS section")?;
+        file.read_specs().ctx("SPECS section")?;
 
         Ok(file)
     }
 
     /// Sanity check of structural validity.
     /// Roughly corresponds to `PXR_PREFER_SAFETY_OVER_SPEED` define in USD.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<(), ReadError> {
         // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3268
-        self.fields.iter().enumerate().try_for_each(|(index, field)| {
-            self.tokens
-                .get(field.token_index)
-                .with_context(|| format!("Invalid field token index {}: {}", index, field.token_index))?;
+        for (index, field) in self.fields.iter().enumerate() {
+            corrupt!(
+                self.tokens.get(field.token_index).is_some(),
+                "Invalid field token index {}: {}",
+                index,
+                field.token_index
+            );
+        }
 
-            anyhow::Ok(())
-        })?;
-
-        self.fieldsets
+        for (index, fieldset) in self
+            .fieldsets
             .iter()
             .enumerate()
             .filter_map(|(i, index)| index.map(|index| (i, index)))
-            .try_for_each(|(index, fieldset)| {
-                self.fields
-                    .get(fieldset)
-                    .with_context(|| format!("Invalid fieldset index {index}: {fieldset}"))?;
+        {
+            corrupt!(
+                self.fields.get(fieldset).is_some(),
+                "Invalid fieldset index {index}: {fieldset}"
+            );
+        }
 
-                anyhow::Ok(())
-            })?;
+        for (index, spec) in self.specs.iter().enumerate() {
+            corrupt!(
+                self.paths.get(spec.path_index).is_some(),
+                "Invalid spec {} path index: {}",
+                index,
+                spec.path_index
+            );
 
-        self.specs.iter().enumerate().try_for_each(|(index, spec)| {
-            self.paths
-                .get(spec.path_index)
-                .with_context(|| format!("Invalid spec {} path index: {}", index, spec.path_index))?;
-
-            self.fieldsets
-                .get(spec.fieldset_index)
-                .with_context(|| format!("Invalid spec {} fieldset index: {}", index, spec.fieldset_index))?;
+            corrupt!(
+                self.fieldsets.get(spec.fieldset_index).is_some(),
+                "Invalid spec {} fieldset index: {}",
+                index,
+                spec.fieldset_index
+            );
 
             // Additionally, a fieldSetIndex must either be 0, or the element at
             // the prior index must be a default-constructed FieldIndex.
             // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3289
 
             if spec.fieldset_index > 0 {
-                ensure!(
+                corrupt!(
                     self.fieldsets[spec.fieldset_index - 1].is_none(),
                     "Invalid spec {}, the element at the prior index {} must be a default-constructed field index",
                     index,
@@ -134,45 +154,44 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 );
             }
 
-            ensure!(spec.spec_type != sdf::SpecType::Unknown, "Invalid spec {index} type");
-
-            anyhow::Ok(())
-        })?;
+            corrupt!(spec.spec_type != sdf::SpecType::Unknown, "Invalid spec {index} type");
+        }
 
         Ok(())
     }
 
     /// Read and verify bootstrap header, retrieve offset to TOC.
-    fn read_header(mut reader: impl io::Read + io::Seek) -> Result<Bootstrap> {
+    fn read_header(mut reader: impl io::Read + io::Seek) -> Result<Bootstrap, ReadError> {
         let header = reader.read_pod::<Bootstrap>()?;
 
-        ensure!(header.ident.eq(super::MAGIC), "Usd crate bootstrap section corrupt");
+        corrupt!(header.ident.eq(super::MAGIC), "Usd crate bootstrap section corrupt");
 
-        ensure!(header.toc_offset > 0, "Invalid TOC offset");
+        corrupt!(header.toc_offset > 0, "Invalid TOC offset");
 
         let file_ver = version(header.version[0], header.version[1], header.version[2]);
 
-        ensure!(
-            SW_VERSION.can_read(file_ver),
-            "Usd crate version mismatch, file is {file_ver}, library supports {SW_VERSION}"
-        );
+        if !SW_VERSION.can_read(file_ver) {
+            return Err(ReadError::unsupported(format!(
+                "Usd crate version mismatch, file is {file_ver}, library supports {SW_VERSION}"
+            )));
+        }
 
         Ok(header)
     }
 
-    fn read_sections(&mut self) -> Result<()> {
+    fn read_sections(&mut self) -> Result<(), ReadError> {
         self.set_position(self.bootstrap.toc_offset)?;
 
         let count = self.reader.read_count()?;
-        ensure!(count > 0, "Crate file has no sections");
-        ensure!(count < 64, "Suspiciously large number of sections: {count}");
+        corrupt!(count > 0, "Crate file has no sections");
+        corrupt!(count < 64, "Suspiciously large number of sections: {count}");
 
         self.sections = self.reader.read_vec::<Section>(count)?;
 
         Ok(())
     }
 
-    fn read_tokens(&mut self) -> Result<()> {
+    fn read_tokens(&mut self) -> Result<(), ReadError> {
         let Some(section) = self.find_section(Section::TOKENS) else {
             return Ok(());
         };
@@ -190,7 +209,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             let uncompressed_size = self.reader.read_count()?;
             let mut buffer = self.read_compressed(uncompressed_size)?;
 
-            ensure!(
+            corrupt!(
                 buffer.len() == uncompressed_size,
                 "Decompressed size mismatch (expected {}, got {})",
                 uncompressed_size,
@@ -198,13 +217,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             );
 
             if buffer.is_empty() {
-                ensure!(
+                corrupt!(
                     count == 0,
                     "Tokens section claims {count} tokens but the buffer is empty"
                 );
                 Vec::new()
             } else {
-                ensure!(
+                corrupt!(
                     buffer.last() == Some(&b'\0'),
                     "Tokens section not null-terminated in crate file"
                 );
@@ -215,10 +234,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let strings = buffer
                     .split(|c| *c == b'\0')
                     .map(|buf| str::from_utf8(buf).map(|str| str.to_string()))
-                    .collect::<Result<Vec<_>, str::Utf8Error>>()
-                    .context("Failed to parse TOKENS section")?;
+                    .collect::<Result<Vec<_>, str::Utf8Error>>()?;
 
-                ensure!(
+                corrupt!(
                     strings.len() == count,
                     "Crate file claims {} tokens, but found {}",
                     count,
@@ -232,7 +250,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(())
     }
 
-    fn read_strings(&mut self) -> Result<()> {
+    fn read_strings(&mut self) -> Result<(), ReadError> {
         let Some(section) = self.find_section(Section::STRINGS) else {
             return Ok(());
         };
@@ -240,7 +258,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         self.set_position(section.start)?;
 
         let count = self.reader.read_count()?;
-        ensure!(
+        corrupt!(
             count < 128 * 1024 * 1024,
             "Suspiciously large number of strings: {count}"
         );
@@ -253,7 +271,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(())
     }
 
-    fn read_fields(&mut self) -> Result<()> {
+    fn read_fields(&mut self) -> Result<(), ReadError> {
         let Some(section) = self.find_section(Section::FIELDS) else {
             return Ok(());
         };
@@ -287,7 +305,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(())
     }
 
-    fn read_fieldsets(&mut self) -> Result<()> {
+    fn read_fieldsets(&mut self) -> Result<(), ReadError> {
         let Some(section) = self.find_section(Section::FIELDSETS) else {
             return Ok(());
         };
@@ -318,7 +336,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(())
     }
 
-    fn read_paths(&mut self) -> Result<()> {
+    fn read_paths(&mut self) -> Result<(), ReadError> {
         let Some(section) = self.find_section(Section::PATHS) else {
             return Ok(());
         };
@@ -343,7 +361,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     /// Read compressed paths.
-    fn read_compressed_paths(&mut self) -> Result<()> {
+    fn read_compressed_paths(&mut self) -> Result<(), ReadError> {
         // Read number of encoded paths.
         let count: usize = self.reader.read_count()?;
 
@@ -368,7 +386,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         path_indexes: &[u32],
         element_token_indexes: &[i32],
         jumps: &[i32],
-    ) -> Result<()> {
+    ) -> Result<(), ReadError> {
         // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3760
         //
         // The inner loop walks a child chain; a node that has both a child and a
@@ -409,14 +427,17 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 if parent_path.is_empty() {
                     parent_path = sdf::Path::new("/")?;
+                    checked_path_slot(&self.paths, index)?;
                     self.paths[index] = parent_path.clone();
                 } else {
-                    let token_index = element_token_indexes[index];
+                    let token_index = *indexed(element_token_indexes, index, "path element")?;
                     let is_prim_property_path = token_index < 0;
                     let token_index = token_index.unsigned_abs() as usize;
-                    let element_token = self.tokens[token_index].as_str();
+                    let element_token = indexed(&self.tokens, token_index, "token")?.as_str();
 
-                    self.paths[path_indexes[index] as usize] = if is_prim_property_path {
+                    let slot = *indexed(path_indexes, index, "path")? as usize;
+                    checked_path_slot(&self.paths, slot)?;
+                    self.paths[slot] = if is_prim_property_path {
                         parent_path.append_property(element_token)?
                     } else if element_token.starts_with('{') {
                         // Variant segments are appended directly without a separator
@@ -427,19 +448,21 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                     };
                 }
 
-                let has_child = jumps[index] > 0 || jumps[index] == -1;
-                let has_sibling = jumps[index] >= 0;
+                let jump = *indexed(jumps, index, "path jump")?;
+                let has_child = jump > 0 || jump == -1;
+                let has_sibling = jump >= 0;
 
                 if has_child {
                     if has_sibling {
-                        let sibling_index = index + jumps[index] as usize;
+                        let sibling_index = index + jump as usize;
                         // Siblings share this node's parent; defer the subtree.
                         pending.push((sibling_index, parent_path.clone()));
                     }
 
                     // Descend into the child (the next sequential entry) under
                     // this node's path.
-                    parent_path = self.paths[path_indexes[index] as usize].clone();
+                    let slot = *indexed(path_indexes, index, "path")? as usize;
+                    parent_path = indexed(&self.paths, slot, "path")?.clone();
                 }
 
                 if !has_child && !has_sibling {
@@ -451,7 +474,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(())
     }
 
-    fn read_specs(&mut self) -> Result<()> {
+    fn read_specs(&mut self) -> Result<(), ReadError> {
         let Some(section) = self.find_section(Section::SPECS) else {
             return Ok(());
         };
@@ -482,10 +505,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                         path_index: path as usize,
                         fieldset_index: fieldset as usize,
                         spec_type: sdf::SpecType::from_repr(spec_type)
-                            .with_context(|| format!("Unable to parse SDF spec type: {spec_type}"))?,
+                            .ok_or_else(|| ReadError::corrupt(format!("Unable to parse SDF spec type: {spec_type}")))?,
                     })
                 })
-                .collect::<Result<Vec<_>>>()?
+                .collect::<Result<Vec<_>, ReadError>>()?
         };
 
         Ok(())
@@ -496,21 +519,21 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         self.sections.iter().find(|s| s.name() == name)
     }
 
-    fn resolve_string(&self, string_index: u32) -> String {
-        let token = self.strings[string_index as usize];
-        self.tokens[token].clone()
+    fn resolve_string(&self, string_index: u32) -> Result<String, ReadError> {
+        let token = *indexed(&self.strings, string_index as usize, "string")?;
+        Ok(indexed(&self.tokens, token, "token")?.clone())
     }
 
-    fn set_position(&mut self, position: u64) -> Result<()> {
+    fn set_position(&mut self, position: u64) -> Result<(), ReadError> {
         self.reader.seek(io::SeekFrom::Start(position))?;
         Ok(())
     }
 
-    fn unpack_value<T: Default + Pod>(&mut self, value: ValueRep) -> Result<T> {
-        ensure!(!value.is_array(), "Can't unpack array {value:?} as inline value");
+    fn unpack_value<T: Default + Pod>(&mut self, value: ValueRep) -> Result<T, ReadError> {
+        corrupt!(!value.is_array(), "Can't unpack array {value:?} as inline value");
 
         let ty = value.ty()?;
-        ensure!(ty != Type::Invalid, "Invalid value type");
+        corrupt!(ty != Type::Invalid, "Invalid value type");
 
         // If the value is inlined, just decode it.
         let value = if value.is_inlined() {
@@ -527,11 +550,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(value)
     }
 
-    fn read_token(&mut self, value: ValueRep) -> Result<String> {
+    fn read_token(&mut self, value: ValueRep) -> Result<String, ReadError> {
         let index: u64 = self.unpack_value(value)?;
-        let value = self.tokens[index as usize].clone();
-
-        Ok(value)
+        Ok(indexed(&self.tokens, index as usize, "token")?.clone())
     }
 
     /// Read a scalar asset path or path expression.
@@ -540,12 +561,12 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     /// inlined but into the string table when it is stored on the heap, so the
     /// table is chosen by the inlined flag (mirrors `SdfAssetPath` /
     /// `SdfPathExpression` handling in Pixar's crate reader).
-    fn read_asset_path(&mut self, value: ValueRep) -> Result<String> {
+    fn read_asset_path(&mut self, value: ValueRep) -> Result<String, ReadError> {
         let index = self.unpack_value::<u32>(value)?;
         if value.is_inlined() {
-            Ok(self.tokens[index as usize].clone())
+            Ok(indexed(&self.tokens, index as usize, "token")?.clone())
         } else {
-            Ok(self.resolve_string(index))
+            self.resolve_string(index)
         }
     }
 
@@ -557,7 +578,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     ///
     /// # Arguments:
     /// - `estimated_size`: Size enough to hold uncompressed data.
-    fn read_compressed<T: Default + NoUninit + AnyBitPattern>(&mut self, estimated_count: usize) -> Result<Vec<T>> {
+    fn read_compressed<T: Default + NoUninit + AnyBitPattern>(
+        &mut self,
+        estimated_count: usize,
+    ) -> Result<Vec<T>, ReadError> {
         // Read data to memory.
         let compressed_size = self.reader.read_count()?;
         let mut input = vec![0_u8; compressed_size];
@@ -577,7 +601,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     /// Reads sequence of compressed integers.
-    fn read_encoded_ints<T: PrimInt + 'static>(&mut self, count: usize) -> Result<Vec<T>>
+    fn read_encoded_ints<T: PrimInt + 'static>(&mut self, count: usize) -> Result<Vec<T>, ReadError>
     where
         i64: AsPrimitive<T>,
     {
@@ -594,7 +618,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     const MIN_COMPRESSED_ARRAY_SIZE: usize = 4;
 
     // Implements various logic and compatibility checks to figure out the array length and whether it's compressed.
-    fn unpack_array_len(&mut self, value: ValueRep, kind: ArrayKind) -> Result<(usize, bool)> {
+    fn unpack_array_len(&mut self, value: ValueRep, kind: ArrayKind) -> Result<(usize, bool), ReadError> {
         debug_assert!(!value.is_inlined());
 
         // Empty array.
@@ -648,7 +672,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok((count, compressed))
     }
 
-    fn read_ints<T: PrimInt + Pod + Default>(&mut self, value: ValueRep) -> Result<Vec<T>>
+    fn read_ints<T: PrimInt + Pod + Default>(&mut self, value: ValueRep) -> Result<Vec<T>, ReadError>
     where
         i64: AsPrimitive<T>,
     {
@@ -665,9 +689,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         }
     }
 
-    fn read_floats<T: Float + Default + Pod>(&mut self, value: ValueRep) -> Result<Vec<T>> {
+    fn read_floats<T: Float + Default + Pod>(&mut self, value: ValueRep) -> Result<Vec<T>, ReadError> {
         use num_traits::cast;
-        ensure!(!value.is_inlined());
+        corrupt!(!value.is_inlined());
 
         let (count, compressed) = self.unpack_array_len(value, ArrayKind::Floats)?;
 
@@ -690,7 +714,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                     let lut: Vec<T> = self.reader.read_vec(lut_size)?;
 
                     let indexes: Vec<u32> = self.read_encoded_ints(count)?;
-                    ensure!(
+                    corrupt!(
                         indexes.len() == count,
                         "Read invalid number of indexes to decompress doubles array"
                     );
@@ -702,7 +726,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                     output
                 }
-                _ => bail!("Invalid compressed double array code: {code}"),
+                _ => {
+                    return Err(ReadError::corrupt(format!(
+                        "Invalid compressed double array code: {code}"
+                    )));
+                }
             }
         } else {
             self.reader.read_vec(count)?
@@ -714,8 +742,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     fn read_list_op<T: Default + Clone + PartialEq>(
         &mut self,
         value: ValueRep,
-        mut read: impl FnMut(&mut Self) -> Result<Vec<T>>,
-    ) -> Result<sdf::ListOp<T>> {
+        mut read: impl FnMut(&mut Self) -> Result<Vec<T>, ReadError>,
+    ) -> Result<sdf::ListOp<T>, ReadError> {
         self.set_position(value.payload())?;
 
         let mut out = sdf::ListOp::<T>::default();
@@ -755,46 +783,48 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
     /// Reads a count-prefixed vector of `u32` indices and maps each through
     /// `lookup` to produce the element value.
-    fn read_indexed_vec<T>(&mut self, lookup: impl Fn(&Self, usize) -> T) -> Result<Vec<T>> {
+    fn read_indexed_vec<T>(
+        &mut self,
+        lookup: impl Fn(&Self, usize) -> Result<T, ReadError>,
+    ) -> Result<Vec<T>, ReadError> {
         let count = self.reader.read_count()?;
         let indices = self.reader.read_vec::<u32>(count)?;
 
-        Ok(indices.into_iter().map(|index| lookup(self, index as usize)).collect())
+        indices.into_iter().map(|index| lookup(self, index as usize)).collect()
     }
 
-    fn read_string_vec(&mut self) -> Result<Vec<String>> {
-        self.read_indexed_vec(|file, index| file.tokens[file.strings[index]].clone())
+    fn read_string_vec(&mut self) -> Result<Vec<String>, ReadError> {
+        self.read_indexed_vec(|file, index| {
+            let token = *indexed(&file.strings, index, "string")?;
+            Ok(indexed(&file.tokens, token, "token")?.clone())
+        })
     }
 
-    fn read_token_vec(&mut self) -> Result<Vec<String>> {
-        self.read_indexed_vec(|file, index| file.tokens[index].clone())
+    fn read_token_vec(&mut self) -> Result<Vec<String>, ReadError> {
+        self.read_indexed_vec(|file, index| Ok(indexed(&file.tokens, index, "token")?.clone()))
     }
 
-    fn read_path_vec(&mut self) -> Result<Vec<sdf::Path>> {
-        self.read_indexed_vec(|file, index| file.paths[index].clone())
+    fn read_path_vec(&mut self) -> Result<Vec<sdf::Path>, ReadError> {
+        self.read_indexed_vec(|file, index| Ok(indexed(&file.paths, index, "path")?.clone()))
     }
 
     /// Reads a count-prefixed vector of POD values.
-    fn read_pod_vec<T: Default + NoUninit + AnyBitPattern>(&mut self) -> Result<Vec<T>> {
+    fn read_pod_vec<T: Default + NoUninit + AnyBitPattern>(&mut self) -> Result<Vec<T>, ReadError> {
         let count = self.reader.read_count()?;
         self.reader.read_vec(count)
     }
 
-    fn read_string(&mut self) -> Result<String> {
+    fn read_string(&mut self) -> Result<String, ReadError> {
         let index = self.reader.read_pod::<u32>()?;
-        let string = self.resolve_string(index);
-
-        Ok(string)
+        self.resolve_string(index)
     }
 
-    fn read_path(&mut self) -> Result<sdf::Path> {
+    fn read_path(&mut self) -> Result<sdf::Path, ReadError> {
         let index = self.reader.read_pod::<u32>()?;
-        let path = self.paths[index as usize].clone();
-
-        Ok(path)
+        Ok(indexed(&self.paths, index as usize, "path")?.clone())
     }
 
-    fn read_reference(&mut self) -> Result<sdf::Reference> {
+    fn read_reference(&mut self) -> Result<sdf::Reference, ReadError> {
         let asset_path = self.read_string()?;
         let prim_path = self.read_path()?;
         let layer_offset = self.reader.read_pod::<sdf::LayerOffset>()?;
@@ -808,7 +838,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         })
     }
 
-    fn read_payload(&mut self) -> Result<sdf::Payload> {
+    fn read_payload(&mut self) -> Result<sdf::Payload, ReadError> {
         let asset_path = self.read_string()?;
         let prim_path = self.read_path()?;
 
@@ -836,7 +866,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     /// offset we just consumed) to land at the correct location.
     ///
     /// See <https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100>
-    fn apply_recursive_offset(&mut self) -> Result<()> {
+    fn apply_recursive_offset(&mut self) -> Result<(), ReadError> {
         let offset = self.reader.read_pod::<i64>()?;
         self.reader.seek(io::SeekFrom::Current(offset - 8))?;
         Ok(())
@@ -850,7 +880,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     /// one Rust frame per nesting level over file-controlled data. Bound the
     /// depth (a guard or an explicit stack), as `build_compressed_paths` does
     /// for wide path trees.
-    fn read_custom_data(&mut self) -> Result<HashMap<String, Value>> {
+    fn read_custom_data(&mut self) -> Result<HashMap<String, Value>, ReadError> {
         let mut count = self.reader.read_count()?;
         let mut dict = HashMap::default();
 
@@ -862,7 +892,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 let value = self.reader.read_pod::<ValueRep>()?;
 
-                ensure!(value.ty()? != Type::Invalid, "Can't parse dictionary value type");
+                corrupt!(value.ty()? != Type::Invalid, "Can't parse dictionary value type");
 
                 // Save current position.
                 let saved_position = self.reader.stream_position()?;
@@ -888,7 +918,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     /// [`read_vec_array`] performs. `U` must have the same binary layout as
     /// the on-disk element — safe for all gf vec types since they are
     /// `#[repr(C)]` and `bytemuck::Pod`.
-    fn read_gf_array<U: Default + NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>> {
+    fn read_gf_array<U: Default + NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>, ReadError> {
         debug_assert!(value.is_array() && !value.is_compressed());
         let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
         if count == 0 {
@@ -900,7 +930,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     fn read_vec_array<T: Default + NoUninit + AnyBitPattern, const N: usize>(
         &mut self,
         value: ValueRep,
-    ) -> Result<Vec<[T; N]>> {
+    ) -> Result<Vec<[T; N]>, ReadError> {
         debug_assert!(value.is_array());
         debug_assert!(!value.is_compressed());
 
@@ -923,9 +953,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(result)
     }
 
-    pub fn value(&mut self, value: ValueRep) -> Result<sdf::Value> {
+    pub fn value(&mut self, value: ValueRep) -> Result<sdf::Value, ReadError> {
         let ty = value.ty()?;
-        ensure!(ty != Type::Invalid, "Invalid value type");
+        corrupt!(ty != Type::Invalid, "Invalid value type");
 
         let variant = match ty {
             //
@@ -994,7 +1024,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // Tokens, strings, asset paths
             //
             Type::StringVector => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
 
                 self.set_position(value.payload())?;
                 sdf::Value::StringVec(self.read_string_vec()?)
@@ -1006,10 +1036,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             }
 
             Type::String => {
-                ensure!(!value.is_array());
+                corrupt!(!value.is_array());
 
                 let string_index = self.unpack_value::<u32>(value)?;
-                sdf::Value::String(self.resolve_string(string_index))
+                sdf::Value::String(self.resolve_string(string_index)?)
             }
             Type::AssetPath if value.is_array() => {
                 // Asset arrays (`asset[]`, e.g. value-clip `assetPaths`) are
@@ -1025,8 +1055,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let indices = self.reader.read_vec::<u32>(count)?;
                 let tokens = indices
                     .into_iter()
-                    .map(|i| self.tokens[i as usize].as_str().into())
-                    .collect();
+                    .map(|i| Ok(indexed(&self.tokens, i as usize, "token")?.as_str().into()))
+                    .collect::<Result<Vec<_>, ReadError>>()?;
 
                 sdf::Value::TokenVec(tokens)
             }
@@ -1193,7 +1223,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // ListOp
             //
             Type::TokenListOp => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |file: &mut Self| {
                     Ok(file.read_token_vec()?.into_iter().map(tf::Token::from).collect())
@@ -1201,19 +1231,19 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::TokenListOp(list)
             }
             Type::StringListOp => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |file: &mut Self| file.read_string_vec())?;
                 sdf::Value::StringListOp(list)
             }
             Type::PathListOp => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |file: &mut Self| file.read_path_vec())?;
                 sdf::Value::PathListOp(list)
             }
             Type::ReferenceListOp => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |file: &mut Self| {
                     let count = file.reader.read_count()?;
@@ -1231,19 +1261,19 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             }
 
             Type::IntListOp => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
                 sdf::Value::IntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
             Type::Int64ListOp => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
                 sdf::Value::Int64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
             Type::UIntListOp => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
                 sdf::Value::UIntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
             Type::UInt64ListOp => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
                 sdf::Value::UInt64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
 
@@ -1251,7 +1281,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // SDF types
             //
             Type::TokenVector => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
 
                 self.set_position(value.payload())?;
 
@@ -1260,7 +1290,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             }
 
             Type::PathVector => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
 
                 self.set_position(value.payload())?;
 
@@ -1270,32 +1300,32 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             Type::Specifier => {
                 let tmp: i32 = self.unpack_value(value)?;
-                let specifier =
-                    sdf::Specifier::from_repr(tmp).with_context(|| format!("Unable to parse SDF specifier: {tmp}"))?;
+                let specifier = sdf::Specifier::from_repr(tmp)
+                    .ok_or_else(|| ReadError::corrupt(format!("Unable to parse SDF specifier: {tmp}")))?;
 
                 sdf::Value::Specifier(specifier)
             }
 
             Type::Permission => {
                 let tmp: i32 = self.unpack_value(value)?;
-                let permission =
-                    sdf::Permission::from_repr(tmp).with_context(|| format!("Unable to parse permission: {tmp}"))?;
+                let permission = sdf::Permission::from_repr(tmp)
+                    .ok_or_else(|| ReadError::corrupt(format!("Unable to parse permission: {tmp}")))?;
 
                 sdf::Value::Permission(permission)
             }
 
             Type::Variability => {
                 let tmp: i32 = self.unpack_value(value)?;
-                let variability =
-                    sdf::Variability::from_repr(tmp).with_context(|| format!("Unable to parse variability: {tmp}"))?;
+                let variability = sdf::Variability::from_repr(tmp)
+                    .ok_or_else(|| ReadError::corrupt(format!("Unable to parse variability: {tmp}")))?;
 
                 sdf::Value::Variability(variability)
             }
 
             Type::LayerOffsetVector => {
-                ensure!(!value.is_inlined());
-                ensure!(!value.is_array());
-                ensure!(!value.is_compressed());
+                corrupt!(!value.is_inlined());
+                corrupt!(!value.is_array());
+                corrupt!(!value.is_compressed());
 
                 self.set_position(value.payload())?;
 
@@ -1306,9 +1336,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             }
 
             Type::Payload => {
-                ensure!(!value.is_inlined());
-                ensure!(!value.is_array());
-                ensure!(!value.is_compressed());
+                corrupt!(!value.is_inlined());
+                corrupt!(!value.is_array());
+                corrupt!(!value.is_compressed());
 
                 self.set_position(value.payload())?;
 
@@ -1332,9 +1362,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             }
 
             Type::VariantSelectionMap => {
-                ensure!(!value.is_inlined());
-                ensure!(!value.is_array());
-                ensure!(!value.is_compressed());
+                corrupt!(!value.is_inlined());
+                corrupt!(!value.is_array());
+                corrupt!(!value.is_compressed());
 
                 self.set_position(value.payload())?;
 
@@ -1351,8 +1381,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             }
 
             Type::TimeSamples => {
-                ensure!(!value.is_inlined());
-                ensure!(!value.is_compressed());
+                corrupt!(!value.is_inlined());
+                corrupt!(!value.is_compressed());
 
                 self.set_position(value.payload())?;
 
@@ -1361,7 +1391,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let times_rep = self.reader.read_pod::<ValueRep>()?;
 
                 let ty = times_rep.ty()?;
-                ensure!(
+                corrupt!(
                     ty == Type::DoubleVector || (ty == Type::Double && times_rep.is_array()),
                     "Invalid time samples type: expected either double vector or double array"
                 );
@@ -1372,7 +1402,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let times = self
                     .value(times_rep)?
                     .try_as_double_vec()
-                    .context("Failed to read time samples")?;
+                    .ok_or_else(|| ReadError::corrupt("Failed to read time samples"))?;
 
                 // Restore position
                 self.set_position(saved_position)?;
@@ -1380,7 +1410,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 self.apply_recursive_offset()?;
 
                 let count = self.reader.read_count()?;
-                ensure!(count == times.len(), "Invalid time samples count");
+                corrupt!(count == times.len(), "Invalid time samples count");
 
                 let value_reps = self.reader.read_vec::<ValueRep>(count)?;
                 debug_assert_eq!(value_reps.len(), count);
@@ -1388,7 +1418,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let values = value_reps
                     .into_iter()
                     .map(|value| self.value(value))
-                    .collect::<Result<Vec<_>>>()?;
+                    .collect::<Result<Vec<_>, ReadError>>()?;
 
                 let samples = times.into_iter().zip(values).collect();
 
@@ -1398,8 +1428,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // Empty dictionary.
             Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(HashMap::default()),
             Type::Dictionary => {
-                ensure!(!value.is_compressed(), "Dictionary {ty} can't be compressed");
-                ensure!(!value.is_array(), "Dictionary {ty} can't be inlined");
+                corrupt!(!value.is_compressed(), "Dictionary {ty} can't be compressed");
+                corrupt!(!value.is_array(), "Dictionary {ty} can't be inlined");
 
                 self.set_position(value.payload())?;
 
@@ -1438,27 +1468,27 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::UnregisteredValue(token)
             }
             Type::UnregisteredValueListOp => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
                 let list = self.read_list_op(value, |file: &mut Self| file.read_string_vec())?;
                 sdf::Value::UnregisteredValueListOp(list)
             }
 
             Type::Relocates => {
-                ensure!(!value.is_inlined());
+                corrupt!(!value.is_inlined());
                 self.set_position(value.payload())?;
                 let count = self.reader.read_count()?;
                 let mut pairs = Vec::with_capacity(count);
                 for _ in 0..count {
                     let src_idx: u32 = self.reader.read_pod()?;
                     let tgt_idx: u32 = self.reader.read_pod()?;
-                    let src = self.paths[src_idx as usize].clone();
-                    let tgt = self.paths[tgt_idx as usize].clone();
+                    let src = indexed(&self.paths, src_idx as usize, "path")?.clone();
+                    let tgt = indexed(&self.paths, tgt_idx as usize, "path")?.clone();
                     pairs.push((src, tgt));
                 }
                 sdf::Value::Relocates(pairs)
             }
 
-            Type::Invalid => bail!("Unsupported value type: {ty}"),
+            Type::Invalid => return Err(ReadError::unsupported(format!("Unsupported value type: {ty}"))),
         };
 
         Ok(variant)
@@ -1470,6 +1500,21 @@ enum ArrayKind {
     #[allow(dead_code)]
     Floats,
     Other,
+}
+
+/// Looks up `table[index]`, reporting an out-of-range index — a corrupt
+/// crate — as the error the caller propagates instead of panicking.
+fn indexed<'a, T>(table: &'a [T], index: usize, what: &'static str) -> Result<&'a T, ReadError> {
+    table
+        .get(index)
+        .ok_or_else(|| ReadError::corrupt(format!("{what} index {index} out of range ({} entries)", table.len())))
+}
+
+/// Checks that `slot` addresses an entry of the decoded path table before it
+/// is written, so a corrupt jump table cannot write out of bounds.
+fn checked_path_slot(paths: &[sdf::Path], slot: usize) -> Result<(), ReadError> {
+    indexed(paths, slot, "path")?;
+    Ok(())
 }
 
 /// Pixar's `GfQuat<T>` stores components on disk as `[x, y, z, w]` (imaginary fields first,
@@ -1501,14 +1546,14 @@ fn to_mat_diag<const N: usize, const M: usize>(data: [i8; N]) -> [f64; M] {
     matrix
 }
 
-fn decompress_lz4(mut input: &[u8], output: &mut [u8]) -> Result<usize> {
+fn decompress_lz4(mut input: &[u8], output: &mut [u8]) -> Result<usize, ReadError> {
     // Check first byte for # chunks.
     // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/base/tf/fastCompression.cpp#L108
 
-    let chunks = input.read_pod::<u8>().context("Unable to read lz4 chunk count")? as usize;
+    let chunks = input.read_pod::<u8>().ctx("lz4 chunk count")? as usize;
 
     if chunks == 0 {
-        let size = lz4_flex::decompress_into(input, output).context("Failed to decompress data, possibly corrupt?")?;
+        let size = lz4_flex::decompress_into(input, output)?;
 
         Ok(size)
     } else {
@@ -1524,39 +1569,37 @@ pub trait ReadExt {
     ///
     /// # Format:
     /// - u64 size
-    fn read_count(&mut self) -> Result<usize>;
+    fn read_count(&mut self) -> Result<usize, ReadError>;
 
-    fn read_pod<T: Default + Pod>(&mut self) -> Result<T>;
+    fn read_pod<T: Default + Pod>(&mut self) -> Result<T, ReadError>;
 
-    fn read_vec<T: Default + NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>>;
+    fn read_vec<T: Default + NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>, ReadError>;
 }
 
 impl<R: io::Read> ReadExt for R {
-    fn read_count(&mut self) -> Result<usize> {
+    fn read_count(&mut self) -> Result<usize, ReadError> {
         let mut count = 0_u64;
-        self.read_exact(bytes_of_mut(&mut count))
-            .context("Unable to read size from IO stream")?;
+        self.read_exact(bytes_of_mut(&mut count)).ctx("size from IO stream")?;
 
         Ok(count as usize)
     }
 
-    fn read_pod<T: Default + Pod>(&mut self) -> Result<T> {
+    fn read_pod<T: Default + Pod>(&mut self) -> Result<T, ReadError> {
         let mut object = T::default();
 
         self.read_exact(bytes_of_mut(&mut object))
-            .with_context(|| format!("Unable to read pod: {}", type_name::<T>()))?;
+            .map_err(|error| ReadError::from(error).in_context(format!("pod {}", type_name::<T>())))?;
 
         Ok(object)
     }
 
-    fn read_vec<T: Default + NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>> {
+    fn read_vec<T: Default + NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>, ReadError> {
         if count == 0 {
             return Ok(Vec::new());
         }
 
         let mut vec = vec![T::default(); count];
-        self.read_exact(cast_slice_mut(&mut vec))
-            .context("Unable to read vec")?;
+        self.read_exact(cast_slice_mut(&mut vec)).ctx("vec")?;
 
         Ok(vec)
     }
@@ -1565,6 +1608,7 @@ impl<R: io::Read> ReadExt for R {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Result;
     use std::fs;
 
     #[test]

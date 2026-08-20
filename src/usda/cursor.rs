@@ -4,9 +4,9 @@ use std::borrow::Cow;
 use std::iter::Peekable;
 use std::ops::Range;
 
-use anyhow::{Result, anyhow, bail, ensure};
 use logos::{Logos, SpannedIter};
 
+use super::error::{RawError, bail, ensure};
 use super::token::Token;
 
 // TODO: `sdf::expr` drives its own `Peekable<SpannedIter>` with the same
@@ -55,7 +55,7 @@ impl<'source> Cursor<'source> {
     /// Returns the next token without consuming it, or `None` at the end of the
     /// stream.
     #[inline]
-    pub(super) fn peek(&mut self) -> Result<Option<&Token<'source>>> {
+    pub(super) fn peek(&mut self) -> Result<Option<&Token<'source>>, RawError> {
         match self.iter.peek() {
             Some((Ok(token), span)) => {
                 self.last_span = Some(span.start..span.end);
@@ -74,25 +74,25 @@ impl<'source> Cursor<'source> {
 
     /// Whether the next token equals `expected`, without consuming it.
     #[inline]
-    fn at(&mut self, expected: &Token<'_>) -> Result<bool> {
+    fn at(&mut self, expected: &Token<'_>) -> Result<bool, RawError> {
         Ok(matches!(self.peek()?, Some(token) if token == expected))
     }
 
     /// Consumes and returns the next token.
     #[inline]
-    pub(super) fn bump(&mut self) -> Result<Token<'source>> {
+    pub(super) fn bump(&mut self) -> Result<Token<'source>, RawError> {
         let Some((token, span)) = self.iter.next() else {
             self.last_span = Some(self.source.len()..self.source.len());
             bail!("Unexpected end of tokens");
         };
         self.last_span = Some(span);
-        token.map_err(|_| anyhow!("Logos error"))
+        token.map_err(|_| RawError::new("Logos error"))
     }
 
     /// Consumes the next token if it equals `expected`, reporting whether it
     /// was consumed.
     #[inline]
-    pub(super) fn eat(&mut self, expected: &Token<'_>) -> Result<bool> {
+    pub(super) fn eat(&mut self, expected: &Token<'_>) -> Result<bool, RawError> {
         if self.at(expected)? {
             self.bump()?;
             Ok(true)
@@ -102,7 +102,7 @@ impl<'source> Cursor<'source> {
     }
 
     /// Consumes the next token, requiring it to equal `expected`.
-    fn expect(&mut self, expected: Token<'_>) -> Result<()> {
+    fn expect(&mut self, expected: Token<'_>) -> Result<(), RawError> {
         let token = self.bump()?;
         ensure!(
             token == expected,
@@ -113,25 +113,25 @@ impl<'source> Cursor<'source> {
 
     /// Whether the next token is the punctuation `value`, without consuming it.
     #[inline]
-    pub(super) fn at_punctuation(&mut self, value: char) -> Result<bool> {
+    pub(super) fn at_punctuation(&mut self, value: char) -> Result<bool, RawError> {
         self.at(&Token::Punctuation(value))
     }
 
     /// Consumes the punctuation `value` if it is next.
     #[inline]
-    pub(super) fn eat_punctuation(&mut self, value: char) -> Result<bool> {
+    pub(super) fn eat_punctuation(&mut self, value: char) -> Result<bool, RawError> {
         self.eat(&Token::Punctuation(value))
     }
 
     /// Consumes the next token, requiring it to be the punctuation `value`.
     #[inline]
-    pub(super) fn expect_punctuation(&mut self, value: char) -> Result<()> {
+    pub(super) fn expect_punctuation(&mut self, value: char) -> Result<(), RawError> {
         self.expect(Token::Punctuation(value))
     }
 
     /// Consumes a quoted string, borrowed from the source unless it carried an
     /// escape sequence.
-    pub(super) fn expect_string(&mut self) -> Result<Cow<'source, str>> {
+    pub(super) fn expect_string(&mut self) -> Result<Cow<'source, str>, RawError> {
         match self.bump()? {
             Token::String(text) => Ok(text),
             other => bail!("Unexpected token {other:?} (want String)"),
@@ -139,7 +139,7 @@ impl<'source> Cursor<'source> {
     }
 
     /// Consumes a plain or namespaced identifier.
-    pub(super) fn expect_identifier(&mut self) -> Result<&'source str> {
+    pub(super) fn expect_identifier(&mut self) -> Result<&'source str, RawError> {
         match self.bump()? {
             Token::Identifier(name) | Token::NamespacedIdentifier(name) => Ok(name),
             other => bail!("expected identifier, got {other:?}"),
@@ -147,7 +147,7 @@ impl<'source> Cursor<'source> {
     }
 
     /// Consumes an asset reference (`@...@`) and returns its body.
-    pub(super) fn expect_asset_ref(&mut self) -> Result<&'source str> {
+    pub(super) fn expect_asset_ref(&mut self) -> Result<&'source str, RawError> {
         match self.bump()? {
             Token::AssetRef(asset_path) => Ok(asset_path),
             other => bail!("Asset reference expected, got {other:?}"),
@@ -155,7 +155,7 @@ impl<'source> Cursor<'source> {
     }
 
     /// Consumes a path reference (`<...>`) and returns its body.
-    pub(super) fn expect_path_ref(&mut self) -> Result<&'source str> {
+    pub(super) fn expect_path_ref(&mut self) -> Result<&'source str, RawError> {
         match self.bump()? {
             Token::PathRef(path) => Ok(path),
             other => bail!("Path reference expected, got {other:?}"),

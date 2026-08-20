@@ -11,12 +11,14 @@
 //! resolution and asset discovery (the C++ `UsdUtilsCreateNewUsdzPackage`
 //! equivalent) are out of scope for v1.
 
-use std::io::{Seek, Write};
+use std::fs;
+use std::io::{self, Seek, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
+
+use super::ArchiveError;
 
 /// Alignment (in bytes) for file data inside a USDZ archive.
 const USDZ_ALIGNMENT: u16 = 64;
@@ -51,7 +53,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// `name` must be an archive-relative forward-slash path: non-empty, not
     /// absolute, and containing no `..` segments or backslashes. Archives
     /// with path-traversing entries are rejected.
-    pub fn add_layer(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+    pub fn add_layer(&mut self, name: &str, bytes: &[u8]) -> Result<(), ArchiveError> {
         validate_entry_name(name)?;
 
         let options = SimpleFileOptions::default()
@@ -60,27 +62,25 @@ impl<W: Write + Seek> ArchiveWriter<W> {
 
         self.inner
             .start_file(name, options)
-            .with_context(|| format!("failed to start USDZ entry {name}"))?;
-        self.inner
-            .write_all(bytes)
-            .with_context(|| format!("failed to write USDZ entry {name}"))?;
+            .map_err(|e| ArchiveError::entry(name, e))?;
+        self.inner.write_all(bytes).map_err(|e| ArchiveError::entry(name, e))?;
         Ok(())
     }
 
     /// Finalize the archive, writing the central directory. Returns the
     /// underlying writer.
-    pub fn finish(self) -> Result<W> {
-        let w = self.inner.finish().context("failed to finalize USDZ archive")?;
+    pub fn finish(self) -> Result<W, ArchiveError> {
+        let w = self.inner.finish()?;
         Ok(w)
     }
 }
 
 impl ArchiveWriter<std::fs::File> {
     /// Create a USDZ archive at `path`.
-    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn create(path: impl AsRef<Path>) -> Result<Self, ArchiveError> {
         let path = path.as_ref();
-        let file = std::fs::File::create(path)
-            .with_context(|| format!("failed to create USDZ archive: {}", path.display()))?;
+        let file = fs::File::create(path)
+            .map_err(|error| io::Error::new(error.kind(), format!("unable to create {}: {error}", path.display())))?;
         Ok(Self::new(file))
     }
 }
@@ -90,25 +90,28 @@ impl ArchiveWriter<std::fs::File> {
 /// consumed by other tools interpret entry names as filesystem paths, so
 /// absolute, traversing, directory-like, or double-separator forms can
 /// escape the extraction root or produce ambiguous results.
-fn validate_entry_name(name: &str) -> Result<()> {
+fn validate_entry_name(name: &str) -> Result<(), ArchiveError> {
+    let invalid = |reason: &'static str| ArchiveError::InvalidEntryName {
+        name: name.to_owned(),
+        reason,
+    };
     if name.is_empty() {
-        bail!("USDZ entry name cannot be empty");
+        return Err(invalid("cannot be empty"));
     }
     if name.contains('\\') {
-        bail!("USDZ entry name {name:?} must not contain backslashes");
+        return Err(invalid("must not contain backslashes"));
     }
     if name.starts_with('/') {
-        bail!("USDZ entry name {name:?} must be relative, not absolute");
+        return Err(invalid("must be relative, not absolute"));
     }
     if name.ends_with('/') {
-        bail!("USDZ entry name {name:?} must name a file, not a directory");
+        return Err(invalid("must name a file, not a directory"));
     }
     for seg in name.split('/') {
         match seg {
-            "" => bail!("USDZ entry name {name:?} has an empty path segment"),
-            "." | ".." => {
-                bail!("USDZ entry name {name:?} must not contain `{seg}` segments")
-            }
+            "" => return Err(invalid("has an empty path segment")),
+            "." => return Err(invalid("must not contain `.` segments")),
+            ".." => return Err(invalid("must not contain `..` segments")),
             _ => {}
         }
     }

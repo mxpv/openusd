@@ -13,7 +13,7 @@
 //! Feed its pre-evaluated local transforms into
 //! [`SkeletonResolver::compute_skinning_transforms_from_local`] below.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::gf;
 

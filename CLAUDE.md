@@ -24,7 +24,7 @@ The codebase mirrors the C++ OpenUSD SDK's module layout. The bullets below are 
 
 - **`pcp/`** - Prim Cache Population, the composition engine (C++ `Pcp`): LIVERPS strength ordering across layers, kept a pure function of `(graph, context, cached indices)` so it stays parallelizable. Composition drives layer loading: a reference/payload target opens on first use and the demand travels out through `BuildOutput` to the stage's load barrier. Start at `pcp/mod.rs` — it has the LIVERPS overview and a per-file structure table.
 
-- **`usd/`** - Composed stage API (C++ `Usd`): `usd::Stage` is the handle that delegates composition to `pcp::IndexCache`; `Prim`, `Attribute`, `Relationship`, and the schema views are `Clone` value types over it, and stage-tier authoring routes through the current `EditTarget`, with `Stage::batch_edit` for atomic multi-layer edits. Notable sub-surfaces: `usd/schema_registry.rs` + `usd/prim_definition.rs` + `usd/prim_type_info.rs` (C++ `UsdSchemaRegistry` / `UsdPrimDefinition` / `UsdPrimTypeInfo` — the schema type table and the property fallbacks it supplies, built from per-family manifest + schematics text), `usd/sink.rs` (`StageSink` composed-change observers, `Provenance`), `usd/diff.rs` (the transferable `Diff` and `Stage::apply_diff`), `usd/capture.rs` (`UndoStage` / `ReplayStage`, recording wrappers over the change seam), `usd/editor.rs` (namespace editing), `usd/composition.rs` (private `StageComposition`: owns the layer graph, index cache, and pending-edit queue, and the operations over them — reconciliation, the composed-query/load fixpoint, demand loading, interning, muting, load rules, construction — calling back to `Stage` through `CompositionHooks`). Start at `usd/stage.rs`. Public users import modules (`use openusd::{sdf, usd};`), not root-level re-exports.
+- **`usd/`** - Composed stage API (C++ `Usd`): `usd::Stage` is the handle that delegates composition to `pcp::IndexCache`; `Prim`, `Attribute`, `Relationship`, and the schema views are `Clone` value types over it, and stage-tier authoring routes through the current `EditTarget`, with `Stage::batch_edit` for atomic multi-layer edits. Notable sub-surfaces: `usd/schema_registry.rs` + `usd/prim_definition.rs` + `usd/prim_type_info.rs` (C++ `UsdSchemaRegistry` / `UsdPrimDefinition` / `UsdPrimTypeInfo` — the schema type table and the property fallbacks it supplies, built from per-family manifest + schematics text), `usd/sink.rs` (`StageSink` composed-change observers, `Provenance`), `usd/diff.rs` (the transferable `Diff` and `Stage::apply_diff`), `usd/capture.rs` (`UndoStage` / `ReplayStage`, recording wrappers over the change seam), `usd/editor.rs` (namespace editing), `usd/composition.rs` (private `StageComposition`: owns the layer graph, index cache, and pending-edit queue, and the operations over them — reconciliation, the composed-query/load fixpoint, demand loading, interning, muting, load rules, construction — calling back to `Stage` through `CompositionHooks`). Start at `usd/stage.rs`. Public users import modules (`use openusd::{sdf, usd};`); the only root-level re-exports are `openusd::Error` and `openusd::Result` (`src/error.rs`), the crate-wide error enum every module error nests into.
 
 - **`schemas/`** - Domain schemas layered on `sdf` / `usd`, not part of the AOUSD core spec. Feature-gated per family (`geom`, `lux`, `media`, `physics`, `proc`, `render`, `shade`, `skel`, `ui`, `vol`; some enable `geom` transitively). See the table in `schemas/mod.rs`.
 
@@ -149,7 +149,6 @@ To pull a typed payload out of a `Value` in tests, use the `EnumTryAs`-generated
 ## Dependencies
 
 Key external dependencies:
-- `anyhow` - Error handling
 - `bitflags` - Bitflag sets (e.g. `PrimPredicate`)
 - `bytemuck` - Safe transmutation for binary data
 - `half` - 16-bit floating point support (re-exported as `f16`)
@@ -158,7 +157,9 @@ Key external dependencies:
 - `num-traits` - Numeric traits
 - `regex-lite` - Lightweight regex engine for the `matches_regex` expression function
 - `strum` - Enum derive macros (Display, EnumIs, EnumTryAs, IntoStaticStr, etc.)
-- `thiserror` - Error type derive macros for typed errors such as `layer::Error` and `pcp::Error`
+- `thiserror` - Error type derive macros behind every error type, from the
+  per-module errors (`sdf::AuthoringError`, `pcp::QueryError`) up to the root
+  `openusd::Error` they nest into
 - `zip` - USDZ archive reading
 - `serde` (optional, `serde` feature) - Serialization support
 

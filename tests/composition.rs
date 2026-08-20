@@ -537,7 +537,12 @@ mod pcp_txt {
     /// `UnresolvedDefaultPrim`) fall through the wildcard and are omitted, matching
     /// the baselines. A new error kind opts in by adding an arm below. When any
     /// error is rendered, the dump ends with the framework's `ERROR:` footer.
-    pub fn error_trailer(name: &str, errors: &[pcp::Error], base: Option<&Path>, order: &[sdf::Path]) -> String {
+    pub fn error_trailer(
+        name: &str,
+        errors: &[pcp::CompositionError],
+        base: Option<&Path>,
+        order: &[sdf::Path],
+    ) -> String {
         use std::fmt::Write as _;
 
         // Layer identifiers inside trailer messages use the asset-repo-relative form
@@ -550,7 +555,7 @@ mod pcp_txt {
         let entries: Vec<(Option<&sdf::Path>, String)> = errors
         .iter()
         .filter_map(|e| match e {
-            pcp::Error::UnresolvedLayer {
+            pcp::CompositionError::UnresolvedLayer {
                 asset_path,
                 arc: pcp::ArcType::Payload,
                 introduced_by,
@@ -563,7 +568,7 @@ mod pcp_txt {
                     layer_id(introduced_by),
                 ),
             )),
-            pcp::Error::UnresolvedPrimPath {
+            pcp::CompositionError::UnresolvedPrimPath {
                 arc,
                 target_layer,
                 prim_path,
@@ -584,7 +589,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::Error::ProhibitedRelocationSource {
+            pcp::CompositionError::ProhibitedRelocationSource {
                 arc,
                 site,
                 site_layer,
@@ -607,7 +612,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::Error::OpinionAtRelocationSource {
+            pcp::CompositionError::OpinionAtRelocationSource {
                 source_path,
                 layer,
                 composing,
@@ -619,7 +624,7 @@ mod pcp_txt {
                     layer_id(layer),
                 ),
             )),
-            pcp::Error::InvalidExternalTargetPath {
+            pcp::CompositionError::InvalidExternalTargetPath {
                 is_connection,
                 target,
                 property,
@@ -652,7 +657,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::Error::InvalidInstanceTargetPath {
+            pcp::CompositionError::InvalidInstanceTargetPath {
                 is_connection,
                 target,
                 property,
@@ -675,7 +680,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::Error::InconsistentPropertyType {
+            pcp::CompositionError::InconsistentPropertyType {
                 property,
                 defining_layer,
                 defining_path,
@@ -702,7 +707,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::Error::SublayerCycle { root_layer, seen_layer } => Some((
+            pcp::CompositionError::SublayerCycle { root_layer, seen_layer } => Some((
                 None,
                 format!(
                     "Sublayer hierarchy with root layer @{}@ has cycles. \
@@ -711,7 +716,7 @@ mod pcp_txt {
                     layer_id(seen_layer),
                 ),
             )),
-            pcp::Error::InvalidRelocate {
+            pcp::CompositionError::InvalidRelocate {
                 source_path,
                 target_path,
                 layer,
@@ -724,7 +729,7 @@ mod pcp_txt {
                     layer_id(layer),
                 ),
             )),
-            pcp::Error::ArcCycle(info) => {
+            pcp::CompositionError::ArcCycle(info) => {
                 let mut msg = format!("Cycle detected:\n@{}@<{}>", layer_id(&info.root_layer), info.composing);
                 let last = info.hops.len() - 1;
                 for (i, hop) in info.hops.iter().enumerate() {
@@ -741,7 +746,7 @@ mod pcp_txt {
                 msg.push('\n');
                 Some((Some(&info.composing), msg))
             }
-            pcp::Error::SameTargetRelocations { target, sources } => {
+            pcp::CompositionError::SameTargetRelocations { target, sources } => {
                 let list = sources
                     .iter()
                     .map(|(s, l)| format!("relocation from <{s}> authored at @{}@</>", layer_id(l)))
@@ -756,7 +761,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::Error::ConflictingRelocation {
+            pcp::CompositionError::ConflictingRelocation {
                 source_path,
                 target_path,
                 layer,

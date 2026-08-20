@@ -248,7 +248,7 @@ where
     /// could not be decoded. Read accessors swallow the error via
     /// [`get`](Self::get); read-modify-write authoring keeps it so an
     /// undecodable field is not mistaken for "absent" and overwritten.
-    pub fn field(&self, key: &str) -> anyhow::Result<Option<sdf::Value>> {
+    pub fn field(&self, key: &str) -> Result<Option<sdf::Value>, sdf::DataError> {
         Ok(self.data.try_field(&self.path, key)?.map(|c| c.into_owned()))
     }
 

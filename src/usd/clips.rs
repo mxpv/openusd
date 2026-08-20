@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use crate::Result;
 use crate::gf;
 use crate::pcp::clip::keys;
 use crate::pcp::clip_manifest;
@@ -25,7 +26,7 @@ use super::{Prim, StageAuthoringError};
 ///
 /// ```no_run
 /// # use openusd::usd::{Stage, ClipsAPI};
-/// # fn demo(stage: &Stage) -> anyhow::Result<()> {
+/// # fn demo(stage: &Stage) -> openusd::Result<()> {
 /// let prim = stage.prim("/World/Anim")?;
 /// let clips = ClipsAPI::new(&prim);
 /// for set in clips.clip_set_names()? {
@@ -51,7 +52,7 @@ impl ClipsAPI {
     /// regardless of `clipSets`; a set listed here may still resolve no clip
     /// values (e.g. a template set with invalid metadata, or a name excluded by
     /// `clipSets`). Use [`clip_sets`](Self::clip_sets) for the strength order.
-    pub fn clip_set_names(&self) -> anyhow::Result<Vec<String>> {
+    pub fn clip_set_names(&self) -> Result<Vec<String>> {
         self.prim.clip_sets()
     }
 
@@ -59,11 +60,12 @@ impl ClipsAPI {
     /// `UsdClipsAPI::GetClipSets`), folding the list-op edits across layers and
     /// preserving the prepend/append/delete structure. `None` when `clipSets`
     /// is unauthored — clip sets then fall back to name order (spec 12.3.4.1).
-    pub fn clip_sets(&self) -> anyhow::Result<Option<sdf::StringListOp>> {
+    pub fn clip_sets(&self) -> Result<Option<sdf::StringListOp>> {
         let path = self.prim.path().clone();
-        self.prim
+        Ok(self
+            .prim
             .stage()
-            .masked(&path, |g, cache| cache.clip_sets_list_op(g, &path))
+            .masked(&path, |g, cache| cache.clip_sets_list_op(g, &path))?)
     }
 
     /// Author the `clipSets` strength-ordering list-op (C++
@@ -80,7 +82,7 @@ impl ClipsAPI {
     /// The whole composed `clips` dictionary (C++ `UsdClipsAPI::GetClips`),
     /// resolved once. Prefer this over the per-field getters when reading many
     /// fields, since each per-field getter re-resolves the entire dictionary.
-    pub fn clips(&self) -> anyhow::Result<Option<sdf::Dictionary>> {
+    pub fn clips(&self) -> Result<Option<sdf::Dictionary>> {
         Ok(self
             .prim
             .stage()
@@ -100,7 +102,7 @@ impl ClipsAPI {
 
     /// Ordered clip asset paths for `clip_set` (`assetPaths`), an `asset[]` (C++
     /// `VtArray<SdfAssetPath>`). Empty when unauthored.
-    pub fn clip_asset_paths(&self, clip_set: &str) -> anyhow::Result<Vec<AssetPath>> {
+    pub fn clip_asset_paths(&self, clip_set: &str) -> Result<Vec<AssetPath>> {
         Ok(self
             .field(clip_set, keys::ASSET_PATHS)?
             .and_then(Value::try_as_asset_path_vec)
@@ -109,7 +111,7 @@ impl ClipsAPI {
 
     /// `(stageTime, clipIndex)` activation pairs for `clip_set` (`active`),
     /// each a `gf::Vec2d`. Empty when unauthored.
-    pub fn clip_active(&self, clip_set: &str) -> anyhow::Result<Vec<gf::Vec2d>> {
+    pub fn clip_active(&self, clip_set: &str) -> Result<Vec<gf::Vec2d>> {
         Ok(self
             .field(clip_set, keys::ACTIVE)?
             .and_then(Value::try_as_vec_2d_vec)
@@ -118,7 +120,7 @@ impl ClipsAPI {
 
     /// `(stageTime, clipTime)` timing pairs for `clip_set` (`times`), each a
     /// `gf::Vec2d`. Empty when unauthored.
-    pub fn clip_times(&self, clip_set: &str) -> anyhow::Result<Vec<gf::Vec2d>> {
+    pub fn clip_times(&self, clip_set: &str) -> Result<Vec<gf::Vec2d>> {
         Ok(self
             .field(clip_set, keys::TIMES)?
             .and_then(Value::try_as_vec_2d_vec)
@@ -126,7 +128,7 @@ impl ClipsAPI {
     }
 
     /// Prim path queried within each clip for `clip_set` (`primPath`), if authored.
-    pub fn clip_prim_path(&self, clip_set: &str) -> anyhow::Result<Option<String>> {
+    pub fn clip_prim_path(&self, clip_set: &str) -> Result<Option<String>> {
         self.cast_field(clip_set, keys::PRIM_PATH)
     }
 
@@ -136,7 +138,7 @@ impl ClipsAPI {
     /// Reported as authored, so a `` `${VAR}` `` comes back unevaluated — as it
     /// does from C++. Value resolution evaluates it and sources the clip the
     /// expression names (see the `pcp` module docs), so the two can differ.
-    pub fn clip_manifest_asset_path(&self, clip_set: &str) -> anyhow::Result<Option<AssetPath>> {
+    pub fn clip_manifest_asset_path(&self, clip_set: &str) -> Result<Option<AssetPath>> {
         Ok(self
             .field(clip_set, keys::MANIFEST_ASSET_PATH)?
             .and_then(Value::try_as_asset_path))
@@ -144,32 +146,32 @@ impl ClipsAPI {
 
     /// Whether gaps in `clip_set` interpolate across surrounding clips rather
     /// than falling back to the manifest default (`interpolateMissingClipValues`).
-    pub fn interpolate_missing_clip_values(&self, clip_set: &str) -> anyhow::Result<Option<bool>> {
+    pub fn interpolate_missing_clip_values(&self, clip_set: &str) -> Result<Option<bool>> {
         self.cast_field(clip_set, keys::INTERPOLATE_MISSING)
     }
 
     /// Template asset-path pattern for `clip_set` (`templateAssetPath`), if authored.
-    pub fn clip_template_asset_path(&self, clip_set: &str) -> anyhow::Result<Option<String>> {
+    pub fn clip_template_asset_path(&self, clip_set: &str) -> Result<Option<String>> {
         self.cast_field(clip_set, keys::TEMPLATE_ASSET_PATH)
     }
 
     /// Template stride for `clip_set` (`templateStride`), if authored.
-    pub fn clip_template_stride(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
+    pub fn clip_template_stride(&self, clip_set: &str) -> Result<Option<f64>> {
         self.cast_field(clip_set, keys::TEMPLATE_STRIDE)
     }
 
     /// Template start time for `clip_set` (`templateStartTime`), if authored.
-    pub fn clip_template_start_time(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
+    pub fn clip_template_start_time(&self, clip_set: &str) -> Result<Option<f64>> {
         self.cast_field(clip_set, keys::TEMPLATE_START_TIME)
     }
 
     /// Template end time for `clip_set` (`templateEndTime`), if authored.
-    pub fn clip_template_end_time(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
+    pub fn clip_template_end_time(&self, clip_set: &str) -> Result<Option<f64>> {
         self.cast_field(clip_set, keys::TEMPLATE_END_TIME)
     }
 
     /// Template active offset for `clip_set` (`templateActiveOffset`), if authored.
-    pub fn clip_template_active_offset(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
+    pub fn clip_template_active_offset(&self, clip_set: &str) -> Result<Option<f64>> {
         self.cast_field(clip_set, keys::TEMPLATE_ACTIVE_OFFSET)
     }
 
@@ -282,7 +284,7 @@ impl ClipsAPI {
     ///
     /// ```no_run
     /// # use openusd::{sdf, usd::{Stage, ClipsAPI}};
-    /// # fn demo(stage: &Stage) -> anyhow::Result<()> {
+    /// # fn demo(stage: &Stage) -> openusd::Result<()> {
     /// let clips = ClipsAPI::new(&stage.prim("/World/Anim")?);
     /// if let Some(manifest) = clips.generate_clip_manifest("default", false)? {
     ///     manifest.export("manifest.usda")?;
@@ -291,15 +293,11 @@ impl ClipsAPI {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn generate_clip_manifest(
-        &self,
-        clip_set: &str,
-        write_blocks_for_missing: bool,
-    ) -> anyhow::Result<Option<sdf::Layer>> {
+    pub fn generate_clip_manifest(&self, clip_set: &str, write_blocks_for_missing: bool) -> Result<Option<sdf::Layer>> {
         let path = self.prim.path().clone();
-        self.prim.stage().masked(&path, |g, cache| {
+        Ok(self.prim.stage().masked(&path, |g, cache| {
             cache.generate_clip_manifest(g, &path, clip_set, write_blocks_for_missing)
-        })
+        })?)
     }
 
     /// Generate a manifest layer for `clip_layers`, queried under
@@ -311,23 +309,27 @@ impl ClipsAPI {
     pub fn generate_clip_manifest_from_layers(
         clip_layers: &[&sdf::Layer],
         clip_prim_path: &sdf::Path,
-    ) -> anyhow::Result<sdf::Layer> {
+    ) -> Result<sdf::Layer> {
         // Without an activation schedule there are no times to block at, so
         // every clip is passed for declaration only.
         let clips: Vec<(&sdf::Layer, Option<f64>)> = clip_layers.iter().map(|layer| (*layer, None)).collect();
-        clip_manifest::generate_manifest(&clips, clip_prim_path, clip_manifest::CLIP_MANIFEST_TAG)
+        Ok(clip_manifest::generate_manifest(
+            &clips,
+            clip_prim_path,
+            clip_manifest::CLIP_MANIFEST_TAG,
+        )?)
     }
 
     /// Read a single field from `clip_set`'s entry in the composed `clips`
     /// dictionary and coerce it to `T` via [`Value::cast`]. Returns `None` when
     /// the set (or field) is unauthored, or its value can't cast to `T`.
-    fn cast_field<T: sdf::FromValueCast>(&self, clip_set: &str, key: &str) -> anyhow::Result<Option<T>> {
+    fn cast_field<T: sdf::FromValueCast>(&self, clip_set: &str, key: &str) -> Result<Option<T>> {
         Ok(self.field(clip_set, key)?.and_then(|v| v.cast().ok()))
     }
 
     /// Read the raw `Value` of a single field in `clip_set`'s entry of the
     /// composed `clips` dictionary, or `None` when the set or field is unauthored.
-    fn field(&self, clip_set: &str, key: &str) -> anyhow::Result<Option<Value>> {
+    fn field(&self, clip_set: &str, key: &str) -> Result<Option<Value>> {
         let Some(mut sets) = self.clips()? else {
             return Ok(None);
         };
@@ -368,6 +370,8 @@ impl ClipsAPI {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::gf;
     use crate::usd::{Stage, TimeCode};
     use std::collections::HashMap;
@@ -382,7 +386,7 @@ mod tests {
     /// `clip_asset_anchor` authors the explicit form on `/Model`:
     /// `asset[] assetPaths`, `double2[] active`, `string primPath`.
     #[test]
-    fn reads_explicit_clip_set_from_fixture() -> anyhow::Result<()> {
+    fn reads_explicit_clip_set_from_fixture() -> Result<()> {
         let stage = Stage::open(&fixture("clip_asset_anchor"))?;
         let clips = ClipsAPI::new(&stage.prim("/Model")?);
 
@@ -398,7 +402,7 @@ mod tests {
     /// `asset`-typed template path is the case a `String`-only extractor
     /// would silently miss.
     #[test]
-    fn reads_template_clip_set_from_fixture() -> anyhow::Result<()> {
+    fn reads_template_clip_set_from_fixture() -> Result<()> {
         let stage = Stage::open(&fixture("clip_template"))?;
         let clips = ClipsAPI::new(&stage.prim("/Model")?);
 
@@ -419,7 +423,7 @@ mod tests {
     /// `templateActiveOffset`) plus the missing-set / missing-field edges,
     /// authored in-memory with the value types the parser produces.
     #[test]
-    fn reads_remaining_fields_and_missing_edges() -> anyhow::Result<()> {
+    fn reads_remaining_fields_and_missing_edges() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let set = Value::Dictionary(
             [
@@ -465,7 +469,7 @@ mod tests {
     /// back — also covers that the per-field read-modify-write preserves the
     /// other sets and fields already authored.
     #[test]
-    fn set_get_round_trip() -> anyhow::Result<()> {
+    fn set_get_round_trip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Anim")?;
         let clips = ClipsAPI::new(&stage.prim("/Anim")?);
@@ -523,7 +527,7 @@ mod tests {
     /// `clipSets` round-trips through the list-op setter/getter, and a prepend
     /// composes over a weaker explicit opinion.
     #[test]
-    fn clip_sets_list_op_round_trip() -> anyhow::Result<()> {
+    fn clip_sets_list_op_round_trip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Anim")?;
         let clips = ClipsAPI::new(&stage.prim("/Anim")?);
@@ -538,7 +542,7 @@ mod tests {
     /// `set_clips` authors the whole dictionary in one write and `clips` reads
     /// it back composed.
     #[test]
-    fn clips_dict_round_trip() -> anyhow::Result<()> {
+    fn clips_dict_round_trip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Anim")?;
         let clips = ClipsAPI::new(&stage.prim("/Anim")?);
@@ -570,7 +574,7 @@ mod tests {
     /// (`/Clip/B`). Ported from the C++ `testUsdValueClips` manifest-generation
     /// assets.
     #[test]
-    fn generate_manifest_declares_sampled() -> anyhow::Result<()> {
+    fn generate_manifest_declares_sampled() -> Result<()> {
         let stage = Stage::open(&fixture("clip_manifest_gen"))?;
         let clips = ClipsAPI::new(&stage.prim("/Model")?);
 
@@ -591,12 +595,12 @@ mod tests {
     /// of every clip that carries no samples for it. `clip_1` is activated at 0
     /// and again at 8, so `z` — which only `clip_2` carries — is blocked twice.
     #[test]
-    fn generate_manifest_blocks_missing() -> anyhow::Result<()> {
+    fn generate_manifest_blocks_missing() -> Result<()> {
         let stage = Stage::open(&fixture("clip_manifest_gen"))?;
         let clips = ClipsAPI::new(&stage.prim("/Model")?);
 
         let manifest = clips.generate_clip_manifest("default", true)?.expect("set resolves");
-        let blocked = |path: &str| -> anyhow::Result<Vec<f64>> {
+        let blocked = |path: &str| -> Result<Vec<f64>> {
             Ok(manifest
                 .attribute(sdf::path(path)?)?
                 .expect("declared")
@@ -619,7 +623,7 @@ mod tests {
     /// `manifestAssetPath`, it gates value resolution exactly as the synthesized
     /// one it replaces did. An unknown clip-set name generates nothing.
     #[test]
-    fn generate_manifest_round_trip() -> anyhow::Result<()> {
+    fn generate_manifest_round_trip() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let stage = Stage::open(&fixture("clip_manifest_gen"))?;
         let clips = ClipsAPI::new(&stage.prim("/Model")?);
@@ -650,7 +654,7 @@ mod tests {
     /// manifest that would silently de-source that clip's attributes is never
     /// handed back for export.
     #[test]
-    fn generate_manifest_unreadable_clip_errors() -> anyhow::Result<()> {
+    fn generate_manifest_unreadable_clip_errors() -> Result<()> {
         let dir = tempfile::tempdir()?;
         std::fs::write(
             dir.path().join("clip.usda"),
@@ -679,14 +683,15 @@ def "Model" (
         let error = clips
             .generate_clip_manifest("default", false)
             .expect_err("clip missing");
-        assert!(format!("{error:#}").contains("absent.usda"), "{error:#}");
+        let rendered = crate::tf::error_chain(&error);
+        assert!(rendered.contains("absent.usda"), "{rendered}");
         Ok(())
     }
 
     /// The from-layers form declares over layers the caller already holds,
     /// without an activation schedule, so it never writes blocks.
     #[test]
-    fn generate_manifest_from_layers() -> anyhow::Result<()> {
+    fn generate_manifest_from_layers() -> Result<()> {
         let mut clip = sdf::Layer::new_anonymous("clip.usda");
         clip.edit(|l| {
             sdf::AttributeSpec::new(l.data_mut(), "/A.sampled", "double", sdf::Variability::Varying, false)?
@@ -710,7 +715,7 @@ def "Model" (
     /// Authoring clips on a prim that has no local spec on the edit-target
     /// layer creates an `over` (C++ `SetMetadata` behavior) rather than erroring.
     #[test]
-    fn set_creates_over_without_local_spec() -> anyhow::Result<()> {
+    fn set_creates_over_without_local_spec() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let clips = ClipsAPI::new(&stage.prim("/NoSpec")?);
         clips.set_clip_prim_path("default", "/Geo")?;

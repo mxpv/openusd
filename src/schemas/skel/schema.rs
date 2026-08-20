@@ -9,7 +9,7 @@
 //! quaternions stay in USD's `(w, x, y, z)` order, and half-precision storage
 //! is widened to `f32`.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::gf;
 use crate::sdf::{self, Value, Variability};
@@ -755,6 +755,8 @@ fn vec3f_vec(attr: &Attribute) -> Result<Vec<gf::Vec3f>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::geom::Boundable;
 
     #[test]

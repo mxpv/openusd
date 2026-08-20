@@ -7,7 +7,7 @@
 //! [`Field3DAsset`](super::Field3DAsset)). Concrete views implement both
 //! through the `impl_vol_schema!(field_asset ...)` macro arm.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::schemas::geom;
 use crate::usd::Attribute;

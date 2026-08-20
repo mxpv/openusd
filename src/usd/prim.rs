@@ -33,7 +33,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::error::Error;
 use std::sync::Arc;
 
 use super::{
@@ -41,7 +40,7 @@ use super::{
     Stage, StageAuthoringError, VersionFilter, schema_registry,
 };
 use crate::tf::Token;
-use crate::{pcp, sdf};
+use crate::{Result, pcp, sdf};
 
 /// Which property names [`Prim::properties_of_type`] walks, and whether a
 /// schema declaration may answer for a name no layer authors.
@@ -185,7 +184,7 @@ impl Prim {
     /// through [`is_a`](Self::is_a).
     pub fn can_apply_api(&self, name: impl Into<Token>) -> Result<(), ApplyApiError> {
         let name = name.into();
-        if !self.is_valid()? {
+        if !self.stage.has_spec(&self.path)? {
             return Err(ApplyApiError::PrimNotValid {
                 path: self.path.clone(),
             });
@@ -208,7 +207,7 @@ impl Prim {
         if !allowed.is_empty() {
             // The prim's type answers for every candidate, so it is resolved
             // before the scan.
-            let type_info = self.prim_type_info()?;
+            let type_info = self.stage.prim_type_info_composed(&self.path)?;
             if !allowed.iter().any(|t| registry.is_a(type_info.schema_type_name(), t)) {
                 return Err(ApplyApiError::PrimTypeNotAllowed {
                     schema: schema.clone(),
@@ -237,13 +236,13 @@ impl Prim {
     /// TODO: a schema-declared dictionary should compose *under* the authored
     /// one (C++ `VtDictionaryOver`) rather than being shadowed by it; the same
     /// generalization is missing from [`Attribute::get_metadata`].
-    pub fn get_metadata<T>(&self, key: &str) -> anyhow::Result<Option<T>>
+    pub fn get_metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
-        T::Error: Error + Send + Sync + 'static,
+        T::Error: Into<crate::Error>,
     {
-        if let Some(authored) = self.stage.field::<T>(&self.path, key)? {
-            return Ok(Some(authored));
+        if let Some(authored) = self.stage.field::<sdf::Value>(&self.path, key)? {
+            return super::decode_value(Some(authored));
         }
         // Schema metadata parses untyped, so a declaration may hold a variant
         // the caller did not ask for; that is "not declared", not an error.
@@ -357,7 +356,7 @@ impl Prim {
     /// can't be flattened).
     ///
     /// Useful for ordered token stacks like `xformOpOrder` or `apiSchemas`.
-    pub fn append_to_uniform_token_array(&self, name: &str, value: impl Into<String>) -> anyhow::Result<bool> {
+    pub fn append_to_uniform_token_array(&self, name: &str, value: impl Into<String>) -> Result<bool> {
         let value = value.into();
         let attr_path = self.path.append_property(name)?;
         let existing: Vec<String> = match self.stage.field::<sdf::Value>(&attr_path, sdf::FieldKey::Default)? {
@@ -387,7 +386,7 @@ impl Prim {
     /// This is read-only introspection — clip values are resolved through
     /// [`Attribute::get_at`]. The `clipSets` strength order is not applied to
     /// the returned names.
-    pub fn clip_sets(&self) -> anyhow::Result<Vec<String>> {
+    pub fn clip_sets(&self) -> Result<Vec<String>> {
         let Some(sdf::Value::Dictionary(sets)) = self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::Clips)?
         else {
             return Ok(Vec::new());
@@ -399,7 +398,7 @@ impl Prim {
 
     /// Returns `true` when one or more value-clip sets are composed onto this
     /// prim (spec 12.3.4).
-    pub fn has_clips(&self) -> anyhow::Result<bool> {
+    pub fn has_clips(&self) -> Result<bool> {
         Ok(!self.clip_sets()?.is_empty())
     }
 
@@ -407,7 +406,13 @@ impl Prim {
     ///
     /// `typeName` is a token; a value of any other type is treated as untyped
     /// (`None`), matching C++ reading the field as an empty `TfToken`.
-    pub fn type_name(&self) -> anyhow::Result<Option<Token>> {
+    pub fn type_name(&self) -> Result<Option<Token>> {
+        Ok(self.type_name_composed()?)
+    }
+
+    /// [`type_name`](Self::type_name) at the composition tier, for the type
+    /// resolution that folds the failure into its own error.
+    pub(crate) fn type_name_composed(&self) -> Result<Option<Token>, pcp::QueryError> {
         Ok(self
             .stage
             .field::<sdf::Value>(&self.path, sdf::FieldKey::TypeName)?
@@ -415,15 +420,17 @@ impl Prim {
     }
 
     /// Composed specifier, if one resolves. Mirrors C++ `UsdPrim::GetSpecifier`.
-    pub fn specifier(&self) -> anyhow::Result<Option<sdf::Specifier>> {
-        self.stage.field::<sdf::Specifier>(&self.path, sdf::FieldKey::Specifier)
+    pub fn specifier(&self) -> Result<Option<sdf::Specifier>> {
+        Ok(self
+            .stage
+            .field::<sdf::Specifier>(&self.path, sdf::FieldKey::Specifier)?)
     }
 
     /// Composed `kind` metadata, if authored. Mirrors C++ `UsdPrim::GetKind`.
     ///
     /// `kind` is a token; a value of any other type is treated as unauthored
     /// (`None`), matching C++ reading the field as an empty `TfToken`.
-    pub fn kind(&self) -> anyhow::Result<Option<Token>> {
+    pub fn kind(&self) -> Result<Option<Token>> {
         Ok(self
             .stage
             .field::<sdf::Value>(&self.path, sdf::FieldKey::Kind)?
@@ -432,8 +439,8 @@ impl Prim {
 
     /// Returns this prim's composed `customData` dictionary, if authored.
     /// Mirrors C++ `UsdObject::GetCustomData`.
-    pub fn custom_data(&self) -> anyhow::Result<Option<sdf::Value>> {
-        self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::CustomData)
+    pub fn custom_data(&self) -> Result<Option<sdf::Value>> {
+        Ok(self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::CustomData)?)
     }
 
     /// The API schemas that apply to this prim, strongest first. Mirrors C++
@@ -445,7 +452,7 @@ impl Prim {
     /// `PhysicsLimitAPI:rotZ`). Use
     /// [`authored_api_schemas`](Self::authored_api_schemas) for the authored
     /// list alone.
-    pub fn api_schemas(&self) -> anyhow::Result<Vec<Token>> {
+    pub fn api_schemas(&self) -> Result<Vec<Token>> {
         let info = self.prim_type_info()?;
         let mut names = info.prim_definition().applied_api_schemas().to_vec();
 
@@ -468,7 +475,13 @@ impl Prim {
     /// The prim's composed `apiSchemas` list op, flattened across all
     /// contributing opinions. Mirrors C++ `UsdPrim::GetAppliedSchemas` before
     /// the prim definition folds in built-ins.
-    pub fn authored_api_schemas(&self) -> anyhow::Result<Vec<Token>> {
+    pub fn authored_api_schemas(&self) -> Result<Vec<Token>> {
+        Ok(self.authored_api_schemas_composed()?)
+    }
+
+    /// [`authored_api_schemas`](Self::authored_api_schemas) at the composition
+    /// tier, for the type resolution that folds the failure into its own error.
+    pub(crate) fn authored_api_schemas_composed(&self) -> Result<Vec<Token>, pcp::QueryError> {
         self.stage
             .masked(&self.path, |g, cache| cache.api_schemas(g, &self.path))
     }
@@ -485,7 +498,7 @@ impl Prim {
     /// The question is asked of the prim's schema type, which is empty unless a
     /// registered type backs it. So a prim whose `typeName` this registry does
     /// not know is nothing — including the very name it authors.
-    pub fn is_a(&self, schema: impl Into<Token>) -> anyhow::Result<bool> {
+    pub fn is_a(&self, schema: impl Into<Token>) -> Result<bool> {
         let info = self.prim_type_info()?;
         Ok(self
             .stage
@@ -495,7 +508,7 @@ impl Prim {
 
     /// `true` when `name` is in the prim's composed `apiSchemas` (pass the full
     /// instance name for multi-apply schemas). Mirrors C++ `UsdPrim::HasAPI`.
-    pub fn has_api_schema(&self, name: impl Into<Token>) -> anyhow::Result<bool> {
+    pub fn has_api_schema(&self, name: impl Into<Token>) -> Result<bool> {
         let name = name.into();
         Ok(self.api_schemas()?.iter().any(|s| s.as_str() == name.as_str()))
     }
@@ -510,7 +523,7 @@ impl Prim {
     ///
     /// Deriving the type costs composed reads, so a registry with nothing in it
     /// answers `None` without paying them.
-    pub fn schema_type(&self) -> anyhow::Result<Option<Token>> {
+    pub fn schema_type(&self) -> Result<Option<Token>> {
         if self.stage.schema_registry().is_empty() {
             return Ok(None);
         }
@@ -524,7 +537,7 @@ impl Prim {
     /// This is [`is_a`](Self::is_a) asked of a whole family rather than one
     /// identifier, so a caller does not have to name every version a schema has
     /// shipped under (`DomeLight`, `DomeLight_1`, …).
-    pub fn is_in_family(&self, family: impl Into<Token>, filter: VersionFilter) -> anyhow::Result<bool> {
+    pub fn is_in_family(&self, family: impl Into<Token>, filter: VersionFilter) -> Result<bool> {
         Ok(self.version_in_family(family, filter)?.is_some())
     }
 
@@ -538,7 +551,7 @@ impl Prim {
     /// The newest accepted version the prim satisfies wins, which is the order
     /// [`SchemaRegistry::schema_infos_in_family`](super::SchemaRegistry::schema_infos_in_family)
     /// answers in.
-    pub fn version_in_family(&self, family: impl Into<Token>, filter: VersionFilter) -> anyhow::Result<Option<u32>> {
+    pub fn version_in_family(&self, family: impl Into<Token>, filter: VersionFilter) -> Result<Option<u32>> {
         let family = family.into();
         let registry = self.stage.schema_registry();
         if let Some(schema_type) = self.schema_type()? {
@@ -568,7 +581,7 @@ impl Prim {
         family: impl Into<Token>,
         filter: VersionFilter,
         instance: Option<&Token>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool> {
         Ok(self.api_version_in_family(family, filter, instance)?.is_some())
     }
 
@@ -588,7 +601,7 @@ impl Prim {
         family: impl Into<Token>,
         filter: VersionFilter,
         instance: Option<&Token>,
-    ) -> anyhow::Result<Option<u32>> {
+    ) -> Result<Option<u32>> {
         let family = family.into();
         let registry = self.stage.schema_registry();
         let definition = self.prim_definition()?;
@@ -628,14 +641,14 @@ impl Prim {
     ///
     /// Shared with every prim of the same type, and valid for as long as the
     /// stage's [`SchemaRegistry`](super::SchemaRegistry) lives.
-    pub fn prim_type_info(&self) -> anyhow::Result<Arc<PrimTypeInfo>> {
+    pub fn prim_type_info(&self) -> Result<Arc<PrimTypeInfo>> {
         self.stage.prim_type_info(&self.path)
     }
 
     /// What this prim's schemas declare: their properties, and the fallback
     /// values those properties take when nothing is authored. Mirrors C++
     /// `UsdPrim::GetPrimDefinition`.
-    pub fn prim_definition(&self) -> anyhow::Result<Arc<PrimDefinition>> {
+    pub fn prim_definition(&self) -> Result<Arc<PrimDefinition>> {
         Ok(self.prim_type_info()?.prim_definition().clone())
     }
 
@@ -645,13 +658,15 @@ impl Prim {
     /// this stage at all, and reads back as the gate's "no answer" value, which
     /// for a `bool` query is `false` — ask [`is_valid`](Self::is_valid) to tell
     /// the two apart.
-    pub fn is_active(&self) -> anyhow::Result<bool> {
-        self.stage.masked(&self.path, |g, cache| cache.is_active(g, &self.path))
+    pub fn is_active(&self) -> Result<bool> {
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.is_active(g, &self.path))?)
     }
 
     /// Composed `instanceable` flag (spec 11.3.1). Mirrors C++
     /// `UsdPrim::IsInstanceable`; an unauthored flag resolves to `false`.
-    pub fn is_instanceable(&self) -> anyhow::Result<bool> {
+    pub fn is_instanceable(&self) -> Result<bool> {
         Ok(self
             .stage
             .field::<bool>(&self.path, sdf::FieldKey::Instanceable)?
@@ -661,7 +676,7 @@ impl Prim {
     /// `true` if the prim is loaded — active, and no payload-carrying prim at
     /// or above it (per the stage's runtime load rules) is excluded. Mirrors
     /// C++ `UsdPrim::IsLoaded`.
-    pub fn is_loaded(&self) -> anyhow::Result<bool> {
+    pub fn is_loaded(&self) -> Result<bool> {
         if !self.is_active()? {
             return Ok(false);
         }
@@ -681,14 +696,15 @@ impl Prim {
     /// `true` if the prim and all ancestors have defining specifiers (`def` or
     /// `class`). `over`, missing specs, and missing specifier opinions are not
     /// defining. Mirrors C++ `UsdPrim::IsDefined`.
-    pub fn is_defined(&self) -> anyhow::Result<bool> {
-        self.stage
-            .masked(&self.path, |g, cache| cache.is_defined(g, &self.path))
+    pub fn is_defined(&self) -> Result<bool> {
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.is_defined(g, &self.path))?)
     }
 
     /// `true` if the prim or any ancestor resolves to `class`. Mirrors C++
     /// `UsdPrim::IsAbstract`.
-    pub fn is_abstract(&self) -> anyhow::Result<bool> {
+    pub fn is_abstract(&self) -> Result<bool> {
         if self.path == sdf::Path::abs_root() || !self.stage.has_spec(&self.path)? {
             return Ok(false);
         }
@@ -701,9 +717,10 @@ impl Prim {
     }
 
     /// `true` if the prim index contains at least one composition arc.
-    pub fn has_composition_arc(&self) -> anyhow::Result<bool> {
-        self.stage
-            .masked(&self.path, |g, cache| cache.has_composition_arc(g, &self.path))
+    pub fn has_composition_arc(&self) -> Result<bool> {
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.has_composition_arc(g, &self.path))?)
     }
 
     /// `true` if this prim is an instance (spec 11.3.3): `instanceable` resolves
@@ -712,42 +729,44 @@ impl Prim {
     /// A `/__Prototype_N` root is never an instance even when `instanceable`
     /// composes true on it, which is routine for a published asset; the
     /// composition cache resolves that rule.
-    pub fn is_instance(&self) -> anyhow::Result<bool> {
-        self.stage
-            .masked(&self.path, |g, cache| cache.is_instance(g, &self.path))
+    pub fn is_instance(&self) -> Result<bool> {
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.is_instance(g, &self.path))?)
     }
 
     /// `true` if the prim is in the contiguous model hierarchy: its `kind` is
     /// `group` / `assembly` / `component`, and every ancestor below the
     /// pseudo-root is `group` / `assembly`. Mirrors C++ `UsdPrim::IsModel`.
-    pub fn is_model(&self) -> anyhow::Result<bool> {
+    pub fn is_model(&self) -> Result<bool> {
         Ok(self.model_kind()?.is_some())
     }
 
     /// `true` if the prim is a group-like model (`group` or `assembly`).
     /// Mirrors C++ `UsdPrim::IsGroup`.
-    pub fn is_group(&self) -> anyhow::Result<bool> {
+    pub fn is_group(&self) -> Result<bool> {
         Ok(matches!(self.model_kind()?, Some("group" | "assembly")))
     }
 
     /// `true` if the prim is a component model in a valid model hierarchy.
     /// Mirrors C++ `UsdPrim::IsComponent`.
-    pub fn is_component(&self) -> anyhow::Result<bool> {
+    pub fn is_component(&self) -> Result<bool> {
         Ok(self.model_kind()? == Some("component"))
     }
 
     /// `true` if the prim has `kind = "subcomponent"`. Mirrors C++
     /// `UsdPrim::IsSubComponent`.
-    pub fn is_subcomponent(&self) -> anyhow::Result<bool> {
+    pub fn is_subcomponent(&self) -> Result<bool> {
         Ok(self.kind()?.as_deref() == Some("subcomponent"))
     }
 
     /// Returns the shared prototype path (`/__Prototype_N`) for this prim if it
     /// is an instance, else `None` (spec 11.3.3). Mirrors C++
     /// `UsdPrim::GetPrototype`.
-    pub fn prototype(&self) -> anyhow::Result<Option<sdf::Path>> {
-        self.stage
-            .masked(&self.path, |g, cache| cache.prototype_of(g, &self.path))
+    pub fn prototype(&self) -> Result<Option<sdf::Path>> {
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.prototype_of(g, &self.path))?)
     }
 
     /// Returns the instance prims sharing this prototype root (a
@@ -762,14 +781,14 @@ impl Prim {
     /// No population filtering is applied to the results: only a prim the stage
     /// populated can register (see `IndexCache::is_populated`), so every
     /// instance here is one the mask exposes.
-    pub fn instances(&self) -> anyhow::Result<Vec<sdf::Path>> {
+    pub fn instances(&self) -> Result<Vec<sdf::Path>> {
         self.stage.resolve_prototype_path(&self.path)?;
         Ok(self.stage.cache().instances_of(&self.path))
     }
 
     /// Returns `true` if this prim is a prototype root (`/__Prototype_N`).
     /// Mirrors C++ `UsdPrim::IsPrototype`.
-    pub fn is_prototype(&self) -> anyhow::Result<bool> {
+    pub fn is_prototype(&self) -> Result<bool> {
         self.stage.resolve_prototype_path(&self.path)?;
         Ok(self.stage.cache().is_prototype(&self.path))
     }
@@ -782,7 +801,7 @@ impl Prim {
     /// A composed prim is required, not just a path in the namespace: C++ can
     /// only ask this of a prim it instantiated, so a path under a registered
     /// root that composes to nothing answers `false`.
-    pub fn is_in_prototype(&self) -> anyhow::Result<bool> {
+    pub fn is_in_prototype(&self) -> Result<bool> {
         self.stage.resolve_prototype_path(&self.path)?;
         let in_namespace = self.stage.cache().is_in_prototype(&self.path);
         Ok(in_namespace && self.is_valid()?)
@@ -791,15 +810,16 @@ impl Prim {
     /// `true` if this prim is an instance proxy — a descendant of an instance
     /// prim, in the instance's own namespace, standing in for a prim in the
     /// shared prototype (spec 11.3.3). Mirrors C++ `UsdPrim::IsInstanceProxy`.
-    pub fn is_instance_proxy(&self) -> anyhow::Result<bool> {
-        self.stage
-            .masked(&self.path, |g, cache| cache.is_instance_proxy(g, &self.path))
+    pub fn is_instance_proxy(&self) -> Result<bool> {
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.is_instance_proxy(g, &self.path))?)
     }
 
     /// Returns the prim in the shared prototype this instance proxy stands in
     /// for (a `/__Prototype_N/...` prim), or `None` when this prim is not an
     /// instance proxy (spec 11.3.3). Mirrors C++ `UsdPrim::GetPrimInPrototype`.
-    pub fn prim_in_prototype(&self) -> anyhow::Result<Option<Prim>> {
+    pub fn prim_in_prototype(&self) -> Result<Option<Prim>> {
         let path = self
             .stage
             .masked(&self.path, |g, cache| cache.prim_in_prototype(g, &self.path))?;
@@ -809,7 +829,7 @@ impl Prim {
     /// The model-hierarchy `kind` for the prim — `Some("group" | "assembly" |
     /// "component")` when the prim and all ancestors form a contiguous model
     /// hierarchy, else `None`.
-    fn model_kind(&self) -> anyhow::Result<Option<&'static str>> {
+    fn model_kind(&self) -> Result<Option<&'static str>> {
         if self.path == sdf::Path::abs_root() || !self.stage.has_spec(&self.path)? {
             return Ok(None);
         }
@@ -837,8 +857,8 @@ impl Prim {
     /// Returns the prim stack: each `(layer identifier, spec path)` site that
     /// contributes a prim spec to this prim, strongest first. Mirrors C++
     /// `UsdPrim::GetPrimStack`.
-    pub fn prim_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
-        self.stage.with_cache(|g, c| c.prim_stack(g, &self.path))
+    pub fn prim_stack(&self) -> Result<Vec<(String, sdf::Path)>> {
+        Ok(self.stage.with_cache(|g, c| c.prim_stack(g, &self.path))?)
     }
 
     /// Returns a handle to this prim's composition index (C++
@@ -868,14 +888,15 @@ impl Prim {
     /// Returns the composed child prim names, in strongest-layer order and
     /// filtered by the stage's population mask. The name-only counterpart of
     /// [`children`](Self::children).
-    pub fn child_names(&self) -> anyhow::Result<Vec<Token>> {
-        self.stage
-            .masked(&self.path, |g, cache| cache.prim_children(g, &self.path))
+    pub fn child_names(&self) -> Result<Vec<Token>> {
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.prim_children(g, &self.path))?)
     }
 
     /// Returns the composed child prims, in strongest-layer order and filtered
     /// by the stage's population mask. Mirrors C++ `UsdPrim::GetChildren`.
-    pub fn children(&self) -> anyhow::Result<Vec<Prim>> {
+    pub fn children(&self) -> Result<Vec<Prim>> {
         Ok(self
             .child_names()?
             .into_iter()
@@ -891,7 +912,7 @@ impl Prim {
     /// composed `propertyOrder`, so the result does not depend on which half a
     /// name came from. Use [`authored_property_names`](Self::authored_property_names)
     /// to scan only what layers actually author.
-    pub fn property_names(&self) -> anyhow::Result<Vec<Token>> {
+    pub fn property_names(&self) -> Result<Vec<Token>> {
         let mut names = self.authored_property_names()?;
 
         // A schema-declared property is part of the prim's surface whether or
@@ -920,14 +941,15 @@ impl Prim {
     ///
     /// This is the set to scan when the question is "what did someone write?" —
     /// enumerating a schema's declarations would answer a different one.
-    pub fn authored_property_names(&self) -> anyhow::Result<Vec<Token>> {
-        self.stage
-            .masked(&self.path, |g, cache| cache.prim_properties(g, &self.path))
+    pub fn authored_property_names(&self) -> Result<Vec<Token>> {
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.prim_properties(g, &self.path))?)
     }
 
     /// Returns handles to the composed attributes of this prim. Mirrors C++
     /// `UsdPrim::GetAttributes`.
-    pub fn attributes(&self) -> anyhow::Result<Vec<Attribute>> {
+    pub fn attributes(&self) -> Result<Vec<Attribute>> {
         Ok(self
             .properties_of_type(PropertySource::Composed, sdf::SpecType::Attribute)?
             .into_iter()
@@ -937,7 +959,7 @@ impl Prim {
 
     /// Returns handles to the attributes layers author on this prim. Mirrors
     /// C++ `UsdPrim::GetAuthoredAttributes`.
-    pub fn authored_attributes(&self) -> anyhow::Result<Vec<Attribute>> {
+    pub fn authored_attributes(&self) -> Result<Vec<Attribute>> {
         Ok(self
             .properties_of_type(PropertySource::Authored, sdf::SpecType::Attribute)?
             .into_iter()
@@ -947,7 +969,7 @@ impl Prim {
 
     /// Returns handles to the composed relationships of this prim. Mirrors C++
     /// `UsdPrim::GetRelationships`.
-    pub fn relationships(&self) -> anyhow::Result<Vec<Relationship>> {
+    pub fn relationships(&self) -> Result<Vec<Relationship>> {
         Ok(self
             .properties_of_type(PropertySource::Composed, sdf::SpecType::Relationship)?
             .into_iter()
@@ -957,7 +979,7 @@ impl Prim {
 
     /// Returns handles to the relationships layers author on this prim. Mirrors
     /// C++ `UsdPrim::GetAuthoredRelationships`.
-    pub fn authored_relationships(&self) -> anyhow::Result<Vec<Relationship>> {
+    pub fn authored_relationships(&self) -> Result<Vec<Relationship>> {
         Ok(self
             .properties_of_type(PropertySource::Authored, sdf::SpecType::Relationship)?
             .into_iter()
@@ -969,13 +991,13 @@ impl Prim {
     /// `UsdPrim::IsValid` for a handle obtained from
     /// [`Stage::prim`](crate::usd::Stage::prim): a path with no
     /// contributing spec yields a handle that is not valid.
-    pub fn is_valid(&self) -> anyhow::Result<bool> {
-        self.stage.has_spec(&self.path)
+    pub fn is_valid(&self) -> Result<bool> {
+        Ok(self.stage.has_spec(&self.path)?)
     }
 
     /// The property paths of `source` whose spec type matches `ty`, in composed
     /// order.
-    fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType) -> anyhow::Result<Vec<sdf::Path>> {
+    fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType) -> Result<Vec<sdf::Path>> {
         let names = match source {
             PropertySource::Composed => self.property_names()?,
             PropertySource::Authored => self.authored_property_names()?,
@@ -1040,7 +1062,7 @@ impl Prim {
 
 /// `true` when a non-empty `payload` opinion is composed at `prim` — the
 /// per-prim check behind [`Prim::is_loaded`].
-pub(super) fn has_payload(stage: &Stage, prim: &sdf::Path) -> anyhow::Result<bool> {
+pub(super) fn has_payload(stage: &Stage, prim: &sdf::Path) -> Result<bool> {
     let payload = stage.field::<sdf::Value>(prim, sdf::FieldKey::Payload)?;
     Ok(match payload {
         Some(sdf::Value::Payload(payload)) => payload_has_target(&payload),
@@ -1085,7 +1107,13 @@ impl PrimIndexRef {
     /// index and reclamation removes a stack, resolving that node's members
     /// (e.g. [`Stage::node_layer_stack`](super::Stage::node_layer_stack))
     /// reports `None`.
-    pub fn graph(&self) -> anyhow::Result<pcp::PrimIndex> {
+    pub fn graph(&self) -> Result<pcp::PrimIndex> {
+        Ok(self.graph_composed()?)
+    }
+
+    /// [`graph`](Self::graph) at the composition tier, for the namespace
+    /// editor's validation walks.
+    pub(crate) fn graph_composed(&self) -> Result<pcp::PrimIndex, pcp::QueryError> {
         self.stage.with_cache(|g, c| Ok(c.index(g, &self.path)?.clone()))
     }
 
@@ -1093,8 +1121,10 @@ impl PrimIndexRef {
     /// — children relocated away (renamed or deleted) that cannot be
     /// re-introduced — returned as `(children, prohibited)` (C++
     /// `PcpPrimIndex::ComputePrimChildNames`).
-    pub fn child_names(&self) -> anyhow::Result<(Vec<Token>, Vec<Token>)> {
-        self.stage.with_cache(|g, c| c.compute_prim_child_names(g, &self.path))
+    pub fn child_names(&self) -> Result<(Vec<Token>, Vec<Token>)> {
+        Ok(self
+            .stage
+            .with_cache(|g, c| c.compute_prim_child_names(g, &self.path))?)
     }
 }
 
@@ -1125,8 +1155,8 @@ impl VariantSets {
     /// `UsdVariantSets::GetAllVariantSelections`. These are the effective
     /// selections — authored, fallback, or default — read from the variant
     /// selection sites that actually contribute to the prim.
-    pub fn get_all_variant_selections(&self) -> anyhow::Result<Vec<(String, String)>> {
-        self.stage.with_cache(|g, c| c.variant_selections(g, &self.prim))
+    pub fn get_all_variant_selections(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.stage.with_cache(|g, c| c.variant_selections(g, &self.prim))?)
     }
 }
 
@@ -1135,24 +1165,26 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use crate::Result;
+
     use crate::sdf;
     use crate::tf::Token;
     use crate::usd::{ApplyApiError, SchemaRegistry, Stage, StageAuthoringError, VersionFilter};
 
-    fn stage() -> anyhow::Result<Stage> {
+    fn stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
     }
 
     /// A stage over the shared test schema family, so prim definitions have
     /// something to resolve against.
-    fn schema_stage() -> anyhow::Result<Stage> {
+    fn schema_stage() -> Result<Stage> {
         Stage::builder()
             .schema_registry(SchemaRegistry::test_registry())
             .in_memory("anon.usda")
     }
 
     #[test]
-    fn prim_type_info_is_shared() -> anyhow::Result<()> {
+    fn prim_type_info_is_shared() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/A")?.set_type_name("DistantLight")?;
         stage.define_prim("/B")?.set_type_name("DistantLight")?;
@@ -1174,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn prim_type_info_follows_edits() -> anyhow::Result<()> {
+    fn prim_type_info_follows_edits() -> Result<()> {
         let stage = schema_stage()?;
         let prim = stage.define_prim("/Light")?;
         assert!(prim.prim_definition()?.is_empty());
@@ -1197,7 +1229,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_properties_are_enumerated() -> anyhow::Result<()> {
+    fn schema_properties_are_enumerated() -> Result<()> {
         let stage = schema_stage()?;
         let prim = stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         prim.create_attribute("authored", "double")?;
@@ -1221,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_properties_split_by_kind() -> anyhow::Result<()> {
+    fn schema_properties_split_by_kind() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1244,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_properties_by_kind() -> anyhow::Result<()> {
+    fn authored_properties_by_kind() -> Result<()> {
         let stage = schema_stage()?;
         let prim = stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         prim.create_attribute("authored", "double")?;
@@ -1263,7 +1295,7 @@ mod tests {
     }
 
     #[test]
-    fn enumeration_ignores_unknown_schemas() -> anyhow::Result<()> {
+    fn enumeration_ignores_unknown_schemas() -> Result<()> {
         let stage = stage()?;
         let prim = stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         prim.create_attribute("authored", "double")?;
@@ -1275,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_prim_type() -> anyhow::Result<()> {
+    fn fallback_prim_type() -> Result<()> {
         let stage = Stage::builder()
             .schema_registry(SchemaRegistry::test_registry())
             .in_memory("anon.usda")?;
@@ -1318,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn typeless_prim_has_empty_definition() -> anyhow::Result<()> {
+    fn typeless_prim_has_empty_definition() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Plain")?;
 
@@ -1329,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn type_identity_survives_an_empty_registry() -> anyhow::Result<()> {
+    fn type_identity_survives_an_empty_registry() -> Result<()> {
         let stage = stage()?;
         stage
             .define_prim("/Sun")?
@@ -1349,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn is_a_base_chain() -> anyhow::Result<()> {
+    fn is_a_base_chain() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1362,7 +1394,7 @@ mod tests {
     }
 
     #[test]
-    fn is_a_needs_schema_data() -> anyhow::Result<()> {
+    fn is_a_needs_schema_data() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1376,7 +1408,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_api_checks_kind() -> anyhow::Result<()> {
+    fn apply_api_checks_kind() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1411,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_api_unknown_schema() -> anyhow::Result<()> {
+    fn apply_api_unknown_schema() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1423,7 +1455,7 @@ mod tests {
     }
 
     #[test]
-    fn can_apply_api_restrictions() -> anyhow::Result<()> {
+    fn can_apply_api_restrictions() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage.define_prim("/Plain")?.set_type_name("DomeLight_1")?;
@@ -1449,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn is_in_family_versions() -> anyhow::Result<()> {
+    fn is_in_family_versions() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Old")?.set_type_name("DomeLight")?;
         stage.define_prim("/New")?.set_type_name("DomeLight_1")?;
@@ -1487,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn has_api_in_family_instance() -> anyhow::Result<()> {
+    fn has_api_in_family_instance() -> Result<()> {
         let stage = schema_stage()?;
         stage
             .define_prim("/Sun")?
@@ -1547,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn family_queries_without_registry() -> anyhow::Result<()> {
+    fn family_queries_without_registry() -> Result<()> {
         // A plain stage registers no schema data, which is the state every
         // stage is in until it is vendored.
         let stage = stage()?;
@@ -1589,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn api_family_rejected_version() -> anyhow::Result<()> {
+    fn api_family_rejected_version() -> Result<()> {
         let stage = schema_stage()?;
         // `DistantLight` builds in `LightAPI`, so authoring a second version of
         // that family conflicts and composition keeps the built-in.
@@ -1615,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn can_apply_api_invalid_prim() -> anyhow::Result<()> {
+    fn can_apply_api_invalid_prim() -> Result<()> {
         let stage = schema_stage()?;
 
         // Nothing composes at the path, so there is nothing to apply to —
@@ -1626,7 +1658,7 @@ mod tests {
     }
 
     #[test]
-    fn can_apply_api_malformed_instance() -> anyhow::Result<()> {
+    fn can_apply_api_malformed_instance() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1652,7 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_api_schemas_survive_a_known_one() -> anyhow::Result<()> {
+    fn unknown_api_schemas_survive_a_known_one() -> Result<()> {
         let stage = schema_stage()?;
         stage
             .define_prim("/Sun")?
@@ -1676,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_relationship_is_uniform_and_not_custom() -> anyhow::Result<()> {
+    fn schema_relationship_is_uniform_and_not_custom() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1701,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_relationship_is_writable() -> anyhow::Result<()> {
+    fn schema_relationship_is_writable() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1716,7 +1748,7 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_knows_nothing() -> anyhow::Result<()> {
+    fn default_registry_knows_nothing() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Light")?.set_type_name("DistantLight")?;
 
@@ -1731,7 +1763,7 @@ mod tests {
     /// binding — that produced them is gone. The `'s` borrow used to forbid
     /// this.
     #[test]
-    fn handles_outlive_stage() -> anyhow::Result<()> {
+    fn handles_outlive_stage() -> Result<()> {
         let prims: Vec<super::Prim> = {
             let stage = stage()?;
             stage.define_prim("/A")?.set_type_name("Xform")?;
@@ -1750,7 +1782,7 @@ mod tests {
     /// `Prim::has_clips`/`clip_sets` report composed clip sets, and
     /// `Attribute::get_at` resolves clip values (spec 12.3.4).
     #[test]
-    fn clip_introspection() -> anyhow::Result<()> {
+    fn clip_introspection() -> Result<()> {
         let path = format!(
             "{}/vendor/core-spec-supplemental-release_dec2025/value_resolution/tests/assets/clip_basic/entry.usd",
             env!("CARGO_MANIFEST_DIR")
@@ -1777,7 +1809,7 @@ mod tests {
     /// `Prim::is_instance`/`prototype`/`is_in_prototype` mirror the stage-level
     /// instancing queries (spec 11.3.3).
     #[test]
-    fn prim_prototype_handle() -> anyhow::Result<()> {
+    fn prim_prototype_handle() -> Result<()> {
         let path = format!("{}/fixtures/instancing_shared.usda", env!("CARGO_MANIFEST_DIR"));
         let stage = Stage::open(&path)?;
 
@@ -1795,7 +1827,7 @@ mod tests {
     /// `Prim::specifier` mirrors C++ `UsdPrim::GetSpecifier`: `define_prim`
     /// resolves to `Def`, `override_prim` to `Over`.
     #[test]
-    fn prim_specifier() -> anyhow::Result<()> {
+    fn prim_specifier() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Def")?;
         stage.override_prim("/Over")?;
@@ -1807,7 +1839,7 @@ mod tests {
     /// `Prim::custom_data` reads the composed `customData` dictionary
     /// (C++ `UsdObject::GetCustomData`).
     #[test]
-    fn prim_custom_data() -> anyhow::Result<()> {
+    fn prim_custom_data() -> Result<()> {
         let stage = stage()?;
         let dict = sdf::Value::Dictionary([("note".to_string(), sdf::Value::String("hi".into()))].into());
         stage
@@ -1822,7 +1854,7 @@ mod tests {
     }
 
     #[test]
-    fn prim_chain() -> anyhow::Result<()> {
+    fn prim_chain() -> Result<()> {
         let stage = stage()?;
         stage
             .define_prim("/World")?
@@ -1838,7 +1870,7 @@ mod tests {
     }
 
     #[test]
-    fn add_api_schema() -> anyhow::Result<()> {
+    fn add_api_schema() -> Result<()> {
         let stage = stage()?;
         let prim = stage.define_prim("/World")?.add_applied_schema("MaterialBindingAPI")?;
         assert_eq!(
@@ -1850,7 +1882,7 @@ mod tests {
     }
 
     #[test]
-    fn add_api_schema_merges() -> anyhow::Result<()> {
+    fn add_api_schema_merges() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/World")?;
         stage.with_target_layer_at(&sdf::Path::new("/World").expect("valid path"), |layer, _path| {
@@ -1883,7 +1915,7 @@ mod tests {
     }
 
     #[test]
-    fn set_prim_metadata() -> anyhow::Result<()> {
+    fn set_prim_metadata() -> Result<()> {
         let stage = stage()?;
         let mut dict = std::collections::HashMap::new();
         dict.insert("hint".to_string(), sdf::Value::String("v".to_string()));
@@ -1899,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn update_metadata_reads_local() -> anyhow::Result<()> {
+    fn update_metadata_reads_local() -> Result<()> {
         let stage = stage()?;
         let mut dict = std::collections::HashMap::new();
         dict.insert("a".to_string(), sdf::Value::Int(1));
@@ -1925,7 +1957,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_metadata_drops_local() -> anyhow::Result<()> {
+    fn clear_metadata_drops_local() -> Result<()> {
         let stage = stage()?;
         stage
             .define_prim("/World")?
@@ -1947,7 +1979,7 @@ mod tests {
     /// clearing prim metadata through it must leave them alone — the read
     /// counterpart of `set_metadata` rejecting the pseudo-root outright.
     #[test]
-    fn clear_metadata_pseudo_root() -> anyhow::Result<()> {
+    fn clear_metadata_pseudo_root() -> Result<()> {
         let stage = stage()?;
         stage.set_default_prim("World")?;
 
@@ -1960,7 +1992,7 @@ mod tests {
     /// Clearing a field no layer authors locally leaves the layer untouched
     /// rather than stamping an empty `over` to hold the absence.
     #[test]
-    fn clear_metadata_authors_nothing() -> anyhow::Result<()> {
+    fn clear_metadata_authors_nothing() -> Result<()> {
         let stage = stage()?;
         stage.prim("/Absent")?.clear_metadata("documentation")?;
         assert!(!stage.prim("/Absent")?.is_defined()?);
@@ -1970,7 +2002,7 @@ mod tests {
     /// Authoring prim metadata on the pseudo-root reports an error rather than
     /// panicking — the pseudo-root carries no prim spec to author into.
     #[test]
-    fn update_metadata_on_pseudo_root_errors() -> anyhow::Result<()> {
+    fn update_metadata_on_pseudo_root_errors() -> Result<()> {
         let stage = stage()?;
         let result = stage
             .prim("/")?

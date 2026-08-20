@@ -1,6 +1,6 @@
 //! `UsdGeomBoundable` — prims with a computable bounding extent.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::usd::Attribute;
 

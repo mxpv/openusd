@@ -1,6 +1,6 @@
 //! The UsdPhysics prim and API-schema views.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, Stage};
@@ -1095,6 +1095,8 @@ impl_physics_schema!(multi_api LimitAPI);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::physics::{CollisionApprox, DriveType, JointAxis, JointBase};
 
     #[test]

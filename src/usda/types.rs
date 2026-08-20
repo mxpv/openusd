@@ -13,7 +13,7 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use super::error::{Ctx, RawError, bail, ensure};
 
 use crate::{gf, sdf};
 
@@ -92,7 +92,7 @@ impl fmt::Display for TypeInfo<'_> {
 /// Tries to parse a type declaration: a recognized type name optionally followed by `[]`.
 ///
 /// Returns `Ok(None)` if the next token is not a known type (without consuming it).
-pub(super) fn parse_type<'source>(cursor: &mut Cursor<'source>) -> Result<Option<TypeInfo<'source>>> {
+pub(super) fn parse_type<'source>(cursor: &mut Cursor<'source>) -> Result<Option<TypeInfo<'source>>, RawError> {
     let base = match cursor.peek()? {
         Some(Token::Identifier(name)) => *name,
         Some(Token::Dictionary) => "dictionary",
@@ -117,7 +117,7 @@ pub(super) fn parse_type<'source>(cursor: &mut Cursor<'source>) -> Result<Option
 }
 
 /// Decode a typed value based on USD's scalar/array/role type tables.
-pub(super) fn parse_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<sdf::Value> {
+pub(super) fn parse_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<sdf::Value, RawError> {
     // None means "value block" (explicitly unset) regardless of type.
     if cursor.eat(&Token::None)? {
         return Ok(sdf::Value::ValueBlock);
@@ -232,7 +232,7 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result
 }
 
 /// Parse a single attribute metadata value (scalar or array) from within a metadata block.
-pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value> {
+pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawError> {
     // Handle array case: parse each element as a typed scalar, then collect
     // into the most specific Vec variant that fits all elements.
     if cursor.at_punctuation('[')? {
@@ -296,7 +296,7 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value>
 }
 
 /// Parse a dictionary value from `{` to `}`.
-pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value> {
+pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawError> {
     let mut dict = HashMap::new();
 
     parse_block(cursor, '{', '}', |c| {
@@ -310,7 +310,7 @@ pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value> {
             other => other
                 .keyword_lexeme()
                 .map(str::to_owned)
-                .ok_or_else(|| anyhow!("Expected identifier as dictionary key, got: {other:?}"))?,
+                .ok_or_else(|| RawError::new(format!("Expected identifier as dictionary key, got: {other:?}")))?,
         };
 
         c.expect_punctuation('=')?;
@@ -343,7 +343,7 @@ pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value> {
 ///   — the spec corpus's `attributes.usda` deliberately authors
 ///   bare scalars (`5.67`, `-7`) and `None` against typed
 ///   `vector3f` properties to verify the parser's tolerance.
-pub(super) fn parse_time_samples(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<sdf::TimeSampleMap> {
+pub(super) fn parse_time_samples(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<sdf::TimeSampleMap, RawError> {
     let mut samples = Vec::new();
     parse_block(cursor, '{', '}', |c| {
         let time_str = c.bump()?;
@@ -367,7 +367,7 @@ pub(super) fn parse_time_samples(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) ->
 ///
 /// The result is stored as a `Dictionary` matching the baseline JSON structure:
 /// `{ curveType, preExtrapolation, postExtrapolation, loopParameters, knots, knotCustomData }`.
-pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value> {
+pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawError> {
     let mut curve_type: Option<String> = None;
     let mut pre_extrapolation = sdf::Value::ValueBlock;
     let mut post_extrapolation = sdf::Value::ValueBlock;
@@ -503,12 +503,12 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value> {
 }
 
 /// Parses a single `<...>` path reference token into an `sdf::Path`.
-pub(super) fn parse_path_reference(cursor: &mut Cursor<'_>) -> Result<sdf::Path> {
+pub(super) fn parse_path_reference(cursor: &mut Cursor<'_>) -> Result<sdf::Path, RawError> {
     path_ref_to_path(cursor.expect_path_ref()?)
 }
 
 /// Parse one reference entry, including optional target prim path and layer offset.
-pub(super) fn parse_reference(cursor: &mut Cursor<'_>) -> Result<sdf::Reference> {
+pub(super) fn parse_reference(cursor: &mut Cursor<'_>) -> Result<sdf::Reference, RawError> {
     let mut reference = sdf::Reference::default();
 
     match cursor.bump()? {
@@ -538,7 +538,7 @@ pub(super) fn parse_reference(cursor: &mut Cursor<'_>) -> Result<sdf::Reference>
 }
 
 /// Parse one payload entry, including optional target prim path and layer offset.
-pub(super) fn parse_payload(cursor: &mut Cursor<'_>) -> Result<sdf::Payload> {
+pub(super) fn parse_payload(cursor: &mut Cursor<'_>) -> Result<sdf::Payload, RawError> {
     let mut payload = sdf::Payload::default();
 
     match cursor.bump()? {
@@ -567,7 +567,7 @@ pub(super) fn parse_payload(cursor: &mut Cursor<'_>) -> Result<sdf::Payload> {
 }
 
 /// Parses a relocates dictionary: `{ <source>: <target>, ... }`.
-pub(super) fn parse_relocates(cursor: &mut Cursor<'_>) -> Result<Vec<(sdf::Path, sdf::Path)>> {
+pub(super) fn parse_relocates(cursor: &mut Cursor<'_>) -> Result<Vec<(sdf::Path, sdf::Path)>, RawError> {
     let mut pairs = Vec::new();
     parse_block(cursor, '{', '}', |c| {
         let src = c.expect_path_ref().context("Expected relocate source path")?;
@@ -587,7 +587,7 @@ pub(super) fn parse_relocates(cursor: &mut Cursor<'_>) -> Result<Vec<(sdf::Path,
 }
 
 /// Parse `subLayers` entries along with their optional `(offset/scale)` metadata.
-pub(super) fn parse_sublayers(cursor: &mut Cursor<'_>) -> Result<(Vec<String>, Vec<sdf::LayerOffset>)> {
+pub(super) fn parse_sublayers(cursor: &mut Cursor<'_>) -> Result<(Vec<String>, Vec<sdf::LayerOffset>), RawError> {
     let mut sublayers = Vec::new();
     let mut sublayer_offsets = Vec::new();
 
@@ -636,7 +636,7 @@ pub(super) fn parse_sublayers(cursor: &mut Cursor<'_>) -> Result<(Vec<String>, V
 /// not variant selections, so a `{set=sel}` element anywhere in the path is a
 /// parse error (C++ `Sdf_TextFileFormatParser` raises the same error, e.g.
 /// "Inherit paths cannot contain variant selections"). `arc` names the field.
-pub(super) fn reject_variant_selection_in_path(path: &sdf::Path, arc: &str) -> Result<()> {
+pub(super) fn reject_variant_selection_in_path(path: &sdf::Path, arc: &str) -> Result<(), RawError> {
     ensure!(
         !path.contains_prim_variant_selection(),
         "{arc} paths cannot contain variant selections: <{path}>"
@@ -649,7 +649,7 @@ pub(super) fn reject_variant_selection_in_path(path: &sdf::Path, arc: &str) -> R
 /// See
 /// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Basic_Datatypes>
 /// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Roles>
-fn parse_base_type(name: &str) -> Result<Type> {
+fn parse_base_type(name: &str) -> Result<Type, RawError> {
     let ty = match name {
         "bool" => Type::Bool,
         "uchar" => Type::Uchar,
@@ -706,7 +706,7 @@ fn parse_base_type(name: &str) -> Result<Type> {
 /// Anything else (scalar literal, `None`, identifier) flows
 /// through the type-blind path so the spec corpus's lenient
 /// `vector3f`-with-bare-scalar samples keep parsing.
-fn next_is_typed_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<bool> {
+fn next_is_typed_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<bool, RawError> {
     let is_tuple_type = matches!(
         info.ty,
         Type::Int2
@@ -737,7 +737,7 @@ fn next_is_typed_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<bo
 }
 
 /// Parse an extrapolation mode: `mode [(slope)]`.
-fn parse_extrapolation(cursor: &mut Cursor<'_>) -> Result<sdf::Value> {
+fn parse_extrapolation(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawError> {
     let mode = cursor.expect_identifier()?;
     if mode == "none" {
         return Ok(sdf::Value::ValueBlock);
@@ -758,7 +758,9 @@ fn parse_extrapolation(cursor: &mut Cursor<'_>) -> Result<sdf::Value> {
 
 /// Parse `(offset = ...; scale = ...; customData = {...})` blocks attached to
 /// references or sublayers.
-fn parse_reference_layer_offset(cursor: &mut Cursor<'_>) -> Result<(sdf::LayerOffset, HashMap<String, sdf::Value>)> {
+fn parse_reference_layer_offset(
+    cursor: &mut Cursor<'_>,
+) -> Result<(sdf::LayerOffset, HashMap<String, sdf::Value>), RawError> {
     let mut layer_offset = sdf::LayerOffset::default();
     let mut custom_data = HashMap::new();
 
@@ -798,8 +800,8 @@ fn parse_block<'source>(
     cursor: &mut Cursor<'source>,
     open: char,
     close: char,
-    mut entry: impl FnMut(&mut Cursor<'source>) -> Result<()>,
-) -> Result<()> {
+    mut entry: impl FnMut(&mut Cursor<'source>) -> Result<(), RawError>,
+) -> Result<(), RawError> {
     cursor.expect_punctuation(open)?;
     loop {
         if cursor.eat_punctuation(close)? {
@@ -814,8 +816,8 @@ fn parse_block<'source>(
 /// Parse a `[...]` array, using `parse_element` for each item.
 pub(super) fn parse_array_with<'source, T>(
     cursor: &mut Cursor<'source>,
-    mut parse_element: impl FnMut(&mut Cursor<'source>) -> Result<T>,
-) -> Result<Vec<T>> {
+    mut parse_element: impl FnMut(&mut Cursor<'source>) -> Result<T, RawError>,
+) -> Result<Vec<T>, RawError> {
     let mut out = Vec::new();
     parse_block(cursor, '[', ']', |c| {
         out.push(parse_element(c)?);
@@ -825,7 +827,7 @@ pub(super) fn parse_array_with<'source, T>(
 }
 
 /// Parse single token as `T` which can be deserialized from string (such as `int`, `float`, etc).
-pub(super) fn parse_token<T: FromStr>(cursor: &mut Cursor<'_>) -> Result<T>
+pub(super) fn parse_token<T: FromStr>(cursor: &mut Cursor<'_>) -> Result<T, RawError>
 where
     <T as FromStr>::Err: Debug,
 {
@@ -854,8 +856,14 @@ where
         }
         _ => bail!("Expected a number, identifier, or string, got {token:?}"),
     };
-    let value = T::from_str(&value_str)
-        .map_err(|err| anyhow!("Failed to parse {} from '{}': {:?}", type_name::<T>(), value_str, err))?;
+    let value = T::from_str(&value_str).map_err(|err| {
+        RawError::new(format!(
+            "Failed to parse {} from '{}': {:?}",
+            type_name::<T>(),
+            value_str,
+            err
+        ))
+    })?;
 
     Ok(value)
 }
@@ -863,7 +871,7 @@ where
 /// Parse USD's flexible boolean literal forms (identifiers, numeric, or string).
 /// A `true` / `false` word, however it was spelled — bare, namespaced, or
 /// quoted.
-pub(super) fn parse_bool(cursor: &mut Cursor<'_>) -> Result<bool> {
+pub(super) fn parse_bool(cursor: &mut Cursor<'_>) -> Result<bool, RawError> {
     let token = cursor.bump()?;
     match token {
         Token::Identifier(value) | Token::NamespacedIdentifier(value) => parse_bool_word(value),
@@ -883,7 +891,7 @@ pub(super) fn parse_bool(cursor: &mut Cursor<'_>) -> Result<bool> {
 }
 
 /// Whether `word` is the boolean `true` or `false`, case-insensitively.
-fn parse_bool_word(word: &str) -> Result<bool> {
+fn parse_bool_word(word: &str) -> Result<bool, RawError> {
     if word.eq_ignore_ascii_case("true") {
         Ok(true)
     } else if word.eq_ignore_ascii_case("false") {
@@ -894,7 +902,7 @@ fn parse_bool_word(word: &str) -> Result<bool> {
 }
 
 /// Parse fixed-size tuples, preserving order and surfacing contextual errors.
-fn parse_tuple<T, const N: usize>(cursor: &mut Cursor<'_>) -> Result<[T; N]>
+fn parse_tuple<T, const N: usize>(cursor: &mut Cursor<'_>) -> Result<[T; N], RawError>
 where
     T: FromStr + Default + Copy,
     <T as FromStr>::Err: Debug,
@@ -912,7 +920,7 @@ where
 }
 
 /// Parse a `[scalar, ...]` array of `FromStr` values.
-fn parse_array<T>(cursor: &mut Cursor<'_>) -> Result<Vec<T>>
+fn parse_array<T>(cursor: &mut Cursor<'_>) -> Result<Vec<T>, RawError>
 where
     T: FromStr,
     <T as FromStr>::Err: Debug,
@@ -923,7 +931,7 @@ where
 /// Parse a single matrix literal, flattening rows in row-major order.
 ///
 /// Handles both bare `(row), (row), ...` and bracket-wrapped `[ (row), ... ]` forms.
-fn parse_matrix<const N: usize, const M: usize>(cursor: &mut Cursor<'_>) -> Result<[f64; M]> {
+fn parse_matrix<const N: usize, const M: usize>(cursor: &mut Cursor<'_>) -> Result<[f64; M], RawError> {
     if cursor.at_punctuation('[')? {
         let mut arr = parse_matrix_array::<N, M>(cursor)?;
         ensure!(arr.len() == 1, "expected a single matrix value");
@@ -946,12 +954,12 @@ fn parse_matrix<const N: usize, const M: usize>(cursor: &mut Cursor<'_>) -> Resu
 }
 
 /// Parse `[ matrix, matrix, ... ]`.
-fn parse_matrix_array<const N: usize, const M: usize>(cursor: &mut Cursor<'_>) -> Result<Vec<[f64; M]>> {
+fn parse_matrix_array<const N: usize, const M: usize>(cursor: &mut Cursor<'_>) -> Result<Vec<[f64; M]>, RawError> {
     parse_array_with(cursor, parse_matrix::<N, M>)
 }
 
 // Parse a tuple and convert it to a gf type via `From<[E; N]>`.
-fn parse_gf<E, T, const N: usize>(cursor: &mut Cursor<'_>) -> Result<T>
+fn parse_gf<E, T, const N: usize>(cursor: &mut Cursor<'_>) -> Result<T, RawError>
 where
     E: FromStr + Default + Copy,
     <E as FromStr>::Err: Debug,
@@ -961,7 +969,7 @@ where
 }
 
 // Parse an array of tuples and convert each element to a gf type via `From<[E; N]>`.
-fn parse_gf_array<E, T, const N: usize>(cursor: &mut Cursor<'_>) -> Result<Vec<T>>
+fn parse_gf_array<E, T, const N: usize>(cursor: &mut Cursor<'_>) -> Result<Vec<T>, RawError>
 where
     E: FromStr + Default + Copy,
     <E as FromStr>::Err: Debug,
@@ -973,7 +981,7 @@ where
 /// Converts the text of a `<...>` path-reference token into a path. `<>`
 /// carries the empty path (e.g. a reference resolving to the target layer's
 /// defaultPrim), as in C++.
-fn path_ref_to_path(text: &str) -> Result<sdf::Path> {
+fn path_ref_to_path(text: &str) -> Result<sdf::Path, RawError> {
     if text.is_empty() {
         return Ok(sdf::Path::default());
     }

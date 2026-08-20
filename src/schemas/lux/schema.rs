@@ -14,7 +14,7 @@
 //! prim's `apiSchemas`, and `get` gates on it being present. [`LightAPI`]
 //! makes an arbitrary prim (a `Mesh`, `Volume`, …) emissive via [`Light`].
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, Stage};
@@ -786,6 +786,8 @@ impl_lux_schema!(applied_api LightListAPI);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::geom::Xformable;
     use crate::usd::SchemaBase;
 

@@ -7,7 +7,7 @@
 //! class. Attribute getters return a handle whose `get()` yields the authored
 //! value (or `None`).
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, Stage};
@@ -432,6 +432,8 @@ impl_geom_schema!(pointbased NurbsPatch);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
 
     #[test]
     fn basis_curves_roundtrip() -> Result<()> {

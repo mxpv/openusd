@@ -2,8 +2,9 @@
 //! `usdGeom_scene.usda` fixture: the cross-cutting Imageable / Boundable
 //! surface, the `Xformable` transform stack, and every concrete prim view.
 
-use anyhow::Result;
+use openusd::Result;
 use openusd::gf::{Matrix4d, Vec3f};
+use openusd::schemas::SchemaError;
 use openusd::schemas::geom::{
     self, Axis, BasisCurves, Boundable, Camera, Capsule, Cone, Cube, Curves, Cylinder, ElementType, GeomSubset, Gprim,
     HermiteCurves, Imageable, InterpolateBoundary, Interpolation, Mesh, NurbsCurves, NurbsPatch, PatchForm, Plane,
@@ -183,7 +184,7 @@ fn resets_xform_stack_detects_sentinel() -> Result<()> {
 }
 
 #[test]
-fn unauthored_xform_is_identity() -> Result<()> {
+fn unauthored_xform_is_identity() -> Result<(), SchemaError> {
     let stage = open()?;
     let m = xform(&stage, "/World")?.local_to_parent_transform(0.0)?;
     assert_eq!(m, Matrix4d::IDENTITY);
@@ -191,7 +192,7 @@ fn unauthored_xform_is_identity() -> Result<()> {
 }
 
 #[test]
-fn matrix_op_round_trips_to_authored_matrix() -> Result<()> {
+fn matrix_op_round_trips_to_authored_matrix() -> Result<(), SchemaError> {
     let stage = open()?;
     let m = xform(&stage, "/World/MatrixOp")?.local_to_parent_transform(0.0)?;
     assert_eq!(m.0[12..15], [5.0, 6.0, 7.0]);
@@ -199,7 +200,7 @@ fn matrix_op_round_trips_to_authored_matrix() -> Result<()> {
 }
 
 #[test]
-fn invert_prefix_inverts_the_op() -> Result<()> {
+fn invert_prefix_inverts_the_op() -> Result<(), SchemaError> {
     let stage = open()?;
     // Authored translate (4, 0, 0), then !invert! it → translation row (-4, 0, 0).
     let m = xform(&stage, "/World/Inverted")?.local_to_parent_transform(0.0)?;
@@ -208,7 +209,7 @@ fn invert_prefix_inverts_the_op() -> Result<()> {
 }
 
 #[test]
-fn rotate_xyz_matches_pixar_composition() -> Result<()> {
+fn rotate_xyz_matches_pixar_composition() -> Result<(), SchemaError> {
     // Pixar's `rotateXYZ` in `pxr/usd/usdGeom/xformOp.cpp` composes
     // as `xRot * yRot * zRot` (row-vector matrices, leftmost applies
     // first to v). Test rotateXYZ(0, 90°, 0) on +X: Ry(90°) takes
@@ -223,7 +224,7 @@ fn rotate_xyz_matches_pixar_composition() -> Result<()> {
 }
 
 #[test]
-fn trs_stack_composes_in_authored_order() -> Result<()> {
+fn trs_stack_composes_in_authored_order() -> Result<(), SchemaError> {
     let stage = open()?;
     // Order is translate → rotateY(90°) → scale(2,2,2). The *last*
     // op in xformOpOrder is most local — applied first to the point
@@ -241,7 +242,7 @@ fn trs_stack_composes_in_authored_order() -> Result<()> {
 }
 
 #[test]
-fn xform_double_precision() -> Result<()> {
+fn xform_double_precision() -> Result<(), SchemaError> {
     let stage = open()?;
 
     let translate = xform(&stage, "/World/DoubleTranslate")?.local_to_parent_transform(0.0)?;

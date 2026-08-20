@@ -1,6 +1,6 @@
 //! Typed view over a UsdShade `inputs:` attribute.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::{sdf, usd};
 
@@ -55,7 +55,7 @@ impl ConnectionTarget for Input {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
+    use crate::Result;
 
     use crate::schemas::shade::{Connectable, Shader};
     use crate::usd::Stage;

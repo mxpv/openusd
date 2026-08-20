@@ -14,7 +14,7 @@
 //!   caller doesn't have to re-read them per frame.
 //! - Driving the [`super::skinning`] math against the right inputs.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::gf;
 use crate::usd::SchemaBase;

@@ -42,7 +42,8 @@ pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
 pub use schema_registry::{
-    ApplyApiError, FamilySource, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, Schematics, VersionFilter,
+    ApplyApiError, FamilySource, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError, Schematics,
+    VersionFilter,
 };
 pub use sink::{CommittedChange, PendingChange, Provenance, StageSink, StageSinkId};
 pub use stage::{
@@ -60,7 +61,20 @@ pub use crate::pcp::PopulationMask as StagePopulationMask;
 pub use crate::pcp::PopulationMaskError as StagePopulationMaskError;
 pub use timecode::TimeCode;
 
+use crate::Result;
 use crate::sdf;
+
+/// Decodes an optionally-composed value to `T`, folding the conversion
+/// failure into the caller's error. The one decode step behind every generic
+/// read accessor ([`Attribute::get_at`], [`Prim::get_metadata`], ...), so a
+/// future decode nuance lands in one place.
+pub(crate) fn decode_value<T, E>(value: Option<sdf::Value>) -> Result<Option<T>, E>
+where
+    T: TryFrom<sdf::Value>,
+    T::Error: Into<E>,
+{
+    value.map(T::try_from).transpose().map_err(Into::into)
+}
 
 /// Run `f` on the typed spec at `path` on the edit-target layer, or return
 /// [`sdf::AuthoringError::InvalidPath`] when no such spec exists. `get` is the

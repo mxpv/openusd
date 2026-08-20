@@ -4,9 +4,8 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::error::Error;
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::usd::SchemaBase;
 use crate::{sdf, tf, usd};
@@ -248,7 +247,7 @@ impl Shader {
 fn source_value<T>(prim: &usd::Prim, attr: &SourceAttr, source_type: &str) -> Result<Option<T>>
 where
     T: TryFrom<sdf::Value>,
-    T::Error: Error + Send + Sync + 'static,
+    T::Error: Into<crate::Error>,
 {
     if implementation_source(prim)? != attr.implementation {
         return Ok(None);
@@ -445,6 +444,8 @@ fn stringify(value: sdf::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::shade::Connectable;
 
     /// Source types sorted, since the order follows the prim's property order

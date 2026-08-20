@@ -2,11 +2,12 @@
 
 use std::{ffi::CStr, fmt};
 
-use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
 use crate::sdf;
+
+use super::ReadError;
 
 /// Appears at start of file, houses version, file identifier string and offset to TOC.
 #[repr(C)]
@@ -215,9 +216,9 @@ impl ValueRep {
     const PAYLOAD_MASK: u64 = ((1 << 48) - 1);
 
     #[inline]
-    pub fn ty(self) -> Result<Type> {
+    pub fn ty(self) -> Result<Type, ReadError> {
         let index = ((self.data() >> 48) & 0xFF) as u32;
-        Type::from_repr(index).with_context(|| format!("Unable to parse type enum {index}"))
+        Type::from_repr(index).ok_or_else(|| ReadError::corrupt(format!("Unable to parse type enum {index}")))
     }
 
     #[inline]

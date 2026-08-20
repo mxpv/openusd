@@ -5,7 +5,6 @@
 
 use std::{collections::HashMap, fmt::Debug};
 
-use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
 use strum::FromRepr;
 
@@ -39,16 +38,18 @@ pub use copy::{
 };
 pub(crate) use copy::{author_spec, is_children_field};
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
-pub use expr::{Evaluation, EvaluationValue, Expr, StringEvaluation, StringSegment};
-pub use file_format::{FileFormat, FileFormatCaps, WriteSeek};
+pub use expr::{Evaluation, EvaluationValue, Expr, ExprError, StringEvaluation, StringSegment};
+pub use file_format::{FileFormat, FileFormatCaps, FormatError, WriteSeek};
 pub use layer::{
-    AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSinkId, PendingLayerChange, default_prim_path,
+    AuthoringError, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId, PendingLayerChange,
+    default_prim_path,
 };
 pub(crate) use layer::{dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
+pub(crate) use layer_registry::LoadError;
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{IntoPath, Path, PathComponent, PathComponents, PathElement, PathParseError, path, try_into_path};
-pub use path_expr::{ExpressionReference, PathExpression, PathPattern, PredicateExpression};
+pub use path_expr::{EvalError, ExpressionReference, PathExpression, PathPattern, PredicateExpression};
 pub use path_table::PathTable;
 pub use schema::{ChildrenKey, FieldKey, folds_list_ops};
 pub use spec::{
@@ -56,7 +57,7 @@ pub use spec::{
     PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,
     RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
-pub use value::{CastError, FromValueCast, Value, ValueConversionError, dictionary_over};
+pub use value::{CastError, FromValueCast, Value, dictionary_over};
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]
@@ -119,12 +120,15 @@ impl TimeCode {
 }
 
 impl TryFrom<Value> for TimeCode {
-    type Error = ValueConversionError;
+    type Error = CastError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
             Value::TimeCode(v) => Ok(v),
-            other => ValueConversionError::err("TimeCode", &other),
+            other => Err(CastError::TypeMismatch {
+                target: "TimeCode",
+                actual: (&other).into(),
+            }),
         }
     }
 }

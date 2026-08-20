@@ -35,7 +35,7 @@
 //! stage.traverse(usd::PrimPredicate::DEFAULT, |prim_path| {
 //!     println!("{prim_path}");
 //! })?;
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), openusd::Error>(())
 //! ```
 //!
 //! Query the composed scene through `UsdPrim` / `UsdAttribute`-style handles
@@ -53,7 +53,7 @@
 //! if let Some(r) = radius.get::<f64>()? {
 //!     println!("radius = {r}");
 //! }
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), openusd::Error>(())
 //! ```
 //!
 //! Author a scene in memory, then read a value back — no files involved:
@@ -71,7 +71,7 @@
 //! let radius = stage.attribute("/World/Sphere.radius")?.get::<f64>()?;
 //! assert_eq!(radius, Some(2.5));
 //!
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), openusd::Error>(())
 //! ```
 //!
 //! Configure how a stage is opened through [`StageBuilder`](usd::StageBuilder) —
@@ -91,10 +91,11 @@
 //! for err in stage.composition_errors() {
 //!     eprintln!("warning: {err}");
 //! }
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), openusd::Error>(())
 //! ```
 
 pub mod ar;
+mod error;
 pub mod gf;
 pub mod pcp;
 pub mod schemas;
@@ -104,3 +105,5 @@ pub mod usd;
 pub mod usda;
 pub mod usdc;
 pub mod usdz;
+
+pub use error::{Error, Result};

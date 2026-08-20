@@ -5,7 +5,7 @@
 use openusd::sdf::{self, ChildrenKey, FieldKey, SpecType, Specifier, Value};
 use openusd::usdc::CrateWriter;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> openusd::Result<()> {
     let out = std::env::args().nth(1).unwrap_or_else(|| "out.usdc".to_string());
 
     let mut data = sdf::Data::new();

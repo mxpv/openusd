@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn base_accessors() -> anyhow::Result<()> {
+    fn base_accessors() -> crate::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let prim = stage.define_prim("/World")?;
 
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn into_prim_via_from() -> anyhow::Result<()> {
+    fn into_prim_via_from() -> crate::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let schema = Marker(stage.define_prim("/World")?);
 

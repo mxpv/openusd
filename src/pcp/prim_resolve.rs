@@ -8,8 +8,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
-
 use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Specifier, Value};
@@ -19,7 +17,7 @@ use super::clip;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
-use super::{Error, LayerGraph, LayerId, LayerStackId};
+use super::{CompositionError, LayerGraph, LayerId, LayerStackId, QueryError};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
 ///
@@ -136,7 +134,7 @@ impl PrimIndex {
         field: &str,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<Value>, QueryError> {
         if field == FieldKey::Specifier.as_str() {
             return self.resolve_specifier(stack, prop_suffix);
         }
@@ -183,7 +181,7 @@ impl PrimIndex {
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
         strongest: Value,
-    ) -> Result<Value> {
+    ) -> Result<Value, QueryError> {
         macro_rules! fold {
             ($variant:ident) => {{
                 let mut ops = Vec::new();
@@ -246,7 +244,7 @@ impl PrimIndex {
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
         instance_targets: &HashSet<(Path, Path)>,
-    ) -> Result<(Vec<Path>, Vec<InvalidTarget>)> {
+    ) -> Result<(Vec<Path>, Vec<InvalidTarget>), QueryError> {
         let mut ops = Vec::new();
         let mut invalid = Vec::new();
         let mut deleted_composed: HashSet<Path> = HashSet::new();
@@ -344,7 +342,7 @@ impl PrimIndex {
         field: FieldKey,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-    ) -> Result<Vec<sdf::PathListOp>> {
+    ) -> Result<Vec<sdf::PathListOp>, QueryError> {
         let field = field.as_str();
         let mut ops = Vec::new();
         for opinion in self.opinions(field, stack, prop_suffix) {
@@ -376,7 +374,7 @@ impl PrimIndex {
         field: FieldKey,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-    ) -> Result<Vec<Path>> {
+    ) -> Result<Vec<Path>, QueryError> {
         // `collect_path_list_ops` yields strongest first; deletions accumulate as
         // the C++ applies them, weakest to strongest, and an explicit opinion
         // clears the accumulated deletions.
@@ -453,7 +451,7 @@ impl PrimIndex {
 
     /// Builds the query path for a node, applying `prop_suffix` if given.
     /// Borrows the node's path when no suffix is needed (zero-copy).
-    fn query_path<'a>(node: &'a Node, prop_suffix: Option<&str>) -> Result<Cow<'a, Path>> {
+    fn query_path<'a>(node: &'a Node, prop_suffix: Option<&str>) -> Result<Cow<'a, Path>, QueryError> {
         match prop_suffix {
             Some(suffix) => Ok(Cow::Owned(Path::new(&format!("{}{suffix}", node.path))?)),
             None => Ok(Cow::Borrowed(&node.path)),
@@ -468,7 +466,7 @@ impl PrimIndex {
     fn contributing_sites<'a>(
         &'a self,
         prop_suffix: Option<&'a str>,
-    ) -> impl Iterator<Item = Result<ContributingSite<'a>>> + 'a {
+    ) -> impl Iterator<Item = Result<ContributingSite<'a>, QueryError>> + 'a {
         self.live_spec_sites().map(move |(site, node)| {
             Ok(ContributingSite {
                 node,
@@ -489,7 +487,7 @@ impl PrimIndex {
         field: &'a str,
         stack: &'a LayerGraph,
         prop_suffix: Option<&'a str>,
-    ) -> impl Iterator<Item = Result<Opinion<'a>>> + 'a {
+    ) -> impl Iterator<Item = Result<Opinion<'a>, QueryError>> + 'a {
         self.contributing_sites(prop_suffix).filter_map(move |site| {
             let site = match site {
                 Ok(site) => site,
@@ -553,7 +551,12 @@ impl PrimIndex {
     ///   compose-over with generic value resolution); a surviving `%_`
     ///   resolves to the empty expression, and every opinion is mapped into
     ///   the root namespace through its node first
-    fn resolve_strongest(&self, field: &str, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+    fn resolve_strongest(
+        &self,
+        field: &str,
+        stack: &LayerGraph,
+        prop_suffix: Option<&str>,
+    ) -> Result<Option<Value>, QueryError> {
         let mut opinions = self.opinions(field, stack, prop_suffix);
         let Some(first) = opinions.next() else {
             return Ok(None);
@@ -632,7 +635,7 @@ impl PrimIndex {
         &self,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-    ) -> Result<Option<sdf::TimeSampleMap>> {
+    ) -> Result<Option<sdf::TimeSampleMap>, QueryError> {
         self.first_time_samples(stack, prop_suffix, None, |map, opinion| {
             retime_samples(map.clone(), opinion.offset)
         })
@@ -661,7 +664,7 @@ impl PrimIndex {
     // All three states of the nested `Option` are distinct results the callers
     // act on, as the doc above spells out; flattening them would lose the
     // matched-but-valueless case that stops fall-through.
-    #[allow(clippy::option_option)]
+    #[allow(clippy::option_option, clippy::type_complexity)]
     pub(crate) fn resolve_value_at(
         &self,
         stack: &LayerGraph,
@@ -669,7 +672,7 @@ impl PrimIndex {
         local_layers: Option<&HashSet<LayerId>>,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<(Option<Value>, Option<AssetSite>)>> {
+    ) -> Result<Option<(Option<Value>, Option<AssetSite>)>, QueryError> {
         self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
             let value = interp(map, opinion.offset.inverse().apply(time));
             let site = value
@@ -692,7 +695,7 @@ impl PrimIndex {
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
         local_layers: Option<&HashSet<LayerId>>,
-    ) -> Result<Option<(sdf::TimeSampleMap, LayerOffset, AssetSite)>> {
+    ) -> Result<Option<(sdf::TimeSampleMap, LayerOffset, AssetSite)>, QueryError> {
         self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
             (map.clone(), opinion.offset, opinion.asset_site(stack))
         })
@@ -707,7 +710,7 @@ impl PrimIndex {
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
         local_layers: Option<&HashSet<LayerId>>,
-    ) -> Result<Option<Vec<f64>>> {
+    ) -> Result<Option<Vec<f64>>, QueryError> {
         self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
             map.iter().map(|(t, _)| opinion.offset.apply(*t)).collect()
         })
@@ -722,7 +725,7 @@ impl PrimIndex {
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
         local_layers: Option<&HashSet<LayerId>>,
-    ) -> Result<Option<usize>> {
+    ) -> Result<Option<usize>, QueryError> {
         self.first_time_samples(stack, prop_suffix, local_layers, |map, _| map.len())
     }
 
@@ -745,7 +748,7 @@ impl PrimIndex {
         prop_suffix: Option<&str>,
         local_layers: Option<&HashSet<LayerId>>,
         extract: impl FnOnce(&sdf::TimeSampleMap, &Opinion<'_>) -> R,
-    ) -> Result<Option<R>> {
+    ) -> Result<Option<R>, QueryError> {
         let field = FieldKey::TimeSamples.as_str();
         for opinion in self.opinions(field, stack, prop_suffix) {
             let opinion = opinion?;
@@ -781,7 +784,7 @@ impl PrimIndex {
     /// accepted, since USDC backends may decode the field either way. A
     /// `ValueBlock` with no stronger opinion leaves the field unauthored
     /// (`None`), falling back to name order.
-    pub(crate) fn clip_sets_order(&self, stack: &LayerGraph) -> Result<Option<Vec<String>>> {
+    pub(crate) fn clip_sets_order(&self, stack: &LayerGraph) -> Result<Option<Vec<String>>, QueryError> {
         // Fold directly into the applied order. This shares the opinion-gather
         // (`clip_sets_ops`) with `clip_sets_list_op` but composes into a `Vec`
         // in one pass, rather than building an intermediate list-op — value
@@ -797,7 +800,7 @@ impl PrimIndex {
     /// `SdfStringListOp` folding), preserving the prepend/append/delete
     /// structure rather than flattening to an applied order like
     /// [`clip_sets_order`](Self::clip_sets_order). `None` when unauthored.
-    pub(crate) fn clip_sets_list_op(&self, stack: &LayerGraph) -> Result<Option<sdf::StringListOp>> {
+    pub(crate) fn clip_sets_list_op(&self, stack: &LayerGraph) -> Result<Option<sdf::StringListOp>, QueryError> {
         // `clip_sets_ops` yields strongest first; fold each weaker op under the
         // accumulated stronger one.
         Ok(self
@@ -810,7 +813,7 @@ impl PrimIndex {
     /// stopping at a `ValueBlock`. The `String`/`Token` list-op encodings and
     /// bare vecs (treated as explicit) are all accepted, since USDC backends may
     /// decode the field either way (spec 12.2.6).
-    fn clip_sets_ops(&self, stack: &LayerGraph) -> Result<Vec<sdf::StringListOp>> {
+    fn clip_sets_ops(&self, stack: &LayerGraph) -> Result<Vec<sdf::StringListOp>, QueryError> {
         let mut ops = Vec::new();
         for opinion in self.opinions(FieldKey::ClipSets.as_str(), stack, None) {
             match opinion?.value.into_owned() {
@@ -835,7 +838,7 @@ impl PrimIndex {
     ///
     /// The three asset-valued fields have any `` `${VAR}` `` evaluated against
     /// the variables in scope at the opinion that supplied them, and a set whose
-    /// expression fails is dropped with [`Error::InvalidExpression`] in `errors`.
+    /// expression fails is dropped with [`CompositionError::InvalidExpression`] in `errors`.
     /// C++ diverges here: `clipSetDefinition.cpp` reads all three through plain
     /// dictionary lookups, and `UsdStage::_MakeResolvedAssetPaths` never descends
     /// into a `VtDictionary`, so an expression is inert there. The Sdf
@@ -844,8 +847,8 @@ impl PrimIndex {
     pub(crate) fn resolve_clip_sets(
         &self,
         stack: &LayerGraph,
-        errors: &mut Vec<Error>,
-    ) -> Result<Vec<clip::ResolvedClipSet>> {
+        errors: &mut Vec<CompositionError>,
+    ) -> Result<Vec<clip::ResolvedClipSet>, QueryError> {
         let mut sets: HashMap<String, HashMap<String, Value>> = HashMap::new();
         let mut blocked_sets: HashSet<String> = HashSet::new();
         // The layer that authored a set's clip asset paths, paired with the stack
@@ -996,7 +999,7 @@ impl PrimIndex {
     /// Variability resolution per spec 12.2.3: weakest authored opinion wins.
     /// Iterates strongest-to-weakest tracking the latest match, so a
     /// [`Value::ValueBlock`] still blocks weaker opinions.
-    fn resolve_variability(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+    fn resolve_variability(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>, QueryError> {
         let field = FieldKey::Variability.as_str();
         let mut weakest = None;
         for opinion in self.opinions(field, stack, prop_suffix) {
@@ -1015,7 +1018,7 @@ impl PrimIndex {
     /// Returns `Bool(true)` as soon as any opinion is true, `Bool(false)` if
     /// at least one opinion was authored but none were true, and `None`
     /// otherwise.
-    fn resolve_custom(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+    fn resolve_custom(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>, QueryError> {
         let field = FieldKey::Custom.as_str();
         let mut saw_opinion = false;
         for opinion in self.opinions(field, stack, prop_suffix) {
@@ -1039,7 +1042,7 @@ impl PrimIndex {
     /// It is `class` if the strongest defining opinion not from a direct
     /// inherit is `class`, or if every defining opinion is `class`. It is
     /// `over` only when every authored opinion is `over`.
-    fn resolve_specifier(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+    fn resolve_specifier(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>, QueryError> {
         let field = FieldKey::Specifier.as_str();
         let mut specs: Vec<(Specifier, ArcType)> = Vec::new();
         for opinion in self.opinions(field, stack, prop_suffix) {
@@ -1111,7 +1114,7 @@ fn evaluate_clip_assets(
     sets: &mut HashMap<String, HashMap<String, Value>>,
     order: Option<&[String]>,
     asset_sites: &HashMap<String, ClipAssetSites>,
-    errors: &mut Vec<Error>,
+    errors: &mut Vec<CompositionError>,
 ) {
     if asset_sites.is_empty() {
         return;

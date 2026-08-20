@@ -16,7 +16,7 @@ use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, SpecSite};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
-use super::{Error, ExpressionContext, LayerGraph, LayerId, VariantFallbackMap};
+use super::{CompositionError, ExpressionContext, LayerGraph, LayerId, VariantFallbackMap};
 
 /// Composition index for a single prim.
 ///
@@ -70,7 +70,7 @@ pub(crate) struct PrimEntry {
     /// Recoverable composition errors recorded while building [`index`](Self::index),
     /// replaced wholesale on each rebuild so they always reflect the current
     /// composition.
-    pub errors: Vec<Error>,
+    pub errors: Vec<CompositionError>,
     /// Lazily-memoized resolved property targets — cached composed query output,
     /// not authored data — keyed by property kind and suffix. Filled on the first
     /// [`relationship_targets`] / [`connection_paths`] query for a property whose
@@ -112,7 +112,7 @@ pub(crate) struct TargetMemoKey {
 #[derive(Clone)]
 pub(crate) struct TargetMemo {
     pub targets: Vec<Path>,
-    pub errors: Vec<Error>,
+    pub errors: Vec<CompositionError>,
 }
 
 /// Outcome of [`PrimIndex::refresh_has_specs_at`]: what the spec-tier rescan
@@ -665,7 +665,7 @@ impl PrimIndex {
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimEntry>,
         load_payloads: bool,
-    ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>, ExprVarDeps)> {
+    ) -> BuildResult<(Self, Vec<CompositionError>, Vec<Demand>, ExprVarDeps)> {
         Self::build_with_cache_in(path, stack, ctx, cached_indices, LayerStackId::ROOT, load_payloads)
     }
 
@@ -685,7 +685,7 @@ impl PrimIndex {
         cached_indices: &sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
         load_payloads: bool,
-    ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>, ExprVarDeps)> {
+    ) -> BuildResult<(Self, Vec<CompositionError>, Vec<Demand>, ExprVarDeps)> {
         if ambient == LayerStackId::ROOT
             && let Some(cached) = cached_indices.get(path)
         {
@@ -698,7 +698,7 @@ impl PrimIndex {
             return Ok((cached.index.clone(), Vec::new(), Vec::new(), ExprVarDeps::default()));
         }
         // The task-queue indexer is the sole composition path. A genuine cycle
-        // surfaces as `Error::ArcCycle`; an unresolvable arc is recorded in the
+        // surfaces as `CompositionError::ArcCycle`; an unresolvable arc is recorded in the
         // returned errors and skipped. A `None` graph means an unestablished seed
         // or the runaway nesting backstop, which composes to an empty prim index.
         let indexer = super::prim_indexer::Indexer::new(stack, ctx, cached_indices, ambient, load_payloads);
@@ -1057,7 +1057,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    use anyhow::Result;
+    use crate::Result;
 
     use crate::sdf::LayerOffset;
 
@@ -1080,7 +1080,7 @@ pub(crate) mod tests {
     /// the layer set composition would have loaded on demand had it been driven
     /// through a stage.
     fn load_layers(path: &str) -> Result<Vec<sdf::Layer>> {
-        sdf::LayerRegistry::default().collect_with_arcs(path)
+        Ok(sdf::LayerRegistry::default().collect_with_arcs(path)?)
     }
 
     /// Builds a prim index for a given path string.
@@ -1150,7 +1150,7 @@ pub(crate) mod tests {
     }
 
     /// Helper: loads layers and builds a [`LayerGraph`].
-    fn load_stack(path: &str) -> anyhow::Result<LayerGraph> {
+    fn load_stack(path: &str) -> Result<LayerGraph> {
         let layers = load_layers(path)?;
         Ok(LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default()))
     }
@@ -1742,7 +1742,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    // --- Error reporting ---
+    // --- CompositionError reporting ---
 
     fn parse_usda(text: &str) -> Box<dyn sdf::AbstractData> {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
@@ -1872,7 +1872,7 @@ def "World" (
         );
     }
 
-    /// A reference cycle is recorded as a recoverable `Error::ArcCycle` and the
+    /// A reference cycle is recorded as a recoverable `CompositionError::ArcCycle` and the
     /// cycle-closing arc is skipped, rather than aborting the whole build (C++
     /// `_CheckForCycle` drops the arc and continues).
     #[test]
@@ -1913,7 +1913,7 @@ def "Root" (
             true,
         )?;
         assert!(
-            errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
+            errors.iter().any(|e| matches!(e, CompositionError::ArcCycle(_))),
             "expected a recorded ArcCycle error, got {errors:?}"
         );
         Ok(())
@@ -1961,7 +1961,7 @@ def "Outer"
             true,
         )?;
         assert!(
-            errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
+            errors.iter().any(|e| matches!(e, CompositionError::ArcCycle(_))),
             "expected a recorded ArcCycle error for a cross-frame cycle, got {errors:?}"
         );
         Ok(())
@@ -1993,7 +1993,9 @@ def "Prim" (
             true,
         )?;
         assert!(
-            errors.iter().any(|e| matches!(e, Error::UnresolvedLayer { .. })),
+            errors
+                .iter()
+                .any(|e| matches!(e, CompositionError::UnresolvedLayer { .. })),
             "expected a recorded UnresolvedLayer error, got {errors:?}"
         );
         assert!(
@@ -2032,7 +2034,9 @@ def "Prim" (
             true,
         )?;
         assert!(
-            errors.iter().any(|e| matches!(e, Error::UnresolvedDefaultPrim { .. })),
+            errors
+                .iter()
+                .any(|e| matches!(e, CompositionError::UnresolvedDefaultPrim { .. })),
             "expected a recorded UnresolvedDefaultPrim error, got {errors:?}"
         );
         assert!(
@@ -2364,12 +2368,12 @@ def "Prim" (
             .collect()
     }
 
-    fn basic_time_offset_stack() -> anyhow::Result<LayerGraph> {
+    fn basic_time_offset_stack() -> Result<LayerGraph> {
         load_stack(&spec_composition_path("BasicTimeOffset_root/usda/root.usd"))
     }
 
     #[test]
-    fn time_offset_reference_then_sublayer() -> anyhow::Result<()> {
+    fn time_offset_reference_then_sublayer() -> Result<()> {
         // /Root references A.usd (offset=10, scale=1).
         // A.usd sublayers B.usd (offset=20, scale=1).
         // Expected effective offsets (from pcp.txt):
@@ -2390,7 +2394,7 @@ def "Prim" (
     }
 
     #[test]
-    fn time_offset_payload_with_scale_and_sublayer() -> anyhow::Result<()> {
+    fn time_offset_payload_with_scale_and_sublayer() -> Result<()> {
         // /PayloadRefPayload payload = ref.usd (offset=10, scale=2).
         // ref.usd sublayers ref_sub.usd (offset=20, scale=1).
         // ref_sub's /Ref payload = B.usd/Model (no offset).
@@ -2422,7 +2426,7 @@ def "Prim" (
     }
 
     #[test]
-    fn time_offset_payload_with_nested_reference() -> anyhow::Result<()> {
+    fn time_offset_payload_with_nested_reference() -> Result<()> {
         // /PayloadMultiRef payload = ref.usd/Ref2 (offset=10, scale=2).
         // ref.usd sublayers ref_sub.usd (offset=20, scale=1).
         // ref_sub's /Ref2 references B.usd/Model (no offset).
@@ -2450,7 +2454,7 @@ def "Prim" (
     }
 
     #[test]
-    fn time_offset_descendant_inherits_parents_offset() -> anyhow::Result<()> {
+    fn time_offset_descendant_inherits_parents_offset() -> Result<()> {
         // /Root/Anim is a descendant of /Root, which references A.usd
         // (offset=10). A.usd sublayers B.usd (offset=20). /Model/Anim lives
         // in B.usd only.

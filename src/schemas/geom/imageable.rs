@@ -1,6 +1,6 @@
 //! `UsdGeomImageable` — the base of the UsdGeom prim hierarchy.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::tf;

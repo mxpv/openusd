@@ -9,7 +9,9 @@
 //! scope; consumers that need them dispatch on
 //! [`Shader::id`](super::Shader::id).
 
-use anyhow::Result;
+use crate::Result;
+
+use crate::schemas::SchemaError;
 
 use crate::{gf, sdf, usd};
 
@@ -76,7 +78,10 @@ pub struct ReadPreviewSurface {
 /// when it resolves nothing, the authored render-context surface terminals
 /// are tried in sorted order, so a context-only material still decodes.
 /// Returns `None` when no terminal yields a `UsdPreviewSurface` shader.
-pub fn read_preview_surface(stage: &usd::Stage, material: &sdf::Path) -> Result<Option<ReadPreviewSurface>> {
+pub fn read_preview_surface(
+    stage: &usd::Stage,
+    material: &sdf::Path,
+) -> Result<Option<ReadPreviewSurface>, SchemaError> {
     let Some(material) = Material::get(stage, material.clone())? else {
         return Ok(None);
     };
@@ -112,7 +117,7 @@ pub fn read_preview_surface(stage: &usd::Stage, material: &sdf::Path) -> Result<
 
 /// Resolve the surface terminal: the universal context first, then the
 /// authored render-context terminals in sorted order for a stable choice.
-fn resolve_surface_terminal(material: &Material) -> Result<Option<super::ResolvedTerminal>> {
+fn resolve_surface_terminal(material: &Material) -> Result<Option<super::ResolvedTerminal>, SchemaError> {
     if let Some(terminal) = material.compute_surface_source(&[])? {
         return Ok(Some(terminal));
     }
@@ -137,7 +142,7 @@ fn resolve_surface_terminal(material: &Material) -> Result<Option<super::Resolve
 /// The input is resolved to the shader output that produces it, so a texture
 /// reached through a NodeGraph interface is found the same as one wired
 /// directly.
-fn connected_texture_file(shader: &Shader, base: &str) -> Result<Option<String>> {
+fn connected_texture_file(shader: &Shader, base: &str) -> Result<Option<String>, SchemaError> {
     let produced = shader
         .input(base)
         .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)?;
@@ -161,7 +166,7 @@ fn connected_texture_file(shader: &Shader, base: &str) -> Result<Option<String>>
 ///
 /// TODO: the returned path is the raw authored token; anchoring it to the layer
 /// that authored the opinion is not yet done.
-fn resolve_asset_value(input: &Input) -> Result<Option<String>> {
+fn resolve_asset_value(input: &Input) -> Result<Option<String>, SchemaError> {
     let produced = input.value_producing_attributes(ProducerFilter::Any)?;
     let Some(source) = produced.first() else {
         return Ok(None);
@@ -174,7 +179,7 @@ fn resolve_asset_value(input: &Input) -> Result<Option<String>> {
         .map(str::to_owned))
 }
 
-fn read_color_channel(shader: &Shader, base: &str) -> Result<Channel<gf::Vec3f>> {
+fn read_color_channel(shader: &Shader, base: &str) -> Result<Channel<gf::Vec3f>, SchemaError> {
     if let Some(file) = connected_texture_file(shader, base)? {
         return Ok(Channel::Texture(file));
     }
@@ -186,7 +191,7 @@ fn read_color_channel(shader: &Shader, base: &str) -> Result<Channel<gf::Vec3f>>
     })
 }
 
-fn read_scalar_channel(shader: &Shader, base: &str) -> Result<Channel<f32>> {
+fn read_scalar_channel(shader: &Shader, base: &str) -> Result<Channel<f32>, SchemaError> {
     if let Some(file) = connected_texture_file(shader, base)? {
         return Ok(Channel::Texture(file));
     }
@@ -203,8 +208,10 @@ fn read_scalar_channel(shader: &Shader, base: &str) -> Result<Channel<f32>> {
 mod tests {
     use super::*;
 
+    use crate::Result;
+
     #[test]
-    fn context_only_surface() -> Result<()> {
+    fn context_only_surface() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
@@ -224,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_and_textured_channels() -> Result<()> {
+    fn scalar_and_textured_channels() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
 
         // A UsdUVTexture feeding diffuseColor; roughness/metallic are scalars.
@@ -258,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_driven_texture() -> Result<()> {
+    fn interface_driven_texture() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
 
         // The texture's file path is driven by a Material interface input rather
@@ -287,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn non_preview_surface_none() -> Result<()> {
+    fn non_preview_surface_none() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.create_id_attr()?

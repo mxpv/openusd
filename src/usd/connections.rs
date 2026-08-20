@@ -24,8 +24,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use anyhow::Result;
-
+use crate::Result;
 use crate::sdf::Path;
 use crate::usd::{PrimPredicate, Stage};
 
@@ -149,6 +148,8 @@ impl ConnectionGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::sdf;
 
     /// Build a tiny three-node chain: `A.in <- B.out`, `B.in <- C.out`.

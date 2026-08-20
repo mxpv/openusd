@@ -17,12 +17,12 @@
 //! (spec 10.3.1.1).
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::PathBuf;
-
-use anyhow::{Context, Result};
 
 use crate::ar;
 use crate::sdf::{self, expr};
+use crate::tf;
 use crate::usda::UsdaFileFormat;
 use crate::usdc::UsdcFileFormat;
 use crate::usdz::UsdzFileFormat;
@@ -80,6 +80,57 @@ pub(crate) enum Error {
         /// The evaluator's errors, joined.
         reason: String,
     },
+}
+
+/// Operational failure that aborts a registry load.
+///
+/// Recoverable per-sublayer problems are reported as [`Error`] values through
+/// the caller's `on_error` handler and never travel through this type.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LoadError {
+    /// The asset did not resolve to a physical location.
+    #[error("failed to resolve asset path: {asset_path}")]
+    Unresolved {
+        /// The asset path that did not resolve.
+        asset_path: String,
+    },
+
+    /// No registered file format claims the resolved location.
+    #[error("no file format registered for {resolved}")]
+    UnsupportedFormat {
+        /// The resolved location.
+        resolved: String,
+    },
+
+    /// The chosen format failed to read the asset.
+    #[error(transparent)]
+    Format(#[from] sdf::FormatError),
+
+    /// Reading a field out of an opened layer's data failed.
+    #[error(transparent)]
+    Data(#[from] sdf::DataError),
+
+    /// The caller's `on_error` handler declined to recover from a sublayer
+    /// load failure, aborting the load with it.
+    #[error(transparent)]
+    Rejected(#[from] Error),
+}
+
+/// Projects a load failure onto the public [`crate::Error`]: resolution and
+/// format-dispatch failures map to the root variants that name them, layer
+/// read failures convert transparently, and a rejected sublayer failure rides
+/// whole — Display and typed source intact — as a decode failure of the stack
+/// being loaded.
+impl From<LoadError> for crate::Error {
+    fn from(error: LoadError) -> Self {
+        match error {
+            LoadError::Unresolved { asset_path } => crate::Error::UnresolvedAsset(asset_path),
+            LoadError::UnsupportedFormat { resolved } => crate::Error::UnsupportedFormat(resolved),
+            LoadError::Format(error) => error.into(),
+            LoadError::Data(error) => error.into(),
+            LoadError::Rejected(error) => crate::Error::Format(sdf::FormatError::Decode(Box::new(error))),
+        }
+    }
 }
 
 /// Owns layer loading for a stage: the [`ar::Resolver`] that finds and opens
@@ -210,7 +261,7 @@ impl LayerRegistry {
     /// caller building an [`sdf::Layer`] from this passes it to
     /// [`Layer::new_resolved`](sdf::Layer::new_resolved) rather than letting
     /// `real_path` fall back to the identifier.
-    pub(crate) fn open(&self, identifier: &str) -> Result<Option<(ar::ResolvedPath, sdf::LayerData)>> {
+    pub(crate) fn open(&self, identifier: &str) -> Result<Option<(ar::ResolvedPath, sdf::LayerData)>, LoadError> {
         match self.resolve_layer(identifier) {
             Some(resolved) => {
                 let data = self.read(&resolved)?;
@@ -234,14 +285,14 @@ impl LayerRegistry {
         &self,
         asset_path: &str,
         anchor: Option<&ar::ResolvedPath>,
-    ) -> Result<HashMap<String, sdf::Value>> {
+    ) -> Result<HashMap<String, sdf::Value>, LoadError> {
         let identifier = self.create_identifier(asset_path, anchor);
         if identifier.is_empty() {
             return Ok(HashMap::new());
         }
-        let resolved = self
-            .resolve_layer(&identifier)
-            .with_context(|| format!("failed to resolve asset path: {asset_path}"))?;
+        let resolved = self.resolve_layer(&identifier).ok_or_else(|| LoadError::Unresolved {
+            asset_path: asset_path.to_owned(),
+        })?;
         let data = self.read(&resolved)?;
         Ok(expr::read_expression_variables(data.as_ref())?.into_owned())
     }
@@ -286,9 +337,9 @@ impl LayerRegistry {
         anchor: Option<&ar::ResolvedPath>,
         ancestor_expr_vars: &HashMap<String, sdf::Value>,
         reload: bool,
-        on_error: &dyn Fn(Error) -> Result<()>,
+        on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
-    ) -> Result<Option<Vec<sdf::Layer>>> {
+    ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
         let mut layers = Vec::new();
         let mut visited = HashSet::new();
 
@@ -351,7 +402,7 @@ impl LayerRegistry {
         identifier: &str,
         stack_vars: &HashMap<String, sdf::Value>,
         already_present: &dyn Fn(&str) -> bool,
-    ) -> Result<Option<Vec<sdf::Layer>>> {
+    ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
         let Some(resolved) = self.resolve_layer(identifier) else {
             return Ok(None);
         };
@@ -377,13 +428,13 @@ impl LayerRegistry {
     /// crate or text — so it peeks the leading bytes and chooses by
     /// [`matches_content`](sdf::FileFormat::matches_content) (the crate magic),
     /// falling back to text. C++ `SdfFileFormat::FindByExtension` + `CanRead`.
-    fn read(&self, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
+    fn read(&self, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData, LoadError> {
         let ext = resolved.extension();
         let format = if ext.eq_ignore_ascii_case("usd") {
             // TODO(perf): the chosen format re-opens the asset in `read`; only
             // `.usd` peeks, so fold the peek into one read once `FileFormat::read`
             // can take already-read bytes.
-            let prefix = self.read_prefix(resolved)?;
+            let prefix = self.read_prefix(resolved).map_err(sdf::FormatError::from)?;
             DEFAULT_FORMATS
                 .iter()
                 .copied()
@@ -392,13 +443,15 @@ impl LayerRegistry {
         } else {
             Self::find_by_extension(&ext)
         };
-        format
-            .ok_or_else(|| anyhow::anyhow!("no file format registered for {resolved}"))?
-            .read(self.resolver.as_ref(), resolved)
+        Ok(format
+            .ok_or_else(|| LoadError::UnsupportedFormat {
+                resolved: resolved.to_string(),
+            })?
+            .read(self.resolver.as_ref(), resolved)?)
     }
 
     /// Reads the leading bytes of `resolved` for content-based format detection.
-    fn read_prefix(&self, resolved: &ar::ResolvedPath) -> Result<Vec<u8>> {
+    fn read_prefix(&self, resolved: &ar::ResolvedPath) -> Result<Vec<u8>, io::Error> {
         use std::io::Read;
         let mut asset = self.resolver.open_asset(resolved)?;
         let mut prefix = Vec::new();
@@ -427,11 +480,11 @@ impl LayerRegistry {
         data: sdf::LayerData,
         stack_vars: &HashMap<String, sdf::Value>,
         reload: bool,
-        on_error: &dyn Fn(Error) -> Result<()>,
+        on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
         visited: &mut HashSet<String>,
         layers: &mut Vec<sdf::Layer>,
-    ) -> Result<()> {
+    ) -> Result<(), LoadError> {
         let sub_paths = Self::sublayer_paths(data.as_ref());
 
         // Emit this layer ahead of its sublayers so the collected stack is
@@ -515,7 +568,7 @@ impl LayerRegistry {
                     on_error(Error::UnreadableAsset {
                         asset_path: sub_asset,
                         referencing_layer: identifier.clone(),
-                        reason: format!("{reason:#}"),
+                        reason: tf::error_chain(&reason),
                     })?;
                     failed.insert(sub_id);
                     continue;
@@ -557,7 +610,7 @@ impl LayerRegistry {
     /// Opens a root layer and the full transitive closure of its sublayers,
     /// references, and payloads — the layer set a fully-composed (and fully-
     /// traversed) stage would have loaded on demand.
-    pub(crate) fn collect_with_arcs(&self, root_path: &str) -> Result<Vec<sdf::Layer>> {
+    pub(crate) fn collect_with_arcs(&self, root_path: &str) -> Result<Vec<sdf::Layer>, LoadError> {
         let mut layers = Vec::new();
         let mut visited = HashSet::new();
         self.collect_with_arcs_in(root_path, None, &HashMap::new(), &mut layers, &mut visited)?;
@@ -572,7 +625,7 @@ impl LayerRegistry {
         ancestor_expr_vars: &HashMap<String, sdf::Value>,
         layers: &mut Vec<sdf::Layer>,
         visited: &mut HashSet<String>,
-    ) -> Result<()> {
+    ) -> Result<(), LoadError> {
         let identifier = self.create_identifier(asset_path, anchor);
         if identifier.is_empty() || visited.contains(&identifier) {
             return Ok(());
@@ -601,7 +654,7 @@ impl LayerRegistry {
     }
 
     /// Every sublayer, reference, and payload asset path authored in a layer.
-    fn arc_dependencies(data: &dyn sdf::AbstractData) -> Result<Vec<String>> {
+    fn arc_dependencies(data: &dyn sdf::AbstractData) -> Result<Vec<String>, sdf::DataError> {
         let mut deps = Self::sublayer_paths(data);
         let mut queue = vec![sdf::Path::abs_root()];
         while let Some(path) = queue.pop() {
@@ -669,6 +722,7 @@ impl LayerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Result;
     use crate::sdf::FileFormatCaps;
 
     const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
@@ -693,9 +747,9 @@ mod tests {
     /// Opens a root layer and its sublayer stack, erroring on a missing sublayer
     /// or an unresolvable root.
     fn open_stack(path: &str) -> Result<Vec<sdf::Layer>> {
-        registry()
-            .open_stack(path, None, &HashMap::new(), false, &|e| Err(e.into()), &|_| false)?
-            .context("root did not resolve")
+        Ok(registry()
+            .open_stack(path, None, &HashMap::new(), false, &Err, &|_| false)?
+            .expect("root did not resolve"))
     }
 
     #[test]
@@ -820,7 +874,7 @@ mod tests {
                 },
                 &|_| false,
             )?
-            .context("root resolves")?;
+            .expect("root resolves");
 
         // The root still loads despite the missing sublayer.
         assert_eq!(layers.len(), 1);

@@ -3,6 +3,7 @@
 
 use std::cmp::Ordering;
 use std::convert::Infallible;
+use std::error;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
@@ -182,6 +183,25 @@ impl serde::Serialize for Token {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
     }
+}
+
+/// Renders `error` followed by its `source` chain as one `: `-separated line,
+/// for flattening a typed error into a plain-text diagnostic field.
+pub(crate) fn error_chain(error: &dyn error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let rendered = cause.to_string();
+        // A wrapper often embeds its source's rendering (a transparent error,
+        // or a located error quoting its cause); skip what the text already
+        // contains so the chain reads each failure once.
+        if !rendered.is_empty() && !text.contains(&rendered) {
+            text.push_str(": ");
+            text.push_str(&rendered);
+        }
+        source = cause.source();
+    }
+    text
 }
 
 #[cfg(test)]

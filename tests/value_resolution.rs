@@ -16,7 +16,7 @@
 //! - Spline interpolation (`InterpolationType.Spline`). The reference stubs it
 //!   too and no fixture asserts spline values.
 
-use anyhow::Result;
+use openusd::Result;
 use openusd::sdf::{Value, path};
 use openusd::usd;
 

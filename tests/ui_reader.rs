@@ -1,6 +1,6 @@
 //! Integration test for the `UsdUI` schema views against a fixture.
 
-use anyhow::Result;
+use openusd::Result;
 
 use openusd::schemas::ui::{Backdrop, ExpansionState, NodeGraphNodeAPI, SceneGraphPrimAPI};
 use openusd::sdf;

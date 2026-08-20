@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::schemas::common::{get_typed, get_with_api};
 use crate::sdf::{self, FieldKey, Value};
@@ -251,6 +251,8 @@ fn nested_dict_mut<'a>(d: &'a mut HashMap<String, Value>, key: &str) -> &'a mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::media::{AuralMode, PlaybackMode};
 
     #[test]

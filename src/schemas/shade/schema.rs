@@ -3,7 +3,9 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use anyhow::{Result, ensure};
+use crate::Result;
+
+use crate::schemas::SchemaError;
 
 use crate::{sdf, tf, usd};
 
@@ -281,7 +283,7 @@ impl Material {
     /// An empty context addresses the universal `outputs:surface` terminal;
     /// a context that is not a namespaced identifier errors, as the create
     /// counterpart does.
-    pub fn surface_output_for(&self, render_context: &str) -> Result<Output> {
+    pub fn surface_output_for(&self, render_context: &str) -> Result<Output, SchemaError> {
         checked_context(render_context)?;
         Ok(self.terminal_output(render_context, TerminalKind::Surface))
     }
@@ -315,7 +317,7 @@ impl Material {
     /// An empty context addresses the universal `outputs:displacement`
     /// terminal; a context that is not a namespaced identifier errors, as the
     /// create counterpart does.
-    pub fn displacement_output_for(&self, render_context: &str) -> Result<Output> {
+    pub fn displacement_output_for(&self, render_context: &str) -> Result<Output, SchemaError> {
         checked_context(render_context)?;
         Ok(self.terminal_output(render_context, TerminalKind::Displacement))
     }
@@ -350,7 +352,7 @@ impl Material {
     /// An empty context addresses the universal `outputs:volume` terminal; a
     /// context that is not a namespaced identifier errors, as the create
     /// counterpart does.
-    pub fn volume_output_for(&self, render_context: &str) -> Result<Output> {
+    pub fn volume_output_for(&self, render_context: &str) -> Result<Output, SchemaError> {
         checked_context(render_context)?;
         Ok(self.terminal_output(render_context, TerminalKind::Volume))
     }
@@ -377,19 +379,22 @@ impl Material {
     ///
     /// The earliest context with valid shader sources wins. The universal
     /// context is tried last unless it already appears in `render_contexts`.
-    pub fn compute_surface_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>> {
+    pub fn compute_surface_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
         self.compute_terminal_source(TerminalKind::Surface, render_contexts)
     }
 
     /// Resolve the displacement terminal for the ordered render-context
     /// preferences, with universal fallback.
-    pub fn compute_displacement_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>> {
+    pub fn compute_displacement_source(
+        &self,
+        render_contexts: &[&str],
+    ) -> Result<Option<ResolvedTerminal>, SchemaError> {
         self.compute_terminal_source(TerminalKind::Displacement, render_contexts)
     }
 
     /// Resolve the volume terminal for the ordered render-context preferences,
     /// with universal fallback.
-    pub fn compute_volume_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>> {
+    pub fn compute_volume_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
         self.compute_terminal_source(TerminalKind::Volume, render_contexts)
     }
 
@@ -397,7 +402,7 @@ impl Material {
         &self,
         kind: TerminalKind,
         render_contexts: &[&str],
-    ) -> Result<Option<ResolvedTerminal>> {
+    ) -> Result<Option<ResolvedTerminal>, SchemaError> {
         for &render_context in render_contexts {
             checked_context(render_context)?;
         }
@@ -414,7 +419,11 @@ impl Material {
         Ok(None)
     }
 
-    fn resolve_terminal(&self, kind: TerminalKind, render_context: &str) -> Result<Option<ResolvedTerminal>> {
+    fn resolve_terminal(
+        &self,
+        kind: TerminalKind,
+        render_context: &str,
+    ) -> Result<Option<ResolvedTerminal>, SchemaError> {
         let output = self.terminal_output(render_context, kind);
         let mut sources = Vec::new();
         let mut seen = HashSet::new();
@@ -482,11 +491,12 @@ fn terminal_output_name(render_context: &str, kind: TerminalKind) -> Cow<'static
 
 /// Validates a caller-supplied render context: the universal context, or a
 /// namespaced identifier (`ri`, `mtlx:standard`).
-fn checked_context(render_context: &str) -> Result<()> {
-    ensure!(
-        render_context == tok::UNIVERSAL_RENDER_CONTEXT || sdf::Path::is_valid_namespace_identifier(render_context),
-        "invalid render context {render_context:?}"
-    );
+fn checked_context(render_context: &str) -> Result<(), SchemaError> {
+    if render_context != tok::UNIVERSAL_RENDER_CONTEXT && !sdf::Path::is_valid_namespace_identifier(render_context) {
+        return Err(SchemaError::InvalidRenderContext {
+            context: render_context.to_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -495,6 +505,8 @@ impl_shade_schema!(connectable Material);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::shade::{Connectable, ImplementationSource};
     use crate::sdf::Value;
 
@@ -564,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn material_surface_terminal() -> Result<()> {
+    fn material_surface_terminal() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         Shader::define(&stage, "/Mat/Surface")?
             .create_id_attr()?
@@ -590,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_through_node_graph() -> Result<()> {
+    fn surface_through_node_graph() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let shader = Shader::define(&stage, "/Mat/NG/Surface")?;
         let shader_output = shader.create_output("surface", "token")?;
@@ -613,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn render_context_terminal_source() -> Result<()> {
+    fn render_context_terminal_source() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let ri = Shader::define(&stage, "/Mat/RiSurface")?;
         let ri_output = ri.create_output("surface", "token")?;
@@ -634,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn universal_terminal_decides() -> Result<()> {
+    fn universal_terminal_decides() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let ri = Shader::define(&stage, "/Mat/RiSurface")?;
         let ri_output = ri.create_output("surface", "token")?;
@@ -718,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn material_terminal_kinds() -> Result<()> {
+    fn material_terminal_kinds() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let surface = Shader::define(&stage, "/Mat/Surface")?.create_output("surface", "token")?;
         let displacement = Shader::define(&stage, "/Mat/Displace")?.create_output("displacement", "token")?;
@@ -751,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn context_selection_fallback() -> Result<()> {
+    fn context_selection_fallback() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let universal = Shader::define(&stage, "/Mat/Universal")?.create_output("result", "token")?;
         let renderman = Shader::define(&stage, "/Mat/Renderman")?.create_output("result", "token")?;
@@ -781,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_source_order() -> Result<()> {
+    fn terminal_source_order() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let first = Shader::define(&stage, "/Mat/First")?.create_output("density", "token")?;
         let second = Shader::define(&stage, "/Mat/Second")?.create_output("fog", "token")?;
@@ -813,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_commits_untyped_endpoint() -> Result<()> {
+    fn terminal_commits_untyped_endpoint() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let material = Material::define(&stage, "/Mat")?;
         // The ri terminal ends on a custom-typed node; the universal terminal
@@ -836,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn converging_sources_dedup() -> Result<()> {
+    fn converging_sources_dedup() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let material = Material::define(&stage, "/Mat")?;
         let shader = Shader::define(&stage, "/Mat/S")?;
@@ -867,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_output_enumeration() -> Result<()> {
+    fn terminal_output_enumeration() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let material = Material::define(&stage, "/Mat")?;
         material.create_surface_output_for("ri")?;

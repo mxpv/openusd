@@ -4,13 +4,13 @@ use openusd::gf;
 use openusd::sdf::{self, ChildrenKey, FieldKey, LayerOffset, ListOp, Reference, SpecType, Specifier, Value};
 use openusd::usda::TextWriter;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> openusd::Result<()> {
     write_spheres("sphere.usda")?;
     write_scene("scene.usda")?;
     Ok(())
 }
 
-fn write_spheres(path: &str) -> anyhow::Result<()> {
+fn write_spheres(path: &str) -> openusd::Result<()> {
     let mut data = sdf::Data::new();
 
     let root_spec = data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
@@ -29,7 +29,7 @@ fn write_spheres(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn add_sphere(data: &mut sdf::Data, prim_path: &str, color: gf::Vec3f) -> anyhow::Result<()> {
+fn add_sphere(data: &mut sdf::Data, prim_path: &str, color: gf::Vec3f) -> openusd::Result<()> {
     let prim = sdf::path(prim_path)?;
     let prim_spec = data.create_spec(prim.clone(), SpecType::Prim);
     prim_spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
@@ -48,7 +48,7 @@ fn add_sphere(data: &mut sdf::Data, prim_path: &str, color: gf::Vec3f) -> anyhow
 
 /// Write `scene.usda` — a single prim with a `color` variant set that references
 /// one of the three spheres from `sphere.usda` depending on the selected variant.
-fn write_scene(path: &str) -> anyhow::Result<()> {
+fn write_scene(path: &str) -> openusd::Result<()> {
     let mut data = sdf::Data::new();
 
     let root_spec = data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
@@ -103,7 +103,7 @@ fn add_variant(
     set_name: &str,
     variant_name: &str,
     target_prim: Option<&str>,
-) -> anyhow::Result<()> {
+) -> openusd::Result<()> {
     let variant_path = sdf::Path::new(&format!("{prim_path}{{{set_name}={variant_name}}}"))?;
     let variant_spec = data.create_spec(variant_path, SpecType::Variant);
 

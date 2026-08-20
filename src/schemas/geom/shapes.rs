@@ -8,7 +8,7 @@
 //! `get()` yields the authored value, falling back to what the schema
 //! declares (see [`crate::usd::SchemaRegistry`]).
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, Stage};
@@ -341,6 +341,8 @@ impl_geom_schema!(gprim Plane);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::geom::Purpose;
 
     #[test]

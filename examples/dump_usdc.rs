@@ -9,18 +9,19 @@
 
 use std::{env, fs};
 
-use anyhow::{Context as _, Result};
+use openusd::Result;
 use openusd::usdc::{CrateFile, Version};
 
 fn main() -> Result<()> {
     let args = env::args().collect::<Vec<_>>();
 
-    let path = args
-        .get(1)
-        .context("Missing path to usdc file, use: cargo run --example dump_usdc {PATH_TO_FILE}.usdc")?;
+    let Some(path) = args.get(1) else {
+        eprintln!("usage: cargo run --example dump_usdc <FILE>.usdc");
+        std::process::exit(2);
+    };
 
-    let reader = fs::File::open(path).context("Failed to read crate file")?;
-    let mut file = CrateFile::open(reader).context("Failed to read crate file")?;
+    let reader = fs::File::open(path)?;
+    let mut file = CrateFile::open(reader)?;
 
     println!("-- Bootrap header");
     println!("Magic: {:?}", file.bootstrap.ident);

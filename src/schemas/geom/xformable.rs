@@ -9,7 +9,9 @@
 //! flow through [`crate::usd::Attribute::get`], so time-sampled ops
 //! interpolate per AOUSD §12.5.
 
-use anyhow::Result;
+use crate::Result;
+
+use crate::schemas::SchemaError;
 
 use crate::gf;
 use crate::sdf;
@@ -76,7 +78,7 @@ pub trait Xformable: Imageable {
     /// Compose `xformOpOrder` into a single local-to-parent 4×4 matrix at
     /// `time`. [`gf::Matrix4d::IDENTITY`] when no stack is authored. Mirrors C++
     /// `ComputeLocalToParentTransform`.
-    fn local_to_parent_transform(&self, time: impl Into<TimeCode>) -> Result<gf::Matrix4d> {
+    fn local_to_parent_transform(&self, time: impl Into<TimeCode>) -> Result<gf::Matrix4d, SchemaError> {
         let time = time.into();
         let Some(order) = self.xform_op_order()? else {
             return Ok(gf::Matrix4d::IDENTITY);
@@ -87,11 +89,10 @@ pub trait Xformable: Imageable {
                 if i == 0 {
                     continue;
                 }
-                anyhow::bail!(
-                    "xformOpOrder on `{}`: `!resetXformStack!` is only valid at index 0, found at index {}",
-                    self.prim().path().as_str(),
-                    i,
-                );
+                return Err(SchemaError::InvalidOpOrder {
+                    prim: self.prim().path().clone(),
+                    index: i,
+                });
             }
             // Row-vector convention: the last listed op is most local
             // (applied first to a point), so each new op is prepended,
@@ -207,7 +208,7 @@ pub trait Xformable: Imageable {
 }
 
 /// Build the 4×4 contribution of a single xformOp (possibly `!invert!`-ed).
-fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Matrix4d> {
+fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Matrix4d, SchemaError> {
     let (inverted, base) = match op_name.strip_prefix(TOKEN_INVERT_PREFIX) {
         Some(stripped) => (true, stripped),
         None => (false, op_name),
@@ -261,8 +262,9 @@ fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Mat
     };
 
     if inverted {
-        m.inverse()
-            .ok_or_else(|| anyhow::anyhow!("xformOp `{op_name}` matrix is singular and cannot be inverted"))
+        m.inverse().ok_or_else(|| SchemaError::SingularTransform {
+            op: op_name.to_string(),
+        })
     } else {
         Ok(m)
     }
@@ -319,11 +321,12 @@ fn value_to_quat_wxyz(v: &sdf::Value) -> Option<[f64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::Xformable;
+    use crate::Result;
     use crate::gf;
+    use crate::schemas::SchemaError;
     use crate::schemas::geom::Xform;
     use crate::sdf;
     use crate::usd::Stage;
-    use anyhow::Result;
 
     #[test]
     fn translate_appears_in_order() -> Result<()> {
@@ -356,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn local_to_parent_translate_unrotated() -> Result<()> {
+    fn local_to_parent_translate_unrotated() -> Result<(), SchemaError> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(3.0, 5.0, 7.0))?

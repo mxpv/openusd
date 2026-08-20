@@ -2,13 +2,13 @@
 
 use std::{
     fs::File,
-    io::{Cursor, Read, Seek},
+    io::{self, Cursor, Read, Seek},
     path::Path,
 };
 
-use anyhow::{Context, Result, bail};
 use zip::ZipArchive;
 
+use super::ArchiveError;
 use crate::{ar, sdf, usda, usdc};
 
 /// USDZ archive reader.
@@ -24,11 +24,11 @@ pub struct Archive<R: Read + Seek = File> {
 
 impl Archive<File> {
     /// Opens a USDZ archive from a file path.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ArchiveError> {
         let path = path.as_ref();
-        let file = File::open(path).with_context(|| format!("Failed to open USDZ archive: {}", path.display()))?;
-        let archive =
-            ZipArchive::new(file).with_context(|| format!("Failed to read ZIP archive: {}", path.display()))?;
+        let file = File::open(path)
+            .map_err(|error| io::Error::new(error.kind(), format!("unable to open {}: {error}", path.display())))?;
+        let archive = ZipArchive::new(file)?;
         Ok(Self { archive })
     }
 }
@@ -36,9 +36,9 @@ impl Archive<File> {
 impl Archive<Cursor<Vec<u8>>> {
     /// Reads the entire package at `resolved` through the resolver's asset seam
     /// and opens it as an archive, so a host-provided byte source is honored.
-    pub fn from_asset(resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<Self> {
+    pub fn from_asset(resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<Self, ArchiveError> {
         let bytes = resolver.open_asset(resolved)?.read_all()?;
-        Archive::from_reader(Cursor::new(bytes)).context("failed to open USDZ archive")
+        Archive::from_reader(Cursor::new(bytes))
     }
 }
 
@@ -47,8 +47,8 @@ impl<R: Read + Seek> Archive<R> {
     ///
     /// Use this when the archive bytes come from a custom asset resolver
     /// rather than directly from the filesystem.
-    pub fn from_reader(reader: R) -> Result<Self> {
-        let archive = ZipArchive::new(reader).context("Failed to read ZIP archive")?;
+    pub fn from_reader(reader: R) -> Result<Self, ArchiveError> {
+        let archive = ZipArchive::new(reader)?;
         Ok(Self { archive })
     }
 
@@ -65,27 +65,29 @@ impl<R: Read + Seek> Archive<R> {
     }
 
     /// Opens the first (root) layer from the archive.
-    pub fn read_first_layer(&mut self) -> Result<Box<dyn sdf::AbstractData>> {
-        let name = self.first_layer_name().context("no USD layer found in USDZ archive")?;
+    pub fn read_first_layer(&mut self) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
+        let name = self.first_layer_name().ok_or(ArchiveError::NoDefaultLayer)?;
         self.read(&name)
     }
 
     /// Read either a USDA or USDC file from the archive.
     ///
     /// NOTE: Nested USDZ files are not yet supported.
-    pub fn read(&mut self, file_path: &str) -> Result<Box<dyn sdf::AbstractData>> {
+    pub fn read(&mut self, file_path: &str) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
         let mut file = self
             .archive
             .by_name(file_path)
-            .with_context(|| format!("File '{}' not found in archive", file_path))?;
+            .map_err(|e| ArchiveError::entry(file_path, e))?;
 
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)
-            .with_context(|| format!("Failed to read file '{}' from archive", file_path))?;
+            .map_err(|e| ArchiveError::entry(file_path, e))?;
 
         if file_path.ends_with(".usdz") {
             // TODO: Implement nested USDZ files support.
-            bail!("Nested USDZ files are not yet supported: '{}'", file_path);
+            return Err(ArchiveError::NestedPackage {
+                path: file_path.to_owned(),
+            });
         }
 
         // The named extension decides crate vs text; a format-agnostic `.usd`
@@ -102,12 +104,14 @@ impl<R: Read + Seek> Archive<R> {
         };
 
         if is_crate {
-            let data = usdc::CrateData::open(Cursor::new(buffer), true)
-                .with_context(|| format!("Failed to parse USDC data from '{}'", file_path))?;
+            let data =
+                usdc::CrateData::open(Cursor::new(buffer), true).map_err(|e| ArchiveError::entry(file_path, e))?;
             Ok(Box::new(data))
         } else {
-            let content =
-                String::from_utf8(buffer).with_context(|| format!("File '{}' is not valid UTF-8", file_path))?;
+            let content = String::from_utf8(buffer).map_err(|e| ArchiveError::Utf8 {
+                name: file_path.to_owned(),
+                source: e.utf8_error(),
+            })?;
             let data = usda::parse(&content).map_err(|error| error.with_source_name(file_path))?;
             Ok(Box::new(data))
         }
@@ -117,6 +121,7 @@ impl<R: Read + Seek> Archive<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Result;
 
     #[test]
     fn test_open_usdz() -> Result<()> {

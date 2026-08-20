@@ -9,7 +9,7 @@
 //! [`LightAPI`](super::LightAPI) applied-schema view implements [`Light`]
 //! directly.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::schemas::geom;
 use crate::usd::{Attribute, Relationship, SchemaBase};

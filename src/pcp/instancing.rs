@@ -18,14 +18,11 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
-
 use crate::sdf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{Path, PathElement, Value};
 use crate::tf::Token;
 
-use super::LayerId;
 use super::index_cache::IndexCache;
 use super::layer_graph::LayerGraph;
 use super::load_rules::LoadRules;
@@ -33,6 +30,7 @@ use super::population_mask::PopulationMask;
 use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
 use super::prim_indexer::ExprVarDeps;
+use super::{LayerId, QueryError};
 
 /// The shared-prototype registry (spec 11.3.3): maps each instancing key to its
 /// prototype and tracks the instances that share it. Owns no composition state
@@ -430,7 +428,7 @@ impl IndexCache {
     /// parent recursion by construction, and the existence check only through
     /// [`Self::enclosing_instance`], which walks strict ancestors (see
     /// [`Self::is_instance`]).
-    pub(crate) fn is_populated(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub(crate) fn is_populated(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         if path.is_abs_root() {
             return Ok(true);
         }
@@ -500,7 +498,7 @@ impl IndexCache {
     /// on a strict ancestor to find the enclosing instance, but each step moves
     /// to a shorter path and bottoms out at the root, so the recursion
     /// terminates.
-    pub(crate) fn is_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub(crate) fn is_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         if path.is_abs_root() || self.is_prototype(path) {
             return Ok(false);
         }
@@ -530,7 +528,7 @@ impl IndexCache {
     /// (spec 11.3.3). Composing the index here (and computing its
     /// [`InstanceKey`]) is the cache's job; the dedup is the
     /// [`PrototypeRegistry`]'s.
-    fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<Path> {
+    fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<Path, QueryError> {
         // A nested instance can itself be an instance proxy. Its shared
         // composition lives at the corresponding prim inside the enclosing
         // prototype, so that is the index defining the nested prototype's key
@@ -608,7 +606,7 @@ impl IndexCache {
     /// Returns the synthetic prototype path (`/__Prototype_N`) shared by
     /// `instance`, registering it on first use. `None` when `instance` is not
     /// an instance prim (spec 11.3.3).
-    pub(crate) fn prototype_of(&mut self, graph: &LayerGraph, instance: &Path) -> Result<Option<Path>> {
+    pub(crate) fn prototype_of(&mut self, graph: &LayerGraph, instance: &Path) -> Result<Option<Path>, QueryError> {
         if !self.is_instance(graph, instance)? {
             return Ok(None);
         }
@@ -752,7 +750,7 @@ impl IndexCache {
     /// an instance that composes to no prim (e.g. a misspelled child) is not a
     /// proxy — mirroring the existence check on [`Self::is_instance`] /
     /// `Prim::is_valid`.
-    pub(crate) fn is_instance_proxy(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub(crate) fn is_instance_proxy(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         if path.is_abs_root() || self.is_prototype(path) {
             return Ok(false);
         }
@@ -766,7 +764,7 @@ impl IndexCache {
     /// a proxy `instance/tail` maps to `/__Prototype_N/tail` (spec 11.3.3).
     /// `None` when `path` is not an instance proxy (including a path under an
     /// instance that composes to no prim).
-    pub(crate) fn prim_in_prototype(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>> {
+    pub(crate) fn prim_in_prototype(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>, QueryError> {
         if !self.is_instance_proxy(graph, path)? {
             return Ok(None);
         }
@@ -787,7 +785,7 @@ impl IndexCache {
     // composition). The `redirected_prims` memo collapses it to O(d) once the
     // ancestors are warm, which a top-down traversal keeps it; a dedicated
     // `is_instance` memo would remove the cold-cache factor entirely.
-    fn enclosing_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>> {
+    fn enclosing_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>, QueryError> {
         let mut ancestor = path.parent();
         while let Some(current) = ancestor {
             if current.is_abs_root() {
@@ -806,7 +804,7 @@ impl IndexCache {
     /// prototype's namespace, so identical instances share one composed subtree
     /// (spec 11.3.3). Other paths — the prototype namespace itself, an instance
     /// root, and non-instanced prims — pass through unchanged.
-    fn redirect_prim(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Path> {
+    fn redirect_prim(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Path, QueryError> {
         match self.redirect_anchor(graph, prim)? {
             Some((origin, target)) => Ok(prim.replace_prefix(&origin, &target).unwrap_or_else(|| prim.clone())),
             None => Ok(prim.clone()),
@@ -830,7 +828,11 @@ impl IndexCache {
     /// plain content (a prototype root is never an instance, so never an enclosing
     /// one; see [`Self::is_instance`] — the shared subtree lives there, composed by
     /// deepening the materialized index), and every non-instanced prim.
-    pub(super) fn redirect_anchor(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Option<(Path, Path)>> {
+    pub(super) fn redirect_anchor(
+        &mut self,
+        graph: &LayerGraph,
+        prim: &Path,
+    ) -> Result<Option<(Path, Path)>, QueryError> {
         if let Some(instance) = self.enclosing_instance(graph, prim)? {
             let prototype = self.register_prototype(graph, &instance)?;
             return Ok(Some((instance, prototype)));
@@ -848,7 +850,7 @@ impl IndexCache {
     /// ancestor walk that finds an enclosing instance runs once per prim path
     /// rather than once per query; the memo is cleared whenever the prototype
     /// registry is invalidated.
-    pub(super) fn effective_path(&mut self, graph: &LayerGraph, path: &Path) -> Result<Path> {
+    pub(super) fn effective_path(&mut self, graph: &LayerGraph, path: &Path) -> Result<Path, QueryError> {
         let prim = path.prim_path();
         let redirected = if let Some(hit) = self.redirected_prims.get(&prim) {
             hit.clone()

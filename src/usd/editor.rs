@@ -50,7 +50,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{EditTarget, Prim, Stage, StageAuthoringError};
-use crate::{pcp, sdf};
+use crate::{Result, pcp, sdf};
 
 /// Batches namespace edits — prim/property renames, reparents, and deletes —
 /// and applies them to a [`Stage`] with full target/connection/reference fixup.
@@ -169,7 +169,7 @@ pub enum NamespaceEditError {
 
     /// A composed-stage query needed to validate or apply an edit failed.
     #[error(transparent)]
-    Composition(#[from] anyhow::Error),
+    Composition(#[from] pcp::QueryError),
 
     /// Authoring the edit onto a layer failed.
     #[error(transparent)]
@@ -782,7 +782,9 @@ impl<'a> NamespaceProjection<'a> {
         let Some(origin) = projected_origin(path, earlier) else {
             return Ok((false, false));
         };
-        let index = Prim::new(self.stage, origin.prim_path()).prim_index().graph()?;
+        let index = Prim::new(self.stage, origin.prim_path())
+            .prim_index()
+            .graph_composed()?;
         let facts = classify_source_nodes(&index, &origin, None);
         Ok((facts.realized, facts.masks))
     }
@@ -829,7 +831,7 @@ impl<'a> NamespaceProjection<'a> {
             return Ok(TargetFacts::default());
         };
         let prim = origin.prim_path();
-        let index = Prim::new(self.stage, prim.clone()).prim_index().graph()?;
+        let index = Prim::new(self.stage, prim.clone()).prim_index().graph_composed()?;
         let target_spec = target.map_to_spec_path(&prim);
         let target_node = target_spec.as_ref().and_then(|spec| {
             index

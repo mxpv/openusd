@@ -4,9 +4,9 @@
 
 use std::{collections::HashMap, io, mem};
 
-use anyhow::{Result, bail};
 use num_traits::{AsPrimitive, PrimInt};
 
+use super::ReadError;
 use super::reader::ReadExt;
 
 const COMMON: u8 = 0;
@@ -23,7 +23,7 @@ pub fn encoded_buffer_size<T: PrimInt>(count: usize) -> usize {
     }
 }
 
-pub fn decode_ints<T: PrimInt + 'static>(data: &[u8], count: usize) -> Result<Vec<T>>
+pub fn decode_ints<T: PrimInt + 'static>(data: &[u8], count: usize) -> Result<Vec<T>, ReadError>
 where
     i64: AsPrimitive<T>,
 {
@@ -65,7 +65,7 @@ where
                 (MEDIUM, false) => ints_reader.read_pod::<i16>()? as i64,
                 (LARGE, true) => ints_reader.read_pod::<i64>()?,
                 (LARGE, false) => ints_reader.read_pod::<i32>()? as i64,
-                _ => bail!("Unexpected code: {ty}"),
+                _ => return Err(ReadError::corrupt(format!("Unexpected code: {ty}"))),
             };
 
             prev = prev.wrapping_add(delta);

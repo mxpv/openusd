@@ -30,9 +30,7 @@
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
 
-use anyhow::Result;
-
-use crate::{pcp, sdf, tf};
+use crate::{Result, pcp, sdf, tf};
 
 use super::sink::{Payload, Provenance};
 
@@ -183,9 +181,9 @@ impl StageComposition {
     /// caller's reused buffer, so a warmed-up load loop allocates nothing.
     fn query_pass<T>(
         &self,
-        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
+        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         demands: &mut Vec<pcp::Demand>,
-    ) -> Result<T> {
+    ) -> Result<T, pcp::QueryError> {
         self.assert_settled();
         let layers = self.layers.borrow();
         let mut cache = self.cache.borrow_mut();
@@ -483,8 +481,8 @@ impl StageComposition {
     /// whose failed open records the per-referrer, per-stack diagnostic the
     /// graph regenerates on each rebuild. A target that cannot be opened is
     /// marked failed with what went wrong, so the next composition pass
-    /// reports it — [`MalformedLayer`](pcp::Error::MalformedLayer) for a
-    /// read/parse failure, [`UnresolvedLayer`](pcp::Error::UnresolvedLayer)
+    /// reports it — [`MalformedLayer`](pcp::CompositionError::MalformedLayer) for a
+    /// read/parse failure, [`UnresolvedLayer`](pcp::CompositionError::UnresolvedLayer)
     /// for a resolve failure — rather than demanding it again; otherwise the
     /// demanding prim's index would never cache.
     ///
@@ -567,7 +565,7 @@ impl StageComposition {
                             }
                         })
                     }
-                    Err(err) => Some(pcp::LoadFailure::Unreadable(format!("{err:#}"))),
+                    Err(err) => Some(pcp::LoadFailure::Unreadable(tf::error_chain(&err))),
                 };
                 if let Some(failure) = failure {
                     let mut graph = self.layers.borrow_mut();
@@ -721,7 +719,7 @@ impl StageComposition {
                         None
                     }
                     Ok(None) => Some(pcp::LoadFailure::Unresolved),
-                    Err(err) => Some(pcp::LoadFailure::Unreadable(format!("{err:#}"))),
+                    Err(err) => Some(pcp::LoadFailure::Unreadable(tf::error_chain(&err))),
                 };
                 if let Some(load_failure) = failure {
                     let mut graph = self.layers.borrow_mut();
@@ -774,9 +772,9 @@ impl StageComposition {
     /// drives layer loading: an un-visited subtree never loads.
     pub(super) fn query<T>(
         &self,
-        mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
+        mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         hooks: &dyn CompositionHooks,
-    ) -> Result<T> {
+    ) -> Result<T, pcp::QueryError> {
         // Reused across passes: swapped with the cache's queue so neither
         // reallocates once warmed up.
         let mut pending: Vec<pcp::Demand> = Vec::new();
@@ -960,7 +958,7 @@ impl StageComposition {
         // per rebuild — as per-stack regenerable diagnostics; the loader's
         // one-shot copies of those would double-report and outlive a later fix,
         // so they are dropped.
-        let superseded: Vec<pcp::Error> = {
+        let superseded: Vec<pcp::CompositionError> = {
             let graph = self.layers.borrow();
             graph
                 .errors()
@@ -968,9 +966,9 @@ impl StageComposition {
                 .filter(|error| {
                     matches!(
                         error,
-                        pcp::Error::UnresolvedSublayer { .. }
-                            | pcp::Error::MalformedSublayer { .. }
-                            | pcp::Error::InvalidExpression { .. }
+                        pcp::CompositionError::UnresolvedSublayer { .. }
+                            | pcp::CompositionError::MalformedSublayer { .. }
+                            | pcp::CompositionError::InvalidExpression { .. }
                     )
                 })
                 .collect()

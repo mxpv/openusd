@@ -1,6 +1,8 @@
 //! Logical UsdShade value-producing attribute resolution.
 
-use anyhow::{Result, bail};
+use crate::Result;
+
+use crate::schemas::SchemaError;
 
 use crate::{sdf, usd};
 
@@ -32,7 +34,7 @@ const MAX_CONNECTION_DEPTH: usize = 256;
 pub(super) fn value_producing_attributes(
     attribute: ShadingAttribute,
     filter: ProducerFilter,
-) -> Result<Vec<ShadingAttribute>> {
+) -> Result<Vec<ShadingAttribute>, SchemaError> {
     let mut producing = Vec::new();
     resolve_recursive(attribute, &mut Vec::new(), &mut producing, filter)?;
     Ok(producing)
@@ -50,7 +52,7 @@ fn resolve_recursive(
     chain: &mut Vec<sdf::Path>,
     producing: &mut Vec<ShadingAttribute>,
     filter: ProducerFilter,
-) -> Result<bool> {
+) -> Result<bool, SchemaError> {
     if !attribute.attribute().is_defined()? || chain.contains(attribute.path()) {
         return Ok(false);
     }
@@ -60,10 +62,10 @@ fn resolve_recursive(
     let connected = !sources.is_empty();
     if connected {
         if chain.len() >= MAX_CONNECTION_DEPTH {
-            bail!(
-                "connection chain at {} is deeper than {MAX_CONNECTION_DEPTH} hops",
-                attribute.path()
-            );
+            return Err(SchemaError::ConnectionDepthExceeded {
+                attribute: attribute.path().clone(),
+                max: MAX_CONNECTION_DEPTH,
+            });
         }
         chain.push(attribute.path().clone());
     }
@@ -105,7 +107,7 @@ fn follow_source(
     chain: &mut Vec<sdf::Path>,
     producing: &mut Vec<ShadingAttribute>,
     filter: ProducerFilter,
-) -> Result<bool> {
+) -> Result<bool, SchemaError> {
     let attribute = source.attribute();
     match source.source_type() {
         // An output on a shader node is a terminal producer; nothing upstream
@@ -127,11 +129,13 @@ fn follow_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::shade::{AttributeType, Connectable, Material, NodeGraph, Shader};
     use crate::usd;
 
     #[test]
-    fn untyped_source_terminal() -> Result<()> {
+    fn untyped_source_terminal() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let source = stage.override_prim("/Mat/Source")?;
         let source_output = source.create_attribute("outputs:result", "float")?;
@@ -149,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_graph_resolution() -> Result<()> {
+    fn nested_graph_resolution() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let source = Shader::define(&stage, "/Mat/Source")?;
         let source_output = source.create_output("result", "float")?;
@@ -172,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_value_resolution() -> Result<()> {
+    fn interface_value_resolution() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let material = Material::define(&stage, "/Mat")?;
         material.create_input("gain", "float")?.set(2.0_f32)?;
@@ -198,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_source_order() -> Result<()> {
+    fn multiple_source_order() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let first = Shader::define(&stage, "/Mat/First")?;
         let first_output = first.create_output("result", "float")?;
@@ -226,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn diamond_resolves_both() -> Result<()> {
+    fn diamond_resolves_both() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let shader = Shader::define(&stage, "/Mat/Source")?;
         let shader_output = shader.create_output("result", "float")?;
@@ -256,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_source_followed_once() -> Result<()> {
+    fn repeated_source_followed_once() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let shader = Shader::define(&stage, "/Mat/Source")?;
         let shader_output = shader.create_output("result", "float")?;
@@ -298,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn cycle_stops() -> Result<()> {
+    fn cycle_stops() -> Result<(), SchemaError> {
         let stage = usd::Stage::builder().in_memory("anon.usda")?;
         let first = NodeGraph::define(&stage, "/Mat/First")?;
         let second = NodeGraph::define(&stage, "/Mat/Second")?;

@@ -13,7 +13,7 @@
 // all — silence the dead-code warning on per-feature builds.
 #![allow(dead_code)]
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf::{self, FieldKey, Path};
 use crate::tf;
@@ -22,7 +22,7 @@ use crate::usd::{Prim, Stage, VersionFilter};
 /// Read a `token`-valued attribute. A non-token value reads as absent
 /// (`token` attributes never resolve to a `Value::String`).
 pub(crate) fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<tf::Token>> {
-    stage.field::<tf::Token>(prim.append_property(name)?, FieldKey::Default)
+    Ok(stage.field::<tf::Token>(prim.append_property(name)?, FieldKey::Default)?)
 }
 
 /// Wrap `path` as a concrete view's `Prim` if the prim is `type_name` or
@@ -116,14 +116,17 @@ macro_rules! impl_token_value {
         }
 
         impl TryFrom<$crate::sdf::Value> for $ty {
-            type Error = $crate::sdf::ValueConversionError;
+            type Error = $crate::sdf::CastError;
 
             fn try_from(value: $crate::sdf::Value) -> Result<Self, Self::Error> {
                 match &value {
                     $crate::sdf::Value::Token(s) => <$ty>::from_token(s.as_str()),
                     _ => None,
                 }
-                .ok_or_else(|| $crate::sdf::ValueConversionError::new(stringify!($ty), &value))
+                .ok_or_else(|| $crate::sdf::CastError::TypeMismatch {
+                    target: stringify!($ty),
+                    actual: (&value).into(),
+                })
             }
         }
     )+};
@@ -134,6 +137,8 @@ pub(crate) use impl_token_value;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::usd::SchemaRegistry;
 
     /// A stage resolving against the miniature test family.

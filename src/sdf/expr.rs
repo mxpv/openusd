@@ -30,7 +30,6 @@
 //! ```
 
 use crate::sdf;
-use anyhow::{Result, anyhow, bail, ensure};
 use logos::{Logos, SpannedIter};
 use regex_lite::Regex;
 use std::borrow::Cow;
@@ -47,6 +46,40 @@ pub fn is_expression(s: &str) -> bool {
     s.len() > 2 && s.starts_with('`') && s.ends_with('`')
 }
 
+/// A variable-expression parse failure, reported by [`Expr::parse`] and the
+/// `FromStr` impl. Evaluation problems are not errors of this type: they
+/// aggregate as strings on [`Evaluation::errors`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct ExprError {
+    message: String,
+}
+
+impl ExprError {
+    /// Wraps a parse-failure message.
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+/// Returns `Err(ExprError)` built from a format string.
+macro_rules! bail {
+    ($($arg:tt)*) => {
+        return Err(ExprError::new(format!($($arg)*)))
+    };
+}
+
+/// Returns a parse failure built from a format string unless `cond` holds.
+macro_rules! ensure {
+    ($cond:expr, $($arg:tt)*) => {
+        if !$cond {
+            bail!($($arg)*);
+        }
+    };
+}
+
 /// Reads a layer's pseudo-root `expressionVariables` dictionary, borrowing it
 /// from `data` when the backing store holds it directly (the common in-memory
 /// case) and only owning an empty map when the field is absent or not a
@@ -54,7 +87,9 @@ pub fn is_expression(s: &str) -> bool {
 /// `pcp`-level concern (C++ `PcpExpressionVariables`); this is the single
 /// per-layer read both layer collection and arc composition share, overlaid
 /// with [`compose_over`].
-pub fn read_expression_variables(data: &dyn sdf::AbstractData) -> Result<Cow<'_, HashMap<String, sdf::Value>>> {
+pub fn read_expression_variables(
+    data: &dyn sdf::AbstractData,
+) -> Result<Cow<'_, HashMap<String, sdf::Value>>, sdf::DataError> {
     let root = sdf::Path::abs_root();
     Ok(
         match data.try_field(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
@@ -95,7 +130,7 @@ pub fn compose_over(base: &mut HashMap<String, sdf::Value>, overlay: &HashMap<St
 pub fn stack_expression_variables(
     root_data: &dyn sdf::AbstractData,
     overrides: &HashMap<String, sdf::Value>,
-) -> Result<HashMap<String, sdf::Value>> {
+) -> Result<HashMap<String, sdf::Value>, sdf::DataError> {
     let mut vars = read_expression_variables(root_data)?.into_owned();
     compose_over(&mut vars, overrides);
     Ok(vars)
@@ -126,7 +161,7 @@ pub fn evaluate_string(s: &str, vars: &HashMap<String, sdf::Value>) -> StringEva
         Err(err) => {
             return StringEvaluation {
                 value: None,
-                errors: vec![format!("{err:#}")],
+                errors: vec![err.to_string()],
                 used_variables: HashSet::new(),
             };
         }
@@ -317,7 +352,7 @@ pub enum Func {
 impl Func {
     /// Validates the parsed argument count against the function's arity, with
     /// the C++ parse-time messages.
-    fn validate_arg_count(self, count: usize) -> Result<()> {
+    fn validate_arg_count(self, count: usize) -> Result<(), ExprError> {
         match self {
             Func::Defined => ensure!(count >= 1, "Function '{self}' requires at least 1 arguments."),
             Func::And | Func::Or => ensure!(count >= 2, "Function '{self}' requires at least 2 arguments."),
@@ -365,9 +400,9 @@ pub enum StringSegment {
 }
 
 impl FromStr for Expr {
-    type Err = anyhow::Error;
+    type Err = ExprError;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut parser = Parser::new(s);
         parser.parse_expr()
     }
@@ -375,7 +410,7 @@ impl FromStr for Expr {
 
 impl Expr {
     /// Parse an expression string into an expression tree.
-    pub fn parse(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self, ExprError> {
         s.parse()
     }
 
@@ -458,7 +493,7 @@ impl EvalContext<'_> {
                     self.stack.pop();
                     result
                 }
-                Err(err) => EvalResult::error(format!("{err:#} (in variable '{name}')")),
+                Err(err) => EvalResult::error(format!("{err} (in variable '{name}')")),
             },
             sdf::Value::String(_)
             | sdf::Value::Bool(_)
@@ -940,7 +975,7 @@ impl<'a> Parser<'a> {
 
     /// Consume and return the current token; a malformed token is a parse
     /// error.
-    fn next(&mut self) -> Result<Option<Token<'a>>> {
+    fn next(&mut self) -> Result<Option<Token<'a>>, ExprError> {
         match self.iter.next() {
             Some((Ok(token), _)) => Ok(Some(token)),
             Some((Err(()), span)) => bail!("Unexpected character '{}'", &self.input[span]),
@@ -949,7 +984,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Consume a token if it matches the expected token, otherwise return an error.
-    fn expect(&mut self, expected: Token<'a>) -> Result<()> {
+    fn expect(&mut self, expected: Token<'a>) -> Result<(), ExprError> {
         match self.next()? {
             Some(ref token) if *token == expected => Ok(()),
             Some(token) => bail!("Expected {:?}, got {:?}", expected, token),
@@ -958,7 +993,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a complete expression: one expression body spanning all input.
-    fn parse_expr(&mut self) -> Result<Expr> {
+    fn parse_expr(&mut self) -> Result<Expr, ExprError> {
         let expr = self.parse()?;
         match self.next()? {
             None => Ok(expr),
@@ -969,7 +1004,7 @@ impl<'a> Parser<'a> {
     /// Parse an expression body (C++ `ExpressionBody`): a scalar expression or
     /// a list. List elements are scalar expressions (C++ `ListElement`), so a
     /// nested list is a parse error.
-    fn parse(&mut self) -> Result<Expr> {
+    fn parse(&mut self) -> Result<Expr, ExprError> {
         if matches!(self.peek(), Some(Token::LBracket)) {
             self.next()?;
             let elements = self.parse_delimited(Token::RBracket, ']', "list", Self::parse_scalar)?;
@@ -981,13 +1016,15 @@ impl<'a> Parser<'a> {
     /// Parse a scalar expression (C++ `ScalarExpression`): a literal, a
     /// `${var}` reference, or a function call. A bare identifier not followed
     /// by `(` is a parse error.
-    fn parse_scalar(&mut self) -> Result<Expr> {
-        let token = self.next()?.ok_or_else(|| anyhow!("Unexpected end of input"))?;
+    fn parse_scalar(&mut self) -> Result<Expr, ExprError> {
+        let token = self.next()?.ok_or_else(|| ExprError::new("Unexpected end of input"))?;
 
         match token {
             Token::String(raw) => Ok(Expr::String(parse_quoted_string(raw)?)),
             Token::Integer(s) => {
-                let value = s.parse::<i64>().map_err(|_| anyhow!("Integer {s} out of range."))?;
+                let value = s
+                    .parse::<i64>()
+                    .map_err(|_| ExprError::new(format!("Integer {s} out of range.")))?;
                 Ok(Expr::Integer(value))
             }
             Token::True => Ok(Expr::Bool(true)),
@@ -1007,8 +1044,10 @@ impl<'a> Parser<'a> {
 
     /// Parse a function call: `funcName(arg1, arg2, ...)`. Arguments are full
     /// expression bodies, so a list argument is allowed.
-    fn parse_call(&mut self, name: &str) -> Result<Expr> {
-        let func: Func = name.parse().map_err(|_| anyhow!("Unknown function {name}"))?;
+    fn parse_call(&mut self, name: &str) -> Result<Expr, ExprError> {
+        let func: Func = name
+            .parse()
+            .map_err(|_| ExprError::new(format!("Unknown function {name}")))?;
         self.expect(Token::LParen)?;
         let args = self.parse_delimited(Token::RParen, ')', "function call", Self::parse)?;
         func.validate_arg_count(args.len())?;
@@ -1024,8 +1063,8 @@ impl<'a> Parser<'a> {
         close: Token<'a>,
         close_char: char,
         what: &str,
-        parse_element: fn(&mut Self) -> Result<Expr>,
-    ) -> Result<Vec<Expr>> {
+        parse_element: fn(&mut Self) -> Result<Expr, ExprError>,
+    ) -> Result<Vec<Expr>, ExprError> {
         let mut elements = Vec::new();
         if self.peek() == Some(&close) {
             self.next()?;
@@ -1061,7 +1100,7 @@ impl<'a> Parser<'a> {
 /// and the enclosing quote — produces the character itself, so `\${var}` is
 /// the literal text `${var}` rather than a reference. A `$` not starting a
 /// `${name}` reference is an ordinary character.
-fn parse_quoted_string(raw: &str) -> Result<Vec<StringSegment>> {
+fn parse_quoted_string(raw: &str) -> Result<Vec<StringSegment>, ExprError> {
     let body = &raw[1..raw.len() - 1];
     let mut segments = Vec::new();
     let mut literal = String::new();
@@ -1071,7 +1110,9 @@ fn parse_quoted_string(raw: &str) -> Result<Vec<StringSegment>> {
             '\\' => {
                 // The lexer only forms a string token from complete escape
                 // pairs, so a character always follows.
-                let escaped = chars.next().ok_or_else(|| anyhow!("Trailing backslash in string"))?;
+                let escaped = chars
+                    .next()
+                    .ok_or_else(|| ExprError::new("Trailing backslash in string"))?;
                 literal.push(match escaped {
                     'n' => '\n',
                     'r' => '\r',

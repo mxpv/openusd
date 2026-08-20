@@ -6,7 +6,7 @@
 //! `UsdSkelCache` populated against a SkelRoot; the Rust port keeps it
 //! stateless — one walk, one allocation, plain returned data.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf::Path;
 use crate::usd::{PrimPredicate, Stage};

@@ -7,7 +7,7 @@
 //! [`RevoluteJoint`](super::RevoluteJoint), …) through the
 //! `impl_physics_schema!(joint ...)` macro arm.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Relationship};

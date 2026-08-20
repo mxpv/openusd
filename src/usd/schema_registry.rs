@@ -33,9 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
-use anyhow::{Context, Result, bail};
-
-use crate::{ar, sdf, tf, usda};
+use crate::{ar, pcp, sdf, tf, usda};
 
 use super::prim_definition::{self, FamilyVersions};
 use super::{PrimDefinition, PrimTypeId, PrimTypeInfo, SchemaKind};
@@ -181,6 +179,109 @@ pub enum VersionFilter {
     LessThanOrEqual(u32),
 }
 
+/// Error registering schema families with a
+/// [`SchemaRegistryBuilder`] or building their definitions.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SchemaRegistryError {
+    /// A family was registered with a present but empty resolved location —
+    /// a resolver's way of saying it found nothing.
+    #[error("Schema family {family} was registered with an empty resolved location")]
+    EmptyResolvedLocation {
+        /// The offending family.
+        family: tf::Token,
+    },
+
+    /// The family's schematics text failed to parse.
+    #[error("Unable to parse schematics for schema family {family}")]
+    Schematics {
+        /// The offending family.
+        family: tf::Token,
+        /// The parse failure.
+        #[source]
+        source: usda::ParseError,
+    },
+
+    /// The family's manifest text failed to parse.
+    #[error("Unable to parse manifest for schema family {family}")]
+    Manifest {
+        /// The offending family.
+        family: tf::Token,
+        /// The parse failure.
+        #[source]
+        source: usda::ParseError,
+    },
+
+    /// One schema's manifest entry could not be read. The underlying failure
+    /// is part of the message — not a `source()` link — so callers reporting
+    /// by Display see it, and chain-walking reporters print it once.
+    #[error("Unable to read schema {identifier} of family {family}: {cause}")]
+    Schema {
+        /// The schema whose entry failed.
+        identifier: tf::Token,
+        /// The family being registered.
+        family: tf::Token,
+        /// The entry's failure.
+        cause: Box<SchemaRegistryError>,
+    },
+
+    /// A manifest entry declares no `schemaKind`.
+    #[error("schemaKind is required")]
+    MissingSchemaKind,
+
+    /// A manifest entry declares a `schemaKind` this build does not know.
+    #[error("Unknown schemaKind {kind}")]
+    UnknownSchemaKind {
+        /// The unrecognized kind token.
+        kind: tf::Token,
+    },
+
+    /// A schema identifier is not a legal `family` or `family_N` name.
+    #[error("Schema identifier {identifier} of family {family} is not a valid identifier")]
+    InvalidIdentifier {
+        /// The offending identifier.
+        identifier: tf::Token,
+        /// The family being registered.
+        family: tf::Token,
+    },
+
+    /// Two registered families claim the same schema identifier.
+    #[error("Duplicate schema identifier {identifier} registering family {family}")]
+    DuplicateIdentifier {
+        /// The repeated identifier.
+        identifier: tf::Token,
+        /// The family being registered when the repeat surfaced.
+        family: tf::Token,
+    },
+
+    /// A definition build named a schema no registered manifest declares.
+    #[error("No manifest entry for schema {identifier}")]
+    MissingManifestEntry {
+        /// The unregistered schema.
+        identifier: tf::Token,
+    },
+
+    /// A definition build named a schema no registered schematics back.
+    #[error("No schematics registered for schema {identifier}")]
+    MissingSchematics {
+        /// The unregistered schema.
+        identifier: tf::Token,
+    },
+
+    /// The schematics carry no class prim for a schema the manifest declares.
+    #[error("No class prim for schema {identifier} in the schematics of family {family}")]
+    MissingClassPrim {
+        /// The schema whose class prim is missing.
+        identifier: tf::Token,
+        /// The family whose schematics were searched.
+        family: tf::Token,
+    },
+
+    /// A path built from a schema identifier failed to parse.
+    #[error(transparent)]
+    Path(#[from] sdf::PathParseError),
+}
+
 /// Why an API schema cannot be applied to a prim — the reason C++
 /// `UsdPrim::CanApplyAPI` reports through its `whyNot`.
 ///
@@ -200,7 +301,7 @@ pub enum ApplyApiError {
     /// Deciding the question needed the prim's composed type, and composing it
     /// failed.
     #[error(transparent)]
-    Composition(#[from] anyhow::Error),
+    Composition(#[from] pcp::QueryError),
 
     /// The schema is registered, but is not one that applies to a prim through
     /// `apiSchemas` — a typed schema, or a non-applied API schema.
@@ -794,35 +895,42 @@ impl SchemaRegistryBuilder {
     // Opening it as a layer also subsumes `FamilySource::resolved_location`:
     // the layer carries its own `anchor_location`, so no caller has to supply
     // one and none can supply a wrong one.
-    pub fn family(mut self, source: FamilySource<'_>) -> Result<Self> {
+    pub fn family(mut self, source: FamilySource<'_>) -> Result<Self, SchemaRegistryError> {
         let family = tf::Token::from(source.name);
 
         if source.resolved_location.is_some_and(|location| location.is_empty()) {
-            bail!("Schema family {family} was registered with an empty resolved location");
+            return Err(SchemaRegistryError::EmptyResolvedLocation { family });
         }
 
         let schematics = Arc::new(Schematics {
             family: family.clone(),
             resolved_location: source.resolved_location.cloned(),
-            data: usda::parse(source.schematics)
-                .with_context(|| format!("Unable to parse schematics for schema family {family}"))?,
+            data: usda::parse(source.schematics).map_err(|source| SchemaRegistryError::Schematics {
+                family: family.clone(),
+                source,
+            })?,
         });
 
-        let manifest = usda::parse(source.manifest)
-            .with_context(|| format!("Unable to parse manifest for schema family {family}"))?;
+        let manifest = usda::parse(source.manifest).map_err(|source| SchemaRegistryError::Manifest {
+            family: family.clone(),
+            source,
+        })?;
 
         for identifier in root_prims(&manifest) {
-            let info = read_schema_info(&manifest, &identifier)
-                .with_context(|| format!("Unable to read schema {identifier} of family {family}"))?;
+            let info = read_schema_info(&manifest, &identifier).map_err(|cause| SchemaRegistryError::Schema {
+                identifier: identifier.clone(),
+                family: family.clone(),
+                cause: Box::new(cause),
+            })?;
 
             if !SchemaRegistry::is_allowed_identifier(&identifier) {
-                bail!("Schema identifier {identifier} of family {family} is not a valid identifier");
+                return Err(SchemaRegistryError::InvalidIdentifier { identifier, family });
             }
             // An allowed identifier is exactly its family plus its version, so
             // rejecting a repeat identifier also rejects a repeated
             // (family, version).
             if self.infos.contains_key(&identifier) {
-                bail!("Duplicate schema identifier {identifier} registering family {family}");
+                return Err(SchemaRegistryError::DuplicateIdentifier { identifier, family });
             }
             self.source_of.insert(identifier.clone(), schematics.clone());
             self.infos.insert(identifier, info);
@@ -864,7 +972,7 @@ impl SchemaRegistryBuilder {
     /// schemas a definition builds in. Applied API schemas are defined next
     /// and fully expanded, so a typed schema that includes one picks up
     /// everything that schema itself includes.
-    pub fn build(mut self) -> Result<Arc<SchemaRegistry>> {
+    pub fn build(mut self) -> Result<Arc<SchemaRegistry>, SchemaRegistryError> {
         // TODO: report an auto-apply declaration that resolves to nothing —
         // an API schema name no family registered (dropped here) or one that
         // is not single-apply (ignored by `compute_auto_applied`). C++ lets
@@ -1010,7 +1118,7 @@ impl SchemaRegistryBuilder {
         auto_applied: &AutoApplied,
         api_defs: &mut HashMap<tf::Token, Arc<PrimDefinition>>,
         expansion: &mut Expansion,
-    ) -> Result<()> {
+    ) -> Result<(), SchemaRegistryError> {
         if api_defs.contains_key(identifier) {
             return Ok(());
         }
@@ -1049,7 +1157,7 @@ impl SchemaRegistryBuilder {
         identifier: &tf::Token,
         auto_applied: &AutoApplied,
         api_defs: &HashMap<tf::Token, Arc<PrimDefinition>>,
-    ) -> Result<PrimDefinition> {
+    ) -> Result<PrimDefinition, SchemaRegistryError> {
         let mut pending = self.begin_definition(identifier, auto_applied)?;
         for name in mem::take(&mut pending.built_ins) {
             let (built_in, instance) = split_instance_name(&name);
@@ -1060,15 +1168,23 @@ impl SchemaRegistryBuilder {
 
     /// Starts one schema's definition from its own class prim, before any
     /// built-in API schema contributes.
-    fn begin_definition(&self, identifier: &tf::Token, auto_applied: &AutoApplied) -> Result<PendingDefinition> {
+    fn begin_definition(
+        &self,
+        identifier: &tf::Token,
+        auto_applied: &AutoApplied,
+    ) -> Result<PendingDefinition, SchemaRegistryError> {
         let info = self
             .infos
             .get(identifier)
-            .with_context(|| format!("No manifest entry for schema {identifier}"))?;
+            .ok_or_else(|| SchemaRegistryError::MissingManifestEntry {
+                identifier: identifier.clone(),
+            })?;
         let schematics = self
             .source_of
             .get(identifier)
-            .with_context(|| format!("No schematics registered for schema {identifier}"))?
+            .ok_or_else(|| SchemaRegistryError::MissingSchematics {
+                identifier: identifier.clone(),
+            })?
             .clone();
 
         let class_prim = sdf::Path::abs_root().append_path(identifier.as_str())?;
@@ -1346,11 +1462,11 @@ fn root_prims(data: &sdf::Data) -> Vec<tf::Token> {
 }
 
 /// Reads one schema's manifest entry from the prim at `/<identifier>`.
-fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<SchemaInfo> {
+fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<SchemaInfo, SchemaRegistryError> {
     let prim = sdf::Path::abs_root().append_path(identifier.as_str())?;
 
-    let kind = manifest_token(manifest, &prim, "schemaKind").context("schemaKind is required")?;
-    let kind = SchemaKind::from_token(kind.as_str()).with_context(|| format!("Unknown schemaKind {kind}"))?;
+    let kind = manifest_token(manifest, &prim, "schemaKind").ok_or(SchemaRegistryError::MissingSchemaKind)?;
+    let kind = SchemaKind::from_token(kind.as_str()).ok_or_else(|| SchemaRegistryError::UnknownSchemaKind { kind })?;
 
     let (family, version) = SchemaRegistry::parse_identifier(identifier);
 

@@ -42,7 +42,7 @@ use super::layer_stack::{ExprVarId, LayerStackId, LayerStackRegistry, StackMarks
 use super::mapping::MapFunction;
 use super::prim_index::Demand;
 use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
-use super::{Error, ExpressionContext, effective_time_codes_per_second};
+use super::{CompositionError, ExpressionContext, effective_time_codes_per_second};
 
 /// A cheap, `Copy` handle identifying a layer within a `LayerGraph`.
 ///
@@ -218,12 +218,12 @@ pub(crate) struct LayerGraph {
     /// by [`build_sublayer_edges`](Self::build_sublayer_edges) on every edge
     /// rebuild so a fixed cycle stops being reported and a recompute never
     /// duplicates one.
-    cycle_errors: Vec<Error>,
+    cycle_errors: Vec<CompositionError>,
     /// Validated-relocate diagnostics, replaced wholesale by
     /// [`recompute_relocates`](Self::recompute_relocates) on every relocate
     /// rebuild. Independent of [`cycle_errors`](Self::cycle_errors): a
     /// relocate-only edit refreshes these alone.
-    relocate_errors: Vec<Error>,
+    relocate_errors: Vec<CompositionError>,
     /// Loads layers: the resolver that anchors relative asset paths (its
     /// [`identity`](Resolver::identity) is the resolver component of the stack's
     /// [`layer_stack_id`](Self::layer_stack_id)) and the format registry.
@@ -232,7 +232,7 @@ pub(crate) struct LayerGraph {
     /// Anchored asset paths whose on-demand open failed, each mapped to what
     /// went wrong ([`LoadFailure`]). Consulted at the reference/payload demand
     /// point so a target that cannot be opened is reported
-    /// [`MalformedLayer`](Error::MalformedLayer) once (with the arc's site
+    /// [`MalformedLayer`](CompositionError::MalformedLayer) once (with the arc's site
     /// context and the failure's reason) rather than re-demanded every pass —
     /// without it the demanding prim's index would never cache — and at
     /// sublayer-demand derivation
@@ -305,16 +305,16 @@ struct SublayerState {
     /// reflect its latest rebuild ([`replace_stack`](Self::replace_stack)).
     pending_demands: Vec<SublayerDemand>,
     /// Per-stack sublayer diagnostics: `${VAR}` expression failures
-    /// ([`Error::InvalidExpression`] with the sublayer context) and the
+    /// ([`CompositionError::InvalidExpression`] with the sublayer context) and the
     /// per-referrer load failures of unresolved entries
-    /// ([`Error::UnresolvedSublayer`] / [`Error::MalformedSublayer`]). Each
+    /// ([`CompositionError::UnresolvedSublayer`] / [`CompositionError::MalformedSublayer`]). Each
     /// stack's bucket is replaced on its contextual re-resolution — load
     /// failures re-derived from `LayerGraph::failed_loads` — so a fixed
     /// expression or a removed entry stops being reported; the load barrier
     /// appends a freshly discovered failure between rebuilds
     /// ([`record_error`](Self::record_error)). Keyed by stack in mint order, so
     /// the [`diagnostics`](Self::diagnostics) listing is deterministic.
-    errors: BTreeMap<LayerStackId, Vec<Error>>,
+    errors: BTreeMap<LayerStackId, Vec<CompositionError>>,
 }
 
 impl SublayerState {
@@ -322,7 +322,7 @@ impl SublayerState {
     /// bucket — with a fresh re-resolution's. The supersession invariant: a
     /// stale demand or diagnostic could name an entry a mute or edit just
     /// removed, so both always reflect the stack's latest rebuild.
-    fn replace_stack(&mut self, stack: LayerStackId, demands: Vec<SublayerDemand>, errors: Vec<Error>) {
+    fn replace_stack(&mut self, stack: LayerStackId, demands: Vec<SublayerDemand>, errors: Vec<CompositionError>) {
         self.pending_demands.retain(|demand| demand.stack != stack);
         self.pending_demands.extend(demands);
         if errors.is_empty() {
@@ -337,7 +337,7 @@ impl SublayerState {
     /// re-resolution re-derives or drops it
     /// ([`replace_stack`](Self::replace_stack)). An identical already-recorded
     /// diagnostic is not repeated.
-    fn record_error(&mut self, stack: LayerStackId, error: Error) {
+    fn record_error(&mut self, stack: LayerStackId, error: CompositionError) {
         let bucket = self.errors.entry(stack).or_default();
         if !bucket.contains(&error) {
             bucket.push(error);
@@ -377,7 +377,7 @@ impl SublayerState {
     }
 
     /// Every per-stack diagnostic, in stack mint order.
-    fn diagnostics(&self) -> impl Iterator<Item = &Error> {
+    fn diagnostics(&self) -> impl Iterator<Item = &CompositionError> {
         self.errors.values().flatten()
     }
 }
@@ -463,13 +463,13 @@ impl LoadFailure {
     /// The per-referrer sublayer diagnostic for this failure: the entry
     /// `asset_path`, authored by `introduced_by`, names an asset that did not
     /// resolve or could not be read.
-    pub(crate) fn sublayer_error(&self, asset_path: &str, introduced_by: &str) -> Error {
+    pub(crate) fn sublayer_error(&self, asset_path: &str, introduced_by: &str) -> CompositionError {
         match self {
-            LoadFailure::Unresolved => Error::UnresolvedSublayer {
+            LoadFailure::Unresolved => CompositionError::UnresolvedSublayer {
                 asset_path: asset_path.to_string(),
                 introduced_by: introduced_by.to_string(),
             },
-            LoadFailure::Unreadable(reason) => Error::MalformedSublayer {
+            LoadFailure::Unreadable(reason) => CompositionError::MalformedSublayer {
                 asset_path: asset_path.to_string(),
                 introduced_by: introduced_by.to_string(),
                 reason: reason.clone(),
@@ -500,7 +500,7 @@ struct EdgeSink {
 #[derive(Default)]
 struct ContextualSink {
     /// Expression diagnostics as `(parent, error)`.
-    errors: Vec<(LayerId, Error)>,
+    errors: Vec<(LayerId, CompositionError)>,
     /// Variable names the `${VAR}` evaluations requested, as `(parent, name)`.
     used_vars: Vec<(LayerId, String)>,
 }
@@ -522,7 +522,7 @@ impl EdgeSink {
         self,
         stack: LayerStackId,
         members: &HashSet<LayerId>,
-    ) -> (Vec<SublayerDemand>, Vec<Error>, HashSet<String>) {
+    ) -> (Vec<SublayerDemand>, Vec<CompositionError>, HashSet<String>) {
         let demands = self
             .demands
             .into_iter()
@@ -894,7 +894,9 @@ impl LayerGraph {
         // `(root_layer, seen_layer)` pair once.
         let mut seen = HashSet::new();
         errors.retain(|error| match error {
-            Error::SublayerCycle { root_layer, seen_layer } => seen.insert((root_layer.clone(), seen_layer.clone())),
+            CompositionError::SublayerCycle { root_layer, seen_layer } => {
+                seen.insert((root_layer.clone(), seen_layer.clone()))
+            }
             _ => true,
         });
         self.cycle_errors = errors;
@@ -1092,7 +1094,7 @@ impl LayerGraph {
     /// Appends a sublayer diagnostic to `stack`'s bucket
     /// ([`SublayerState::record_error`]) — the load barrier's channel for a
     /// failure discovered between rebuilds.
-    pub(crate) fn record_sublayer_error(&mut self, stack: LayerStackId, error: Error) {
+    pub(crate) fn record_sublayer_error(&mut self, stack: LayerStackId, error: CompositionError) {
         self.sublayers.record_error(stack, error);
     }
 
@@ -1116,11 +1118,11 @@ impl LayerGraph {
         for (&stack, bucket) in &self.sublayers.errors {
             for error in bucket {
                 let (asset_path, introduced_by) = match error {
-                    Error::UnresolvedSublayer {
+                    CompositionError::UnresolvedSublayer {
                         asset_path,
                         introduced_by,
                     }
-                    | Error::MalformedSublayer {
+                    | CompositionError::MalformedSublayer {
                         asset_path,
                         introduced_by,
                         ..
@@ -1200,7 +1202,7 @@ impl LayerGraph {
         }
     }
 
-    /// Depth-first cycle scan recording [`Error::SublayerCycle`] for any edge
+    /// Depth-first cycle scan recording [`CompositionError::SublayerCycle`] for any edge
     /// that re-enters a layer already on the path from the root. Runs on an
     /// explicit work stack so a deep chain does not overflow the native stack; an
     /// `Exit` frame pops the layer back out of the `ancestors` path after its
@@ -1212,7 +1214,7 @@ impl LayerGraph {
         root: LayerId,
         children_of: impl Fn(LayerId) -> &'e [(LayerId, LayerOffset)],
         ancestors: &mut HashSet<LayerId>,
-        errors: &mut Vec<Error>,
+        errors: &mut Vec<CompositionError>,
     ) {
         enum Step {
             Enter(LayerId),
@@ -1240,7 +1242,7 @@ impl LayerGraph {
                     continue;
                 }
                 if ancestors.contains(&child) {
-                    errors.push(Error::SublayerCycle {
+                    errors.push(CompositionError::SublayerCycle {
                         root_layer: self.nodes[&id].layer.identifier().to_string(),
                         seen_layer: self.nodes[&child].layer.identifier().to_string(),
                     });
@@ -1322,7 +1324,7 @@ impl LayerGraph {
     }
 
     /// Records that an on-demand open of `asset_path` failed, so composition
-    /// stops demanding it and reports it — [`MalformedLayer`](Error::MalformedLayer)
+    /// stops demanding it and reports it — [`MalformedLayer`](CompositionError::MalformedLayer)
     /// at a reference/payload arc, a per-referrer sublayer diagnostic at each
     /// stack rebuild. Called from the stage's load barriers.
     pub(crate) fn mark_load_failed(&mut self, asset_path: &str, failure: LoadFailure) {
@@ -1830,7 +1832,7 @@ impl LayerGraph {
     /// (e.g. `renderSettingsPrimPath`) honors a session-layer override, matching
     /// C++ `UsdStage::GetMetadata`. A [`Value::ValueBlock`] in a stronger layer
     /// blocks weaker opinions.
-    pub(crate) fn stage_metadata(&self, field: &str) -> anyhow::Result<Option<Value>> {
+    pub(crate) fn stage_metadata(&self, field: &str) -> Result<Option<Value>, sdf::DataError> {
         let root = Path::abs_root();
         // Walk session layers then the root layer so the session opinion wins,
         // skipping muted session layers (the root is never muted).
@@ -1856,7 +1858,7 @@ impl LayerGraph {
     ///
     /// Session-layer and sublayer opinions are intentionally ignored here,
     /// matching spec 12.2.7.
-    pub(crate) fn root_layer_field(&self, field: &str) -> anyhow::Result<Option<Value>> {
+    pub(crate) fn root_layer_field(&self, field: &str) -> Result<Option<Value>, sdf::DataError> {
         let root = Path::abs_root();
         let Some(root_layer) = self.root_layer() else {
             return Ok(None);
@@ -2058,8 +2060,9 @@ impl LayerGraph {
     /// present graph state: a fixed cycle, relocate, expression, or removed
     /// entry stops appearing and a recompute never duplicates one, since each
     /// bucket is replaced on rebuild.
-    pub(crate) fn errors(&self) -> Vec<Error> {
-        let mut errors: Vec<Error> = self.cycle_errors.iter().chain(&self.relocate_errors).cloned().collect();
+    pub(crate) fn errors(&self) -> Vec<CompositionError> {
+        let mut errors: Vec<CompositionError> =
+            self.cycle_errors.iter().chain(&self.relocate_errors).cloned().collect();
         // A parent composing into several stacks derives the same per-referrer
         // diagnostic into each stack's bucket; report each distinct diagnostic
         // once.
@@ -2543,13 +2546,13 @@ impl LayerGraph {
     /// muted; otherwise muting prunes it and the raw diagnostic is spurious. The
     /// `effective` set is a pure function of the muted set and the live stacks
     /// (see [`effective_layers`](Self::effective_layers)).
-    pub(crate) fn sublayer_error_contributes(&self, error: &Error, effective: &HashSet<LayerId>) -> bool {
+    pub(crate) fn sublayer_error_contributes(&self, error: &CompositionError, effective: &HashSet<LayerId>) -> bool {
         let (asset_path, introduced_by) = match error {
-            Error::UnresolvedSublayer {
+            CompositionError::UnresolvedSublayer {
                 asset_path,
                 introduced_by,
             }
-            | Error::MalformedSublayer {
+            | CompositionError::MalformedSublayer {
                 asset_path,
                 introduced_by,
                 ..
@@ -2966,7 +2969,10 @@ mod tests {
         });
         let graph = LayerGraph::from_layers(vec![session, root], 1, sdf::LayerRegistry::default());
         assert!(
-            graph.errors().iter().any(|e| matches!(e, Error::SublayerCycle { .. })),
+            graph
+                .errors()
+                .iter()
+                .any(|e| matches!(e, CompositionError::SublayerCycle { .. })),
             "the session-resolved self-sublayer is reported as a cycle: {:?}",
             graph.errors()
         );
@@ -2992,7 +2998,7 @@ mod tests {
             .filter(|e| {
                 matches!(
                     e,
-                    Error::InvalidExpression {
+                    CompositionError::InvalidExpression {
                         context: ExpressionContext::Sublayer,
                         ..
                     }
@@ -4013,7 +4019,7 @@ mod tests {
         let cycles = graph
             .errors()
             .iter()
-            .filter(|e| matches!(e, Error::SublayerCycle { .. }))
+            .filter(|e| matches!(e, CompositionError::SublayerCycle { .. }))
             .count();
         assert_eq!(cycles, 1, "the root<->a cycle is reported once: {:?}", graph.errors());
 

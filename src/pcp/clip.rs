@@ -26,17 +26,16 @@
 use std::collections::HashMap;
 use std::mem;
 
-use anyhow::Result;
-
 use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AssetPath, LayerOffset, Path, Value};
+use crate::tf;
 
 use super::asset_resolve::{self, AssetSite};
 use super::clip_manifest::{self, ManifestKey};
 use super::index_cache::block_to_none;
 use super::layer_graph::LayerGraph;
-use super::{Error, LayerId, LayerStackId};
+use super::{ClipLoad, CompositionError, LayerId, LayerStackId, QueryError};
 
 /// Dictionary keys inside a single clip set's metadata (spec 12.3.4.1).
 pub(crate) mod keys {
@@ -581,7 +580,7 @@ pub(crate) struct ClipCache {
     /// Clips a synthesized manifest could not read, for the cache above to
     /// merge into its composition diagnostics. Held here because a clip query
     /// answers through a value, not a diagnostic channel.
-    clip_errors: Vec<Error>,
+    clip_errors: Vec<CompositionError>,
 }
 
 /// A synthesized manifest and the clip set it was generated from.
@@ -625,7 +624,7 @@ impl ClipCache {
         query: &ClipQuery<'_>,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<Value>, QueryError> {
         for resolved in sets {
             let set = &resolved.set;
             // With no active schedule no clip is ever selected, so the set
@@ -711,7 +710,7 @@ impl ClipCache {
         graph: &LayerGraph,
         sets: &[ResolvedClipSet],
         query: &ClipQuery<'_>,
-    ) -> Result<Option<(Vec<f64>, bool)>> {
+    ) -> Result<Option<(Vec<f64>, bool)>, QueryError> {
         for resolved in sets {
             let clip_path = clip_attr_path(query, &resolved.set.clip_prim_path(query.anchor))?;
             if let Some(per_clip) = self.clip_set_participates(graph, resolved, query.anchor, &clip_path)? {
@@ -744,7 +743,7 @@ impl ClipCache {
         prim: &Path,
         tag: &str,
         write_blocks: bool,
-    ) -> Result<(sdf::Layer, Vec<Error>)> {
+    ) -> Result<(sdf::Layer, Vec<CompositionError>), QueryError> {
         let mut scheduled: Vec<(String, Option<f64>)> = Vec::with_capacity(resolved.set.active.len());
         let mut unread = Vec::new();
         for &(stage_time, index) in &resolved.set.active {
@@ -757,9 +756,9 @@ impl ClipCache {
                     continue;
                 }
                 Ok(None) => "asset path did not resolve".to_owned(),
-                Err(error) => error.to_string(),
+                Err(error) => tf::error_chain(&error),
             };
-            unread.push(Error::UnreadableClip {
+            unread.push(CompositionError::UnreadableClip {
                 asset_path: asset.asset_path().to_owned(),
                 clip_set: resolved.set.name.clone(),
                 prim_path: prim.clone(),
@@ -792,7 +791,12 @@ impl ClipCache {
     /// but never reused, so the next read regenerates and picks that clip up
     /// once it becomes readable; the clips that failed are reported through
     /// [`Self::take_errors`].
-    fn manifest_id(&mut self, graph: &LayerGraph, resolved: &ResolvedClipSet, prim: &Path) -> Result<Option<String>> {
+    fn manifest_id(
+        &mut self,
+        graph: &LayerGraph,
+        resolved: &ResolvedClipSet,
+        prim: &Path,
+    ) -> Result<Option<String>, QueryError> {
         if let Some(asset) = resolved.set.manifest_asset.as_deref() {
             let anchor = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
             return self.ensure_clip_layer(graph, asset, anchor);
@@ -838,7 +842,7 @@ impl ClipCache {
 
     /// Drains the diagnostics recorded while synthesizing manifests, for the
     /// cache above to merge into its composition errors.
-    pub(super) fn take_errors(&mut self) -> Vec<Error> {
+    pub(super) fn take_errors(&mut self) -> Vec<CompositionError> {
         mem::take(&mut self.clip_errors)
     }
 
@@ -901,10 +905,14 @@ impl ClipCache {
         graph: &LayerGraph,
         asset_path: &str,
         anchor_layer: LayerId,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<String>, QueryError> {
         let clip_id = clip_identifier(graph, asset_path, anchor_layer);
         if !self.clip_layers.contains_key(&clip_id) {
-            let Some((resolved, data)) = graph.layer_registry().open(&clip_id)? else {
+            let opened = graph
+                .layer_registry()
+                .open(&clip_id)
+                .map_err(|error| ClipLoad::new(clip_id.clone(), error))?;
+            let Some((resolved, data)) = opened else {
                 return Ok(None);
             };
             // Built with the location it resolved to, not just the identifier:
@@ -945,7 +953,7 @@ impl ClipCache {
         resolved: &ResolvedClipSet,
         prim: &Path,
         clip_path: &Path,
-    ) -> Result<Option<Vec<Vec<f64>>>> {
+    ) -> Result<Option<Vec<Vec<f64>>>, QueryError> {
         let set = &resolved.set;
         // With no active schedule no clip is ever selected, so the set sources
         // nothing regardless of what its clips author.
@@ -971,7 +979,7 @@ impl ClipCache {
         asset: &str,
         anchor_layer: LayerId,
         clip_path: &Path,
-    ) -> Result<Vec<f64>> {
+    ) -> Result<Vec<f64>, QueryError> {
         Ok(self
             .clip_time_samples(graph, asset, anchor_layer, clip_path)?
             .map(|(_, samples)| samples.iter().map(|(t, _)| *t).collect())
@@ -993,7 +1001,7 @@ impl ClipCache {
         asset: &str,
         anchor_layer: LayerId,
         clip_path: &Path,
-    ) -> Result<Option<(String, sdf::TimeSampleMap)>> {
+    ) -> Result<Option<(String, sdf::TimeSampleMap)>, QueryError> {
         let Some(id) = self.ensure_clip_layer(graph, asset, anchor_layer)? else {
             return Ok(None);
         };
@@ -1029,7 +1037,7 @@ impl ClipCache {
         clip_path: &Path,
         clip_time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<(String, Value)>> {
+    ) -> Result<Option<(String, Value)>, QueryError> {
         let Some((clip_id, samples)) = self.clip_time_samples(graph, asset, resolved.asset_layer, clip_path)? else {
             return Ok(None);
         };
@@ -1069,7 +1077,7 @@ impl ClipCache {
     /// default stands in as the sample value. Returns `None` when the manifest
     /// holds no usable default for the attribute — as a synthesized one never
     /// does, since generation copies declarations only.
-    fn manifest_default(&self, manifest: &str, clip_path: &Path) -> Result<Option<Value>> {
+    fn manifest_default(&self, manifest: &str, clip_path: &Path) -> Result<Option<Value>, QueryError> {
         let Some(layer) = self.layer(manifest) else {
             return Ok(None);
         };
@@ -1106,7 +1114,7 @@ impl ClipCache {
         clip_path: &Path,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<Value>, QueryError> {
         let set = &resolved.set;
         // Position of the active clip among the `active` entries at `time`.
         let active_pos = set.active.iter().rposition(|&(stage, _)| stage <= time).unwrap_or(0);
@@ -1242,7 +1250,7 @@ fn clip_identifier(graph: &LayerGraph, asset_path: &str, anchor_layer: LayerId) 
 /// 12.3.4.1.1.1). `query.anchor` is an ancestor of `query.attr_prim`, so the
 /// replacement lands on a path boundary; the fallback keeps the path unchanged
 /// if it ever is not a prefix.
-fn clip_attr_path(query: &ClipQuery<'_>, base: &Path) -> Result<Path> {
+fn clip_attr_path(query: &ClipQuery<'_>, base: &Path) -> Result<Path, QueryError> {
     let attr = Path::new(&format!("{}{}", query.attr_prim, query.suffix))?;
     Ok(attr.replace_prefix(query.anchor, base).unwrap_or(attr))
 }
@@ -1258,7 +1266,7 @@ mod tests {
     /// an independently-owned [`ClipCache`], so this exercises it without an
     /// [`IndexCache`](super::super::index_cache::IndexCache).
     #[test]
-    fn loads_and_caches_clip_layer() -> anyhow::Result<()> {
+    fn loads_and_caches_clip_layer() -> crate::Result<()> {
         let root = format!(
             "{}/vendor/core-spec-supplemental-release_dec2025/value_resolution/tests/assets/clip_basic/usda/root.usda",
             std::env::var("CARGO_MANIFEST_DIR").unwrap()
@@ -1293,7 +1301,7 @@ mod tests {
     /// reuse it: the memo returns the same anonymous layer rather than minting
     /// one — and growing `clip_layers` without bound — per query.
     #[test]
-    fn synthesized_manifest_is_memoized() -> anyhow::Result<()> {
+    fn synthesized_manifest_is_memoized() -> crate::Result<()> {
         let root = format!(
             "{}/fixtures/clip_manifestless_held/root.usda",
             std::env::var("CARGO_MANIFEST_DIR").unwrap()

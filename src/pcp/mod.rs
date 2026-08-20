@@ -49,7 +49,7 @@
 //! | `layer_stack` | `PcpLayerStack` identity | Composed-stack identity ([`LayerStackId`]) and the registry of source-keyed instances (`LayerStackRegistry`): a [`LayerId`] names a physical layer, a [`LayerStackId`] a composed view under an expression-variable override source (`VarsSource`, the C++ `PcpExpressionVariablesSource`), so a `${VAR}` sublayer reached from two var-authoring sources resolves independently. |
 //! | `index_cache` | `PcpCache` | Lazily-built composition cache (`IndexCache`). Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
 //! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that maps an instance proxy's subtree onto the shared `/__Prototype_N` namespace) as a second `IndexCache` impl. |
-//! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
+//! | [`CompositionError`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`) and the [`CompositionContext`](prim_index::CompositionContext) that flows parent-to-child. |
 //! | `compose_site` | `PcpComposeSite` | Site field composition: the list-op primitives (`compose_references_in`, `collect_payloads_in`, `compose_arc_list_in`) the `prim_indexer` drives to read a node's arc fields across its layer stack, plus the asset-path anchoring and time-codes retiming they fold in. |
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
@@ -106,7 +106,7 @@
 //! takes only shared references, making it suitable for future parallel
 //! execution.
 //!
-//! Recoverable composition errors ([`Error`]) are retained by the cache and
+//! Recoverable composition errors ([`CompositionError`]) are retained by the cache and
 //! exposed through [`Stage::composition_errors`](crate::usd::Stage::composition_errors).
 //! Operational failures are returned to the caller.
 //!
@@ -321,6 +321,8 @@
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::{error, mem};
 
 pub(crate) mod asset_resolve;
 pub(crate) mod change;
@@ -437,7 +439,7 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
 }
 
 /// The kind of authored field a variable expression came from, carried by
-/// [`Error::InvalidExpression`] to name the failing site in diagnostics.
+/// [`CompositionError::InvalidExpression`] to name the failing site in diagnostics.
 ///
 /// The composition-time kinds mirror C++ `PcpErrorVariableExpressionError`'s
 /// context. [`AssetValue`](Self::AssetValue) has no C++ counterpart there —
@@ -462,13 +464,146 @@ pub enum ExpressionContext {
     AssetValue,
 }
 
+/// Operational failure answering a composed query or building a prim index.
+///
+/// Recoverable composition problems are [`CompositionError`] diagnostics
+/// collected on the side
+/// ([`Stage::composition_errors`](crate::usd::Stage::composition_errors));
+/// this type carries only operational failures, at most citing a diagnostic
+/// as context ([`IncompleteClipManifest`]). Every variant boxes its payload
+/// so the error arm stays pointer-sized on the query paths that return it
+/// constantly.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum QueryError {
+    /// A layer backend failed to decode an authored field value.
+    #[error(transparent)]
+    Data(Box<sdf::DataError>),
+
+    /// A recombined path string failed validation.
+    #[error(transparent)]
+    Path(Box<sdf::PathParseError>),
+
+    /// A composed metadata value does not hold the type the query requires.
+    #[error(transparent)]
+    Cast(Box<sdf::CastError>),
+
+    /// Synthesizing an in-memory layer (a generated clip manifest) failed.
+    #[error(transparent)]
+    Edit(Box<sdf::EditError>),
+
+    /// A clip the schedule names could not be read, so a complete manifest
+    /// cannot be generated.
+    #[error(transparent)]
+    IncompleteClipManifest(Box<IncompleteClipManifest>),
+
+    /// A value-clip layer demanded during value resolution failed to load.
+    #[error(transparent)]
+    ClipLoad(Box<ClipLoad>),
+}
+
+const _: () = assert!(mem::size_of::<QueryError>() <= 16);
+
+/// An infallible conversion can never produce an error; the impl exists so
+/// generic `TryFrom<sdf::Value>` bounds accept the reflexive conversion.
+impl From<Infallible> for QueryError {
+    fn from(error: Infallible) -> Self {
+        match error {}
+    }
+}
+
+impl From<sdf::DataError> for QueryError {
+    fn from(error: sdf::DataError) -> Self {
+        Self::Data(Box::new(error))
+    }
+}
+
+impl From<sdf::PathParseError> for QueryError {
+    fn from(error: sdf::PathParseError) -> Self {
+        Self::Path(Box::new(error))
+    }
+}
+
+impl From<sdf::CastError> for QueryError {
+    fn from(error: sdf::CastError) -> Self {
+        Self::Cast(Box::new(error))
+    }
+}
+
+impl From<sdf::EditError> for QueryError {
+    fn from(error: sdf::EditError) -> Self {
+        Self::Edit(Box::new(error))
+    }
+}
+
+/// A clip the schedule names could not be read, so a complete manifest cannot
+/// be generated ([`QueryError::IncompleteClipManifest`]). Its own error type so
+/// the variant stays transparent over the boxed payload.
+#[derive(Debug, thiserror::Error)]
+#[error("cannot generate a complete manifest for clip set {clip_set:?} on {prim}")]
+pub struct IncompleteClipManifest {
+    /// The clip set whose manifest was requested.
+    clip_set: String,
+    /// The prim the clip set is authored on.
+    prim: Path,
+    /// The diagnostic for the unreadable clip.
+    #[source]
+    source: CompositionError,
+}
+
+impl IncompleteClipManifest {
+    /// Wraps the unreadable-clip diagnostic with the requested set and prim.
+    pub(crate) fn new(clip_set: impl Into<String>, prim: Path, source: CompositionError) -> Self {
+        Self {
+            clip_set: clip_set.into(),
+            prim,
+            source,
+        }
+    }
+}
+
+impl From<IncompleteClipManifest> for QueryError {
+    fn from(error: IncompleteClipManifest) -> Self {
+        Self::IncompleteClipManifest(Box::new(error))
+    }
+}
+
+/// A value-clip layer demanded during value resolution failed to load
+/// ([`QueryError::ClipLoad`]). Its own error type so the variant stays
+/// transparent over the boxed payload.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to load clip layer {identifier:?}")]
+pub struct ClipLoad {
+    /// The clip layer's canonical identifier.
+    identifier: String,
+    /// The underlying load failure.
+    #[source]
+    source: Box<dyn error::Error + Send + Sync>,
+}
+
+impl ClipLoad {
+    /// Wraps a clip layer's load failure with its identifier.
+    pub(crate) fn new(identifier: impl Into<String>, source: impl error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            identifier: identifier.into(),
+            source: Box::new(source),
+        }
+    }
+}
+
+impl From<ClipLoad> for QueryError {
+    fn from(error: ClipLoad) -> Self {
+        Self::ClipLoad(Box::new(error))
+    }
+}
+
 /// An error encountered while building a [`PrimIndex`](prim_index::PrimIndex).
 ///
 /// These errors represent composition diagnostics. Recoverable failures skip
 /// the broken opinion and are retained by [`Stage`](crate::usd::Stage).
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum CompositionError {
     /// A composition arc cycle was detected (C++ `PcpErrorArcCycle`). The arc
     /// closing the cycle is dropped so the rest of the prim still composes;
     /// `.0.hops` is the chain of arcs from the composing prim to the cycle-closing
@@ -818,7 +953,7 @@ pub enum Error {
     },
 }
 
-impl Error {
+impl CompositionError {
     /// Records this diagnostic in `errors` unless an identical one is already
     /// there.
     ///
@@ -826,22 +961,22 @@ impl Error {
     /// variant-selection search re-runs per declaring node and on task retry,
     /// and a value-time read re-evaluates on every read — so a repeat says
     /// nothing new.
-    pub(crate) fn record(self, errors: &mut Vec<Error>) {
+    pub(crate) fn record(self, errors: &mut Vec<CompositionError>) {
         if !errors.contains(&self) {
             errors.push(self);
         }
     }
 }
 
-impl From<sdf::layer_registry::Error> for Error {
+impl From<sdf::layer_registry::Error> for CompositionError {
     /// Lifts a layer-registry load error into a composition error: a sublayer
     /// that failed to resolve while opening a layer stack (the root stack or a
     /// reference/payload target reached on demand) is an
-    /// [`UnresolvedSublayer`](Error::UnresolvedSublayer); a sublayer that
+    /// [`UnresolvedSublayer`](CompositionError::UnresolvedSublayer); a sublayer that
     /// resolved but could not be read is a
-    /// [`MalformedSublayer`](Error::MalformedSublayer); a sublayer expression
+    /// [`MalformedSublayer`](CompositionError::MalformedSublayer); a sublayer expression
     /// that failed to evaluate is an
-    /// [`InvalidExpression`](Error::InvalidExpression) with the sublayer
+    /// [`InvalidExpression`](CompositionError::InvalidExpression) with the sublayer
     /// context — field for field the diagnostic the layer graph regenerates
     /// for the same entry, so the two copies compare equal and report once.
     fn from(error: sdf::layer_registry::Error) -> Self {
@@ -849,7 +984,7 @@ impl From<sdf::layer_registry::Error> for Error {
             sdf::layer_registry::Error::UnresolvedAsset {
                 asset_path,
                 referencing_layer,
-            } => Error::UnresolvedSublayer {
+            } => CompositionError::UnresolvedSublayer {
                 asset_path,
                 introduced_by: referencing_layer,
             },
@@ -857,7 +992,7 @@ impl From<sdf::layer_registry::Error> for Error {
                 asset_path,
                 referencing_layer,
                 reason,
-            } => Error::MalformedSublayer {
+            } => CompositionError::MalformedSublayer {
                 asset_path,
                 introduced_by: referencing_layer,
                 reason,
@@ -866,7 +1001,7 @@ impl From<sdf::layer_registry::Error> for Error {
                 expression,
                 referencing_layer,
                 reason,
-            } => Error::InvalidExpression {
+            } => CompositionError::InvalidExpression {
                 expression,
                 context: ExpressionContext::Sublayer,
                 source_layer: referencing_layer,
@@ -911,7 +1046,7 @@ pub enum RelocateConflictReason {
     SourceDescendant,
 }
 
-/// A composition arc cycle ([`Error::ArcCycle`]). The chain reads from the
+/// A composition arc cycle ([`CompositionError::ArcCycle`]). The chain reads from the
 /// composing prim (`composing`, in the `root_layer`) through each `hops` site;
 /// the last hop is the arc that closes the cycle and is dropped.
 #[derive(Debug, Clone, PartialEq)]
@@ -1013,7 +1148,7 @@ mod tests {
             graph
                 .errors()
                 .iter()
-                .any(|error| matches!(error, Error::SameTargetRelocations { .. })),
+                .any(|error| matches!(error, CompositionError::SameTargetRelocations { .. })),
             "relocates in one sublayer stack must conflict"
         );
         assert_eq!(
@@ -1047,7 +1182,7 @@ mod tests {
             !graph
                 .errors()
                 .iter()
-                .any(|error| matches!(error, Error::SameTargetRelocations { .. })),
+                .any(|error| matches!(error, CompositionError::SameTargetRelocations { .. })),
             "a repeated sublayer has one authored relocate occurrence"
         );
         assert_eq!(
@@ -1121,7 +1256,7 @@ mod tests {
             !graph
                 .errors()
                 .iter()
-                .any(|error| matches!(error, Error::SameTargetRelocations { .. })),
+                .any(|error| matches!(error, CompositionError::SameTargetRelocations { .. })),
             "relocates in unrelated layer stacks do not conflict"
         );
         assert_eq!(relocate_count(&graph), 2);

@@ -1,6 +1,6 @@
 //! `UsdGeomCamera` — a camera prim.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, Stage};
@@ -318,6 +318,8 @@ impl_geom_schema!(xformable Camera);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
 
     #[test]
     fn camera_roundtrip() -> Result<()> {

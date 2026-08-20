@@ -1,9 +1,8 @@
 //! Text file format (`usda`) reader and writer.
 
 use std::fs;
+use std::io;
 use std::path::Path;
-
-use anyhow::{Context, Result};
 
 mod cursor;
 mod error;
@@ -26,9 +25,10 @@ pub fn parse(text: &str) -> Result<sdf::Data, ParseError> {
 }
 
 /// Read a `usda` file from disk into an in-memory [`sdf::Data`] store.
-pub fn read_file(path: impl AsRef<Path>) -> Result<sdf::Data> {
+pub fn read_file(path: impl AsRef<Path>) -> crate::Result<sdf::Data> {
     let path = path.as_ref();
-    let text = fs::read_to_string(path).with_context(|| format!("Unable to read file: {}", path.display()))?;
+    let text = fs::read_to_string(path)
+        .map_err(|error| io::Error::new(error.kind(), format!("unable to read {}: {error}", path.display())))?;
 
     Ok(parse(&text).map_err(|error| error.with_source_name(path.display().to_string()))?)
 }
@@ -46,14 +46,19 @@ impl sdf::FileFormat for UsdaFileFormat {
         &["usda"]
     }
 
-    fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
+    fn read(
+        &self,
+        resolver: &dyn ar::Resolver,
+        resolved: &ar::ResolvedPath,
+    ) -> Result<sdf::LayerData, sdf::FormatError> {
         let bytes = resolver.open_asset(resolved)?.read_all()?;
-        let text = String::from_utf8(bytes).context("layer is not valid UTF-8")?;
-        let data = parse(&text).map_err(|error| error.with_source_name(resolved.to_string()))?;
+        let text = String::from_utf8(bytes).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
+        let data = parse(&text)
+            .map_err(|error| sdf::FormatError::Decode(Box::new(error.with_source_name(resolved.to_string()))))?;
         Ok(Box::new(data))
     }
 
-    fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<()> {
+    fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
         TextWriter::write(data, &mut sink)
     }
 }

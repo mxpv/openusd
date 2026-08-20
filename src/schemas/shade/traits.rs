@@ -1,6 +1,6 @@
 //! The UsdShade connectable interface shared across shading prims.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::usd::SchemaBase;
 

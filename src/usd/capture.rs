@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 use std::ops::Deref;
 use std::rc::Rc;
 
+use crate::Result;
 use crate::pcp;
 
 use super::diff::{apply_edits_verbatim, forward_diff, inverse_diff};
@@ -424,9 +425,9 @@ impl<L> Drop for CaptureStage<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Result;
     use crate::sdf;
     use crate::usd::ApplyMode;
-    use anyhow::Result;
 
     fn in_memory_stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")

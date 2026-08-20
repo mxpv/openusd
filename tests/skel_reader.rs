@@ -3,7 +3,7 @@
 //! (topology, AnimMapper, SkeletonResolver, SkinningResolver, binding
 //! discovery).
 
-use anyhow::Result;
+use openusd::Result;
 use openusd::gf::{Matrix4d, Quatf, Vec3f};
 use openusd::schemas::geom::Boundable;
 use openusd::schemas::skel::{

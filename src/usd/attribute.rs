@@ -11,6 +11,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use super::{Prim, PrimTypeInfo, Stage, StageAuthoringError, TimeCode, interp};
+use crate::Result;
+use crate::pcp;
 use crate::pcp::AttributeValueSource;
 use crate::sdf;
 use crate::tf;
@@ -278,7 +280,7 @@ impl Attribute {
         // Dedup against the composed result, not just the local edit-target
         // op. Otherwise adding a weaker-layer target would author a stronger
         // duplicate and could accidentally reorder it.
-        if self.connections()?.iter().any(|p| p == &target) {
+        if self.connections_composed()?.iter().any(|p| p == &target) {
             return Ok(self);
         }
         self.edit_connection(move |spec| Ok(spec.add_connection_path(target, prepend)?))
@@ -292,7 +294,7 @@ impl Attribute {
         // The target may exist only through weaker layers. Check the composed
         // list first so this call can author a delete opinion even when the
         // edit-target layer has no local connection item to remove.
-        if !self.connections()?.iter().any(|p| p == &target) {
+        if !self.connections_composed()?.iter().any(|p| p == &target) {
             return Ok(false);
         }
         let type_name = self.stage.field::<tf::Token>(&self.path, sdf::FieldKey::TypeName)?;
@@ -351,7 +353,7 @@ impl Attribute {
     /// explicit-empty list op (`.connect = []`), the canonical way to
     /// block weaker-layer connections. Mirrors C++
     /// `UsdAttribute::HasAuthoredConnections`.
-    pub fn has_authored_connections(&self) -> anyhow::Result<bool> {
+    pub fn has_authored_connections(&self) -> Result<bool> {
         Ok(self
             .stage
             .field::<sdf::Value>(&self.path, sdf::FieldKey::ConnectionPaths)?
@@ -363,7 +365,13 @@ impl Attribute {
     /// vec when no connection is authored, the path is not a property, or the
     /// owning prim is outside the population mask. Mirrors C++
     /// `UsdAttribute::GetConnections`.
-    pub fn connections(&self) -> anyhow::Result<Vec<sdf::Path>> {
+    pub fn connections(&self) -> Result<Vec<sdf::Path>> {
+        Ok(self.connections_composed()?)
+    }
+
+    /// [`connections`](Self::connections) at the composition tier, for the
+    /// authoring paths that dedup against the composed list.
+    fn connections_composed(&self) -> Result<Vec<sdf::Path>, pcp::QueryError> {
         self.stage
             .masked(&self.path, |g, cache| cache.connection_paths(g, &self.path))
     }
@@ -372,10 +380,10 @@ impl Attribute {
     /// list-op deletes, returned as `(connections, deleted)` (C++
     /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). Both are
     /// empty when the owning prim is outside the population mask.
-    pub fn compute_connections(&self) -> anyhow::Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
-        self.stage.masked(&self.path, |g, cache| {
+    pub fn compute_connections(&self) -> Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
+        Ok(self.stage.masked(&self.path, |g, cache| {
             cache.compute_attribute_connection_paths(g, &self.path)
-        })
+        })?)
     }
 
     /// Composed `variability` for this attribute (spec 12.2.3: the weakest
@@ -384,12 +392,13 @@ impl Attribute {
     /// A schema that declares this attribute wins outright: variability is part
     /// of the declaration, so an authored opinion cannot make a `uniform`
     /// attribute animate.
-    pub fn variability(&self) -> anyhow::Result<Option<sdf::Variability>> {
+    pub fn variability(&self) -> Result<Option<sdf::Variability>> {
         if let Some(declared) = self.declared_variability()? {
             return Ok(Some(declared));
         }
-        self.stage
-            .field::<sdf::Variability>(&self.path, sdf::FieldKey::Variability)
+        Ok(self
+            .stage
+            .field::<sdf::Variability>(&self.path, sdf::FieldKey::Variability)?)
     }
 
     /// The variability this attribute's schema declares, if a schema declares
@@ -397,7 +406,7 @@ impl Attribute {
     ///
     /// A schema that omits the field declares the default, so this is a
     /// property of the declaration existing — not of the field being authored.
-    fn declared_variability(&self) -> anyhow::Result<Option<sdf::Variability>> {
+    fn declared_variability(&self) -> Result<Option<sdf::Variability>, pcp::QueryError> {
         let Some((info, name)) = self.declaring_property()? else {
             return Ok(None);
         };
@@ -413,7 +422,7 @@ impl Attribute {
     ///
     /// A property a schema declares is never custom — that is what `custom`
     /// means — so an authored `custom` opinion on one is ignored.
-    pub fn is_custom(&self) -> anyhow::Result<bool> {
+    pub fn is_custom(&self) -> Result<bool> {
         if self.declaring_property()?.is_some() {
             return Ok(false);
         }
@@ -430,7 +439,7 @@ impl Attribute {
     /// The composed spec answers first and a schema declaration answers for a
     /// path no layer authors, so a relationship composed where a schema
     /// declares an attribute is not one.
-    pub fn is_defined(&self) -> anyhow::Result<bool> {
+    pub fn is_defined(&self) -> Result<bool> {
         let spec_type = match self.stage.spec_type(&self.path)? {
             Some(spec_type) => Some(spec_type),
             None => self.declared_spec_type()?,
@@ -447,7 +456,7 @@ impl Attribute {
     /// attribute as a different type. Composition answers only for an
     /// attribute no schema declares. `typeName` is a token; a value of any
     /// other type is treated as untyped (`None`).
-    pub fn type_name(&self) -> anyhow::Result<Option<tf::Token>> {
+    pub fn type_name(&self) -> Result<Option<tf::Token>> {
         if let Some(declared) = self.definition_field(sdf::FieldKey::TypeName)? {
             return Ok(declared.try_as_token());
         }
@@ -464,10 +473,10 @@ impl Attribute {
     /// (`get::<f32>()`), an array (`get::<Vec<f32>>()`), or [`sdf::Value`]
     /// itself (`get::<sdf::Value>()`) for the raw value. A type mismatch
     /// against the authored value surfaces as an `Err`, not `None`.
-    pub fn get<T>(&self) -> anyhow::Result<Option<T>>
+    pub fn get<T>(&self) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
-        T::Error: std::error::Error + Send + Sync + 'static,
+        T::Error: Into<crate::Error>,
     {
         self.get_at(None)
     }
@@ -483,10 +492,10 @@ impl Attribute {
     /// fallback; [`value_source`](Self::value_source) reports which answered.
     ///
     /// [`InterpolationType`]: super::InterpolationType
-    pub fn get_at<T>(&self, time: impl Into<Option<super::TimeCode>>) -> anyhow::Result<Option<T>>
+    pub fn get_at<T>(&self, time: impl Into<Option<super::TimeCode>>) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
-        T::Error: std::error::Error + Send + Sync + 'static,
+        T::Error: Into<crate::Error>,
     {
         let value = match time.into() {
             None => self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::Default)?,
@@ -496,7 +505,7 @@ impl Attribute {
             Some(value) => Some(value),
             None => self.fallback_value()?,
         };
-        Ok(value.map(T::try_from).transpose()?)
+        super::decode_value(value)
     }
 
     /// The value this attribute's schema declares when nothing is authored
@@ -510,7 +519,7 @@ impl Attribute {
     /// An `asset` fallback is anchored against the schematics that declared it,
     /// on the terms
     /// [`resolved_location`](super::FamilySource::resolved_location) states.
-    pub fn fallback_value(&self) -> anyhow::Result<Option<sdf::Value>> {
+    pub fn fallback_value(&self) -> Result<Option<sdf::Value>> {
         let Some((info, name)) = self.declaring_definition()? else {
             return Ok(None);
         };
@@ -535,7 +544,7 @@ impl Attribute {
     /// [`fallback_value`](Self::fallback_value): everything a schema states
     /// about a property — its type, its variability, its display metadata —
     /// lives on the same declaration, whether or not any layer authors a spec.
-    fn definition_field(&self, field: impl AsRef<str>) -> anyhow::Result<Option<sdf::Value>> {
+    fn definition_field(&self, field: impl AsRef<str>) -> Result<Option<sdf::Value>, pcp::QueryError> {
         let Some((info, name)) = self.declaring_definition()? else {
             return Ok(None);
         };
@@ -547,7 +556,7 @@ impl Attribute {
 
     /// The spec type the owning prim's schema declares for this property, or
     /// `None` when no schema declares it.
-    fn declared_spec_type(&self) -> anyhow::Result<Option<sdf::SpecType>> {
+    fn declared_spec_type(&self) -> Result<Option<sdf::SpecType>, pcp::QueryError> {
         let Some((info, name)) = self.declaring_definition()? else {
             return Ok(None);
         };
@@ -559,16 +568,16 @@ impl Attribute {
 
     /// The schema of the prim this attribute hangs off, with the attribute's
     /// own name — the pair every declaration lookup starts from.
-    fn declaring_definition(&self) -> anyhow::Result<Option<(Arc<PrimTypeInfo>, tf::Token)>> {
+    fn declaring_definition(&self) -> Result<Option<(Arc<PrimTypeInfo>, tf::Token)>, pcp::QueryError> {
         let Some((prim, name)) = self.path.split_property() else {
             return Ok(None);
         };
-        Ok(Some((self.stage.prim_type_info(prim)?, tf::Token::from(name))))
+        Ok(Some((self.stage.prim_type_info_composed(prim)?, tf::Token::from(name))))
     }
 
     /// Like [`declaring_definition`](Self::declaring_definition), but `None`
     /// unless a schema actually declares this property.
-    fn declaring_property(&self) -> anyhow::Result<Option<(Arc<PrimTypeInfo>, tf::Token)>> {
+    fn declaring_property(&self) -> Result<Option<(Arc<PrimTypeInfo>, tf::Token)>, pcp::QueryError> {
         let Some((info, name)) = self.declaring_definition()? else {
             return Ok(None);
         };
@@ -580,7 +589,7 @@ impl Attribute {
     /// A blocked attribute reports [`ValueSource::Fallback`] when its schema
     /// declares one: blocking removes the authored opinions, and resolution
     /// then falls through to the schema, per spec §12.3.6.
-    pub fn value_source(&self) -> anyhow::Result<ValueSource> {
+    pub fn value_source(&self) -> Result<ValueSource> {
         let authored = match self.stage.resolve_value_source(&self.path)? {
             AttributeValueSource::Static(value) => value.is_some(),
             AttributeValueSource::TimeSamples { .. } | AttributeValueSource::Clips => true,
@@ -603,7 +612,7 @@ impl Attribute {
     /// range-checked, `token` ↔ `string`, vector/quaternion precision) and
     /// returns an error if no conversion to `T` applies. `None` when no layer
     /// authored an opinion.
-    pub fn cast<T: sdf::FromValueCast>(&self) -> anyhow::Result<Option<T>> {
+    pub fn cast<T: sdf::FromValueCast>(&self) -> Result<Option<T>> {
         match self.get::<sdf::Value>()? {
             Some(value) => Ok(Some(value.cast::<T>()?)),
             None => Ok(None),
@@ -619,10 +628,10 @@ impl Attribute {
     /// `elementSize` on primvars, UsdSkel's inbetween `weight`, …). Decode to
     /// the field's type (`get_metadata::<i32>("elementSize")`) or to
     /// [`sdf::Value`] for the raw value.
-    pub fn get_metadata<T>(&self, key: &str) -> anyhow::Result<Option<T>>
+    pub fn get_metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
-        T::Error: std::error::Error + Send + Sync + 'static,
+        T::Error: Into<crate::Error>,
     {
         // `typeName`, `variability` and `custom` each resolve by their own rule
         // rather than plain strongest-opinion composition, and reading them
@@ -631,8 +640,8 @@ impl Attribute {
         if let Some(special) = self.special_metadata(key)? {
             return Ok(T::try_from(special).ok());
         }
-        if let Some(authored) = self.stage.field::<T>(&self.path, key)? {
-            return Ok(Some(authored));
+        if let Some(authored) = self.stage.field::<sdf::Value>(&self.path, key)? {
+            return super::decode_value(Some(authored));
         }
         // Schema metadata parses untyped, so a declaration may hold a variant
         // the caller did not ask for; that is "not declared", not an error.
@@ -641,7 +650,7 @@ impl Attribute {
 
     /// The value of a field whose resolution is not plain composition, or
     /// `None` when `key` is an ordinary metadata field.
-    fn special_metadata(&self, key: &str) -> anyhow::Result<Option<sdf::Value>> {
+    fn special_metadata(&self, key: &str) -> Result<Option<sdf::Value>> {
         if key == sdf::FieldKey::TypeName.as_str() {
             return Ok(self.type_name()?.map(sdf::Value::Token));
         }
@@ -655,7 +664,7 @@ impl Attribute {
     }
 
     /// Composed `timeSamples` map.
-    pub fn time_samples(&self) -> anyhow::Result<Option<sdf::TimeSampleMap>> {
+    pub fn time_samples(&self) -> Result<Option<sdf::TimeSampleMap>> {
         self.stage.time_samples(&self.path)
     }
 
@@ -674,7 +683,7 @@ impl Attribute {
     /// Gathers the times from the strongest value source — local `timeSamples`,
     /// then value clips (spec 12.3.4), then `timeSamples` across reference /
     /// payload arcs — each retimed to stage time.
-    pub fn time_sample_times(&self) -> anyhow::Result<Vec<f64>> {
+    pub fn time_sample_times(&self) -> Result<Vec<f64>> {
         Ok(self.stage.time_sample_times(&self.path)?.unwrap_or_default())
     }
 
@@ -684,7 +693,7 @@ impl Attribute {
     /// The interval is inclusive at both ends. For samples authored at
     /// `{0, 5, 10}`, `time_samples_in_interval(2.0..=8.0)` returns `[5.0]`,
     /// while `time_samples_in_interval(0.0..=5.0)` returns `[0.0, 5.0]`.
-    pub fn time_samples_in_interval(&self, interval: std::ops::RangeInclusive<f64>) -> anyhow::Result<Vec<f64>> {
+    pub fn time_samples_in_interval(&self, interval: std::ops::RangeInclusive<f64>) -> Result<Vec<f64>> {
         Ok(self
             .time_sample_times()?
             .into_iter()
@@ -694,7 +703,7 @@ impl Attribute {
 
     /// The number of authored time samples, zero when none. Mirrors C++
     /// `UsdAttribute::GetNumTimeSamples`.
-    pub fn num_time_samples(&self) -> anyhow::Result<usize> {
+    pub fn num_time_samples(&self) -> Result<usize> {
         self.stage.num_time_samples(&self.path)
     }
 
@@ -704,7 +713,7 @@ impl Attribute {
     /// repeated time at or beyond an end sample, or when `time` lands exactly
     /// on a sample; otherwise `lower < time < upper`. The two-sample primitive
     /// behind motion-blur and shutter sampling.
-    pub fn bracketing_time_samples(&self, time: impl Into<super::TimeCode>) -> anyhow::Result<Option<(f64, f64)>> {
+    pub fn bracketing_time_samples(&self, time: impl Into<super::TimeCode>) -> Result<Option<(f64, f64)>> {
         let time = time.into();
         let times = self.time_sample_times()?;
         Ok(interp::bracketing_time_samples(&times, time.value()))
@@ -716,15 +725,15 @@ impl Attribute {
     /// is composed, and conservatively when a participating value-clip set has
     /// more than one active clip (spec 12.3.4) — those clips can each serve a
     /// different value even where the reported sample count collapses to one.
-    pub fn value_might_be_time_varying(&self) -> anyhow::Result<bool> {
+    pub fn value_might_be_time_varying(&self) -> Result<bool> {
         self.stage.value_might_be_time_varying(&self.path)
     }
 
     /// Returns the property stack: each `(layer identifier, spec path)` site
     /// that authors a spec for this attribute, strongest first. Mirrors C++
     /// `UsdProperty::GetPropertyStack`.
-    pub fn property_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
-        self.stage.with_cache(|g, c| c.property_stack(g, &self.path))
+    pub fn property_stack(&self) -> Result<Vec<(String, sdf::Path)>> {
+        Ok(self.stage.with_cache(|g, c| c.property_stack(g, &self.path))?)
     }
 
     /// Borrow the attribute spec at `self.path` on the edit target's layer,
@@ -769,7 +778,7 @@ impl Attribute {
 
     /// The type and variability a schema declares for this attribute, which is
     /// what a spec authored for it has to be created with.
-    fn declared_spec(&self) -> anyhow::Result<Option<(tf::Token, sdf::Variability)>> {
+    fn declared_spec(&self) -> Result<Option<(tf::Token, sdf::Variability)>, pcp::QueryError> {
         let Some((info, name)) = self.declaring_property()? else {
             return Ok(None);
         };
@@ -870,10 +879,10 @@ impl AttributeQuery {
 
     /// Composed default value decoded to `T`. The convenience spelling of
     /// `get_at(None)`; mirrors C++ `UsdAttributeQuery::Get()`.
-    pub fn get<T>(&self) -> anyhow::Result<Option<T>>
+    pub fn get<T>(&self) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
-        T::Error: std::error::Error + Send + Sync + 'static,
+        T::Error: Into<crate::Error>,
     {
         self.get_at(None)
     }
@@ -887,10 +896,10 @@ impl AttributeQuery {
     /// A timed read reuses the cached value source; the default read delegates
     /// to the attribute, since a `default` opinion is resolved from a separate
     /// field.
-    pub fn get_at<T>(&self, time: impl Into<Option<TimeCode>>) -> anyhow::Result<Option<T>>
+    pub fn get_at<T>(&self, time: impl Into<Option<TimeCode>>) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
-        T::Error: std::error::Error + Send + Sync + 'static,
+        T::Error: Into<crate::Error>,
     {
         let value = match time.into() {
             // The untimed read goes through the attribute, which resolves the
@@ -901,25 +910,25 @@ impl AttributeQuery {
                 None => self.attr.fallback_value()?,
             },
         };
-        Ok(value.map(T::try_from).transpose()?)
+        super::decode_value(value)
     }
 
     /// `true` when more than one time sample is authored — the cached-source
     /// counterpart of [`Attribute::value_might_be_time_varying`]. Mirrors C++
     /// `UsdAttributeQuery::ValueMightBeTimeVarying`.
-    pub fn value_might_be_time_varying(&self) -> anyhow::Result<bool> {
+    pub fn value_might_be_time_varying(&self) -> Result<bool> {
         self.attr.value_might_be_time_varying()
     }
 
     /// The authored sample times in ascending order, or empty when none are
     /// authored. Mirrors C++ `UsdAttributeQuery::GetTimeSamples`.
-    pub fn time_sample_times(&self) -> anyhow::Result<Vec<f64>> {
+    pub fn time_sample_times(&self) -> Result<Vec<f64>> {
         self.attr.time_sample_times()
     }
 
     /// Resolves the value at stage `time` through the cached source, rebuilding
     /// it when the stage's composition revision has advanced.
-    fn value_at(&self, time: f64) -> anyhow::Result<Option<sdf::Value>> {
+    fn value_at(&self, time: f64) -> Result<Option<sdf::Value>> {
         let stage = self.attr.stage();
         let revision = stage.cache_revision();
 
@@ -949,7 +958,7 @@ impl AttributeQuery {
     }
 
     /// Evaluates an already-resolved value source at stage `time`.
-    fn evaluate(&self, source: &AttributeValueSource, time: f64) -> anyhow::Result<Option<sdf::Value>> {
+    fn evaluate(&self, source: &AttributeValueSource, time: f64) -> Result<Option<sdf::Value>> {
         let stage = self.attr.stage();
         match source {
             AttributeValueSource::Static(value) => Ok(value.clone()),
@@ -967,7 +976,7 @@ impl AttributeQuery {
                 }
                 // `with_cache` takes an `FnMut`, so the closure cannot consume
                 // `value`.
-                stage.with_cache(|g, c| Ok(c.resolve_asset_values(g, value.clone(), Some(site))))
+                Ok(stage.with_cache(|g, c| Ok(c.resolve_asset_values(g, value.clone(), Some(site))))?)
             }
             AttributeValueSource::Clips => stage.resolve_at(self.attr.path(), time),
         }
@@ -976,24 +985,65 @@ impl AttributeQuery {
 
 #[cfg(test)]
 mod tests {
+    use crate::Result;
     use crate::usd::SchemaRegistry;
+
+    /// A downstream value type with its own conversion error, standing in for
+    /// an application extending the generic accessors.
+    #[derive(Debug, PartialEq)]
+    struct Meters(f64);
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("not a length")]
+    struct NotALength;
+
+    impl TryFrom<sdf::Value> for Meters {
+        type Error = NotALength;
+
+        fn try_from(value: sdf::Value) -> std::result::Result<Self, Self::Error> {
+            match value {
+                sdf::Value::Double(v) => Ok(Meters(v)),
+                _ => Err(NotALength),
+            }
+        }
+    }
+
+    impl From<NotALength> for crate::Error {
+        fn from(error: NotALength) -> Self {
+            crate::Error::convert(error)
+        }
+    }
+
+    #[test]
+    fn custom_value_type_reads() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        stage.define_prim("/P")?;
+        stage.create_attribute("/P.depth", "double")?.set(2.5_f64)?;
+
+        assert_eq!(stage.attribute("/P.depth")?.get::<Meters>()?, Some(Meters(2.5)));
+
+        stage.create_attribute("/P.name", "string")?.set("x".to_string())?;
+        let error = stage.attribute("/P.name")?.get::<Meters>().expect_err("not a double");
+        assert!(matches!(error, crate::Error::Convert(_)), "got: {error}");
+        Ok(())
+    }
     use crate::usd::{AttributeQuery, Stage, TimeCode, ValueSource};
     use crate::{sdf, tf};
 
-    fn stage() -> anyhow::Result<Stage> {
+    fn stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
     }
 
     /// A stage whose prims resolve against the shared test schema family, on
     /// which `DistantLight.inputs:intensity` falls back to 50000.
-    fn schema_stage() -> anyhow::Result<Stage> {
+    fn schema_stage() -> Result<Stage> {
         Stage::builder()
             .schema_registry(SchemaRegistry::test_registry())
             .in_memory("anon.usda")
     }
 
     #[test]
-    fn defined_by_schema_or_spec() -> anyhow::Result<()> {
+    fn defined_by_schema_or_spec() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1012,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn unauthored_reads_fallback() -> anyhow::Result<()> {
+    fn unauthored_reads_fallback() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1025,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_beats_fallback() -> anyhow::Result<()> {
+    fn authored_beats_fallback() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage.create_attribute("/Sun.inputs:intensity", "float")?.set(3.0_f32)?;
@@ -1037,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_matches_across_time() -> anyhow::Result<()> {
+    fn fallback_matches_across_time() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1054,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_falls_back_to_schema() -> anyhow::Result<()> {
+    fn blocked_falls_back_to_schema() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage
@@ -1070,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn applied_schema_supplies_fallback() -> anyhow::Result<()> {
+    fn applied_schema_supplies_fallback() -> Result<()> {
         let stage = schema_stage()?;
         stage
             .define_prim("/Group")?
@@ -1090,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_property_reports_its_type() -> anyhow::Result<()> {
+    fn schema_property_reports_its_type() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1107,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_property_metadata_reads_back() -> anyhow::Result<()> {
+    fn schema_property_metadata_reads_back() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1128,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_varying_beats_authored_uniform() -> anyhow::Result<()> {
+    fn declared_varying_beats_authored_uniform() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1146,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_property_is_writable() -> anyhow::Result<()> {
+    fn schema_property_is_writable() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1165,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_over_enumerated_attributes() -> anyhow::Result<()> {
+    fn round_trip_over_enumerated_attributes() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1182,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn every_setter_stamps_the_schema_spec() -> anyhow::Result<()> {
+    fn every_setter_stamps_the_schema_spec() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1206,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_property_is_not_custom() -> anyhow::Result<()> {
+    fn schema_property_is_not_custom() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage
@@ -1221,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn time_samples_count_as_authored() -> anyhow::Result<()> {
+    fn time_samples_count_as_authored() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage
@@ -1238,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_type_beats_authored() -> anyhow::Result<()> {
+    fn declared_type_beats_authored() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage.create_attribute("/Sun.inputs:angle", "double")?;
@@ -1258,7 +1308,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_metadata_matches_its_accessor() -> anyhow::Result<()> {
+    fn generic_metadata_matches_its_accessor() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage
@@ -1286,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_metadata_type_mismatch_is_not_an_error() -> anyhow::Result<()> {
+    fn schema_metadata_type_mismatch_is_not_an_error() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1298,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_variability_cannot_override_schema() -> anyhow::Result<()> {
+    fn authored_variability_cannot_override_schema() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage
@@ -1316,7 +1366,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_schema_has_no_fallback() -> anyhow::Result<()> {
+    fn unknown_schema_has_no_fallback() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1327,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn masked_prim_has_no_fallback() -> anyhow::Result<()> {
+    fn masked_prim_has_no_fallback() -> Result<()> {
         let stage = Stage::builder()
             .schema_registry(SchemaRegistry::test_registry())
             .mask(crate::usd::StagePopulationMask::new(["/Keep"])?)
@@ -1342,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_without_data_has_no_fallback() -> anyhow::Result<()> {
+    fn registry_without_data_has_no_fallback() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1354,7 +1404,7 @@ mod tests {
     }
 
     #[test]
-    fn attribute_chain() -> anyhow::Result<()> {
+    fn attribute_chain() -> Result<()> {
         let stage = stage()?;
         let radius = stage
             .define_prim("/Sphere")?
@@ -1375,7 +1425,7 @@ mod tests {
     /// `Attribute::variability`/`is_custom` read the composed core fields
     /// (C++ `UsdAttribute::GetVariability` / `UsdProperty::IsCustom`).
     #[test]
-    fn attribute_variability_custom() -> anyhow::Result<()> {
+    fn attribute_variability_custom() -> Result<()> {
         let stage = stage()?;
         let prim = stage.define_prim("/A")?.set_type_name("Xform")?;
         let uniform = prim
@@ -1392,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn attribute_time_samples() -> anyhow::Result<()> {
+    fn attribute_time_samples() -> Result<()> {
         let stage = stage()?;
         let attr = stage
             .define_prim("/A")?
@@ -1409,7 +1459,7 @@ mod tests {
 
     /// The time-sample introspection accessors over `timeSamples = {0, 10}`.
     #[test]
-    fn time_sample_queries() -> anyhow::Result<()> {
+    fn time_sample_queries() -> Result<()> {
         let stage = stage()?;
         let attr = stage
             .define_prim("/A")?
@@ -1442,7 +1492,7 @@ mod tests {
     /// The times-only / count-only accessors match the keys and length of the
     /// full `time_samples()` map (identity offset).
     #[test]
-    fn time_sample_times_parity() -> anyhow::Result<()> {
+    fn time_sample_times_parity() -> Result<()> {
         let stage = stage()?;
         let attr = stage
             .define_prim("/A")?
@@ -1462,7 +1512,7 @@ mod tests {
     /// A `ValueBlock` authored on the `timeSamples` field resolves to no
     /// samples on the times-only path, matching `time_samples()`.
     #[test]
-    fn time_sample_times_blocked() -> anyhow::Result<()> {
+    fn time_sample_times_blocked() -> Result<()> {
         let stage = stage()?;
         let attr = stage
             .define_prim("/A")?
@@ -1479,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn attribute_block() -> anyhow::Result<()> {
+    fn attribute_block() -> Result<()> {
         let stage = stage()?;
         let attr = stage
             .define_prim("/A")?
@@ -1497,7 +1547,7 @@ mod tests {
     /// `ValueBlock` — otherwise the default block is silently bypassed for
     /// time-code queries that fall onto an authored sample.
     #[test]
-    fn attribute_block_clears_time_samples() -> anyhow::Result<()> {
+    fn attribute_block_clears_time_samples() -> Result<()> {
         let stage = stage()?;
         let attr = stage
             .define_prim("/A")?
@@ -1513,7 +1563,7 @@ mod tests {
     }
 
     #[test]
-    fn attribute_connections() -> anyhow::Result<()> {
+    fn attribute_connections() -> Result<()> {
         let stage = stage()?;
         let mat = stage.define_prim("/Mat")?.set_type_name("Material")?;
         mat.create_attribute("inputs:diffuseColor", "color3f")?;
@@ -1556,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_connections_explicit_empty() -> anyhow::Result<()> {
+    fn authored_connections_explicit_empty() -> Result<()> {
         // `set_connections([])` authors an explicit-empty list op, the
         // canonical way to block weaker-layer connection opinions.
         // `has_authored_connections` must see this as authored even though
@@ -1573,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn add_connection_prepends() -> anyhow::Result<()> {
+    fn add_connection_prepends() -> Result<()> {
         // First-time `add_connection` on a no-prior-opinion attribute must
         // author a non-explicit (prepended) list op, so weaker-layer
         // connection opinions still compose. Authoring `explicit` here
@@ -1600,7 +1650,7 @@ mod tests {
     }
 
     #[test]
-    fn add_connection_appended() -> anyhow::Result<()> {
+    fn add_connection_appended() -> Result<()> {
         let stage = stage()?;
         let target = sdf::Path::new("/Tex.outputs:rgb")?;
         let attr = stage
@@ -1622,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn add_connection_prepend_on_explicit() -> anyhow::Result<()> {
+    fn add_connection_prepend_on_explicit() -> Result<()> {
         // When the existing op is `explicit` (e.g. authored via
         // `set_connections`), `add_connection_prepended` must honour the
         // prepend position by inserting at the front of `explicit_items`
@@ -1651,7 +1701,7 @@ mod tests {
     /// A query reproduces `get_at` at every time code over a time-sampled
     /// attribute: before, between, exact, and after the authored samples.
     #[test]
-    fn query_matches_get_at() -> anyhow::Result<()> {
+    fn query_matches_get_at() -> Result<()> {
         let stage = stage()?;
         let attr = stage
             .define_prim("/A")?
@@ -1673,7 +1723,7 @@ mod tests {
     /// An attribute with only a default resolves to that default at every time
     /// code, and `get()` returns it.
     #[test]
-    fn query_static_default() -> anyhow::Result<()> {
+    fn query_static_default() -> Result<()> {
         let stage = stage()?;
         let attr = stage
             .define_prim("/A")?
@@ -1690,7 +1740,7 @@ mod tests {
     /// The cached source rebuilds after an edit: re-authoring a sample value is
     /// reflected on the next query, since the composition revision advances.
     #[test]
-    fn query_rebuilds_after_edit() -> anyhow::Result<()> {
+    fn query_rebuilds_after_edit() -> Result<()> {
         let stage = stage()?;
         let attr = stage
             .define_prim("/A")?
@@ -1710,7 +1760,7 @@ mod tests {
     /// A query over samples brought in through a non-identity arc offset
     /// interpolates identically to `get_at`, proving the layer-time mapping.
     #[test]
-    fn query_retimed_offset() -> anyhow::Result<()> {
+    fn query_retimed_offset() -> Result<()> {
         let stage = stage()?;
         stage
             .define_prim("/Source")?
@@ -1744,7 +1794,7 @@ mod tests {
     /// the layer alone: no spec is stamped from the schema declaration just to
     /// hold the absence.
     #[test]
-    fn clear_metadata_keeps_layer() -> anyhow::Result<()> {
+    fn clear_metadata_keeps_layer() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
@@ -1760,7 +1810,7 @@ mod tests {
     /// An attribute handle at a non-property path addresses no attribute, so
     /// clearing through it must not reach the prim's own metadata.
     #[test]
-    fn clear_metadata_wrong_spec() -> anyhow::Result<()> {
+    fn clear_metadata_wrong_spec() -> Result<()> {
         let stage = stage()?;
         stage
             .define_prim("/P")?
@@ -1779,7 +1829,7 @@ mod tests {
     /// A property neither authored nor declared has no opinion to clear, so
     /// clearing one reports success without authoring anything.
     #[test]
-    fn clear_metadata_absent_spec() -> anyhow::Result<()> {
+    fn clear_metadata_absent_spec() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/P")?;
 

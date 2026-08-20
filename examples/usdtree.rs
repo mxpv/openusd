@@ -22,15 +22,18 @@ use std::io::{self, BufWriter, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use anyhow::{Context as _, Result};
+use openusd::Result;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 
 fn main() -> Result<()> {
-    let path = std::env::args().nth(1).context("usage: usdtree <root.usd[a|c|z]>")?;
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: usdtree <root.usd[a|c|z]>");
+        std::process::exit(2);
+    };
     let start = Instant::now();
 
-    let stage = Stage::open(&path).context("failed to open/compose stage")?;
+    let stage = Stage::open(&path)?;
 
     let out = io::stdout();
     let mut out = BufWriter::new(out.lock());

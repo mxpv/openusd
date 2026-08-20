@@ -6,7 +6,7 @@
 //! It is a [`Boundable`] (it has an `extent` and a transform) but not a
 //! [`Gprim`], mirroring the C++ `UsdGeomPointInstancer : UsdGeomBoundable`.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, SchemaBase, Stage};
@@ -214,6 +214,8 @@ impl_geom_schema!(boundable PointInstancer);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::geom::Cube;
 
     #[test]

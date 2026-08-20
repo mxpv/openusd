@@ -7,16 +7,17 @@
 //! header at offset 0 with the final TOC offset.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{Seek, SeekFrom, Write};
+use std::path::Path as FsPath;
 
 use crate::gf::f16;
-use anyhow::{Context, Result, bail};
 use bytemuck::{Pod, bytes_of};
 use num_traits::{AsPrimitive, PrimInt};
 
 use crate::{
     gf,
-    sdf::{AbstractData, LayerOffset, ListOp, Path, PathElement, Payload, Reference, Value},
+    sdf::{AbstractData, FormatError, LayerOffset, ListOp, Path, PathElement, Payload, Reference, Value},
     tf,
 };
 
@@ -29,20 +30,24 @@ use super::layout::{
 /// handles (time samples, relocates, path expressions, etc.).
 const WRITER_VERSION: Version = version(0, 12, 0);
 
+/// The compressed-paths encoding of the interned path table: per-entry path
+/// indices, element token indices, and sibling jumps.
+type EncodedPaths = (Vec<u32>, Vec<i32>, Vec<i32>);
+
 /// Emits `.usdc` binary from an [`AbstractData`].
 pub struct CrateWriter;
 
 impl CrateWriter {
     /// Write the layer to a file on disk.
-    pub fn write_to_file(data: &dyn AbstractData, path: impl AsRef<std::path::Path>) -> Result<()> {
-        let mut file = std::fs::File::create(path).context("failed to create usdc file")?;
+    pub fn write_to_file(data: &dyn AbstractData, path: impl AsRef<FsPath>) -> Result<(), FormatError> {
+        let mut file = fs::File::create(path)?;
         Self::write(data, &mut file)?;
-        file.sync_all().context("failed to sync usdc file to disk")?;
+        file.sync_all()?;
         Ok(())
     }
 
     /// Write the layer to any seekable writer.
-    pub fn write<W: Write + Seek>(data: &dyn AbstractData, out: &mut W) -> Result<()> {
+    pub fn write<W: Write + Seek>(data: &dyn AbstractData, out: &mut W) -> Result<(), FormatError> {
         let mut packer = Packer::new(out);
         packer.pack(data)?;
         packer.finish()
@@ -88,7 +93,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     }
 
     /// Build the in-memory tables and write out-of-line values to the file.
-    fn pack(&mut self, data: &dyn AbstractData) -> Result<()> {
+    fn pack(&mut self, data: &dyn AbstractData) -> Result<(), FormatError> {
         // Reserve bootstrap header; heap data starts immediately after.
         self.out
             .seek(SeekFrom::Start(std::mem::size_of::<Bootstrap>() as u64))?;
@@ -108,9 +113,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
         // Walk specs and build the fieldsets + specs tables.
         for path in &paths {
-            let ty = data
-                .spec_type(path)
-                .ok_or_else(|| anyhow::anyhow!("path {path} reported by paths() has no spec"))?;
+            let ty = data.spec_type(path).ok_or_else(|| FormatError::Encode {
+                reason: format!("path {path} reported by paths() has no spec").into(),
+            })?;
             let path_idx = self.intern_path(path.clone());
 
             let fieldset_idx = self.fieldsets.len() as u32;
@@ -167,7 +172,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     }
 
     /// Emit all sections then the TOC then the bootstrap header.
-    fn finish(mut self) -> Result<()> {
+    fn finish(mut self) -> Result<(), FormatError> {
         self.write_tokens_section()?;
         self.write_strings_section()?;
         self.write_fields_section()?;
@@ -186,20 +191,20 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // Low-level positioning
     // -----------------------------------------------------------------
 
-    fn pos(&mut self) -> Result<u64> {
+    fn pos(&mut self) -> Result<u64, FormatError> {
         Ok(self.out.stream_position()?)
     }
 
-    fn write_pod<T: Pod>(&mut self, v: &T) -> Result<()> {
+    fn write_pod<T: Pod>(&mut self, v: &T) -> Result<(), FormatError> {
         self.out.write_all(bytes_of(v))?;
         Ok(())
     }
 
-    fn write_count(&mut self, n: u64) -> Result<()> {
+    fn write_count(&mut self, n: u64) -> Result<(), FormatError> {
         self.write_pod(&n)
     }
 
-    fn write_bytes(&mut self, b: &[u8]) -> Result<()> {
+    fn write_bytes(&mut self, b: &[u8]) -> Result<(), FormatError> {
         self.out.write_all(b)?;
         Ok(())
     }
@@ -208,13 +213,13 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // Sections
     // -----------------------------------------------------------------
 
-    fn begin_section(&mut self, name: &str) -> Result<u64> {
+    fn begin_section(&mut self, name: &str) -> Result<u64, FormatError> {
         let start = self.pos()?;
         self.sections_written.push((name.to_owned(), start, 0));
         Ok(start)
     }
 
-    fn end_section(&mut self) -> Result<()> {
+    fn end_section(&mut self) -> Result<(), FormatError> {
         let end = self.pos()?;
         if let Some(last) = self.sections_written.last_mut() {
             last.2 = end - last.1;
@@ -222,7 +227,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(())
     }
 
-    fn write_tokens_section(&mut self) -> Result<()> {
+    fn write_tokens_section(&mut self) -> Result<(), FormatError> {
         self.begin_section(Section::TOKENS)?;
         self.write_count(self.tokens.items.len() as u64)?;
 
@@ -240,7 +245,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.end_section()
     }
 
-    fn write_strings_section(&mut self) -> Result<()> {
+    fn write_strings_section(&mut self) -> Result<(), FormatError> {
         self.begin_section(Section::STRINGS)?;
         let n = self.strings.items.len();
         self.write_count(n as u64)?;
@@ -251,7 +256,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.end_section()
     }
 
-    fn write_fields_section(&mut self) -> Result<()> {
+    fn write_fields_section(&mut self) -> Result<(), FormatError> {
         self.begin_section(Section::FIELDS)?;
         let field_count = self.fields.items.len();
         self.write_count(field_count as u64)?;
@@ -271,7 +276,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.end_section()
     }
 
-    fn write_fieldsets_section(&mut self) -> Result<()> {
+    fn write_fieldsets_section(&mut self) -> Result<(), FormatError> {
         self.begin_section(Section::FIELDSETS)?;
         self.write_count(self.fieldsets.len() as u64)?;
 
@@ -281,7 +286,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.end_section()
     }
 
-    fn write_paths_section(&mut self) -> Result<()> {
+    fn write_paths_section(&mut self) -> Result<(), FormatError> {
         self.begin_section(Section::PATHS)?;
         let path_count = self.paths.items.len();
         self.write_count(path_count as u64)?;
@@ -296,7 +301,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.end_section()
     }
 
-    fn write_specs_section(&mut self) -> Result<()> {
+    fn write_specs_section(&mut self) -> Result<(), FormatError> {
         self.begin_section(Section::SPECS)?;
         let n = self.specs.len();
         self.write_count(n as u64)?;
@@ -312,7 +317,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.end_section()
     }
 
-    fn write_toc(&mut self) -> Result<()> {
+    fn write_toc(&mut self) -> Result<(), FormatError> {
         // `finish()` consumes `self` immediately after this call, so taking
         // the vec out is fine; it lets us iterate without a pre-copy.
         let sections = std::mem::take(&mut self.sections_written);
@@ -329,7 +334,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(())
     }
 
-    fn write_bootstrap(&mut self, toc_offset: u64) -> Result<()> {
+    fn write_bootstrap(&mut self, toc_offset: u64) -> Result<(), FormatError> {
         let mut boot = Bootstrap::default();
         boot.ident = *b"PXR-USDC";
         boot.version[0] = WRITER_VERSION.major;
@@ -346,7 +351,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // Paths — DFS over the prim/property tree.
     // -----------------------------------------------------------------
 
-    fn encode_paths(&mut self) -> Result<(Vec<u32>, Vec<i32>, Vec<i32>)> {
+    fn encode_paths(&mut self) -> Result<EncodedPaths, FormatError> {
         let by_index: HashMap<Path, u32> = self
             .paths
             .items
@@ -364,9 +369,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             if p.as_str() == "/" || p.is_empty() {
                 continue;
             }
-            let parent = p
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("path {p} has no parent but is not root"))?;
+            let parent = p.parent().ok_or_else(|| FormatError::Encode {
+                reason: format!("path {p} has no parent but is not root").into(),
+            })?;
             children.entry(parent).or_default().push(p.clone());
         }
         for list in children.values_mut() {
@@ -402,12 +407,12 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         path_indexes: &mut Vec<u32>,
         tokens: &mut Vec<i32>,
         jumps: &mut Vec<i32>,
-    ) -> Result<()> {
+    ) -> Result<(), FormatError> {
         let this_idx = path_indexes.len();
 
-        let path_index = *by_index
-            .get(node)
-            .ok_or_else(|| anyhow::anyhow!("path {node} not interned"))?;
+        let path_index = *by_index.get(node).ok_or_else(|| FormatError::Encode {
+            reason: format!("path {node} not interned").into(),
+        })?;
         path_indexes.push(path_index);
 
         // element_token_indexes: token index of the element name, negative if
@@ -456,11 +461,13 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // Value encoding
     // -----------------------------------------------------------------
 
-    fn write_value(&mut self, value: &Value) -> Result<ValueRep> {
+    fn write_value(&mut self, value: &Value) -> Result<ValueRep, FormatError> {
         match value {
             // `Value::None` represents an absent opinion and has no crate
             // representation — `Type::Invalid` would fail validation on read.
-            Value::None => bail!("Value::None cannot be serialized to USDC"),
+            Value::None => Err(FormatError::Encode {
+                reason: "Value::None cannot be serialized to USDC".into(),
+            }),
             Value::ValueBlock => Ok(rep_inline(Type::ValueBlock, 0)),
             Value::Value => Ok(rep_inline(Type::Value, 0)),
 
@@ -672,9 +679,11 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
             // Heterogeneous arrays are produced only by the USDA spline parser;
             // the USDC binary format has no native representation for them.
-            Value::ValueVec(_) => bail!(
-                "Value::ValueVec cannot be serialized to USDC (the binary format lacks a heterogeneous-array type)"
-            ),
+            Value::ValueVec(_) => Err(FormatError::Encode {
+                reason:
+                    "Value::ValueVec cannot be serialized to USDC (the binary format lacks a heterogeneous-array type)"
+                        .into(),
+            }),
         }
     }
 
@@ -688,13 +697,13 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     }
 
     /// Write a POD value at the current position and return a heap `ValueRep`.
-    fn write_pod_out<T: Pod>(&mut self, ty: Type, v: &T) -> Result<ValueRep> {
+    fn write_pod_out<T: Pod>(&mut self, ty: Type, v: &T) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_pod(v)?;
         Ok(rep_heap(ty, off, false))
     }
 
-    fn write_array<T>(&mut self, ty: Type, count: usize, bytes: &[T]) -> Result<ValueRep>
+    fn write_array<T>(&mut self, ty: Type, count: usize, bytes: &[T]) -> Result<ValueRep, FormatError>
     where
         T: Pod,
     {
@@ -707,7 +716,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     /// Write an integer array, applying the crate format's integer-coding +
     /// LZ4 compression when the array is large enough for the reader to treat
     /// it as compressed (see [`MIN_COMPRESSED_ARRAY_SIZE`]).
-    fn write_array_ints<T>(&mut self, ty: Type, v: &[T]) -> Result<ValueRep>
+    fn write_array_ints<T>(&mut self, ty: Type, v: &[T]) -> Result<ValueRep, FormatError>
     where
         T: Pod + PrimInt + 'static + AsPrimitive<i64>,
     {
@@ -725,7 +734,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         }
     }
 
-    fn write_array_le_half(&mut self, v: &[f16]) -> Result<ValueRep> {
+    fn write_array_le_half(&mut self, v: &[f16]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for h in v {
@@ -734,7 +743,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(Type::Half, off, true))
     }
 
-    fn write_array_f32(&mut self, v: &[f32]) -> Result<ValueRep> {
+    fn write_array_f32(&mut self, v: &[f32]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for f in v {
@@ -743,7 +752,12 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(Type::Float, off, true))
     }
 
-    fn write_array_f64_type(&mut self, ty: Type, len: usize, values: impl Iterator<Item = f64>) -> Result<ValueRep> {
+    fn write_array_f64_type(
+        &mut self,
+        ty: Type,
+        len: usize,
+        values: impl Iterator<Item = f64>,
+    ) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(len as u64)?;
         for f in values {
@@ -754,7 +768,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
     /// Write a quat array reordering each element from internal `(w, x, y, z)`
     /// to Pixar's on-disk `[x, y, z, w]` layout.
-    fn write_gf_quat_f32_wxyz(&mut self, ty: Type, v: &[gf::Quatf]) -> Result<ValueRep> {
+    fn write_gf_quat_f32_wxyz(&mut self, ty: Type, v: &[gf::Quatf]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for q in v {
@@ -768,7 +782,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
     /// Write a quat array reordering each element from internal `(w, x, y, z)`
     /// to Pixar's on-disk `[x, y, z, w]` layout.
-    fn write_gf_quat_f64_wxyz(&mut self, ty: Type, v: &[gf::Quatd]) -> Result<ValueRep> {
+    fn write_gf_quat_f64_wxyz(&mut self, ty: Type, v: &[gf::Quatd]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for q in v {
@@ -782,7 +796,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
     /// Write a quat array reordering each element from internal `(w, x, y, z)`
     /// to Pixar's on-disk `[x, y, z, w]` layout.
-    fn write_gf_quat_half_wxyz(&mut self, ty: Type, v: &[gf::Quath]) -> Result<ValueRep> {
+    fn write_gf_quat_half_wxyz(&mut self, ty: Type, v: &[gf::Quath]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for q in v {
@@ -794,7 +808,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_token_vec(&mut self, ty: Type, v: &[tf::Token]) -> Result<ValueRep> {
+    fn write_token_vec(&mut self, ty: Type, v: &[tf::Token]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         // Token arrays: just write the indices (no inner count for the
         // Type::Token array path — reader does `unpack_array_len` then
@@ -807,7 +821,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_string_vec<S: AsRef<str>>(&mut self, ty: Type, v: &[S]) -> Result<ValueRep> {
+    fn write_string_vec<S: AsRef<str>>(&mut self, ty: Type, v: &[S]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for s in v {
@@ -817,7 +831,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_dictionary(&mut self, d: &HashMap<String, Value>) -> Result<ValueRep> {
+    fn write_dictionary(&mut self, d: &HashMap<String, Value>) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_dictionary_entries(d)?;
         Ok(rep_heap(Type::Dictionary, off, false))
@@ -827,7 +841,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     /// `(string_idx (u32), recursive_offset (i64), ValueRep)` per entry in
     /// sorted key order. Used both for standalone dictionaries and inlined
     /// under a reference's `customData`.
-    fn write_dictionary_entries(&mut self, d: &HashMap<String, Value>) -> Result<()> {
+    fn write_dictionary_entries(&mut self, d: &HashMap<String, Value>) -> Result<(), FormatError> {
         self.write_count(d.len() as u64)?;
 
         // Stable order for determinism (HashMap is unordered).
@@ -859,7 +873,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(())
     }
 
-    fn write_path_vec(&mut self, v: &[Path]) -> Result<ValueRep> {
+    fn write_path_vec(&mut self, v: &[Path]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for p in v {
@@ -869,7 +883,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(Type::PathVector, off, false))
     }
 
-    fn write_layer_offset_vec(&mut self, v: &[LayerOffset]) -> Result<ValueRep> {
+    fn write_layer_offset_vec(&mut self, v: &[LayerOffset]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for o in v {
@@ -878,7 +892,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(Type::LayerOffsetVector, off, false))
     }
 
-    fn write_variant_selection_map(&mut self, m: &HashMap<String, String>) -> Result<ValueRep> {
+    fn write_variant_selection_map(&mut self, m: &HashMap<String, String>) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(m.len() as u64)?;
         let mut keys: Vec<&String> = m.keys().collect();
@@ -892,7 +906,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(Type::VariantSelectionMap, off, false))
     }
 
-    fn write_relocates(&mut self, v: &[(Path, Path)]) -> Result<ValueRep> {
+    fn write_relocates(&mut self, v: &[(Path, Path)]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for (src, tgt) in v {
@@ -904,13 +918,13 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(Type::Relocates, off, false))
     }
 
-    fn write_payload(&mut self, p: &Payload) -> Result<ValueRep> {
+    fn write_payload(&mut self, p: &Payload) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_payload_inline(p)?;
         Ok(rep_heap(Type::Payload, off, false))
     }
 
-    fn write_payload_inline(&mut self, p: &Payload) -> Result<()> {
+    fn write_payload_inline(&mut self, p: &Payload) -> Result<(), FormatError> {
         let asset_idx = self.intern_string(&p.asset_path);
         self.write_pod(&asset_idx)?;
         let prim_idx = self.intern_path(p.prim_path.clone());
@@ -920,7 +934,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(())
     }
 
-    fn write_reference(&mut self, r: &Reference) -> Result<()> {
+    fn write_reference(&mut self, r: &Reference) -> Result<(), FormatError> {
         let asset_idx = self.intern_string(&r.asset_path);
         self.write_pod(&asset_idx)?;
         let prim_idx = self.intern_path(r.prim_path.clone());
@@ -929,10 +943,10 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.write_dictionary_entries(&r.custom_data)
     }
 
-    fn write_listop<T, F>(&mut self, ty: Type, op: &ListOp<T>, mut write_items: F) -> Result<ValueRep>
+    fn write_listop<T, F>(&mut self, ty: Type, op: &ListOp<T>, mut write_items: F) -> Result<ValueRep, FormatError>
     where
         T: Default + Clone + PartialEq,
-        F: FnMut(&mut Self, &[T]) -> Result<()>,
+        F: FnMut(&mut Self, &[T]) -> Result<(), FormatError>,
     {
         let off = self.pos()?;
 
@@ -982,7 +996,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, false))
     }
 
-    fn write_time_samples(&mut self, samples: &[(f64, Value)]) -> Result<ValueRep> {
+    fn write_time_samples(&mut self, samples: &[(f64, Value)]) -> Result<ValueRep, FormatError> {
         // Layout (matches reader/crateFile.cpp):
         //   [i64 rel1]                         — relative offset to times_rep
         //   ...                                — intervening heap for the times array
@@ -1042,7 +1056,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // LZ4 wrapper
     // -----------------------------------------------------------------
 
-    fn write_lz4_compressed(&mut self, input: &[u8]) -> Result<()> {
+    fn write_lz4_compressed(&mut self, input: &[u8]) -> Result<(), FormatError> {
         let compressed = lz4_compress_single_chunk(input);
         self.write_count(compressed.len() as u64)?;
         self.write_bytes(&compressed)?;

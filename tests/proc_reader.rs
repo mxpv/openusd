@@ -1,6 +1,6 @@
 //! Integration test for the UsdProc schema views against a fixture.
 
-use anyhow::Result;
+use openusd::Result;
 
 use openusd::schemas::proc::GenerativeProcedural;
 use openusd::sdf;

@@ -1,7 +1,7 @@
 //! Integration tests for `Attribute::get_at` — the universal
 //! time-sample evaluator wired through stage composition.
 
-use anyhow::Result;
+use openusd::Result;
 use openusd::sdf::{Value, path};
 use openusd::usd;
 

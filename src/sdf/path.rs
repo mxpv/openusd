@@ -1,7 +1,5 @@
 use std::{convert::Infallible, fmt, str::FromStr};
 
-use anyhow::{bail, ensure};
-
 use crate::tf;
 
 /// Parses `str` into a validated [`Path`] — the terse form of [`Path::new`].
@@ -181,14 +179,27 @@ impl Path {
         Ok(Path { path: new_path })
     }
 
-    pub fn append_path(&self, path: impl TryInto<Path, Error: Into<PathParseError>>) -> anyhow::Result<Path> {
+    /// Appends `path` (parsed if given as a string) under this path with a `/`
+    /// separator (C++ `SdfPath::AppendPath`). Appending an absolute path to an
+    /// absolute base, or anything to a property path, is an error.
+    pub fn append_path(&self, path: impl TryInto<Path, Error: Into<PathParseError>>) -> Result<Path, PathParseError> {
         let append: Path = try_into_path(path)?;
 
         if self.is_abs() && append.is_abs() {
-            bail!("Cannot append absolute path to absolute path");
+            return Err(PathParseError {
+                input: append.path,
+                offset: 0,
+                reason: "cannot append an absolute path to an absolute path",
+            });
         }
 
-        ensure!(!self.is_property_path(), "Cannot append path to property path");
+        if self.is_property_path() {
+            return Err(PathParseError {
+                input: self.path.clone(),
+                offset: self.path.rfind('.').unwrap_or(0),
+                reason: "cannot append a path to a property path",
+            });
+        }
 
         if append.as_str() == "." {
             return Ok(self.clone());
@@ -204,10 +215,13 @@ impl Path {
         // A `.`-anchored argument (a `..` step or a property-relative `.attr`)
         // cannot attach under a prim namespace; the concatenation would not be
         // a valid path.
-        ensure!(
-            !append.as_str().starts_with('.'),
-            "Cannot append `.`-anchored path {append} under {self}"
-        );
+        if append.as_str().starts_with('.') {
+            return Err(PathParseError {
+                input: append.path,
+                offset: 0,
+                reason: "cannot append a `.`-anchored path under a prim path",
+            });
+        }
 
         // If base is slash only.
         // "/" + "foo/bar" => "/foo/bar"
@@ -1331,7 +1345,7 @@ impl TryFrom<&String> for Path {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
+    use crate::Result;
 
     use super::*;
 

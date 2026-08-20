@@ -21,7 +21,7 @@ use super::layer_graph::LayerGraph;
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::prim_index::{CompositionContext, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
 use super::prim_indexer::ExprVarDeps;
-use super::{Error, LayerId};
+use super::{CompositionError, LayerId};
 
 /// Per-prim composition index storage with dependency tracking. See the
 /// [module docs](self).
@@ -92,7 +92,7 @@ impl IndexStore {
 
     /// Every recoverable build error across all cached entries, for
     /// [`composition_errors`](super::index_cache::IndexCache::composition_errors).
-    pub(super) fn errors(&self) -> impl Iterator<Item = &Error> {
+    pub(super) fn errors(&self) -> impl Iterator<Item = &CompositionError> {
         self.entries.iter().flat_map(|(_, entry)| entry.errors.iter())
     }
 
@@ -128,7 +128,7 @@ impl IndexStore {
         path: &Path,
         index: PrimIndex,
         context: CompositionContext,
-        errors: Vec<Error>,
+        errors: Vec<CompositionError>,
         expr_var_deps: ExprVarDeps,
     ) {
         // Owner counts pair one increment per entry with one decrement at its
@@ -203,7 +203,7 @@ impl IndexStore {
         self.ownership_lost = false;
     }
 
-    /// The paths whose entry recorded a [`MalformedLayer`](Error::MalformedLayer)
+    /// The paths whose entry recorded a [`MalformedLayer`](CompositionError::MalformedLayer)
     /// build error — an arc to an unreadable target that may now be readable, so
     /// the index should be dropped and re-demanded. Such an index carries no
     /// dependency on the failed target, so an ordinary layer-stack invalidation
@@ -211,7 +211,12 @@ impl IndexStore {
     pub(super) fn paths_with_malformed_layer(&self) -> Vec<Path> {
         self.entries
             .iter()
-            .filter(|(_, entry)| entry.errors.iter().any(|e| matches!(e, Error::MalformedLayer { .. })))
+            .filter(|(_, entry)| {
+                entry
+                    .errors
+                    .iter()
+                    .any(|e| matches!(e, CompositionError::MalformedLayer { .. }))
+            })
             .map(|(path, _)| path.clone())
             .collect()
     }

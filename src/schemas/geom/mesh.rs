@@ -6,7 +6,7 @@
 //! `UsdGeomSubset` derives `UsdTyped` directly) that enumerates a subset of a
 //! parent mesh's elements, e.g. for per-face material binding.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, Stage};
@@ -314,6 +314,8 @@ impl_geom_schema!(typed GeomSubset);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
 
     #[test]
     fn mesh_topology_and_subdiv() -> Result<()> {

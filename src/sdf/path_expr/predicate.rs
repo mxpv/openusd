@@ -9,7 +9,7 @@ use std::fmt;
 use std::ops::Not;
 use std::rc::Rc;
 
-use anyhow::{Result, bail};
+use super::EvalError;
 
 /// A logical expression of named predicate functions, as written between
 /// `{` and `}` in a path pattern (`{isa:Imageable and not abstract}`).
@@ -381,13 +381,19 @@ impl<D> PredicateLibrary<D> {
 
     /// Binds one call to its function. An unknown name or arguments the
     /// binder rejects are errors.
-    fn bind(&self, call: &FnCall) -> Result<PredicateFn<D>> {
+    fn bind(&self, call: &FnCall) -> Result<PredicateFn<D>, EvalError> {
         let Some(binder) = self.binders.get(&call.name) else {
-            bail!("No registered predicate function '{}'", call.name);
+            return Err(EvalError::new(format!(
+                "No registered predicate function '{}'",
+                call.name
+            )));
         };
         match binder(&call.args) {
             Some(function) => Ok(function),
-            None => bail!("Invalid arguments to predicate function '{}'", call.name),
+            None => Err(EvalError::new(format!(
+                "Invalid arguments to predicate function '{}'",
+                call.name
+            ))),
         }
     }
 }
@@ -398,7 +404,7 @@ impl<D> PredicateLibrary<D> {
 pub fn link_predicate_expression<D>(
     expr: &PredicateExpression,
     library: &PredicateLibrary<D>,
-) -> Result<PredicateProgram<D>> {
+) -> Result<PredicateProgram<D>, EvalError> {
     let mut program = PredicateProgram {
         ops: Vec::new(),
         funcs: Vec::new(),
@@ -412,7 +418,11 @@ pub fn link_predicate_expression<D>(
 /// Emits `node`'s instructions: calls in leftmost order, `Not` postfix, and
 /// each binary operator between its operands with its right operand fenced by
 /// `Open`/`Close` so evaluation can skip it.
-fn link_node<D>(node: &PredNode, library: &PredicateLibrary<D>, program: &mut PredicateProgram<D>) -> Result<()> {
+fn link_node<D>(
+    node: &PredNode,
+    library: &PredicateLibrary<D>,
+    program: &mut PredicateProgram<D>,
+) -> Result<(), EvalError> {
     match node {
         PredNode::Call(call) => {
             program.funcs.push(library.bind(call)?);

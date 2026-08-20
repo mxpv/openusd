@@ -3,7 +3,7 @@
 //! concrete light, the `Light` interface inputs, and the `ShapingAPI` /
 //! `ShadowAPI` / `LightListAPI` / `LightAPI` applied schemas.
 
-use anyhow::Result;
+use openusd::Result;
 use openusd::schemas::lux::{
     CylinderLight, DiskLight, DistantLight, DomeLight, GeometryLight, Light, LightAPI, LightListAPI,
     LightListCacheBehavior, PortalLight, RectLight, ShadowAPI, ShapingAPI, SphereLight, TextureFormat,

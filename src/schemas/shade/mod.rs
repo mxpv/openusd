@@ -215,7 +215,7 @@ macro_rules! impl_shading_attribute {
             }
 
             /// The renderer-specific `renderType` hint, when authored.
-            pub fn render_type(&self) -> ::anyhow::Result<Option<$crate::tf::Token>> {
+            pub fn render_type(&self) -> $crate::Result<Option<$crate::tf::Token>> {
                 self.attribute
                     .get_metadata($crate::schemas::shade::tokens::META_RENDER_TYPE)
             }
@@ -237,19 +237,19 @@ macro_rules! impl_shading_attribute {
             ///
             /// TODO(perf): each query in this group re-composes and clones the
             /// whole dictionary, so reading N keys costs N compositions.
-            pub fn sdr_metadata(&self) -> ::anyhow::Result<$crate::schemas::shade::SdrMetadata> {
+            pub fn sdr_metadata(&self) -> $crate::Result<$crate::schemas::shade::SdrMetadata> {
                 $crate::schemas::shade::node_def::attribute_sdr_metadata(&self.attribute)
             }
 
             /// The composed `sdrMetadata` value for `key` on this shading
             /// attribute.
-            pub fn sdr_metadata_by_key(&self, key: impl AsRef<str>) -> ::anyhow::Result<Option<String>> {
+            pub fn sdr_metadata_by_key(&self, key: impl AsRef<str>) -> $crate::Result<Option<String>> {
                 $crate::schemas::shade::node_def::attribute_sdr_metadata_by_key(&self.attribute, key.as_ref())
             }
 
             /// Whether a composed `sdrMetadata` field exists on this shading
             /// attribute.
-            pub fn has_sdr_metadata(&self) -> ::anyhow::Result<bool> {
+            pub fn has_sdr_metadata(&self) -> $crate::Result<bool> {
                 $crate::schemas::shade::node_def::attribute_has_sdr_metadata(&self.attribute)
             }
 
@@ -257,7 +257,7 @@ macro_rules! impl_shading_attribute {
             /// dictionary contains `key`, regardless of the entry's value type.
             /// An aggregate value has no text rendering, so a key holding one
             /// reports here but reads back as absent from the value queries.
-            pub fn has_sdr_metadata_by_key(&self, key: impl AsRef<str>) -> ::anyhow::Result<bool> {
+            pub fn has_sdr_metadata_by_key(&self, key: impl AsRef<str>) -> $crate::Result<bool> {
                 $crate::schemas::shade::node_def::attribute_has_sdr_metadata_by_key(&self.attribute, key.as_ref())
             }
 
@@ -318,7 +318,7 @@ macro_rules! impl_shading_attribute {
 
             /// Valid and invalid upstream connection sources, in composed order
             /// (C++ `UsdShadeConnectableAPI::GetConnectedSources`).
-            pub fn connected_sources(&self) -> ::anyhow::Result<$crate::schemas::shade::ConnectedSources> {
+            pub fn connected_sources(&self) -> $crate::Result<$crate::schemas::shade::ConnectedSources> {
                 $crate::schemas::shade::connectable::connected_sources(&self.attribute)
             }
 
@@ -331,7 +331,7 @@ macro_rules! impl_shading_attribute {
             pub fn value_producing_attributes(
                 &self,
                 filter: $crate::schemas::shade::ProducerFilter,
-            ) -> ::anyhow::Result<Vec<$crate::schemas::shade::ShadingAttribute>> {
+            ) -> Result<Vec<$crate::schemas::shade::ShadingAttribute>, $crate::schemas::SchemaError> {
                 $crate::schemas::shade::utils::value_producing_attributes(
                     $crate::schemas::shade::ShadingAttribute::from(self.clone()),
                     filter,

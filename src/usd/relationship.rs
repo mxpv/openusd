@@ -7,6 +7,7 @@
 //! single statement that ends with the final handle bound.
 
 use super::{Prim, Stage, StageAuthoringError};
+use crate::Result;
 use crate::sdf;
 
 /// Stage-composed relationship handle. Mirrors C++ `UsdRelationship`.
@@ -68,7 +69,7 @@ impl Relationship {
     /// `true` when this relationship is composed as `custom`. Mirrors C++
     /// `UsdProperty::IsCustom`; an unauthored `custom` field resolves to
     /// `false`.
-    pub fn is_custom(&self) -> anyhow::Result<bool> {
+    pub fn is_custom(&self) -> Result<bool> {
         // A property a schema declares is never custom — that is what `custom`
         // means — so an authored opinion on one is ignored, exactly as for an
         // attribute (C++ `UsdStage::_GetPropCustomImpl` covers both).
@@ -129,7 +130,7 @@ impl Relationship {
     /// `true` when any target opinion is authored — including an
     /// explicit-empty list op (`rel r = []`), the canonical way to block
     /// weaker-layer targets. Mirrors C++ `UsdRelationship::HasAuthoredTargets`.
-    pub fn has_authored_targets(&self) -> anyhow::Result<bool> {
+    pub fn has_authored_targets(&self) -> Result<bool> {
         Ok(self
             .stage
             .field::<sdf::Value>(&self.path, sdf::FieldKey::TargetPaths)?
@@ -142,9 +143,10 @@ impl Relationship {
     /// [`Self::forwarded_targets`]. Returns an empty vec for a non-property
     /// path, an unauthored relationship, or an owning prim outside the
     /// population mask. Mirrors C++ `UsdRelationship::GetTargets`.
-    pub fn targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
-        self.stage
-            .masked(&self.path, |g, cache| cache.relationship_targets(g, &self.path))
+    pub fn targets(&self) -> Result<Vec<sdf::Path>> {
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.relationship_targets(g, &self.path))?)
     }
 
     /// Composes this relationship's target paths together with the paths its
@@ -152,10 +154,10 @@ impl Relationship {
     /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). The
     /// targets match [`Relationship::targets`]; both are empty when the
     /// owning prim is outside the population mask.
-    pub fn compute_targets(&self) -> anyhow::Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
-        self.stage.masked(&self.path, |g, cache| {
+    pub fn compute_targets(&self) -> Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
+        Ok(self.stage.masked(&self.path, |g, cache| {
             cache.compute_relationship_target_paths(g, &self.path)
-        })
+        })?)
     }
 
     /// Composed forwarded targets: a target that resolves to another
@@ -167,17 +169,17 @@ impl Relationship {
     /// directly-reached terminal outside the mask is still returned, matching
     /// raw [`Self::targets`]. Mirrors C++
     /// `UsdRelationship::GetForwardedTargets`.
-    pub fn forwarded_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
-        self.stage.masked(&self.path, |g, cache| {
+    pub fn forwarded_targets(&self) -> Result<Vec<sdf::Path>> {
+        Ok(self.stage.masked(&self.path, |g, cache| {
             cache.forwarded_relationship_targets(g, &self.path)
-        })
+        })?)
     }
 
     /// Returns the property stack: each `(layer identifier, spec path)` site
     /// that authors a spec for this relationship, strongest first. Mirrors C++
     /// `UsdProperty::GetPropertyStack`.
-    pub fn property_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
-        self.stage.with_cache(|g, c| c.property_stack(g, &self.path))
+    pub fn property_stack(&self) -> Result<Vec<(String, sdf::Path)>> {
+        Ok(self.stage.with_cache(|g, c| c.property_stack(g, &self.path))?)
     }
 
     /// Borrow the relationship spec at `self.path` on the edit target's
@@ -227,11 +229,11 @@ impl Relationship {
     /// The variability a schema declares for this relationship, if a schema
     /// declares it at all — which is also the test for whether a spec may be
     /// stamped for it.
-    fn declared_variability(&self) -> anyhow::Result<Option<sdf::Variability>> {
+    fn declared_variability(&self) -> Result<Option<sdf::Variability>, crate::pcp::QueryError> {
         let Some((prim, name)) = self.path.split_property() else {
             return Ok(None);
         };
-        let info = self.stage.prim_type_info(prim)?;
+        let info = self.stage.prim_type_info_composed(prim)?;
         let definition = info.prim_definition();
         let Some(property) = definition.property(&crate::tf::Token::from(name)) else {
             return Ok(None);
@@ -242,15 +244,16 @@ impl Relationship {
 
 #[cfg(test)]
 mod tests {
+    use crate::Result;
     use crate::sdf;
     use crate::usd::Stage;
 
-    fn stage() -> anyhow::Result<Stage> {
+    fn stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
     }
 
     #[test]
-    fn relationship_chain() -> anyhow::Result<()> {
+    fn relationship_chain() -> Result<()> {
         let stage = stage()?;
         let mesh = stage.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
         stage.define_prim("/World/Material")?.set_type_name("Material")?;
@@ -270,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn relationship_targets() -> anyhow::Result<()> {
+    fn relationship_targets() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/World/Material")?.set_type_name("Material")?;
         stage.define_prim("/World/Material2")?.set_type_name("Material")?;
@@ -293,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn relationship_targets_unauthored() -> anyhow::Result<()> {
+    fn relationship_targets_unauthored() -> Result<()> {
         let stage = stage()?;
         let rel = stage
             .define_prim("/World/Mesh")?
@@ -308,7 +311,7 @@ mod tests {
     /// relationship forwards to two prims. Forwarding flattens the chain to
     /// only prim/attribute paths, while the raw targets keep the relationship.
     #[test]
-    fn forwarded_targets_spec_example() -> anyhow::Result<()> {
+    fn forwarded_targets_spec_example() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/foo")?;
         stage.define_prim("/foo/bar")?;
@@ -340,7 +343,7 @@ mod tests {
 
     /// Forwarding follows a multi-hop relationship chain to its terminal prim.
     #[test]
-    fn forwarded_targets_multi_hop() -> anyhow::Result<()> {
+    fn forwarded_targets_multi_hop() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Geom")?;
         let p = stage.define_prim("/P")?;
@@ -355,7 +358,7 @@ mod tests {
     /// A deep relationship chain forwards without overflowing the call stack
     /// (the iterative walk must finish where recursion would abort).
     #[test]
-    fn forwarded_targets_deep_chain() -> anyhow::Result<()> {
+    fn forwarded_targets_deep_chain() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Geom")?;
         let host = stage.define_prim("/Host")?;
@@ -377,7 +380,7 @@ mod tests {
     /// queried: the earlier query must not cache a stale "not a relationship"
     /// verdict for the target path.
     #[test]
-    fn forwarded_targets_after_target_authored() -> anyhow::Result<()> {
+    fn forwarded_targets_after_target_authored() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Geom")?;
         let p = stage.define_prim("/P")?;
@@ -396,7 +399,7 @@ mod tests {
     /// when it has no spec at all (dangling path), matching C++ which forwards
     /// only through live relationships.
     #[test]
-    fn forwarded_targets_keeps_dangling() -> anyhow::Result<()> {
+    fn forwarded_targets_keeps_dangling() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Geom")?;
         let a = stage
@@ -414,7 +417,7 @@ mod tests {
     /// Terminals reachable through multiple relationship paths collapse to a
     /// single first-occurrence entry.
     #[test]
-    fn forwarded_targets_dedup() -> anyhow::Result<()> {
+    fn forwarded_targets_dedup() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Geom")?;
         let p = stage.define_prim("/P")?;
@@ -431,7 +434,7 @@ mod tests {
     /// A pure relationship cycle forwards to no terminal targets without
     /// hanging.
     #[test]
-    fn forwarded_targets_cycle() -> anyhow::Result<()> {
+    fn forwarded_targets_cycle() -> Result<()> {
         let stage = stage()?;
         let p = stage.define_prim("/P")?;
         let a = p.create_relationship("a")?.set_targets(["/P.b"])?;

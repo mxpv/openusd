@@ -67,7 +67,7 @@ fn reports_unreadable_clip(stage: &Stage) -> bool {
     stage
         .composition_errors()
         .iter()
-        .any(|e| matches!(e, pcp::Error::UnreadableClip { .. }))
+        .any(|e| matches!(e, pcp::CompositionError::UnreadableClip { .. }))
 }
 
 /// The authored site of every reported invalid-expression diagnostic.
@@ -76,7 +76,7 @@ fn expression_error_sites(stage: &Stage) -> Vec<sdf::Path> {
         .composition_errors()
         .into_iter()
         .filter_map(|e| match e {
-            pcp::Error::InvalidExpression { site_path, .. } => Some(site_path),
+            pcp::CompositionError::InvalidExpression { site_path, .. } => Some(site_path),
             _ => None,
         })
         .collect()

@@ -1,7 +1,7 @@
 //! Integration tests for the `UsdPhysics` schema views against a fixture
 //! that exercises every schema family.
 
-use anyhow::Result;
+use openusd::Result;
 use openusd::gf;
 use openusd::schemas::physics::{self, DriveType, JointAxis, JointBase};
 use openusd::sdf;

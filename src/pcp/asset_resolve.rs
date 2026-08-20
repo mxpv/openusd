@@ -18,7 +18,7 @@ use crate::ar;
 use crate::sdf::{self, Path, Value};
 
 use super::layer_graph::LayerGraph;
-use super::{Error, ExpressionContext, LayerId, LayerStackId};
+use super::{CompositionError, ExpressionContext, LayerId, LayerStackId};
 
 /// Where an `asset` value was authored: what to anchor a relative path against,
 /// whose `expressionVariables` are in scope, and the site to name in a
@@ -40,7 +40,7 @@ pub(crate) struct AssetSite {
     /// against; a named layer that failed to resolve still anchors on its
     /// identifier, since that is what [`sdf::Layer::real_path`] falls back to.
     anchor: Option<ar::ResolvedPath>,
-    /// Identifier of the source layer, for [`Error::InvalidExpression`].
+    /// Identifier of the source layer, for [`CompositionError::InvalidExpression`].
     source_layer: String,
     /// The layer stack whose composed variables an expression evaluates against.
     stack: LayerStackId,
@@ -105,7 +105,7 @@ pub(super) fn resolve_values(
     graph: &LayerGraph,
     value: Value,
     site: Option<&AssetSite>,
-    errors: &mut Vec<Error>,
+    errors: &mut Vec<CompositionError>,
 ) -> Value {
     let mut failures = Vec::new();
     let anchor = site.and_then(AssetSite::anchor);
@@ -131,7 +131,7 @@ pub(super) fn evaluate_values(
     graph: &LayerGraph,
     value: Value,
     site: Option<&AssetSite>,
-    errors: &mut Vec<Error>,
+    errors: &mut Vec<CompositionError>,
 ) -> (Value, sdf::AssetOutcome) {
     let mut failures = Vec::new();
     let variables = site.map(|site| site.variables(graph));
@@ -141,21 +141,25 @@ pub(super) fn evaluate_values(
 }
 
 /// Names the site every expression failure was authored at and records it as
-/// [`Error::InvalidExpression`], as a reference or payload arc's asset path
+/// [`CompositionError::InvalidExpression`], as a reference or payload arc's asset path
 /// does.
 ///
 /// No variable dependency is recorded: the read carries no prim index to
 /// register one against, so no per-variable invalidation could name it.
 /// `Changes::apply` covers these reads wholesale through its asset-path channel
 /// instead.
-fn record_failures(site: Option<&AssetSite>, failures: Vec<sdf::AssetExpressionFailure>, errors: &mut Vec<Error>) {
+fn record_failures(
+    site: Option<&AssetSite>,
+    failures: Vec<sdf::AssetExpressionFailure>,
+    errors: &mut Vec<CompositionError>,
+) {
     // Only a site supplies variables, and only an evaluation against variables
     // can fail, so a caller with no site has nothing to report.
     let Some(site) = site else {
         return;
     };
     for failure in failures {
-        Error::InvalidExpression {
+        CompositionError::InvalidExpression {
             expression: failure.expression,
             context: ExpressionContext::AssetValue,
             source_layer: site.source_layer.clone(),

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use super::error::{Ctx, RawError, bail, ensure};
 use std::collections::HashMap;
 
 use crate::sdf::{
@@ -17,6 +17,10 @@ pub struct Parser<'a> {
     cursor: Cursor<'a>,
 }
 
+/// The names a prim or variant body declares: child prims, properties, and
+/// variant sets, in authored order.
+type PrimBodyNames = (Vec<String>, Vec<String>, Vec<String>);
+
 impl<'a> Parser<'a> {
     pub fn new(data: &'a str) -> Self {
         Self {
@@ -28,18 +32,18 @@ impl<'a> Parser<'a> {
     ///
     /// Keyword tokens (e.g. `rel`, `kind`) are accepted through
     /// `keyword_lexeme`, so they may be used as property or relationship names.
-    fn expect_name(&mut self) -> Result<&'a str> {
+    fn expect_name(&mut self) -> Result<&'a str, RawError> {
         let token = self.cursor.bump()?;
         match token {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => Ok(s),
             other => other
                 .keyword_lexeme()
-                .ok_or_else(|| anyhow!("expected name, got {other:?}")),
+                .ok_or_else(|| RawError::new(format!("expected name, got {other:?}"))),
         }
     }
 
     /// Tries to consume a list-op keyword (`add`, `append`, `prepend`, `delete`, `reorder`).
-    fn try_list_op(&mut self) -> Result<Option<Token<'a>>> {
+    fn try_list_op(&mut self) -> Result<Option<Token<'a>>, RawError> {
         if matches!(
             self.cursor.peek()?,
             Some(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)
@@ -50,7 +54,10 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a single item or a bracketed array of items.
-    fn parse_one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Cursor<'a>) -> Result<T>) -> Result<Vec<T>> {
+    fn parse_one_or_list<T>(
+        &mut self,
+        mut parse: impl FnMut(&mut Cursor<'a>) -> Result<T, RawError>,
+    ) -> Result<Vec<T>, RawError> {
         if self.cursor.eat(&Token::None)? {
             return Ok(Vec::new());
         }
@@ -62,7 +69,12 @@ impl<'a> Parser<'a> {
 
     /// Runs `entry` over each item of a delimited block, tolerating `,` and `;`
     /// separators between items.
-    fn parse_block(&mut self, open: char, close: char, mut entry: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
+    fn parse_block(
+        &mut self,
+        open: char,
+        close: char,
+        mut entry: impl FnMut(&mut Self) -> Result<(), RawError>,
+    ) -> Result<(), RawError> {
         self.cursor.expect_punctuation(open)?;
         loop {
             if self.cursor.eat_punctuation(close)? {
@@ -81,7 +93,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Walks the entire token stream, seeding the pseudo root and recursing through every prim.
-    fn parse_impl(&mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>> {
+    fn parse_impl(&mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>, RawError> {
         let mut data = HashMap::new();
         let current_path = sdf::Path::abs_root();
 
@@ -106,7 +118,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse the file header/pseudo-root to populate layer-level metadata before prim traversal.
-    fn read_pseudo_root(&mut self) -> Result<sdf::SpecData> {
+    fn read_pseudo_root(&mut self) -> Result<sdf::SpecData, RawError> {
         // Make sure text file starts with #usda...
         let version = match self.cursor.bump()? {
             Token::Magic(version) => version,
@@ -186,7 +198,7 @@ impl<'a> Parser<'a> {
         current_path: &sdf::Path,
         parent_children: &mut Vec<String>,
         data: &mut HashMap<sdf::Path, sdf::SpecData>,
-    ) -> Result<()> {
+    ) -> Result<(), RawError> {
         let mut spec = sdf::SpecData::new(sdf::SpecType::Prim);
 
         let specifier = {
@@ -241,15 +253,16 @@ impl<'a> Parser<'a> {
 
     /// Parse the body of a prim or variant (`{ ... }`).
     ///
-    /// Returns the child prim names and property names found in the body.
-    /// `owner_spec` is the in-progress prim/variant spec that owns this body;
-    /// `reorder` statements write `primOrder`/`propertyOrder` directly into it.
+    /// Returns the child prim names, property names, and variant-set names
+    /// found in the body ([`PrimBodyNames`]). `owner_spec` is the in-progress
+    /// prim/variant spec that owns this body; `reorder` statements write
+    /// `primOrder`/`propertyOrder` directly into it.
     fn read_prim_body(
         &mut self,
         path: &sdf::Path,
         owner_spec: &mut sdf::SpecData,
         data: &mut HashMap<sdf::Path, sdf::SpecData>,
-    ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+    ) -> Result<PrimBodyNames, RawError> {
         let mut children = Vec::new();
         let mut properties = Vec::new();
         let mut suffixed_properties = Vec::<String>::new();
@@ -293,7 +306,7 @@ impl<'a> Parser<'a> {
     /// These statements set the `primOrder` or `propertyOrder` fields on the
     /// owning prim/variant spec, controlling child/property display order;
     /// `rootPrims` sets `primOrder` on the pseudo-root.
-    fn read_reorder(&mut self, owner_spec: &mut sdf::SpecData) -> Result<()> {
+    fn read_reorder(&mut self, owner_spec: &mut sdf::SpecData) -> Result<(), RawError> {
         self.cursor.bump()?; // consume `reorder`
 
         let token = self
@@ -322,7 +335,7 @@ impl<'a> Parser<'a> {
         &mut self,
         prim_path: &sdf::Path,
         data: &mut HashMap<sdf::Path, sdf::SpecData>,
-    ) -> Result<String> {
+    ) -> Result<String, RawError> {
         self.cursor.bump()?; // consume `variantSet`
 
         let name = self
@@ -410,7 +423,7 @@ impl<'a> Parser<'a> {
         properties: &mut Vec<String>,
         suffixed_properties: &mut Vec<String>,
         data: &mut HashMap<sdf::Path, sdf::SpecData>,
-    ) -> Result<()> {
+    ) -> Result<(), RawError> {
         let mut custom = false;
         let list_op = self.try_list_op()?;
 
@@ -541,7 +554,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse the metadata block attached to a property and stash entries on the spec.
-    fn parse_property_metadata(&mut self, spec: &mut sdf::SpecData) -> Result<()> {
+    fn parse_property_metadata(&mut self, spec: &mut sdf::SpecData) -> Result<(), RawError> {
         self.parse_block('(', ')', |this| {
             let list_op = this.try_list_op()?;
 
@@ -558,7 +571,7 @@ impl<'a> Parser<'a> {
                 other => other
                     .keyword_lexeme()
                     .map(str::to_owned)
-                    .ok_or_else(|| anyhow!("Unexpected attribute metadata name token: {other:?}"))?,
+                    .ok_or_else(|| RawError::new(format!("Unexpected attribute metadata name token: {other:?}")))?,
             };
 
             this.cursor.expect_punctuation('=')?;
@@ -598,7 +611,7 @@ impl<'a> Parser<'a> {
         properties: &mut Vec<String>,
         data: &mut HashMap<sdf::Path, sdf::SpecData>,
         outer_list_op: Option<Token<'a>>,
-    ) -> Result<()> {
+    ) -> Result<(), RawError> {
         let name = self.expect_name().context("relationship name expected")?;
 
         let mut spec = sdf::SpecData::new(sdf::SpecType::Relationship);
@@ -654,7 +667,7 @@ impl<'a> Parser<'a> {
     /// Parse prim metadata contained either within parentheses or directly after the prim
     /// declaration (until `{` is encountered).
     /// Parse a single prim metadata assignment, honoring list ops for supported fields.
-    fn read_prim_metadata_entry(&mut self, spec: &mut sdf::SpecData) -> Result<()> {
+    fn read_prim_metadata_entry(&mut self, spec: &mut sdf::SpecData) -> Result<(), RawError> {
         let list_op = self.try_list_op()?;
         let name_token = self.cursor.bump()?;
 
@@ -829,7 +842,10 @@ impl<'a> Parser<'a> {
 
 /// Wrap `items` in the list op the `op` keyword names, or an explicit list when
 /// no keyword was authored.
-fn apply_list_op<T: Default + Clone + PartialEq>(op: Option<Token<'_>>, items: Vec<T>) -> Result<sdf::ListOp<T>> {
+fn apply_list_op<T: Default + Clone + PartialEq>(
+    op: Option<Token<'_>>,
+    items: Vec<T>,
+) -> Result<sdf::ListOp<T>, RawError> {
     match op {
         None => Ok(sdf::ListOp::explicit(items)),
         Some(Token::Prepend) => Ok(sdf::ListOp::prepended(items)),
@@ -852,7 +868,7 @@ fn push_unique(vec: &mut Vec<String>, name: &str) {
 mod tests {
     use super::*;
     use crate::gf;
-    use anyhow::Error;
+    use std::error::Error as StdError;
     use std::fs;
     use std::path::PathBuf;
 
@@ -1492,13 +1508,16 @@ def Scope \"A\"
 
         // The wrapper must not truncate the chain: the typed root error stays
         // reachable through `std::error::Error::source`.
-        let wrapped = Error::new(error);
-        assert!(
-            wrapped
-                .chain()
-                .any(|link| link.downcast_ref::<sdf::PathParseError>().is_some()),
-            "typed path error should survive the wrapper, got: {wrapped:#}"
-        );
+        let mut link: Option<&(dyn StdError + 'static)> = Some(&error);
+        let mut found = false;
+        while let Some(current) = link {
+            if current.downcast_ref::<sdf::PathParseError>().is_some() {
+                found = true;
+                break;
+            }
+            link = current.source();
+        }
+        assert!(found, "typed path error should survive the wrapper, got: {error}");
     }
 
     #[test]

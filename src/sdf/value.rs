@@ -297,36 +297,6 @@ impl serde::Serialize for Value {
     }
 }
 
-/// Error returned when a [`Value`] cannot be converted to the requested type.
-#[derive(Debug, Clone)]
-pub struct ValueConversionError {
-    expected: &'static str,
-    actual: &'static str,
-}
-
-impl ValueConversionError {
-    /// Creates a new error from the expected type name and the actual value.
-    pub fn new(expected: &'static str, actual: &Value) -> Self {
-        Self {
-            expected,
-            actual: actual.into(),
-        }
-    }
-
-    /// Returns an `Err` with a new conversion error.
-    pub fn err<T>(expected: &'static str, actual: &Value) -> Result<T, Self> {
-        Err(Self::new(expected, actual))
-    }
-}
-
-impl std::fmt::Display for ValueConversionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "expected {}, got {}", self.expected, self.actual)
-    }
-}
-
-impl std::error::Error for ValueConversionError {}
-
 impl Value {
     /// Extracts the payload as `T` if this holds the matching variant, else
     /// `None`. A typed view over the `try_as_*` accessors and the
@@ -443,12 +413,12 @@ macro_rules! impl_try_from_value {
     // Exact: unwrap the matching variant.
     ($target:ty, $method:ident, $label:literal) => {
         impl TryFrom<Value> for $target {
-            type Error = ValueConversionError;
+            type Error = CastError;
 
             fn try_from(value: Value) -> Result<Self, Self::Error> {
                 let tag: &'static str = (&value).into();
-                value.$method().ok_or(ValueConversionError {
-                    expected: $label,
+                value.$method().ok_or(CastError::TypeMismatch {
+                    target: $label,
                     actual: tag,
                 })
             }
@@ -466,12 +436,12 @@ macro_rules! impl_try_from_value {
     // the `gf`-vector-to-fixed-array conversions (`Vec3f` → `[f32; 3]`).
     ($target:ty, $method:ident, $label:literal, $transform:expr) => {
         impl TryFrom<Value> for $target {
-            type Error = ValueConversionError;
+            type Error = CastError;
 
             fn try_from(value: Value) -> Result<Self, Self::Error> {
                 let tag: &'static str = (&value).into();
-                value.$method().map($transform).ok_or(ValueConversionError {
-                    expected: $label,
+                value.$method().map($transform).ok_or(CastError::TypeMismatch {
+                    target: $label,
                     actual: tag,
                 })
             }
@@ -722,7 +692,8 @@ pub trait FromValueCast: Sized {
     fn cast_from(value: Value) -> Result<Self, CastError>;
 }
 
-/// Error returned by [`Value::cast`].
+/// Error returned by [`Value::cast`] and the exact-variant `TryFrom<Value>`
+/// conversions.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CastError {
     /// The held variant has no registered cast to the target type.
@@ -1117,10 +1088,10 @@ mod tests {
     #[test]
     fn try_from_wrong_variant() {
         let err = f32::try_from(Value::Int(1)).unwrap_err();
-        assert_eq!(err.to_string(), "expected Float, got Int");
+        assert_eq!(err.to_string(), "cannot cast Int to Float");
 
         let err = gf::Vec3f::try_from(Value::Bool(true)).unwrap_err();
-        assert_eq!(err.to_string(), "expected gf::Vec3f, got Bool");
+        assert_eq!(err.to_string(), "cannot cast Bool to gf::Vec3f");
     }
 
     #[test]

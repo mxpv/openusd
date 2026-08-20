@@ -1,6 +1,6 @@
 //! `UsdGeomGprim` — the base for geometric primitives.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf;
 use crate::usd::Attribute;

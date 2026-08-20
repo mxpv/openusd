@@ -7,7 +7,7 @@
 //! settings it is produced from and may override any of them. Concrete views
 //! implement it through the `impl_render_schema!(settings_base ...)` macro arm.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf::Variability;
 use crate::usd::{Attribute, Relationship, SchemaBase};

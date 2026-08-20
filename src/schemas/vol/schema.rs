@@ -1,7 +1,9 @@
 //! The UsdVol prim views: [`Volume`] and the file-backed field assets
 //! [`OpenVDBAsset`] / [`Field3DAsset`].
 
-use anyhow::{Result, bail};
+use crate::Result;
+
+use crate::schemas::SchemaError;
 
 use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, Stage};
@@ -39,9 +41,9 @@ impl Volume {
     /// `field:<name>` relationship (C++ `UsdVolVolume::CreateFieldRelationship`).
     /// `name` must be non-empty, otherwise the property name would end in a
     /// colon (`field:`), which is not a valid USD property name.
-    pub fn create_field_relationship(self, name: &str, target: impl sdf::IntoPath) -> Result<Self> {
+    pub fn create_field_relationship(self, name: &str, target: impl sdf::IntoPath) -> Result<Self, SchemaError> {
         if name.is_empty() {
-            bail!("Volume field name must not be empty");
+            return Err(SchemaError::EmptyFieldName);
         }
         self.create_relationship(format!("{}{name}", tok::NS_FIELD))?
             .set_custom(false)?
@@ -154,11 +156,13 @@ impl_vol_schema!(field_asset Field3DAsset);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::vol::{FieldAsset, VectorDataRoleHint};
     use crate::tf::Token;
 
     #[test]
-    fn volume_fields_roundtrip() -> Result<()> {
+    fn volume_fields_roundtrip() -> Result<(), SchemaError> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         Volume::define(&stage, "/V")?
             .create_field_relationship("density", sdf::path("/V/density")?)?

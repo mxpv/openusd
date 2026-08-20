@@ -8,8 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
-use anyhow::Result;
-
+use crate::Result;
 use crate::sdf::path_expr::{
     FnArg, GlobPattern, IncrementalSearcher, PathExpressionEval, PredResult, PredicateArg, PredicateLibrary,
 };

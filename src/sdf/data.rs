@@ -8,8 +8,6 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use anyhow::Result;
-
 use crate::sdf::{Path, SpecData, SpecType, Value};
 
 /// The scene-description storage interface, mirroring C++ `SdfAbstractData`.
@@ -102,10 +100,6 @@ pub trait AbstractData {
 #[non_exhaustive]
 pub enum DataError {
     /// A backend failed to decode or decompress an authored field value.
-    //
-    // TODO: the crate reader's value decoder still returns `anyhow::Error`, so
-    // its failure is boxed here rather than typed. Give the decoder its own
-    // error and have this variant wrap it directly.
     #[error("failed to decode field {field:?} at {path}")]
     Decode {
         /// The spec path whose field failed to decode.
@@ -125,6 +119,14 @@ pub enum DataError {
         path: Path,
         /// The name of the absent field.
         field: String,
+    },
+
+    /// A backend listed a path in [`spec_paths`](AbstractData::spec_paths)
+    /// but reports no spec there — an [`AbstractData`] contract violation.
+    #[error("path {path} reported by spec_paths() has no spec")]
+    MissingSpec {
+        /// The path with no spec behind it.
+        path: Path,
     },
 }
 
@@ -147,12 +149,16 @@ impl Data {
     }
 
     /// Copy every spec and field from `src` into a new `Data`.
-    pub fn from_abstract(src: &dyn AbstractData) -> Result<Self> {
+    ///
+    /// A backend whose `spec_paths` reports a path it then holds no spec for
+    /// violates the [`AbstractData`] contract; the copy surfaces that as
+    /// [`DataError::MissingSpec`] rather than panicking.
+    pub fn from_abstract(src: &dyn AbstractData) -> Result<Self, DataError> {
         let mut out = Self::new();
         for path in src.spec_paths() {
             let ty = src
                 .spec_type(&path)
-                .ok_or_else(|| anyhow::anyhow!("path {path} reported by paths() has no spec"))?;
+                .ok_or_else(|| DataError::MissingSpec { path: path.clone() })?;
             let spec = out.create_spec(path.clone(), ty);
             if let Some(fields) = src.list_fields(&path) {
                 for name in fields {

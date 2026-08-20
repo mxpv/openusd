@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::{sdf, usd};
 
@@ -271,6 +271,8 @@ fn input_matches(input: &Input, stage: &usd::Stage, path: &sdf::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::shade::Shader;
     use crate::usd::SchemaBase;
 

@@ -1,7 +1,7 @@
 //! Integration tests for the `UsdRender` schema views and the computed
 //! render spec, against a hand-authored fixture scene.
 
-use anyhow::Result;
+use openusd::Result;
 
 use openusd::schemas::render::{
     AspectRatioConformPolicy, ProductType, RenderProduct, RenderSettings, RenderSettingsBase, RenderVar, SourceType,

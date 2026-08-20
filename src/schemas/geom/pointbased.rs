@@ -1,6 +1,6 @@
 //! `UsdGeomPointBased` — gprims whose geometry is a point cloud.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::usd::Attribute;
 

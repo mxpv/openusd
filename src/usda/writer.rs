@@ -5,17 +5,17 @@
 //! [`usda::parse`](super::parse) must reproduce the original specs
 //! opinion-for-opinion.
 
+use std::path::Path as FsPath;
 use std::{
     collections::HashMap,
     fmt::Write as FmtWrite,
+    fs,
     io::{self, Write},
 };
 
-use anyhow::{Context, Result, bail};
-
 use crate::sdf::{
-    self, AbstractData, AssetPath, ChildrenKey, FieldKey, LayerOffset, ListOp, Path, Payload, Reference, SpecType,
-    Specifier, Value, Variability,
+    self, AbstractData, AssetPath, ChildrenKey, FieldKey, FormatError, LayerOffset, ListOp, Path, Payload, Reference,
+    SpecType, Specifier, Value, Variability,
 };
 use crate::tf::Token;
 
@@ -24,21 +24,21 @@ pub struct TextWriter;
 
 impl TextWriter {
     /// Write the layer to a newly allocated `String`.
-    pub fn write_to_string(data: &dyn AbstractData) -> Result<String> {
+    pub fn write_to_string(data: &dyn AbstractData) -> Result<String, FormatError> {
         let mut buf = Vec::new();
         Self::write(data, &mut buf)?;
-        String::from_utf8(buf).context("writer produced non-UTF-8 output")
+        Ok(String::from_utf8(buf).expect("the usda writer emits UTF-8 text"))
     }
 
     /// Write the layer to a file on disk.
-    pub fn write_to_file(data: &dyn AbstractData, path: impl AsRef<std::path::Path>) -> Result<()> {
+    pub fn write_to_file(data: &dyn AbstractData, path: impl AsRef<FsPath>) -> Result<(), FormatError> {
         let text = Self::write_to_string(data)?;
-        std::fs::write(path, text).context("failed to write usda file")?;
+        fs::write(path, text)?;
         Ok(())
     }
 
     /// Write the layer to any `io::Write` sink.
-    pub fn write<W: Write>(data: &dyn AbstractData, out: &mut W) -> Result<()> {
+    pub fn write<W: Write>(data: &dyn AbstractData, out: &mut W) -> Result<(), FormatError> {
         let mut emitter = Emitter { out, indent: 0 };
         emitter.emit_layer(data)
     }
@@ -61,7 +61,7 @@ impl<W: Write> Emitter<'_, W> {
 
     // ---------- top-level walk ----------
 
-    fn emit_layer(&mut self, data: &dyn AbstractData) -> Result<()> {
+    fn emit_layer(&mut self, data: &dyn AbstractData) -> Result<(), FormatError> {
         writeln!(self.out, "#usda 1.0")?;
 
         let root = Path::abs_root();
@@ -118,7 +118,7 @@ impl<W: Write> Emitter<'_, W> {
 
     // ---------- prim ----------
 
-    fn emit_prim(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<()> {
+    fn emit_prim(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
         // Header: [specifier] [typeName] "name"
         self.write_indent()?;
         let specifier = get_value(data, path, FieldKey::Specifier.as_str())
@@ -197,7 +197,7 @@ impl<W: Write> Emitter<'_, W> {
     /// Emit `reorder nameChildren / properties` statements (if authored) at
     /// the top of a prim or variant body. The grammar only accepts these
     /// inside `{...}`, not in the metadata block.
-    fn emit_body_reorders(&mut self, data: &dyn AbstractData, path: &Path) -> Result<()> {
+    fn emit_body_reorders(&mut self, data: &dyn AbstractData, path: &Path) -> Result<(), FormatError> {
         if let Some(Value::TokenVec(v)) = get_value(data, path, FieldKey::PrimOrder.as_str()) {
             self.emit_reorder("nameChildren", &v)?;
         }
@@ -209,16 +209,20 @@ impl<W: Write> Emitter<'_, W> {
 
     // ---------- property (attribute or relationship) ----------
 
-    fn emit_property(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<()> {
+    fn emit_property(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
         match data.spec_type(path) {
             Some(SpecType::Attribute) => self.emit_attribute(data, path, name),
             Some(SpecType::Relationship) => self.emit_relationship(data, path, name),
-            Some(other) => anyhow::bail!("unsupported property spec type {other:?} at {path}"),
-            None => anyhow::bail!("property path {path} has no spec"),
+            Some(other) => Err(FormatError::Encode {
+                reason: format!("unsupported property spec type {other:?} at {path}").into(),
+            }),
+            None => Err(FormatError::Encode {
+                reason: format!("property path {path} has no spec").into(),
+            }),
         }
     }
 
-    fn emit_attribute(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<()> {
+    fn emit_attribute(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
         self.write_indent()?;
 
         if matches!(
@@ -236,7 +240,11 @@ impl<W: Write> Emitter<'_, W> {
 
         let type_name = match get_value(data, path, FieldKey::TypeName.as_str()) {
             Some(Value::Token(t)) => String::from(t),
-            _ => anyhow::bail!("attribute {path} missing typeName"),
+            _ => {
+                return Err(FormatError::Encode {
+                    reason: format!("attribute {path} missing typeName").into(),
+                });
+            }
         };
         write!(self.out, "{type_name} {name}")?;
 
@@ -299,7 +307,7 @@ impl<W: Write> Emitter<'_, W> {
     /// `parser::parse_spline`. The input `dict` has the keys produced there:
     /// `curveType`, `pre/postExtrapolation`, `loopParameters`, `knots`,
     /// `knotCustomData`.
-    fn write_spline(&mut self, dict: &HashMap<String, Value>) -> Result<()> {
+    fn write_spline(&mut self, dict: &HashMap<String, Value>) -> Result<(), FormatError> {
         self.out.write_all(b"{")?;
         writeln!(self.out)?;
         self.indent += 1;
@@ -343,7 +351,7 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
-    fn write_extrapolation(&mut self, dir: &str, value: &Value) -> Result<()> {
+    fn write_extrapolation(&mut self, dir: &str, value: &Value) -> Result<(), FormatError> {
         self.write_indent()?;
         match value {
             Value::ValueBlock | Value::None => {
@@ -371,7 +379,7 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
-    fn write_loop(&mut self, d: &HashMap<String, Value>) -> Result<()> {
+    fn write_loop(&mut self, d: &HashMap<String, Value>) -> Result<(), FormatError> {
         let a = get_double(d, "protoStart");
         let b = get_double(d, "protoEnd");
         let c = get_double(d, "numPreLoops");
@@ -398,7 +406,7 @@ impl<W: Write> Emitter<'_, W> {
         &mut self,
         knot: &HashMap<String, Value>,
         knot_custom: Option<&HashMap<String, Value>>,
-    ) -> Result<()> {
+    ) -> Result<(), FormatError> {
         let time = get_double(knot, "time");
         let value = get_double(knot, "value");
         let pre_value = get_double(knot, "preValue");
@@ -460,7 +468,7 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
-    fn emit_connection(&mut self, attr_name: &str, op: &ListOp<Path>, type_name: &str) -> Result<()> {
+    fn emit_connection(&mut self, attr_name: &str, op: &ListOp<Path>, type_name: &str) -> Result<(), FormatError> {
         // Emit as `typeName attr.connect = paths` or list-op form.
         self.emit_listop_statement(&format!("{type_name} {attr_name}.connect"), op, |s, p| {
             write!(s, "<{}>", p.as_str())?;
@@ -468,7 +476,7 @@ impl<W: Write> Emitter<'_, W> {
         })
     }
 
-    fn emit_relationship(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<()> {
+    fn emit_relationship(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
         self.write_indent()?;
 
         if matches!(
@@ -549,7 +557,7 @@ impl<W: Write> Emitter<'_, W> {
 
     // ---------- variant set / variant ----------
 
-    fn emit_variant_set(&mut self, data: &dyn AbstractData, vset_path: &Path, name: &str) -> Result<()> {
+    fn emit_variant_set(&mut self, data: &dyn AbstractData, vset_path: &Path, name: &str) -> Result<(), FormatError> {
         self.write_indent()?;
         let mut quoted = String::new();
         write_quoted(&mut quoted, name)?;
@@ -571,7 +579,7 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
-    fn emit_variant(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<()> {
+    fn emit_variant(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
         self.write_indent()?;
         let mut quoted = String::new();
         write_quoted(&mut quoted, name)?;
@@ -621,7 +629,7 @@ impl<W: Write> Emitter<'_, W> {
 
     /// Combine `subLayers` (asset paths) with `subLayerOffsets` at emit time —
     /// the text grammar wants them fused into `subLayers = [@path@ (offset=X; scale=Y), ...]`.
-    fn emit_sub_layers(&mut self, data: &dyn AbstractData, root: &Path) -> Result<()> {
+    fn emit_sub_layers(&mut self, data: &dyn AbstractData, root: &Path) -> Result<(), FormatError> {
         let sublayers = match get_value(data, root, FieldKey::SubLayers.as_str()) {
             Some(Value::StringVec(v)) => v,
             _ => return Ok(()),
@@ -660,7 +668,7 @@ impl<W: Write> Emitter<'_, W> {
 
     // ---------- metadata entry ----------
 
-    fn emit_metadata_entry(&mut self, name: &str, value: &Value) -> Result<()> {
+    fn emit_metadata_entry(&mut self, name: &str, value: &Value) -> Result<(), FormatError> {
         // "comment" is authored as a bare string in the metadata block, with
         // no keyword. Parser recognises a lone string as the Sdf comment field.
         if name == FieldKey::Comment.as_str()
@@ -700,7 +708,7 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
-    fn emit_reorder(&mut self, target: &str, names: &[Token]) -> Result<()> {
+    fn emit_reorder(&mut self, target: &str, names: &[Token]) -> Result<(), FormatError> {
         self.write_indent()?;
         write!(self.out, "reorder {target} = [")?;
         for (i, n) in names.iter().enumerate() {
@@ -717,7 +725,7 @@ impl<W: Write> Emitter<'_, W> {
 
     /// Returns `Ok(Some(true))` if this value was a `ListOp` and was fully emitted;
     /// `Ok(Some(false))` / `Ok(None)` if caller should emit as a normal field.
-    fn try_emit_listop_metadata(&mut self, name: &str, value: &Value) -> Result<Option<bool>> {
+    fn try_emit_listop_metadata(&mut self, name: &str, value: &Value) -> Result<Option<bool>, FormatError> {
         match value {
             Value::TokenListOp(op) => {
                 self.emit_listop_statement(name, op, |s, t| write_quoted(s, t.as_str()))?;
@@ -762,10 +770,10 @@ impl<W: Write> Emitter<'_, W> {
         }
     }
 
-    fn emit_listop_statement<T, F>(&mut self, prefix: &str, op: &ListOp<T>, mut fmt_item: F) -> Result<()>
+    fn emit_listop_statement<T, F>(&mut self, prefix: &str, op: &ListOp<T>, mut fmt_item: F) -> Result<(), FormatError>
     where
         T: Default + Clone + PartialEq,
-        F: FnMut(&mut String, &T) -> Result<()>,
+        F: FnMut(&mut String, &T) -> Result<(), FormatError>,
     {
         if op.explicit {
             self.write_indent()?;
@@ -792,9 +800,9 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
-    fn write_listop_items<T, F>(&mut self, items: &[T], fmt_item: &mut F) -> Result<()>
+    fn write_listop_items<T, F>(&mut self, items: &[T], fmt_item: &mut F) -> Result<(), FormatError>
     where
-        F: FnMut(&mut String, &T) -> Result<()>,
+        F: FnMut(&mut String, &T) -> Result<(), FormatError>,
     {
         if items.len() == 1 {
             let mut buf = String::new();
@@ -817,14 +825,14 @@ impl<W: Write> Emitter<'_, W> {
 
     // ---------- value formatting ----------
 
-    fn write_value(&mut self, value: &Value) -> Result<()> {
+    fn write_value(&mut self, value: &Value) -> Result<(), FormatError> {
         let mut buf = String::new();
         format_value(&mut buf, value)?;
         self.out.write_all(buf.as_bytes())?;
         Ok(())
     }
 
-    fn write_time_samples(&mut self, samples: &[(f64, Value)]) -> Result<()> {
+    fn write_time_samples(&mut self, samples: &[(f64, Value)]) -> Result<(), FormatError> {
         self.out.write_all(b"{")?;
         writeln!(self.out)?;
         self.indent += 1;
@@ -845,14 +853,22 @@ impl<W: Write> Emitter<'_, W> {
 
 // ---------- value formatter (string-producing) ----------
 
-fn format_value(s: &mut String, v: &Value) -> Result<()> {
+fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
     match v {
         // The USDA parser reads the `None` token as `Value::ValueBlock`. Emitting
         // either `Value::None` (absent-opinion marker) or `Value::Value` (expression
         // placeholder) as `None` would silently re-parse as `Value::ValueBlock` and
         // drop the original variant.
-        Value::None => bail!("Value::None cannot be serialized to USDA"),
-        Value::Value => bail!("Value::Value cannot be serialized to USDA"),
+        Value::None => {
+            return Err(FormatError::Encode {
+                reason: "Value::None cannot be serialized to USDA".into(),
+            });
+        }
+        Value::Value => {
+            return Err(FormatError::Encode {
+                reason: "Value::Value cannot be serialized to USDA".into(),
+            });
+        }
         Value::ValueBlock => s.push_str("None"),
 
         Value::Bool(b) => s.push_str(if *b { "true" } else { "false" }),
@@ -993,7 +1009,11 @@ fn format_value(s: &mut String, v: &Value) -> Result<()> {
             s.push_str(" }");
         }
 
-        Value::TimeSamples(_) => anyhow::bail!("Value::TimeSamples must be handled by caller"),
+        Value::TimeSamples(_) => {
+            return Err(FormatError::Encode {
+                reason: "Value::TimeSamples must be handled by caller".into(),
+            });
+        }
 
         Value::LayerOffsetVec(offsets) => {
             format_vec(s, offsets, |s, o| {
@@ -1021,9 +1041,9 @@ fn format_value(s: &mut String, v: &Value) -> Result<()> {
     Ok(())
 }
 
-fn format_vec<T, F>(s: &mut String, items: &[T], mut fmt: F) -> Result<()>
+fn format_vec<T, F>(s: &mut String, items: &[T], mut fmt: F) -> Result<(), FormatError>
 where
-    F: FnMut(&mut String, &T) -> Result<()>,
+    F: FnMut(&mut String, &T) -> Result<(), FormatError>,
 {
     s.push('[');
     for (i, item) in items.iter().enumerate() {
@@ -1036,10 +1056,10 @@ where
     Ok(())
 }
 
-fn format_inline_listop<T, F>(s: &mut String, op: &ListOp<T>, fmt_item: F) -> Result<()>
+fn format_inline_listop<T, F>(s: &mut String, op: &ListOp<T>, fmt_item: F) -> Result<(), FormatError>
 where
     T: Default + Clone + PartialEq,
-    F: FnMut(&mut String, &T) -> Result<()>,
+    F: FnMut(&mut String, &T) -> Result<(), FormatError>,
 {
     // Only explicit list ops render inline; non-explicit must be broken out by caller.
     if !op.explicit {
@@ -1050,7 +1070,7 @@ where
     format_vec(s, &op.explicit_items, fmt_item)
 }
 
-fn format_tuple_half<const N: usize>(s: &mut String, a: &[crate::gf::f16; N]) -> Result<()> {
+fn format_tuple_half<const N: usize>(s: &mut String, a: &[crate::gf::f16; N]) -> Result<(), FormatError> {
     s.push('(');
     for (i, v) in a.iter().enumerate() {
         if i > 0 {
@@ -1062,7 +1082,7 @@ fn format_tuple_half<const N: usize>(s: &mut String, a: &[crate::gf::f16; N]) ->
     Ok(())
 }
 
-fn format_tuple_f32<const N: usize>(s: &mut String, a: &[f32; N]) -> Result<()> {
+fn format_tuple_f32<const N: usize>(s: &mut String, a: &[f32; N]) -> Result<(), FormatError> {
     s.push('(');
     for (i, v) in a.iter().enumerate() {
         if i > 0 {
@@ -1074,7 +1094,7 @@ fn format_tuple_f32<const N: usize>(s: &mut String, a: &[f32; N]) -> Result<()> 
     Ok(())
 }
 
-fn format_tuple_f64<const N: usize>(s: &mut String, a: &[f64; N]) -> Result<()> {
+fn format_tuple_f64<const N: usize>(s: &mut String, a: &[f64; N]) -> Result<(), FormatError> {
     s.push('(');
     for (i, v) in a.iter().enumerate() {
         if i > 0 {
@@ -1086,7 +1106,7 @@ fn format_tuple_f64<const N: usize>(s: &mut String, a: &[f64; N]) -> Result<()> 
     Ok(())
 }
 
-fn format_tuple_int<const N: usize>(s: &mut String, a: &[i32; N]) -> Result<()> {
+fn format_tuple_int<const N: usize>(s: &mut String, a: &[i32; N]) -> Result<(), FormatError> {
     s.push('(');
     for (i, v) in a.iter().enumerate() {
         if i > 0 {
@@ -1098,7 +1118,7 @@ fn format_tuple_int<const N: usize>(s: &mut String, a: &[i32; N]) -> Result<()> 
     Ok(())
 }
 
-fn format_matrix(s: &mut String, m: &[f64], dim: usize) -> Result<()> {
+fn format_matrix(s: &mut String, m: &[f64], dim: usize) -> Result<(), FormatError> {
     s.push('(');
     for row in 0..dim {
         if row > 0 {
@@ -1142,7 +1162,7 @@ fn format_double(s: &mut String, v: f64) {
     }
 }
 
-fn format_dictionary(s: &mut String, dict: &HashMap<String, Value>) -> Result<()> {
+fn format_dictionary(s: &mut String, dict: &HashMap<String, Value>) -> Result<(), FormatError> {
     let mut keys: Vec<&String> = dict.keys().collect();
     keys.sort();
     s.push('{');
@@ -1195,7 +1215,7 @@ fn format_layer_offset(s: &mut String, o: &LayerOffset) {
 /// must be doubled or it would read back as whatever it precedes — a Windows
 /// path would return with `\t` as a tab. Escaping also means one delimiter
 /// always suffices, so no string is unquotable.
-fn write_quoted(s: &mut String, text: &str) -> Result<()> {
+fn write_quoted(s: &mut String, text: &str) -> Result<(), FormatError> {
     s.push('"');
     for c in text.chars() {
         match c {
@@ -1211,7 +1231,7 @@ fn write_quoted(s: &mut String, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_asset_path(s: &mut String, path: &str) -> Result<()> {
+fn write_asset_path(s: &mut String, path: &str) -> Result<(), FormatError> {
     if path.contains('@') {
         s.push_str("@@@");
         s.push_str(path);
@@ -1224,7 +1244,7 @@ fn write_asset_path(s: &mut String, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_reference(s: &mut String, r: &Reference) -> Result<()> {
+fn write_reference(s: &mut String, r: &Reference) -> Result<(), FormatError> {
     if !r.asset_path.is_empty() {
         write_asset_path(s, &r.asset_path)?;
     }
@@ -1241,7 +1261,7 @@ fn write_reference(s: &mut String, r: &Reference) -> Result<()> {
     Ok(())
 }
 
-fn write_payload(s: &mut String, p: &Payload) -> Result<()> {
+fn write_payload(s: &mut String, p: &Payload) -> Result<(), FormatError> {
     if !p.asset_path.is_empty() {
         write_asset_path(s, &p.asset_path)?;
     }

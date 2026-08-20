@@ -4,9 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
-
-use crate::{sdf, tf};
+use crate::{Result, sdf, tf};
 
 use super::{SchemaInfo, SchemaRegistry, Schematics, schema_registry};
 
@@ -167,13 +165,13 @@ impl PrimDefinition {
         identifier: &tf::Token,
         applied_name: Option<tf::Token>,
         overrides: &[tf::Token],
-    ) -> Result<PrimDefinition> {
+    ) -> Result<PrimDefinition, schema_registry::SchemaRegistryError> {
         let path = sdf::Path::abs_root().append_path(identifier.as_str())?;
         if schematics.data().spec(&path).is_none() {
-            bail!(
-                "No class prim for schema {identifier} in the schematics of family {}",
-                schematics.family()
-            );
+            return Err(schema_registry::SchemaRegistryError::MissingClassPrim {
+                identifier: identifier.clone(),
+                family: schematics.family().clone(),
+            });
         }
 
         // Only a schema that applies whole contributes prim metadata. A

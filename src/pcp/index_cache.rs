@@ -13,8 +13,6 @@
 use std::collections::{HashMap, HashSet};
 use std::mem;
 
-use anyhow::Result;
-
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerOffset, Path, SpecType, Value};
@@ -37,7 +35,9 @@ use super::prim_index::{
 use super::prim_indexer::ExprVarDeps;
 use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
-use super::{Error, LayerId, MapFunction, StackIdentity, VariantFallbackMap};
+use super::{
+    CompositionError, IncompleteClipManifest, LayerId, MapFunction, QueryError, StackIdentity, VariantFallbackMap,
+};
 
 /// What [`IndexCache::edit_target_node_info`] reports for an arc node: the target
 /// layer's identifier, the node's spec-to-scene mapping, and the value identity
@@ -126,7 +126,7 @@ pub struct IndexCache {
     /// One-shot errors from layer collection that the [`LayerGraph`](super::layer_graph::LayerGraph)
     /// cannot regenerate (e.g. `UnresolvedSublayer`). Set once at construction;
     /// never cleared, since nothing recomputes them.
-    collection_errors: Vec<Error>,
+    collection_errors: Vec<CompositionError>,
     /// Transient errors produced by on-demand target / property-stack queries
     /// (invalid external targets, inconsistent property types). Cleared on any
     /// index invalidation so they never go stale across an edit; they are
@@ -151,7 +151,7 @@ pub struct IndexCache {
     // `classify_property_entry`; computing it eagerly at index build instead would
     // add per-property work to every prim's build (a cost on Caldera-class stages).
     // Deferred until a profile justifies one.
-    query_errors: Vec<Error>,
+    query_errors: Vec<CompositionError>,
     /// Paths whose [`ensure_index`](Self::ensure_index) call is still on the
     /// stack. Pre-caching an inherit/specialize target (and that target's own
     /// targets) re-enters `ensure_index`; a cyclic class hierarchy (e.g. two
@@ -261,7 +261,7 @@ impl IndexCache {
         variant_fallbacks: VariantFallbackMap,
         load_rules: LoadRules,
         population_mask: PopulationMask,
-        collection_errors: Vec<Error>,
+        collection_errors: Vec<CompositionError>,
     ) -> Self {
         Self {
             store: IndexStore::default(),
@@ -377,7 +377,7 @@ impl IndexCache {
     /// Returns the recoverable composition errors encountered so far: the
     /// one-shot collection errors, the current per-prim build errors, and the
     /// transient query errors.
-    pub(crate) fn composition_errors(&self) -> Vec<Error> {
+    pub(crate) fn composition_errors(&self) -> Vec<CompositionError> {
         self.collection_errors
             .iter()
             .chain(self.store.errors())
@@ -392,12 +392,12 @@ impl IndexCache {
     /// double-report and outlive a later fix. Collection keeps what the loader
     /// alone knows, e.g. a failure under a branch muted at open, which the
     /// graph derives no diagnostic for.
-    pub(crate) fn discard_collection_errors(&mut self, superseded: &[Error]) {
+    pub(crate) fn discard_collection_errors(&mut self, superseded: &[CompositionError]) {
         self.collection_errors.retain(|error| !superseded.contains(error));
     }
 
     #[cfg(test)]
-    fn take_composition_errors(&mut self) -> Vec<Error> {
+    fn take_composition_errors(&mut self) -> Vec<CompositionError> {
         let errors = self.composition_errors();
         self.collection_errors.clear();
         self.query_errors.clear();
@@ -425,7 +425,7 @@ impl IndexCache {
         attr_path: &Path,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<Value>, QueryError> {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
             return Ok(None);
         };
@@ -482,7 +482,7 @@ impl IndexCache {
         &mut self,
         graph: &LayerGraph,
         attr_path: &Path,
-    ) -> Result<AttributeValueSource> {
+    ) -> Result<AttributeValueSource, QueryError> {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
             return Ok(AttributeValueSource::Static(None));
         };
@@ -540,7 +540,11 @@ impl IndexCache {
     /// then clips, then arc `timeSamples`. Keep the tiers here in lockstep with
     /// `value_at`; the `clip_*` / `has_local_default` checks mirror its branches
     /// 1-4, and the consistency tests in `tests/stage.rs` pin the agreement.
-    pub(crate) fn time_sample_times(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<Option<Vec<f64>>> {
+    pub(crate) fn time_sample_times(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<Option<Vec<f64>>, QueryError> {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
             return Ok(None);
         };
@@ -575,7 +579,7 @@ impl IndexCache {
     /// order; keeps the count-only fast path for the common `timeSamples` case
     /// and only materializes the time list when value clips own the attribute.
     /// Zero when no source has samples or the prim is masked out.
-    pub(crate) fn num_time_samples(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<usize> {
+    pub(crate) fn num_time_samples(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<usize, QueryError> {
         Ok(self.time_sample_summary(graph, attr_path)?.0)
     }
 
@@ -588,7 +592,11 @@ impl IndexCache {
     /// time-varying merely because it shadows a multi-clip set.
     ///
     /// [`Attribute::value_might_be_time_varying`]: crate::usd::Attribute::value_might_be_time_varying
-    pub(crate) fn value_might_be_time_varying(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<bool> {
+    pub(crate) fn value_might_be_time_varying(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<bool, QueryError> {
         let (count, clip_may_vary) = self.time_sample_summary(graph, attr_path)?;
         Ok(count > 1 || clip_may_vary)
     }
@@ -600,7 +608,7 @@ impl IndexCache {
     /// clips, then arc `timeSamples` — so [`Self::num_time_samples`] and
     /// [`Self::value_might_be_time_varying`] share a single resolution. `(0,
     /// false)` when no source has samples or the prim is masked out.
-    fn time_sample_summary(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<(usize, bool)> {
+    fn time_sample_summary(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<(usize, bool), QueryError> {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
             return Ok((0, false));
         };
@@ -636,7 +644,7 @@ impl IndexCache {
         prim: &Path,
         suffix: &str,
         local_layers: &HashSet<LayerId>,
-    ) -> Result<bool> {
+    ) -> Result<bool, QueryError> {
         Ok(matches!(
             self.resolve_local_field_value(graph, prim, suffix, FieldKey::Default.as_str(), local_layers)?,
             FieldValue::Authored(_)
@@ -653,7 +661,7 @@ impl IndexCache {
         suffix: &str,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<Value>, QueryError> {
         let mut anchor_prim = attr_prim.clone();
         loop {
             if let Some(value) = self.clip_value_at(graph, &anchor_prim, attr_prim, suffix, time, interp)? {
@@ -677,7 +685,7 @@ impl IndexCache {
         suffix: &str,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<Value>, QueryError> {
         let sets = self.clip_sets_for(graph, anchor_prim)?;
         let query = ClipQuery {
             anchor: anchor_prim,
@@ -705,7 +713,7 @@ impl IndexCache {
     /// same failing opinion is re-derived on every read — a value-time asset
     /// expression is never cached — so the dedup is what keeps repeated reads
     /// from growing the list.
-    fn merge_query_errors(&mut self, errors: Vec<Error>) {
+    fn merge_query_errors(&mut self, errors: Vec<CompositionError>) {
         for error in errors {
             if !self.query_errors.contains(&error) {
                 self.query_errors.push(error);
@@ -726,7 +734,7 @@ impl IndexCache {
         graph: &LayerGraph,
         attr_prim: &Path,
         suffix: &str,
-    ) -> Result<Option<(Vec<f64>, bool)>> {
+    ) -> Result<Option<(Vec<f64>, bool)>, QueryError> {
         let mut anchor = attr_prim.clone();
         loop {
             let sets = self.clip_sets_for(graph, &anchor)?;
@@ -752,7 +760,12 @@ impl IndexCache {
     /// from [`Self::clip_introspection`] for callers that need only the times.
     /// `Some` exactly when a clip set participates, so this doubles as the clip
     /// gate for [`Self::resolve_value_source`] (and `value_at`'s clip tier).
-    fn clip_sample_times(&mut self, graph: &LayerGraph, attr_prim: &Path, suffix: &str) -> Result<Option<Vec<f64>>> {
+    fn clip_sample_times(
+        &mut self,
+        graph: &LayerGraph,
+        attr_prim: &Path,
+        suffix: &str,
+    ) -> Result<Option<Vec<f64>>, QueryError> {
         Ok(self
             .clip_introspection(graph, attr_prim, suffix)?
             .map(|(times, _)| times))
@@ -767,7 +780,7 @@ impl IndexCache {
     /// `${VAR}` in a set's asset paths is re-parsed and re-evaluated on every
     /// clip read. A per-(prim, revision) cache of the returned `Vec` at this seam
     /// would bound both.
-    fn clip_sets_for(&mut self, graph: &LayerGraph, anchor: &Path) -> Result<Vec<ResolvedClipSet>> {
+    fn clip_sets_for(&mut self, graph: &LayerGraph, anchor: &Path) -> Result<Vec<ResolvedClipSet>, QueryError> {
         self.ensure_index(graph, anchor)?;
         let mut errors = Vec::new();
         let sets = self.cached(anchor).resolve_clip_sets(graph, &mut errors)?;
@@ -797,7 +810,7 @@ impl IndexCache {
         prim: &Path,
         clip_set: &str,
         write_blocks: bool,
-    ) -> Result<Option<sdf::Layer>> {
+    ) -> Result<Option<sdf::Layer>, QueryError> {
         if prim.is_abs_root() {
             return Ok(None);
         }
@@ -817,9 +830,7 @@ impl IndexCache {
             write_blocks,
         )?;
         if let Some(error) = unread.first() {
-            return Err(anyhow::anyhow!(error.clone()).context(format!(
-                "cannot generate a complete manifest for clip set {clip_set:?} on {prim}"
-            )));
+            return Err(IncompleteClipManifest::new(clip_set, prim.clone(), error.clone()).into());
         }
         Ok(Some(manifest))
     }
@@ -828,7 +839,11 @@ impl IndexCache {
     /// owning prim's index is composed, returning the owned prim path and
     /// property suffix for a subsequent [`Self::cached`] lookup. `None` when no
     /// spec exists at the path (absent or masked out).
-    fn ensure_attr_index(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<Option<(Path, String)>> {
+    fn ensure_attr_index(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<Option<(Path, String)>, QueryError> {
         let attr_path = &self.effective_path(graph, attr_path)?;
         if !self.has_spec_at(graph, attr_path)? {
             return Ok(None);
@@ -846,7 +861,7 @@ impl IndexCache {
         suffix: &str,
         field: &str,
         local_layers: &HashSet<LayerId>,
-    ) -> Result<FieldValue> {
+    ) -> Result<FieldValue, QueryError> {
         let Some(index) = self.store.index_at(prim) else {
             return Ok(FieldValue::NotAuthored);
         };
@@ -920,7 +935,7 @@ impl IndexCache {
         path: &Path,
         index: PrimIndex,
         context: CompositionContext,
-        errors: Vec<Error>,
+        errors: Vec<CompositionError>,
         expr_var_deps: ExprVarDeps,
     ) {
         self.store.insert(graph, path, index, context, errors, expr_var_deps);
@@ -951,7 +966,7 @@ impl IndexCache {
     }
 
     /// Drops every cached index that recorded a
-    /// [`MalformedLayer`](Error::MalformedLayer) error so it recomposes and
+    /// [`MalformedLayer`](CompositionError::MalformedLayer) error so it recomposes and
     /// re-demands the target. The arc to an unreadable target was dropped, so
     /// these indices carry no dependency on it and an ordinary layer-stack
     /// invalidation misses them; the stage calls this when an edit clears the
@@ -1102,7 +1117,7 @@ impl IndexCache {
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
-    pub fn has_spec(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub fn has_spec(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         let path = &self.effective_path(graph, path)?;
         self.has_spec_at(graph, path)
     }
@@ -1115,7 +1130,7 @@ impl IndexCache {
     /// Mask-independent — the population mask is the stage's policy, applied by
     /// the query gate before this is ever reached — and existence-aware, which
     /// is what separates it from [`Self::is_populated`].
-    pub(crate) fn is_active(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub(crate) fn is_active(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         if path.is_abs_root() {
             return Ok(true);
         }
@@ -1138,7 +1153,7 @@ impl IndexCache {
     /// The specifier twin of [`Self::is_active`], and resolved the same way:
     /// one cache borrow for the whole ancestor chain, rather than a stage
     /// round-trip per level.
-    pub(crate) fn is_defined(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub(crate) fn is_defined(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         if path.is_abs_root() {
             return Ok(true);
         }
@@ -1160,14 +1175,14 @@ impl IndexCache {
     /// This prim's own composed `active` opinion, defaulting to `true`. The
     /// per-prim read [`Self::is_active`] walks and [`Self::is_populated`] takes
     /// for the prim it is deciding, its ancestors having been decided already.
-    fn active_locally(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    fn active_locally(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         let path = &self.effective_path(graph, path)?;
         self.active_at(graph, path)
     }
 
     /// [`active_locally`](Self::active_locally) for a path already redirected
     /// onto the index that composes it, for a caller holding that redirection.
-    pub(super) fn active_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub(super) fn active_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         match self.resolve_field_at(graph, path, FieldKey::Active.as_str())? {
             Some(value) => Ok(bool::try_from(value)?),
             None => Ok(true),
@@ -1189,7 +1204,7 @@ impl IndexCache {
         graph: &LayerGraph,
         path: &Path,
         mut probe: impl FnMut(&sdf::Layer, &Path) -> Option<T>,
-    ) -> Result<Option<T>> {
+    ) -> Result<Option<T>, QueryError> {
         let prim_path = path.prim_path();
         self.ensure_index(graph, &prim_path)?;
         let Some(index) = self.store.index_at(&prim_path) else {
@@ -1211,7 +1226,7 @@ impl IndexCache {
     /// Like [`Self::has_spec`], but assumes `path` has already been redirected
     /// through [`Self::effective_path`]. Callers that redirected the path
     /// themselves (e.g. [`Self::value_at`]) use this to avoid redirecting twice.
-    pub(super) fn has_spec_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub(super) fn has_spec_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         if path.is_property_path() {
             return Ok(self
                 .find_property_node(graph, path, |layer, p| layer.data().has_spec(p).then_some(()))?
@@ -1227,7 +1242,7 @@ impl IndexCache {
     /// composition nodes (see [`Self::find_property_node`]) rather than from a
     /// property-keyed index, so a property spec added after this path was first
     /// queried is picked up instead of a stale cached `None`.
-    pub fn spec_type(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<SpecType>> {
+    pub fn spec_type(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<SpecType>, QueryError> {
         let path = &self.effective_path(graph, path)?;
         if path.is_property_path() {
             return self.find_property_node(graph, path, |layer, p| layer.data().spec_type(p));
@@ -1247,7 +1262,7 @@ impl IndexCache {
     }
 
     /// Returns `true` if the composed prim index contains any non-local arc.
-    pub(crate) fn has_composition_arc(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+    pub(crate) fn has_composition_arc(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         self.ensure_index(graph, path)?;
         Ok(self
             .store
@@ -1278,7 +1293,7 @@ impl IndexCache {
         graph: &LayerGraph,
         prim_path: &Path,
         matches: impl Fn(ArcType) -> bool,
-    ) -> Result<Option<EditTargetNodeInfo>> {
+    ) -> Result<Option<EditTargetNodeInfo>, QueryError> {
         let prim_path = self.effective_path(graph, prim_path)?.prim_path();
         self.ensure_index(graph, &prim_path)?;
         let Some(index) = self.store.index_at(&prim_path) else {
@@ -1328,7 +1343,7 @@ impl IndexCache {
     /// the root layer and does not compose with sublayers or arcs. The
     /// pseudo-root's `primChildren` field remains a child-list query and is
     /// handled by normal composition.
-    pub fn resolve_field(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>> {
+    pub fn resolve_field(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>, QueryError> {
         let path = &self.effective_path(graph, path)?;
         self.resolve_field_at(graph, path, field)
     }
@@ -1336,9 +1351,9 @@ impl IndexCache {
     /// [`resolve_field`](Self::resolve_field) for a path already redirected onto
     /// the index that composes it — the half a caller holding that redirection
     /// reuses rather than resolving it again.
-    fn resolve_field_at(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>> {
+    fn resolve_field_at(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>, QueryError> {
         if path.is_abs_root() && field != ChildrenKey::PrimChildren.as_str() {
-            return graph.root_layer_field(field);
+            return Ok(graph.root_layer_field(field)?);
         }
 
         if path.is_property_path() {
@@ -1402,7 +1417,7 @@ impl IndexCache {
 
     /// Returns the composed `apiSchemas` list for a prim: the items of the
     /// generic list-op fold over the field.
-    pub fn api_schemas(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
+    pub fn api_schemas(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
         match self
@@ -1417,7 +1432,11 @@ impl IndexCache {
     /// Resolves the `clipSets` strength-ordering list-op on the prim at `path`,
     /// folding the list-op edits across every contributing layer (spec 12.2.6).
     /// `None` when `clipSets` is unauthored (clip sets fall back to name order).
-    pub fn clip_sets_list_op(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<sdf::StringListOp>> {
+    pub fn clip_sets_list_op(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+    ) -> Result<Option<sdf::StringListOp>, QueryError> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
         self.cached(&path).clip_sets_list_op(graph)
@@ -1426,7 +1445,7 @@ impl IndexCache {
     /// Returns the composed `connectionPaths` list for an attribute path,
     /// folding list-op edits (prepend / append / add / delete) across every
     /// contributing layer. Non-property paths trivially return an empty list.
-    pub fn connection_paths(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>> {
+    pub fn connection_paths(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>, QueryError> {
         self.property_targets(graph, path, FieldKey::ConnectionPaths)
     }
 
@@ -1437,7 +1456,7 @@ impl IndexCache {
     /// These are the raw targets (the resolved `targetPaths` list op, spec
     /// 12.4); target forwarding — recursively chasing relationship-to-
     /// relationship chains — is not applied here.
-    pub fn relationship_targets(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>> {
+    pub fn relationship_targets(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>, QueryError> {
         self.property_targets(graph, path, FieldKey::TargetPaths)
     }
 
@@ -1458,7 +1477,7 @@ impl IndexCache {
     /// followed — its raw targets would be empty under the mask anyway — so the
     /// forwarded result never leaks scene the mask excludes (it stays
     /// consistent with [`Self::relationship_targets`] on that path).
-    pub fn forwarded_relationship_targets(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>> {
+    pub fn forwarded_relationship_targets(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>, QueryError> {
         let mut out = Vec::new();
         let mut emitted = HashSet::new();
         let mut followed = HashSet::new();
@@ -1494,7 +1513,7 @@ impl IndexCache {
     /// `targetPaths`) by folding list-op edits across every contributing layer
     /// and mapping targets through composition arcs into the stage namespace.
     /// Both fields follow generic list-op value resolution (spec 12.2.6).
-    fn property_targets(&mut self, graph: &LayerGraph, path: &Path, field: FieldKey) -> Result<Vec<Path>> {
+    fn property_targets(&mut self, graph: &LayerGraph, path: &Path, field: FieldKey) -> Result<Vec<Path>, QueryError> {
         self.compose_property_paths(graph, path, field, false)
     }
 
@@ -1510,7 +1529,7 @@ impl IndexCache {
         path: &Path,
         field: FieldKey,
         deleted: bool,
-    ) -> Result<Vec<Path>> {
+    ) -> Result<Vec<Path>, QueryError> {
         if !path.is_property_path() {
             return Ok(Vec::new());
         }
@@ -1584,10 +1603,10 @@ impl IndexCache {
         // Targets dropped during composition are reported in authored order, the
         // `invalid` list already honoring list-op composition (a target shadowed
         // by a stronger explicit, or retracted by a delete, is not reported).
-        let mut errs: Vec<Error> = Vec::new();
+        let mut errs: Vec<CompositionError> = Vec::new();
         for inv in invalid {
             errs.push(match inv.kind {
-                InvalidTargetKind::External => Error::InvalidExternalTargetPath {
+                InvalidTargetKind::External => CompositionError::InvalidExternalTargetPath {
                     is_connection,
                     target: inv.target,
                     property: inv.property,
@@ -1596,7 +1615,7 @@ impl IndexCache {
                     arc_root: inv.arc_root,
                     composing: prim.clone(),
                 },
-                InvalidTargetKind::Instance => Error::InvalidInstanceTargetPath {
+                InvalidTargetKind::Instance => CompositionError::InvalidInstanceTargetPath {
                     is_connection,
                     target: inv.target,
                     property: inv.property,
@@ -1658,7 +1677,7 @@ impl IndexCache {
         resolved_prim: &Path,
         field: FieldKey,
         prop_suffix: &str,
-    ) -> Result<(HashSet<(Path, Path)>, bool)> {
+    ) -> Result<(HashSet<(Path, Path)>, bool), QueryError> {
         // Phase 1: gather candidates that translate, releasing the index borrow
         // before the cross-prim composition in phase 2.
         let mut candidates: Vec<InstanceCandidate> = Vec::new();
@@ -1746,7 +1765,7 @@ impl IndexCache {
         &mut self,
         graph: &LayerGraph,
         path: &Path,
-    ) -> Result<(Vec<Path>, Vec<Path>)> {
+    ) -> Result<(Vec<Path>, Vec<Path>), QueryError> {
         self.compute_target_paths(graph, path, FieldKey::TargetPaths)
     }
 
@@ -1757,7 +1776,7 @@ impl IndexCache {
         &mut self,
         graph: &LayerGraph,
         path: &Path,
-    ) -> Result<(Vec<Path>, Vec<Path>)> {
+    ) -> Result<(Vec<Path>, Vec<Path>), QueryError> {
         self.compute_target_paths(graph, path, FieldKey::ConnectionPaths)
     }
 
@@ -1769,7 +1788,7 @@ impl IndexCache {
         graph: &LayerGraph,
         path: &Path,
         field: FieldKey,
-    ) -> Result<(Vec<Path>, Vec<Path>)> {
+    ) -> Result<(Vec<Path>, Vec<Path>), QueryError> {
         let targets = self.compose_property_paths(graph, path, field, false)?;
         let deleted = self.compose_property_paths(graph, path, field, true)?;
         Ok((targets, deleted))
@@ -1777,7 +1796,7 @@ impl IndexCache {
 
     /// Returns the composed list of child names for a prim path (C++
     /// `PcpPrimIndex::ComputePrimChildNames`'s `nameOrder` out-param).
-    pub fn prim_children(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
+    pub fn prim_children(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
         let names = self.compute_prim_child_names(graph, path)?.0;
         // Filtered here, where the list is produced, so no caller can compose a
         // child list the population mask has not been applied to — C++ masks
@@ -1806,7 +1825,11 @@ impl IndexCache {
     /// targets with their subtrees, so a single structural walk covers class
     /// children. On an instance prim, locally-authored children are dropped (spec
     /// 11.3.3) so the children come only from the composition arcs.
-    pub fn compute_prim_child_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<(Vec<Token>, Vec<Token>)> {
+    pub fn compute_prim_child_names(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+    ) -> Result<(Vec<Token>, Vec<Token>), QueryError> {
         let path = self.effective_path(graph, path)?;
         self.ensure_index(graph, &path)?;
 
@@ -1906,12 +1929,12 @@ impl IndexCache {
     /// applied: USD value resolution ignores `reorder properties` (C++
     /// `_ComposePrimPropertyNames` passes a null order field in USD mode), so
     /// composed property order follows authoring order alone.
-    pub fn prim_properties(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
+    pub fn prim_properties(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
         let path = &self.effective_path(graph, path)?;
         self.composed_property_names(graph, path)
     }
 
-    /// Pushes a [`Error::InconsistentPropertyType`] for each composed property of
+    /// Pushes a [`CompositionError::InconsistentPropertyType`] for each composed property of
     /// `prim_path` whose specs mix attribute and relationship kinds (C++
     /// `PcpErrorInconsistentPropertyType`). C++ reports the conflict on each
     /// property-index composition; the dump's property-name pass (here) and
@@ -1947,7 +1970,7 @@ impl IndexCache {
         index: &PrimIndex,
         prim_path: &Path,
         prop_path: &Path,
-    ) -> (Vec<(String, Path)>, Vec<Error>) {
+    ) -> (Vec<(String, Path)>, Vec<CompositionError>) {
         let mut stack = Vec::new();
         let mut conflicts = Vec::new();
         let mut defining: Option<(SpecType, String, Path)> = None;
@@ -1962,7 +1985,7 @@ impl IndexCache {
             match &defining {
                 None => defining = Some((spec_type, layer_id.clone(), p.clone())),
                 Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
-                    conflicts.push(Error::InconsistentPropertyType {
+                    conflicts.push(CompositionError::InconsistentPropertyType {
                         property: prop_path.clone(),
                         defining_layer: def_layer.clone(),
                         defining_path: def_path.clone(),
@@ -1985,7 +2008,7 @@ impl IndexCache {
     /// `UsdPrim::GetPrimIndex` / `PcpCache::ComputePrimIndex`). The borrow is
     /// tied to the cache, so callers reach it through the borrowing
     /// [`PrimIndexRef`](crate::usd::PrimIndexRef) view.
-    pub fn index(&mut self, graph: &LayerGraph, path: &Path) -> Result<&PrimIndex> {
+    pub fn index(&mut self, graph: &LayerGraph, path: &Path) -> Result<&PrimIndex, QueryError> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
         Ok(self.cached(&path))
@@ -1997,7 +2020,7 @@ impl IndexCache {
     /// Projects the live spec sites; permission-denied sites are kept — they still
     /// author a spec, so the structural introspection lists them, unlike value
     /// resolution.
-    pub fn prim_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, Path)>> {
+    pub fn prim_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, Path)>, QueryError> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
         let index = self.cached(&path);
@@ -2012,7 +2035,7 @@ impl IndexCache {
     /// spec path)` site that authors a property spec, strongest first. Backs
     /// C++ `UsdProperty::GetPropertyStack`. A non-property path yields an empty
     /// stack.
-    pub fn property_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, Path)>> {
+    pub fn property_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, Path)>, QueryError> {
         let path = self.effective_path(graph, path)?;
         if !path.is_property_path() {
             return Ok(Vec::new());
@@ -2037,7 +2060,7 @@ impl IndexCache {
     /// selections — authored, fallback, or default — read from the variant
     /// selection sites composed into the index, so they match the variant
     /// branches that actually contribute opinions.
-    pub fn variant_selections(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, String)>> {
+    pub fn variant_selections(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, String)>, QueryError> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
         Ok(self.cached(&path).variant_selections())
@@ -2148,7 +2171,7 @@ impl IndexCache {
     /// — C++ hands back an invalid prim for it — and composing the synthetic
     /// path in place would cache an empty index that a later mint would have to
     /// evict.
-    pub(super) fn ensure_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<()> {
+    pub(super) fn ensure_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<(), QueryError> {
         if self.is_indexed(path) || self.in_unregistered_prototype(path) {
             return Ok(());
         }
@@ -2176,7 +2199,7 @@ impl IndexCache {
 
     /// Builds and caches the index for `path`, assuming `path` is already
     /// recorded in [`in_progress`](Self::in_progress) (see [`ensure_index`](Self::ensure_index)).
-    fn build_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<()> {
+    fn build_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<(), QueryError> {
         // An already-cached path must not rebuild through here: the builder's
         // cache-hit path reports empty expression-variable dependencies (the
         // cached entry's registration is authoritative), so re-registering
@@ -2225,10 +2248,7 @@ impl IndexCache {
         // mid-build — parallelizing the driver needs a concurrent map or a
         // topological (targets-first) build order.
         let (mut index, mut build_errors, pending_loads, mut expr_var_deps) =
-            match PrimIndex::build_with_cache(path, graph, &parent_ctx, self.store.entries(), load_payloads) {
-                Ok(result) => result,
-                Err(e) => return Err(e.into()),
-            };
+            PrimIndex::build_with_cache(path, graph, &parent_ctx, self.store.entries(), load_payloads)?;
         self.pending_loads.extend(pending_loads);
         // A reference/payload arc demanded a layer that is not yet loaded — here,
         // or in a pre-cached ancestor that then seeded this build incompletely —
@@ -2246,9 +2266,9 @@ impl IndexCache {
         // own site path differs.
         for error in &mut build_errors {
             match error {
-                Error::OpinionAtRelocationSource { composing, .. }
-                | Error::ProhibitedRelocationSource { composing, .. } => *composing = path.clone(),
-                Error::ArcCycle(info) => info.composing = path.clone(),
+                CompositionError::OpinionAtRelocationSource { composing, .. }
+                | CompositionError::ProhibitedRelocationSource { composing, .. } => *composing = path.clone(),
+                CompositionError::ArcCycle(info) => info.composing = path.clone(),
                 _ => {}
             }
         }
@@ -2340,7 +2360,7 @@ impl IndexCache {
     /// alone. The recursive build already grafts inherit/specialize/reference
     /// targets with their subtrees, so this single structural walk covers class
     /// properties with no separate target rediscovery.
-    fn composed_property_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
+    fn composed_property_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
         self.ensure_index(graph, path)?;
 
         let index = self.cached(path);
@@ -2428,6 +2448,8 @@ fn target_prim_inherits_class(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use crate::Result;
 
     use super::super::{Changes, ExpressionContext, LayerChanges};
     use super::*;
@@ -2757,7 +2779,7 @@ def "A" (
             cache
                 .take_composition_errors()
                 .iter()
-                .any(|e| matches!(e, Error::UnresolvedLayer { .. })),
+                .any(|e| matches!(e, CompositionError::UnresolvedLayer { .. })),
             "the ancestor's unresolved reference is recorded"
         );
         Ok(())
@@ -2775,7 +2797,7 @@ def "A" (
         let unresolved = |c: &IndexCache| {
             c.composition_errors()
                 .iter()
-                .filter(|e| matches!(e, Error::UnresolvedLayer { .. }))
+                .filter(|e| matches!(e, CompositionError::UnresolvedLayer { .. }))
                 .count()
         };
 
@@ -2838,7 +2860,7 @@ def "A" (
             cache
                 .take_composition_errors()
                 .iter()
-                .any(|e| matches!(e, Error::InvalidExpression { .. })),
+                .any(|e| matches!(e, CompositionError::InvalidExpression { .. })),
             "the invalid asset-path expression is recorded as a recoverable error"
         );
         Ok(())
@@ -2870,7 +2892,7 @@ def "A" (
         assert!(
             cache.take_composition_errors().iter().any(|e| matches!(
                 e,
-                Error::InvalidExpression {
+                CompositionError::InvalidExpression {
                     context: ExpressionContext::Variant,
                     ..
                 }
@@ -2960,7 +2982,7 @@ def "Scope"
         assert!(
             !errors.iter().any(|e| matches!(
                 e,
-                Error::InvalidInstanceTargetPath { .. } | Error::InvalidExternalTargetPath { .. }
+                CompositionError::InvalidInstanceTargetPath { .. } | CompositionError::InvalidExternalTargetPath { .. }
             )),
             "a class target removed by a stronger delete must not be reported: {errors:?}"
         );
@@ -3001,7 +3023,7 @@ def "Scope"
         assert!(
             errors
                 .iter()
-                .any(|e| matches!(e, Error::InvalidInstanceTargetPath { .. })),
+                .any(|e| matches!(e, CompositionError::InvalidInstanceTargetPath { .. })),
             "the class node's instance-target contribution is still reported: {errors:?}"
         );
         Ok(())
@@ -3249,7 +3271,7 @@ def "Anchor" (inherits = </Rig>) {}
             cache
                 .composition_errors()
                 .iter()
-                .any(|e| matches!(e, Error::UnresolvedDefaultPrim { .. })),
+                .any(|e| matches!(e, CompositionError::UnresolvedDefaultPrim { .. })),
             "the unresolved arc is reported"
         );
         Ok(())
@@ -4806,7 +4828,7 @@ def "Anchor" (inherits = </Rig>) {}
             PopulationMask::all(),
             Vec::new(),
         );
-        cache.resolve_field(&graph, &world, field)
+        Ok(cache.resolve_field(&graph, &world, field)?)
     }
 
     /// A custom metadata field authored as a list op composes by folding its
@@ -5055,7 +5077,7 @@ def "Anchor" (inherits = </Rig>) {}
 
     /// Authors a `layerRelocates` edit on the root layer and drives it through
     /// the change pipeline, returning the graph's diagnostics afterward.
-    fn relocate_edit(graph: &mut LayerGraph, cache: &mut IndexCache, text: &str) -> Vec<Error> {
+    fn relocate_edit(graph: &mut LayerGraph, cache: &mut IndexCache, text: &str) -> Vec<CompositionError> {
         let root_id = graph.root_id().unwrap();
         graph.get_mut(root_id).expect("root layer exists").layer = parse_layer(text);
         let mut cl = sdf::ChangeList::new();
@@ -5084,7 +5106,9 @@ def "Anchor" (inherits = </Rig>) {}
             "#usda 1.0\n(\n    relocates = { </A/B/C>: </A> }\n)\ndef \"A\" {}\n",
         );
         assert!(
-            errors.iter().any(|e| matches!(e, Error::InvalidRelocate { .. })),
+            errors
+                .iter()
+                .any(|e| matches!(e, CompositionError::InvalidRelocate { .. })),
             "an invalid relocate authored after construction must be retained"
         );
         Ok(())
@@ -5104,7 +5128,7 @@ def "Anchor" (inherits = </Rig>) {}
         assert_eq!(
             errors
                 .iter()
-                .filter(|e| matches!(e, Error::InvalidRelocate { .. }))
+                .filter(|e| matches!(e, CompositionError::InvalidRelocate { .. }))
                 .count(),
             1,
             "recomputing the same invalid relocate must not duplicate the diagnostic"
@@ -5114,7 +5138,9 @@ def "Anchor" (inherits = </Rig>) {}
         let valid = "#usda 1.0\n(\n    relocates = { </A/B>: </A/C> }\n)\ndef \"A\" {}\n";
         let errors = relocate_edit(&mut graph, &mut cache, valid);
         assert!(
-            !errors.iter().any(|e| matches!(e, Error::InvalidRelocate { .. })),
+            !errors
+                .iter()
+                .any(|e| matches!(e, CompositionError::InvalidRelocate { .. })),
             "fixing the relocate must clear the diagnostic"
         );
         Ok(())

@@ -1,6 +1,6 @@
 //! Integration test for the `UsdVol` schema views against a fixture.
 
-use anyhow::Result;
+use openusd::Result;
 
 use openusd::schemas::vol::{self, FieldAsset};
 use openusd::sdf;

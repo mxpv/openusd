@@ -9,7 +9,7 @@
 //! `namespace:`-prefixed settings are gathered per level (settings,
 //! product, var) into `namespacedSettings`.
 
-use anyhow::Result;
+use crate::Result;
 
 use std::collections::HashMap;
 
@@ -287,6 +287,8 @@ fn read_rel_first_target(rel: &Relationship) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::gf;
     use crate::sdf;
 

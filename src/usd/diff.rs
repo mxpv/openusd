@@ -34,7 +34,7 @@
 //! ```
 //! use openusd::usd::{ApplyMode, ReplayStage, Stage};
 //!
-//! # fn main() -> anyhow::Result<()> {
+//! # fn main() -> openusd::Result<()> {
 //! // Producer: record every committed edit as a transferable diff.
 //! let producer = ReplayStage::from(Stage::builder().in_memory("producer.usda")?);
 //! producer.define_prim("/World")?.set_type_name("Xform")?;
@@ -50,9 +50,7 @@
 //! ```
 use std::borrow::Cow;
 
-use anyhow::Result;
-
-use crate::{pcp, sdf, tf};
+use crate::{Result, pcp, sdf, tf};
 
 use super::sink::{CommittedChange, PendingChange};
 use super::stage::{EditTarget, Stage, StageAuthoringError};
@@ -729,7 +727,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use anyhow::Result;
+    use crate::Result;
 
     use super::super::sink::Provenance;
     use super::*;

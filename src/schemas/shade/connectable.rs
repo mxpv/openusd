@@ -1,6 +1,6 @@
 //! UsdShade connection source queries and attribute namespacing.
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::schemas::common::is_any_typed;
 use crate::{sdf, tf, usd};
@@ -283,6 +283,8 @@ pub(super) fn authored_inputs(prim: &usd::Prim) -> Result<Vec<Input>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::schemas::shade::{Connectable, Shader};
 
     #[test]

@@ -1,7 +1,7 @@
 //! The UsdUI prim and applied-API views: [`Backdrop`], [`SceneGraphPrimAPI`],
 //! and [`NodeGraphNodeAPI`].
 
-use anyhow::Result;
+use crate::Result;
 
 use crate::sdf::{self, Variability};
 use crate::tf;
@@ -237,6 +237,8 @@ impl_ui_schema!(single_api NodeGraphNodeAPI);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Result;
     use crate::gf;
     use crate::schemas::ui::ExpansionState;
     use crate::tf::Token;

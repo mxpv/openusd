@@ -8,13 +8,74 @@
 //! [`LayerRegistry`](super::LayerRegistry) (`find_by_extension` / `find_by_id`),
 //! mirroring C++ `SdfFileFormat::FindByExtension` / `FindById`.
 
-use std::io::{Seek, Write};
+use std::io::{self, Seek, Write};
+use std::{error, fmt, mem};
 
-use anyhow::Result;
 use bitflags::bitflags;
 
-use super::{AbstractData, LayerData};
+use super::{AbstractData, DataError, LayerData, PathParseError};
 use crate::{ar, tf};
+
+/// Error returned by [`FileFormat::read`] and [`FileFormat::write`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum FormatError {
+    /// Byte I/O against the asset failed (resolver open, read, seek, write).
+    #[error(transparent)]
+    Io(#[from] io::Error),
+
+    /// The asset's bytes could not be decoded as this format. Transparent:
+    /// Display and `source` are the boxed format error's own, so a rich decode
+    /// diagnostic (e.g. a `usda` parse error's caret rendering) survives to
+    /// the caller and stays downcastable. Boxed so `sdf` stays below the
+    /// concrete formats and external [`FileFormat`] implementors can report
+    /// their own decode errors.
+    #[error(transparent)]
+    Decode(Box<dyn error::Error + Send + Sync>),
+
+    /// The data holds something this format cannot encode.
+    #[error("cannot encode: {reason}")]
+    Encode {
+        /// What could not be encoded.
+        reason: Box<str>,
+    },
+
+    /// Reading a field value out of the layer's data failed while serializing
+    /// it (a lazy backend could not decode the authored value). Boxed, with
+    /// [`Path`](Self::Path), to keep the enum small — the assertion below
+    /// pins it, since this error rides the writers' per-element loops.
+    #[error(transparent)]
+    Data(Box<DataError>),
+
+    /// A name in the data does not form a valid `sdf` path while walking the
+    /// hierarchy for serialization.
+    #[error(transparent)]
+    Path(Box<PathParseError>),
+}
+
+const _: () = assert!(mem::size_of::<FormatError>() <= 24);
+
+impl From<DataError> for FormatError {
+    fn from(error: DataError) -> Self {
+        Self::Data(Box::new(error))
+    }
+}
+
+impl From<PathParseError> for FormatError {
+    fn from(error: PathParseError) -> Self {
+        Self::Path(Box::new(error))
+    }
+}
+
+/// A `Display` implementation failed while formatting a value into text.
+/// `fmt::Error` carries no detail, so the message is fixed.
+impl From<fmt::Error> for FormatError {
+    fn from(_: fmt::Error) -> Self {
+        Self::Encode {
+            reason: "formatting failed".into(),
+        }
+    }
+}
 
 bitflags! {
     /// The operations a [`FileFormat`] supports, mirroring C++ `SdfFileFormat`'s
@@ -85,7 +146,7 @@ pub trait FileFormat: Sync {
 
     /// Read a layer's data from `resolved`, opening the asset (and any
     /// sibling assets) through `resolver`.
-    fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData>;
+    fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData, FormatError>;
 
     /// Resolves the real path of the layer to open at `resolved` — the location
     /// it physically loads from and anchors its relative asset paths against
@@ -111,7 +172,7 @@ pub trait FileFormat: Sync {
     }
 
     /// Serialize `data` to `sink` in this format.
-    fn write(&self, data: &dyn AbstractData, sink: &mut dyn WriteSeek) -> Result<()>;
+    fn write(&self, data: &dyn AbstractData, sink: &mut dyn WriteSeek) -> Result<(), FormatError>;
 }
 
 #[cfg(test)]
