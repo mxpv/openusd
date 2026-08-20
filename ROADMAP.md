@@ -14,9 +14,9 @@ that broader spec behavior can be considered fully covered.
 |---|---|---|---|---|
 | Scalar types (bool, int, float, double, half, string, token, asset, timecode, int64, uint, uint64, uchar) | `6.2` | :white_check_mark: | `0.1.1` | `sdf::Value` enum |
 | Dimensioned types (vectors, matrices, quaternions) | `6.3` | :white_check_mark: | `0.1.2` | float2..4, double2..4, matrix2d..4d, quath/f/d, int2..4, half2..4 |
-| Algebraic types (opaque) | `6.4` | :white_check_mark: | `0.2.0` | `Value::Opaque` |
+| Algebraic types (opaque) | `6.4` | :white_check_mark: | `0.2.0` | An `opaque` attribute carries no value, so it is stored as its `typeName` alone |
 | Semantic aliases (color, normal, point, vector, texCoord, frame) | `6.5` | :thinking: | | Parsed as underlying types; semantic role not tracked separately |
-| Arrays | `6.6.1` | :white_check_mark: | `0.1.2` | All scalar and dimensioned array variants |
+| Arrays | `6.6.1` | :white_check_mark: | `main` | Every scalar and dimensioned array form of the §16.3.10.1 type table, round-tripping through both formats |
 | Dictionaries | `6.6.2` | :white_check_mark: | `0.1.2` | Including nested dictionaries |
 | Dictionary combining | `6.6.2.1` | :white_check_mark: | `0.4.0` | Recursive merge of stronger/weaker dictionaries during value resolution |
 | [List operations](https://openusd.org/release/glossary.html#usdglossary-listediting) (explicit, composable) | `6.6.3` | :white_check_mark: | `0.2.0` | int, int64, uint, uint64, token, string, path, reference, payload |
@@ -74,7 +74,7 @@ that broader spec behavior can be considered fully covered.
 | Reference [namespace mapping](https://openusd.org/release/api/class_pcp_map_function.html) | `10.3.2.1.1` | :white_check_mark: | `0.3.0` | `MapFunction` with source/target pairs |
 | Reference offset composition | `10.3.2.1.2` | :white_check_mark: | `0.4.0` | Reference offsets composed with target layer-stack offsets and applied during value resolution (§12.3.2.1); `scale <= 0` falls back to identity |
 | [Payloads](https://openusd.org/release/api/class_usd_payloads.html) | `10.3.2.2` | :white_check_mark: | `0.1.2` | Treated identically to references |
-| [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | `10.3.2.2` | :white_check_mark: | `0.4.0` | `StageBuilder::load` supports loading all payloads or leaving them unloaded |
+| [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | `10.3.2.2` | :white_check_mark: | `0.6.0` | `pcp::LoadRules` and `usd::LoadPolicy`, reached through `Stage::load` / `unload` / `set_load_rules` / `find_loadable`; `StageBuilder::load` sets the initial load set<br>Remaining — the `IsLoadedWithAllDescendants` / `IsLoadedWithNoDescendants` queries; prim-level `Load` / `Unload` |
 | Payload offset composition | `10.3.2.2.2` | :white_check_mark: | `0.4.0` | Loaded payload offsets compose like references (unloaded ignored) and applied during value resolution (§12.3.2.1); `scale <= 0` falls back to identity |
 | [Inherits](https://openusd.org/release/api/class_usd_inherits.html) | `10.3.2.3` | :white_check_mark: | `0.2.0` | Including implied inherit propagation |
 | Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `0.3.0` | `from_pair_identity` adds `(/, /)` catch-all |
@@ -124,7 +124,7 @@ that broader spec behavior can be considered fully covered.
 | Fallback values | `12.2.8` | :construction: | | `Attribute::get` / `get_at` fall through to the prim definition's fallback when composition resolves no value, including for a blocked attribute (§12.3.6); `Attribute::value_source` reports which tier answered<br>Remaining — import the OpenUSD schema data so the process registry has fallbacks to supply |
 | Basic attribute resolution | `12.3` | :white_check_mark: | `main` | `0.2.0` — resolves authored `default`, `timeSamples`, and `ValueBlock`<br>`0.5.0` — layer-offset retiming applied<br>`main` — `asset` value resolution (`pcp::asset_resolve`)<br>Value clips and splines are tracked separately |
 | Time-sample lookup and interpolation | `12.3, 12.5.1-2` | :white_check_mark: | `0.5.0` | `0.1.2` — time-sample parsing<br>`0.4.0` — `Stage::value_at` performs held/linear interpolation over composed samples<br>`0.5.0` — per-node retiming and value clips |
-| Layer-offset retiming during value resolution | `12.3.2.1` | :white_check_mark: | `0.5.0` | Each node's sample times mapped to stage time through its composed offset (`stage_t = scale*layer_t + offset`; sublayer/reference/payload)<br>Strongest `timeSamples` node wins, `ValueBlock` blocks weaker layers |
+| Layer-offset retiming during value resolution | `12.3.2.1` | :white_check_mark: | `main` | `0.5.0` — each node's sample times mapped to stage time through its composed offset (`stage_t = scale*layer_t + offset`; sublayer/reference/payload); strongest `timeSamples` node wins, `ValueBlock` blocks weaker layers<br>`main` — a `timecode` value is a time coordinate too, so `sdf::LayerOffset::apply_to_value` retimes it alongside the times (C++ `Usd_ApplyLayerOffsetToValue`), with `usd::EditTarget::map_to_spec_value` applying the inverse when authoring<br>Remaining — a clip-sourced `timecode` still resolves in clip time |
 | Spline evaluation | `12.5.3` | :construction: | | Bezier/Hermite curve interpolation |
 | Interpolation (Held) | `12.5.1` | :white_check_mark: | `0.4.0` | `Stage::value_at(attr, time)` with `InterpolationType::Held`. |
 | Interpolation (Linear) | `12.5.2` | :white_check_mark: | `0.4.0` | `Stage::value_at(attr, time)` with `InterpolationType::Linear` (default)<br>All §12.5.2 types incl. `quath`/`f`/`d` via slerp<br>Held-fallback for unsupported types and past-last-sample |
@@ -199,7 +199,7 @@ Features from the C++ reference implementation not covered by the core specifica
 | [Kind registry](https://openusd.org/release/api/class_kind_registry.html) | :thinking: | | Model/group/assembly/component taxonomy |
 | [Edit targets](https://openusd.org/release/api/class_usd_edit_target.html) | :white_check_mark: | `0.6.0` | Fully supported, see `usd::EditTarget` |
 | [Change notification](https://openusd.org/release/api/class_usd_notice.html) | :white_check_mark: | `main` | `sdf::LayerSink` (layer commit seam) and `usd::StageSink` (composed changes, incl. `layer_muting_changed` / `load_rules_changed`); transferable `Diff` via `usd::UndoStage` / `usd::ReplayStage` and `Stage::apply_diff`<br>`CommittedChange::asset_paths_resynced` (C++ `GetResolvedAssetPathsResyncedPaths`) |
-| [Property stack queries](https://openusd.org/release/api/class_usd_resolve_info.html) | :thinking: | | Inspect all contributing opinions across layers |
+| [Property stack queries](https://openusd.org/release/api/class_usd_resolve_info.html) | :construction: | `0.5.0` | `Attribute::property_stack` / `Relationship::property_stack` / `Prim::prim_stack` name the contributing sites, and `Attribute::value_source` reports which tier answered<br>Remaining — `UsdResolveInfo`'s finer source enum (default / time samples / clips / spline) with its node and layer-stack accessors; the layer-offset-bearing property stack |
 
 ## Tooling
 
