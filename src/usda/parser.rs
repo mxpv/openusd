@@ -1125,19 +1125,12 @@ def "Mesh"
             other => panic!("expressionVariables parsed as unexpected value: {other:?}"),
         };
 
-        let render_passes = dict.get("RENDER_PASSES").expect("RENDER_PASSES entry");
-        match render_passes {
-            sdf::Value::TokenVec(values) => {
-                assert_eq!(
-                    values.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
-                    ["beauty", "shadow", "reflection"]
-                );
-            }
-            sdf::Value::StringVec(values) => {
-                assert_eq!(values, &["beauty", "shadow", "reflection"]);
-            }
-            other => panic!("RENDER_PASSES stored as unexpected value: {other:?}"),
-        }
+        let render_passes = dict
+            .get("RENDER_PASSES")
+            .expect("RENDER_PASSES entry")
+            .try_as_string_vec_ref()
+            .expect("string[] entry");
+        assert_eq!(render_passes, &["beauty", "shadow", "reflection"]);
 
         let frame_range = dict.get("FRAME_RANGE").expect("FRAME_RANGE entry");
         match frame_range {
@@ -1372,6 +1365,48 @@ def Scope "Root" {
             }
             other => panic!("expected Matrix4dVec, got {other:?}"),
         }
+    }
+
+    #[test]
+    // Every array element type decodes into its own value variant: the unsigned
+    // integers carry arrays like their signed counterparts, and `string[]` stays
+    // distinct from `token[]` rather than collapsing onto the interned one.
+    fn parse_array_element_types() {
+        let data = crate::usda::parse(
+            r#"#usda 1.0
+
+def "Root"
+{
+    uint[] small = [1, 2, 4294967295]
+    uint64[] big = [1000, 18446744073709551615]
+    string[] names = ["a b", "c"]
+    token[] ids = ["a b", "c"]
+}
+"#,
+        )
+        .expect("parses");
+
+        let value = |name: &str| {
+            data.spec(&sdf::path(format!("/Root.{name}")).unwrap())
+                .expect("spec")
+                .get(FieldKey::Default.as_str())
+                .expect("default")
+                .clone()
+        };
+
+        assert_eq!(value("small").try_as_uint_vec().expect("uint[]"), vec![1, 2, u32::MAX]);
+        assert_eq!(
+            value("big").try_as_uint_64_vec().expect("uint64[]"),
+            vec![1000, u64::MAX]
+        );
+        assert_eq!(
+            value("names").try_as_string_vec().expect("string[]"),
+            vec!["a b".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            value("ids").try_as_token_vec().expect("token[]"),
+            vec![tf::Token::from("a b"), tf::Token::from("c")]
+        );
     }
 
     #[test]

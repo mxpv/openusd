@@ -152,9 +152,11 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result
         (Type::Int4, false) => sdf::Value::Vec4i(parse_gf::<i32, _, 4>(cursor)?),
         (Type::Int4, true) => sdf::Value::Vec4iVec(parse_gf_array::<i32, _, 4>(cursor)?),
         (Type::Uint, false) => sdf::Value::Uint(parse_token(cursor)?),
+        (Type::Uint, true) => sdf::Value::UintVec(parse_array(cursor)?),
         (Type::Int64, false) => sdf::Value::Int64(parse_token(cursor)?),
         (Type::Int64, true) => sdf::Value::Int64Vec(parse_array(cursor)?),
         (Type::Uint64, false) => sdf::Value::Uint64(parse_token(cursor)?),
+        (Type::Uint64, true) => sdf::Value::Uint64Vec(parse_array(cursor)?),
 
         (Type::Half, false) => sdf::Value::Half(parse_token(cursor)?),
         (Type::Half, true) => sdf::Value::HalfVec(parse_array(cursor)?),
@@ -192,8 +194,9 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result
         (Type::Quatd, true) => sdf::Value::QuatdVec(parse_gf_array::<f64, _, 4>(cursor)?),
 
         (Type::String, false) => sdf::Value::String(cursor.expect_string()?.into_owned()),
+        (Type::String, true) => sdf::Value::StringVec(parse_array(cursor)?),
         (Type::Token, false) => sdf::Value::token(cursor.expect_string()?.as_ref()),
-        (Type::String | Type::Token, true) => sdf::Value::token_vec(parse_array::<String>(cursor)?),
+        (Type::Token, true) => sdf::Value::token_vec(parse_array::<String>(cursor)?),
 
         (Type::PathExpression, false) => {
             sdf::Value::PathExpression(sdf::PathExpression::parse(cursor.expect_string()?.as_ref()))
@@ -224,8 +227,6 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result
         (Type::Dictionary, _) => parse_dictionary(cursor)?,
 
         (Type::Custom, _) => bail!("Cannot parse value for unrecognized type: {}", info.type_name),
-
-        (ty, true) => bail!("Array of {ty:?} is not supported"),
     };
 
     Ok(value)

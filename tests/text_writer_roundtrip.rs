@@ -167,12 +167,14 @@ fixture_tests! {
     fixture_inherit_child_propagation,
     fixture_inherit_nested_child,
     fixture_instanceable_metadata,
+    fixture_ints,
     fixture_payload,
     fixture_reference,
     fixture_reorder,
     fixture_ref_external,
     fixture_ref_prim,
     fixture_ref_target,
+    fixture_sdf_types,
     fixture_session_layer,
     fixture_session_root,
     fixture_sublayer_base,
@@ -186,6 +188,4 @@ fn fixture_usd_physics_schema() {
     assert_fixture_roundtrip("usdPhysics_schema");
 }
 
-// Skipped fixtures (reader-side gaps, out of scope for the writer):
-//   - `ints.usda`, `sdf_types.usda`: parser errors on `uint[]` arrays.
-//   - `invalid_pseudo_root.usda`: deliberately malformed.
+// Skipped fixture: `invalid_pseudo_root.usda` is deliberately malformed.

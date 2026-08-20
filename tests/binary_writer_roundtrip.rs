@@ -204,6 +204,7 @@ macro_rules! vendor_tests {
 }
 
 vendor_tests! {
+    vendor_gen_assetpath,
     vendor_gen_bool,
     vendor_gen_uchar,
     vendor_gen_int,
@@ -353,10 +354,8 @@ fn quat_write_read_preserves_wxyz_convention() {
     );
 }
 
-// Skipped fixtures — these fail during the *read* step, not during writing,
-// and are therefore pre-existing reader-side limitations:
+// Skipped fixture — this fails during the *read* step, not during writing, and
+// is therefore a pre-existing reader-side limitation:
 //
-// - `gen_assetpath.usdc`: reader has no branch for `AssetPath[]` array
-//   ValueReps (hits `Can't unpack array ... as inline value`).
-// - `gen_splines.usdc`: splines materialise as `Value::ValueVec`, which has no
-//   USDC type code (the binary format lacks a heterogeneous-array type).
+// - `gen_splines.usdc`: the crate spline type (59, crate 0.12.0) has no
+//   `Type` enum entry, so the `spline` field fails to decode.
