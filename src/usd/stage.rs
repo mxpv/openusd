@@ -374,7 +374,29 @@ impl EditTarget {
     /// time is run through the inverse offset. A local or variant target carries
     /// the identity offset, so this is a no-op there.
     pub fn map_to_spec_time(&self, stage_time: f64) -> f64 {
-        self.mapping.time_offset().inverse().apply(stage_time)
+        self.spec_time_offset().apply(stage_time)
+    }
+
+    /// Maps a stage (scene) value to the one an authoring write should put in
+    /// the source layer, retiming every `timecode` it holds (C++
+    /// `_StageValueToFieldXf`).
+    ///
+    /// A `timecode` is a time coordinate in the same frame as the key a sample
+    /// is authored at, so it runs through the same inverse offset and likewise
+    /// reads back unchanged once composition re-applies the arc's offset. A
+    /// value holding no timecode passes through, as does any value through a
+    /// local or variant target, which carries the identity offset.
+    pub fn map_to_spec_value(&self, value: impl Into<sdf::Value>) -> sdf::Value {
+        let mut value = value.into();
+        self.spec_time_offset().apply_to_value(&mut value);
+        value
+    }
+
+    /// The offset that maps a stage time into the time frame of the layer this
+    /// target authors into — the inverse of the arc's composed offset (C++
+    /// `_StageValueToFieldXf::GetLayerOffset`).
+    fn spec_time_offset(&self) -> sdf::LayerOffset {
+        self.mapping.time_offset().inverse()
     }
 
     /// Whether this target names no layer, so it can author nothing (C++
@@ -920,6 +942,13 @@ impl Stage {
     /// [`EditTarget::map_to_spec_time`].
     pub(super) fn map_to_spec_time(&self, stage_time: f64) -> f64 {
         self.edit_target.borrow().map_to_spec_time(stage_time)
+    }
+
+    /// Maps a stage value to the one the current edit target authors, borrowing
+    /// the target rather than cloning it. See
+    /// [`EditTarget::map_to_spec_value`].
+    pub(super) fn map_to_spec_value(&self, value: impl Into<sdf::Value>) -> sdf::Value {
+        self.edit_target.borrow().map_to_spec_value(value)
     }
 
     /// This stage's cached root layer stack identity, stamped onto stage-bound

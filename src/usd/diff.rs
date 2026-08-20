@@ -691,35 +691,47 @@ fn translate_value_path(diff: &Diff, target: &EditTarget, path: &sdf::Path) -> O
 /// value is correct as-is.
 ///
 /// Embedded namespace paths are rewritten through [`translate_value_path`];
-/// time-sample keys are re-keyed through `time_offset` so a diff replayed
-/// across a composition arc with a layer offset keeps its samples at the same
-/// composed stage times, and sampled values translate like any other value.
+/// every time coordinate the value holds — a sample key, and a `timecode` the
+/// value or a sample carries — is re-keyed through `time_offset`, so a diff
+/// replayed across a composition arc with a layer offset resolves to the stage
+/// values it captured.
 fn translate_value(
     value: &sdf::Value,
     diff: &Diff,
     target: &EditTarget,
     time_offset: sdf::LayerOffset,
 ) -> Option<sdf::Value> {
-    if let sdf::Value::TimeSamples(samples) = value {
-        let retime = !time_offset.is_identity();
-        if !retime && !samples.iter().any(|(_, sample)| sample.has_embedded_paths()) {
-            return None;
-        }
-        return Some(sdf::Value::TimeSamples(
+    let retime = !time_offset.is_identity() && value.holds_time_codes();
+    let holds_paths = match value {
+        sdf::Value::TimeSamples(samples) => samples.iter().any(|(_, sample)| sample.has_embedded_paths()),
+        other => other.has_embedded_paths(),
+    };
+    if !retime && !holds_paths {
+        return None;
+    }
+
+    // Only the path rewriting recurses per sample; the retiming below reaches
+    // the keys and the samples in one pass, so the recursion leaves time alone.
+    let mut translated = match value {
+        sdf::Value::TimeSamples(samples) => sdf::Value::TimeSamples(
             samples
                 .iter()
                 .map(|(time, sample)| {
-                    let time = if retime { time_offset.apply(*time) } else { *time };
-                    let sample = translate_value(sample, diff, target, time_offset).unwrap_or_else(|| sample.clone());
-                    (time, sample)
+                    let sample = translate_value(sample, diff, target, sdf::LayerOffset::IDENTITY)
+                        .unwrap_or_else(|| sample.clone());
+                    (*time, sample)
                 })
                 .collect(),
-        ));
+        ),
+        other if holds_paths => {
+            other.remap_paths(|path| translate_value_path(diff, target, path).unwrap_or_else(|| path.clone()))
+        }
+        other => other.clone(),
+    };
+    if retime {
+        time_offset.apply_to_value(&mut translated);
     }
-    if !value.has_embedded_paths() {
-        return None;
-    }
-    Some(value.remap_paths(|path| translate_value_path(diff, target, path).unwrap_or_else(|| path.clone())))
+    Some(translated)
 }
 
 #[cfg(test)]
@@ -1238,6 +1250,65 @@ mod tests {
         let source = c.attribute("/Source.x")?.time_samples()?.expect("samples");
         assert_eq!(source, vec![(5.0, sdf::Value::Double(42.0))]);
         assert_eq!(c.attribute("/Prim.x")?.get_at::<f64>(TimeCode::new(15.0))?, Some(42.0));
+        Ok(())
+    }
+
+    /// A `timecode` value is a time coordinate like a sample key, so replaying
+    /// one through an arc target with a layer offset maps the value itself into
+    /// the arc source's frame and it resolves to the stage value captured.
+    #[test]
+    fn apply_diff_retimes_timecodes() -> Result<()> {
+        // `/Prim` references `/Source` with a (offset = 10) layer offset.
+        let reference_stage = || -> Result<Stage> {
+            let stage = in_memory_stage()?;
+            stage.define_prim("/Source")?.create_attribute("t", "timecode")?;
+            stage.define_prim("/Prim")?.set_metadata(
+                sdf::FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    prim_path: sdf::path("/Source")?,
+                    layer_offset: sdf::LayerOffset::new(10.0, 1.0),
+                    ..Default::default()
+                }])),
+            )?;
+            Ok(stage)
+        };
+        let stage_value = Some(sdf::Value::TimeCode(sdf::TimeCode(20.0)));
+
+        // The producer authors stage value 20 through its own arc target, so
+        // the diff carries `/Source.t` holding source-frame 10.
+        let a = reference_stage()?;
+        let diffs = capture_diffs(&a);
+        {
+            let target = a.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference)?;
+            let _ctx = a.edit_context(target)?;
+            a.attribute("/Prim.t")?.set(sdf::Value::TimeCode(sdf::TimeCode(20.0)))?;
+        }
+        assert_eq!(a.attribute("/Prim.t")?.get::<sdf::Value>()?, stage_value);
+
+        // An identity consumer lifts the value through the producer's offset,
+        // landing stage-frame 20 on the local `/Prim.t` override.
+        let b = reference_stage()?;
+        b.create_attribute("/Prim.t", "timecode")?;
+        for diff in diffs.borrow().iter() {
+            b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
+        }
+        assert_eq!(b.attribute("/Prim.t")?.get::<sdf::Value>()?, stage_value);
+
+        // An arc consumer maps it back into the source's frame, where
+        // composition re-applies the offset to reach the captured value.
+        let c = reference_stage()?;
+        {
+            let target = c.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference)?;
+            let _ctx = c.edit_context(target)?;
+            for diff in diffs.borrow().iter() {
+                c.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
+            }
+        }
+        assert_eq!(
+            c.attribute("/Source.t")?.get::<sdf::Value>()?,
+            Some(sdf::Value::TimeCode(sdf::TimeCode(10.0)))
+        );
+        assert_eq!(c.attribute("/Prim.t")?.get::<sdf::Value>()?, stage_value);
         Ok(())
     }
 

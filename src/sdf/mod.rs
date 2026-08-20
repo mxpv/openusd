@@ -192,6 +192,86 @@ impl LayerOffset {
         self.offset + self.scale * time
     }
 
+    /// Applies this offset to every time coordinate a value holds, mapping it
+    /// out of the frame of the layer that authored it (spec 12.3.2.1, C++
+    /// `Usd_ApplyLayerOffsetToValue`).
+    ///
+    /// A `timecode` is a time coordinate, not a plain number, so an offset
+    /// retimes the value itself just as [`apply`](Self::apply) retimes the times
+    /// a sample map is keyed by: an attribute authoring `timecode t = 5` in a
+    /// layer sublayered with `(offset = 10; scale = 2)` resolves to `20` on the
+    /// stage. Dictionaries and sample maps are recursed into, either being able
+    /// to carry a timecode at any depth; every other value is left as it stands,
+    /// as is any value at all under the identity offset.
+    ///
+    /// [`Value::holds_time_codes`] answers in advance whether this would rewrite
+    /// anything, for a caller holding the value behind a borrow.
+    pub fn apply_to_value(&self, value: &mut Value) {
+        if self.is_identity() {
+            return;
+        }
+        match value {
+            Value::TimeCode(time) => *time = TimeCode(self.apply(time.value())),
+            Value::TimeCodeVec(times) => {
+                for time in times {
+                    *time = TimeCode(self.apply(time.value()));
+                }
+            }
+            Value::TimeSamples(samples) => self.apply_to_samples(samples),
+            Value::Dictionary(entries) => {
+                for entry in entries.values_mut() {
+                    self.apply_to_value(entry);
+                }
+            }
+            Value::ValueVec(values) => {
+                for value in values {
+                    self.apply_to_value(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Applies this offset to a sample map in place: every key is a time in the
+    /// authoring layer's frame, and every sample may itself be time-valued.
+    ///
+    /// A [`TimeSampleMap`] is keyed in ascending time, which a negative scale
+    /// reverses; the keys are restored to ascending order so a bracketing search
+    /// over the result stays valid. Composition never authors one — a
+    /// non-positive scale [sanitizes](Self::sanitized) to the identity — but the
+    /// arithmetic here is defined for any offset.
+    pub fn apply_to_samples(&self, samples: &mut TimeSampleMap) {
+        for (time, sample) in samples.iter_mut() {
+            *time = self.apply(*time);
+            self.apply_to_value(sample);
+        }
+        if self.scale < 0.0 {
+            samples.reverse();
+        }
+    }
+
+    /// Interpolates a sample map at stage `time`, returning the result in stage
+    /// time.
+    ///
+    /// `samples` stays in its authoring layer's frame: `time` maps backwards
+    /// through this offset to select and blend the samples, and the interpolated
+    /// value maps forward again through [`apply_to_value`](Self::apply_to_value).
+    /// The lerp fraction is invariant under an affine offset, so the result is
+    /// the one stage-frame samples would give, and a per-time query allocates
+    /// only the value it returns.
+    ///
+    /// `interp` supplies the interpolation policy, which lives above this tier.
+    pub fn sample_in_stage_time(
+        &self,
+        samples: &TimeSampleMap,
+        time: f64,
+        interp: impl Fn(&TimeSampleMap, f64) -> Option<Value>,
+    ) -> Option<Value> {
+        let mut value = interp(samples, self.inverse().apply(time))?;
+        self.apply_to_value(&mut value);
+        Some(value)
+    }
+
     /// Returns the inverse offset, undoing [`apply`](Self::apply): if `self`
     /// maps a source time `t` to `offset + scale * t`, the inverse maps that
     /// result back to `t`. The identity inverts to itself; a `scale == 0`
@@ -356,6 +436,77 @@ mod tests {
         assert!(!LayerOffset::new(10.0, -1.0).is_valid_composition());
         assert!(!LayerOffset::new(f64::INFINITY, 1.0).is_valid_composition());
         assert!(!LayerOffset::new(0.0, f64::NAN).is_valid_composition());
+    }
+
+    #[test]
+    fn samples_offset_scale() {
+        let mut samples: TimeSampleMap = vec![(1.0, Value::Double(0.0)), (5.0, Value::Double(1.0))];
+        LayerOffset::new(10.0, 2.0).apply_to_samples(&mut samples);
+        let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
+        assert_eq!(times, vec![12.0, 20.0]);
+    }
+
+    #[test]
+    fn samples_negative_scale() {
+        // Reversing the time axis must leave the keys ascending, which is what
+        // a bracketing search over the result relies on.
+        let mut samples: TimeSampleMap = vec![(1.0, Value::Double(0.0)), (5.0, Value::Double(1.0))];
+        LayerOffset::new(0.0, -1.0).apply_to_samples(&mut samples);
+        let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
+        assert_eq!(times, vec![-5.0, -1.0]);
+        assert_eq!(samples[0].1, Value::Double(1.0));
+    }
+
+    #[test]
+    fn value_identity_passthrough() {
+        let samples: TimeSampleMap = vec![(1.0, Value::Double(0.0))];
+        let mut value = Value::TimeSamples(samples.clone());
+        LayerOffset::IDENTITY.apply_to_value(&mut value);
+        assert_eq!(value, Value::TimeSamples(samples));
+    }
+
+    #[test]
+    fn value_time_codes() {
+        let offset = LayerOffset::new(10.0, 2.0);
+
+        let mut scalar = Value::TimeCode(TimeCode(5.0));
+        offset.apply_to_value(&mut scalar);
+        assert_eq!(scalar, Value::TimeCode(TimeCode(20.0)));
+
+        let mut array = Value::TimeCodeVec(vec![TimeCode(5.0), TimeCode(10.0)]);
+        offset.apply_to_value(&mut array);
+        assert_eq!(array, Value::TimeCodeVec(vec![TimeCode(20.0), TimeCode(30.0)]));
+
+        // A plain number is not a time coordinate, whatever it holds.
+        let mut plain = Value::Double(5.0);
+        offset.apply_to_value(&mut plain);
+        assert_eq!(plain, Value::Double(5.0));
+    }
+
+    #[test]
+    fn value_nested() {
+        let offset = LayerOffset::new(10.0, 2.0);
+
+        // A dictionary carries timecodes at any depth.
+        let inner = HashMap::from([("deep".to_string(), Value::TimeCode(TimeCode(5.0)))]);
+        let mut dict = Value::Dictionary(HashMap::from([
+            ("nested".to_string(), Value::Dictionary(inner)),
+            ("kept".to_string(), Value::Double(5.0)),
+        ]));
+        assert!(dict.holds_time_codes());
+        offset.apply_to_value(&mut dict);
+        let entries = dict.try_as_dictionary_ref().expect("dictionary");
+        assert_eq!(entries.get("kept"), Some(&Value::Double(5.0)));
+        let nested = entries.get("nested").expect("nested").try_as_dictionary_ref().unwrap();
+        assert_eq!(nested.get("deep"), Some(&Value::TimeCode(TimeCode(20.0))));
+
+        // A sample map's keys and its time-valued samples both move.
+        let mut samples = Value::TimeSamples(vec![(1.0, Value::TimeCode(TimeCode(5.0)))]);
+        offset.apply_to_value(&mut samples);
+        assert_eq!(
+            samples,
+            Value::TimeSamples(vec![(12.0, Value::TimeCode(TimeCode(20.0)))])
+        );
     }
 
     #[test]

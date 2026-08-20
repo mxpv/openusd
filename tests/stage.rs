@@ -5598,6 +5598,19 @@ fn layer_stack_id_same_inputs() -> Result<()> {
     Ok(())
 }
 
+/// Adds `/Prim`, referencing `/Source` through `offset`.
+fn reference_with_offset(stage: &Stage, offset: sdf::LayerOffset) -> Result<()> {
+    stage.define_prim("/Prim")?.set_metadata(
+        sdf::FieldKey::References.as_str(),
+        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            prim_path: sdf::path("/Source")?,
+            layer_offset: offset,
+            ..Default::default()
+        }])),
+    )?;
+    Ok(())
+}
+
 /// Authoring a time sample through an arc target with a non-identity layer
 /// offset keys the sample at the inverse-mapped source time, so it reads back
 /// at the original stage time once composition re-applies the offset.
@@ -5607,14 +5620,7 @@ fn arc_target_retimes_time_sample() -> Result<()> {
     // `/Prim` references `/Source` with a (offset = 10) layer offset, so a
     // source-layer time `t` composes to stage time `t + 10`.
     stage.define_prim("/Source")?.create_attribute("x", "double")?;
-    stage.define_prim("/Prim")?.set_metadata(
-        sdf::FieldKey::References.as_str(),
-        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
-            prim_path: sdf::path("/Source")?,
-            layer_offset: sdf::LayerOffset::new(10.0, 1.0),
-            ..Default::default()
-        }])),
-    )?;
+    reference_with_offset(&stage, sdf::LayerOffset::new(10.0, 1.0))?;
 
     let target = stage.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference)?;
     // Stage time 15 inverse-maps to source time 5.
@@ -5649,14 +5655,7 @@ fn time_sample_times_retimed() -> Result<()> {
         .create_attribute("x", "double")?
         .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
         .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
-    stage.define_prim("/Prim")?.set_metadata(
-        sdf::FieldKey::References.as_str(),
-        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
-            prim_path: sdf::path("/Source")?,
-            layer_offset: sdf::LayerOffset::new(10.0, 1.0),
-            ..Default::default()
-        }])),
-    )?;
+    reference_with_offset(&stage, sdf::LayerOffset::new(10.0, 1.0))?;
 
     let attr = stage.attribute("/Prim.x")?;
     let map = attr.time_samples()?.expect("samples");
@@ -5667,6 +5666,87 @@ fn time_sample_times_retimed() -> Result<()> {
     // The retimed times read back as live samples through the offset arc.
     assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(10.0))?, Some(1.0));
     assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(20.0))?, Some(3.0));
+    Ok(())
+}
+
+/// A `timecode` value is a time coordinate, so an arc's layer offset retimes
+/// the value itself — not only the times a sample map is keyed by (C++
+/// `Usd_ApplyLayerOffsetToValue`).
+#[test]
+fn timecode_values_retimed() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let source = stage.define_prim("/Source")?;
+    source
+        .create_attribute("t", "timecode")?
+        .set(sdf::Value::TimeCode(sdf::TimeCode(5.0)))?;
+    source
+        .create_attribute("many", "timecode[]")?
+        .set(sdf::Value::TimeCodeVec(vec![sdf::TimeCode(5.0), sdf::TimeCode(10.0)]))?;
+    // A sampled timecode is retimed twice over: the sample's key moves, and so
+    // does the time the sample holds.
+    source
+        .create_attribute("animated", "timecode")?
+        .set_at(sdf::Value::TimeCode(sdf::TimeCode(5.0)), usd::TimeCode::new(0.0))?;
+    // Source time `t` composes to stage time `10 + 2t`.
+    reference_with_offset(&stage, sdf::LayerOffset::new(10.0, 2.0))?;
+
+    let scalar = Some(sdf::Value::TimeCode(sdf::TimeCode(20.0)));
+    let array = Some(sdf::Value::TimeCodeVec(vec![sdf::TimeCode(20.0), sdf::TimeCode(30.0)]));
+    assert_eq!(stage.attribute("/Prim.t")?.get::<sdf::Value>()?, scalar);
+    assert_eq!(stage.attribute("/Prim.many")?.get::<sdf::Value>()?, array);
+    // A default resolves the same whether or not the read names a time: the
+    // timed read takes the local-default shortcut, the untimed one full
+    // composition, and the two must not disagree about the time frame.
+    let at = usd::TimeCode::new(0.0);
+    assert_eq!(stage.attribute("/Prim.t")?.get_at::<sdf::Value>(at)?, scalar);
+    assert_eq!(stage.attribute("/Prim.many")?.get_at::<sdf::Value>(at)?, array);
+    assert_eq!(stage.attribute_query("/Prim.t")?.get_at::<sdf::Value>(at)?, scalar);
+
+    let animated = stage.attribute("/Prim.animated")?;
+    let sampled = Some(sdf::Value::TimeCode(sdf::TimeCode(20.0)));
+    assert_eq!(animated.time_sample_times()?, vec![10.0]);
+    assert_eq!(animated.get_at::<sdf::Value>(usd::TimeCode::new(10.0))?, sampled);
+    // The whole-map read and the cached query replay agree with the direct one.
+    assert_eq!(
+        animated.time_samples()?,
+        Some(vec![(10.0, sdf::Value::TimeCode(sdf::TimeCode(20.0)))])
+    );
+    assert_eq!(
+        stage
+            .attribute_query("/Prim.animated")?
+            .get_at::<sdf::Value>(usd::TimeCode::new(10.0))?,
+        sampled
+    );
+    Ok(())
+}
+
+/// Authoring a `timecode` through an arc target with a layer offset writes the
+/// inverse-mapped value, so it reads back as authored (C++
+/// `_StageValueToFieldXf`).
+#[test]
+fn timecode_authoring_retimed() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/Source")?.create_attribute("t", "timecode")?;
+    reference_with_offset(&stage, sdf::LayerOffset::new(10.0, 2.0))?;
+
+    let target = stage.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference)?;
+    {
+        let _ctx = stage.edit_context(target)?;
+        stage
+            .attribute("/Prim.t")?
+            .set(sdf::Value::TimeCode(sdf::TimeCode(20.0)))?;
+    }
+
+    // Stage time 20 inverse-maps to source time 5...
+    assert_eq!(
+        stage.attribute("/Source.t")?.get::<sdf::Value>()?,
+        Some(sdf::Value::TimeCode(sdf::TimeCode(5.0)))
+    );
+    // ...and composition maps it back through the arc.
+    assert_eq!(
+        stage.attribute("/Prim.t")?.get::<sdf::Value>()?,
+        Some(sdf::Value::TimeCode(sdf::TimeCode(20.0)))
+    );
     Ok(())
 }
 

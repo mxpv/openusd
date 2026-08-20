@@ -319,6 +319,25 @@ impl Value {
         matches!(self, Value::AssetPath(_) | Value::AssetPathVec(_))
     }
 
+    /// Whether this value holds a time coordinate that
+    /// [`LayerOffset::apply_to_value`](super::LayerOffset::apply_to_value)
+    /// retimes: a `timecode` at any depth — including inside a dictionary or a
+    /// heterogeneous array — or a sample map, whose keys are times whatever the
+    /// samples themselves hold.
+    ///
+    /// The single source of truth for the time-bearing variants, so the
+    /// retiming and the callers that decide whether to pay for it cannot
+    /// disagree. Checking it lets a borrowed value skip the clone a retiming
+    /// would need.
+    pub fn holds_time_codes(&self) -> bool {
+        match self {
+            Value::TimeCode(_) | Value::TimeCodeVec(_) | Value::TimeSamples(_) => true,
+            Value::Dictionary(entries) => entries.values().any(Value::holds_time_codes),
+            Value::ValueVec(values) => values.iter().any(Value::holds_time_codes),
+            _ => false,
+        }
+    }
+
     /// Whether this value embeds namespace paths that [`remap_paths`](Self::remap_paths)
     /// rewrites — `PathVec`, `PathListOp` (relationship targets, attribute
     /// connections, `inheritPaths`, `specializes`), `Relocates`,

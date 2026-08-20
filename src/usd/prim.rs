@@ -259,8 +259,11 @@ impl Prim {
     /// `key` is `&'static str` so the change-tracking layer can record it
     /// without copying; pass a `pub const FOO: &str = "..."` token rather than
     /// a runtime-built string.
+    ///
+    /// `value` is in stage time, so any `timecode` it holds is mapped into the
+    /// edit target's own time frame (C++ `_StageValueToFieldXf`).
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
-        let value = value.into();
+        let value = self.stage.map_to_spec_value(value);
         self.update_metadata(key, |_| Some(value))
     }
 
@@ -282,6 +285,10 @@ impl Prim {
     /// for dictionary-valued metadata such as `assetInfo` / `customData`, which
     /// value resolution merges key-by-key across layers (spec 12.2.5): a caller
     /// that merges one nested key should leave the rest to composition.
+    ///
+    /// Both sides of `f` are in the target layer's own time frame, since it
+    /// reads and writes that one layer: a `timecode` arrives as the layer holds
+    /// it and is authored back the same way.
     ///
     /// `key` is `&'static str` for the same change-tracking reason as
     /// [`set_metadata`](Self::set_metadata).

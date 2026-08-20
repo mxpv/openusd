@@ -48,6 +48,17 @@ impl Opinion<'_> {
     fn asset_site(&self, stack: &LayerGraph) -> AssetSite {
         AssetSite::in_graph(stack, self.node.layer_stack_id(), self.layer, &self.query_path)
     }
+
+    /// Maps this opinion's value into the stage's time frame through the
+    /// contributing layer's offset
+    /// ([`LayerOffset::apply_to_value`](sdf::LayerOffset::apply_to_value)). The
+    /// value stays borrowed unless the offset actually retimes something in it.
+    fn retimed(mut self) -> Self {
+        if !self.offset.is_identity() && self.value.holds_time_codes() {
+            self.offset.apply_to_value(self.value.to_mut());
+        }
+        self
+    }
 }
 
 /// A live contributing spec site: a [`SpecSite`](super::prim_graph::SpecSite)
@@ -477,12 +488,33 @@ impl PrimIndex {
         })
     }
 
+    /// Iterates the opinions for `field` across the composition graph, strongest
+    /// to weakest, each value mapped into the stage's time frame by the
+    /// contributing layer's offset — C++ transforms a field value the moment it
+    /// is read from its layer, before composing it (`_FieldValueToStageXf` in
+    /// `ConsumeAuthored`), so a `timecode` merges and compares against weaker
+    /// opinions in the one frame every consumer resolves in.
+    ///
+    /// A consumer that does its own retiming from
+    /// [`Opinion::offset`](Opinion::offset) reads
+    /// [`opinions_in_layer_time`](Self::opinions_in_layer_time) instead.
+    fn opinions<'a>(
+        &'a self,
+        field: &'a str,
+        stack: &'a LayerGraph,
+        prop_suffix: Option<&'a str>,
+    ) -> impl Iterator<Item = Result<Opinion<'a>, QueryError>> + 'a {
+        self.opinions_in_layer_time(field, stack, prop_suffix)
+            .map(|opinion| opinion.map(Opinion::retimed))
+    }
+
     /// Iterates the authored opinions for `field` across the composition graph,
-    /// strongest to weakest, skipping sites with no opinion for `field`. Reads
-    /// the memoized spec stack through [`contributing_sites`](Self::contributing_sites),
+    /// strongest to weakest, each value exactly as its layer holds it — in that
+    /// layer's own time frame — and skipping sites with no opinion for `field`. Reads the
+    /// memoized spec stack through [`contributing_sites`](Self::contributing_sites),
     /// so each site's contributing layer and root-namespace offset are already
     /// resolved; only the `try_field` for this `field` happens per query.
-    fn opinions<'a>(
+    fn opinions_in_layer_time<'a>(
         &'a self,
         field: &'a str,
         stack: &'a LayerGraph,
@@ -637,7 +669,9 @@ impl PrimIndex {
         prop_suffix: Option<&str>,
     ) -> Result<Option<sdf::TimeSampleMap>, QueryError> {
         self.first_time_samples(stack, prop_suffix, None, |map, opinion| {
-            retime_samples(map.clone(), opinion.offset)
+            let mut samples = map.clone();
+            opinion.offset.apply_to_samples(&mut samples);
+            samples
         })
     }
 
@@ -674,7 +708,7 @@ impl PrimIndex {
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<(Option<Value>, Option<AssetSite>)>, QueryError> {
         self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
-            let value = interp(map, opinion.offset.inverse().apply(time));
+            let value = opinion.offset.sample_in_stage_time(map, time, interp);
             let site = value
                 .as_ref()
                 .is_some_and(Value::is_asset_valued)
@@ -684,12 +718,13 @@ impl PrimIndex {
     }
 
     /// Resolves the strongest authored `timeSamples` map together with its
-    /// node's layer offset, cloning the map once. A cached value view
-    /// ([`Stage::attribute_query`](crate::usd::Stage::attribute_query))
-    /// resolves this once and then interpolates the held map per query via
-    /// `offset.inverse().apply(time)`, matching [`Self::resolve_value_at`]
-    /// without re-walking opinions. `local_layers` filters as in
-    /// [`Self::resolve_value_at`].
+    /// node's layer offset, cloning the map once. The map is in that node's
+    /// layer time frame, so a cached value view
+    /// ([`Stage::attribute_query`](crate::usd::Stage::attribute_query)) resolves
+    /// this once and then replays it per query through
+    /// [`sdf::LayerOffset::sample_in_stage_time`], which owns both halves of the
+    /// frame mapping.
+    /// `local_layers` filters as in [`Self::resolve_value_at`].
     pub(crate) fn resolve_time_samples_with_offset(
         &self,
         stack: &LayerGraph,
@@ -742,6 +777,12 @@ impl PrimIndex {
     /// anchored and evaluated like a default-sourced one. Building that site
     /// copies two strings, so an extract that resolves no asset simply never
     /// asks for it.
+    ///
+    /// The map reaches `extract` in the contributing layer's own time frame, so
+    /// an extract that reads a time — the map's keys or a `timecode` sample —
+    /// retimes it by `Opinion::offset` itself. A per-time extract does that
+    /// through [`sdf::LayerOffset::sample_in_stage_time`], which reads the
+    /// borrowed map directly.
     fn first_time_samples<R>(
         &self,
         stack: &LayerGraph,
@@ -750,7 +791,7 @@ impl PrimIndex {
         extract: impl FnOnce(&sdf::TimeSampleMap, &Opinion<'_>) -> R,
     ) -> Result<Option<R>, QueryError> {
         let field = FieldKey::TimeSamples.as_str();
-        for opinion in self.opinions(field, stack, prop_suffix) {
+        for opinion in self.opinions_in_layer_time(field, stack, prop_suffix) {
             let opinion = opinion?;
             if local_layers.is_some_and(|local| !local.contains(&opinion.layer)) {
                 continue;
@@ -815,7 +856,7 @@ impl PrimIndex {
     /// decode the field either way (spec 12.2.6).
     fn clip_sets_ops(&self, stack: &LayerGraph) -> Result<Vec<sdf::StringListOp>, QueryError> {
         let mut ops = Vec::new();
-        for opinion in self.opinions(FieldKey::ClipSets.as_str(), stack, None) {
+        for opinion in self.opinions_in_layer_time(FieldKey::ClipSets.as_str(), stack, None) {
             match opinion?.value.into_owned() {
                 // Stop weaker opinions while keeping any stronger composed edits.
                 Value::ValueBlock => break,
@@ -873,7 +914,7 @@ impl PrimIndex {
 
         // Opinions fan out per contributing sublayer, strongest first; a value
         // block on any layer stops every weaker opinion (spec 12.3.4).
-        for opinion in self.opinions(FieldKey::Clips.as_str(), stack, None) {
+        for opinion in self.opinions_in_layer_time(FieldKey::Clips.as_str(), stack, None) {
             let Opinion {
                 node,
                 layer,
@@ -1177,16 +1218,6 @@ fn compose_list_ops<T: Default + Clone + PartialEq>(ops: &[sdf::ListOp<T>]) -> V
     result
 }
 
-/// Maps time sample keys from layer time to stage time through `offset`
-/// (spec 12.3.2.1): `stage_t = offset + scale * layer_t`. Returns the samples
-/// untouched when `offset` is the identity.
-fn retime_samples(samples: sdf::TimeSampleMap, offset: LayerOffset) -> sdf::TimeSampleMap {
-    if offset.is_identity() {
-        return samples;
-    }
-    samples.into_iter().map(|(t, value)| (offset.apply(t), value)).collect()
-}
-
 /// Maps the stage-time component of clip `active`/`times` pairs through the
 /// layer offset of the node that authored the field.
 fn retime_clip_stage_times(value: Value, offset: LayerOffset) -> Value {
@@ -1198,25 +1229,5 @@ fn retime_clip_stage_times(value: Value, offset: LayerOffset) -> Value {
             Value::Vec2dVec(pairs.into_iter().map(|p| gf::vec2d(offset.apply(p.x), p.y)).collect())
         }
         other => other,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retime_samples_offset_scale() {
-        let samples: sdf::TimeSampleMap = vec![(1.0, Value::Double(0.0)), (5.0, Value::Double(1.0))];
-        let retimed = retime_samples(samples, LayerOffset::new(10.0, 2.0));
-        let times: Vec<f64> = retimed.iter().map(|(t, _)| *t).collect();
-        assert_eq!(times, vec![12.0, 20.0]);
-    }
-
-    #[test]
-    fn retime_samples_identity_passthrough() {
-        let samples: sdf::TimeSampleMap = vec![(1.0, Value::Double(0.0))];
-        let retimed = retime_samples(samples.clone(), LayerOffset::IDENTITY);
-        assert_eq!(retimed, samples);
     }
 }

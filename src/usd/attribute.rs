@@ -100,12 +100,16 @@ impl Attribute {
     /// offset, the sample is keyed at the inverse-mapped source-layer time (C++
     /// `UsdEditTarget::MapToSpecTime`), so it reads back at `time` once
     /// composition re-applies the offset.
+    ///
+    /// A `timecode` value is a time coordinate in that same frame, so it is
+    /// inverse-mapped alongside the key it is authored at (C++
+    /// `_StageValueToFieldXf`) and likewise reads back unchanged.
     pub fn set_at(
         self,
         value: impl Into<sdf::Value>,
         time: impl Into<Option<super::TimeCode>>,
     ) -> Result<Self, StageAuthoringError> {
-        let value = value.into();
+        let value = self.stage.map_to_spec_value(value);
         match time.into() {
             None => self.edit(|spec| {
                 spec.set_default(value);
@@ -161,8 +165,11 @@ impl Attribute {
     /// `key` is `&'static str` so the change-tracking layer can record it
     /// without copying; pass a `pub const FOO: &str = "..."` token rather than
     /// a runtime-built string.
+    ///
+    /// `value` is in stage time, so any `timecode` it holds is mapped into the
+    /// edit target's own time frame (C++ `_StageValueToFieldXf`).
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
-        let value = value.into();
+        let value = self.stage.map_to_spec_value(value);
         self.edit(|spec| {
             spec.set(key, value);
             Ok(())
@@ -196,6 +203,10 @@ impl Attribute {
     ///
     /// The read is fallible so an undecodable local field surfaces instead of
     /// reading back as absent and being overwritten.
+    ///
+    /// Both sides of `f` are in the target layer's own time frame, since it
+    /// reads and writes that one layer: a `timecode` arrives as the layer holds
+    /// it and is authored back the same way.
     ///
     /// `key` is `&'static str` for the same change-tracking reason as
     /// [`set_metadata`](Self::set_metadata).
@@ -962,10 +973,10 @@ impl AttributeQuery {
         let stage = self.attr.stage();
         match source {
             AttributeValueSource::Static(value) => Ok(value.clone()),
-            // Interpolate in the node's layer-time frame, mapping `time` back
-            // through the inverse offset — matching `PrimIndex::resolve_value_at`.
             AttributeValueSource::TimeSamples { samples, offset, site } => {
-                let value = interp::evaluate(samples, offset.inverse().apply(time), stage.interpolation_type());
+                let value = offset.sample_in_stage_time(samples, time, |map, layer_time| {
+                    interp::evaluate(map, layer_time, stage.interpolation_type())
+                });
                 // Only the interpolated result is anchored and evaluated, not
                 // the held map: resolving every sample here would report a
                 // malformed expression authored at a time this read never

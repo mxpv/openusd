@@ -207,9 +207,10 @@ pub(crate) enum AttributeValueSource {
     /// returns.
     Static(Option<Value>),
     /// A time-sampled source — the matched map, its node's layer offset, and
-    /// where it was authored. Interpolated per query in layer time via
-    /// `offset.inverse().apply(time)`, matching
-    /// [`PrimIndex::resolve_value_at`](super::PrimIndex::resolve_value_at).
+    /// where it was authored. The map is in the node's layer time frame and is
+    /// replayed per query through
+    /// [`sdf::LayerOffset::sample_in_stage_time`], which both selects the
+    /// samples and returns the value in stage time.
     ///
     /// The site travels with the map so a replayed read resolves an `asset`
     /// value exactly as a direct one does. Only the interpolated value is
@@ -866,27 +867,30 @@ impl IndexCache {
             return Ok(FieldValue::NotAuthored);
         };
 
-        for node in index.nodes() {
-            let query_path = Path::new(&format!("{}{suffix}", node.path))?;
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-                if !local_layers.contains(&layer) {
-                    continue;
-                }
-                let Some(value) = graph.layer(layer).data().try_field(&query_path, field)? else {
-                    continue;
-                };
-                // A dictionary or path-expression opinion composes with the
-                // weaker opinions beneath it rather than winning outright;
-                // once one anchors the field locally, hand the query to full
-                // composition so every contributing opinion participates.
-                if matches!(
-                    value.as_ref(),
-                    Value::Dictionary(_) | Value::PathExpression(_) | Value::PathExpressionVec(_)
-                ) {
-                    return Ok(FieldValue::Authored(index.resolve_field(field, graph, Some(suffix))?));
-                }
-                return Ok(FieldValue::Authored(block_to_none(value.into_owned())));
+        // Walks the same memoized spec sites, in the same strength order, that
+        // full composition resolves from, so this shortcut can only ever answer
+        // with what the composed read would have found.
+        for (site, node) in index.live_spec_sites() {
+            if !local_layers.contains(&site.layer) {
+                continue;
             }
+            let query_path = Path::new(&format!("{}{suffix}", node.path))?;
+            let Some(value) = graph.layer(site.layer).data().try_field(&query_path, field)? else {
+                continue;
+            };
+            // A dictionary or path-expression opinion composes with the
+            // weaker opinions beneath it rather than winning outright;
+            // once one anchors the field locally, hand the query to full
+            // composition so every contributing opinion participates.
+            if matches!(
+                value.as_ref(),
+                Value::Dictionary(_) | Value::PathExpression(_) | Value::PathExpressionVec(_)
+            ) {
+                return Ok(FieldValue::Authored(index.resolve_field(field, graph, Some(suffix))?));
+            }
+            let mut value = value.into_owned();
+            site.offset.apply_to_value(&mut value);
+            return Ok(FieldValue::Authored(block_to_none(value)));
         }
 
         Ok(FieldValue::NotAuthored)

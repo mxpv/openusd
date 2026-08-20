@@ -617,6 +617,15 @@ impl ClipCache {
     /// clip-value resolution; an authored value block presents as
     /// `Some(Value::ValueBlock)` so the caller stops fall-through to weaker
     /// sources.
+    ///
+    /// TODO: the stage-to-clip mapping is applied to the query time only, so
+    /// every value returned here — a clip sample, a manifest default, an
+    /// interpolated gap value — comes back in clip time. A `timecode` among
+    /// them is a time coordinate in the clip's own frame and needs the inverse
+    /// mapping applied on the way out, the way
+    /// [`sdf::LayerOffset::apply_to_value`] maps a composed value out of its
+    /// layer's frame (C++ `Usd_Clip::_TranslateTimeToExternal`, which is also
+    /// why C++ skips the layer-offset transform for clip-sourced samples).
     pub(super) fn value_in_sets(
         &mut self,
         graph: &LayerGraph,

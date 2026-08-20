@@ -104,9 +104,12 @@ impl Relationship {
     /// it without copying — pass a `pub const` token, not a runtime
     /// string.
     ///
+    /// `value` is in stage time, so any `timecode` it holds is mapped into the
+    /// edit target's own time frame (C++ `_StageValueToFieldXf`).
+    ///
     /// [`Attribute::set_metadata`]: crate::usd::Attribute::set_metadata
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
-        let value = value.into();
+        let value = self.stage.map_to_spec_value(value);
         self.edit(|spec| {
             spec.set(key, value);
             Ok(())
