@@ -22,12 +22,11 @@
 //! Edit-type → tier, the audit behind the classifier:
 //!
 //! - `references`, `payload`, `inheritPaths`, `specializes`, `variantSetNames`,
-//!   `variantSelection`, `instanceable`, `permission` → significant: each is a
-//!   composition-arc, instancing, or permission opinion that can add or drop a
-//!   subtree (C++ `Pcp_EntryRequiresPrimIndexChange`). `specifier`, `active`,
-//!   `apiSchemas`, and `relocates` are significant here too, slightly broader
-//!   than C++ (which routes `active` / `specifier` through separate
-//!   mechanisms).
+//!   `variantSelection`, `instanceable` → significant: each is a
+//!   composition-arc or instancing opinion that can add or drop a subtree (C++
+//!   `Pcp_EntryRequiresPrimIndexChange`). `specifier`, `active`, `apiSchemas`,
+//!   and `relocates` are significant here too, slightly broader than C++ (which
+//!   routes `active` / `specifier` through separate mechanisms).
 //! - an inert `over` add or remove carrying no significant field → spec tier.
 //! - `subLayers`, `subLayerOffsets`, `layerRelocates`, `timeCodesPerSecond` /
 //!   `framesPerSecond`, `expressionVariables` on the root → layer-stack tier.
@@ -36,15 +35,18 @@
 //!   to name are reported (`apply_default_prim_edits`). Neither half is the
 //!   layer-stack tier, and the report is not C++-identical — see the parity notes
 //!   in the module docs.
-//! - `clips` / `clipSets` → significant, because a prim index caches whether
-//!   value clips can source it at all
-//!   ([`PrimIndex::may_have_clips`](super::PrimIndex::may_have_clips)) and every
-//!   descendant inherits that answer.
-//! - non-composition metadata (`kind`, `colorConfiguration`, `customData`, …) →
-//!   no index drop. These resolve live through the cached index's spec sites,
-//!   and every value view rebuilds against the composition-revision bump
-//!   [`apply`](Changes::apply) always makes, so the new opinion is visible
-//!   without invalidating the graph.
+//! - `clips` / `clipSets` appearing or disappearing → significant, because a
+//!   prim index caches whether value clips can source it at all
+//!   ([`PrimIndex::authors_clips`](super::PrimIndex::authors_clips)) and every
+//!   descendant inherits that answer. Editing what the metadata holds is not:
+//!   the sets themselves are composed live on each clip query.
+//! - `permission`, and non-composition metadata (`kind`, `colorConfiguration`,
+//!   `customData`, …) → no index drop. C++ does treat `permission` as
+//!   significant; this port deliberately diverges, because `permission` is
+//!   data-only here and composes no arc. The rest resolve live through the
+//!   cached index's spec sites, and every value view rebuilds against the
+//!   composition-revision bump [`apply`](Changes::apply) always makes, so the
+//!   new opinion is visible without invalidating the graph.
 
 use std::collections::{BTreeSet, HashSet};
 use std::mem;
@@ -56,6 +58,7 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{ChangeEntry, ChangeList, Path};
 use crate::tf;
 
+use super::clip;
 use super::layer_graph::LayerGraph;
 use super::layer_stack::StackVarsDelta;
 use super::prim_index::{PropertyTargetKind, TargetMemoKey};
@@ -346,10 +349,10 @@ impl Changes {
 
     fn classify_prim_entry(&mut self, cache: &IndexCache, layer: LayerId, path: &Path, entry: &ChangeEntry) {
         let significant = entry.flags.intersects(sdf::ChangeFlags::NON_INERT_PRIM)
-            || entry
-                .info_changed
-                .iter()
-                .any(|k| Self::field_promotes_to_significant(k));
+            || entry.fields().any(|(field, change)| {
+                Self::field_promotes_to_significant(field.as_str())
+                    || (change == sdf::FieldChange::Presence && clip::is_clip_field(field.as_str()))
+            });
 
         if significant {
             self.fanout_significant(cache, layer, path);
@@ -389,12 +392,9 @@ impl Changes {
     /// them too.
     fn classify_property_entry(&mut self, cache: &IndexCache, layer: LayerId, path: &Path, entry: &ChangeEntry) {
         let is_connection = entry.flags.contains(sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION)
-            || entry
-                .info_changed
-                .iter()
-                .any(|k| *k == FieldKey::ConnectionPaths.as_str());
+            || entry.changed(FieldKey::ConnectionPaths.as_str());
         let is_relationship = entry.flags.contains(sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS)
-            || entry.info_changed.iter().any(|k| *k == FieldKey::TargetPaths.as_str());
+            || entry.changed(FieldKey::TargetPaths.as_str());
         if !is_connection && !is_relationship {
             return;
         }
@@ -457,7 +457,7 @@ impl Changes {
     fn classify_root_entry(&mut self, edit: &LayerChanges<'_>, entry: &ChangeEntry) {
         let layer = edit.layer;
         let mut touches_stack = false;
-        for key in &entry.info_changed {
+        for key in entry.info_changed() {
             if *key == FieldKey::SubLayers.as_str() {
                 self.layer_stack |= LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT;
                 touches_stack = true;
@@ -553,19 +553,6 @@ impl Changes {
             // Stage-tier producer authors this yet, but it matches the C++
             // classifier and forecloses a latent gap.
             || field == FieldKey::Relocates.as_str()
-            // Clip presence is cached per prim index and inherited by every
-            // descendant (`PrimIndex::may_have_clips`), so authoring or removing
-            // clip metadata has to drop the subtree that reads it. `clipSets`
-            // joins it because deleting a set through that list op can empty a
-            // prim's clips just as removing the dictionary does.
-            //
-            // TODO: C++ narrows this to an add or a removal, comparing the
-            // field's before and after values, so a content-only clip edit stays
-            // insignificant. `sdf::ChangeEntry::info_changed` carries field names
-            // alone, so every clip edit resyncs the subtree until it carries the
-            // values too.
-            || field == FieldKey::Clips.as_str()
-            || field == FieldKey::ClipSets.as_str()
     }
 
     /// Apply phase: commit the planned invalidations to `cache`.
@@ -929,8 +916,7 @@ mod tests {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo"))
-            .info_changed
-            .insert(FieldKey::References.as_str().into());
+            .note(FieldKey::References.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
@@ -941,8 +927,7 @@ mod tests {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo"))
-            .info_changed
-            .insert(FieldKey::VariantSelection.as_str().into());
+            .note(FieldKey::VariantSelection.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
@@ -957,8 +942,7 @@ mod tests {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo{set=sel}Bar"))
-            .info_changed
-            .insert(FieldKey::References.as_str().into());
+            .note(FieldKey::References.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert_eq!(
@@ -980,8 +964,7 @@ mod tests {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo"))
-            .info_changed
-            .insert(FieldKey::Permission.as_str().into());
+            .note(FieldKey::Permission.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.all_significant().next().is_none());
@@ -996,12 +979,33 @@ mod tests {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo"))
-            .info_changed
-            .insert(FieldKey::Kind.as_str().into());
+            .note(FieldKey::Kind.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
+    }
+
+    /// Editing what `clips` holds leaves the cached "can clips source this prim"
+    /// answer alone, so it drops no index; the metadata appearing or
+    /// disappearing changes that answer for the whole subtree.
+    #[test]
+    fn clip_significance_follows_presence() {
+        let significant_for = |presence: bool| {
+            let (graph, cache) = empty_cache();
+            let mut cl = ChangeList::new();
+            let entry = cl.entry_mut(&p("/X"));
+            entry.note(FieldKey::Clips.as_str(), sdf::FieldChange::Value);
+            if presence {
+                entry.note(FieldKey::Clips.as_str(), sdf::FieldChange::Presence);
+            }
+            let mut changes = Changes::new();
+            changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+            !changes.cache.authored_significant.is_empty()
+        };
+
+        assert!(!significant_for(false), "a value edit invalidates nothing");
+        assert!(significant_for(true), "the metadata appearing resyncs the subtree");
     }
 
     /// An inert prim add whose spec authors `instanceable` flips the prim's
@@ -1014,7 +1018,7 @@ mod tests {
         let mut cl = ChangeList::new();
         let entry = cl.entry_mut(&p("/X"));
         entry.flags = ChangeFlags::ADD_INERT_PRIM;
-        entry.info_changed.insert(FieldKey::Instanceable.as_str().into());
+        entry.note(FieldKey::Instanceable.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
 
@@ -1080,8 +1084,7 @@ mod tests {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
-            .info_changed
-            .insert(FieldKey::SubLayers.as_str().into());
+            .note(FieldKey::SubLayers.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
@@ -1094,8 +1097,7 @@ mod tests {
         let layer = first_layer(&graph);
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
-            .info_changed
-            .insert(FieldKey::DefaultPrim.as_str().into());
+            .note(FieldKey::DefaultPrim.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(
             &cache,
@@ -1124,8 +1126,7 @@ mod tests {
             let (graph, cache) = empty_cache();
             let mut cl = ChangeList::new();
             cl.entry_mut(&Path::abs_root())
-                .info_changed
-                .insert(field.as_str().into());
+                .note(field.as_str(), sdf::FieldChange::Value);
             let mut changes = Changes::new();
             changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
             assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
@@ -1141,8 +1142,7 @@ mod tests {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
-            .info_changed
-            .insert(FieldKey::ExpressionVariables.as_str().into());
+            .note(FieldKey::ExpressionVariables.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::EXPRESSION_VARS));
@@ -1154,8 +1154,7 @@ mod tests {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
-            .info_changed
-            .insert(FieldKey::LayerRelocates.as_str().into());
+            .note(FieldKey::LayerRelocates.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::RELOCATES));
@@ -1183,7 +1182,7 @@ mod tests {
         let mut cl = ChangeList::new();
         let entry = cl.entry_mut(&p("/P{v=x}Child.r"));
         entry.flags = ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
-        entry.info_changed.insert(FieldKey::TargetPaths.as_str().into());
+        entry.note(FieldKey::TargetPaths.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         let key = TargetMemoKey {
@@ -1203,8 +1202,8 @@ mod tests {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         let entry = cl.entry_mut(&p("/P.x"));
-        entry.info_changed.insert(FieldKey::TargetPaths.as_str().into());
-        entry.info_changed.insert(FieldKey::ConnectionPaths.as_str().into());
+        entry.note(FieldKey::TargetPaths.as_str(), sdf::FieldChange::Value);
+        entry.note(FieldKey::ConnectionPaths.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         let key = |kind| TargetMemoKey {

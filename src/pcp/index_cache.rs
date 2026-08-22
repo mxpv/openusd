@@ -4774,8 +4774,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         let mut cl = sdf::ChangeList::new();
         cl.entry_mut(&sdf::path("/A")?)
-            .info_changed
-            .insert(sdf::FieldKey::Instanceable.as_str().into());
+            .note(sdf::FieldKey::Instanceable.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
@@ -5615,8 +5614,7 @@ def "Anchor" (inherits = </Rig>) {}
         graph.get_mut(root_id).expect("root layer exists").layer = parse_layer(text);
         let mut cl = sdf::ChangeList::new();
         cl.entry_mut(&Path::abs_root())
-            .info_changed
-            .insert(sdf::FieldKey::LayerRelocates.as_str().into());
+            .note(sdf::FieldKey::LayerRelocates.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         changes.did_change(cache, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(cache, graph);

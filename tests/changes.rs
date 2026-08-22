@@ -11,17 +11,17 @@ use std::path::Path as FsPath;
 use std::rc::Rc;
 
 use openusd::Result;
-use openusd::{pcp, sdf, tf, usd};
+use openusd::{gf, pcp, sdf, tf, usd};
 
 #[test]
 fn change_list_entry_dedups() {
     let mut cl = sdf::ChangeList::new();
     let p = sdf::Path::abs_root();
     cl.entry_mut(&p).flags |= sdf::ChangeFlags::ADD_NON_INERT_PRIM;
-    cl.entry_mut(&p).info_changed.insert(tf::Token::new("specifier"));
+    cl.entry_mut(&p).note("specifier", sdf::FieldChange::Value);
     assert_eq!(cl.entries().len(), 1);
     assert!(cl.entries()[0].1.flags.contains(sdf::ChangeFlags::ADD_NON_INERT_PRIM));
-    assert!(cl.entries()[0].1.info_changed.contains(&tf::Token::new("specifier")));
+    assert!(cl.entries()[0].1.changed("specifier"));
 }
 
 #[test]
@@ -997,5 +997,105 @@ fn threshold_sweep_recomposes() -> Result<()> {
         "no diagnostics accrete across the sweep, got {:?}",
         stage.composition_errors()
     );
+    Ok(())
+}
+
+/// A clip set's `clips` dictionary, selecting `active_index` from two clips.
+fn clip_metadata(active_index: f64) -> sdf::Value {
+    let set = HashMap::from([
+        (
+            "assetPaths".to_string(),
+            sdf::Value::AssetPathVec(vec!["./clipA.usda".into(), "./clipB.usda".into()]),
+        ),
+        (
+            "manifestAssetPath".to_string(),
+            sdf::Value::AssetPath("./manifest.usda".into()),
+        ),
+        ("primPath".to_string(), sdf::Value::String("/Model".to_string())),
+        (
+            "active".to_string(),
+            sdf::Value::Vec2dVec(vec![gf::vec2d(0.0, active_index)]),
+        ),
+    ]);
+    sdf::Value::Dictionary(HashMap::from([("default".to_string(), sdf::Value::Dictionary(set))]))
+}
+
+/// A stage whose `/Model` carries a two-clip set selecting the first, with the
+/// subtree composed so there is something for a later edit to evict.
+fn open_clip_fixture(dir: &tempfile::TempDir) -> Result<usd::Stage> {
+    for (name, sample) in [("clipA.usda", 1.0), ("clipB.usda", 2.0)] {
+        fs::write(
+            dir.path().join(name),
+            format!("#usda 1.0\ndef \"Model\"\n{{\n    float size.timeSamples = {{\n        0: {sample}\n    }}\n}}\n"),
+        )?;
+    }
+    fs::write(
+        dir.path().join("manifest.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n    def \"Child\"\n    {\n    }\n}\n",
+    )?;
+
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    stage
+        .prim("/Model")?
+        .set_metadata(sdf::FieldKey::Clips.as_str(), clip_metadata(0.0))?;
+    assert!(exists(&stage, "/Model/Child"));
+    assert_eq!(clip_value(&stage), Some(1.0));
+    Ok(stage)
+}
+
+/// `/Model.size` at time 0. Read through `sdf::Value` because a usda
+/// `timeSamples` entry carries the type its literal spells, not the one the
+/// attribute declares.
+fn clip_value(stage: &usd::Stage) -> Option<f64> {
+    stage
+        .attribute("/Model.size")
+        .unwrap()
+        .get_at::<sdf::Value>(usd::TimeCode::new(0.0))
+        .expect("value_at")
+        .map(|value| value.cast::<f64>().expect("numeric"))
+}
+
+/// Editing what a clip set holds invalidates nothing: the sets are composed
+/// live on each clip query, and only whether the metadata exists is cached.
+#[test]
+fn clip_edit_is_inert() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_clip_fixture(&dir)?;
+    let pre = stage.indexed_count();
+    let notices = capture_notices(&stage);
+
+    // Re-point the schedule at the other clip: the metadata is still there, so
+    // only what it holds changed.
+    stage
+        .prim("/Model")?
+        .set_metadata(sdf::FieldKey::Clips.as_str(), clip_metadata(1.0))?;
+
+    // Read through the stage before borrowing the sink's slot: a composed read
+    // drains any pending edit, which fires the sink.
+    assert_eq!(clip_value(&stage), Some(2.0), "the new schedule takes effect");
+    assert_eq!(stage.indexed_count(), pre, "nothing is evicted");
+    let notices = notices.borrow();
+    assert!(notices.resynced.is_empty(), "nothing resyncs: {:?}", notices.resynced);
+    Ok(())
+}
+
+/// Removing the metadata, by contrast, is a presence change and must resync the
+/// subtree that inherited the cached answer.
+#[test]
+fn clip_removal_resyncs_subtree() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_clip_fixture(&dir)?;
+    let notices = capture_notices(&stage);
+
+    stage.prim("/Model")?.clear_metadata(sdf::FieldKey::Clips.as_str())?;
+
+    assert_eq!(clip_value(&stage), None, "the clips no longer source the value");
+    let notices = notices.borrow();
+    assert_eq!(notices.resynced, paths(&["/Model"]));
     Ok(())
 }

@@ -14,7 +14,6 @@
 //! plain `Fn(&Stage, &CommittedChange)` closure is itself a `StageSink`, so
 //! `add_sink` takes either a full sink type or a quick closure observer.
 
-use std::collections::BTreeSet;
 use std::mem;
 
 use super::stage::Stage;
@@ -241,25 +240,28 @@ pub struct CommittedChange<'a> {
 
 impl CommittedChange<'_> {
     /// The field names authored at `path` by this edit (C++ `GetChangedFields`),
-    /// or an empty set if `path` was not touched. `path` is in stage namespace,
-    /// the same as the paths in [`resynced`](Self::resynced) and
+    /// empty if `path` was not touched. `path` is in stage namespace, the same
+    /// as the paths in [`resynced`](Self::resynced) and
     /// [`changed_info_only`](Self::changed_info_only); under an arc or variant
     /// edit target it is translated back to the layer-namespace key
     /// [`change_list`](Self::change_list) records it under.
-    pub fn changed_fields(&self, path: &sdf::Path) -> &BTreeSet<tf::Token> {
-        static EMPTY: BTreeSet<tf::Token> = BTreeSet::new();
-        let key = match self.provenance.mapping() {
-            Some(m) => match m.map_target_to_source(path) {
-                Some(key) => key,
-                None => return &EMPTY,
-            },
-            None => path.clone(),
-        };
+    ///
+    /// To tell a field that appeared or disappeared from one re-authored in
+    /// place, read [`sdf::ChangeEntry::presence_changed`] off
+    /// [`layer_changes`](Self::layer_changes). Not off
+    /// [`change_list`](Self::change_list): that is the cross-layer merge, where
+    /// one layer's presence change stands for the whole entry.
+    pub fn changed_fields<'a>(&'a self, path: &sdf::Path) -> impl Iterator<Item = &'a tf::Token> + use<'a> {
+        let key = self
+            .provenance
+            .mapping()
+            .map_or_else(|| Some(path.clone()), |m| m.map_target_to_source(path));
         self.change_list
             .entries()
             .iter()
-            .find(|(p, _)| p == &key)
-            .map_or(&EMPTY, |(_, entry)| &entry.info_changed)
+            .find(|(p, _)| Some(p) == key.as_ref())
+            .into_iter()
+            .flat_map(|(_, entry)| entry.info_changed())
     }
 }
 
@@ -467,7 +469,7 @@ impl Payload {
                 let removed = e.flags.contains(sdf::ChangeFlags::REMOVE_PROPERTY)
                     && !e.flags.contains(sdf::ChangeFlags::ADD_PROPERTY);
                 !removed
-                    && (!e.info_changed.is_empty()
+                    && (e.info_changed().next().is_some()
                         || e.flags.intersects(
                             sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS
                                 | sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION,
@@ -631,7 +633,7 @@ mod tests {
         }
         let mut scratch = sdf::ChangeList::new();
         for path in info {
-            scratch.entry_mut(&p(path)).info_changed.insert(tf::Token::new("kind"));
+            scratch.entry_mut(&p(path)).note("kind", sdf::FieldChange::Value);
         }
         let mut payload = Payload::new(&changes, &scratch, Vec::new(), &provenance);
         payload.finish(outcome);

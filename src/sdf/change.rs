@@ -18,7 +18,7 @@
 // reference shape. Today no `Layer` method renames a prim, so the field
 // would have no producer.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use bitflags::bitflags;
 
@@ -47,16 +47,37 @@ pub struct ChangeList {
 pub struct ChangeEntry {
     /// Shape changes — adds/removes of specs and relationship/connection edits.
     pub flags: ChangeFlags,
-    /// Names of fields whose value was authored at this path. Interned as
-    /// [`tf::Token`] so [`ChangeList::from_overlay`] can note any field name —
-    /// schema `FieldKey`s and custom metadata alike — from the borrowed `&str`
-    /// it reads off a staged patch. This is the raw set of touched
-    /// fields (including non-composition metadata like `customData` and the
-    /// child-name lists); deciding which are significant is the consumer's job
-    /// — [`pcp::Changes`](crate::pcp::Changes) filters it against its own
-    /// structural-field list, so presence here does not by itself imply a
-    /// composition change.
-    pub info_changed: BTreeSet<tf::Token>,
+    /// Each field this edit authored at the path, and how it changed. Interned
+    /// as [`tf::Token`] so [`ChangeList::from_overlay`] can note any field name
+    /// — schema `FieldKey`s and custom metadata alike — from the borrowed
+    /// `&str` it reads off a staged patch.
+    ///
+    /// One entry per field, so a field cannot record a presence change without
+    /// also being a changed field. Read through
+    /// [`info_changed`](Self::info_changed) and
+    /// [`presence_changed`](Self::presence_changed); written through
+    /// [`note`](Self::note).
+    ///
+    /// These are the raw touched fields, including non-composition metadata like
+    /// `customData` and the child-name lists; deciding which are significant is
+    /// the consumer's job — [`pcp::Changes`](crate::pcp::Changes) filters them
+    /// against its own structural-field list, so appearing here does not by
+    /// itself imply a composition change.
+    fields: BTreeMap<tf::Token, FieldChange>,
+}
+
+/// How an authored field changed at a site.
+///
+/// C++ keeps both sides of every edit on `SdfChangeList::Entry::infoChanged` and
+/// lets each consumer compare them; this records the one comparison its
+/// consumers make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldChange {
+    /// The field was authored where the base held none, or removed — its
+    /// authored/unauthored state flipped.
+    Presence,
+    /// The field was authored before and after, and now holds a different value.
+    Value,
 }
 
 bitflags! {
@@ -101,7 +122,48 @@ impl ChangeEntry {
     /// Whether this entry records no change at all — no shape flags and no
     /// authored fields.
     pub fn is_empty(&self) -> bool {
-        self.flags.is_empty() && self.info_changed.is_empty()
+        self.flags.is_empty() && self.fields.is_empty()
+    }
+
+    /// The fields this edit authored at the path.
+    pub fn info_changed(&self) -> impl Iterator<Item = &tf::Token> {
+        self.fields.keys()
+    }
+
+    /// The fields whose authored/unauthored state flipped, as opposed to fields
+    /// re-authored in place.
+    pub fn presence_changed(&self) -> impl Iterator<Item = &tf::Token> {
+        self.fields
+            .iter()
+            .filter(|(_, change)| **change == FieldChange::Presence)
+            .map(|(field, _)| field)
+    }
+
+    /// Each field this edit authored, paired with how it changed.
+    pub fn fields(&self) -> impl Iterator<Item = (&tf::Token, FieldChange)> {
+        self.fields.iter().map(|(field, change)| (field, *change))
+    }
+
+    /// Whether this edit authored `field` at the path.
+    pub fn changed(&self, field: &str) -> bool {
+        self.fields.keys().any(|held| held == field)
+    }
+
+    /// Records that `field` changed at this path.
+    ///
+    /// [`Presence`](FieldChange::Presence) wins over
+    /// [`Value`](FieldChange::Value) when two records for one field combine: it
+    /// is the stronger statement, and a consumer that invalidates only on
+    /// presence must not lose it to a weaker record of the same field.
+    pub fn note(&mut self, field: &str, change: FieldChange) {
+        let slot = self.fields.entry(tf::Token::from(field)).or_insert(change);
+        if change == FieldChange::Presence {
+            *slot = FieldChange::Presence;
+        }
+        // The shape flag a target/connection write implies travels with the
+        // field, so a consumer reading the flag and one reading the field name
+        // cannot disagree.
+        self.flags |= flag_for_field(field);
     }
 
     /// Whether this entry records only child-name bookkeeping: no structural
@@ -117,9 +179,7 @@ impl ChangeEntry {
     /// [`info_changed`](Self::info_changed) without the structural child-name
     /// lists.
     pub fn authored_fields(&self) -> impl Iterator<Item = &tf::Token> {
-        self.info_changed
-            .iter()
-            .filter(|f| !super::is_children_field(f.as_str()))
+        self.info_changed().filter(|f| !super::is_children_field(f.as_str()))
     }
 }
 
@@ -168,7 +228,9 @@ impl ChangeList {
         for (path, entry) in &other.entries {
             let merged = self.entry_mut(path);
             merged.flags |= entry.flags;
-            merged.info_changed.extend(entry.info_changed.iter().cloned());
+            for (field, change) in &entry.fields {
+                merged.note(field.as_str(), *change);
+            }
         }
     }
 
@@ -206,24 +268,35 @@ impl ChangeList {
             let mut entry = ChangeEntry::default();
             match patch {
                 Patch::Created(spec) => {
-                    // A create over a pre-existing spec replaces it: record the
-                    // old spec's removal — surfacing a prim's authored fields —
-                    // so a structural opinion the replace tears down still
-                    // reaches the classifier.
-                    if base.has_spec(path) {
-                        note_removal(&mut entry, base, path);
+                    // A create over a pre-existing spec replaces it. Its removal
+                    // flag records the tear-down, but the fields are the net of
+                    // what the base held against what the new spec authors —
+                    // the same base-versus-final-overlay model every other patch
+                    // uses, so a field the replacement retains reads as a value
+                    // change rather than as one that appeared.
+                    let replaced = base.has_spec(path);
+                    if replaced {
+                        entry.flags |= remove_flag(base, path).unwrap_or_default();
                     }
                     match spec.ty {
                         SpecType::Prim | SpecType::Attribute | SpecType::Relationship => {
                             // A created prim/property carries its shape in the add
                             // flag; record every field except the auto-stamped
                             // `specifier` (significant on every spec, and already
-                            // implied by the flag). Created fields are new, so no
-                            // value diff is needed.
+                            // implied by the flag). Over a fresh path every field
+                            // is new, so only a replacement diffs against the base.
                             entry.flags |= add_flag(spec);
-                            for (field, _) in &spec.fields {
-                                if field != FieldKey::Specifier.as_str() {
-                                    note_field(&mut entry, field);
+                            for (field, value) in &spec.fields {
+                                if field == FieldKey::Specifier.as_str() {
+                                    continue;
+                                }
+                                match replaced {
+                                    false => entry.note(field, FieldChange::Presence),
+                                    true => {
+                                        if let Some(change) = field_change(base, path, field, value) {
+                                            entry.note(field, change);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -232,9 +305,20 @@ impl ChangeList {
                             // no add flag; record each authored field that differs
                             // from the base — all of them on a fresh create.
                             for (field, value) in &spec.fields {
-                                if field_changed(base, path, field, value) {
-                                    note_field(&mut entry, field);
+                                if let Some(change) = field_change(base, path, field, value) {
+                                    entry.note(field, change);
                                 }
+                            }
+                        }
+                    }
+                    // The other half of the net: what the base held and the new
+                    // spec does not re-author is gone. A replacement keeps the
+                    // spec, so every base field counts here — unlike a removal,
+                    // which surfaces only what a consumer must see torn down.
+                    if replaced {
+                        for field in base_fields(base, path) {
+                            if !spec.fields.iter().any(|(authored, _)| *authored == field) {
+                                entry.note(&field, FieldChange::Presence);
                             }
                         }
                     }
@@ -242,14 +326,14 @@ impl ChangeList {
                 Patch::Tombstone => note_removal(&mut entry, base, path),
                 Patch::Edited { set, erased } => {
                     for (field, value) in set {
-                        if field_changed(base, path, field, value) {
-                            note_field(&mut entry, field);
+                        if let Some(change) = field_change(base, path, field, value) {
+                            entry.note(field, change);
                         }
                     }
                     // CowData only tombstones a field the base actually held, so
                     // every erased field is a real removal worth recording.
                     for field in erased {
-                        note_field(&mut entry, field);
+                        entry.note(field, FieldChange::Presence);
                     }
                 }
             }
@@ -262,20 +346,19 @@ impl ChangeList {
     }
 }
 
-/// Note a field write into `entry`: record the field name (interned so any
-/// field name — schema `FieldKey` or custom metadata — is captured from a
-/// borrowed `&str`) and OR in any shape flag the field implies
-/// (relationship-target / connection).
-fn note_field(entry: &mut ChangeEntry, field: &str) {
-    entry.info_changed.insert(tf::Token::from(field));
-    entry.flags |= flag_for_field(field);
-}
-
-/// Whether staging `value` at `path`.`field` actually changes the base — the
-/// value-diff idempotence check, so re-authoring an unchanged value records no
-/// change.
-fn field_changed(base: &dyn AbstractData, path: &Path, field: &str, value: &Value) -> bool {
-    base.try_field(path, field).ok().flatten().as_deref() != Some(value)
+/// How staging `value` at `path`.`field` changes the base, or `None` when it
+/// does not — the value-diff idempotence check, so re-authoring an unchanged
+/// value records no change.
+fn field_change(base: &dyn AbstractData, path: &Path, field: &str, value: &Value) -> Option<FieldChange> {
+    match base.try_field(path, field) {
+        Ok(None) => Some(FieldChange::Presence),
+        Ok(Some(held)) if &*held != value => Some(FieldChange::Value),
+        Ok(Some(_)) => None,
+        // A backend that cannot read the old value cannot say the field is
+        // appearing. Reporting the weaker change keeps a read failure from
+        // invalidating more than the edit itself would.
+        Err(_) => Some(FieldChange::Value),
+    }
 }
 
 /// Record the removal of the spec currently at `path` in `data` into `entry`:
@@ -301,21 +384,34 @@ fn note_removal(entry: &mut ChangeEntry, data: &dyn AbstractData, path: &Path) {
         return;
     };
     entry.flags |= flag;
-    if flag.intersects(ChangeFlags::REMOVE_INERT_PRIM | ChangeFlags::REMOVE_NON_INERT_PRIM) {
-        if let Some(fields) = data.list_fields(path) {
-            for field in fields {
-                if field != FieldKey::Specifier.as_str() {
-                    note_field(entry, &field);
-                }
-            }
-        }
-    } else {
-        for field in [FieldKey::TargetPaths.as_str(), FieldKey::ConnectionPaths.as_str()] {
-            if data.has_field(path, field) {
-                note_field(entry, field);
-            }
-        }
+    for field in torn_down_fields(data, path, flag) {
+        entry.note(&field, FieldChange::Presence);
     }
+}
+
+/// The authored fields a removal of the spec at `path` surfaces, given the
+/// removal `flag` it recorded. See [`note_removal`] for which fields those are
+/// and why.
+fn torn_down_fields(data: &dyn AbstractData, path: &Path, flag: ChangeFlags) -> Vec<String> {
+    if flag.intersects(ChangeFlags::REMOVE_INERT_PRIM | ChangeFlags::REMOVE_NON_INERT_PRIM) {
+        return base_fields(data, path);
+    }
+    [FieldKey::TargetPaths, FieldKey::ConnectionPaths]
+        .iter()
+        .map(|key| key.as_str())
+        .filter(|field| data.has_field(path, field))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The fields `data` authors at `path`, less the auto-stamped `specifier` the
+/// create side also skips.
+fn base_fields(data: &dyn AbstractData, path: &Path) -> Vec<String> {
+    data.list_fields(path)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|field| field != FieldKey::Specifier.as_str())
+        .collect()
 }
 
 /// The add flag a created `spec` implies, by its final type and specifier: a
@@ -398,6 +494,13 @@ mod tests {
         data
     }
 
+    /// The derived entry at `path`.
+    fn entry_at<'a>(cl: &'a ChangeList, path: &str) -> &'a ChangeEntry {
+        cl.iter()
+            .find_map(|(pp, e)| (pp == &p(path)).then_some(e))
+            .expect("an entry at the path")
+    }
+
     /// Whether the derived entry at `path` carries `flag`.
     fn has_flag(cl: &ChangeList, path: &str, flag: ChangeFlags) -> bool {
         cl.iter().any(|(pp, e)| pp == &p(path) && e.flags.contains(flag))
@@ -420,6 +523,110 @@ mod tests {
         ChangeList::from_overlay(&cow)
     }
 
+    /// `presence_changed` separates a field appearing or disappearing from one
+    /// re-authored in place. The mechanism is field-agnostic, so any field with
+    /// two distinct values exercises it.
+    #[test]
+    fn presence_split_from_value() {
+        let field = FieldKey::Kind.as_str();
+        let mut base = rooted();
+        base.create_spec(p("/P"), SpecType::Prim);
+
+        // Authoring the field where the base held none is a presence change.
+        let added = derive(base.clone(), |cow| {
+            cow.set_field(&p("/P"), field, Value::token("component"));
+        });
+        let entry = entry_at(&added, "/P");
+        assert!(entry.changed(field));
+        assert!(entry.presence_changed().any(|f| f == field));
+
+        // Re-authoring it with a different value is not.
+        base.set_field(&p("/P"), field, Value::token("component"));
+        let edited = derive(base.clone(), |cow| {
+            cow.set_field(&p("/P"), field, Value::token("assembly"));
+        });
+        let entry = entry_at(&edited, "/P");
+        assert!(entry.changed(field));
+        assert!(
+            entry.presence_changed().next().is_none(),
+            "a value edit leaves presence alone: {:?}",
+            entry.presence_changed().collect::<Vec<_>>()
+        );
+
+        // Erasing it is a presence change again.
+        let erased = derive(base, |cow| {
+            cow.erase_field(&p("/P"), field);
+        });
+        assert!(entry_at(&erased, "/P").presence_changed().any(|f| f == field));
+    }
+
+    /// Replacing a spec nets the base against the final overlay: a field the
+    /// replacement retains changed value at most, so it must not be left looking
+    /// like it appeared, while one the replacement drops did disappear.
+    #[test]
+    fn replacement_nets_presence() {
+        let kept = FieldKey::Kind.as_str();
+        let dropped = FieldKey::Documentation.as_str();
+        let mut base = rooted();
+        base.create_spec(p("/P"), SpecType::Prim);
+        base.set_field(&p("/P"), kept, Value::token("component"));
+        base.set_field(&p("/P"), dropped, Value::String("gone".into()));
+
+        // Re-create the spec carrying a new value for `kept` and nothing else.
+        let cl = derive(base, |cow| {
+            cow.create_spec(p("/P"), SpecType::Prim);
+            cow.set_field(&p("/P"), kept, Value::token("assembly"));
+        });
+
+        let entry = entry_at(&cl, "/P");
+        let presence: Vec<_> = entry.presence_changed().map(tf::Token::as_str).collect();
+        assert_eq!(presence, [dropped], "only the dropped field flipped presence");
+        assert!(entry.changed(kept), "the retained field still changed value");
+    }
+
+    /// A property replacement nets every field the base held, not just the
+    /// subset a genuine removal surfaces: re-creating an attribute wipes its
+    /// `typeName`, and a consumer told only about the value fields would hear
+    /// nothing at all.
+    #[test]
+    fn property_replacement_nets_all() {
+        let mut base = rooted();
+        base.create_spec(p("/P"), SpecType::Prim);
+        base.create_spec(p("/P.attr"), SpecType::Attribute);
+        base.set_field(&p("/P.attr"), FieldKey::TypeName.as_str(), Value::token("float"));
+        base.set_field(&p("/P.attr"), FieldKey::Default.as_str(), Value::Double(1.0));
+
+        // Re-create the attribute carrying the same `default` and no type.
+        let cl = derive(base, |cow| {
+            cow.create_spec(p("/P.attr"), SpecType::Attribute);
+            cow.set_field(&p("/P.attr"), FieldKey::Default.as_str(), Value::Double(1.0));
+        });
+
+        let entry = entry_at(&cl, "/P.attr");
+        assert!(
+            entry.changed(FieldKey::TypeName.as_str()),
+            "the wiped type is a change: {:?}",
+            entry.info_changed().collect::<Vec<_>>()
+        );
+        assert!(entry.presence_changed().any(|f| f == FieldKey::TypeName.as_str()));
+    }
+
+    /// `merge_from` unions both field sets, so the presence subset survives a
+    /// batched multi-layer notice.
+    #[test]
+    fn merge_keeps_presence() {
+        let field = FieldKey::Clips.as_str();
+        let mut a = ChangeList::new();
+        let mut b = ChangeList::new();
+        b.entry_mut(&p("/P")).note(field, FieldChange::Presence);
+
+        a.merge_from(&b);
+
+        let entry = entry_at(&a, "/P");
+        assert!(entry.presence_changed().any(|f| f == field));
+        assert!(entry.changed(field), "presence implies changed");
+    }
+
     /// Authors an `over` carrying a `references` opinion into `cow` in one
     /// window, the way `define_prim` / `override_prim` + `add_reference` do.
     fn create_over_with_reference(cow: &mut CowData<Data>, path: &Path) {
@@ -439,14 +646,12 @@ mod tests {
         let mut a = ChangeList::new();
         a.entry_mut(&p("/P")).flags |= ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
         a.entry_mut(&p("/P"))
-            .info_changed
-            .insert(FieldKey::TargetPaths.as_str().into());
+            .note(FieldKey::TargetPaths.as_str(), FieldChange::Value);
 
         let mut b = ChangeList::new();
         b.entry_mut(&p("/P")).flags |= ChangeFlags::ADD_PROPERTY;
         b.entry_mut(&p("/P"))
-            .info_changed
-            .insert(FieldKey::ConnectionPaths.as_str().into());
+            .note(FieldKey::ConnectionPaths.as_str(), FieldChange::Value);
 
         a.merge_from(&b);
 
@@ -455,13 +660,8 @@ mod tests {
         let entry = &same[0].1;
         assert!(entry.flags.contains(ChangeFlags::CHANGE_RELATIONSHIP_TARGETS));
         assert!(entry.flags.contains(ChangeFlags::ADD_PROPERTY));
-        assert!(entry.info_changed.iter().any(|t| t == FieldKey::TargetPaths.as_str()));
-        assert!(
-            entry
-                .info_changed
-                .iter()
-                .any(|t| t == FieldKey::ConnectionPaths.as_str())
-        );
+        assert!(entry.info_changed().any(|t| t == FieldKey::TargetPaths.as_str()));
+        assert!(entry.info_changed().any(|t| t == FieldKey::ConnectionPaths.as_str()));
     }
 
     #[test]
@@ -469,8 +669,8 @@ mod tests {
         let cl = derive(Data::new(), |c| create_over_with_reference(c, &p("/X")));
         let entry = &cl.entries()[0].1;
         assert!(entry.flags.contains(ChangeFlags::ADD_INERT_PRIM));
-        assert!(entry.info_changed.iter().any(|t| references(t)));
-        assert!(!entry.info_changed.iter().any(|t| specifier(t)));
+        assert!(entry.info_changed().any(|t| references(t)));
+        assert!(!entry.info_changed().any(|t| specifier(t)));
     }
 
     /// A created `over` with only its auto-stamped `specifier` records the add
@@ -487,7 +687,7 @@ mod tests {
         });
         let entry = &cl.entries()[0].1;
         assert!(entry.flags.contains(ChangeFlags::ADD_INERT_PRIM));
-        assert!(entry.info_changed.is_empty());
+        assert!(entry.info_changed().next().is_none());
     }
 
     /// A created `def`/`class` is a non-inert add; an attribute or relationship
@@ -525,8 +725,8 @@ mod tests {
         let cl = derive(base, |c| c.erase_spec(&p("/X")));
         let entry = &cl.entries()[0].1;
         assert!(entry.flags.contains(ChangeFlags::REMOVE_INERT_PRIM));
-        assert!(entry.info_changed.iter().any(|t| references(t)));
-        assert!(!entry.info_changed.iter().any(|t| specifier(t)));
+        assert!(entry.info_changed().any(|t| references(t)));
+        assert!(!entry.info_changed().any(|t| specifier(t)));
     }
 
     /// Erasing a relationship spec surfaces its `targetPaths` (and the
@@ -546,7 +746,7 @@ mod tests {
         let entry = &cl.entries()[0].1;
         assert!(entry.flags.contains(ChangeFlags::REMOVE_PROPERTY));
         assert!(entry.flags.contains(ChangeFlags::CHANGE_RELATIONSHIP_TARGETS));
-        assert!(entry.info_changed.iter().any(|t| t == FieldKey::TargetPaths.as_str()));
+        assert!(entry.info_changed().any(|t| t == FieldKey::TargetPaths.as_str()));
     }
 
     /// Replacing an existing `over` (which carried a composition arc) by
@@ -579,7 +779,7 @@ mod tests {
         });
         let entry = &cl.entries()[0].1;
         assert!(entry.flags.contains(ChangeFlags::REMOVE_INERT_PRIM));
-        assert!(entry.info_changed.iter().any(|t| references(t)));
+        assert!(entry.info_changed().any(|t| references(t)));
     }
 
     /// A spec freshly created (with field writes) and erased in the same window
@@ -711,9 +911,9 @@ mod tests {
         assert!(has_flag(&cl, "/A/B", ChangeFlags::ADD_INERT_PRIM));
         assert!(has_flag(&cl, "/A/B/C", ChangeFlags::ADD_NON_INERT_PRIM));
         assert!(has_flag(&cl, "/A/B/C.size", ChangeFlags::ADD_PROPERTY));
-        let leaf = &cl.iter().find(|(pp, _)| pp == &p("/A/B/C")).unwrap().1.info_changed;
-        assert!(leaf.iter().any(|t| t == FieldKey::TypeName.as_str()));
-        assert!(!leaf.iter().any(|t| specifier(t)));
+        let leaf = entry_at(&cl, "/A/B/C");
+        assert!(leaf.info_changed().any(|t| t == FieldKey::TypeName.as_str()));
+        assert!(!leaf.info_changed().any(|t| specifier(t)));
     }
 
     /// `PrimSpec::over` creates missing specs as `over`, recording inert adds.
@@ -738,7 +938,7 @@ mod tests {
         });
         let e = &cl.iter().find(|(pp, _)| pp == &p("/A")).unwrap().1;
         assert!(e.flags.is_empty());
-        assert!(e.info_changed.iter().any(|t| t == FieldKey::Kind.as_str()));
+        assert!(e.info_changed().any(|t| t == FieldKey::Kind.as_str()));
     }
 
     /// A root-metadata edit that also materializes the pseudo-root spec still
@@ -751,7 +951,7 @@ mod tests {
             c.set_field(&Path::abs_root(), FieldKey::DefaultPrim.as_str(), Value::token("World"));
         });
         let e = &cl.iter().find(|(pp, _)| pp.is_abs_root()).unwrap().1;
-        assert!(e.info_changed.iter().any(|t| t == FieldKey::DefaultPrim.as_str()));
+        assert!(e.info_changed().any(|t| t == FieldKey::DefaultPrim.as_str()));
     }
 
     /// Re-defining an existing `def` with the same type, through the real

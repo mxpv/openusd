@@ -9112,7 +9112,7 @@ fn listener_info_only() -> Result<()> {
         stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
             info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
             resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-            if oc.changed_fields(&size).iter().any(|t| t.as_str() == "default") {
+            if oc.changed_fields(&size).any(|t| t.as_str() == "default") {
                 has_default.set(true);
             }
         })
@@ -9151,7 +9151,7 @@ fn listener_info_under_variant_target() -> Result<()> {
             info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
             // `changed_fields` takes the stage-namespace path from
             // `changed_info_only` and finds the field under the layer key.
-            if oc.changed_fields(&size).iter().any(|t| t.as_str() == "default") {
+            if oc.changed_fields(&size).any(|t| t.as_str() == "default") {
                 has_default.set(true);
             }
         })

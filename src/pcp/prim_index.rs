@@ -460,8 +460,9 @@ impl PrimIndex {
                         offset: arc_offset.concatenate(&sub),
                     });
                     if !authors_clips {
-                        authors_clips = data.has_field(&node.path, FieldKey::Clips.as_str())
-                            || data.has_field(&node.path, FieldKey::ClipSets.as_str());
+                        authors_clips = super::clip::CLIP_FIELDS
+                            .iter()
+                            .any(|key| data.has_field(&node.path, key.as_str()));
                     }
                 }
             }

@@ -69,6 +69,27 @@ pub(crate) mod keys {
     pub const TEMPLATE_ACTIVE_OFFSET: &str = "templateActiveOffset";
 }
 
+/// The fields whose presence makes a prim author value-clip metadata.
+///
+/// Read both by the cached answer
+/// ([`PrimIndex::authors_clips`](super::PrimIndex::authors_clips)) and by the
+/// change classifier that invalidates it, so the two cannot name different
+/// fields.
+pub(crate) const CLIP_FIELDS: [FieldKey; 2] = [FieldKey::Clips, FieldKey::ClipSets];
+
+/// Whether `field` is one of [`CLIP_FIELDS`].
+///
+/// Authoring or removing one forces a prim-index rebuild, where changing its
+/// value in place does not: the cached answer records only that the metadata
+/// exists, and what it holds is composed live on each clip query. C++
+/// `Pcp_EntryRequiresPrimIndexChange` draws the same line for `clips` by testing
+/// whether either side of the edit is empty; `clipSets` joins it here because
+/// the cached answer reads both, so that field appearing on a prim with no
+/// `clips` still flips it.
+pub(crate) fn is_clip_field(field: &str) -> bool {
+    CLIP_FIELDS.iter().any(|key| key.as_str() == field)
+}
+
 /// A single explicit clip set: a named group of value clips with sequencing
 /// and timing metadata (spec 12.3.4.1).
 #[derive(Debug, Clone, PartialEq)]
