@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{self, Path, Value};
+use crate::sdf::{self, LayerOffset, Path, Value};
 
 use super::compose_site::evaluate_expression;
 use super::layer_stack::LayerStackId;
@@ -17,6 +17,21 @@ use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, SpecSite};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
 use super::{CompositionError, ExpressionContext, LayerGraph, LayerId, VariantFallbackMap};
+
+/// How much of the composition graph a value-resolution walk visits
+/// ([`PrimIndex::live_sites`]) — C++ `Usd_Resolver`'s `skipEmptyNodes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SiteScope {
+    /// Only the layers authoring a spec for this prim. Every opinion a walk can
+    /// answer from lives at one of these, so this is what a walk that reads
+    /// nothing but authored opinions visits.
+    SpecStack,
+    /// Every layer of every contributing node. A value-clip set is introduced by
+    /// `clips` metadata on an *ancestor* prim, so it can apply at a node whose
+    /// layers author no spec for this prim at all — a walk that consults clips
+    /// has to reach those sites too.
+    EveryLayer,
+}
 
 /// Composition index for a single prim.
 ///
@@ -37,6 +52,10 @@ pub struct PrimIndex {
     /// artifact, kept off [`PrimIndexGraph`] so the indexer's structural seed
     /// clone does not carry it.
     spec_stack: Vec<SpecSite>,
+    /// Whether any contributing node authors `clips` or `clipSets` at its own
+    /// path. Computed alongside [`spec_stack`](Self::spec_stack), whose walk
+    /// visits exactly the sites a clip opinion can live at.
+    authors_clips: bool,
     /// Arena handles sorted by node path: the spec-tier refresh's site index.
     /// Every node sitting at a given path forms one contiguous run, found by
     /// binary search in [`nodes_at`](Self::nodes_at), so
@@ -246,6 +265,39 @@ impl PrimIndex {
         })
     }
 
+    /// Iterates the `(node, layer, offset)` sites value resolution walks, in
+    /// strength order, at the breadth `scope` asks for.
+    ///
+    /// [`EveryLayer`](SiteScope::EveryLayer) yields a superset of
+    /// [`SpecStack`](SiteScope::SpecStack) in the same relative order, adding
+    /// the layers that author no spec for this prim.
+    ///
+    /// The two read different sources for that: `SpecStack` replays the
+    /// memoized [`spec_stack`](Self::spec_stack) while `EveryLayer` walks the
+    /// nodes live, so they agree only while the memo is current — which
+    /// [`rescan_specs`](super::IndexCache::rescan_specs) keeps it after a
+    /// spec-tier edit.
+    pub(crate) fn live_sites<'a>(
+        &'a self,
+        graph: &'a LayerGraph,
+        scope: SiteScope,
+    ) -> impl Iterator<Item = (&'a Node, LayerId, LayerOffset)> {
+        let specs = (scope == SiteScope::SpecStack).then(|| {
+            self.live_spec_sites()
+                .map(|(site, node)| (node, site.layer, site.offset))
+        });
+        let every = (scope == SiteScope::EveryLayer).then(|| {
+            self.nodes().flat_map(|node| {
+                let arc_offset = node.map_to_root.time_offset();
+                graph
+                    .layer_stack(node.layer_stack)
+                    .iter()
+                    .map(move |&(layer, sub)| (node, layer, arc_offset.concatenate(&sub)))
+            })
+        });
+        specs.into_iter().flatten().chain(every.into_iter().flatten())
+    }
+
     /// Iterates every node in strength order, unfiltered — the shared projection
     /// the filtered public node iterators build on.
     fn ordered_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone {
@@ -384,13 +436,15 @@ impl PrimIndex {
     ///
     /// TODO(perf): re-reads `has_spec` per member, duplicating the indexer's own
     /// `has_specs` pass — the build could emit the spec-authoring layers it
-    /// already scans. It also rebuilds the whole stack on each call; the spec-tier
+    /// already scans, and the two clip probes below with them, which every stage
+    /// pays whether or not it uses value clips. It also rebuilds the whole stack on each call; the spec-tier
     /// refresh ([`IndexCache::rescan_specs`](super::index_cache::IndexCache::rescan_specs))
     /// calls it once per affected index per change round, so splicing in only the
     /// entries of the nodes a changed site touches ([`nodes_at`](Self::nodes_at))
     /// would replace the full rebuild.
     pub(crate) fn finalize_spec_stack(&mut self, graph: &LayerGraph) {
         let mut stack = Vec::new();
+        let mut authors_clips = false;
         for &id in &self.graph.strength_order {
             let node = &self.graph.nodes[id.idx()];
             if !node.has_specs {
@@ -398,16 +452,32 @@ impl PrimIndex {
             }
             let arc_offset = node.map_to_root.time_offset();
             for &(layer, sub) in graph.layer_stack(node.layer_stack).iter() {
-                if graph.layer(layer).data().has_spec(&node.path) {
+                let data = graph.layer(layer).data();
+                if data.has_spec(&node.path) {
                     stack.push(SpecSite {
                         node: id,
                         layer,
                         offset: arc_offset.concatenate(&sub),
                     });
+                    if !authors_clips {
+                        authors_clips = data.has_field(&node.path, FieldKey::Clips.as_str())
+                            || data.has_field(&node.path, FieldKey::ClipSets.as_str());
+                    }
                 }
             }
         }
         self.spec_stack = stack;
+        self.authors_clips = authors_clips;
+    }
+
+    /// Whether this prim authors clip metadata, so a value-clip set can be
+    /// anchored here.
+    ///
+    /// Only the local half of the question value resolution asks — a set on an
+    /// ancestor sources this prim's attributes too, which
+    /// [`CompositionContext::may_have_clips`] answers.
+    pub(crate) fn authors_clips(&self) -> bool {
+        self.authors_clips
     }
 
     /// Builds [`path_order`](Self::path_order) from the finalized arena: arena
@@ -711,6 +781,7 @@ impl PrimIndex {
         let mut index = PrimIndex {
             graph: graph.unwrap_or_default(),
             spec_stack: Vec::new(),
+            authors_clips: false,
             path_order: Vec::new(),
         };
         // Build the memoized spec stack and the path-order site index here, the
@@ -782,6 +853,7 @@ impl PrimIndex {
             selections: merged_selections,
             ancestor_arcs,
             variant_fallbacks: parent_ctx.variant_fallbacks.clone(),
+            may_have_clips: parent_ctx.may_have_clips || self.authors_clips,
             // Inherited from the parent; the cache additionally sets this when
             // the current prim itself resolves as an instance.
             instance_depth: parent_ctx.instance_depth,
@@ -836,6 +908,16 @@ pub(crate) struct CompositionContext {
     /// Variant fallback selections for sets without authored opinions.
     /// Propagated unchanged from the stage configuration.
     pub variant_fallbacks: VariantFallbackMap,
+    /// Whether this prim or an ancestor authors clip metadata, so value
+    /// resolution has to consult value clips here (C++
+    /// `Usd_PrimData::MayHaveOpinionsInClips`, which likewise combines a prim's
+    /// own clips with its parent's answer).
+    ///
+    /// Accumulated down the namespace, so the context composed *at* a prim is
+    /// already the answer *for* it. False lets a read skip the clip tier
+    /// outright, along with the wider site walk ([`SiteScope::EveryLayer`])
+    /// consulting it needs.
+    pub may_have_clips: bool,
     /// Namespace depth of the nearest enclosing instance prim (spec 11.3.3),
     /// or `None` when this prim is not inside an instance. Set by the cache once
     /// an ancestor resolves as an instance and inherited by every deeper prim; a
@@ -853,6 +935,7 @@ impl Default for CompositionContext {
             selections: HashMap::new(),
             ancestor_arcs: Vec::new(),
             variant_fallbacks: VariantFallbackMap::new(),
+            may_have_clips: false,
             instance_depth: None,
         }
     }

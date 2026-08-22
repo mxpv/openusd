@@ -140,7 +140,7 @@ impl Shader {
     /// family needs no opinion, while one that did has an opinion to correct —
     /// the test C++ applies when it writes the attribute sparsely.
     pub fn set_shader_id(&self, id: impl Into<tf::Token>) -> Result<usd::Attribute> {
-        if self.implementation_source_attr().value_source()? == usd::ValueSource::Authored {
+        if self.implementation_source_attr().resolve_info()?.has_authored_value() {
             self.create_implementation_source_attr()?
                 .set(ImplementationSource::Id)?;
         }

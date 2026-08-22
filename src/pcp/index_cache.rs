@@ -24,17 +24,21 @@ use super::clip_manifest;
 use super::dependencies::Dependencies;
 use super::index_store::IndexStore;
 use super::instancing::PrototypeRegistry;
-use super::layer_graph::LayerGraph;
+use super::layer_graph::{LayerGraph, LayerStackIdentifier};
 use super::layer_stack::StackMarks;
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
 use super::prim_graph::ArcType;
 use super::prim_index::{
-    AncestorArc, CompositionContext, Demand, PrimIndex, PropertyTargetKind, TargetMemo, TargetMemoKey,
+    AncestorArc, CompositionContext, Demand, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo, TargetMemoKey,
 };
 use super::prim_indexer::ExprVarDeps;
 use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
+use super::value_resolve::{
+    self, ClipProbe, OpinionResolver, OpinionSite, Resolution, ResolveMode, ResolveNode, ResolveSourceKind,
+    SampleField, SelectedSite, Step, ValueState, Withheld,
+};
 use super::{
     CompositionError, IncompleteClipManifest, LayerId, MapFunction, QueryError, StackIdentity, VariantFallbackMap,
 };
@@ -187,11 +191,6 @@ pub struct IndexCache {
     revision: u64,
 }
 
-enum FieldValue {
-    NotAuthored,
-    Authored(Option<Value>),
-}
-
 /// The resolved source of an attribute's value at a time code, the cacheable
 /// half of [`IndexCache::value_at`]. A cached view
 /// ([`Stage::attribute_query`](crate::usd::Stage::attribute_query)) resolves
@@ -247,6 +246,572 @@ pub(super) fn block_to_none(value: Value) -> Option<Value> {
     match value {
         Value::ValueBlock | Value::None => None,
         other => Some(other),
+    }
+}
+
+/// The property-kind rule a spec stack applies: the strongest spec's kind
+/// (attribute vs relationship) defines the property, and a weaker spec of the
+/// other kind is inconsistent (C++ `PcpErrorInconsistentPropertyType`) — it is
+/// dropped from the stack and reported.
+///
+/// Driven by both walks that build a property stack, so the rule is stated once.
+#[derive(Default)]
+struct DefiningKind {
+    defining: Option<(SpecType, String, Path)>,
+}
+
+impl DefiningKind {
+    /// Offers one spec to the rule. `None` admits it to the stack; `Some`
+    /// rejects it and carries the conflict to report.
+    fn admit(
+        &mut self,
+        spec_type: SpecType,
+        layer: &str,
+        path: &Path,
+        prop_path: &Path,
+        prim_path: &Path,
+    ) -> Option<CompositionError> {
+        match &self.defining {
+            None => {
+                self.defining = Some((spec_type, layer.to_string(), path.clone()));
+                None
+            }
+            Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
+                Some(CompositionError::InconsistentPropertyType {
+                    property: prop_path.clone(),
+                    defining_layer: def_layer.clone(),
+                    defining_path: def_path.clone(),
+                    defining_is_attribute: *def_type == SpecType::Attribute,
+                    conflicting_layer: layer.to_string(),
+                    conflicting_path: path.clone(),
+                    conflicting_is_attribute: spec_type == SpecType::Attribute,
+                    composing: prim_path.clone(),
+                })
+            }
+            Some(_) => None,
+        }
+    }
+}
+
+/// The clip tier of one value-resolution walk: the sets that can source the
+/// property, and the cache fields consulting them needs while the site walk
+/// holds the store.
+struct ClipTier<'a> {
+    /// The anchor prims carrying clip sets — the property's own prim and each
+    /// ancestor, nearest first, so a nearer set overrides one on an ancestor
+    /// (spec 12.3.4.5).
+    ///
+    /// Composed on the first site that consults clips rather than ahead of the
+    /// walk, so a read a stronger opinion answers raises none of the diagnostics
+    /// composing them would. Once that site is reached every clip-bearing
+    /// ancestor composes, since a nearer set overriding a further one is decided
+    /// per property rather than per anchor.
+    anchors: Option<Vec<(Path, Vec<ResolvedClipSet>)>>,
+    /// The `(anchor, set)` positions already offered to the resolver.
+    ///
+    /// One layer stack can reach the walk through several nodes — a variant
+    /// branch beside its own root, an arc grafted twice — and a set introduced
+    /// in that stack applies at each of them. A set is one source and answers
+    /// the same wherever it is reached, so it is consulted at the strongest site
+    /// it matches and not again.
+    offered: HashSet<(usize, usize)>,
+    store: &'a IndexStore,
+    cache: &'a mut ClipCache,
+    query_errors: &'a mut Vec<CompositionError>,
+}
+
+impl<'a> ClipTier<'a> {
+    fn new(store: &'a IndexStore, cache: &'a mut ClipCache, query_errors: &'a mut Vec<CompositionError>) -> Self {
+        Self {
+            anchors: None,
+            offered: HashSet::new(),
+            store,
+            cache,
+            query_errors,
+        }
+    }
+
+    /// Offers every clip set introduced at `site` to `resolver`, nearest anchor
+    /// first, until one answers.
+    fn visit<R: OpinionResolver>(
+        &mut self,
+        graph: &LayerGraph,
+        prim: &Path,
+        suffix: &str,
+        site: &OpinionSite<'_>,
+        resolver: &mut R,
+    ) -> Result<Step, QueryError> {
+        self.compose_anchors(graph, prim)?;
+        let Self {
+            anchors,
+            offered,
+            cache,
+            query_errors,
+            ..
+        } = self;
+        for (anchor_index, (anchor, sets)) in anchors.as_deref().unwrap_or_default().iter().enumerate() {
+            for (set_index, set) in sets.iter().enumerate() {
+                if !set.source.applies_at(site.node, site.layer) || !offered.insert((anchor_index, set_index)) {
+                    continue;
+                }
+                let step = {
+                    let mut probe = ClipProbe {
+                        cache,
+                        graph,
+                        set,
+                        query: ClipQuery {
+                            anchor,
+                            attr_prim: prim,
+                            suffix,
+                        },
+                    };
+                    resolver.on_clips(&mut probe, site)
+                };
+                push_new(query_errors, cache.take_errors());
+                if step?.stop() {
+                    return Ok(Step::Stop);
+                }
+            }
+        }
+        Ok(Step::Continue)
+    }
+
+    /// Composes the anchors on the first call, leaving them in place after.
+    ///
+    /// Only a prim that authors clip metadata can carry a set, and the presence
+    /// flag is monotone down the namespace, so an ancestor that reports none
+    /// ends the walk: nothing above it can carry one either.
+    fn compose_anchors(&mut self, graph: &LayerGraph, prim: &Path) -> Result<(), QueryError> {
+        if self.anchors.is_some() {
+            return Ok(());
+        }
+        let mut anchors = Vec::new();
+        for anchor in prim.ancestors_below_root() {
+            if !self.store.context_at(&anchor).is_some_and(|ctx| ctx.may_have_clips) {
+                break;
+            }
+            let index = self.store.cached(&anchor);
+            if !index.authors_clips() {
+                continue;
+            }
+            let mut errors = Vec::new();
+            let sets = index.resolve_clip_sets(graph, &mut errors)?;
+            push_new(self.query_errors, errors);
+            if !sets.is_empty() {
+                anchors.push((anchor, sets));
+            }
+        }
+        self.anchors = Some(anchors);
+        Ok(())
+    }
+}
+
+/// Appends the diagnostics a query produced to `held`, skipping any already
+/// there.
+///
+/// A value query answers through a value, not a diagnostic channel, so what it
+/// discovers lands in the cache's query errors to reach
+/// [`Stage::composition_errors`](crate::usd::Stage::composition_errors). The
+/// same failing opinion is re-derived on every read — a value-time asset
+/// expression is never cached — so the dedup is what keeps repeated reads from
+/// growing the list.
+fn push_new(held: &mut Vec<CompositionError>, produced: impl IntoIterator<Item = CompositionError>) {
+    for error in produced {
+        if !held.contains(&error) {
+            held.push(error);
+        }
+    }
+}
+
+/// Which source answered the shared walk. The tier that won is decided by the
+/// walk; extracting a `default`'s value is left to composed field resolution,
+/// which merges dictionaries and path expressions across weaker opinions.
+enum Winner {
+    /// Nothing authored survived.
+    None,
+    /// A `timeSamples` map won, already interpolated into stage time.
+    Samples {
+        value: Option<Value>,
+        site: Option<AssetSite>,
+    },
+    /// A `default` won at this site; its composed value is read separately,
+    /// starting there.
+    Default { site: SelectedSite },
+    /// A value-clip set owns the property.
+    Clips { value: Option<Value> },
+}
+
+/// Resolves an attribute's value at one time (the resolver behind
+/// [`IndexCache::value_at`]).
+struct ValueAtResolver<'a> {
+    graph: &'a LayerGraph,
+    time: f64,
+    interp: &'a dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    winner: Winner,
+}
+
+impl OpinionResolver for ValueAtResolver<'_> {
+    fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        let value = site.offset.sample_in_stage_time(samples, self.time, self.interp);
+        // Only an asset-valued result needs provenance, and building it copies
+        // two strings, so an ordinary read never asks for one.
+        let asset_site = value
+            .as_ref()
+            .is_some_and(Value::is_asset_valued)
+            .then(|| site.asset_site(self.graph));
+        self.winner = Winner::Samples {
+            value,
+            site: asset_site,
+        };
+        Step::Stop
+    }
+
+    fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
+        self.winner = Winner::Default { site: site.select() };
+        Step::Stop
+    }
+
+    fn on_withheld(&mut self, kind: Withheld, site: &OpinionSite<'_>) -> Step {
+        if !matches!(kind, Withheld::DefaultBlock) {
+            // Only samples were withheld: resolution carries on to this site's
+            // own `default` and then to weaker sources.
+            return Step::Continue;
+        }
+        // The block is a `default` opinion like any other, and composing from it
+        // is what turns it back into "no value".
+        self.winner = Winner::Default { site: site.select() };
+        Step::Stop
+    }
+
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        let answer = probe.answer_at(self.time, self.interp)?;
+        if matches!(answer.value_state(), ValueState::Absent) {
+            return Ok(Step::Continue);
+        }
+        // A set that owns the property answers even where it supplies no value,
+        // so nothing weaker contributes.
+        self.winner = Winner::Clips {
+            value: answer.into_value(),
+        };
+        Ok(Step::Stop)
+    }
+}
+
+/// Resolves the cacheable value source for an attribute (the resolver behind
+/// [`IndexCache::resolve_value_source`]).
+struct SourceResolver<'a> {
+    graph: &'a LayerGraph,
+    source: Option<AttributeValueSource>,
+    /// The site a winning `default` was found at, whose composed value the
+    /// cached source holds. `None` when samples or clips won, or when nothing
+    /// was authored.
+    default_site: Option<SelectedSite>,
+}
+
+impl OpinionResolver for SourceResolver<'_> {
+    /// TODO(perf): the asset site copies two strings for every sampled
+    /// attribute, where the per-time read builds one only for a value that turns
+    /// out to hold asset paths. The samples are not yet interpolated here, so
+    /// the same guard does not apply; carrying the site's `layer` and stack id
+    /// instead and resolving them when a replayed value first needs them would
+    /// pay the copies only where they are read.
+    fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        self.source = Some(AttributeValueSource::TimeSamples {
+            samples: samples.clone(),
+            offset: site.offset,
+            site: site.asset_site(self.graph),
+        });
+        Step::Stop
+    }
+
+    /// A `default` answers through composed field resolution, so only the site
+    /// it won at is recorded; the value is composed from there below.
+    fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
+        self.default_site = Some(site.select());
+        Step::Stop
+    }
+
+    fn on_withheld(&mut self, kind: Withheld, site: &OpinionSite<'_>) -> Step {
+        match matches!(kind, Withheld::DefaultBlock) {
+            true => {
+                self.default_site = Some(site.select());
+                Step::Stop
+            }
+            false => Step::Continue,
+        }
+    }
+
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        // Participation alone decides: clip values are time-dependent, so the
+        // query replays them through `value_at` per time code.
+        match probe.introspection()? {
+            Some(_) => {
+                self.source = Some(AttributeValueSource::Clips);
+                Ok(Step::Stop)
+            }
+            None => Ok(Step::Continue),
+        }
+    }
+}
+
+/// Resolves an attribute's composed sample times and whether its winning source
+/// can vary over time (the resolver behind [`IndexCache::time_sample_times`] and
+/// [`IndexCache::time_sample_summary`]).
+struct SampleTimesResolver {
+    /// `None` until a source answers; the empty vector is a real answer for a
+    /// participating clip set with no discrete times.
+    times: Option<Vec<f64>>,
+    /// The winning source's sample map, retimed into stage time. Only filled
+    /// for [`Want::Map`], and only when a `timeSamples` opinion won: a clip set
+    /// answers with a schedule rather than a map (see
+    /// [`IndexCache::time_samples`]).
+    map: Option<sdf::TimeSampleMap>,
+    /// Whether the winning source is a clip set whose schedule alone can vary
+    /// the value.
+    clip_may_vary: bool,
+    /// How many samples the winning source holds, which the count-only
+    /// consumers read instead of `times`.
+    count: usize,
+    /// How much of the winning source the caller reads.
+    want: Want,
+}
+
+/// How much of the winning `timeSamples` source a sample query needs, so the
+/// walk retimes and clones only what is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// The sample count alone. An offset maps times one-for-one, so nothing has
+    /// to be retimed to answer it.
+    Count,
+    /// The retimed sample times.
+    Times,
+    /// The retimed sample map, values included.
+    Map,
+}
+
+impl OpinionResolver for SampleTimesResolver {
+    fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        // A map supplying no value is not a value source, so it contributes no
+        // times — the same judgement the value read and the resolve info make of
+        // it. It still answers, blocking weaker sources.
+        if !value_resolve::samples_supply_any_value(samples) {
+            self.times = Some(Vec::new());
+            return Step::Stop;
+        }
+        self.times = Some(match self.want {
+            Want::Count => Vec::new(),
+            Want::Times | Want::Map => samples.iter().map(|(t, _)| site.offset.apply(*t)).collect(),
+        });
+        if self.want == Want::Map {
+            let mut map = samples.clone();
+            site.offset.apply_to_samples(&mut map);
+            self.map = Some(map);
+        }
+        self.count = samples.len();
+        Step::Stop
+    }
+
+    /// A `default` is a constant: it answers, contributing no sample times.
+    fn on_default(&mut self, _value: &Value, _site: &OpinionSite<'_>) -> Step {
+        Step::Stop
+    }
+
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        // TODO(perf): the count-only consumers materialize every clip's stage
+        // times to read the length. `ClipSet::stage_sample_times` builds the
+        // vector; a count-only form over the same per-clip times would answer
+        // `num_time_samples` and `value_might_be_time_varying` without it.
+        match probe.introspection()? {
+            Some((times, may_vary)) => {
+                self.count = times.len();
+                self.times = Some(times);
+                self.clip_may_vary = may_vary;
+                Ok(Step::Stop)
+            }
+            None => Ok(Step::Continue),
+        }
+    }
+}
+
+/// Collects where value resolution found its answer (the resolver behind
+/// [`IndexCache::resolve_info`]).
+struct InfoResolver<'a> {
+    graph: &'a LayerGraph,
+    stage: &'a LayerStackIdentifier,
+    /// The stage time the query names, if any. A numeric query evaluates the
+    /// samples that answer *there*; without one the map is judged as a whole.
+    time: Option<f64>,
+    /// The stage's interpolation policy, so a numeric query decides which
+    /// samples answer exactly as the value read does.
+    interp: &'a dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    resolution: Resolution,
+}
+
+impl InfoResolver<'_> {
+    /// Records the source that answered and the site it answered at.
+    fn select(&mut self, kind: ResolveSourceKind, site: &OpinionSite<'_>) {
+        self.resolution.source = kind;
+        self.resolution.node = Some(ResolveNode::capture(self.graph, site.node, self.stage));
+    }
+}
+
+impl OpinionResolver for InfoResolver<'_> {
+    fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        self.resolution.authored = true;
+        // A map that supplies no value here is not a value source: the read
+        // falls through to the schema tier, and reporting `TimeSamples` would
+        // disagree with it. It still answers the walk, blocking weaker sources.
+        if !value_resolve::samples_supply_value(samples, site.offset, self.time, self.interp) {
+            self.resolution.value = ValueState::Blocked;
+            return Step::Stop;
+        }
+        self.select(ResolveSourceKind::TimeSamples, site);
+        self.resolution.value = ValueState::Present;
+        Step::Stop
+    }
+
+    fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
+        self.resolution.authored = true;
+        self.select(ResolveSourceKind::Default, site);
+        self.resolution.value = ValueState::Present;
+        Step::Stop
+    }
+
+    fn on_withheld(&mut self, kind: Withheld, _site: &OpinionSite<'_>) -> Step {
+        // A blocked `default` answers, withholding the value: resolution reverts
+        // to whatever follows the authored tiers. A blocked `timeSamples` field
+        // withholds samples alone, so the walk carries on and this site's own
+        // `default`, or a weaker opinion, may still answer. Either way the
+        // opinion is on record.
+        self.resolution.authored = true;
+        match kind {
+            Withheld::DefaultBlock => {
+                self.resolution.value = ValueState::Blocked;
+                Step::Stop
+            }
+            Withheld::TimeSamplesFieldBlock => Step::Continue,
+        }
+    }
+
+    /// The samples are authored even though a default-time walk resolves from
+    /// `default` alone, so the opinion is recorded without becoming the source.
+    fn on_unresolved_samples(&mut self, _site: &OpinionSite<'_>) {
+        self.resolution.authored = true;
+    }
+
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        // A set that sources the property does not necessarily supply a value:
+        // at a numeric time it may be inactive or blocked, and without one it
+        // may carry nothing for the property anywhere. Both forms decide that
+        // the way the value read does.
+        let state = match self.time {
+            Some(time) => probe.answer_at(time, self.interp)?.value_state(),
+            None => probe.answer_untimed()?,
+        };
+        if matches!(state, ValueState::Absent) {
+            return Ok(Step::Continue);
+        }
+        // The set answers here. It becomes the reported source only where it
+        // supplied a value: a clip that owns the property but blocks it there
+        // sends the read to the schema tier, and naming the clip would disagree
+        // with that — C++ reports the clip either way.
+        self.resolution.authored = true;
+        self.resolution.value = state;
+        if matches!(state, ValueState::Present) {
+            self.select(ResolveSourceKind::ValueClips, site);
+        }
+        Ok(Step::Stop)
+    }
+}
+
+/// Collects the spec sites contributing to a property, strongest first (the
+/// resolver behind [`IndexCache::property_stack`]).
+///
+/// Unlike the value resolvers this never stops the walk and never claims a
+/// site: every contributing spec is wanted, which is also why a site that
+/// authors a value does not suppress a clip at the same anchor.
+struct StackResolver<'a> {
+    graph: &'a LayerGraph,
+    prop_path: &'a Path,
+    prim_path: &'a Path,
+    /// The stage time the stack was asked for, when it named one. Value clips
+    /// contribute nothing at the default time, so only a numeric query lists
+    /// them.
+    time: Option<f64>,
+    sites: Vec<SpecSiteRecord>,
+    conflicts: Vec<CompositionError>,
+    defining: DefiningKind,
+}
+
+/// One spec contributing to a composed property or prim, resolved out of the
+/// graph's arena handles (C++ `SdfPropertySpecHandle` / `SdfPrimSpecHandle`
+/// paired with its cumulative layer offset).
+///
+/// The resolved counterpart of the internal [`SpecSite`](super::prim_graph::SpecSite),
+/// which holds handles only meaningful inside the owning graph. C++ splits the
+/// offset-bearing stack queries from the plain ones for compatibility; a site
+/// here always carries its offset, so there is one spelling to keep in step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpecSiteRecord {
+    /// Canonical identifier of the layer holding the spec.
+    pub layer: String,
+    /// The spec's path within that layer, which under a reference or variant
+    /// differs from the composed stage path.
+    pub path: Path,
+    /// The cumulative offset from the stage's root layer to this one, composing
+    /// the arc's offset with the layer's own sublayer offset.
+    pub offset: LayerOffset,
+}
+
+impl OpinionResolver for StackResolver<'_> {
+    fn on_site(&mut self, site: &OpinionSite<'_>) -> Step {
+        let Some(spec_type) = self.graph.layer(site.layer).data().spec_type(&site.query_path) else {
+            return Step::Continue;
+        };
+        let layer = self.graph.identifier(site.layer);
+        match self
+            .defining
+            .admit(spec_type, layer, &site.query_path, self.prop_path, self.prim_path)
+        {
+            None => self.sites.push(SpecSiteRecord {
+                layer: layer.to_string(),
+                path: site.query_path.clone(),
+                offset: site.offset,
+            }),
+            Some(conflict) => self.conflicts.push(conflict),
+        }
+        Step::Continue
+    }
+
+    /// Every contributing spec is wanted, so a withheld value neither answers
+    /// nor truncates the stack.
+    fn on_withheld(&mut self, _kind: Withheld, _site: &OpinionSite<'_>) -> Step {
+        Step::Continue
+    }
+
+    /// A site that authors a spec may also introduce a clip set, and the stack
+    /// wants both.
+    fn claims_sites(&self) -> bool {
+        false
+    }
+
+    /// A clip set that sources the property at the queried time contributes the
+    /// clip layer it sources it from, on top of whatever spec this site authors.
+    /// The offset is the site's own, since a set is only reached at the layer
+    /// that introduced it (C++ reports `sourceLayer`'s offset for the same
+    /// reason).
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        let Some(time) = self.time else {
+            return Ok(Step::Continue);
+        };
+        if let Some((layer, path)) = probe.spec_site_at(time)? {
+            self.sites.push(SpecSiteRecord {
+                layer,
+                path,
+                offset: site.offset,
+            });
+        }
+        Ok(Step::Continue)
     }
 }
 
@@ -406,20 +971,164 @@ impl IndexCache {
         errors
     }
 
-    /// Resolves an attribute's value at `time`, honoring value clips
-    /// (spec 12.3.4). Strength ordering:
+    /// Runs the shared value-resolution walk for the property at `prim +
+    /// suffix` under `mode`, handing `resolver` every opinion it reaches in
+    /// strength order until the resolver stops.
     ///
-    /// 1. Local (`Root` arc) `timeSamples` win over clips.
-    /// 2. Value clips anchored on the attribute's prim or an ancestor.
-    /// 3. The strongest remaining `timeSamples` (across reference/payload arcs).
-    /// 4. The strongest authored `default`.
+    /// The single transcription of value-resolution strength order: the
+    /// per-time read, the cached source, the sample times, the sample summary
+    /// and the property stack are all resolvers over this one walk, so they
+    /// cannot disagree about which source answers.
+    fn resolve_property<R: OpinionResolver>(
+        &mut self,
+        graph: &LayerGraph,
+        prim: &Path,
+        suffix: &str,
+        mode: ResolveMode,
+        resolver: &mut R,
+    ) -> Result<(), QueryError> {
+        // Clips are consulted only where they can exist: without the presence
+        // flag the walk visits the spec stack alone, and never composes an
+        // ancestor's `clips` metadata.
+        let consults_clips = mode.consults_clips() && self.may_have_clips(prim);
+        if consults_clips {
+            // The clip tier composes each anchor prim's clip sets out of that
+            // prim's index while the site walk holds the store, so the indices
+            // are made ready first. Composing the sets stays inside the walk,
+            // which also decides how far up the chain it needs to look.
+            for anchor in prim.ancestors_below_root() {
+                self.ensure_index(graph, &anchor)?;
+                if !self.may_have_clips(&anchor) {
+                    break;
+                }
+            }
+        }
+        let Self {
+            store,
+            clip_cache,
+            query_errors,
+            ..
+        } = self;
+        let mut clips = ClipTier::new(store, clip_cache, query_errors);
+        let scope = match consults_clips {
+            true => SiteScope::EveryLayer,
+            false => SiteScope::SpecStack,
+        };
+        let index = store.cached(prim);
+        // Whether a `timeSamples` field block has withheld samples from every
+        // weaker site (a `ValueBlock` blocks weaker opinions for any field).
+        let mut samples_blocked = false;
+
+        // TODO(perf): the query path is rebuilt per site though it depends only
+        // on the node, and under `EveryLayer` it is built even for the layers the
+        // spec gate below rejects. `live_sites` is node-major in both scopes, so
+        // yielding a node with its layers would build it once per node.
+        for (node, layer, offset) in index.live_sites(graph, scope) {
+            let site = OpinionSite {
+                node,
+                layer,
+                offset,
+                query_path: PrimIndex::query_path(node, Some(suffix)).into_owned(),
+            };
+
+            if resolver.on_site(&site).stop() {
+                return Ok(());
+            }
+            // Whether this site authored a value opinion. A site supplies one
+            // value, so a resolver that claims what it finds does not also read
+            // a clip set introduced here (C++'s `foundOpinion`).
+            let mut found_opinion = false;
+            let data = graph.layer(layer).data();
+            // The wider walk reaches layers that author no spec for this prim,
+            // so that a clip introduced there is still consulted; one lookup
+            // rules the field probes out at those.
+            if node.has_specs() && data.has_spec(&node.path) {
+                if !samples_blocked
+                    && let Some(value) = data.try_field(&site.query_path, FieldKey::TimeSamples.as_str())?
+                {
+                    // What the field holds decides whether there is an opinion
+                    // here at all; the mode then decides what to do with it.
+                    let field = SampleField::classify(&value);
+                    found_opinion = matches!(field, SampleField::Map(_));
+                    // A block withholds samples from every weaker site whatever
+                    // the query asked for, so the flag only ever latches on.
+                    samples_blocked |= matches!(field, SampleField::Blocked);
+                    let step = match (field, mode.visits_time_samples()) {
+                        (SampleField::Unusable, _) => Step::Continue,
+                        // A default-time walk resolves from `default` alone, so
+                        // the opinion is only reported as the authored one it is;
+                        // this site's `default` is still probed below.
+                        (_, false) => {
+                            resolver.on_unresolved_samples(&site);
+                            Step::Continue
+                        }
+                        (SampleField::Map(samples), true) => resolver.on_time_samples(samples, &site),
+                        (SampleField::Blocked, true) => resolver.on_withheld(Withheld::TimeSamplesFieldBlock, &site),
+                    };
+                    if step.stop() {
+                        return Ok(());
+                    }
+                }
+                if let Some(value) = data.try_field(&site.query_path, FieldKey::Default.as_str())? {
+                    found_opinion = true;
+                    let step = match &*value {
+                        Value::ValueBlock | Value::None => resolver.on_withheld(Withheld::DefaultBlock, &site),
+                        other => resolver.on_default(other, &site),
+                    };
+                    if step.stop() {
+                        return Ok(());
+                    }
+                }
+            }
+            if consults_clips
+                && !(found_opinion && resolver.claims_sites())
+                && clips.visit(graph, prim, suffix, &site, resolver)?.stop()
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolves where an attribute's value comes from, without producing the
+    /// value (C++ `UsdStage::_GetResolveInfo`). `mode` selects the walk:
+    /// [`Proximal`](ResolveMode::Proximal) reports the source that would answer
+    /// without naming a time, while a timed mode reports the one that answers
+    /// there.
+    pub(crate) fn resolve_info(
+        &mut self,
+        graph: &LayerGraph,
+        stage: &LayerStackIdentifier,
+        attr_path: &Path,
+        mode: ResolveMode,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Resolution, QueryError> {
+        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
+            // Nothing authored, nothing blocked: what a prim the population mask
+            // excludes resolves to, so the masked path needs no special case.
+            return Ok(Resolution::default());
+        };
+        let mut resolver = InfoResolver {
+            graph,
+            stage,
+            time: match mode {
+                ResolveMode::Numeric(time) => Some(time),
+                ResolveMode::Proximal | ResolveMode::Default => None,
+            },
+            interp,
+            resolution: Resolution::default(),
+        };
+        self.resolve_property(graph, &prim, &suffix, mode, &mut resolver)?;
+        Ok(resolver.resolution)
+    }
+
+    /// Resolves an attribute's value at `time`, honoring value clips
+    /// (spec 12.3.4). Runs [`Self::resolve_property`], so the source it answers
+    /// from is the one every other value query reports.
     ///
     /// `interp` applies the stage's interpolation policy to a sample map at a
     /// given time; it is supplied by the caller so this layer stays free of any
     /// interpolation policy.
-    ///
-    /// [`Self::resolve_value_source`] mirrors this strength order to cache the
-    /// winning source for replay; keep the two in sync when the order changes.
     pub(crate) fn value_at(
         &mut self,
         graph: &LayerGraph,
@@ -430,53 +1139,26 @@ impl IndexCache {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
             return Ok(None);
         };
-        let local_layers = graph.local_layers();
-
-        // 1) Local time samples take precedence over clip data.
-        if let Some((value, site)) =
-            self.cached(&prim)
-                .resolve_value_at(graph, Some(&suffix), Some(&local_layers), time, interp)?
-        {
-            return Ok(self.resolve_asset_values(graph, value, site.as_ref()));
+        let mut resolver = ValueAtResolver {
+            graph,
+            time,
+            interp,
+            winner: Winner::None,
+        };
+        self.resolve_property(graph, &prim, &suffix, ResolveMode::Numeric(time), &mut resolver)?;
+        match resolver.winner {
+            Winner::None => Ok(None),
+            Winner::Samples { value, site } => Ok(self.resolve_asset_values(graph, value, site.as_ref())),
+            Winner::Clips { value } => Ok(value),
+            Winner::Default { site } => self.composed_default(graph, &prim, &suffix, &site),
         }
-
-        // 2) Local defaults also take precedence over clip data.
-        if let FieldValue::Authored(value) =
-            self.resolve_local_field_value(graph, &prim, &suffix, FieldKey::Default.as_str(), &local_layers)?
-        {
-            return Ok(self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), value));
-        }
-
-        // 3) Value clips, anchored on this prim or an ancestor. A clip set that
-        //    owns the attribute resolves it authoritatively: an authored value
-        //    block stops fall-through to weaker sources but presents as `None`,
-        //    matching the local-default handling above and the default below.
-        if let Some(value) = self.resolve_clip_value(graph, &prim, &suffix, time, interp)? {
-            return Ok(block_to_none(value));
-        }
-
-        // 4) Remaining time samples (reference/payload arcs), retimed.
-        if let Some((value, site)) = self
-            .cached(&prim)
-            .resolve_value_at(graph, Some(&suffix), None, time, interp)?
-        {
-            return Ok(self.resolve_asset_values(graph, value, site.as_ref()));
-        }
-
-        // 5) Fall back to the strongest authored default.
-        let default = self
-            .cached(&prim)
-            .resolve_field(FieldKey::Default.as_str(), graph, Some(&suffix))?;
-        let default = self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), default);
-        Ok(default.and_then(block_to_none))
     }
 
     /// Resolves the cacheable value source for an attribute (the source half of
     /// [`Self::value_at`]), so a [`Stage::attribute_query`] can replay it across
-    /// time codes. Walks the same strength order as `value_at`, stopping at the
-    /// first authoritative source. When value clips claim the attribute the
-    /// source is [`AttributeValueSource::Clips`]: the query then falls back to
-    /// `value_at` per call, since clip resolution is time-dependent.
+    /// time codes. When value clips claim the attribute the source is
+    /// [`AttributeValueSource::Clips`]: the query then falls back to `value_at`
+    /// per call, since clip resolution is time-dependent.
     ///
     /// [`Stage::attribute_query`]: crate::usd::Stage::attribute_query
     pub(crate) fn resolve_value_source(
@@ -487,99 +1169,83 @@ impl IndexCache {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
             return Ok(AttributeValueSource::Static(None));
         };
-        let local_layers = graph.local_layers();
-
-        // 1) Local time samples take precedence over clip data.
-        if let Some((samples, offset, site)) =
-            self.cached(&prim)
-                .resolve_time_samples_with_offset(graph, Some(&suffix), Some(&local_layers))?
-        {
-            return Ok(AttributeValueSource::TimeSamples { samples, offset, site });
+        let mut resolver = SourceResolver {
+            graph,
+            source: None,
+            default_site: None,
+        };
+        self.resolve_property(graph, &prim, &suffix, ResolveMode::Proximal, &mut resolver)?;
+        if let Some(source) = resolver.source {
+            return Ok(source);
         }
+        // A winning `default` composes from the site the walk selected; with no
+        // site nothing was authored, which is the same static `None`.
+        let Some(site) = resolver.default_site else {
+            return Ok(AttributeValueSource::Static(None));
+        };
+        Ok(AttributeValueSource::Static(
+            self.composed_default(graph, &prim, &suffix, &site)?,
+        ))
+    }
 
-        // 2) Local defaults also take precedence over clip data.
-        if let FieldValue::Authored(value) =
-            self.resolve_local_field_value(graph, &prim, &suffix, FieldKey::Default.as_str(), &local_layers)?
-        {
-            let value = self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), value);
-            return Ok(AttributeValueSource::Static(value));
-        }
-
-        // 3) Value clips, anchored on this prim or an ancestor, resolve
-        //    authoritatively but per-time; defer them to `value_at`. The gate is
-        //    clip participation (`clip_sample_times` returns `Some` exactly when
-        //    a set sources the attribute), so a clip-bearing prim's non-clip
-        //    attributes fall through to the cached arc / default tiers below.
-        if self.clip_sample_times(graph, &prim, &suffix)?.is_some() {
-            return Ok(AttributeValueSource::Clips);
-        }
-
-        // 4) Remaining time samples (reference/payload arcs).
-        if let Some((samples, offset, site)) =
-            self.cached(&prim)
-                .resolve_time_samples_with_offset(graph, Some(&suffix), None)?
-        {
-            return Ok(AttributeValueSource::TimeSamples { samples, offset, site });
-        }
-
-        // 5) Fall back to the strongest authored default.
-        let default = self
-            .cached(&prim)
-            .resolve_field(FieldKey::Default.as_str(), graph, Some(&suffix))?;
-        let default = self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), default);
-        Ok(AttributeValueSource::Static(default.and_then(block_to_none)))
+    /// The composed `default` for a property whose winning site the shared walk
+    /// selected.
+    ///
+    /// A `default` composes across weaker opinions (dictionaries merge, path
+    /// expressions substitute), so the value comes from composed field
+    /// resolution rather than from the winning site alone — begun at that site,
+    /// which also anchors any `asset` in the result.
+    fn composed_default(
+        &mut self,
+        graph: &LayerGraph,
+        prim: &Path,
+        suffix: &str,
+        site: &SelectedSite,
+    ) -> Result<Option<Value>, QueryError> {
+        let value = self
+            .cached(prim)
+            .resolve_strongest(FieldKey::Default.as_str(), graph, Some(suffix), Some(site))?;
+        Ok(self.resolve_asset_at(graph, value, site).and_then(block_to_none))
     }
 
     /// Resolves an attribute's composed sample times, retimed to stage time and
-    /// including value-clip contributions (the introspection counterpart of
-    /// [`Self::value_at`], spec 12.3.4). `None` when no source has samples or the
-    /// prim is masked out.
+    /// including value-clip contributions (spec 12.3.4). `None` when no source
+    /// has samples or the prim is masked out.
     ///
-    /// This MUST report the times of whichever source [`Self::value_at`] would
-    /// resolve the value from, so it walks the same precedence: local
-    /// `timeSamples`, then a local `default` (a constant — no sample times),
-    /// then clips, then arc `timeSamples`. Keep the tiers here in lockstep with
-    /// `value_at`; the `clip_*` / `has_local_default` checks mirror its branches
-    /// 1-4, and the consistency tests in `tests/stage.rs` pin the agreement.
+    /// Reports the times of whichever source [`Self::value_at`] resolves the
+    /// value from, because both run [`Self::resolve_property`]. A winning
+    /// `default` is a constant, so it contributes none.
     pub(crate) fn time_sample_times(
         &mut self,
         graph: &LayerGraph,
         attr_path: &Path,
     ) -> Result<Option<Vec<f64>>, QueryError> {
-        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
-            return Ok(None);
-        };
-        let local_layers = graph.local_layers();
-        if let Some(times) = self
-            .cached(&prim)
-            .resolve_time_sample_times(graph, Some(&suffix), Some(&local_layers))?
-        {
-            return Ok(Some(times));
-        }
-        // A local `default` opinion resolves to a constant value that shadows
-        // clips and arc time samples (`value_at` branch 2), so the attribute has
-        // no sample times.
-        if self.has_local_default(graph, &prim, &suffix, &local_layers)? {
-            return Ok(None);
-        }
-        // Value clips own the attribute when a set participates, reporting every
-        // active-window boundary so a held window's switch point agrees with
-        // where `value_at` changes. The participation rule — the set's manifest,
-        // authored or synthesized, declares the attribute — is the same one
-        // `clip_value_at` applies per-time, but computed independently there;
-        // the two must stay in agreement, and the consistency tests in
-        // `tests/stage.rs` pin it.
-        if let Some(times) = self.clip_sample_times(graph, &prim, &suffix)? {
-            return Ok(Some(times));
-        }
-        self.cached(&prim).resolve_time_sample_times(graph, Some(&suffix), None)
+        Ok(self.sample_times(graph, attr_path, Want::Times)?.times)
+    }
+
+    /// Resolves an attribute's composed `timeSamples` map, retimed to stage
+    /// time. `None` when the source that answers is not a `timeSamples`
+    /// opinion.
+    ///
+    /// Reports the map of whichever source [`Self::value_at`] resolves the value
+    /// from, because both run [`Self::resolve_property`]: a stronger `default`
+    /// hides a weaker layer's samples here exactly as it does in the read.
+    ///
+    /// A winning value-clip set answers with a schedule rather than a map, so
+    /// this reports `None` for one; its times reach
+    /// [`Self::time_sample_times`], and its values are read per time code
+    /// through [`Self::value_at`].
+    pub(crate) fn time_samples(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<Option<sdf::TimeSampleMap>, QueryError> {
+        Ok(self.sample_times(graph, attr_path, Want::Map)?.map)
     }
 
     /// Resolves the number of composed sample times for an attribute, including
-    /// value-clip contributions. Mirrors [`Self::time_sample_times`]'s source
-    /// order; keeps the count-only fast path for the common `timeSamples` case
-    /// and only materializes the time list when value clips own the attribute.
-    /// Zero when no source has samples or the prim is masked out.
+    /// value-clip contributions, without retiming the times themselves. Zero
+    /// when no source has samples or the prim is masked out.
     pub(crate) fn num_time_samples(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<usize, QueryError> {
         Ok(self.time_sample_summary(graph, attr_path)?.0)
     }
@@ -588,9 +1254,7 @@ impl IndexCache {
     /// [`Attribute::value_might_be_time_varying`]. True when the winning value
     /// source has more than one composed sample, or when that source is a value-
     /// clip set whose schedule alone can vary the value
-    /// ([`ClipSet::may_be_time_varying`]). Resolving the source first keeps a
-    /// constant local `default` / `timeSamples` from being reported as
-    /// time-varying merely because it shadows a multi-clip set.
+    /// ([`ClipSet::may_be_time_varying`]).
     ///
     /// [`Attribute::value_might_be_time_varying`]: crate::usd::Attribute::value_might_be_time_varying
     pub(crate) fn value_might_be_time_varying(
@@ -603,173 +1267,36 @@ impl IndexCache {
     }
 
     /// The composed sample-time count for an attribute plus, when the winning
-    /// source is a value-clip set, whether that set's schedule can vary the value
-    /// ([`ClipSet::may_be_time_varying`]). Walks [`Self::value_at`]'s source
-    /// precedence in one pass — local `timeSamples`, local `default` (constant),
-    /// clips, then arc `timeSamples` — so [`Self::num_time_samples`] and
-    /// [`Self::value_might_be_time_varying`] share a single resolution. `(0,
-    /// false)` when no source has samples or the prim is masked out.
+    /// source is a value-clip set, whether that set's schedule can vary the
+    /// value ([`ClipSet::may_be_time_varying`]). Shared by
+    /// [`Self::num_time_samples`] and [`Self::value_might_be_time_varying`].
+    /// `(0, false)` when no source has samples or the prim is masked out.
     fn time_sample_summary(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<(usize, bool), QueryError> {
+        let resolved = self.sample_times(graph, attr_path, Want::Count)?;
+        Ok((resolved.count, resolved.clip_may_vary))
+    }
+
+    /// The composed sample times of whichever source [`Self::value_at`] would
+    /// resolve from, plus whether that source is a clip set whose schedule alone
+    /// can vary the value.
+    fn sample_times(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+        want: Want,
+    ) -> Result<SampleTimesResolver, QueryError> {
+        let mut resolver = SampleTimesResolver {
+            times: None,
+            map: None,
+            clip_may_vary: false,
+            count: 0,
+            want,
+        };
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
-            return Ok((0, false));
+            return Ok(resolver);
         };
-        let local_layers = graph.local_layers();
-        if let Some(count) = self
-            .cached(&prim)
-            .resolve_time_sample_count(graph, Some(&suffix), Some(&local_layers))?
-        {
-            return Ok((count, false));
-        }
-        // A local `default` shadows clips and arc samples (see
-        // [`Self::time_sample_times`]), so the attribute has no time samples.
-        if self.has_local_default(graph, &prim, &suffix, &local_layers)? {
-            return Ok((0, false));
-        }
-        if let Some((times, may_vary)) = self.clip_introspection(graph, &prim, &suffix)? {
-            return Ok((times.len(), may_vary));
-        }
-        let arc = self
-            .cached(&prim)
-            .resolve_time_sample_count(graph, Some(&suffix), None)?
-            .unwrap_or(0);
-        Ok((arc, false))
-    }
-
-    /// Whether a `default` opinion is authored for the attribute in the root
-    /// layer stack. Such a local default resolves to a constant value that
-    /// shadows weaker time-varying sources (clips, arc `timeSamples`), matching
-    /// [`Self::value_at`]'s branch 2 — so the attribute reports no sample times.
-    fn has_local_default(
-        &self,
-        graph: &LayerGraph,
-        prim: &Path,
-        suffix: &str,
-        local_layers: &HashSet<LayerId>,
-    ) -> Result<bool, QueryError> {
-        Ok(matches!(
-            self.resolve_local_field_value(graph, prim, suffix, FieldKey::Default.as_str(), local_layers)?,
-            FieldValue::Authored(_)
-        ))
-    }
-
-    /// Resolves a clip value for `attr_path` at `time` by searching the
-    /// attribute's prim and then its ancestors, nearest first — a nearer clip
-    /// set overrides one on an ancestor (spec 12.3.4.5).
-    fn resolve_clip_value(
-        &mut self,
-        graph: &LayerGraph,
-        attr_prim: &Path,
-        suffix: &str,
-        time: f64,
-        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>, QueryError> {
-        let mut anchor_prim = attr_prim.clone();
-        loop {
-            if let Some(value) = self.clip_value_at(graph, &anchor_prim, attr_prim, suffix, time, interp)? {
-                return Ok(Some(value));
-            }
-            match anchor_prim.parent() {
-                Some(parent) if !parent.is_abs_root() => anchor_prim = parent,
-                _ => return Ok(None),
-            }
-        }
-    }
-
-    /// Looks for a clip set anchored on `anchor_prim` that provides a value for
-    /// `attr_prim + suffix` at `time`, delegating the per-set resolution to the
-    /// [`ClipCache`].
-    fn clip_value_at(
-        &mut self,
-        graph: &LayerGraph,
-        anchor_prim: &Path,
-        attr_prim: &Path,
-        suffix: &str,
-        time: f64,
-        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>, QueryError> {
-        let sets = self.clip_sets_for(graph, anchor_prim)?;
-        let query = ClipQuery {
-            anchor: anchor_prim,
-            attr_prim,
-            suffix,
-        };
-        let value = self.clip_cache.value_in_sets(graph, &sets, &query, time, interp);
-        self.record_clip_errors();
-        value
-    }
-
-    /// Merges any clip a manifest synthesis could not read into the cache's
-    /// query diagnostics, so a clip missing from an otherwise-resolving stage is
-    /// reported rather than silently dropping the attributes it carried.
-    fn record_clip_errors(&mut self) {
-        let errors = self.clip_cache.take_errors();
-        self.merge_query_errors(errors);
-    }
-
-    /// Records diagnostics a value query produced, skipping any already held.
-    ///
-    /// A value query answers through a value, not a diagnostic channel, so what
-    /// it discovers lands here to reach
-    /// [`Stage::composition_errors`](crate::usd::Stage::composition_errors). The
-    /// same failing opinion is re-derived on every read — a value-time asset
-    /// expression is never cached — so the dedup is what keeps repeated reads
-    /// from growing the list.
-    fn merge_query_errors(&mut self, errors: Vec<CompositionError>) {
-        for error in errors {
-            if !self.query_errors.contains(&error) {
-                self.query_errors.push(error);
-            }
-        }
-    }
-
-    /// The value-clip introspection for `attr_prim + suffix` from the first
-    /// participating set, searching the attribute's prim and its ancestors
-    /// nearest-first: its stage sample times (spec 12.3.4) and whether its
-    /// schedule alone can vary the value ([`ClipSet::may_be_time_varying`]).
-    /// `None` when no clip set sources the attribute; `Some` exactly when a set
-    /// participates. The sample-time vector may be empty for a participating set
-    /// that contributes no discrete times. Delegates the per-set participation
-    /// check to the [`ClipCache`].
-    fn clip_introspection(
-        &mut self,
-        graph: &LayerGraph,
-        attr_prim: &Path,
-        suffix: &str,
-    ) -> Result<Option<(Vec<f64>, bool)>, QueryError> {
-        let mut anchor = attr_prim.clone();
-        loop {
-            let sets = self.clip_sets_for(graph, &anchor)?;
-            let query = ClipQuery {
-                anchor: &anchor,
-                attr_prim,
-                suffix,
-            };
-            let introspection = self.clip_cache.clip_introspection_in_sets(graph, &sets, &query);
-            self.record_clip_errors();
-            if let Some(introspection) = introspection? {
-                return Ok(Some(introspection));
-            }
-            match anchor.parent() {
-                Some(parent) if !parent.is_abs_root() => anchor = parent,
-                _ => return Ok(None),
-            }
-        }
-    }
-
-    /// The stage times a value-clip set contributes for `attr_prim + suffix`, or
-    /// `None` when no clip set sources the attribute. Drops the time-varying flag
-    /// from [`Self::clip_introspection`] for callers that need only the times.
-    /// `Some` exactly when a clip set participates, so this doubles as the clip
-    /// gate for [`Self::resolve_value_source`] (and `value_at`'s clip tier).
-    fn clip_sample_times(
-        &mut self,
-        graph: &LayerGraph,
-        attr_prim: &Path,
-        suffix: &str,
-    ) -> Result<Option<Vec<f64>>, QueryError> {
-        Ok(self
-            .clip_introspection(graph, attr_prim, suffix)?
-            .map(|(times, _)| times))
+        self.resolve_property(graph, &prim, &suffix, ResolveMode::Proximal, &mut resolver)?;
+        Ok(resolver)
     }
 
     /// Ensures `anchor`'s index is composed and resolves its value-clip sets —
@@ -785,7 +1312,7 @@ impl IndexCache {
         self.ensure_index(graph, anchor)?;
         let mut errors = Vec::new();
         let sets = self.cached(anchor).resolve_clip_sets(graph, &mut errors)?;
-        self.merge_query_errors(errors);
+        push_new(&mut self.query_errors, errors);
         Ok(sets)
     }
 
@@ -855,50 +1382,18 @@ impl IndexCache {
         Ok(Some((prim, suffix)))
     }
 
-    fn resolve_local_field_value(
-        &self,
-        graph: &LayerGraph,
-        prim: &Path,
-        suffix: &str,
-        field: &str,
-        local_layers: &HashSet<LayerId>,
-    ) -> Result<FieldValue, QueryError> {
-        let Some(index) = self.store.index_at(prim) else {
-            return Ok(FieldValue::NotAuthored);
-        };
-
-        // Walks the same memoized spec sites, in the same strength order, that
-        // full composition resolves from, so this shortcut can only ever answer
-        // with what the composed read would have found.
-        for (site, node) in index.live_spec_sites() {
-            if !local_layers.contains(&site.layer) {
-                continue;
-            }
-            let query_path = Path::new(&format!("{}{suffix}", node.path))?;
-            let Some(value) = graph.layer(site.layer).data().try_field(&query_path, field)? else {
-                continue;
-            };
-            // A dictionary or path-expression opinion composes with the
-            // weaker opinions beneath it rather than winning outright;
-            // once one anchors the field locally, hand the query to full
-            // composition so every contributing opinion participates.
-            if matches!(
-                value.as_ref(),
-                Value::Dictionary(_) | Value::PathExpression(_) | Value::PathExpressionVec(_)
-            ) {
-                return Ok(FieldValue::Authored(index.resolve_field(field, graph, Some(suffix))?));
-            }
-            let mut value = value.into_owned();
-            site.offset.apply_to_value(&mut value);
-            return Ok(FieldValue::Authored(block_to_none(value)));
-        }
-
-        Ok(FieldValue::NotAuthored)
-    }
-
     /// Read-only access to the dependency map for change-driven invalidation.
     pub(super) fn dependencies(&self) -> &Dependencies {
         self.store.dependencies()
+    }
+
+    /// Whether value resolution has to consult value clips for `path`: clip
+    /// metadata is authored there or on an ancestor.
+    ///
+    /// Read off the composed context, which accumulates the answer down the
+    /// namespace, so this asks one prim rather than walking the chain.
+    fn may_have_clips(&self, path: &Path) -> bool {
+        self.store.context_at(path).is_some_and(|ctx| ctx.may_have_clips)
     }
 
     /// Returns `true` if a composed prim index is currently cached at `path`.
@@ -1373,11 +1868,27 @@ impl IndexCache {
         }
     }
 
+    /// [`Self::anchor_asset_paths`] for a value whose authoring site the shared
+    /// value-resolution walk already selected, so no search for it is needed.
+    fn resolve_asset_at(&mut self, graph: &LayerGraph, value: Option<Value>, site: &SelectedSite) -> Option<Value> {
+        // Building the site copies two strings, so only a value that turns out
+        // to hold asset paths asks for one.
+        let asset_site = value
+            .as_ref()
+            .filter(|value| value.is_asset_valued())
+            .map(|_| AssetSite::in_graph(graph, site.layer_stack, site.layer, &site.query_path));
+        self.resolve_asset_values(graph, value, asset_site.as_ref())
+    }
+
     /// Fills the resolved path on any `asset` / `asset[]` value just resolved,
     /// taking its provenance from the strongest opinion for `field` — the
     /// default-sourced case of C++ `UsdStage::_GetAssetPathContext`. Non-asset
     /// values pass through; asset paths nested inside a dictionary value are not
     /// recursed into, only top-level `asset` / `asset[]` fields are resolved.
+    ///
+    /// A read that resolved through the shared value-resolution walk knows the
+    /// site already and uses [`Self::resolve_asset_at`] instead; this is for a
+    /// plain metadata read, which has no walk to take it from.
     fn anchor_asset_paths(
         &mut self,
         graph: &LayerGraph,
@@ -1415,7 +1926,7 @@ impl IndexCache {
     ) -> Option<Value> {
         let mut errors = Vec::new();
         let resolved = asset_resolve::resolve_values(graph, value?, site, &mut errors);
-        self.merge_query_errors(errors);
+        push_new(&mut self.query_errors, errors);
         Some(resolved)
     }
 
@@ -1569,7 +2080,7 @@ impl IndexCache {
             let TargetMemo { targets, errors } = hit.clone();
             // Re-surface the cached errors: an unrelated index invalidation may
             // have cleared `query_errors` since, so push any it now lacks.
-            self.merge_query_errors(errors);
+            push_new(&mut self.query_errors, errors);
             return Ok(targets);
         }
 
@@ -1953,7 +2464,7 @@ impl IndexCache {
             let Ok(prop_path) = prim_path.append_property(name) else {
                 continue;
             };
-            conflicts.extend(Self::compose_property_specs(graph, index, prim_path, &prop_path).1);
+            conflicts.extend(Self::property_type_conflicts(graph, index, prim_path, &prop_path));
         }
         self.query_errors.append(&mut conflicts);
     }
@@ -1969,15 +2480,14 @@ impl IndexCache {
     /// requires its owning prim spec, so every layer that authors the property
     /// also authors the prim spec the stack records. Inert and culled nodes are
     /// skipped (matching the structural node walk); permission-denied sites stay.
-    fn compose_property_specs(
+    fn property_type_conflicts(
         graph: &LayerGraph,
         index: &PrimIndex,
         prim_path: &Path,
         prop_path: &Path,
-    ) -> (Vec<(String, Path)>, Vec<CompositionError>) {
-        let mut stack = Vec::new();
+    ) -> Vec<CompositionError> {
         let mut conflicts = Vec::new();
-        let mut defining: Option<(SpecType, String, Path)> = None;
+        let mut defining = DefiningKind::default();
         for (site, node) in index.live_spec_sites() {
             let Some(p) = prop_path.replace_prefix(prim_path, node.path()) else {
                 continue;
@@ -1985,27 +2495,12 @@ impl IndexCache {
             let Some(spec_type) = graph.layer(site.layer).data().spec_type(&p) else {
                 continue;
             };
-            let layer_id = graph.identifier(site.layer).to_string();
-            match &defining {
-                None => defining = Some((spec_type, layer_id.clone(), p.clone())),
-                Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
-                    conflicts.push(CompositionError::InconsistentPropertyType {
-                        property: prop_path.clone(),
-                        defining_layer: def_layer.clone(),
-                        defining_path: def_path.clone(),
-                        defining_is_attribute: *def_type == SpecType::Attribute,
-                        conflicting_layer: layer_id,
-                        conflicting_path: p.clone(),
-                        conflicting_is_attribute: spec_type == SpecType::Attribute,
-                        composing: prim_path.clone(),
-                    });
-                    continue;
-                }
-                Some(_) => {}
+            let layer_id = graph.identifier(site.layer);
+            if let Some(conflict) = defining.admit(spec_type, layer_id, &p, prop_path, prim_path) {
+                conflicts.push(conflict);
             }
-            stack.push((layer_id, p));
         }
-        (stack, conflicts)
+        conflicts
     }
 
     /// Returns the composed [`PrimIndex`] for a prim, building it if needed (C++
@@ -2024,13 +2519,17 @@ impl IndexCache {
     /// Projects the live spec sites; permission-denied sites are kept — they still
     /// author a spec, so the structural introspection lists them, unlike value
     /// resolution.
-    pub fn prim_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, Path)>, QueryError> {
+    pub fn prim_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<SpecSiteRecord>, QueryError> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
         let index = self.cached(&path);
         let stack = index
             .live_spec_sites()
-            .map(|(site, node)| (graph.identifier(site.layer).to_string(), node.path().clone()))
+            .map(|(site, node)| SpecSiteRecord {
+                layer: graph.identifier(site.layer).to_string(),
+                path: node.path().clone(),
+                offset: site.offset,
+            })
             .collect();
         Ok(stack)
     }
@@ -2039,23 +2538,46 @@ impl IndexCache {
     /// spec path)` site that authors a property spec, strongest first. Backs
     /// C++ `UsdProperty::GetPropertyStack`. A non-property path yields an empty
     /// stack.
-    pub fn property_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, Path)>, QueryError> {
+    ///
+    /// `time` selects the walk: `None` collects the graph specs alone, while a
+    /// numeric time also lists the clip layer each participating value-clip set
+    /// sources the property from there.
+    pub fn property_stack(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        time: Option<f64>,
+    ) -> Result<Vec<SpecSiteRecord>, QueryError> {
         let path = self.effective_path(graph, path)?;
         if !path.is_property_path() {
             return Ok(Vec::new());
         }
         let prim_path = path.prim_path();
+        let suffix = path.property_suffix().to_owned();
         self.ensure_index(graph, &prim_path)?;
-        let Some(index) = self.store.index_at(&prim_path) else {
-            return Ok(Vec::new());
+        let mode = match time {
+            None => ResolveMode::Default,
+            Some(time) => ResolveMode::Numeric(time),
         };
-        let (stack, mut conflicts) = Self::compose_property_specs(graph, index, &prim_path, &path);
+        let mut resolver = StackResolver {
+            graph,
+            prop_path: &path,
+            prim_path: &prim_path,
+            time,
+            sites: Vec::new(),
+            conflicts: Vec::new(),
+            defining: DefiningKind::default(),
+        };
+        self.resolve_property(graph, &prim_path, &suffix, mode, &mut resolver)?;
+        let StackResolver {
+            sites, mut conflicts, ..
+        } = resolver;
         // These transient conflicts are cleared on any index invalidation, so
         // they never go stale across an edit; repeated `property_stack` queries
         // on the same conflicting property without an intervening edit still
         // re-append within a session (the `query_errors` TODO).
         self.query_errors.append(&mut conflicts);
-        Ok(stack)
+        Ok(sites)
     }
 
     /// Returns the variant selections composed onto a prim, as `(set,
@@ -2460,6 +2982,11 @@ mod tests {
 
     fn manifest_dir() -> String {
         std::env::var("CARGO_MANIFEST_DIR").unwrap()
+    }
+
+    /// Projects a spec stack onto the `(layer, path)` pairs these tests compare.
+    fn sites(stack: Vec<SpecSiteRecord>) -> Vec<(String, Path)> {
+        stack.into_iter().map(|site| (site.layer, site.path)).collect()
     }
 
     /// Builds a stack with the root and the full transitive closure of its
@@ -3829,28 +4356,24 @@ def "Anchor" (inherits = </Rig>) {}
         Ok(())
     }
 
-    /// `clip_sample_times` reports each clip's activation time in a
-    /// participating set and `None` when no set sources the attribute. The held
+    /// A participating clip set reports each clip's activation time. The held
     /// set contributes both activations and neither clip's samples — clip0's
     /// sole sample maps to stage 50, outside its `[0, 10)` window, and clip1
-    /// authors none. A manifest that omits an attribute does not source it:
-    /// `extra` returns `None`, falling through to the arc.
+    /// authors none. A manifest that omits an attribute does not source it, so
+    /// `extra` falls through to the arc's own samples.
     #[test]
     fn clip_sample_times_boundaries() -> Result<()> {
         let held = format!("{}/fixtures/clip_manifestless_held/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&held);
         assert_eq!(
-            cache.clip_sample_times(&graph, &sdf::path("/Model")?, ".size")?,
+            cache.time_sample_times(&graph, &sdf::path("/Model.size")?)?,
             Some(vec![0.0, 10.0])
         );
 
         let arc = format!("{}/fixtures/clip_undeclared_arc/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&arc);
-        assert!(
-            cache
-                .clip_sample_times(&graph, &sdf::path("/Model")?, ".extra")?
-                .is_none()
-        );
+        let extra = cache.time_sample_times(&graph, &sdf::path("/Model.extra")?)?;
+        assert_eq!(extra, Some(vec![3.0]));
         Ok(())
     }
 
@@ -4378,7 +4901,10 @@ def "Anchor" (inherits = </Rig>) {}
         let a = sdf::path("/A")?;
 
         // Before the edit only the weak sublayer authors /A.
-        assert_eq!(cache.prim_stack(&graph, &a)?, vec![("weak.usd".into(), a.clone())]);
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![("weak.usd".to_string(), a.clone())]
+        );
 
         // Author an inert `over "A"` into the strong root layer.
         let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
@@ -4398,8 +4924,8 @@ def "Anchor" (inherits = </Rig>) {}
         // composition of the same layers.
         let refreshed = cache.prim_stack(&graph, &a)?;
         assert_eq!(
-            refreshed,
-            vec![("root.usd".into(), a.clone()), ("weak.usd".into(), a.clone())],
+            sites(refreshed.clone()),
+            vec![("root.usd".to_string(), a.clone()), ("weak.usd".to_string(), a.clone())],
             "the spec-tier refresh adds the new strong site to the prim stack"
         );
         let mut fresh = IndexCache::new(
@@ -4440,7 +4966,10 @@ def "Anchor" (inherits = </Rig>) {}
         let a = sdf::path("/A")?;
 
         // Only the weakest sublayer authors /A before the edit.
-        assert_eq!(cache.prim_stack(&graph, &a)?, vec![("weak.usd".into(), a.clone())]);
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![("weak.usd".to_string(), a.clone())]
+        );
 
         // In one change round author an inert `over "A"` into both the root and
         // the middle sublayer — two spec-tier sites that both reach index /A.
@@ -4470,11 +4999,11 @@ def "Anchor" (inherits = </Rig>) {}
         // composition of the edited layers.
         let refreshed = cache.prim_stack(&graph, &a)?;
         assert_eq!(
-            refreshed,
+            sites(refreshed.clone()),
             vec![
-                ("root.usd".into(), a.clone()),
-                ("mid.usd".into(), a.clone()),
-                ("weak.usd".into(), a.clone()),
+                ("root.usd".to_string(), a.clone()),
+                ("mid.usd".to_string(), a.clone()),
+                ("weak.usd".to_string(), a.clone()),
             ],
             "the batched spec-tier refresh adds both new strong sites"
         );

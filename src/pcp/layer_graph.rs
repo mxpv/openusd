@@ -103,7 +103,7 @@ pub struct LayerStackIdentifier {
 /// [`stack_identity`](LayerGraph::stack_identity) and resolved by
 /// [`resolve_stack_identity`](LayerGraph::resolve_stack_identity).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum StackIdentity {
+pub enum StackIdentity {
     /// The stage root layer stack.
     Root,
     /// A reference/payload target stack: the target root layer's canonical
@@ -1975,12 +1975,6 @@ impl LayerGraph {
         self.stacks.members(id).first().map_or(LayerId::INVALID, |&(li, _)| li)
     }
 
-    /// The layer ids of the stage's root layer stack, as a set (C++ "local"
-    /// layers, spec 12.3.4.5). Opinions from these outrank value-clip data.
-    pub(crate) fn local_layers(&self) -> HashSet<LayerId> {
-        self.stacks.member_set(LayerStackId::ROOT).cloned().unwrap_or_default()
-    }
-
     /// Rebuilds the sublayer edges and relocate data from the current layer
     /// data, refreshing both [`cycle_errors`](Self::cycle_errors) and
     /// [`relocate_errors`](Self::relocate_errors). Called after a
@@ -2846,8 +2840,8 @@ mod tests {
         LayerGraph::from_layers(vec![root, sub, leaf], 0, sdf::LayerRegistry::default())
     }
 
-    /// Muting a sublayer drops it and its whole subtree from `sublayer_stack`,
-    /// `root_layer_stack`, and `local_layers`; unmuting restores them.
+    /// Muting a sublayer drops it and its whole subtree from `sublayer_stack`
+    /// and `root_layer_stack`; unmuting restores them.
     #[test]
     fn muted_excludes_subtree() {
         let mut graph = chain_graph();
@@ -2863,12 +2857,10 @@ mod tests {
         let ids: Vec<LayerId> = graph.sublayer_stack(root).iter().map(|&(id, _)| id).collect();
         assert_eq!(ids, vec![root], "the muted sublayer and its subtree are pruned");
         assert_eq!(graph.root_layer_stack().len(), 1);
-        assert_eq!(graph.local_layers(), HashSet::from([root]));
 
         assert!(graph.unmute_layer("sub.usda").is_some());
         let ids: Vec<LayerId> = graph.sublayer_stack(root).iter().map(|&(id, _)| id).collect();
         assert_eq!(ids, vec![root, sub, leaf], "unmuting restores the subtree");
-        assert_eq!(graph.local_layers(), HashSet::from([root, sub, leaf]));
     }
 
     /// Muting the root layer is rejected: `mute_layer` reports no change and the

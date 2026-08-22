@@ -36,11 +36,15 @@
 //!   to name are reported (`apply_default_prim_edits`). Neither half is the
 //!   layer-stack tier, and the report is not C++-identical — see the parity notes
 //!   in the module docs.
-//! - `clips` / `clipSets`, and non-composition metadata (`kind`,
-//!   `colorConfiguration`, `customData`, …) → no index drop. Clips resolve
-//!   live through the cached index's spec sites, and every value view rebuilds
-//!   against the composition-revision bump [`apply`](Changes::apply) always
-//!   makes, so the new opinion is visible without invalidating the graph.
+//! - `clips` / `clipSets` → significant, because a prim index caches whether
+//!   value clips can source it at all
+//!   ([`PrimIndex::may_have_clips`](super::PrimIndex::may_have_clips)) and every
+//!   descendant inherits that answer.
+//! - non-composition metadata (`kind`, `colorConfiguration`, `customData`, …) →
+//!   no index drop. These resolve live through the cached index's spec sites,
+//!   and every value view rebuilds against the composition-revision bump
+//!   [`apply`](Changes::apply) always makes, so the new opinion is visible
+//!   without invalidating the graph.
 
 use std::collections::{BTreeSet, HashSet};
 use std::mem;
@@ -549,6 +553,19 @@ impl Changes {
             // Stage-tier producer authors this yet, but it matches the C++
             // classifier and forecloses a latent gap.
             || field == FieldKey::Relocates.as_str()
+            // Clip presence is cached per prim index and inherited by every
+            // descendant (`PrimIndex::may_have_clips`), so authoring or removing
+            // clip metadata has to drop the subtree that reads it. `clipSets`
+            // joins it because deleting a set through that list op can empty a
+            // prim's clips just as removing the dictionary does.
+            //
+            // TODO: C++ narrows this to an add or a removal, comparing the
+            // field's before and after values, so a content-only clip edit stays
+            // insignificant. `sdf::ChangeEntry::info_changed` carries field names
+            // alone, so every clip edit resyncs the subtree until it carries the
+            // values too.
+            || field == FieldKey::Clips.as_str()
+            || field == FieldKey::ClipSets.as_str()
     }
 
     /// Apply phase: commit the planned invalidations to `cache`.

@@ -336,8 +336,8 @@ mod pcp_txt {
             out.push('\n');
 
             let _ = writeln!(out, "Prim Stack:");
-            for (identifier, spec_path) in prim.prim_stack().unwrap() {
-                site_line(&mut out, base, &identifier, &spec_path);
+            for site in prim.prim_stack().unwrap() {
+                site_line(&mut out, base, &site.layer, &site.path);
             }
             out.push('\n');
 
@@ -424,7 +424,7 @@ mod pcp_txt {
             }
 
             // Property stacks list every property with an authored spec.
-            let mut stacks: Vec<(sdf::Path, Vec<(String, sdf::Path)>)> = Vec::new();
+            let mut stacks: Vec<(sdf::Path, Vec<usd::SpecSite>)> = Vec::new();
             for name in &properties {
                 let prop = prim.attribute(name);
                 let stack = prop.property_stack().unwrap();
@@ -432,8 +432,8 @@ mod pcp_txt {
                     stacks.push((prop.path().clone(), stack));
                 }
             }
-            write_grouped(&mut out, "Property stacks", stacks, |out, (identifier, spec_path)| {
-                site_line(out, base, identifier, spec_path);
+            write_grouped(&mut out, "Property stacks", stacks, |out, site| {
+                site_line(out, base, &site.layer, &site.path);
             });
 
             // Relationship targets and attribute connections, split by spec type.

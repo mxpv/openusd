@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use super::{
     ApplyApiError, Attribute, EditTarget, EditTargetArc, PrimDefinition, PrimTypeInfo, Relationship, SchemaRegistry,
-    Stage, StageAuthoringError, VersionFilter, schema_registry,
+    SpecSite, Stage, StageAuthoringError, VersionFilter, schema_registry,
 };
 use crate::tf::Token;
 use crate::{Result, pcp, sdf};
@@ -861,10 +861,10 @@ impl Prim {
         Ok(Some(leaf))
     }
 
-    /// Returns the prim stack: each `(layer identifier, spec path)` site that
-    /// contributes a prim spec to this prim, strongest first. Mirrors C++
+    /// Every spec that contributes a prim spec to this prim, strongest first,
+    /// each with the cumulative layer offset that reaches it. Mirrors C++
     /// `UsdPrim::GetPrimStack`.
-    pub fn prim_stack(&self) -> Result<Vec<(String, sdf::Path)>> {
+    pub fn prim_stack(&self) -> Result<Vec<SpecSite>> {
         Ok(self.stage.with_cache(|g, c| c.prim_stack(g, &self.path))?)
     }
 

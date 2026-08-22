@@ -17,7 +17,8 @@ use super::clip;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
-use super::{CompositionError, LayerGraph, LayerId, LayerStackId, QueryError};
+use super::value_resolve::SelectedSite;
+use super::{CompositionError, LayerGraph, LayerId, QueryError};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
 ///
@@ -44,11 +45,6 @@ struct Opinion<'a> {
 }
 
 impl Opinion<'_> {
-    /// Where this opinion was authored, for resolving an `asset` it holds.
-    fn asset_site(&self, stack: &LayerGraph) -> AssetSite {
-        AssetSite::in_graph(stack, self.node.layer_stack_id(), self.layer, &self.query_path)
-    }
-
     /// Maps this opinion's value into the stage's time frame through the
     /// contributing layer's offset
     /// ([`LayerOffset::apply_to_value`](sdf::LayerOffset::apply_to_value)). The
@@ -158,7 +154,7 @@ impl PrimIndex {
         if field == FieldKey::TimeSamples.as_str() {
             return Ok(self.resolve_time_samples(stack, prop_suffix)?.map(Value::TimeSamples));
         }
-        match self.resolve_strongest(field, stack, prop_suffix)? {
+        match self.resolve_strongest(field, stack, prop_suffix, None)? {
             Some(strongest) if sdf::folds_list_ops(field) => {
                 self.resolve_list_op(field, stack, prop_suffix, strongest).map(Some)
             }
@@ -462,10 +458,14 @@ impl PrimIndex {
 
     /// Builds the query path for a node, applying `prop_suffix` if given.
     /// Borrows the node's path when no suffix is needed (zero-copy).
-    fn query_path<'a>(node: &'a Node, prop_suffix: Option<&str>) -> Result<Cow<'a, Path>, QueryError> {
+    ///
+    /// The suffix comes from an already-validated property path and the node
+    /// path from the composed graph, so appending one to the other needs no
+    /// re-validation.
+    pub(super) fn query_path<'a>(node: &'a Node, prop_suffix: Option<&str>) -> Cow<'a, Path> {
         match prop_suffix {
-            Some(suffix) => Ok(Cow::Owned(Path::new(&format!("{}{suffix}", node.path))?)),
-            None => Ok(Cow::Borrowed(&node.path)),
+            Some(suffix) => Cow::Owned(Path::from_str_unchecked(&format!("{}{suffix}", node.path))),
+            None => Cow::Borrowed(&node.path),
         }
     }
 
@@ -483,7 +483,7 @@ impl PrimIndex {
                 node,
                 layer: site.layer,
                 offset: site.offset,
-                query_path: Self::query_path(node, prop_suffix)?,
+                query_path: Self::query_path(node, prop_suffix),
             })
         })
     }
@@ -583,17 +583,36 @@ impl PrimIndex {
     ///   compose-over with generic value resolution); a surviving `%_`
     ///   resolves to the empty expression, and every opinion is mapped into
     ///   the root namespace through its node first
-    fn resolve_strongest(
+    pub(crate) fn resolve_strongest(
         &self,
         field: &str,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
+        start: Option<&SelectedSite>,
     ) -> Result<Option<Value>, QueryError> {
         let mut opinions = self.opinions(field, stack, prop_suffix);
-        let Some(first) = opinions.next() else {
+        // With a `start`, composition begins at the site the shared
+        // value-resolution walk selected instead of searching for the strongest
+        // opinion again — which is what keeps the composed value and the source
+        // that walk reports naming one site. A site that fails to read on the
+        // way there is still the walk's to report rather than to skip.
+        let first = match start {
+            Some(start) => {
+                let mut found = None;
+                for opinion in opinions.by_ref() {
+                    let opinion = opinion?;
+                    if start.is(opinion.layer, opinion.node, &opinion.query_path) {
+                        found = Some(opinion);
+                        break;
+                    }
+                }
+                found
+            }
+            None => opinions.next().transpose()?,
+        };
+        let Some(first) = first else {
             return Ok(None);
         };
-        let first = first?;
         match first.value.into_owned() {
             Value::ValueBlock => Ok(None),
             Value::Dictionary(mut merged) => {
@@ -668,110 +687,17 @@ impl PrimIndex {
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
     ) -> Result<Option<sdf::TimeSampleMap>, QueryError> {
-        self.first_time_samples(stack, prop_suffix, None, |map, opinion| {
+        self.first_time_samples(stack, prop_suffix, |map, opinion| {
             let mut samples = map.clone();
             opinion.offset.apply_to_samples(&mut samples);
             samples
         })
     }
 
-    /// Interpolates the strongest authored `timeSamples` at stage `time`
-    /// without cloning the sample map. The matched map is borrowed and
-    /// interpolated in its own layer-time frame: `time` is mapped back through
-    /// the node's inverse layer offset, which yields the same result as
-    /// retiming every sample to stage time (the lerp fraction is invariant
-    /// under the affine offset) but clones only the value `interp` returns,
-    /// not the whole map.
-    ///
-    /// When `local_layers` is `Some`, only opinions from those layers
-    /// contribute, giving the root-layer-stack precedence that value-clip
-    /// resolution relies on (clip data is weaker than the anchoring layer's
-    /// local opinions but stronger than data across reference/payload arcs,
-    /// spec 12.3.4.5). Membership is by layer index, not arc type: a referenced
-    /// layer stack also contributes `Root`-arc nodes, so only the stage's own
-    /// root layer stack counts as local.
-    ///
-    /// The outer `Option` distinguishes a matched `timeSamples` opinion
-    /// (`Some`, so value resolution stops here) from no authored or blocked
-    /// opinion (`None`, fall through to weaker sources); the inner `Option` is
-    /// the interpolated value, `None` for an empty or blocked-bracket result.
-    // All three states of the nested `Option` are distinct results the callers
-    // act on, as the doc above spells out; flattening them would lose the
-    // matched-but-valueless case that stops fall-through.
-    #[allow(clippy::option_option, clippy::type_complexity)]
-    pub(crate) fn resolve_value_at(
-        &self,
-        stack: &LayerGraph,
-        prop_suffix: Option<&str>,
-        local_layers: Option<&HashSet<LayerId>>,
-        time: f64,
-        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<(Option<Value>, Option<AssetSite>)>, QueryError> {
-        self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
-            let value = opinion.offset.sample_in_stage_time(map, time, interp);
-            let site = value
-                .as_ref()
-                .is_some_and(Value::is_asset_valued)
-                .then(|| opinion.asset_site(stack));
-            (value, site)
-        })
-    }
-
-    /// Resolves the strongest authored `timeSamples` map together with its
-    /// node's layer offset, cloning the map once. The map is in that node's
-    /// layer time frame, so a cached value view
-    /// ([`Stage::attribute_query`](crate::usd::Stage::attribute_query)) resolves
-    /// this once and then replays it per query through
-    /// [`sdf::LayerOffset::sample_in_stage_time`], which owns both halves of the
-    /// frame mapping.
-    /// `local_layers` filters as in [`Self::resolve_value_at`].
-    pub(crate) fn resolve_time_samples_with_offset(
-        &self,
-        stack: &LayerGraph,
-        prop_suffix: Option<&str>,
-        local_layers: Option<&HashSet<LayerId>>,
-    ) -> Result<Option<(sdf::TimeSampleMap, LayerOffset, AssetSite)>, QueryError> {
-        self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
-            (map.clone(), opinion.offset, opinion.asset_site(stack))
-        })
-    }
-
-    /// Resolves only the retimed sample times of the strongest authored
-    /// `timeSamples` opinion, without cloning the sample values. `local_layers`
-    /// filters as in [`Self::resolve_value_at`], letting the clip-aware times
-    /// path distinguish local from arc opinions.
-    pub(crate) fn resolve_time_sample_times(
-        &self,
-        stack: &LayerGraph,
-        prop_suffix: Option<&str>,
-        local_layers: Option<&HashSet<LayerId>>,
-    ) -> Result<Option<Vec<f64>>, QueryError> {
-        self.first_time_samples(stack, prop_suffix, local_layers, |map, opinion| {
-            map.iter().map(|(t, _)| opinion.offset.apply(*t)).collect()
-        })
-    }
-
-    /// Resolves only the count of the strongest authored `timeSamples`
-    /// opinion, without cloning the sample values. The layer offset does not
-    /// change the count; `local_layers` filters as in
-    /// [`Self::resolve_time_sample_times`].
-    pub(crate) fn resolve_time_sample_count(
-        &self,
-        stack: &LayerGraph,
-        prop_suffix: Option<&str>,
-        local_layers: Option<&HashSet<LayerId>>,
-    ) -> Result<Option<usize>, QueryError> {
-        self.first_time_samples(stack, prop_suffix, local_layers, |map, _| map.len())
-    }
-
     /// Walks `timeSamples` opinions strongest-to-weakest and applies `extract`
     /// to the first authored map, borrowed rather than cloned, paired with its
     /// layer `offset` and the [`AssetSite`] it came from. A `ValueBlock` blocks
     /// weaker layers and yields `Ok(None)`, as does the absence of any opinion.
-    /// When `local_layers` is `Some`, opinions whose contributing layer is
-    /// outside that set are skipped so only root-layer-stack opinions
-    /// contribute.
-    ///
     /// The winning opinion is handed to `extract` whole so it can describe its
     /// own [`AssetSite`] — which is what lets a sampled `asset` value be
     /// anchored and evaluated like a default-sourced one. Building that site
@@ -787,15 +713,11 @@ impl PrimIndex {
         &self,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-        local_layers: Option<&HashSet<LayerId>>,
         extract: impl FnOnce(&sdf::TimeSampleMap, &Opinion<'_>) -> R,
     ) -> Result<Option<R>, QueryError> {
         let field = FieldKey::TimeSamples.as_str();
         for opinion in self.opinions_in_layer_time(field, stack, prop_suffix) {
             let opinion = opinion?;
-            if local_layers.is_some_and(|local| !local.contains(&opinion.layer)) {
-                continue;
-            }
             match &*opinion.value {
                 Value::ValueBlock => return Ok(None),
                 Value::TimeSamples(map) => return Ok(Some(extract(map, &opinion))),
@@ -892,11 +814,13 @@ impl PrimIndex {
     ) -> Result<Vec<clip::ResolvedClipSet>, QueryError> {
         let mut sets: HashMap<String, HashMap<String, Value>> = HashMap::new();
         let mut blocked_sets: HashSet<String> = HashSet::new();
-        // The layer that authored a set's clip asset paths, paired with the stack
-        // of the node it came from — the variables a clip-sourced `asset`
-        // expression evaluates against, the clip layer itself belonging to no
-        // stack (C++ takes the node from where the clips were introduced).
-        let mut asset_sources: HashMap<String, (LayerId, LayerStackId)> = HashMap::new();
+        // The site that authored a set's clip asset paths: the layer, the stack
+        // of the node it came from, and that node's own prim path. The stack
+        // supplies the variables a clip-sourced `asset` expression evaluates
+        // against, the clip layer itself belonging to no stack, and the three
+        // together are the position value resolution consults the set at (C++
+        // `Usd_ClipSetDefinition`'s anchor).
+        let mut asset_sources: HashMap<String, clip::ClipAnchor> = HashMap::new();
         let mut manifest_layers: HashMap<String, LayerId> = HashMap::new();
         // Sets with explicit `assetPaths` (whose `active`/`times` are retimed
         // as they compose) versus the offset of a template set's authoring
@@ -969,14 +893,28 @@ impl PrimIndex {
                                 active_offsets.insert(set_name.clone(), offset);
                             }
                             if field == clip::keys::ASSET_PATHS {
-                                asset_sources.insert(set_name.clone(), (layer, node_stack));
+                                asset_sources.insert(
+                                    set_name.clone(),
+                                    clip::ClipAnchor {
+                                        layer,
+                                        prim_path: query_path.clone().into_owned(),
+                                        stack: node_stack,
+                                    },
+                                );
                                 explicit_sets.insert(set_name.clone());
                                 if let Some(site) = site() {
                                     asset_sites.entry(set_name.clone()).or_default().asset_paths = Some(site);
                                 }
                             } else if field == clip::keys::TEMPLATE_ASSET_PATH {
                                 if !explicit_sets.contains(&set_name) {
-                                    asset_sources.insert(set_name.clone(), (layer, node_stack));
+                                    asset_sources.insert(
+                                        set_name.clone(),
+                                        clip::ClipAnchor {
+                                            layer,
+                                            prim_path: query_path.clone().into_owned(),
+                                            stack: node_stack,
+                                        },
+                                    );
                                 }
                                 template_offsets.insert(set_name.clone(), offset);
                                 if let Some(site) = site() {
@@ -1008,7 +946,7 @@ impl PrimIndex {
         Ok(clip::ClipSet::parse(&clips, order.as_deref())
             .into_iter()
             .filter_map(|mut set| {
-                let (asset_layer, introducing_stack) = asset_sources.get(&set.name).copied()?;
+                let anchor = asset_sources.get(&set.name)?;
                 let manifest_layer = manifest_layers.get(&set.name).copied();
                 // Explicit `active`/`times` were retimed as they composed. A
                 // template schedule is derived in clip time, so retime its
@@ -1028,8 +966,7 @@ impl PrimIndex {
                 };
                 Some(clip::ResolvedClipSet {
                     set,
-                    asset_layer,
-                    introducing_stack,
+                    source: anchor.clone(),
                     manifest_layer,
                     active_offset,
                 })

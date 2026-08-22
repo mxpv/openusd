@@ -2206,24 +2206,30 @@ impl Stage {
         self.interpolation_type.set(mode);
     }
 
-    /// Returns the composed `timeSamples` for an attribute, or
-    /// `None` when the attribute has none authored.
+    /// Returns the `timeSamples` map value resolution answers from, retimed to
+    /// stage time, or `None` when the source that answers is not a `timeSamples`
+    /// opinion.
     ///
-    /// This returns raw composed samples. Read through
+    /// These are the samples the source [`Self::value_at`] reads from, so a
+    /// stronger `default` hiding a weaker layer's samples yields `None` here
+    /// too. A winning value-clip set answers with a schedule rather than a map
+    /// and likewise yields `None`; its times reach
+    /// [`Self::time_sample_times`].
+    ///
+    /// This returns the samples uninterpolated. Read through
     /// [`Attribute::get`](super::Attribute::get) with a time code when you
     /// need the stage's [`InterpolationType`] applied to a specific time.
     pub fn time_samples(&self, attr_path: impl sdf::IntoPath) -> Result<Option<sdf::TimeSampleMap>> {
-        let attr_path = sdf::try_into_path(attr_path)?;
-        Ok(match self.field::<sdf::Value>(attr_path, sdf::FieldKey::TimeSamples)? {
-            Some(sdf::Value::TimeSamples(samples)) => Some(samples),
-            _ => None,
-        })
+        let attr_path = &sdf::try_into_path(attr_path)?;
+        Ok(self.masked(attr_path, |g, c| c.time_samples(g, attr_path))?)
     }
 
-    /// Returns the composed `timeSamples` sample times for an attribute, or
-    /// `None` when none are authored. Resolves the times without cloning the
-    /// sample values, retimed by the contributing layer offsets to match
-    /// [`Self::time_samples`].
+    /// Returns the sample times of whichever source value resolution answers
+    /// from, or `None` when none has samples. Resolves the times without cloning
+    /// the sample values.
+    ///
+    /// Wider than [`Self::time_samples`], which reports only a `timeSamples`
+    /// source's map: a winning value-clip set contributes its times here.
     pub fn time_sample_times(&self, attr_path: impl sdf::IntoPath) -> Result<Option<Vec<f64>>> {
         let attr_path = sdf::try_into_path(attr_path)?;
         Ok(self.masked(&attr_path, |g, c| c.time_sample_times(g, &attr_path))?)
@@ -2251,11 +2257,11 @@ impl Stage {
     /// [`InterpolationType`]. The crate-internal resolution engine behind
     /// [`Attribute::get`](super::Attribute::get) with a numeric time code.
     ///
-    /// Resolution order (AOUSD §12.3):
-    /// 1. Local `timeSamples` (root layer stack), §12.5 interpolated.
-    /// 2. Value clips anchored on the prim or an ancestor (§12.3.4).
-    /// 3. Remaining `timeSamples` (reference/payload arcs), interpolated.
-    /// 4. The attribute's `default` value.
+    /// Resolution visits the prim's contributing sites strongest-first,
+    /// probing `timeSamples` (interpolated per §12.5) then `default` at each,
+    /// so a stronger layer's `default` hides a weaker layer's samples. Value
+    /// clips (§12.3.4) sit between the root layer stack's own opinions and
+    /// anything reached across an arc.
     ///
     /// Returns `Ok(None)` when the attribute is unauthored, when the
     /// authored value is a [`sdf::Value::ValueBlock`] / [`sdf::Value::None`]
@@ -2275,6 +2281,25 @@ impl Stage {
     /// `None` when the attribute's prim is outside the population mask.
     pub(crate) fn resolve_value_source(&self, attr_path: &sdf::Path) -> Result<pcp::AttributeValueSource> {
         Ok(self.masked(attr_path, |g, c| c.resolve_value_source(g, attr_path))?)
+    }
+
+    /// Every spec contributing to the property at `path`, strongest first, with
+    /// the clip layers participating at `time` when one is named. Backs
+    /// [`Attribute::property_stack`](super::Attribute::property_stack) and
+    /// [`property_stack_at`](super::Attribute::property_stack_at).
+    pub(crate) fn property_stack(&self, path: &sdf::Path, time: Option<f64>) -> Result<Vec<super::SpecSite>> {
+        Ok(self.masked(path, |g, c| c.property_stack(g, path, time))?)
+    }
+
+    /// Resolves where an attribute's value comes from, without producing the
+    /// value. Backs [`Attribute::resolve_info`](super::Attribute::resolve_info).
+    pub(crate) fn resolve_info(&self, attr_path: &sdf::Path, mode: pcp::ResolveMode) -> Result<pcp::Resolution> {
+        let stage_id = self.layer_stack_id().clone();
+        // The same policy [`Self::resolve_at`] reads through, so a timed query
+        // decides which samples answer exactly as the value read does.
+        let interp_type = self.interpolation_type.get();
+        let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
+        Ok(self.masked(attr_path, |g, c| c.resolve_info(g, &stage_id, attr_path, mode, &interp))?)
     }
 
     /// The current composition revision, advanced once per applied edit batch.

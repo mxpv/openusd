@@ -5750,6 +5750,425 @@ fn timecode_authoring_retimed() -> Result<()> {
     Ok(())
 }
 
+// Value resolution walks sites strongest-first and probes `timeSamples` then
+// `default` at each site (C++ `Usd_Resolver`), so a stronger layer's `default`
+// hides a weaker layer's `timeSamples`.
+
+/// A stronger layer's `default` hides a weaker sublayer's `timeSamples`.
+#[test]
+fn default_hides_weaker_samples() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        dir.path().join("sub.usda"),
+        "#usda 1.0\ndef \"A\"\n{\n    double x.timeSamples = { 0: 2.0 }\n}\n",
+    )?;
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\ndef \"A\"\n{\n    double x = 1.0\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let attr = stage.attribute("/A.x")?;
+    // The default answers at every time, so the attribute is not time-varying
+    // and reports no samples — every query must agree, the composed map with
+    // them.
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(1.0));
+    assert_eq!(attr.get::<f64>()?, Some(1.0));
+    assert!(!attr.value_might_be_time_varying()?);
+    assert_eq!(attr.num_time_samples()?, 0);
+    assert_eq!(attr.time_samples()?, None, "the hidden samples are not the source");
+    Ok(())
+}
+
+/// The same ordering one arc down: a referenced stack's root layer authors the
+/// `default`, its own sublayer the `timeSamples`.
+#[test]
+fn default_hides_across_reference() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        dir.path().join("refsub.usda"),
+        "#usda 1.0\ndef \"S\"\n{\n    double x.timeSamples = { 0: 2.0 }\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("ref.usda"),
+        "#usda 1.0\n(\n    subLayers = [@./refsub.usda@]\n)\ndef \"S\"\n{\n    double x = 1.0\n}\n",
+    )?;
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"A\" (\n    references = @./ref.usda@</S>\n)\n{\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/A.x")?.get_at::<f64>(usd::TimeCode::new(0.0))?,
+        Some(1.0)
+    );
+    Ok(())
+}
+
+/// A `Root` node's `default` outranks a weaker `Inherit` node's `timeSamples`,
+/// even though both sit in the stage's local layers.
+#[test]
+fn default_hides_inherited_samples() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .override_prim("/C")?
+        .create_attribute("x", "double")?
+        .set_at(sdf::Value::Double(2.0), usd::TimeCode::new(0.0))?;
+    stage
+        .define_prim("/A")?
+        .set_metadata(
+            sdf::FieldKey::InheritPaths.as_str(),
+            sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/C")?])),
+        )?
+        .create_attribute("x", "double")?
+        .set(sdf::Value::Double(1.0))?;
+
+    assert_eq!(
+        stage.attribute("/A.x")?.get_at::<f64>(usd::TimeCode::new(0.0))?,
+        Some(1.0)
+    );
+    Ok(())
+}
+
+/// `resolve_info` reports the proximal source, `resolve_info_at(None)` the one
+/// that answers at the default time. They differ on an attribute holding both.
+#[test]
+fn proximal_differs_from_default() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .define_prim("/A")?
+        .create_attribute("x", "double")?
+        .set(sdf::Value::Double(1.0))?
+        .set_at(sdf::Value::Double(2.0), usd::TimeCode::new(0.0))?;
+
+    let attr = stage.attribute("/A.x")?;
+    // Without a time, the time-varying source is the proximal one; asking about
+    // the default time skips it and names the `default`.
+    assert_eq!(attr.resolve_info()?.source(), usd::ResolveInfoSource::TimeSamples);
+    assert_eq!(attr.resolve_info_at(None)?.source(), usd::ResolveInfoSource::Default);
+    assert!(attr.resolve_info()?.value_source_might_be_time_varying());
+    assert!(!attr.resolve_info_at(None)?.value_source_might_be_time_varying());
+    Ok(())
+}
+
+/// A block is an authored opinion that withholds a value: the attribute still
+/// reads back its schema fallback (spec 12.3.6), and only
+/// `has_authored_value_opinion` counts the block.
+#[test]
+fn resolve_info_reports_block() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let attr = stage.define_prim("/A")?.create_attribute("x", "double")?;
+    attr.clone().set(sdf::Value::Double(1.0))?;
+    assert!(stage.attribute("/A.x")?.resolve_info()?.has_authored_value());
+
+    attr.block()?;
+    let info = stage.attribute("/A.x")?.resolve_info()?;
+    assert!(info.value_is_blocked());
+    assert!(!info.has_authored_value());
+    assert!(info.has_authored_value_opinion());
+    // No schema declares the attribute here, so nothing answers below the block.
+    assert_eq!(info.source(), usd::ResolveInfoSource::None);
+    assert_eq!(stage.attribute("/A.x")?.get::<f64>()?, None);
+    Ok(())
+}
+
+/// A spec site carries the cumulative offset that reaches its layer, composing
+/// the arc's offset with the layer's own sublayer offset.
+#[test]
+fn spec_site_carries_offset() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .define_prim("/Source")?
+        .create_attribute("x", "double")?
+        .set(sdf::Value::Double(1.0))?;
+    reference_with_offset(&stage, sdf::LayerOffset::new(10.0, 2.0))?;
+
+    let stack = stage.attribute("/Prim.x")?.property_stack()?;
+    let site = stack.first().expect("one contributing spec");
+    assert_eq!(site.path, sdf::path("/Source.x")?);
+    assert_eq!(site.offset, sdf::LayerOffset::new(10.0, 2.0));
+    Ok(())
+}
+
+/// The node a resolve info names is the site that answered, described by value
+/// so it outlives the composition index it came from.
+#[test]
+fn resolve_info_names_node() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .define_prim("/Source")?
+        .create_attribute("x", "double")?
+        .set(sdf::Value::Double(1.0))?;
+    reference_with_offset(&stage, sdf::LayerOffset::IDENTITY)?;
+
+    let info = stage.attribute("/Prim.x")?.resolve_info()?;
+    let node = info.node().expect("an authored opinion names its node");
+    assert_eq!(node.arc(), pcp::ArcType::Reference);
+    assert_eq!(node.path(), &sdf::path("/Source")?);
+    Ok(())
+}
+
+/// Sites are visited in strength order, not partitioned by which layer stack
+/// holds them: a weaker `specializes` authored in the root layer must not
+/// outrank a stronger reference just because its layer is the root's.
+#[test]
+fn resolve_info_strength_order() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ref.usda"),
+        "#usda 1.0
+def \"S\"
+{
+    double x = 111.0
+}
+",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        concat!(
+            "#usda 1.0
+",
+            "class \"C\"
+{
+    double x = 999.0
+}
+",
+            "def \"A\" (
+    references = @./ref.usda@</S>
+    specializes = </C>
+)
+{
+}
+",
+        ),
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let attr = stage.attribute("/A.x")?;
+    // The reference supplies the value, so it must also be the site reported.
+    assert_eq!(attr.get::<f64>()?, Some(111.0));
+    assert_eq!(
+        attr.resolve_info()?.node().map(pcp::ResolveNode::arc),
+        Some(pcp::ArcType::Reference)
+    );
+    let stack: Vec<_> = attr.property_stack()?.into_iter().map(|site| site.path).collect();
+    assert_eq!(stack, vec![sdf::path("/S.x")?, sdf::path("/C.x")?]);
+    Ok(())
+}
+
+/// A blocked `timeSamples` field is an authored opinion even though it is not
+/// a `default` block, which is the only kind `value_is_blocked` reports.
+#[test]
+fn blocked_field_is_authored() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .define_prim("/A")?
+        .create_attribute("x", "double")?
+        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+
+    let info = stage.attribute("/A.x")?.resolve_info()?;
+    assert!(info.has_authored_value_opinion());
+    assert!(!info.has_authored_value());
+    assert!(!info.value_is_blocked());
+    Ok(())
+}
+
+/// A blocked `timeSamples` field withholds samples, not the value: resolution
+/// carries on to the `default` at the same site, as C++ does for a layer with
+/// no samples.
+#[test]
+fn blocked_samples_fall_through() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .define_prim("/A")?
+        .create_attribute("x", "double")?
+        .set(sdf::Value::Double(5.0))?
+        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+
+    let attr = stage.attribute("/A.x")?;
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(5.0));
+    assert_eq!(attr.get::<f64>()?, Some(5.0));
+    Ok(())
+}
+
+/// A clip set the walk never reaches is never composed, so a malformed
+/// expression inside it raises no diagnostic on a locally-sourced read.
+#[test]
+fn shadowed_clip_stays_uncomposed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        concat!(
+            "#usda 1.0
+",
+            "def \"Model\" (
+",
+            "    clips = {
+",
+            "        dictionary default = {
+",
+            "            asset[] assetPaths = [@`bad(`@]
+",
+            "            string primPath = \"/Model\"
+",
+            "            double2[] active = [(0, 0)]
+",
+            "        }
+",
+            "    }
+",
+            ")
+{
+    double size = 42.0
+}
+",
+        ),
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    // The local `default` answers, so the clip set below it never composes.
+    assert_eq!(
+        stage.attribute("/Model.size")?.get_at::<f64>(usd::TimeCode::new(0.0))?,
+        Some(42.0)
+    );
+    assert!(stage.composition_errors().is_empty());
+    Ok(())
+}
+
+/// A default-time query resolves from `default` alone, but authored samples
+/// are still an authored opinion and are reported as one.
+#[test]
+fn default_time_sees_samples() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .define_prim("/A")?
+        .create_attribute("x", "double")?
+        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?;
+
+    let info = stage.attribute("/A.x")?.resolve_info_at(None)?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::None);
+    assert!(!info.has_authored_value(), "no default answers at the default time");
+    assert!(info.has_authored_value_opinion(), "the samples are authored");
+    Ok(())
+}
+
+/// A map mixing real and blocked samples supplies a value at some times and
+/// not others, so a timed resolve info has to interpolate rather than judge the
+/// map as a whole — and it must agree with the value read at that same time.
+#[test]
+fn mixed_blocks_track_time() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A")?.create_attribute("x", "double")?.set_metadata(
+        sdf::FieldKey::TimeSamples.as_str(),
+        sdf::Value::TimeSamples(vec![(0.0, sdf::Value::Double(1.0)), (10.0, sdf::Value::ValueBlock)]),
+    )?;
+
+    let attr = stage.attribute("/A.x")?;
+    let live = attr.resolve_info_at(usd::TimeCode::new(0.0))?;
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(1.0));
+    assert_eq!(live.source(), usd::ResolveInfoSource::TimeSamples);
+    assert!(live.has_authored_value());
+    assert!(!live.value_is_blocked());
+
+    let blocked = attr.resolve_info_at(usd::TimeCode::new(10.0))?;
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(10.0))?, None);
+    assert_eq!(blocked.source(), usd::ResolveInfoSource::None);
+    assert!(!blocked.has_authored_value());
+    assert!(blocked.value_is_blocked());
+
+    // Without a time the map is a potential source: it does supply a value.
+    assert_eq!(attr.resolve_info()?.source(), usd::ResolveInfoSource::TimeSamples);
+    Ok(())
+}
+
+/// `Attribute::block` blocks the `default` and each authored sample in place,
+/// so a sample map survives holding only blocks. It supplies no value at any
+/// time, and the resolve info must say so rather than report a value source.
+#[test]
+fn blocked_values_report_block() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .define_prim("/A")?
+        .create_attribute("x", "double")?
+        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
+        .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?
+        .block()?;
+
+    let attr = stage.attribute("/A.x")?;
+    let at = usd::TimeCode::new(5.0);
+    assert_eq!(attr.get_at::<f64>(at)?, None);
+
+    let info = attr.resolve_info_at(at)?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::None);
+    assert!(!info.has_authored_value(), "no value survives, matching get_at");
+    assert!(info.value_is_blocked());
+    assert!(info.has_authored_value_opinion());
+    Ok(())
+}
+
+/// A blocked `timeSamples` field withholds samples from every weaker opinion
+/// too, so the introspection queries agree with the composed sample map.
+#[test]
+fn blocked_samples_hide_weaker() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("sub.usda"),
+        "#usda 1.0
+def \"A\"
+{
+    double x.timeSamples = { 0: 9.0 }
+}
+",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+(
+    subLayers = [@./sub.usda@]
+)
+def \"A\"
+{
+}
+",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    stage
+        .create_attribute("/A.x", "double")?
+        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+
+    let attr = stage.attribute("/A.x")?;
+    assert_eq!(attr.time_samples()?, None);
+    assert!(attr.time_sample_times()?.is_empty());
+    assert_eq!(attr.num_time_samples()?, 0);
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, None);
+    Ok(())
+}
+
+/// An empty sample map is no more a source than an absent field, so a weaker
+/// `default` still answers and the reported source agrees with the count.
+#[test]
+fn empty_samples_no_source() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .define_prim("/B")?
+        .create_attribute("y", "double")?
+        .set(sdf::Value::Double(7.0))?
+        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(vec![]))?;
+
+    let attr = stage.attribute("/B.y")?;
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(7.0));
+    assert_eq!(attr.num_time_samples()?, 0);
+    assert_eq!(attr.resolve_info()?.source(), usd::ResolveInfoSource::Default);
+    Ok(())
+}
+
 /// A prim outside the population mask reports no sample times and a zero count,
 /// matching the masked behavior of value resolution.
 #[test]
@@ -5939,6 +6358,13 @@ def "Model" (
     let stage = Stage::open(&root)?;
     assert_eq!(value_f64(&stage, "/Model.size", 15.0), Some(75.0));
     assert_eq!(value_f64(&stage, "/Model.size", 20.0), Some(100.0));
+    // The value comes from clipC, so the stack names it.
+    let stack = stack_layers(
+        stage
+            .attribute("/Model.size")?
+            .property_stack_at(usd::TimeCode::new(20.0))?,
+    );
+    assert!(stack.iter().any(|layer| layer.ends_with("clipC.usda")), "{stack:?}");
 
     // Blocked at clipC's activation time, the forward bracket becomes clipD's
     // 300 at stage 30 — and reading inside clipC's own window honours the same
@@ -5951,6 +6377,15 @@ def "Model" (
     let stage = Stage::open(&root)?;
     assert_eq!(value_f64(&stage, "/Model.size", 15.0), Some(150.0));
     assert_eq!(value_f64(&stage, "/Model.size", 20.0), Some(200.0));
+    // The block excludes clipC from sourcing the attribute, so the stack has to
+    // exclude it too rather than name a clip the value never came from.
+    let stack = stack_layers(
+        stage
+            .attribute("/Model.size")?
+            .property_stack_at(usd::TimeCode::new(20.0))?,
+    );
+    assert!(stack.iter().any(|layer| layer.ends_with("manifest.usda")), "{stack:?}");
+    assert!(!stack.iter().any(|layer| layer.ends_with("clipC.usda")), "{stack:?}");
     Ok(())
 }
 
@@ -6475,6 +6910,912 @@ def "Model"
 
     let stage = Stage::open(dir.path().join("root.usda").to_string_lossy().as_ref())?;
     assert_eq!(value_f64(&stage, "/ShotModel.size", 0.0), Some(7.0));
+    Ok(())
+}
+
+/// A clip set is consulted where it is introduced, so a `default` at a stronger
+/// reference node outranks it (C++ `_ClipsApplyToNode`, checked as the walk
+/// reaches each site).
+#[test]
+fn clip_loses_to_reference() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_split_clip_scene(dir.path(), STRONG_PLAIN, WEAK_CLIPPED)?;
+
+    let stage = Stage::open(&root)?;
+    assert_eq!(value_f64(&stage, "/A.size", 0.0), Some(3.0));
+    Ok(())
+}
+
+/// The same pairing the other way up: the clip is introduced at the stronger
+/// reference, so it outranks the weaker node's `default`.
+#[test]
+fn clip_beats_weaker_reference() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_split_clip_scene(dir.path(), STRONG_CLIPPED, WEAK_PLAIN)?;
+
+    let stage = Stage::open(&root)?;
+    assert_eq!(value_f64(&stage, "/A.size", 0.0), Some(7.0));
+
+    // The winning site is the node the clip set was introduced at.
+    let info = stage.attribute("/A.size")?.resolve_info_at(usd::TimeCode::new(0.0))?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::ValueClips);
+    assert_eq!(
+        info.node().map(pcp::ResolveNode::arc),
+        Some(pcp::ArcType::Reference),
+        "a clip-sourced value names the node that introduced the set"
+    );
+    Ok(())
+}
+
+/// The value queries are five views of one strength-ordered walk, so for any
+/// attribute at any time they have to agree about which source answered.
+///
+/// Every regression this file pins was one view drifting from another — a
+/// blocked map the read fell through but the sample count still reported, a
+/// clip that outranked a stronger opinion in the value alone. Checking the
+/// invariants across a table of shapes catches the next one without needing to
+/// have predicted it.
+#[test]
+fn value_queries_agree() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let clipped = write_clip_scene(
+        dir.path(),
+        &clipped_model_body("    float size\n"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = {\n        0: 7.0\n    }\n}\n",
+    )?;
+    let layered = tempfile::tempdir()?;
+    fs::write(
+        layered.path().join("sub.usda"),
+        "#usda 1.0\ndef \"A\"\n{\n    double x.timeSamples = { 0: 2.0 }\n}\n",
+    )?;
+    fs::write(
+        layered.path().join("root.usda"),
+        "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\ndef \"A\"\n{\n    double x = 1.0\n}\n",
+    )?;
+
+    let cases: Vec<(&str, Stage, &str)> = vec![
+        ("declared but unauthored", authored_shape(|_| Ok(()))?, "/A.x"),
+        (
+            "plain default",
+            authored_shape(|attr| {
+                attr.set(sdf::Value::Double(1.0))?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            "plain samples",
+            authored_shape(|attr| {
+                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            "blocked default",
+            authored_shape(|attr| {
+                attr.set(sdf::Value::Double(1.0))?
+                    .set_metadata(sdf::FieldKey::Default.as_str(), sdf::Value::ValueBlock)?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            "blocked timeSamples field",
+            authored_shape(|attr| {
+                attr.set(sdf::Value::Double(5.0))?
+                    .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            "every sample blocked",
+            authored_shape(|attr| {
+                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?
+                    .block()?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            "mixed blocked samples",
+            authored_shape(|attr| {
+                attr.set_metadata(
+                    sdf::FieldKey::TimeSamples.as_str(),
+                    sdf::Value::TimeSamples(vec![(0.0, sdf::Value::Double(1.0)), (10.0, sdf::Value::ValueBlock)]),
+                )?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            "empty sample map",
+            authored_shape(|attr| {
+                attr.set(sdf::Value::Double(1.0))?
+                    .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(Vec::new()))?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        ("clip sourced", Stage::open(&clipped)?, "/Model.size"),
+        (
+            "default hides weaker samples",
+            Stage::open(layered.path().join("root.usda").to_str().unwrap())?,
+            "/A.x",
+        ),
+    ];
+
+    for (name, stage, path) in cases {
+        for time in [-5.0, 0.0, 5.0, 10.0, 20.0] {
+            assert_queries_agree(&stage, path, time, name);
+        }
+    }
+    Ok(())
+}
+
+/// A stage holding one `double /A.x` shaped by `author`.
+fn authored_shape(author: impl FnOnce(usd::Attribute) -> Result<()>) -> Result<Stage> {
+    let stage = in_memory_stage()?;
+    author(stage.define_prim("/A")?.create_attribute("x", "double")?)?;
+    Ok(stage)
+}
+
+/// Asserts the invariants tying the value queries to one another at `time`.
+///
+/// The introspection queries (`num_time_samples`, `time_sample_times`,
+/// `value_might_be_time_varying`) name no time, so they are checked against the
+/// timeless `resolve_info`; the per-time queries against `resolve_info_at`.
+fn assert_queries_agree(stage: &Stage, path: &str, time: f64, case: &str) {
+    let at = usd::TimeCode::new(time);
+    let attr = stage.attribute(path).expect("attribute");
+    let where_ = format!("{case} at t={time}");
+
+    let proximal = attr.resolve_info().expect("resolve_info");
+    let count = attr.num_time_samples().expect("num_time_samples");
+    let times = attr.time_sample_times().expect("time_sample_times");
+    assert_eq!(times.len(), count, "{where_}: sample times and count disagree");
+    if count > 0 {
+        assert!(
+            matches!(
+                proximal.source(),
+                usd::ResolveInfoSource::TimeSamples | usd::ResolveInfoSource::ValueClips
+            ),
+            "{where_}: {count} samples reported but the source is {:?}",
+            proximal.source()
+        );
+    }
+    if attr.value_might_be_time_varying().expect("time varying") {
+        assert!(
+            proximal.value_source_might_be_time_varying(),
+            "{where_}: the attribute varies but its source cannot"
+        );
+    }
+
+    let info = attr.resolve_info_at(at).expect("resolve_info_at");
+    let value = attr.get_at::<sdf::Value>(at).expect("get_at");
+    assert_eq!(
+        value.is_some(),
+        info.source() != usd::ResolveInfoSource::None,
+        "{where_}: the read and the reported source disagree ({:?})",
+        info.source()
+    );
+    if info.has_authored_value() {
+        assert!(value.is_some(), "{where_}: an authored value that reads back as none");
+        assert!(
+            !info.value_is_blocked(),
+            "{where_}: an authored value cannot be blocked"
+        );
+    }
+    if info.has_authored_value_opinion() {
+        assert!(
+            !attr.property_stack_at(at).expect("property_stack_at").is_empty(),
+            "{where_}: an authored opinion with no spec in the stack"
+        );
+    }
+}
+
+/// A `timeSamples` field that holds no usable sample map is no opinion at all,
+/// and every query mode has to agree about that.
+///
+/// An empty map is not a source (C++ requires a layer to hold at least one
+/// sample), and a field holding some other type is not a sample opinion either.
+/// Reporting one as authored at the default time alone would make
+/// `has_authored_value_opinion` depend on how the caller asked rather than on
+/// what the layers hold.
+#[test]
+fn unusable_samples_unauthored() -> Result<()> {
+    for field in [
+        sdf::Value::TimeSamples(Vec::new()),
+        sdf::Value::String("not a sample map".into()),
+    ] {
+        let stage = in_memory_stage()?;
+        stage
+            .define_prim("/A")?
+            .create_attribute("x", "double")?
+            .set_metadata(sdf::FieldKey::TimeSamples.as_str(), field.clone())?;
+
+        let attr = stage.attribute("/A.x")?;
+        let modes = [
+            ("proximal", attr.resolve_info()?),
+            ("default time", attr.resolve_info_at(None)?),
+            ("numeric time", attr.resolve_info_at(usd::TimeCode::new(0.0))?),
+        ];
+        for (mode, info) in modes {
+            assert!(
+                !info.has_authored_value_opinion(),
+                "{field:?} reported as authored by the {mode} query"
+            );
+            assert_eq!(info.source(), usd::ResolveInfoSource::None, "{field:?} at {mode}");
+            assert!(!info.value_is_blocked(), "{field:?} at {mode}");
+        }
+        assert_eq!(attr.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?, None, "{field:?}");
+        assert_eq!(attr.num_time_samples()?, 0, "{field:?}");
+    }
+    Ok(())
+}
+
+/// A blocked `timeSamples` field is an authored opinion, and stays one whatever
+/// time the query names — the counterpart to [`unusable_samples_unauthored`],
+/// which pins the fields that are not.
+#[test]
+fn blocked_samples_every_mode() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage
+        .define_prim("/A")?
+        .create_attribute("x", "double")?
+        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+
+    let attr = stage.attribute("/A.x")?;
+    for (mode, info) in [
+        ("proximal", attr.resolve_info()?),
+        ("default time", attr.resolve_info_at(None)?),
+        ("numeric time", attr.resolve_info_at(usd::TimeCode::new(0.0))?),
+    ] {
+        assert!(info.has_authored_value_opinion(), "the block is authored at {mode}");
+        assert!(!info.has_authored_value(), "a block is not a value at {mode}");
+    }
+    Ok(())
+}
+
+/// A clip set is one source, so it contributes one site however many nodes of
+/// its layer stack the walk passes through.
+///
+/// A prim carrying both a variant set and a clip set has a `Root` node and a
+/// variant node in the same layer stack, both at a path the anchor prefixes —
+/// the shape that offers one set twice if the walk keys clips on the site alone.
+#[test]
+fn clip_contributes_one_site() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+def "Model" (
+    variantSets = "v"
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+    variants = {
+        string v = "a"
+    }
+)
+{
+    float size
+    variantSet "v" = {
+        "a" {
+        }
+    }
+}
+"#,
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = {\n        0: 7.0\n    }\n}\n",
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let attr = stage.attribute("/Model.size")?;
+    assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(7.0));
+
+    let stack = stack_layers(attr.property_stack_at(usd::TimeCode::new(0.0))?);
+    let clips = stack.iter().filter(|layer| layer.ends_with("clip.usda")).count();
+    assert_eq!(clips, 1, "the set contributes one site: {stack:?}");
+    Ok(())
+}
+
+/// A clip set that owns the property but carries no value for it anywhere is
+/// not a value source, and the query that names no time has to say so too.
+///
+/// Its manifest declares the attribute — so the set owns it and nothing weaker
+/// contributes — while no clip authors a sample and no manifest default fills
+/// the gap. The read returns nothing at every time, and a source reported here
+/// would contradict that.
+#[test]
+fn untimed_clip_reports_no_value() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        &clipped_model_body(
+            "    float size
+",
+        ),
+        "#usda 1.0
+def \"Model\"
+{
+    float size
+}
+",
+        "#usda 1.0
+def \"Model\"
+{
+    float other.timeSamples = {
+        0: 1.0
+    }
+}
+",
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let attr = stage.attribute("/Model.size")?;
+    assert_eq!(attr.get_at::<sdf::Value>(usd::TimeCode::new(5.0))?, None);
+
+    let info = attr.resolve_info()?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::None);
+    assert!(!info.has_authored_value());
+    assert!(info.value_is_blocked(), "the set owns the property and blocks it");
+    // And the timed query agrees, as it did before.
+    assert_eq!(attr.resolve_info_at(usd::TimeCode::new(5.0))?.source(), info.source());
+    Ok(())
+}
+
+/// What one source candidate answers with, across every shape value resolution
+/// can reach — the conformance matrix behind [`source_answers_conform`].
+struct Conformance {
+    /// The shape under test.
+    case: &'static str,
+    /// Whether the read yields a value at the queried time.
+    reads: bool,
+    /// The source the read came from.
+    source: usd::ResolveInfoSource,
+    /// Whether an opinion blocked the value.
+    blocked: bool,
+    /// Whether any opinion was authored, blocked or not.
+    authored: bool,
+}
+
+/// Every source candidate must answer the four queries the same way, whatever
+/// withholds the value.
+///
+/// The blocked rows are the ones that drift: each has a real opinion answering
+/// the walk and no value surviving it, so a source reported there would
+/// contradict the read while a missing `value_is_blocked` would hide the
+/// opinion. A clip block is the same shape as a `default` block and has to
+/// report the same way.
+#[test]
+fn source_answers_conform() -> Result<()> {
+    let inactive = tempfile::tempdir()?;
+    let sourced = tempfile::tempdir()?;
+    let blocked = tempfile::tempdir()?;
+    // The three clip rows differ only in what the manifest declares and what the
+    // clip carries: a set that does not own `size` lets weaker sources through,
+    // one that owns and supplies it answers with a value, and one that owns it
+    // but carries nothing answers with a block (spec 12.3.4.6).
+    write_clip_scene(
+        inactive.path(),
+        &clipped_model_body("    float size\n"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float other\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float other.timeSamples = {\n        0: 1.0\n    }\n}\n",
+    )?;
+    write_clip_scene(
+        sourced.path(),
+        &clipped_model_body("    float size\n"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = {\n        0: 7.0\n    }\n}\n",
+    )?;
+    write_clip_scene(
+        blocked.path(),
+        &clipped_model_body("    float size\n"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float other.timeSamples = {\n        0: 1.0\n    }\n}\n",
+    )?;
+
+    let rows: Vec<(Conformance, Stage, &str)> = vec![
+        (
+            Conformance {
+                case: "missing",
+                reads: false,
+                source: usd::ResolveInfoSource::None,
+                blocked: false,
+                authored: false,
+            },
+            authored_shape(|_| Ok(()))?,
+            "/A.x",
+        ),
+        (
+            Conformance {
+                case: "default value",
+                reads: true,
+                source: usd::ResolveInfoSource::Default,
+                blocked: false,
+                authored: true,
+            },
+            authored_shape(|attr| {
+                attr.set(sdf::Value::Double(1.0))?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            Conformance {
+                case: "default block",
+                reads: false,
+                source: usd::ResolveInfoSource::None,
+                blocked: true,
+                authored: true,
+            },
+            authored_shape(|attr| {
+                attr.set(sdf::Value::Double(1.0))?
+                    .set_metadata(sdf::FieldKey::Default.as_str(), sdf::Value::ValueBlock)?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            Conformance {
+                case: "sample value",
+                reads: true,
+                source: usd::ResolveInfoSource::TimeSamples,
+                blocked: false,
+                authored: true,
+            },
+            authored_shape(|attr| {
+                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            Conformance {
+                case: "sample block",
+                reads: false,
+                source: usd::ResolveInfoSource::None,
+                blocked: true,
+                authored: true,
+            },
+            authored_shape(|attr| {
+                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?
+                    .block()?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            Conformance {
+                case: "clip does not own the property",
+                reads: false,
+                source: usd::ResolveInfoSource::None,
+                blocked: false,
+                authored: false,
+            },
+            Stage::open(inactive.path().join("root.usda").to_str().unwrap())?,
+            "/Model.size",
+        ),
+        (
+            Conformance {
+                case: "clip value",
+                reads: true,
+                source: usd::ResolveInfoSource::ValueClips,
+                blocked: false,
+                authored: true,
+            },
+            Stage::open(sourced.path().join("root.usda").to_str().unwrap())?,
+            "/Model.size",
+        ),
+        (
+            Conformance {
+                case: "clip block",
+                reads: false,
+                source: usd::ResolveInfoSource::None,
+                blocked: true,
+                authored: true,
+            },
+            Stage::open(blocked.path().join("root.usda").to_str().unwrap())?,
+            "/Model.size",
+        ),
+    ];
+
+    let at = usd::TimeCode::new(5.0);
+    for (row, stage, path) in rows {
+        let attr = stage.attribute(path)?;
+        let info = attr.resolve_info_at(at)?;
+        assert_eq!(
+            attr.get_at::<sdf::Value>(at)?.is_some(),
+            row.reads,
+            "{}: the value read",
+            row.case
+        );
+        assert_eq!(info.source(), row.source, "{}: the reported source", row.case);
+        assert_eq!(info.value_is_blocked(), row.blocked, "{}: value_is_blocked", row.case);
+        assert_eq!(
+            info.has_authored_value_opinion(),
+            row.authored,
+            "{}: has_authored_value_opinion",
+            row.case
+        );
+        // The two derived predicates follow from the row rather than needing
+        // their own column: a value is authored exactly when a source answered
+        // with one, and nothing can be both authored and blocked.
+        assert_eq!(
+            info.has_authored_value(),
+            row.reads && row.source != usd::ResolveInfoSource::Fallback,
+            "{}: has_authored_value",
+            row.case
+        );
+        assert!(!(info.has_authored_value() && info.value_is_blocked()), "{}", row.case);
+    }
+    Ok(())
+}
+
+/// A numeric property stack lists the clip layer the value comes from on top of
+/// the graph specs, while the default-time stack lists the graph specs alone —
+/// value clips contribute no `default` (spec 12.3.4).
+#[test]
+fn clip_joins_timed_stack() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        &clipped_model_body("    float size\n"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = {\n        0: 7.0\n    }\n}\n",
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let attr = stage.attribute("/Model.size")?;
+    assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(7.0));
+
+    let timed = stack_layers(attr.property_stack_at(usd::TimeCode::new(0.0))?);
+    assert!(
+        timed.iter().any(|layer| layer.ends_with("clip.usda")),
+        "the clip supplying the value joins the stack: {timed:?}"
+    );
+    let plain = stack_layers(attr.property_stack()?);
+    assert!(
+        !plain.iter().any(|layer| layer.ends_with("clip.usda")),
+        "no clip contributes at the default time: {plain:?}"
+    );
+    Ok(())
+}
+
+/// When the active clip authors no samples for the property, the value comes
+/// from the manifest — so the manifest is the spec the stack reports, as in C++.
+#[test]
+fn manifest_joins_timed_stack() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        &clipped_model_body("    float size\n"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size = 3\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float other.timeSamples = {\n        0: 1\n    }\n}\n",
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let attr = stage.attribute("/Model.size")?;
+    assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(3.0));
+
+    let timed = stack_layers(attr.property_stack_at(usd::TimeCode::new(0.0))?);
+    assert!(
+        timed.iter().any(|layer| layer.ends_with("manifest.usda")),
+        "the manifest fills the gap, so it is the reported spec: {timed:?}"
+    );
+    assert!(!timed.iter().any(|layer| layer.ends_with("clip.usda")), "{timed:?}");
+    Ok(())
+}
+
+/// One layer authoring a `default` *and* introducing a clip set: value
+/// resolution takes the `default` and never consults the clip at that site, but
+/// the stack collects every contributor, so it lists both (C++'s property-stack
+/// resolver never sets `foundOpinion`).
+#[test]
+fn timed_stack_keeps_clip() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        &clipped_model_body("    float size = 5\n"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = {\n        0: 7.0\n    }\n}\n",
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let attr = stage.attribute("/Model.size")?;
+    assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(5.0));
+    assert_eq!(
+        attr.resolve_info_at(usd::TimeCode::new(0.0))?.source(),
+        usd::ResolveInfoSource::Default
+    );
+
+    let timed = stack_layers(attr.property_stack_at(usd::TimeCode::new(0.0))?);
+    assert!(timed.iter().any(|layer| layer.ends_with("root.usda")), "{timed:?}");
+    assert!(timed.iter().any(|layer| layer.ends_with("clip.usda")), "{timed:?}");
+    Ok(())
+}
+
+/// Every participating clip set contributes one site, while value resolution
+/// stops at the first that answers (spec 12.3.4.5).
+#[test]
+fn timed_stack_lists_sets() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    for name in ["a", "b"] {
+        fs::write(
+            dir.path().join(format!("manifest_{name}.usda")),
+            "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+        )?;
+        fs::write(
+            dir.path().join(format!("clip_{name}.usda")),
+            "#usda 1.0
+def \"Model\"
+{
+    float size.timeSamples = {
+        0: 1.0
+    }
+}
+",
+        )?;
+    }
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary a = {
+            asset[] assetPaths = [@./clip_a.usda@]
+            asset manifestAssetPath = @./manifest_a.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+        dictionary b = {
+            asset[] assetPaths = [@./clip_b.usda@]
+            asset manifestAssetPath = @./manifest_b.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let attr = stage.attribute("/Model.size")?;
+    let timed = stack_layers(attr.property_stack_at(usd::TimeCode::new(0.0))?);
+    assert!(timed.iter().any(|layer| layer.ends_with("clip_a.usda")), "{timed:?}");
+    assert!(timed.iter().any(|layer| layer.ends_with("clip_b.usda")), "{timed:?}");
+    Ok(())
+}
+
+/// A `def "Model"` introducing the one clip set [`write_clip_scene`] writes,
+/// with `body` as the prim's own contents.
+fn clipped_model_body(body: &str) -> String {
+    format!(
+        r#"#usda 1.0
+def "Model" (
+    clips = {{
+        dictionary default = {{
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }}
+    }}
+)
+{{
+{body}}}
+"#
+    )
+}
+
+/// The layer identifiers of a property stack, in strength order.
+fn stack_layers(stack: Vec<usd::SpecSite>) -> Vec<String> {
+    stack.into_iter().map(|site| site.layer).collect()
+}
+
+/// A `def "S"` with a plain `default`, the strong half of the split scene.
+const STRONG_PLAIN: &str = r#"#usda 1.0
+def "S"
+{
+    float size = 3
+}
+"#;
+
+/// The same prim as the weak half, so a stronger clip has something to outrank.
+const WEAK_PLAIN: &str = r#"#usda 1.0
+def "S"
+{
+    float size = 3
+}
+"#;
+
+/// A `def "S"` introducing a clip set, as the weak half of the split scene.
+const WEAK_CLIPPED: &str = r#"#usda 1.0
+def "S" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/S"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    float size
+}
+"#;
+
+/// The same clip set as the strong half.
+const STRONG_CLIPPED: &str = WEAK_CLIPPED;
+
+/// Writes a stage whose root prim references two layers in strength order, plus
+/// the manifest and clip either half can point at.
+fn write_split_clip_scene(dir: &FsPath, strong: &str, weak: &str) -> Result<String> {
+    fs::write(
+        dir.join("root.usda"),
+        "#usda 1.0\ndef \"A\" (\n    references = [@./strong.usda@</S>, @./weak.usda@</S>]\n)\n{\n}\n",
+    )?;
+    fs::write(dir.join("strong.usda"), strong)?;
+    fs::write(dir.join("weak.usda"), weak)?;
+    fs::write(
+        dir.join("manifest.usda"),
+        "#usda 1.0\ndef \"S\"\n{\n    float size\n}\n",
+    )?;
+    fs::write(
+        dir.join("clip.usda"),
+        "#usda 1.0\ndef \"S\"\n{\n    float size.timeSamples = {\n        0: 7\n    }\n}\n",
+    )?;
+    Ok(dir.join("root.usda").to_string_lossy().into_owned())
+}
+
+/// A clip set anchored on an ancestor applies at the layer that introduced it
+/// even where that layer authors no spec for the descendant prim being read —
+/// the sites a spec stack alone would never reach (C++ resolves with
+/// `skipEmptyNodes = false` once a prim may have clips).
+#[test]
+fn clip_applies_without_spec() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("sub.usda"),
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\ndef \"Model\"\n{\n    def \"Child\"\n    {\n        float size\n    }\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("manifest.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    def \"Child\"\n    {\n        float size\n    }\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("clip.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    def \"Child\"\n    {\n        float size.timeSamples = {\n            0: 7\n        }\n    }\n}\n",
+    )?;
+
+    let stage = Stage::open(dir.path().join("root.usda").to_string_lossy().as_ref())?;
+    assert_eq!(value_f64(&stage, "/Model/Child.size", 0.0), Some(7.0));
+    Ok(())
+}
+
+/// Value clips are consulted only where a prim's composition says they can
+/// exist, so authoring the first `clips` opinion on an ancestor of an
+/// already-cached prim has to reach that prim (C++
+/// `Usd_PrimData::MayHaveOpinionsInClips` plus the resync a clip add triggers).
+/// Removing the opinion again has to take it back.
+#[test]
+fn clip_added_after_read() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_child_clip_files(dir.path(), "Model")?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    def \"Child\"\n    {\n        float size\n    }\n}\n",
+    )?;
+
+    let stage = Stage::open(dir.path().join("root.usda").to_string_lossy().as_ref())?;
+    // Caches the prim index with no clips in sight.
+    assert_eq!(value_f64(&stage, "/Model/Child.size", 0.0), None);
+
+    stage
+        .prim("/Model")?
+        .set_metadata(sdf::FieldKey::Clips.as_str(), clip_metadata("/Model"))?;
+    assert_eq!(value_f64(&stage, "/Model/Child.size", 0.0), Some(7.0));
+
+    stage.prim("/Model")?.clear_metadata(sdf::FieldKey::Clips.as_str())?;
+    assert_eq!(value_f64(&stage, "/Model/Child.size", 0.0), None);
+    Ok(())
+}
+
+/// The same edit reaching across a namespace boundary: the descendant's stage
+/// path lies outside the subtree the `clips` opinion was authored in, so it can
+/// only be reached through the dependency mappings.
+#[test]
+fn clip_added_across_reference() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_child_clip_files(dir.path(), "Src")?;
+    fs::write(
+        dir.path().join("root.usda"),
+        concat!(
+            "#usda 1.0\n",
+            "def \"Src\"\n{\n    def \"Child\"\n    {\n        float size\n    }\n}\n",
+            "def \"Model\" (\n    references = </Src>\n)\n{\n}\n",
+        ),
+    )?;
+
+    let stage = Stage::open(dir.path().join("root.usda").to_string_lossy().as_ref())?;
+    assert_eq!(value_f64(&stage, "/Model/Child.size", 0.0), None);
+
+    // Authored on `/Src`, read at `/Model/Child`.
+    stage
+        .prim("/Src")?
+        .set_metadata(sdf::FieldKey::Clips.as_str(), clip_metadata("/Src"))?;
+    assert_eq!(value_f64(&stage, "/Model/Child.size", 0.0), Some(7.0));
+    Ok(())
+}
+
+/// A `clips` dictionary naming a single set whose clip carries `Child.size`,
+/// anchored at `prim_path`.
+fn clip_metadata(prim_path: &str) -> sdf::Value {
+    let set = HashMap::from([
+        (
+            "assetPaths".to_string(),
+            sdf::Value::AssetPathVec(vec!["./clip.usda".into()]),
+        ),
+        (
+            "manifestAssetPath".to_string(),
+            sdf::Value::AssetPath("./manifest.usda".into()),
+        ),
+        ("primPath".to_string(), sdf::Value::String(prim_path.to_string())),
+        (
+            "active".to_string(),
+            sdf::Value::Vec2dVec(vec![openusd::gf::vec2d(0.0, 0.0)]),
+        ),
+    ]);
+    sdf::Value::Dictionary(HashMap::from([("default".to_string(), sdf::Value::Dictionary(set))]))
+}
+
+/// The manifest and clip [`clip_metadata`] points at, declaring `Child.size`
+/// under `anchor` — the prim the set's `primPath` selects inside them.
+fn write_child_clip_files(dir: &FsPath, anchor: &str) -> Result<()> {
+    fs::write(
+        dir.join("manifest.usda"),
+        format!("#usda 1.0\ndef \"{anchor}\"\n{{\n    def \"Child\"\n    {{\n        float size\n    }}\n}}\n"),
+    )?;
+    fs::write(
+        dir.join("clip.usda"),
+        format!(
+            "#usda 1.0\ndef \"{anchor}\"\n{{\n    def \"Child\"\n    {{\n        float size.timeSamples = {{\n            0: 7\n        }}\n    }}\n}}\n"
+        ),
+    )?;
     Ok(())
 }
 

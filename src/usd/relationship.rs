@@ -6,7 +6,7 @@
 //! fluent setters take `self` by value and return `Self`, so writes chain in a
 //! single statement that ends with the final handle bound.
 
-use super::{Prim, Stage, StageAuthoringError};
+use super::{Prim, SpecSite, Stage, StageAuthoringError};
 use crate::Result;
 use crate::sdf;
 
@@ -178,11 +178,15 @@ impl Relationship {
         })?)
     }
 
-    /// Returns the property stack: each `(layer identifier, spec path)` site
-    /// that authors a spec for this relationship, strongest first. Mirrors C++
-    /// `UsdProperty::GetPropertyStack`.
-    pub fn property_stack(&self) -> Result<Vec<(String, sdf::Path)>> {
-        Ok(self.stage.with_cache(|g, c| c.property_stack(g, &self.path))?)
+    /// Every spec that authors an opinion for this relationship, strongest
+    /// first, each with the cumulative layer offset that reaches it. Mirrors
+    /// C++ `UsdProperty::GetPropertyStack`.
+    ///
+    /// Takes no time, unlike
+    /// [`Attribute::property_stack_at`](super::Attribute::property_stack_at):
+    /// only value clips make a stack time-dependent, and they source attributes.
+    pub fn property_stack(&self) -> Result<Vec<SpecSite>> {
+        self.stage.property_stack(&self.path, None)
     }
 
     /// Borrow the relationship spec at `self.path` on the edit target's

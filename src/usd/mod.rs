@@ -18,13 +18,14 @@ mod prim;
 mod prim_definition;
 mod prim_type_info;
 mod relationship;
+mod resolve_info;
 mod schema;
 mod schema_registry;
 mod sink;
 mod stage;
 mod timecode;
 
-pub use attribute::{Attribute, AttributeQuery, ValueSource};
+pub use attribute::{Attribute, AttributeQuery};
 pub use capture::{ReplayStage, UndoStage};
 pub use clips::ClipsAPI;
 pub use collection::{
@@ -40,6 +41,7 @@ pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use prim_definition::{DefProperty, PrimDefinition};
 pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
 pub use relationship::Relationship;
+pub use resolve_info::{ResolveInfo, ResolveInfoSource};
 pub use schema::{SchemaBase, SchemaKind};
 pub use schema_registry::{
     ApplyApiError, FamilySource, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError, Schematics,
@@ -59,6 +61,9 @@ pub use stage::{
 pub use crate::pcp::PopulationMask as StagePopulationMask;
 /// Why a path was rejected from a [`StagePopulationMask`].
 pub use crate::pcp::PopulationMaskError as StagePopulationMaskError;
+/// One spec contributing to a composed property or prim, under the name the
+/// stack queries report it by.
+pub use crate::pcp::SpecSiteRecord as SpecSite;
 pub use timecode::TimeCode;
 
 use crate::Result;

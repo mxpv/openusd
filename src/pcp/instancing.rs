@@ -597,6 +597,10 @@ impl IndexCache {
         // namespace, not the canonical instance's.
         index.rebase_root(canonical, prototype);
 
+        // Seeded from a namespace root, so the prototype inherits nothing from
+        // where its instance sits: its variant selections, clip presence and
+        // instance depth all come from the arcs the instanceable prim brings in
+        // (spec 11.3.3).
         let (mut context, _) = index.context_for_children(graph, &self.root_parent_context());
         context.instance_depth = None;
 

@@ -4,7 +4,7 @@ use crate::Result;
 
 use crate::schemas::SchemaError;
 
-use crate::{sdf, usd};
+use crate::sdf;
 
 use super::connectable::{AttributeType, ConnectionSource, ShadingAttribute};
 
@@ -81,7 +81,7 @@ fn resolve_recursive(
 
     // Nothing upstream produced a value, so an authored value here is what a
     // consumer resolves to — a NodeGraph or Material interface value.
-    if filter == ProducerFilter::Any && !found && attribute.attribute().value_source()? == usd::ValueSource::Authored {
+    if filter == ProducerFilter::Any && !found && attribute.attribute().resolve_info()?.has_authored_value() {
         producing.push(attribute);
         found = true;
     }

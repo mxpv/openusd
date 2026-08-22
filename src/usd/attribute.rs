@@ -10,7 +10,9 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use super::{Prim, PrimTypeInfo, Stage, StageAuthoringError, TimeCode, interp};
+use super::{
+    Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, TimeCode, interp,
+};
 use crate::Result;
 use crate::pcp;
 use crate::pcp::AttributeValueSource;
@@ -26,19 +28,6 @@ use crate::tf;
 pub struct Attribute {
     stage: Stage,
     path: sdf::Path,
-}
-
-/// Where an attribute's resolved value comes from, reported by
-/// [`Attribute::value_source`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueSource {
-    /// A layer authors the value.
-    Authored,
-    /// No layer authors a value that survives composition, and the attribute's
-    /// schema declares a fallback.
-    Fallback,
-    /// Neither, so the attribute reads back as no value at all.
-    None,
 }
 
 impl Attribute {
@@ -500,7 +489,7 @@ impl Attribute {
     /// into) to resolve a time sample under the stage's [`InterpolationType`].
     ///
     /// When no layer authors a value, the attribute's schema supplies its
-    /// fallback; [`value_source`](Self::value_source) reports which answered.
+    /// fallback; [`resolve_info`](Self::resolve_info) reports which answered.
     ///
     /// [`InterpolationType`]: super::InterpolationType
     pub fn get_at<T>(&self, time: impl Into<Option<super::TimeCode>>) -> Result<Option<T>>
@@ -565,6 +554,18 @@ impl Attribute {
         Ok(property.field(field).cloned())
     }
 
+    /// Whether the declaring schema supplies a value to fall back on.
+    ///
+    /// Reads the filtered fallback, not the raw field: a composed schema
+    /// property can retract an inherited fallback by authoring a value block,
+    /// which leaves the field present but supplies nothing.
+    fn has_schema_fallback(&self) -> Result<bool, pcp::QueryError> {
+        let Some((info, name)) = self.declaring_definition()? else {
+            return Ok(false);
+        };
+        Ok(info.prim_definition().attribute_fallback(&name).is_some())
+    }
+
     /// The spec type the owning prim's schema declares for this property, or
     /// `None` when no schema declares it.
     fn declared_spec_type(&self) -> Result<Option<sdf::SpecType>, pcp::QueryError> {
@@ -595,22 +596,54 @@ impl Attribute {
         Ok(info.prim_definition().has_property(&name).then_some((info, name)))
     }
 
-    /// Where the value [`get`](Self::get) returns comes from.
+    /// Where the value [`get`](Self::get) returns comes from, without producing
+    /// it (C++ `UsdAttribute::GetResolveInfo`).
     ///
-    /// A blocked attribute reports [`ValueSource::Fallback`] when its schema
-    /// declares one: blocking removes the authored opinions, and resolution
-    /// then falls through to the schema, per spec §12.3.6.
-    pub fn value_source(&self) -> Result<ValueSource> {
-        let authored = match self.stage.resolve_value_source(&self.path)? {
-            AttributeValueSource::Static(value) => value.is_some(),
-            AttributeValueSource::TimeSamples { .. } | AttributeValueSource::Clips => true,
+    /// Reports the *proximal* source: the one that answers without naming a
+    /// time. That is not necessarily what [`get`](Self::get) returns, which
+    /// resolves at the default time — use
+    /// [`resolve_info_at`](Self::resolve_info_at) to ask about a specific time.
+    pub fn resolve_info(&self) -> Result<ResolveInfo> {
+        self.build_resolve_info(pcp::ResolveMode::Proximal)
+    }
+
+    /// Where the value at `time` comes from, without producing it.
+    ///
+    /// `time` is `None` for the default time — matching
+    /// [`get_at`](Self::get_at) — or `Some(tc)` for a numeric one.
+    pub fn resolve_info_at(&self, time: impl Into<Option<TimeCode>>) -> Result<ResolveInfo> {
+        let mode = match time.into() {
+            None => pcp::ResolveMode::Default,
+            Some(time) => pcp::ResolveMode::Numeric(time.value()),
         };
-        if authored {
-            return Ok(ValueSource::Authored);
-        }
-        Ok(match self.definition_field(sdf::FieldKey::Default)?.is_some() {
-            true => ValueSource::Fallback,
-            false => ValueSource::None,
+        self.build_resolve_info(mode)
+    }
+
+    /// Adds the schema tier `pcp` knows nothing about to the authored source it
+    /// resolved: a blocked or absent authored value falls through to the
+    /// prim definition's fallback (spec §12.3.6).
+    fn build_resolve_info(&self, mode: pcp::ResolveMode) -> Result<ResolveInfo> {
+        let resolved = self.stage.resolve_info(&self.path, mode)?;
+        let source = match resolved.source {
+            pcp::ResolveSourceKind::Default => ResolveInfoSource::Default,
+            pcp::ResolveSourceKind::TimeSamples => ResolveInfoSource::TimeSamples,
+            pcp::ResolveSourceKind::ValueClips => ResolveInfoSource::ValueClips,
+            pcp::ResolveSourceKind::None => match self.has_schema_fallback()? {
+                true => ResolveInfoSource::Fallback,
+                false => ResolveInfoSource::None,
+            },
+        };
+        // A schema fallback and an absent value come from no composition node,
+        // even when a block at one is what sent resolution there.
+        let node = match source {
+            ResolveInfoSource::Fallback | ResolveInfoSource::None => None,
+            _ => resolved.node,
+        };
+        Ok(ResolveInfo {
+            source,
+            node,
+            value_is_blocked: resolved.value == pcp::ValueState::Blocked,
+            has_authored_opinion: resolved.authored,
         })
     }
 
@@ -674,7 +707,13 @@ impl Attribute {
         Ok(None)
     }
 
-    /// Composed `timeSamples` map.
+    /// The `timeSamples` map [`get_at`](Self::get_at) resolves the value from,
+    /// retimed to stage time, or `None` when the source that answers is not a
+    /// `timeSamples` opinion.
+    ///
+    /// A winning value-clip set answers with a schedule rather than a map, so it
+    /// reports `None` here; its times reach
+    /// [`time_sample_times`](Self::time_sample_times).
     pub fn time_samples(&self) -> Result<Option<sdf::TimeSampleMap>> {
         self.stage.time_samples(&self.path)
     }
@@ -691,9 +730,10 @@ impl Attribute {
     /// The authored sample times in ascending order, or empty when none are
     /// authored. Mirrors C++ `UsdAttribute::GetTimeSamples`.
     ///
-    /// Gathers the times from the strongest value source — local `timeSamples`,
-    /// then value clips (spec 12.3.4), then `timeSamples` across reference /
-    /// payload arcs — each retimed to stage time.
+    /// The times belong to whichever source [`get_at`](Self::get_at) resolves
+    /// the value from, retimed to stage time. A source that answers with a
+    /// constant contributes none, so a `default` that hides a weaker layer's
+    /// samples leaves this empty.
     pub fn time_sample_times(&self) -> Result<Vec<f64>> {
         Ok(self.stage.time_sample_times(&self.path)?.unwrap_or_default())
     }
@@ -740,11 +780,33 @@ impl Attribute {
         self.stage.value_might_be_time_varying(&self.path)
     }
 
-    /// Returns the property stack: each `(layer identifier, spec path)` site
-    /// that authors a spec for this attribute, strongest first. Mirrors C++
-    /// `UsdProperty::GetPropertyStack`.
-    pub fn property_stack(&self) -> Result<Vec<(String, sdf::Path)>> {
-        Ok(self.stage.with_cache(|g, c| c.property_stack(g, &self.path))?)
+    /// Every spec that authors an opinion for this attribute, strongest first,
+    /// each with the cumulative layer offset that reaches it. Mirrors C++
+    /// `UsdProperty::GetPropertyStack` at the default time.
+    ///
+    /// Meant for debugging and introspection: the makeup of a stack can itself
+    /// vary with time, so a repeated value read should use
+    /// [`Stage::attribute_query`](super::Stage::attribute_query) rather than a
+    /// retained stack.
+    pub fn property_stack(&self) -> Result<Vec<SpecSite>> {
+        self.stage.property_stack(&self.path, None)
+    }
+
+    /// [`property_stack`](Self::property_stack) at a numeric time, which also
+    /// lists the value-clip layer each participating clip set supplies the
+    /// property from there.
+    ///
+    /// That clip layer is the one the value would come from: the active clip
+    /// when it authors samples for the property, and the set's manifest
+    /// otherwise — including where `interpolateMissingClipValues` fills the gap
+    /// from surrounding clips, matching C++. Each participating set contributes
+    /// one site, since a stack collects every contributor rather than stopping
+    /// at the one that answers.
+    ///
+    /// Only offered for a numeric time: clips contribute no `default`, so the
+    /// default-time stack is [`property_stack`](Self::property_stack).
+    pub fn property_stack_at(&self, time: TimeCode) -> Result<Vec<SpecSite>> {
+        self.stage.property_stack(&self.path, Some(time.value()))
     }
 
     /// Borrow the attribute spec at `self.path` on the edit target's layer,
@@ -1038,7 +1100,7 @@ mod tests {
         assert!(matches!(error, crate::Error::Convert(_)), "got: {error}");
         Ok(())
     }
-    use crate::usd::{AttributeQuery, Stage, TimeCode, ValueSource};
+    use crate::usd::{AttributeQuery, ResolveInfoSource, Stage, TimeCode};
     use crate::{sdf, tf};
 
     fn stage() -> Result<Stage> {
@@ -1081,7 +1143,41 @@ mod tests {
         // value comes entirely from the schema.
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<f32>()?, Some(50000.0));
-        assert_eq!(intensity.value_source()?, ValueSource::Fallback);
+        assert_eq!(intensity.resolve_info()?.source(), ResolveInfoSource::Fallback);
+        Ok(())
+    }
+
+    /// A `Fallback` source and a usable fallback value are the same question:
+    /// the source is read from the filtered fallback, so a schema property whose
+    /// `default` is a value block reports `None`, not `Fallback`.
+    #[test]
+    fn fallback_source_tracks_value() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        for name in ["inputs:intensity", "mine"] {
+            let attr = match name {
+                "mine" => stage.create_attribute("/Sun.mine", "double")?,
+                _ => stage.attribute(format!("/Sun.{name}"))?,
+            };
+            let is_fallback = attr.resolve_info()?.source() == ResolveInfoSource::Fallback;
+            assert_eq!(is_fallback, attr.fallback_value()?.is_some(), "{name}");
+        }
+        Ok(())
+    }
+
+    /// A schema fallback comes from no composition node, even when a block at
+    /// one is what sent resolution there.
+    #[test]
+    fn fallback_names_no_node() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        stage.create_attribute("/Sun.inputs:intensity", "float")?.block()?;
+
+        let info = stage.attribute("/Sun.inputs:intensity")?.resolve_info()?;
+        assert_eq!(info.source(), ResolveInfoSource::Fallback);
+        assert!(info.value_is_blocked());
+        assert!(info.node().is_none());
         Ok(())
     }
 
@@ -1093,7 +1189,7 @@ mod tests {
 
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<f32>()?, Some(3.0));
-        assert_eq!(intensity.value_source()?, ValueSource::Authored);
+        assert_eq!(intensity.resolve_info()?.source(), ResolveInfoSource::Default);
         Ok(())
     }
 
@@ -1126,7 +1222,7 @@ mod tests {
         // schema, per spec 12.3.6.
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<f32>()?, Some(50000.0));
-        assert_eq!(intensity.value_source()?, ValueSource::Fallback);
+        assert_eq!(intensity.resolve_info()?.source(), ResolveInfoSource::Fallback);
         Ok(())
     }
 
@@ -1291,9 +1387,10 @@ mod tests {
             .set_at(200.0_f32, TimeCode::new(10.0))?;
 
         // The only authored opinion is time samples, and it is what `get_at`
-        // resolves, so the source is authored rather than the schema fallback.
+        // resolves, so the source is that rather than the schema fallback.
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
-        assert_eq!(intensity.value_source()?, ValueSource::Authored);
+        assert_eq!(intensity.resolve_info()?.source(), ResolveInfoSource::TimeSamples);
+        assert!(intensity.resolve_info()?.has_authored_value());
         assert_eq!(intensity.get_at::<f32>(TimeCode::new(5.0))?, Some(150.0));
         Ok(())
     }
@@ -1383,7 +1480,7 @@ mod tests {
 
         let unknown = stage.attribute("/Sun.notASchemaProperty")?;
         assert_eq!(unknown.get::<sdf::Value>()?, None);
-        assert_eq!(unknown.value_source()?, ValueSource::None);
+        assert_eq!(unknown.resolve_info()?.source(), ResolveInfoSource::None);
         Ok(())
     }
 
@@ -1410,7 +1507,7 @@ mod tests {
         // The default process registry ships without schema data.
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<sdf::Value>()?, None);
-        assert_eq!(intensity.value_source()?, ValueSource::None);
+        assert_eq!(intensity.resolve_info()?.source(), ResolveInfoSource::None);
         Ok(())
     }
 
