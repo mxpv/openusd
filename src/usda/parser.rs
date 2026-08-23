@@ -1587,6 +1587,24 @@ def Scope \"A\"
         assert_eq!(error.column(), 15);
     }
 
+    /// A failure whose offending token spans lines — a triple-quoted string
+    /// where a scalar was expected — renders both ends of the token, so the
+    /// reader sees the construct's extent rather than its opening fragment.
+    #[test]
+    fn error_spans_multiline_token() {
+        let source = "#usda 1.0\ndef Scope \"A\"\n{\n    float x = \"\"\"a\nb\"\"\"\n}\n";
+        let error = Parser::new(source).parse().expect_err("a string is not a float");
+        let rendered = error.to_string();
+
+        assert_eq!(error.line(), 4, "{rendered}");
+        let lines: Vec<_> = rendered.lines().collect();
+        assert!(lines.iter().any(|l| l.starts_with("4 | ")), "{rendered}");
+        assert!(
+            lines.iter().any(|l| l.starts_with("5 | ")),
+            "the closing line is rendered: {rendered}"
+        );
+    }
+
     #[test]
     fn error_tab_alignment() {
         let error = Parser::new("#usda 1.0\ndef Scope \"A\"\n{\n\tfloat x = =\n}\n")
@@ -1594,7 +1612,8 @@ def Scope \"A\"
             .expect_err("`=` is not a value");
 
         let rendered = error.to_string();
-        let caret = rendered.lines().last().expect("caret line");
+        // The caret under the line the span opens on.
+        let caret = rendered.lines().nth(4).expect("caret line");
         assert!(caret.starts_with("  | \t"), "tabs must be preserved, got: {caret:?}");
     }
 

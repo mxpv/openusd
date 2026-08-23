@@ -13,75 +13,153 @@ const SNIPPET_WIDTH: usize = 160;
 /// The marker placed at each end of a windowed snippet.
 const ELLIPSIS: &str = "...";
 
+/// Stands in for the source lines between the two ends of a span, of which a
+/// diagnostic prints only the ends.
+const ELIDED_LINES: &str = "...";
+
 /// A `usda` parse failure together with the source location it points at.
 ///
-/// The line and column are resolved once, when the error is built. Formatting
-/// generates the caret line from the stored snippet and marker.
+/// The location is resolved once, when the error is built; formatting renders
+/// the stored lines and their carets.
 #[derive(Debug)]
 pub struct ParseError {
     cause: RawError,
-    line: usize,
-    column: usize,
-    snippet: Box<str>,
-    /// Byte range of the offending token within `snippet`.
-    marker: Range<usize>,
+    head: MarkedLine,
+    /// The line the span closes on, when it closes on a later one than it opens.
+    ///
+    /// Boxed because the span of an ordinary token stays within one line, and
+    /// [`SchemaRegistryError`](crate::usd::SchemaRegistryError) and
+    /// [`ArchiveError`](crate::usdz::ArchiveError) carry a `ParseError` by
+    /// value: the common failure should not grow by the rare one's cost.
+    tail: Option<Box<MarkedLine>>,
     source_name: Option<Box<str>>,
 }
 
-impl ParseError {
-    /// Locates `span` within `source`, keeping only the offending line.
-    pub(super) fn new(cause: RawError, source: &str, span: Range<usize>) -> Self {
-        // An end-of-input span starts one past the last byte, which belongs to
-        // no line; step back onto the final character so the location lands on
-        // real text. The walk stops at 0, which is always a char boundary.
-        let mut offset = span.start.min(source.len());
-        if offset == source.len() && offset > 0 {
-            offset -= 1;
-            while !source.is_char_boundary(offset) {
-                offset -= 1;
-            }
-        }
+/// One source line with the region of it a diagnostic marks.
+///
+/// A span reaching past the line is clamped to it, so the two ends of a span
+/// crossing a line boundary mark the same thing under one rule: whatever of the
+/// span falls on that line.
+#[derive(Debug)]
+struct MarkedLine {
+    /// 1-based line number.
+    line: usize,
+    /// 1-based column the mark starts at, counted in characters.
+    column: usize,
+    /// The line without its terminator, windowed when too long to print whole.
+    snippet: Box<str>,
+    /// Byte range within `snippet` the caret underlines.
+    marker: Range<usize>,
+}
 
-        let line_start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
-        let line_end = source[offset..].find('\n').map_or(source.len(), |index| offset + index);
-        let line = source[..line_start].matches('\n').count() + 1;
+/// Which end of a span a [`MarkedLine`] carries.
+enum Edge {
+    /// The line the span opens on, marked from where the span starts.
+    Opens,
+    /// The line the span closes on, marked from that line's own start.
+    Closes,
+}
 
-        // Clamp the marker against the trimmed line, so a span reaching that
-        // line's `\r` cannot index past the snippet while formatting.
-        let full_line = &source[line_start..line_end];
-        let full_line = full_line.strip_suffix('\r').unwrap_or(full_line);
-        let visible_end = line_start + full_line.len();
-        let marker_start = offset.min(visible_end) - line_start;
-        let marker_end = span.end.min(visible_end) - line_start;
+impl MarkedLine {
+    /// Marks the part of `span` falling on `line`, which carries the span's
+    /// `edge`. Both are byte offsets into the source `line` came from.
+    fn mark(line: &Line<'_>, span: &Range<usize>, edge: Edge) -> Self {
+        // Clamping against the trimmed line keeps a span reaching that line's
+        // `\r`, or lying off it entirely, from indexing past the snippet while
+        // formatting.
+        let visible_end = line.end();
+        let from = match edge {
+            Edge::Opens => span.start.clamp(line.start, visible_end),
+            Edge::Closes => line.start,
+        } - line.start;
+        let to = span.end.clamp(line.start, visible_end) - line.start;
 
-        // Counted from the clamped start so the column and the caret agree.
-        let column = full_line[..marker_start].chars().count() + 1;
-        let (snippet, marker) = window(full_line, marker_start..marker_end.max(marker_start));
+        // A windowed excerpt has to keep the span's own boundary on this line,
+        // rather than the line edge its other end is clamped to.
+        let focus = match edge {
+            Edge::Opens => from,
+            Edge::Closes => to,
+        };
 
+        // Counted before windowing, whose ellipsis prefix would shift it.
+        let column = line.text[..from].chars().count() + 1;
+        let (snippet, marker) = window(line.text, from..to, focus);
         Self {
-            cause,
-            line,
+            line: line.number,
             column,
             snippet,
             marker,
+        }
+    }
+
+    /// Writes the numbered source line and the caret line under it, without a
+    /// trailing newline.
+    fn write(&self, f: &mut fmt::Formatter<'_>, pad: usize) -> fmt::Result {
+        let (line, snippet) = (self.line, &self.snippet);
+        writeln!(f, "{line:pad$} | {snippet}")?;
+        write!(f, "{:pad$} | ", "")?;
+        // Tabs stay tabs so the caret lands under the token.
+        for ch in snippet[..self.marker.start].chars() {
+            write!(f, "{}", if ch == '\t' { '\t' } else { ' ' })?;
+        }
+        let width = snippet[self.marker.clone()].chars().count().max(1);
+        write!(f, "{:^<width$}", "")
+    }
+}
+
+impl ParseError {
+    /// Locates `span` within `source`, keeping the lines it opens and closes on.
+    pub(super) fn new(cause: RawError, source: &str, span: Range<usize>) -> Self {
+        // An end-of-input span starts one past the last byte, which belongs to
+        // no line; step back onto the final character so the location lands on
+        // real text.
+        let offset = if span.start < source.len() {
+            span.start
+        } else {
+            step_back(source, source.len())
+        };
+        let opening = line_at(source, offset);
+        let head = MarkedLine::mark(&opening, &(offset..span.end), Edge::Opens);
+
+        // The span's end is exclusive, so its final character says where it
+        // closes, and a line terminator between there and the opening line's
+        // start is what puts it on a later line. An empty span has no such
+        // character, leaving that range inverted and nothing to close.
+        let last = step_back(source, span.end);
+        let tail = source
+            .get(opening.start..last)
+            .is_some_and(|opened| opened.contains('\n'))
+            .then(|| {
+                let closing = line_at(source, last);
+                Box::new(MarkedLine::mark(&closing, &span, Edge::Closes))
+            });
+
+        Self {
+            cause,
+            head,
+            tail,
             source_name: None,
         }
     }
 
     /// The 1-based line the error points at.
     pub fn line(&self) -> usize {
-        self.line
+        self.head.line
     }
 
     /// The 1-based column the error points at, counted in characters.
     pub fn column(&self) -> usize {
-        self.column
+        self.head.column
     }
 
-    /// The offending source line, without its line terminator. A line longer
-    /// than can be usefully printed is excerpted around the caret.
+    /// The source line the error opens on, without its line terminator. A line
+    /// longer than can be usefully printed is excerpted around the caret.
+    ///
+    /// A span reaching past that line — a multi-line token — closes on a later
+    /// one this does not report; the [`Display`](fmt::Display) rendering is the
+    /// complete one.
     pub fn snippet(&self) -> &str {
-        &self.snippet
+        &self.head.snippet
     }
 
     /// Names the source the text was read from, so the rendered location reads
@@ -99,19 +177,24 @@ impl fmt::Display for ParseError {
         if let Some(name) = &self.source_name {
             write!(f, "{name}:")?;
         }
-        writeln!(f, "{}:{}", self.line, self.column)?;
+        writeln!(f, "{}:{}", self.head.line, self.head.column)?;
 
-        let gutter = self.line.to_string();
-        let pad = gutter.len();
+        // The gutter is sized for the largest line number it will carry.
+        let last_line = self.tail.as_ref().map_or(self.head.line, |tail| tail.line);
+        let pad = last_line.to_string().len();
         writeln!(f, "{:pad$} |", "")?;
-        writeln!(f, "{gutter} | {}", self.snippet)?;
-        write!(f, "{:pad$} | ", "")?;
-        // Tabs stay tabs so the caret lands under the token.
-        for ch in self.snippet[..self.marker.start].chars() {
-            write!(f, "{}", if ch == '\t' { '\t' } else { ' ' })?;
+        self.head.write(f, pad)?;
+
+        let Some(tail) = &self.tail else {
+            return Ok(());
+        };
+        writeln!(f)?;
+        // Only the two ends of a long span are worth printing; the lines it
+        // runs through say nothing the reader cannot see in the source.
+        if tail.line > self.head.line + 1 {
+            writeln!(f, "{ELIDED_LINES}")?;
         }
-        let width = self.snippet[self.marker.clone()].chars().count().max(1);
-        write!(f, "{:^<width$}", "")
+        tail.write(f, pad)
     }
 }
 
@@ -240,14 +323,56 @@ impl<T> Ctx<T> for Option<T> {
     }
 }
 
-/// Trims `line` to a window around `marker` when it is too long to print,
-/// returning the excerpt and the marker rebased onto it.
-fn window(line: &str, marker: Range<usize>) -> (Box<str>, Range<usize>) {
+/// Steps `offset` back onto the previous character, staying on a char boundary
+/// and stopping at 0.
+fn step_back(source: &str, offset: usize) -> usize {
+    let mut offset = offset.min(source.len());
+    if offset > 0 {
+        offset -= 1;
+        while !source.is_char_boundary(offset) {
+            offset -= 1;
+        }
+    }
+    offset
+}
+
+/// One source line, located by a byte offset falling on it.
+struct Line<'a> {
+    /// 1-based line number.
+    number: usize,
+    /// Byte offset the line begins at.
+    start: usize,
+    /// The line itself, without its terminator.
+    text: &'a str,
+}
+
+impl Line<'_> {
+    /// Byte offset just past the line's last printable character.
+    fn end(&self) -> usize {
+        self.start + self.text.len()
+    }
+}
+
+/// The line `offset` falls on.
+fn line_at(source: &str, offset: usize) -> Line<'_> {
+    let start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let end = source[offset..].find('\n').map_or(source.len(), |index| offset + index);
+    let text = &source[start..end];
+    Line {
+        number: source[..start].matches('\n').count() + 1,
+        start,
+        text: text.strip_suffix('\r').unwrap_or(text),
+    }
+}
+
+/// Trims `line` to a window around `focus` when it is too long to print,
+/// returning the excerpt and `marker` rebased onto it.
+fn window(line: &str, marker: Range<usize>, focus: usize) -> (Box<str>, Range<usize>) {
     if line.len() <= SNIPPET_WIDTH {
         return (line.into(), marker);
     }
 
-    let mut start = marker.start.saturating_sub(SNIPPET_WIDTH / 2);
+    let mut start = focus.saturating_sub(SNIPPET_WIDTH / 2);
     while start > 0 && !line.is_char_boundary(start) {
         start -= 1;
     }
@@ -262,7 +387,7 @@ fn window(line: &str, marker: Range<usize>) -> (Box<str>, Range<usize>) {
     let suffix = if end < line.len() { ELLIPSIS } else { "" };
     let excerpt = format!("{prefix}{}{suffix}", &line[start..end]);
     let shift = prefix.len();
-    let rebased = (marker.start - start + shift)..(marker.end.min(end) - start + shift);
+    let rebased = (marker.start.max(start) - start + shift)..(marker.end.min(end) - start + shift);
 
     (excerpt.into(), rebased)
 }
@@ -304,11 +429,24 @@ mod tests {
     }
 
     #[test]
+    fn crlf_eof_single_line() {
+        // The final `\n` sits past the trimmed line yet still on it, so an
+        // end-of-input failure has nothing left to close on a later line.
+        let source = "float x = 1\r\n";
+        let error = locate(source, source.len()..source.len());
+
+        let rendered = error.to_string();
+        assert_eq!(rendered.matches("float x = 1").count(), 1, "{rendered}");
+        assert_eq!(rendered.lines().count(), 5, "{rendered}");
+    }
+
+    #[test]
     fn column_matches_caret() {
         let source = "  float x = =\n";
         let error = locate(source, 12..13);
         let rendered = error.to_string();
-        let caret = rendered.lines().last().expect("caret line");
+        // The caret under the line the span opens on.
+        let caret = rendered.lines().nth(4).expect("caret line");
         let caret_column = caret.find('^').expect("caret") - "  | ".len() + 1;
         assert_eq!(caret_column, error.column());
     }
@@ -359,5 +497,83 @@ mod tests {
         let error = locate("float x = 1\n", 10..11);
         assert_eq!(error.snippet(), "float x = 1");
         assert!(!error.snippet().contains(ELLIPSIS));
+    }
+
+    #[test]
+    fn empty_span_at_line_start() {
+        // The span's final character sits before the line it opens on, so
+        // there is no later line for it to close on.
+        let error = locate("a\nb\n", 2..2);
+
+        assert_eq!(error.line(), 2);
+        assert_eq!(error.column(), 1);
+        assert_eq!(error.to_string().lines().count(), 5);
+    }
+
+    #[test]
+    fn crlf_multiline_span() {
+        let source = "float x = \"\"\"a\r\nb\"\"\"\r\n";
+        let error = locate(source, 10..20);
+
+        let rendered = error.to_string();
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines[3], "1 | float x = \"\"\"a");
+        assert_eq!(lines[5], "2 | b\"\"\"");
+        assert_eq!(lines[6], "  | ^^^^");
+    }
+
+    /// The closing line is windowed around where the span ends, so the
+    /// excerpt shows what its caret points at.
+    #[test]
+    fn long_close_stays_visible() {
+        let source = format!("x = \"\"\"a\n{}\"\"\"", "y".repeat(400));
+        let end = source.rfind("\"\"\"").expect("token") + 3;
+        let error = locate(&source, 4..end);
+
+        let rendered = error.to_string();
+        let closing = rendered.lines().nth(5).expect("closing line");
+        assert!(closing.starts_with("2 | "), "got: {closing}");
+        assert!(closing.ends_with("\"\"\""), "got: {closing}");
+        assert!(closing.contains(ELLIPSIS), "got: {closing}");
+    }
+
+    /// A span crossing a line boundary renders where it closes as well as where
+    /// it opens, so a multi-line token does not report a caret under its first
+    /// fragment alone.
+    #[test]
+    fn multiline_span_shows_close() {
+        let source = "float x = \"\"\"a\nb\"\"\"\n";
+        let start = source.find("\"\"\"").expect("token");
+        let end = source.rfind("\"\"\"").expect("token") + 3;
+        let error = locate(source, start..end);
+
+        assert_eq!(error.line(), 1);
+        assert_eq!(error.column(), 11);
+        let rendered = error.to_string();
+        let lines: Vec<_> = rendered.lines().collect();
+        // Both ends mark the same thing: whatever of the span falls on the line.
+        assert_eq!(lines[3], "1 | float x = \"\"\"a");
+        assert_eq!(lines[4], "  |           ^^^^", "the opening line marks to its end");
+        assert_eq!(lines[5], "2 | b\"\"\"");
+        assert_eq!(lines[6], "  | ^^^^", "the closing line marks from its start");
+    }
+
+    /// The lines a long span runs through are elided: only its two ends carry
+    /// anything the source does not already show.
+    #[test]
+    fn long_span_elides_middle() {
+        let source = "a\nb\nc\nd\n";
+        let error = locate(source, 0..source.len());
+
+        let rendered = error.to_string();
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines[3], "1 | a");
+        assert_eq!(lines[5], ELIDED_LINES);
+        assert_eq!(lines[6], "4 | d");
+
+        // A span closing on the line it opened on renders neither end twice.
+        let single = locate("float x = 1\n", 6..7).to_string();
+        assert!(!single.contains(ELIDED_LINES), "{single}");
+        assert_eq!(single.lines().count(), 5);
     }
 }

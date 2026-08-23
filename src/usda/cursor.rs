@@ -304,4 +304,18 @@ mod tests {
         assert_eq!(cursor.peek().unwrap(), Some(&Token::Over));
         assert_eq!(cursor.diagnostic_span(), 4..8);
     }
+
+    #[test]
+    fn span_covers_multiline_token() {
+        // A triple-quoted string lexes as one token, so the span a rule that
+        // rejects it reports straddles the newline — which is what an error
+        // rendering both ends of its span exists to describe.
+        let source = "\"\"\"a\nb\"\"\"";
+        let mut cursor = Cursor::new(source);
+        assert!(cursor.bump().unwrap().is_string());
+
+        let span = cursor.diagnostic_span();
+        assert_eq!(span, 0..source.len());
+        assert!(source[span].contains('\n'));
+    }
 }
