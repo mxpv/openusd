@@ -3422,6 +3422,77 @@ fn load_and_unload_nested_ancestor_descendant() -> Result<()> {
     Ok(())
 }
 
+/// `Prim::load` / `Prim::unload` act on the prim's own path, so a handle is
+/// enough to change the stage's load state (C++ `UsdPrim::Load` / `Unload`),
+/// and each `LoadPolicy` reaches a different depth.
+#[test]
+fn prim_load_unload() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_nested_payload_scene(dir.path())?;
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(root.to_str().unwrap())?;
+    assert!(!stage.prim("/World/A")?.is_loaded()?);
+
+    // The prim's own payload comes in; the one nested under it stays out.
+    stage.prim("/World/A")?.load(LoadPolicy::WithoutDescendants);
+    assert!(stage.prim("/World/A")?.is_loaded()?);
+    assert!(!stage.prim("/World/A/Deep")?.is_loaded()?);
+    assert!(
+        stage
+            .load_rules()
+            .is_loaded_with_no_descendants(&sdf::path("/World/A")?)
+    );
+
+    stage.prim("/World/A")?.load(LoadPolicy::WithDescendants);
+    assert!(stage.prim("/World/A/Deep")?.is_loaded()?);
+    assert!(
+        stage
+            .load_rules()
+            .is_loaded_with_all_descendants(&sdf::path("/World/A")?)
+    );
+    assert_eq!(stage.attribute("/World/A/Deep.x")?.get::<f64>()?, Some(42.0));
+
+    stage.prim("/World/A")?.unload();
+    assert!(!stage.prim("/World/A")?.is_loaded()?);
+    assert_eq!(child_names(&stage, "/World/A")?, Vec::<String>::new());
+    Ok(())
+}
+
+/// A path in a prototype's `/__Prototype_N` namespace is dropped before it
+/// reaches the rule table, so `Prim::load` / `Prim::unload` on prim reached
+/// through `Prim::prototype` author nothing — the leniency `Stage::load`
+/// documents. The same call on the instance's own real-namespace path does
+/// author a rule, so the gate is selective rather than inert.
+#[test]
+fn prototype_load_ignored() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let proto = dir.path().join("proto.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"World\" {\n    def \"Inst\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n}\n",
+    )?;
+    fs::write(
+        &proto,
+        "#usda 1.0\n(\n    defaultPrim = \"Proto\"\n)\ndef \"Proto\" {\n    def \"Child\" {}\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let prototype = stage.prim("/World/Inst")?.prototype()?.expect("Inst is an instance");
+    let before = stage.load_rules();
+
+    stage.prim(&prototype)?.unload();
+    assert_eq!(stage.load_rules(), before, "the prototype root authors no rule");
+
+    stage.prim(&sdf::path(format!("{prototype}/Child"))?)?.unload();
+    assert_eq!(stage.load_rules(), before, "nor does a prim inside the prototype");
+
+    stage.prim("/World/Inst/Child")?.unload();
+    assert_ne!(stage.load_rules(), before, "the real-namespace path does author one");
+    Ok(())
+}
+
 /// Two instances sharing identical arcs mint one prototype by default; giving
 /// one instance's descendant a different runtime load rule than the other's
 /// splits them into separate prototypes (`InstanceKey` folds in each

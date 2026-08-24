@@ -1851,43 +1851,52 @@ impl Stage {
     /// per `policy` (C++ `UsdStage::Load`). Loading an already-loaded path is
     /// legal and simply costs nothing (see [`load_rules`](Self::load_rules)'s
     /// no-op guarantee). `path` need not currently resolve to a composed
-    /// prim — only an ancestor need exist — since loading a not-yet-visible
-    /// descendant is the common case.
+    /// prim, since loading a not-yet-visible descendant is the common case.
     ///
     /// A `path` that normalizes into a `/__Prototype_N` prototype's namespace
-    /// is silently ignored, mirroring [`mute_layer`](Self::mute_layer)'s
-    /// treatment of the root layer: load rules are always authored in
-    /// real-namespace terms, and a rule on a synthetic prototype path would
-    /// never be consulted. No inactive-ancestor validation is performed — an
-    /// inactive subtree never composes regardless of its load rule, so a rule
-    /// authored there is inert but harmless.
+    /// is silently ignored: load rules are always authored in real-namespace
+    /// terms, so a rule on a synthetic prototype path would never be
+    /// consulted. C++ drops such a path too, but reports a coding error first.
+    /// Nor is `path` checked for being present and active on the stage, which
+    /// C++ does reject: such a subtree never composes whatever its load rule
+    /// says, so the rule simply sits inert in the table.
     pub fn load(&self, path: impl sdf::IntoPath, policy: LoadPolicy) -> Result<(), sdf::PathParseError> {
-        let Some(path) = Self::normalize_load_target(sdf::try_into_path(path)?) else {
-            return Ok(());
+        self.load_path(&sdf::try_into_path(path)?, policy);
+        Ok(())
+    }
+
+    /// [`load`](Self::load) for an already-validated path.
+    pub(super) fn load_path(&self, path: &sdf::Path, policy: LoadPolicy) {
+        let Some(path) = Self::normalize_load_target(path) else {
+            return;
         };
         let victims = self.composition.install_load_rules(
-            |rules| match policy {
-                LoadPolicy::WithDescendants => rules.load_with_descendants(path.clone()),
-                LoadPolicy::WithoutDescendants => rules.load_without_descendants(path.clone()),
+            move |rules| match policy {
+                LoadPolicy::WithDescendants => rules.load_with_descendants(path),
+                LoadPolicy::WithoutDescendants => rules.load_without_descendants(path),
             },
             self,
         );
         self.notify_load_rules_changed(victims);
-        Ok(())
     }
 
     /// Unloads `path`'s payload and everything beneath it (C++
     /// `UsdStage::Unload`). Same leniency as [`load`](Self::load) for a
     /// prototype-namespace path.
     pub fn unload(&self, path: impl sdf::IntoPath) -> Result<(), sdf::PathParseError> {
-        let Some(path) = Self::normalize_load_target(sdf::try_into_path(path)?) else {
-            return Ok(());
+        self.unload_path(&sdf::try_into_path(path)?);
+        Ok(())
+    }
+
+    /// [`unload`](Self::unload) for an already-validated path.
+    pub(super) fn unload_path(&self, path: &sdf::Path) {
+        let Some(path) = Self::normalize_load_target(path) else {
+            return;
         };
         let victims = self
             .composition
-            .install_load_rules(|rules| rules.unload(path.clone()), self);
+            .install_load_rules(move |rules| rules.unload(path), self);
         self.notify_load_rules_changed(victims);
-        Ok(())
     }
 
     /// Loads every path in `to_load` (with `policy`) and unloads every path
@@ -1909,12 +1918,14 @@ impl Stage {
         // either set leaves the stage untouched.
         let to_unload: Vec<sdf::Path> = to_unload
             .into_iter()
-            .map(|path| Ok(Self::normalize_load_target(sdf::try_into_path(path)?)))
+            .map(|path| Ok(Self::normalize_load_target(&sdf::try_into_path(path)?)))
             .filter_map(Result::transpose)
             .collect::<Result<_, sdf::PathParseError>>()?;
         let to_load: Vec<(sdf::Path, LoadPolicy)> = to_load
             .into_iter()
-            .map(|(path, policy)| Ok(Self::normalize_load_target(sdf::try_into_path(path)?).map(|path| (path, policy))))
+            .map(
+                |(path, policy)| Ok(Self::normalize_load_target(&sdf::try_into_path(path)?).map(|path| (path, policy))),
+            )
             .filter_map(Result::transpose)
             .collect::<Result<_, sdf::PathParseError>>()?;
         let victims = self.composition.install_load_rules(
@@ -2034,7 +2045,9 @@ impl Stage {
     /// segment — [`pcp::LoadRules`]' table requires genuinely prim-only
     /// paths), then drops a path in the reserved `/__Prototype_N` namespace,
     /// where load rules are never consulted (see [`pcp::LoadRules`]'s
-    /// instancing notes) — silently, as C++ does. The test is syntactic, so it
+    /// instancing notes) — silently, where C++ reports a coding error before
+    /// dropping it (`UsdStage::_IsValidForUnload`, which likewise rejects the
+    /// relative path this absolutizes). The test is syntactic, so it
     /// does not depend on whether that prototype has been registered yet.
     ///
     /// A cheap early exit for `load`/`unload`/`load_and_unload` — the real
@@ -2042,7 +2055,7 @@ impl Stage {
     /// the single choke point every mutation (including a caller-supplied
     /// [`set_load_rules`](Self::set_load_rules) table this normalization never
     /// sees) passes through.
-    fn normalize_load_target(path: sdf::Path) -> Option<sdf::Path> {
+    fn normalize_load_target(path: &sdf::Path) -> Option<sdf::Path> {
         let path = sdf::Path::abs_root().make_absolute(&path.prim_path().strip_all_variant_selections());
         (!pcp::is_prototype_namespace(&path)).then_some(path)
     }

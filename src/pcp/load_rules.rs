@@ -47,6 +47,11 @@ pub enum Rule {
 /// already-validated [`Path`] values — parse text with [`Path::new`] at
 /// that boundary.
 ///
+/// Every rule is authored in real-namespace terms, and a path inside a
+/// `/__Prototype_N` prototype namespace is not translated here: every query
+/// below answers from this table, never from the relative rules a prototype
+/// was registered with.
+///
 /// Backed by a `BTreeMap`, which derives `Hash`/`Eq` directly — needed since
 /// this type becomes part of an instancing key (see `pcp::instancing`).
 /// `Path`'s derived `Ord` sorts a prim-only path's descendants contiguously
@@ -147,9 +152,15 @@ impl LoadRules {
             .take_while(move |(p, _)| p.has_prefix(path))
     }
 
+    /// The entries lying strictly beneath `path`, in path order —
+    /// [`subtree`](Self::subtree) without `path`'s own entry.
+    fn strict_subtree<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = (&'a Path, &'a Rule)> {
+        self.subtree(path).filter(move |(p, _)| *p != path)
+    }
+
     /// `true` if any entry lies strictly beneath `path`.
     fn has_subtree_entries(&self, path: &Path) -> bool {
-        self.subtree(path).any(|(p, _)| p != path)
+        self.strict_subtree(path).next().is_some()
     }
 
     /// Removes every entry in `path`'s subtree, including `path` itself.
@@ -198,6 +209,30 @@ impl LoadRules {
         self.effective_rule(path) != Rule::None
     }
 
+    /// `true` when `path` and every descendant are included (C++
+    /// `UsdStageLoadRules::IsLoadedWithAllDescendants`).
+    ///
+    /// Holds when no ancestor-or-self entry excludes `path` and every entry in
+    /// its subtree is [`Rule::All`]. The ancestor half is exactly
+    /// [`effective_rule`](Self::effective_rule)'s [`Rule::All`] answer, decided
+    /// without its descendant lookahead, which can only reach [`Rule::Only`]
+    /// or [`Rule::None`].
+    pub fn is_loaded_with_all_descendants(&self, path: &Path) -> bool {
+        self.nearest_prefix_entry(path)
+            .is_none_or(|(_, rule)| rule == Rule::All)
+            && self.subtree(path).all(|(_, rule)| *rule == Rule::All)
+    }
+
+    /// `true` when `path` is included but none of its descendants are (C++
+    /// `UsdStageLoadRules::IsLoadedWithNoDescendants`).
+    ///
+    /// Requires a [`Rule::Only`] entry authored at exactly `path`, with every
+    /// entry beneath it [`Rule::None`]. Reducing a table with
+    /// [`minimize`](Self::minimize) never changes this answer.
+    pub fn is_loaded_with_no_descendants(&self, path: &Path) -> bool {
+        self.own_rule(path) == Some(Rule::Only) && self.strict_subtree(path).all(|(_, rule)| *rule == Rule::None)
+    }
+
     /// The nearest authored entry that is `path` itself or a strict ancestor
     /// of it — a self entry always outranks an ancestor's — or `None` when no
     /// such entry exists. Walks `path`'s own ancestor chain outward (self
@@ -221,7 +256,7 @@ impl LoadRules {
     /// descendants once it has been inspected, so an intervening explicit
     /// rule shadows whatever is beneath it.
     fn has_loaded_descendant(&self, path: &Path) -> bool {
-        let descendants: Vec<(&Path, &Rule)> = self.subtree(path).filter(|(p, _)| *p != path).collect();
+        let descendants: Vec<(&Path, &Rule)> = self.strict_subtree(path).collect();
         let mut i = 0;
         while i < descendants.len() {
             let (cur_path, cur_rule) = descendants[i];
@@ -280,10 +315,7 @@ impl LoadRules {
     pub(crate) fn make_relative_to(&self, path: &Path) -> LoadRules {
         let mut rules = BTreeMap::new();
         rules.insert(Path::abs_root(), self.effective_rule(path));
-        for (p, r) in &self.rules {
-            if p == path {
-                continue;
-            }
+        for (p, r) in self.strict_subtree(path) {
             if let Some(relative) = p.replace_prefix(path, &Path::abs_root()) {
                 rules.insert(relative, *r);
             }
@@ -511,6 +543,87 @@ mod tests {
         assert_eq!(rules.effective_rule(&p("/A")), Rule::None);
         assert_eq!(rules.effective_rule(&p("/A/B")), Rule::Only);
         assert_eq!(rules.effective_rule(&p("/A/B/C")), Rule::All);
+    }
+
+    #[test]
+    fn empty_table_queries() {
+        let rules = LoadRules::all();
+        assert!(rules.is_loaded_with_all_descendants(&p("/A/B")));
+        assert!(
+            !rules.is_loaded_with_no_descendants(&p("/A/B")),
+            "load-everything loads descendants too"
+        );
+    }
+
+    #[test]
+    fn all_rejects_nested_rule() {
+        let mut rules = LoadRules::all();
+        rules.add_rule(p("/A"), Rule::All);
+        rules.add_rule(p("/A/B"), Rule::None);
+        assert!(!rules.is_loaded_with_all_descendants(&p("/A")));
+        assert!(
+            rules.is_loaded_with_all_descendants(&p("/A/C")),
+            "a sibling the nested rule does not cover is still fully loaded"
+        );
+    }
+
+    /// An `Only` that `effective_rule` merely infers -- `/A` is on the way to
+    /// a loaded `/A/B` -- is not the literal `Only` entry this query demands.
+    #[test]
+    fn none_requires_self_only() {
+        let mut rules = LoadRules::all();
+        rules.unload(p("/A"));
+        rules.load_with_descendants(p("/A/B"));
+        assert_eq!(rules.effective_rule(&p("/A")), Rule::Only);
+        assert!(!rules.is_loaded_with_no_descendants(&p("/A")));
+    }
+
+    #[test]
+    fn none_tolerates_children() {
+        let mut rules = LoadRules::all();
+        rules.load_without_descendants(p("/A"));
+        rules.add_rule(p("/A/B"), Rule::None);
+        assert!(rules.is_loaded_with_no_descendants(&p("/A")));
+        assert!(!rules.is_loaded_with_all_descendants(&p("/A")));
+    }
+
+    /// The case OpenUSD's own `testUsdStageLoadUnload.py` pins: the two
+    /// queries are neither symmetric nor complementary, and both answer
+    /// `false` for a path under the `Only` entry.
+    #[test]
+    fn descendant_queries_parity() {
+        let mut rules = LoadRules::none();
+        rules.add_rule(p("/any"), Rule::Only);
+        assert!(rules.is_loaded_with_no_descendants(&p("/any")));
+        assert!(!rules.is_loaded_with_no_descendants(&p("/any/path")));
+        assert!(!rules.is_loaded_with_all_descendants(&p("/any")));
+        assert!(!rules.is_loaded_with_all_descendants(&p("/any/path")));
+    }
+
+    /// `IndexCache` stores a minimized table, so neither query may change
+    /// across the reduction. The rules here lose two entries to `minimize`.
+    #[test]
+    fn descendant_queries_survive_minimize() {
+        let mut rules = LoadRules::none();
+        rules.add_rule(p("/A"), Rule::Only);
+        rules.add_rule(p("/A/B"), Rule::None);
+        rules.add_rule(p("/C"), Rule::All);
+        rules.add_rule(p("/C/D"), Rule::All);
+        let before = rules.clone();
+        rules.minimize();
+        assert!(rules.rules().len() < before.rules().len(), "minimize dropped nothing");
+        for path in [p("/"), p("/A"), p("/A/B"), p("/C"), p("/C/D"), p("/C/E")] {
+            assert_eq!(
+                rules.is_loaded_with_all_descendants(&path),
+                before.is_loaded_with_all_descendants(&path),
+                "all-descendants answer changed at {path}"
+            );
+            assert_eq!(
+                rules.is_loaded_with_no_descendants(&path),
+                before.is_loaded_with_no_descendants(&path),
+                "no-descendants answer changed at {path}"
+            );
+        }
     }
 
     #[test]

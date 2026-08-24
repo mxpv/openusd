@@ -36,8 +36,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
-    ApplyApiError, Attribute, EditTarget, EditTargetArc, PrimDefinition, PrimTypeInfo, Relationship, SchemaRegistry,
-    SpecSite, Stage, StageAuthoringError, VersionFilter, schema_registry,
+    ApplyApiError, Attribute, EditTarget, EditTargetArc, LoadPolicy, PrimDefinition, PrimTypeInfo, Relationship,
+    SchemaRegistry, SpecSite, Stage, StageAuthoringError, VersionFilter, schema_registry,
 };
 use crate::tf::Token;
 use crate::{Result, pcp, sdf};
@@ -698,6 +698,23 @@ impl Prim {
             }
         }
         Ok(true)
+    }
+
+    /// Loads this prim's payload, its ancestors', and — under
+    /// [`LoadPolicy::WithDescendants`] — every descendant's (C++
+    /// `UsdPrim::Load`).
+    ///
+    /// A prim inside a `/__Prototype_N` prototype namespace is silently
+    /// ignored; see [`Stage::load`].
+    pub fn load(&self, policy: LoadPolicy) {
+        self.stage.load_path(&self.path, policy);
+    }
+
+    /// Unloads this prim's payload and everything beneath it (C++
+    /// `UsdPrim::Unload`). Same prototype-namespace leniency as
+    /// [`load`](Self::load).
+    pub fn unload(&self) {
+        self.stage.unload_path(&self.path);
     }
 
     /// `true` if the prim and all ancestors have defining specifiers (`def` or
