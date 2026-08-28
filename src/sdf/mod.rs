@@ -184,6 +184,15 @@ impl LayerOffset {
         self.offset == 0.0 && self.scale == 1.0
     }
 
+    /// The `(offset, scale)` pair as exact bit patterns, for hashing it into a
+    /// key or comparing two copies of it. An authored NaN offset or scale is
+    /// unequal to itself under float equality, yet two offsets that reproduce it
+    /// bit for bit are the same offset.
+    #[inline]
+    pub fn to_bits(&self) -> (u64, u64) {
+        (self.offset.to_bits(), self.scale.to_bits())
+    }
+
     /// Applies this offset to a time value as `offset + scale * time` — the
     /// retiming a layer offset performs on the time coordinate of samples and
     /// clip schedules.

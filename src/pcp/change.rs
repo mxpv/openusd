@@ -518,6 +518,9 @@ impl Changes {
         // could. Clip metadata *appearing* is such a field: the cache stores
         // derived presence bits (`PrimIndex::authors_clips` and the inherited
         // `CompositionContext::may_have_clips`) that only a rebuild recomputes.
+        // The spec tier depends on this: `PrimIndex::respec_nodes` carries
+        // `authors_clips` across a splice untouched, which holds only while a
+        // clip field's presence never reaches that tier.
         let significant = entry.flags.intersects(sdf::ChangeFlags::NON_INERT_PRIM)
             || entry.fields().any(|(field, change)| {
                 Self::field_promotes_to_significant(field.as_str())

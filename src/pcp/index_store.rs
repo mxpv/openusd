@@ -19,7 +19,7 @@ use crate::sdf::{self, Path};
 use super::dependencies::Dependencies;
 use super::layer_graph::LayerGraph;
 use super::layer_stack::{LayerStackId, StackMarks};
-use super::prim_index::{CompositionContext, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
+use super::prim_index::{CompositionContext, NodeRuns, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
 use super::prim_indexer::ExprVarDeps;
 use super::{CompositionError, LayerId};
 
@@ -363,52 +363,82 @@ impl IndexStore {
     /// site as an empty arc target that the spec now fills in, which must un-cull
     /// and graft the target's subtree.
     ///
-    /// The memoized spec stack is left stale: the caller finalizes the deduped
-    /// `refreshed` set once via [`finalize_spec_stacks`](Self::finalize_spec_stacks),
-    /// so an index reached by several of one change round's sites rebuilds its
-    /// stack a single time.
+    /// The memoized spec stack is left stale: the refresh keeps each touched
+    /// node's fresh run in `refreshed`, and the caller splices them in once per
+    /// index via [`splice_spec_stacks`](Self::splice_spec_stacks). An index
+    /// reached by several of one round's sites therefore scans each of its nodes
+    /// once, and rewrites its stack once.
     pub(super) fn refresh_specs(
         &mut self,
         graph: &LayerGraph,
         layer: LayerId,
         path: &Path,
-        refreshed: &mut HashSet<Path>,
+        refreshed: &mut HashMap<Path, NodeRuns>,
         rebuild: &mut HashSet<Path>,
     ) {
         for prim in self.deps.exact_lookup(layer, path) {
+            // An index this round already condemned recomposes from scratch,
+            // flags included, so the rescan leaves it alone.
+            if rebuild.contains(&prim) {
+                continue;
+            }
             let Some(index) = self.entries.get_mut(&prim).map(|entry| &mut entry.index) else {
                 continue;
             };
-            let refresh = index.refresh_has_specs_at(layer, path, graph);
+            // Taken out so the refresh sees what earlier sites in this round
+            // already scanned, and put back under the owned path. It goes back
+            // even when no node was touched, since the entry is also what earns
+            // the index its revision stamp and its resync report.
+            let mut runs = refreshed.remove(&prim).unwrap_or_default();
+            let refresh = index.refresh_has_specs_at(layer, path, graph, &mut runs);
             // The local prim is one of its own dependents (it reads its own
             // site). Rebuild it when it carries no contributing node there; rebuild
             // any index whose culled site the spec just filled in.
             if refresh.needs_rebuild || (prim == *path && !refresh.contributing) {
                 rebuild.insert(prim);
             } else {
-                refreshed.insert(prim);
+                refreshed.insert(prim, runs);
             }
         }
     }
 
-    /// Rebuilds the memoized spec stack of each index at `paths`, the deduped set
-    /// of indices [`refresh_specs`](Self::refresh_specs) flipped `has_specs` on in
-    /// place this change round. Skips a path with no cached entry (one dropped for
-    /// rebuild, which recomposes its stack from scratch).
-    pub(super) fn finalize_spec_stacks<'p>(&mut self, graph: &LayerGraph, paths: impl IntoIterator<Item = &'p Path>) {
-        for path in paths {
-            if !self.entries.contains_key(path) {
-                continue;
-            }
+    /// Splices each index's refreshed node runs into its memoized spec stack —
+    /// what [`refresh_specs`](Self::refresh_specs) collected this change round,
+    /// one call per index however many sites reached it — and returns the paths
+    /// it consumed, for the caller's resync report. Every path here has a cached
+    /// entry: [`refresh_specs`](Self::refresh_specs) records only indices it
+    /// found, and the round's dropped set is disjoint from them.
+    pub(super) fn splice_spec_stacks(&mut self, graph: &LayerGraph, refreshed: HashMap<Path, NodeRuns>) -> Vec<Path> {
+        let mut touched = Vec::with_capacity(refreshed.len());
+        for (path, runs) in refreshed {
+            debug_assert!(
+                self.entries.contains_key(&path),
+                "a refreshed index left the cache before its stack was spliced",
+            );
             // Flipping `has_specs` changes what the prim composes, so the refresh
             // is a mutation like any rebuild: stamp it once here, where the round
-            // reaches each affected index exactly once, rather than per site.
+            // reaches each affected index exactly once, rather than per site. The
+            // entry above is what earns the token, keeping the rule
+            // [`restale`](Self::restale) states: none is minted for nothing.
             let revision = self.mint_revision();
-            if let Some(entry) = self.entries.get_mut(path) {
-                entry.index.finalize_spec_stack(graph);
+            if let Some(entry) = self.entries.get_mut(&path) {
+                entry.index.respec_nodes(runs);
                 entry.revision = revision;
+                // The splice is a memo nothing downstream can re-derive on read,
+                // so debug builds hold it against a full rebuild: this seam owns
+                // both halves of that contract, the runs the refresh accumulated
+                // and the index they were spliced into. Checked for every touched
+                // index, including one the round spliced nothing into, since a
+                // node the refresh should have matched and missed shows up only
+                // as a stack that stayed put.
+                debug_assert!(
+                    entry.index.spec_stack_matches_rebuild(graph),
+                    "spliced spec stack diverged from a full rebuild at {path}",
+                );
             }
+            touched.push(path);
         }
+        touched
     }
 
     /// The [`TargetMemo`] resolved for `prim`'s property at `key`, or `None` on a

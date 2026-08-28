@@ -30,7 +30,8 @@ use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
 use super::prim_graph::ArcType;
 use super::prim_index::{
-    AncestorArc, CompositionContext, Demand, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo, TargetMemoKey,
+    AncestorArc, CompositionContext, Demand, NodeRuns, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo,
+    TargetMemoKey,
 };
 use super::prim_indexer::ExprVarDeps;
 use super::prim_resolve::InvalidTargetKind;
@@ -1606,11 +1607,12 @@ impl IndexCache {
     /// inert spec adds and removes, each a `(layer, path)` site. The store
     /// refreshes every affected index's `has_specs` flags in place per site,
     /// partitioning the indices into those refreshed in place and those it cannot
-    /// refresh; the latter are dropped for rebuild. Each in-place-refreshed index
-    /// then finalizes its memoized spec stack once, however many of this round's
-    /// sites reached it. The transient query errors are retired by
-    /// [`Self::retire_query_errors`] at the edit seam; they may
-    /// reference a dropped prim.
+    /// refresh; the latter are dropped for rebuild. The refresh keeps the spec
+    /// run it scanned for each touched node, and each in-place-refreshed index
+    /// splices those runs into its memoized spec stack once, however many of this
+    /// round's sites reached it — so a layer no site named is never re-probed.
+    /// The transient query errors are retired by [`Self::retire_query_errors`] at
+    /// the edit seam; they may reference a dropped prim.
     ///
     /// An added or removed spec can change whether a prim exists, so the caller
     /// must already have advanced the population epoch for these sites.
@@ -1623,7 +1625,7 @@ impl IndexCache {
     /// resynced. Which of the two partitions a prim landed in says how the cache
     /// caught up, not whether a consumer must.
     pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, sites: &[(LayerId, Path)]) -> Vec<Path> {
-        let mut refreshed: HashSet<Path> = HashSet::new();
+        let mut refreshed: HashMap<Path, NodeRuns> = HashMap::new();
         let mut rebuild: HashSet<Path> = HashSet::new();
         for (layer, path) in sites {
             self.store
@@ -1632,11 +1634,10 @@ impl IndexCache {
         for prim in &rebuild {
             self.store.remove(prim);
         }
-        // The rebuild set was just dropped from the store and `finalize_spec_stacks`
-        // skips a path with no cached entry, so an index that ended up in both sets
-        // is already excluded — the refreshed set needs no further filtering.
-        self.store.finalize_spec_stacks(graph, &refreshed);
-        rebuild.into_iter().chain(refreshed).collect()
+        // An index condemned after an earlier site had already refreshed it kept
+        // its runs out of the map, so the two sets are disjoint by construction.
+        let touched = self.store.splice_spec_stacks(graph, refreshed);
+        rebuild.into_iter().chain(touched).collect()
     }
 
     /// Drop a prim's cached index and every namespace descendant. Used by
@@ -5133,13 +5134,182 @@ def "Anchor" (inherits = </Rig>) {}
         Ok(())
     }
 
+    /// The splice places each refreshed run by node, not by arrival order.
+    ///
+    /// `/A` references `/Src`, which inherits `/SrcClass`, so the reference
+    /// grafts an implied class node into the *root* layer stack. That node is
+    /// created after the reference node it came from, yet inherits outrank
+    /// references — so one round refreshing both hands the splice runs whose
+    /// arena order contradicts the strength order it walks.
+    #[test]
+    fn splice_ignores_arena_order() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usd",
+            "#usda 1.0\n(\n    subLayers = [@mid.usd@]\n)\nover \"SrcClass\" { custom int rc = 1 }\ndef \"A\" (\n    references = @src.usd@</Src>\n)\n{\n}\n",
+        );
+        let mid = parse_named_layer("mid.usd", "#usda 1.0\n");
+        let src = parse_named_layer(
+            "src.usd",
+            "#usda 1.0\n(\n    subLayers = [@srcmid.usd@]\n)\nclass \"SrcClass\" { custom int c = 1 }\ndef \"Src\" (\n    inherits = </SrcClass>\n)\n{\n    custom int x = 1\n}\n",
+        );
+        let srcmid = parse_named_layer("srcmid.usd", "#usda 1.0\n");
+        let mut graph = LayerGraph::from_layers(vec![root, mid, src, srcmid], 0, sdf::LayerRegistry::default());
+        let mid_id = graph.id_of("mid.usd").unwrap();
+        let srcmid_id = graph.id_of("srcmid.usd").unwrap();
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
+        let a = sdf::path("/A")?;
+        let class = sdf::path("/SrcClass")?;
+        let src_path = sdf::path("/Src")?;
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![
+                ("root.usd".to_string(), a.clone()),
+                ("root.usd".to_string(), class.clone()),
+                ("src.usd".to_string(), src_path.clone()),
+                ("src.usd".to_string(), class.clone()),
+            ],
+        );
+
+        // One round, two sites: an inert `over` on the implied class node's
+        // stack and one on the reference node's, each extending a run whose
+        // node keeps the specs it already had.
+        let cl_mid = edit_layer(&mut graph.get_mut(mid_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/SrcClass")?;
+            Ok(())
+        })
+        .unwrap();
+        let cl_srcmid = edit_layer(&mut graph.get_mut(srcmid_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/Src")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(
+            &cache,
+            &[
+                LayerChanges::plain(mid_id, &cl_mid),
+                LayerChanges::plain(srcmid_id, &cl_srcmid),
+            ],
+        );
+        changes.apply(&mut cache, &mut graph);
+
+        // Read before the query below would recompose it: the index is still
+        // cached, so this round took the in-place refresh the splice serves and
+        // not the significant tier's drop.
+        assert!(
+            cache.store.index_at(&a).is_some(),
+            "the spec tier must refresh the index in place",
+        );
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![
+                ("root.usd".to_string(), a.clone()),
+                ("root.usd".to_string(), class.clone()),
+                ("mid.usd".to_string(), class.clone()),
+                ("src.usd".to_string(), src_path.clone()),
+                ("srcmid.usd".to_string(), src_path),
+                ("src.usd".to_string(), class),
+            ],
+            "each new site joined its own node's run, in strength order",
+        );
+        Ok(())
+    }
+
+    /// The splice keeps the runs of nodes no site named. `/A` composes its own
+    /// local node plus a referenced one; an inert `over` added in a sublayer
+    /// lands in the local node's run, in strength order, while the referenced
+    /// node's entry stays exactly where it was.
+    #[test]
+    fn splice_keeps_reference_run() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usd",
+            "#usda 1.0\n(\n    subLayers = [@mid.usd@]\n)\ndef \"A\" (\n    references = @src.usd@</Src>\n)\n{\n}\n",
+        );
+        let mid = parse_named_layer("mid.usd", "#usda 1.0\n");
+        let src = parse_named_layer("src.usd", "#usda 1.0\ndef \"Src\" { custom int x = 1 }\n");
+        let mut graph = LayerGraph::from_layers(vec![root, mid, src], 0, sdf::LayerRegistry::default());
+        let mid_id = graph.id_of("mid.usd").unwrap();
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        );
+        let a = sdf::path("/A")?;
+        let src_path = sdf::path("/Src")?;
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![
+                ("root.usd".to_string(), a.clone()),
+                ("src.usd".to_string(), src_path.clone())
+            ],
+        );
+
+        let cl = edit_layer(&mut graph.get_mut(mid_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/A")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(mid_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![
+                ("root.usd".to_string(), a.clone()),
+                ("mid.usd".to_string(), a.clone()),
+                ("src.usd".to_string(), src_path),
+            ],
+            "the new site joins the local run; the referenced node keeps its own",
+        );
+        Ok(())
+    }
+
+    /// A node that loses its last spec keeps its place in the graph but
+    /// contributes nothing, so the splice must empty its run rather than leave
+    /// the removed site standing. The local root never culls, so this refreshes
+    /// in place instead of rebuilding.
+    #[test]
+    fn splice_empties_run() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\nover \"A\"\n{\n}\n");
+        let root_id = graph.root_id().unwrap();
+        let a = sdf::path("/A")?;
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![("root.usda".to_string(), a.clone())]
+        );
+
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            l.data_mut().erase_spec(&sdf::path("/A").unwrap());
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(
+            cache.prim_stack(&graph, &a)?.is_empty(),
+            "the removed site must leave the stack, not linger in it",
+        );
+        Ok(())
+    }
+
     /// A single change round whose inert spec adds reach the same index through
     /// several sites stays correct. `/A` composes across three sublayers; adding an
     /// `over "A"` into two of them in one round produces two `(layer, /A)` sites
     /// that both reach index `/A`, and the batched rescan must compose the prim
-    /// stack a fresh build would. (The batch also finalizes each index's stack once
-    /// per round, but the idempotent finalize makes that performance property
-    /// invisible to the result; this guards the correctness it must preserve.)
+    /// stack a fresh build would. Both sites reach the same node, which the
+    /// refresh scans once and the splice rewrites once; the debug assert in
+    /// `IndexStore::splice_spec_stacks` checks that result against a full
+    /// rebuild, so this test guards the composed answer the batching must
+    /// preserve.
     #[test]
     fn spec_refresh_multi_site() -> Result<()> {
         let root = parse_named_layer("root.usd", "#usda 1.0\n(\n    subLayers = [@mid.usd@, @weak.usd@]\n)\n");

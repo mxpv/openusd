@@ -6,6 +6,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::{iter, mem};
 
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
@@ -48,7 +49,9 @@ pub struct PrimIndex {
     /// that authors a spec at its node's path, strongest first, so value
     /// resolution and the `prim_stack` / `property_stack` introspection read this
     /// precomputed list. Built by [`finalize_spec_stack`](Self::finalize_spec_stack)
-    /// and rebuilt by the spec-tier change refresh; read through the filtered
+    /// and kept current by the spec-tier change refresh, which splices in the runs
+    /// of the nodes a changed site touched ([`respec_nodes`](Self::respec_nodes))
+    /// rather than rebuilding the whole thing; read through the filtered
     /// [`live_spec_sites`](Self::live_spec_sites) view. It is a resolution-time
     /// artifact, kept off [`PrimIndexGraph`] so the indexer's structural seed
     /// clone does not carry it.
@@ -153,6 +156,43 @@ pub(crate) struct SpecRefresh {
     /// contributing arc target lost its last spec (cull it like an always-empty
     /// target).
     pub needs_rebuild: bool,
+}
+
+/// The spec runs a change round refreshed on one index: one entry per node the
+/// round scanned, holding the run of spec-stack entries that node now
+/// contributes (empty for a node that lost its last spec).
+///
+/// Keyed by node and free of repeats, so both readers find a node by binary
+/// search: [`PrimIndex::refresh_has_specs_at`] to record a scan, skipping one an
+/// earlier site in the round already made, and [`PrimIndex::respec_nodes`] to
+/// claim a node's run as the strength-order walk reaches it.
+#[derive(Debug, Default)]
+pub(crate) struct NodeRuns(Vec<(NodeId, Vec<SpecSite>)>);
+
+impl NodeRuns {
+    /// Records the run `node` contributes, in node order, and borrows it back.
+    /// `run` is called only when the round has not scanned `node` yet; a node it
+    /// already holds answers `None`, since that run is the same run either way —
+    /// every edit in the round is committed before any of it is scanned.
+    fn record_with(&mut self, node: NodeId, run: impl FnOnce() -> Vec<SpecSite>) -> Option<&[SpecSite]> {
+        let at = self.0.binary_search_by_key(&node.idx(), |(id, _)| id.idx()).err()?;
+        self.0.insert(at, (node, run()));
+        Some(&self.0[at].1)
+    }
+
+    /// Takes the run recorded for `node`, or `None` when the round left that
+    /// node alone. Runs are keyed by arena handle, which the strength order
+    /// permutes, so the walk claims each one by lookup.
+    fn take(&mut self, node: NodeId) -> Option<Vec<SpecSite>> {
+        let at = self.0.binary_search_by_key(&node.idx(), |(id, _)| id.idx()).ok()?;
+        Some(self.0.remove(at).1)
+    }
+
+    /// Whether no run is left to place — the round touched no node of this
+    /// index, or the walk has claimed every one it recorded.
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// A reference/payload arc's demand for a not-yet-loaded target layer or
@@ -348,15 +388,27 @@ impl PrimIndex {
     }
 
     /// Recomputes `has_specs` from live layer data for every node sitting at
-    /// site `(layer, path)`, reporting what the caller must do next.
+    /// site `(layer, path)`, reporting what the caller must do next and keeping
+    /// each refreshed node's spec-stack run in `runs`.
     ///
     /// The spec-tier change rescan (C++ `Pcp_RescanForSpecs`) calls this after
     /// an inert spec add or remove, which flips only whether a site contributes
     /// an opinion — never the graph structure — so a contributing node's flag is
     /// refreshed in place without rebuilding or re-finalizing strength order. A
     /// node matches when its site path is `path` and `layer` is one of its
-    /// contributing layers; its refreshed flag reflects whether any layer in its
-    /// stack still authors a spec there.
+    /// contributing layers; its refreshed flag is whether any layer in its stack
+    /// still authors a spec there, read off the run rather than asked separately.
+    ///
+    /// The runs are the point: recomputing the flag scans the node's layer stack
+    /// for the members authoring a spec, which is what the memoized spec stack
+    /// holds for that node, so the matches are kept for
+    /// [`respec_nodes`](Self::respec_nodes). That scan is complete where the flag
+    /// alone stops at the first member answering yes; the splice pays it back,
+    /// except on the branch that ends in `needs_rebuild`, where the index is
+    /// dropped and its runs go with it — a cost that grows with the stack's
+    /// depth. `runs` accumulates across a change round's sites for one index, and
+    /// a node already in it is left alone — its run is final, since every edit in
+    /// the round is committed before classification runs.
     ///
     /// Two transitions are the exception, both handled by rebuilding rather than
     /// flipping in place ([`SpecRefresh::needs_rebuild`]): a *culled* node that
@@ -374,7 +426,13 @@ impl PrimIndex {
     // `subLayers`, so the resolved members equal the node's composition-time
     // stack. A path that rebuilds sublayer stacks goes through the significant
     // branch, which drops the cached index instead of refreshing it.
-    pub(crate) fn refresh_has_specs_at(&mut self, layer: LayerId, path: &Path, graph: &LayerGraph) -> SpecRefresh {
+    pub(crate) fn refresh_has_specs_at(
+        &mut self,
+        layer: LayerId,
+        path: &Path,
+        graph: &LayerGraph,
+        runs: &mut NodeRuns,
+    ) -> SpecRefresh {
         let mut refresh = SpecRefresh::default();
         // `to_vec` copies the small candidate run of handles, releasing the
         // `path_order` borrow so the loop can mutate `graph.nodes` in place.
@@ -384,13 +442,24 @@ impl PrimIndex {
             if !graph.layer_stack(stack).iter().any(|&(li, _)| li == layer) {
                 continue;
             }
-            let has_specs = stack_has_spec(graph, stack, path);
+            refresh.contributing |= !node.is_culled();
+            // A node an earlier site in this round already refreshed keeps that
+            // answer: every edit is committed before classification runs, so the
+            // first scan saw the finished state. Several edited members of one
+            // stack are the common shape, and each is a site of its own.
+            let Some(run) = runs.record_with(id, || {
+                let mut run = Vec::new();
+                push_node_run(graph, node, id, &mut run, None);
+                run
+            }) else {
+                continue;
+            };
+            let has_specs = !run.is_empty();
             if node.is_culled() {
                 // An empty arc target the spec just filled in: rebuild so the
                 // arc un-culls and grafts the target's subtree.
                 refresh.needs_rebuild |= has_specs && !node.has_specs;
             } else {
-                refresh.contributing = true;
                 // An arc target that just lost its last spec must re-cull to
                 // match an always-empty target, so a later re-add takes the
                 // un-cull rebuild path. The local root and inert placeholders
@@ -415,12 +484,69 @@ impl PrimIndex {
         &self.path_order[lo..hi]
     }
 
-    /// Rebuilds the memoized [`spec stack`](SpecSite): the strength-ordered
-    /// list of `(node, layer)` sites that author a spec at their node's path,
-    /// each with the layer's time offset folded to root (the C++ `PcpPrimIndex`
-    /// spec stack). Value resolution ([`opinions`](Self::opinions)) and the
-    /// `prim_stack` / `property_stack` introspection read it as their precomputed
-    /// candidate sites.
+    /// Installs the spec stack and clip flag this index composes, replacing
+    /// whatever it held. Run by the index builder, the single composition seam.
+    fn finalize_spec_stack(&mut self, graph: &LayerGraph) {
+        let (stack, authors_clips) = self.build_spec_stack(graph);
+        self.spec_stack = stack;
+        self.authors_clips = authors_clips;
+    }
+
+    /// Replaces the spec-stack entries of the nodes a spec-tier refresh touched,
+    /// keeping every other node's entries as they stand.
+    ///
+    /// `runs` is what [`refresh_has_specs_at`](Self::refresh_has_specs_at)
+    /// collected for this index across the change round: the run each refreshed
+    /// node now contributes, empty for one that lost its last spec. A single pass
+    /// over the strength order takes each node's contiguous run from whichever
+    /// side owns it — the walk [`build_spec_stack`](Self::build_spec_stack)
+    /// makes, differing only in where each run comes from — so the result lands
+    /// ordered. The old stack is consumed as a prefix per node, since it was
+    /// built by that same walk; `runs` is keyed by arena handle, which the
+    /// strength order permutes, so a refreshed node's run is claimed by lookup
+    /// rather than in sequence. Nothing here reads a layer, there being no
+    /// [`LayerGraph`] to read one from, so the spec tier re-probes only the
+    /// layers a change named.
+    ///
+    /// `authors_clips` is carried across untouched. A clip field appearing or
+    /// disappearing is a *presence* change, which the classifier calls
+    /// significant and answers by dropping the index, so it never reaches this
+    /// path; and a node cannot gain or lose its last spec through a clip-bearing
+    /// layer without that same presence change.
+    /// [`spec_stack_matches_rebuild`](Self::spec_stack_matches_rebuild) holds the
+    /// carried flag against a freshly computed one, so the reasoning is checked
+    /// rather than trusted.
+    pub(crate) fn respec_nodes(&mut self, mut runs: NodeRuns) {
+        if runs.is_empty() {
+            return;
+        }
+        let old_len = self.spec_stack.len();
+        let mut old = mem::take(&mut self.spec_stack).into_iter().peekable();
+        let mut stack = Vec::with_capacity(old_len);
+        for &id in &self.graph.strength_order {
+            let old_run = iter::from_fn(|| old.next_if(|site| site.node == id));
+            match runs.take(id) {
+                // The refresh rescanned this node, so what it found stands in
+                // for every entry the node held.
+                Some(run) => {
+                    old_run.for_each(drop);
+                    stack.extend(run);
+                }
+                None => stack.extend(old_run),
+            }
+        }
+        let stranded_old = old.count();
+        debug_assert_eq!(stranded_old, 0, "spec stack held entries for an unordered node");
+        debug_assert!(runs.is_empty(), "a refreshed node is missing from the strength order");
+        self.spec_stack = stack;
+    }
+
+    /// The [`spec stack`](SpecSite) and clip flag this index composes from live
+    /// layer data: the strength-ordered list of `(node, layer)` sites that author
+    /// a spec at their node's path, each with the layer's time offset folded to
+    /// root (the C++ `PcpPrimIndex` spec stack). Value resolution
+    /// ([`opinions`](Self::opinions)) and the `prim_stack` / `property_stack`
+    /// introspection read the memo as their precomputed candidate sites.
     ///
     /// A site is recorded where the layer authors the prim spec at the node's
     /// path (`has_spec`). A property spec requires its owning prim spec, so this
@@ -428,29 +554,26 @@ impl PrimIndex {
     /// whose owning prim spec is absent, reachable only through malformed backend
     /// data) is not represented.
     ///
-    /// Run by the index builder (the single composition seam) and by the
-    /// spec-tier change refresh. It walks every strength-ordered node, gated on
+    /// The walk visits every strength-ordered node, gated on
     /// [`has_specs`](super::prim_graph::Node::has_specs) — a node with no spec on
     /// any member contributes nothing — and leaves the stack *unfiltered* by the
     /// inert / culled flags: those are flipped after the graph is finalized (an
     /// instance-local inerting, often on a clone), so a pre-filtered stack would
     /// go stale. Consumers apply the live flag filter through
-    /// [`live_spec_sites`](Self::live_spec_sites).
+    /// [`live_spec_sites`](Self::live_spec_sites). The clip probes run only while
+    /// `authors_clips` is still false: one site answering yes settles the prim,
+    /// and the rest of the walk asks no more.
     ///
-    /// The folded offset is stable across the refresh and across
+    /// The folded offset is stable across the spec-tier refresh and across
     /// [`rebase_root`](Self::rebase_root): the spec tier never edits
     /// subLayers/offsets (those drop the index), and a rebase re-anchors only the
     /// path side of each map, leaving `map_to_root().time_offset()` intact.
     ///
     /// TODO(perf): re-reads `has_spec` per member, duplicating the indexer's own
     /// `has_specs` pass — the build could emit the spec-authoring layers it
-    /// already scans, and the two clip probes below with them, which every stage
-    /// pays whether or not it uses value clips. It also rebuilds the whole stack on each call; the spec-tier
-    /// refresh ([`IndexCache::rescan_specs`](super::index_cache::IndexCache::rescan_specs))
-    /// calls it once per affected index per change round, so splicing in only the
-    /// entries of the nodes a changed site touches ([`nodes_at`](Self::nodes_at))
-    /// would replace the full rebuild.
-    pub(crate) fn finalize_spec_stack(&mut self, graph: &LayerGraph) {
+    /// already scans, and the clip probes with them, which every stage pays
+    /// whether or not it uses value clips.
+    fn build_spec_stack(&self, graph: &LayerGraph) -> (Vec<SpecSite>, bool) {
         let mut stack = Vec::new();
         let mut authors_clips = false;
         for &id in &self.graph.strength_order {
@@ -458,25 +581,36 @@ impl PrimIndex {
             if !node.has_specs {
                 continue;
             }
-            let arc_offset = node.map_to_root.time_offset();
-            for &(layer, sub) in graph.layer_stack(node.layer_stack).iter() {
-                let data = graph.layer(layer).data();
-                if data.has_spec(&node.path) {
-                    stack.push(SpecSite {
-                        node: id,
-                        layer,
-                        offset: arc_offset.concatenate(&sub),
-                    });
-                    if !authors_clips {
-                        authors_clips = super::clip::CLIP_FIELDS
-                            .iter()
-                            .any(|key| data.has_field(&node.path, key.as_str()));
-                    }
-                }
-            }
+            push_node_run(graph, node, id, &mut stack, Some(&mut authors_clips));
         }
-        self.spec_stack = stack;
-        self.authors_clips = authors_clips;
+        (stack, authors_clips)
+    }
+
+    /// Whether the memoized spec stack and clip flag are what a from-scratch
+    /// build composes — the spec-tier splice's self-check, asserted in debug
+    /// builds by `IndexStore::splice_spec_stacks`, the seam that holds both
+    /// halves of the contract. Every spec-tier edit in the test suite validates
+    /// the splice there, not only the shapes a test thought to construct.
+    ///
+    /// Offsets compare by bit pattern: the entries the splice keeps carry the
+    /// offset an earlier build folded, so agreement with a fresh fold is the
+    /// property under test, and an authored NaN reproduced exactly is agreement
+    /// rather than the divergence float equality would report.
+    ///
+    /// What it proves is bounded by what the rebuild reads: both sides gate on
+    /// the `has_specs` flags the refresh just wrote, so this settles where each
+    /// node's entries landed and whether the clip flag survived, not whether a
+    /// flag is itself current. The flag transitions are covered by
+    /// [`refresh_has_specs_at`](Self::refresh_has_specs_at)'s rebuild rules.
+    pub(super) fn spec_stack_matches_rebuild(&self, graph: &LayerGraph) -> bool {
+        let (rebuilt, authors_clips) = self.build_spec_stack(graph);
+        self.authors_clips == authors_clips
+            && self.spec_stack.len() == rebuilt.len()
+            && self
+                .spec_stack
+                .iter()
+                .zip(&rebuilt)
+                .all(|(a, b)| a.node == b.node && a.layer == b.layer && a.offset.to_bits() == b.offset.to_bits())
     }
 
     /// Whether this prim authors clip metadata, so a value-clip set can be
@@ -975,10 +1109,53 @@ pub(crate) struct AncestorArc {
 // Shared helpers (used by the `Indexer` and Stage)
 // ---------------------------------------------------------------------------
 
+/// Appends the spec-stack entries `node` contributes: one per layer of its
+/// stack that authors a spec at the node's path, in the stack's order, each
+/// carrying the member's sublayer offset folded onto the node's arc offset.
+/// Where `clips` is given, raises it for the first of those layers that also
+/// authors clip metadata at the path, reading each layer once for both
+/// questions.
+///
+/// The single definition of a node's run, shared by the from-scratch build and
+/// by the spec-tier refresh, so the two cannot drift on ordering or on the fold.
+///
+/// Blind to [`Node::has_specs`](super::prim_graph::Node): the refresh calls it
+/// to *compute* that flag, and a gate here would hand back an empty run for a
+/// node whose flag has yet to be raised — leaving it false forever. Callers that
+/// already know the flag apply the gate themselves, to skip probes a node with
+/// no spec anywhere cannot need.
+///
+/// This is [`stack_has_spec`] unrolled: `out` grows iff that predicate holds,
+/// so the flag the refresh derives from it agrees with the one the indexer
+/// computes by asking directly.
+fn push_node_run(graph: &LayerGraph, node: &Node, id: NodeId, out: &mut Vec<SpecSite>, mut clips: Option<&mut bool>) {
+    let arc_offset = node.map_to_root.time_offset();
+    for &(layer, sub) in graph.layer_stack(node.layer_stack).iter() {
+        let data = graph.layer(layer).data();
+        if !data.has_spec(&node.path) {
+            continue;
+        }
+        out.push(SpecSite {
+            node: id,
+            layer,
+            offset: arc_offset.concatenate(&sub),
+        });
+        if let Some(authors_clips) = clips.as_deref_mut()
+            && !*authors_clips
+        {
+            *authors_clips = super::clip::CLIP_FIELDS
+                .iter()
+                .any(|key| data.has_field(&node.path, key.as_str()));
+        }
+    }
+}
+
 /// Whether any layer in `stack` authors a spec at `path` (C++
-/// `PcpNode::HasSpecs`). The canonical definition of a node's `has_specs`, used
-/// both when the indexer builds a node and when [`PrimIndex::refresh_has_specs_at`]
-/// refreshes one after an inert spec edit, so the two never drift.
+/// `PcpNode::HasSpecs`). The canonical definition of a node's `has_specs`, which
+/// the indexer asks directly while building a node.
+///
+/// Short-circuits on the first member that answers yes, which is all its callers
+/// want.
 pub(super) fn stack_has_spec(graph: &LayerGraph, stack: LayerStackId, path: &Path) -> bool {
     graph
         .layer_stack(stack)

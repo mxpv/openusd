@@ -39,6 +39,16 @@ fn layer_by_leaf(stage: &Stage, leaf: &str) -> String {
         .expect("layer is loaded")
 }
 
+/// The file name at the end of a layer identifier, for reporting which layer a
+/// composed site came from without depending on how the stage canonicalized its
+/// path.
+fn leaf_of(identifier: &str) -> String {
+    FsPath::new(identifier)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// A clip layer that joins the graph with no edit of its own must still reach
 /// the queries sourcing from it.
 ///
@@ -525,6 +535,74 @@ fn unculled_dependent_resyncs() -> Result<()> {
         resynced.borrow().contains(&sdf::path("/Ref/Child")?),
         "the dependent whose existence moved must be resynced, got {:?}",
         resynced.borrow()
+    );
+    Ok(())
+}
+
+/// A spec-tier edit splices the affected prims' memoized spec stacks instead of
+/// rebuilding them, and the memo has to end up where a fresh composition would.
+/// Checked on the edited prim and on a *dependent* reached through a reference,
+/// which is the case the splice exists for: it keeps that prim's referenced-node
+/// entries rather than re-deriving the whole stack.
+#[test]
+fn spec_edit_matches_reopen() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("source.usda"),
+        "#usda 1.0\n\ndef \"Src\"\n{\n    double x = 1\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+(
+    subLayers = [
+        @./weak.usda@
+    ]
+)
+
+def "Ref" (
+    references = @./source.usda@</Src>
+)
+{
+}
+"#,
+    )?;
+    fs::write(dir.path().join("weak.usda"), "#usda 1.0\n")?;
+
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    // Warm both memos before the edit.
+    let _ = stage.prim("/Ref")?.prim_stack()?;
+
+    // An inert `over` in the sublayer: the spec tier refreshes rather than drops.
+    let weak = layer_by_leaf(&stage, "weak.usda");
+    stage.layer_mut(&weak).expect("loaded").edit(|edit| {
+        sdf::PrimSpec::new(edit.data_mut(), "/Ref", sdf::Specifier::Over, "")?;
+        Ok(())
+    })?;
+    let sites = |stage: &Stage| -> Result<Vec<(String, sdf::Path)>> {
+        Ok(stage
+            .prim("/Ref")?
+            .prim_stack()?
+            .into_iter()
+            .map(|site| (leaf_of(&site.layer), site.path))
+            .collect())
+    };
+    let spliced = sites(&stage)?;
+
+    // The same content composed from scratch. The edit lives in memory until the
+    // layer is saved, so the reopened stage would otherwise read the old file.
+    stage.layer_mut(&weak).expect("loaded").save()?;
+    let reopened = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    let fresh = sites(&reopened)?;
+
+    assert_eq!(spliced, fresh, "the spliced stack must be what a fresh build composes");
+    assert!(
+        spliced.iter().any(|(layer, _)| layer == "weak.usda"),
+        "the authored `over` joined the stack, got {spliced:?}",
+    );
+    assert!(
+        spliced.iter().any(|(layer, _)| layer == "source.usda"),
+        "the referenced node kept its entry, got {spliced:?}",
     );
     Ok(())
 }

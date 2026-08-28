@@ -139,8 +139,7 @@ struct InstanceArc {
     arc: u8,
     layer: LayerId,
     path: String,
-    offset_bits: u64,
-    scale_bits: u64,
+    layer_offset_bits: (u64, u64),
 }
 
 impl PrototypeRegistry {
@@ -344,13 +343,11 @@ fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules, m
         {
             selections.push((set.to_string(), selection.to_string()));
         }
-        let offset = node.map_to_root.time_offset();
         arcs.push(InstanceArc {
             arc: node.arc as u8,
             layer: node.layer_id(),
             path: node.path.strip_all_variant_selections().to_string(),
-            offset_bits: offset.offset.to_bits(),
-            scale_bits: offset.scale.to_bits(),
+            layer_offset_bits: node.map_to_root.time_offset().to_bits(),
         });
     }
     InstanceKey {
