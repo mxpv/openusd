@@ -905,10 +905,11 @@ fn declare_spec(
 /// [`get_at`](AttributeQuery::get_at) is just an interpolation rather than a
 /// fresh composition.
 ///
-/// The cached source is snapshotted against the stage's composition revision: a
-/// timed [`get_at`](AttributeQuery::get_at) reuses it until an edit advances the
-/// revision, at which point the next query rebuilds it — so the handle stays
-/// correct across authoring without the caller re-creating it.
+/// The cached source is stamped with the composed prim it was resolved from: a
+/// timed [`get_at`](AttributeQuery::get_at) reuses it until an edit moves that
+/// prim, at which point the next query rebuilds it — so the handle stays correct
+/// across authoring without the caller re-creating it, and an edit elsewhere on
+/// the stage leaves it standing.
 ///
 /// The fast path covers attributes resolved from `default` opinions or
 /// `timeSamples`. An attribute resolved through value clips (spec 12.3.4) is
@@ -927,11 +928,44 @@ impl Clone for AttributeQuery {
     }
 }
 
-/// A resolved value source paired with the composition revision it was resolved
-/// against. Stale once the stage's revision advances past `revision`.
+/// A resolved value source paired with the stamp it stays replayable under: the
+/// composed prim it came from and that prim's composition revision, plus the
+/// population epoch when the answer was reached through an instance-proxy
+/// redirection. Stale as soon as either stops matching the stage.
 struct CachedSource {
-    revision: u64,
+    prim: sdf::Path,
+    revision: pcp::PrimRevision,
+    redirect_epoch: Option<u64>,
     source: AttributeValueSource,
+}
+
+impl CachedSource {
+    /// Whether the memo still describes what `stage` would resolve now: the prim
+    /// it resolved from carries the same revision, and — for an answer reached
+    /// by redirection — the epoch that redirection was memoized under still
+    /// stands.
+    ///
+    /// Reads a settled stage, so the caller settles before borrowing the memo
+    /// this is called on.
+    fn is_current(&self, stage: &Stage) -> bool {
+        let (revision, population) = stage.value_stamp(&self.prim);
+        revision == Some(self.revision) && self.redirect_epoch.is_none_or(|epoch| epoch == population)
+    }
+}
+
+#[cfg(test)]
+impl AttributeQuery {
+    /// Whether a memoized source is present and still valid — what a test asks
+    /// to tell "the answer was replayed" from "the answer was recomposed", which
+    /// the returned value alone cannot distinguish.
+    pub(crate) fn memo_is_current(&self) -> bool {
+        let stage = self.attr.stage();
+        stage.process_pending();
+        self.cached
+            .borrow()
+            .as_ref()
+            .is_some_and(|cached| cached.is_current(stage))
+    }
 }
 
 impl AttributeQuery {
@@ -1000,14 +1034,17 @@ impl AttributeQuery {
     }
 
     /// Resolves the value at stage `time` through the cached source, rebuilding
-    /// it when the stage's composition revision has advanced.
+    /// it when the stamp it was resolved under no longer holds.
     fn value_at(&self, time: f64) -> Result<Option<sdf::Value>> {
         let stage = self.attr.stage();
-        let revision = stage.cache_revision();
+        // Settle before the memo is borrowed, not while: draining commits queued
+        // edits and fires the stage sinks, and a sink that reads this very query
+        // would find the memo already borrowed.
+        stage.process_pending();
 
-        // Reuse a cached source still valid at the current revision.
+        // Reuse a cached source whose stamp still stands.
         if let Some(cached) = self.cached.borrow().as_ref()
-            && cached.revision == revision
+            && cached.is_current(stage)
         {
             return self.evaluate(&cached.source, time);
         }
@@ -1017,16 +1054,21 @@ impl AttributeQuery {
         // stage population before it is answered
         // (`Stage::resolve_prototype_path`), so nothing composes into that
         // namespace afterwards without an edit.
-        let source = stage.resolve_value_source(self.attr.path())?;
-        let value = self.evaluate(&source, time)?;
-        // Stamped with the revision as it stands *after* resolving: resolving
-        // drains the pending edits, and a sink authoring during that drain
-        // advances the revision, which would leave the entry stale the moment
-        // it was written.
-        self.cached.replace(Some(CachedSource {
-            revision: stage.cache_revision(),
-            source,
-        }));
+        let resolved = stage.resolve_value_source(self.attr.path())?;
+        let value = self.evaluate(&resolved.source, time)?;
+        // The stamp travels with the source out of the resolving borrow, so an
+        // edit a sink authored while the pending queue drained cannot slip
+        // between the answer and the token guarding it. Without a stamp — no
+        // index is cached at the answering prim, so nothing can say when the
+        // answer expires — the source is used once and not memoized.
+        if let Some(revision) = resolved.revision {
+            self.cached.replace(Some(CachedSource {
+                prim: resolved.prim,
+                revision,
+                redirect_epoch: resolved.redirect_epoch,
+                source: resolved.source,
+            }));
+        }
         Ok(value)
     }
 
@@ -1846,7 +1888,8 @@ mod tests {
     }
 
     /// The cached source rebuilds after an edit: re-authoring a sample value is
-    /// reflected on the next query, since the composition revision advances.
+    /// reflected on the next query, since the edit restales the prim the source
+    /// was resolved from.
     #[test]
     fn query_rebuilds_after_edit() -> Result<()> {
         let stage = stage()?;
@@ -1862,6 +1905,92 @@ mod tests {
         // Re-author the t=10 sample; the next query must reflect it.
         let _attr = attr.set_at(sdf::Value::Double(5.0), TimeCode::new(10.0))?;
         assert_eq!(q.get_at::<f64>(TimeCode::new(5.0))?, Some(3.0));
+        Ok(())
+    }
+
+    /// An edit retires only the queries whose prims it moved: a warmed query on
+    /// an unrelated prim keeps replaying its source, which is the whole point of
+    /// stamping per prim rather than per stage.
+    #[test]
+    fn query_survives_unrelated_edit() -> Result<()> {
+        let stage = stage()?;
+        let edited = stage
+            .define_prim("/A")?
+            .set_type_name("Xform")?
+            .create_attribute("x", "double")?
+            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?;
+        let bystander = stage
+            .define_prim("/B")?
+            .set_type_name("Xform")?
+            .create_attribute("y", "double")?
+            .set_at(sdf::Value::Double(2.0), TimeCode::new(0.0))?;
+
+        let edited_query = edited.query();
+        let bystander_query = bystander.query();
+        assert_eq!(edited_query.get_at::<f64>(TimeCode::new(0.0))?, Some(1.0));
+        assert_eq!(bystander_query.get_at::<f64>(TimeCode::new(0.0))?, Some(2.0));
+
+        edited.set_at(sdf::Value::Double(9.0), TimeCode::new(0.0))?;
+
+        assert!(
+            !edited_query.memo_is_current(),
+            "the edited prim's cached source must be retired"
+        );
+        assert!(
+            bystander_query.memo_is_current(),
+            "an edit to /A says nothing about /B, whose source must survive"
+        );
+        assert_eq!(edited_query.get_at::<f64>(TimeCode::new(0.0))?, Some(9.0));
+        assert_eq!(bystander_query.get_at::<f64>(TimeCode::new(0.0))?, Some(2.0));
+        Ok(())
+    }
+
+    /// A query on an attribute with no spec resolves to nothing and memoizes
+    /// nothing — there is no composed source to stamp it against — so the value
+    /// authored afterwards is picked up.
+    #[test]
+    fn query_authored_after_miss() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/A")?.set_type_name("Xform")?;
+        let q = stage.attribute("/A.x")?.query();
+        assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, None);
+
+        prim.create_attribute("x", "double")?.set(sdf::Value::Double(4.0))?;
+        assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, Some(4.0));
+        Ok(())
+    }
+
+    /// A query on an instance proxy replays a source resolved from the
+    /// prototype, so an edit to the shared source reaches it even though no
+    /// index is cached at the proxy's own path (spec 11.3.3).
+    #[test]
+    fn query_proxy_tracks_source() -> Result<()> {
+        let stage = stage()?;
+        let source = stage
+            .define_prim("/Source/Child")?
+            .set_type_name("Xform")?
+            .create_attribute("x", "double")?
+            .set(sdf::Value::Double(1.0))?;
+        stage
+            .define_prim("/Inst")?
+            .set_metadata(
+                sdf::FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    prim_path: sdf::path("/Source")?,
+                    ..Default::default()
+                }])),
+            )?
+            .set_instanceable(true)?;
+
+        assert!(
+            stage.prim("/Inst/Child")?.is_instance_proxy()?,
+            "the query must resolve through a prototype for this to test the redirect"
+        );
+        let q = stage.attribute("/Inst/Child.x")?.query();
+        assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, Some(1.0));
+
+        let _source = source.set(sdf::Value::Double(2.0))?;
+        assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, Some(2.0));
         Ok(())
     }
 

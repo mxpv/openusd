@@ -339,7 +339,13 @@ impl StageComposition {
         provenance: Provenance,
         hooks: &dyn CompositionHooks,
     ) {
-        let mut pcp_changes = pcp::Changes::new();
+        // Classification collects the notice's path-sets only when a sink is
+        // listening; the invalidation half runs either way.
+        let wants_notice = hooks.wants_notice();
+        let mut pcp_changes = match wants_notice {
+            true => pcp::Changes::reporting(),
+            false => pcp::Changes::new(),
+        };
         {
             let cache = self.cache.borrow();
             pcp_changes.did_change(&cache, edits);
@@ -351,7 +357,7 @@ impl StageComposition {
         // ([`layer_changes`]), so a sink deriving a per-layer diff reads each
         // layer's own record rather than mis-reading a sublayer's change against
         // the strongest layer's data.
-        let mut payload = hooks.wants_notice().then(|| {
+        let mut payload = wants_notice.then(|| {
             let layer_changes: Vec<(String, sdf::ChangeList)> = edits
                 .iter()
                 .map(|edit| (self.layer_identifier(edit.layer), edit.changes.clone()))
@@ -462,13 +468,36 @@ impl StageComposition {
     /// a weak stage handle, so it does not form a reference cycle (the stage owns the
     /// layer, which owns the sink).
     pub(super) fn intern_layer(&self, layer: sdf::Layer, hooks: &dyn CompositionHooks) -> (pcp::LayerId, bool) {
-        let mut layers = self.layers.borrow_mut();
-        let (id, fresh) = layers.ensure_layer(layer);
-        if fresh {
+        // Joining is a value-source change for a clip that named this identifier
+        // while nothing was interned under it: the clip cache read whatever it
+        // could open on its own — or nothing at all — and now reads the graph's
+        // layer instead. No edit accompanies the join, so no change round would
+        // otherwise reach the prims sourcing from it. A stage with no clips never
+        // pays for the identifier, which every demand-loaded layer would
+        // otherwise allocate.
+        let (id, identifier) = {
+            let mut layers = self.layers.borrow_mut();
+            let (id, fresh) = layers.ensure_layer(layer);
+            if !fresh {
+                return (id, false);
+            }
             let node = layers.get_mut(id).expect("just-interned layer is live");
             hooks.attach_layer_sink(id, &mut node.layer);
+            let identifier = self
+                .cache
+                .borrow()
+                .has_clip_sources()
+                .then(|| layers.identifier(id).to_owned());
+            (id, identifier)
+        };
+        if let Some(identifier) = identifier {
+            // The anchors it restaled go unreported: a join carries no payload to
+            // add them to, the same gap the demand-loading `TODO` beside
+            // `Payload::finish` records. Values are correct either way; an
+            // observer is simply not told, and learns on its next read.
+            let _restaled = self.cache.borrow_mut().invalidate_clip_source(&identifier);
         }
-        (id, fresh)
+        (id, true)
     }
 
     /// Opens the layers a composition pass demanded but that were not yet loaded.

@@ -12,6 +12,7 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path, Value};
 
 use super::compose_site::evaluate_expression;
+use super::index_store::PrimRevision;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, SpecSite};
@@ -95,14 +96,21 @@ pub(crate) struct PrimEntry {
     /// [`relationship_targets`] / [`connection_paths`] query for a property whose
     /// prim composes in place and whose resolution is a pure function of this
     /// prim's own opinions, and dropped with the entry; a `targetPaths` /
-    /// `connectionPaths` edit clears it through
-    /// [`did_change_targets`](super::change::CacheChanges). Instance proxies, the
+    /// `connectionPaths` edit clears the affected keys through the value tier
+    /// ([`ScopedInvalidation`](super::index_store::ScopedInvalidation), which carries
+    /// them alongside the restale). Instance proxies, the
     /// deleted-paths walk, and a resolution that consults cross-prim instance
     /// state resolve live and are never cached.
     ///
     /// [`relationship_targets`]: super::index_cache::IndexCache::relationship_targets
     /// [`connection_paths`]: super::index_cache::IndexCache::connection_paths
     pub resolved_targets: HashMap<TargetMemoKey, TargetMemo>,
+    /// Validity token for answers resolved from this prim's composed state.
+    ///
+    /// Written only by [`IndexStore`](super::index_store::IndexStore), which
+    /// mints every value and stamps a fresh one wherever it inserts an entry or
+    /// mutates one in place. See [`PrimRevision`].
+    pub(super) revision: PrimRevision,
 }
 
 /// Which path-list-op field a [`TargetMemo`] resolved. Narrower than
@@ -1220,6 +1228,7 @@ pub(crate) mod tests {
                         context: CompositionContext::default(),
                         errors: Vec::new(),
                         resolved_targets: HashMap::new(),
+                        revision: PrimRevision::placeholder(),
                     },
                 );
                 last = Some(index);

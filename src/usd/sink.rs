@@ -170,8 +170,13 @@ impl Provenance {
 /// namespace either way, being derived from composition dependencies rather
 /// than from the authored change record.
 pub struct CommittedChange<'a> {
-    /// Paths whose composition was resynced — the prim index and its namespace
-    /// descendants were dropped (C++ `ResyncedPaths`). Composed/stage namespace.
+    /// Paths a consumer must re-resolve outright (C++ `ResyncedPaths`).
+    /// Composed/stage namespace.
+    ///
+    /// A prim path here had its index and namespace descendants dropped. A
+    /// *property* path is one whose spec appeared or vanished: the owning prim
+    /// composes exactly as it did, but the property itself is a different object
+    /// than it was, so a handle to it must be re-resolved rather than re-read.
     ///
     /// Minimal in ancestors: an entry stands for its whole subtree, so a
     /// resynced `/foo` appears without `/foo/bar`. A
@@ -329,12 +334,20 @@ pub(super) struct Payload {
     /// paths already and an edit target maps its own. Emptied by
     /// [`finish`](Self::finish) into [`stage`](Self::stage).
     authored: NamespacedPaths,
+    /// The changed-info paths in composed stage namespace, which yield to
+    /// [`stage`](Self::stage)'s resyncs. Emptied into
+    /// [`changed_info_only`](Self::changed_info_only) by
+    /// [`finish`](Self::finish).
+    stage_info: Vec<sdf::Path>,
+    /// The changed-info paths named in the edited layer's own namespace, which
+    /// only a [`Provenance::DirectLayerEdit`] has, and which yield to
+    /// [`authored`](Self::authored)'s resyncs rather than
+    /// [`stage`](Self::stage)'s — a prefix comparison across namespaces means
+    /// nothing.
+    authored_info: Vec<sdf::Path>,
+    /// The two halves above, merged once every comparison that needed them
+    /// apart is done.
     changed_info_only: Vec<sdf::Path>,
-    /// Whether [`changed_info_only`](Self::changed_info_only) is named in the
-    /// authored namespace, and so yields to [`authored`](Self::authored) rather
-    /// than [`stage`](Self::stage). Recorded where the translation happens, so
-    /// the two cannot disagree.
-    info_is_authored: bool,
     asset_paths_resynced: Vec<sdf::Path>,
     change_list: sdf::ChangeList,
     layer_changes: Vec<(String, sdf::ChangeList)>,
@@ -456,34 +469,24 @@ impl Payload {
         // namespace the authored resyncs ended in. Subsumption against them is
         // left to [`finish`](Self::finish), which owns the rule once the
         // layer-stack tier's paths have landed.
-        let mut changed_info_only: Vec<sdf::Path> = scratch
-            .entries()
-            .iter()
-            .filter(|(_, e)| {
-                // A property removal is a structural change, not an info-only edit.
-                // A removed relationship/connection surfaces its torn-down
-                // `targetPaths` / `connectionPaths` for memo invalidation; that
-                // signal must not also report the now-gone property as if its value
-                // merely changed. A replacement (removed and re-created in one edit)
-                // keeps the property, so it stays an info change.
-                let removed = e.flags.contains(sdf::ChangeFlags::REMOVE_PROPERTY)
-                    && !e.flags.contains(sdf::ChangeFlags::ADD_PROPERTY);
-                !removed
-                    && (e.info_changed().next().is_some()
-                        || e.flags.intersects(
-                            sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS
-                                | sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION,
-                        ))
-            })
-            .filter_map(|(p, _)| to_stage(p))
-            .collect();
-        changed_info_only.sort();
-        changed_info_only.dedup();
+        let mut stage_info: Vec<sdf::Path> = changes.cache.reported.stage_info.iter().cloned().collect();
+        let mut authored_info: Vec<sdf::Path> = changes.cache.reported.authored_info.iter().cloned().collect();
+        if !info_is_authored {
+            // Under every other provenance the authored spellings reach stage
+            // namespace by the same rule the resyncs took, so the two halves
+            // become one — and translation can collapse two spellings onto one
+            // path, which is the only thing here that needs re-ordering. Both
+            // halves arrive sorted and unique out of their `BTreeSet`s.
+            stage_info.extend(authored_info.drain(..).filter_map(|path| to_stage(&path)));
+            stage_info.sort();
+            stage_info.dedup();
+        }
         Self {
             stage,
             authored,
-            changed_info_only,
-            info_is_authored,
+            stage_info,
+            authored_info,
+            changed_info_only: Vec::new(),
             asset_paths_resynced: Vec::new(),
             change_list: scratch.clone(),
             layer_changes,
@@ -502,31 +505,34 @@ impl Payload {
     /// `assetPathResyncChanges`.
     ///
     /// Each namespace normalizes on its own, since a prefix comparison across
-    /// two means nothing: [`changed_info_only`](Self::changed_info_only) yields
-    /// to the half [`new`](Self::new) translated it alongside, recorded there as
-    /// [`info_is_authored`](Self::info_is_authored), while the outcome's victims
-    /// and [`asset_paths_resynced`](Self::asset_paths_resynced) are stage paths
-    /// whatever the provenance. The halves merge only once every comparison is
-    /// done.
+    /// two means nothing: [`stage_info`](Self::stage_info) yields to the stage
+    /// resyncs and [`authored_info`](Self::authored_info) to the authored ones,
+    /// while the outcome's victims and
+    /// [`asset_paths_resynced`](Self::asset_paths_resynced) are stage paths
+    /// whatever the provenance. The halves merge into
+    /// [`changed_info_only`](Self::changed_info_only) only once every comparison
+    /// is done.
     pub(super) fn finish(&mut self, outcome: pcp::ApplyOutcome) {
         let pcp::ApplyOutcome {
             resynced: mut stage_resynced,
+            resynced_prims,
             mut asset_paths_resynced,
         } = outcome;
 
         // The outcome's victims are subtree drops in stage namespace, so they
-        // join both the reported set and the covering projection.
+        // join both the reported set and the covering projection. Its single-prim
+        // resyncs join only the reported set: they cover nothing below them.
         self.stage.resynced.extend(stage_resynced.iter().cloned());
+        self.stage.resynced.extend(resynced_prims);
         self.stage.subtree.append(&mut stage_resynced);
         self.stage.normalize();
         self.authored.normalize();
 
-        let reported = if self.info_is_authored {
-            &self.authored
-        } else {
-            &self.stage
-        };
-        self.changed_info_only.retain(|p| !reported.reports(p));
+        // Each half yields to the resyncs of its own namespace, which is why the
+        // two are kept apart until here: a direct edit to a non-local layer
+        // carries both, and a prefix test across namespaces means nothing.
+        self.stage_info.retain(|p| !self.stage.reports(p));
+        self.authored_info.retain(|p| !self.authored.reports(p));
 
         keep_ancestors(&mut asset_paths_resynced);
         asset_paths_resynced.retain(|p| !is_covered(&self.stage.subtree, p));
@@ -534,10 +540,14 @@ impl Payload {
 
         // Every comparison is done, so the two namespaces can share one reported
         // set — the provenance says which namespace a direct edit's entries are
-        // in, and nothing distinguishes them from here on. The authored bundle is
-        // spent with it, covering projection included.
+        // in, and nothing distinguishes them from here on. The authored bundles
+        // are spent with them, covering projection included.
         let mut authored = mem::take(&mut self.authored);
         self.stage.absorb(&mut authored);
+        self.changed_info_only = mem::take(&mut self.stage_info);
+        self.changed_info_only.append(&mut self.authored_info);
+        self.changed_info_only.sort();
+        self.changed_info_only.dedup();
     }
 
     /// Borrow this payload as a [`CommittedChange`] for the `after_commit` call.
@@ -616,7 +626,8 @@ mod tests {
 
     /// Builds a payload whose classification-derived resyncs are `stage` (paths a
     /// dependency lookup produced) and `authored` (literal edited paths), and
-    /// whose info changes are `info`, then folds `outcome` in.
+    /// whose info changes are `info` — recorded as authored spellings, the half
+    /// a provenance decides the namespace of — then folds `outcome` in.
     fn shaped(
         provenance: Provenance,
         stage: &[&str],
@@ -624,18 +635,17 @@ mod tests {
         info: &[&str],
         outcome: pcp::ApplyOutcome,
     ) -> Payload {
-        let mut changes = pcp::Changes::new();
+        let mut changes = pcp::Changes::reporting();
         for path in stage {
             changes.cache.did_change_significantly.insert(p(path));
         }
         for path in authored {
             changes.cache.authored_significant.insert(p(path));
         }
-        let mut scratch = sdf::ChangeList::new();
         for path in info {
-            scratch.entry_mut(&p(path)).note("kind", sdf::FieldChange::Value);
+            changes.cache.reported.authored_info.insert(p(path));
         }
-        let mut payload = Payload::new(&changes, &scratch, Vec::new(), &provenance);
+        let mut payload = Payload::new(&changes, &sdf::ChangeList::new(), Vec::new(), &provenance);
         payload.finish(outcome);
         payload
     }
@@ -661,6 +671,7 @@ mod tests {
     #[test]
     fn asset_paths_yield_resync() {
         let outcome = pcp::ApplyOutcome {
+            resynced_prims: Vec::new(),
             resynced: Vec::new(),
             asset_paths_resynced: paths(&["/A/B", "/B", "/B/C"]),
         };
@@ -668,6 +679,7 @@ mod tests {
         assert_eq!(payload.asset_paths_resynced, paths(&["/B"]));
 
         let outcome = pcp::ApplyOutcome {
+            resynced_prims: Vec::new(),
             resynced: paths(&["/"]),
             asset_paths_resynced: paths(&["/A", "/B"]),
         };
@@ -683,6 +695,7 @@ mod tests {
     #[test]
     fn direct_edit_keeps_namespaces() {
         let outcome = pcp::ApplyOutcome {
+            resynced_prims: Vec::new(),
             resynced: paths(&["/A"]),
             asset_paths_resynced: paths(&["/A/B", "/C"]),
         };

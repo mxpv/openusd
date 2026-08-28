@@ -1724,3 +1724,55 @@ fn schema_metadatum_stays_unanchored() {
         "a schema value read as metadata is not anchored"
     );
 }
+
+/// An `expressionVariables` edit re-points a value-time `${VAR}` in an `asset`
+/// value without touching the prim that composes it, so no dependency record
+/// names it — the asset-path channel is what carries it. A warmed query holds
+/// the value it already resolved, so that channel has to restale the same
+/// subtrees it reports, or the query keeps replaying the old asset.
+///
+/// The read must be timed: the untimed one goes through the attribute and
+/// resolves live, so it would pass whatever the memo held.
+#[test]
+fn expr_edit_restales_asset() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(dir.path().join("a.png"), b"a").expect("write asset");
+    fs::write(dir.path().join("b.png"), b"b").expect("write asset");
+    let stage = open_scene(
+        &dir,
+        concat!(
+            "#usda 1.0\n",
+            "(\n    expressionVariables = { string WHICH = \"a\" }\n)\n",
+            "def Material \"M\"\n{\n",
+            "    asset inputs:file = @`\"./${WHICH}.png\"`@\n",
+            "}\n",
+        ),
+    );
+    let query = stage.attribute_query("/M.inputs:file").expect("query");
+    let at_zero = usd::TimeCode::from(0.0);
+    assert_eq!(
+        query
+            .get_at::<sdf::AssetPath>(at_zero)
+            .expect("query read")
+            .expect("asset value")
+            .evaluated_path(),
+        Some("./a.png"),
+    );
+
+    stage
+        .set_expression_variables(HashMap::from([(
+            "WHICH".to_string(),
+            sdf::Value::String("b".to_string()),
+        )]))
+        .expect("author expression variables");
+
+    assert_eq!(
+        query
+            .get_at::<sdf::AssetPath>(at_zero)
+            .expect("query read")
+            .expect("asset value")
+            .evaluated_path(),
+        Some("./b.png"),
+        "the warmed query must re-resolve the expression the edit re-pointed",
+    );
+}

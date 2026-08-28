@@ -416,7 +416,7 @@ impl IndexCache {
         if touched.is_empty() {
             return Vec::new();
         }
-        self.bump_revision();
+        self.retire_query_errors();
         // A rule change can expose or hide a payload's whole subtree.
         self.invalidate_population();
         let victims = self.load_rule_victims(&touched);

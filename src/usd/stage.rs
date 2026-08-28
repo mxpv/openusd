@@ -671,35 +671,53 @@ pub struct StageInner {
     prim_types: RefCell<PrimTypeMemo>,
 }
 
-/// Per-prim schema type handles, valid as of one composition revision.
+/// Per-prim schema type handles, valid as of one pair of composition epochs.
 ///
 /// This is the stage-local half of prim type resolution: the registry caches
 /// definitions by type identity, and this remembers which identity each prim
-/// currently has. An edit that changes any prim's type advances the revision,
-/// which drops the whole memo — cheap, since re-deriving one prim's identity is
-/// two composed reads.
+/// currently has.
+///
+/// Two epochs stamp it, because a prim's identity moves in two unrelated ways.
+/// Authoring `typeName`, `apiSchemas`, or the stage's `fallbackPrimTypes` moves
+/// it directly, which is the type-opinion epoch; and any structural change —
+/// a reference, a variant switch, muting, a load rule, a prim removal — can
+/// change which opinion wins without authoring a type field at all, which is
+/// exactly what the population epoch already tracks. Neither covers the other,
+/// and a value-only edit advances neither, which is the point.
+///
+/// A move of either drops the whole memo — cheap, since re-deriving one prim's
+/// identity is two composed reads, and it keeps the map bounded by the prims
+/// queried since the last one.
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+struct TypeEpochs {
+    /// See [`pcp::IndexCache::type_opinion_epoch`].
+    opinions: u64,
+    /// See [`pcp::IndexCache::population_epoch`].
+    population: u64,
+}
+
 #[derive(Default)]
 struct PrimTypeMemo {
-    revision: u64,
+    epochs: TypeEpochs,
     types: HashMap<sdf::Path, Arc<PrimTypeInfo>>,
 }
 
 impl PrimTypeMemo {
-    /// The remembered type of a prim, if it was resolved under the revision
-    /// still in effect.
-    fn lookup(&self, revision: u64, path: &sdf::Path) -> Option<Arc<PrimTypeInfo>> {
-        if self.revision != revision {
+    /// The remembered type of a prim, if it was resolved under the epochs still
+    /// in effect.
+    fn lookup(&self, epochs: TypeEpochs, path: &sdf::Path) -> Option<Arc<PrimTypeInfo>> {
+        if self.epochs != epochs {
             return None;
         }
         self.types.get(path).cloned()
     }
 
-    /// Remembers a prim's type, discarding everything resolved under an
-    /// earlier revision.
-    fn remember(&mut self, revision: u64, path: sdf::Path, info: Arc<PrimTypeInfo>) {
-        if self.revision != revision {
+    /// Remembers a prim's type, discarding everything resolved under earlier
+    /// epochs.
+    fn remember(&mut self, epochs: TypeEpochs, path: sdf::Path, info: Arc<PrimTypeInfo>) {
+        if self.epochs != epochs {
             self.types.clear();
-            self.revision = revision;
+            self.epochs = epochs;
         }
         self.types.insert(path, info);
     }
@@ -1974,9 +1992,8 @@ impl Stage {
     /// reads back the original table afterward, so the *rules* are not
     /// observable — but if `root`'s current rules are not already the
     /// all-inclusive default, each swap can still evict cached prim indices
-    /// and bump the composition revision (matching whatever `set_load_rules`
-    /// would do for that same transition), which a cached value view keyed
-    /// on the revision will notice.
+    /// (matching whatever `set_load_rules` would do for that same transition),
+    /// which a cached value view stamped on one of them will notice.
     ///
     /// This also has a real, permanent side effect worth calling out: every
     /// payload-target layer under `root` is left loaded in the layer
@@ -2288,11 +2305,13 @@ impl Stage {
     }
 
     /// Resolves the cacheable value source for an attribute, the source half of
-    /// [`Self::resolve_at`]. Backs [`AttributeQuery`](super::AttributeQuery),
-    /// which snapshots the source and replays it across time codes. Returns
+    /// [`Self::resolve_at`], paired with the stamp it stays replayable under.
+    /// Backs [`AttributeQuery`](super::AttributeQuery), which snapshots both and
+    /// replays the source across time codes. Resolves to
     /// [`AttributeValueSource::Static`](pcp::AttributeValueSource::Static)
-    /// `None` when the attribute's prim is outside the population mask.
-    pub(crate) fn resolve_value_source(&self, attr_path: &sdf::Path) -> Result<pcp::AttributeValueSource> {
+    /// `None` with no stamp when the attribute's prim is outside the population
+    /// mask.
+    pub(crate) fn resolve_value_source(&self, attr_path: &sdf::Path) -> Result<pcp::StampedValueSource> {
         Ok(self.masked(attr_path, |g, c| c.resolve_value_source(g, attr_path))?)
     }
 
@@ -2315,11 +2334,33 @@ impl Stage {
         Ok(self.masked(attr_path, |g, c| c.resolve_info(g, &stage_id, attr_path, mode, &interp))?)
     }
 
-    /// The current composition revision, advanced once per applied edit batch.
-    /// [`AttributeQuery`](super::AttributeQuery) snapshots this and rebuilds its
-    /// cached source when it advances.
-    pub(crate) fn cache_revision(&self) -> u64 {
-        self.cache().revision()
+    /// The epochs a memoized prim type stays valid under, read together from
+    /// one settled cache borrow.
+    fn type_epochs(&self) -> TypeEpochs {
+        let cache = self.cache();
+        TypeEpochs {
+            opinions: cache.type_opinion_epoch(),
+            population: cache.population_epoch(),
+        }
+    }
+
+    /// The current population epoch, which advances whenever the composed
+    /// population may differ.
+    pub(crate) fn population_epoch(&self) -> u64 {
+        self.cache().population_epoch()
+    }
+
+    /// The stamp a cached answer about `path` is rechecked against: the prim's
+    /// revision (`None` when no index is cached there) and the population epoch
+    /// a redirection to it was memoized under.
+    ///
+    /// Read from one settled cache borrow, which the caller settles for
+    /// ([`process_pending`](Self::process_pending)) rather than draining here: a
+    /// caller checking this against a memo it has borrowed must not have a sink
+    /// fire underneath that borrow.
+    pub(crate) fn value_stamp(&self, path: &sdf::Path) -> (Option<pcp::PrimRevision>, u64) {
+        let cache = self.composition.settled_cache();
+        (cache.prim_revision(path), cache.population_epoch())
     }
 
     /// The schemas this stage resolves against (C++
@@ -2346,8 +2387,8 @@ impl Stage {
         path: impl sdf::IntoPath,
     ) -> Result<Arc<PrimTypeInfo>, pcp::QueryError> {
         let path = sdf::try_into_path(path)?;
-        let revision = self.cache_revision();
-        if let Some(info) = self.prim_types.borrow().lookup(revision, &path) {
+        let epochs = self.type_epochs();
+        if let Some(info) = self.prim_types.borrow().lookup(epochs, &path) {
             return Ok(info);
         }
 
@@ -2360,7 +2401,7 @@ impl Stage {
             id = id.with_mapped_type_name(mapped);
         }
         let info = self.schema_registry.prim_type_info(id);
-        self.prim_types.borrow_mut().remember(revision, path, info.clone());
+        self.prim_types.borrow_mut().remember(epochs, path, info.clone());
         Ok(info)
     }
 
@@ -2543,7 +2584,7 @@ impl Stage {
     /// Completes stage population unless it is already current for the live
     /// population epoch.
     fn ensure_prototypes_discovered(&self) -> Result<(), pcp::QueryError> {
-        if self.prototypes_discovered.get() == Some(self.cache().population_epoch()) {
+        if self.prototypes_discovered.get() == Some(self.population_epoch()) {
             return Ok(());
         }
         self.discover_prototypes()
@@ -2586,7 +2627,7 @@ impl Stage {
     // materialization does (see `IndexCache::materialize_prototype`).
     fn discover_prototypes(&self) -> Result<(), pcp::QueryError> {
         loop {
-            let epoch = self.cache().population_epoch();
+            let epoch = self.population_epoch();
             let mut roots: Vec<sdf::Path> = Vec::new();
             let mut visited: HashSet<sdf::Path> = HashSet::new();
             self.register_instances_below(&sdf::Path::abs_root(), &mut roots)?;
@@ -2598,7 +2639,7 @@ impl Stage {
                     self.register_instances_below(&root, &mut roots)?;
                 }
             }
-            if self.cache().population_epoch() == epoch {
+            if self.population_epoch() == epoch {
                 self.prototypes_discovered.set(Some(epoch));
                 return Ok(());
             }
@@ -4922,10 +4963,57 @@ def "T" {
         Ok(())
     }
 
-    /// Muting bumps the cache revision, so an [`AttributeQuery`] built before the
-    /// mute returns the new composed value afterward.
+    /// A prim's schema identity is composed, so a structural edit can move it
+    /// without authoring a type field anywhere: adding a reference brings the
+    /// target's `typeName` in. The memo of identities must not answer from
+    /// before the arc existed.
     #[test]
-    fn mute_bumps_revision() -> Result<()> {
+    fn type_memo_follows_reference() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.define_prim("/Source")?.set_type_name("Xform")?;
+        let prim = stage.define_prim("/A")?;
+        assert_eq!(
+            stage.prim_type_info_composed("/A")?.id().type_name().as_str(),
+            "",
+            "/A authors no type of its own"
+        );
+
+        prim.set_metadata(
+            sdf::FieldKey::References.as_str(),
+            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                prim_path: sdf::path("/Source")?,
+                ..Default::default()
+            }])),
+        )?;
+
+        assert_eq!(
+            stage.prim_type_info_composed("/A")?.id().type_name().as_str(),
+            "Xform",
+            "the reference brought a type in, and no type field was authored on /A"
+        );
+        Ok(())
+    }
+
+    /// Authoring `typeName` restales the memo through its own channel: the edit
+    /// restructures nothing, so no index is dropped and no population epoch
+    /// moves.
+    #[test]
+    fn type_memo_follows_edit() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let prim = stage.define_prim("/A")?.set_type_name("Scope")?;
+        assert_eq!(stage.prim_type_info_composed("/A")?.id().type_name().as_str(), "Scope");
+
+        prim.set_type_name("Xform")?;
+
+        assert_eq!(stage.prim_type_info_composed("/A")?.id().type_name().as_str(), "Xform");
+        Ok(())
+    }
+
+    /// Muting drops the indices that read the muted layer, so an
+    /// [`AttributeQuery`] built before the mute returns the new composed value
+    /// afterward: its stamp names a prim whose entry is gone.
+    #[test]
+    fn mute_retires_query() -> Result<()> {
         let stage = Stage::builder().make_stage(
             sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?,
             0,

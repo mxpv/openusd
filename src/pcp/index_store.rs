@@ -9,10 +9,10 @@
 //! mutable access to either map.
 //! [`IndexCache`](super::index_cache::IndexCache) holds one and coordinates the
 //! cross-cutting concerns (transient query errors, the prototype registry, the
-//! composition revision) around the store's index and dependency queries.
+//! value-clip cache) around the store's index and dependency queries.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::sdf::{self, Path};
 
@@ -49,6 +49,77 @@ pub(super) struct IndexStore {
     /// deliberately unthresholded: a single deletion, mute, or unload that
     /// orphans a stack must retire it (and its diagnostics) promptly.
     ownership_lost: bool,
+    /// Source of every [`PrimRevision`] this store hands out. Monotonic and
+    /// never reset, so a value it minted is never minted again.
+    next_revision: u64,
+}
+
+/// Validity token for a cached answer about one composed prim.
+///
+/// A cache that resolves something from a prim's composed state — today the
+/// [`AttributeValueSource`](super::index_cache::AttributeValueSource) an
+/// `AttributeQuery` replays — stamps the prim's revision beside it and rechecks
+/// equality before reusing it. The answer is valid exactly while the two
+/// compare equal: a rebuilt entry, an entry restaled by a value edit, and a
+/// dropped entry (no token at all) each fail the check.
+///
+/// Values are minted only by [`IndexStore::mint_revision`], which owns the
+/// counter behind them; the field is private to this module, so no production
+/// seam can forge or reuse one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrimRevision(u64);
+
+#[cfg(test)]
+impl PrimRevision {
+    /// A revision for an entry assembled outside an [`IndexStore`] — the
+    /// scratch build caches some indexer tests hand-build. Zero is never
+    /// minted, so it cannot collide with a stamp any cached answer holds.
+    pub(super) fn placeholder() -> Self {
+        Self(0)
+    }
+}
+
+/// One prim's value-tier invalidation: how far it reaches, and which resolved
+/// target memos go with it.
+///
+/// The two travel together because they are found together — a target edit is a
+/// value change on the same property — and because normalization must not
+/// separate them: absorbing a work item into an ancestor's subtree carries its
+/// memo keys along, where dropping the item would silently keep a stale memo.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ScopedInvalidation {
+    /// How far from the recorded path the change reaches.
+    pub scope: ValueScope,
+    /// Resolved-target memos to drop — a `targetPaths` / `connectionPaths` edit
+    /// changed a relationship or connection this prim composes in place, or one
+    /// it reads through an arc. The prim's other relationships and connections
+    /// keep their memos. The graph is intact, so the index survives; the next
+    /// query recomposes the targets live.
+    pub target_keys: BTreeSet<TargetMemoKey>,
+}
+
+/// How far a value-tier invalidation reaches from the prim it is recorded at.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ValueScope {
+    /// That prim alone: the change is at a site the prim reads exactly.
+    #[default]
+    Prim,
+    /// The prim and every cached descendant. Ordered above
+    /// [`Prim`](Self::Prim), so accumulating the two widens rather than
+    /// narrows.
+    Subtree,
+}
+
+#[cfg(test)]
+impl IndexStore {
+    /// Every cached entry's path and current stamp, for a test that measures how
+    /// far an edit's restaling reached by diffing two snapshots.
+    pub(super) fn revisions(&self) -> Vec<(Path, PrimRevision)> {
+        self.entries
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.revision))
+            .collect()
+    }
 }
 
 impl IndexStore {
@@ -138,6 +209,7 @@ impl IndexStore {
             *self.stack_owners.entry(stack).or_default() += 1;
         }
         self.deps.add(path, &index, graph, expr_var_deps);
+        let revision = self.mint_revision();
         self.entries.insert(
             path.clone(),
             PrimEntry {
@@ -145,8 +217,67 @@ impl IndexStore {
                 context,
                 errors,
                 resolved_targets: HashMap::new(),
+                revision,
             },
         );
+    }
+
+    /// The next unused [`PrimRevision`]. Every stamp comes from here, so two
+    /// live entries never share one and a rebuilt entry never repeats its
+    /// predecessor's.
+    ///
+    /// Overflow is checked rather than assumed away: the token's whole contract
+    /// is that equality means identity, which a wrap would break.
+    fn mint_revision(&mut self) -> PrimRevision {
+        self.next_revision = self
+            .next_revision
+            .checked_add(1)
+            .expect("prim revision counter exhausted");
+        PrimRevision(self.next_revision)
+    }
+
+    /// The revision stamped on the entry at `path`, or `None` when none is
+    /// cached — which no cached answer may validate against.
+    pub(super) fn revision_at(&self, path: &Path) -> Option<PrimRevision> {
+        self.entries.get(path).map(|entry| entry.revision)
+    }
+
+    /// Stamps a fresh revision on the cached entry at `path`, dropping the
+    /// resolved-target memos at `keys` with it — the scoped restale, for a
+    /// mutation that changed what the prim composes without changing its graph.
+    ///
+    /// A path with no cached entry is a no-op: nothing there holds an answer.
+    pub(super) fn restale(&mut self, path: &Path, keys: &BTreeSet<TargetMemoKey>) {
+        // Minted only once the entry is known to be there: a dependency fanout
+        // names plenty of paths nothing is cached at, and a value handed to no
+        // entry is a counter step spent on nothing.
+        if !self.entries.contains_key(path) {
+            return;
+        }
+        let revision = self.mint_revision();
+        if let Some(entry) = self.entries.get_mut(path) {
+            entry.revision = revision;
+            for key in keys {
+                entry.resolved_targets.remove(key);
+            }
+        }
+    }
+
+    /// [`restale`](Self::restale) for `prefix` and every cached descendant — the
+    /// reach of a mutation that follows namespace, such as a clip set an
+    /// ancestor introduced, or one whose exact composed path an arc's namespace
+    /// mapping puts out of reach.
+    //
+    // TODO(perf): the paths are collected before the walk (a stamp needs `&mut`
+    // on the table the iterator borrows), so each is cloned and looked up again.
+    // The root prefix makes that the whole cache — every `expressionVariables`
+    // edit takes that path, since a value-time `${VAR}` names the root stack's
+    // every prim.
+    pub(super) fn restale_subtree(&mut self, prefix: &Path, keys: &BTreeSet<TargetMemoKey>) {
+        let paths: Vec<Path> = self.entries.subtree(prefix).map(|(path, _)| path.clone()).collect();
+        for path in paths {
+            self.restale(&path, keys);
+        }
     }
 
     /// Releases a removed entry's stack ownership, flagging a reclamation
@@ -266,8 +397,16 @@ impl IndexStore {
     /// rebuild, which recomposes its stack from scratch).
     pub(super) fn finalize_spec_stacks<'p>(&mut self, graph: &LayerGraph, paths: impl IntoIterator<Item = &'p Path>) {
         for path in paths {
+            if !self.entries.contains_key(path) {
+                continue;
+            }
+            // Flipping `has_specs` changes what the prim composes, so the refresh
+            // is a mutation like any rebuild: stamp it once here, where the round
+            // reaches each affected index exactly once, rather than per site.
+            let revision = self.mint_revision();
             if let Some(entry) = self.entries.get_mut(path) {
                 entry.index.finalize_spec_stack(graph);
+                entry.revision = revision;
             }
         }
     }
@@ -283,17 +422,6 @@ impl IndexStore {
     pub(super) fn set_target_memo(&mut self, prim: &Path, key: TargetMemoKey, memo: TargetMemo) {
         if let Some(entry) = self.entries.get_mut(prim) {
             entry.resolved_targets.insert(key, memo);
-        }
-    }
-
-    /// Drops the single memoized property `key` from `prim`'s resolved-target map,
-    /// for a `targetPaths` / `connectionPaths` edit that leaves the prim's graph
-    /// intact but restales that one property's composed targets — the prim's other
-    /// relationships and connections keep their memos. No-op when `prim` has no
-    /// cached entry.
-    pub(super) fn clear_target_memo(&mut self, prim: &Path, key: &TargetMemoKey) {
-        if let Some(entry) = self.entries.get_mut(prim) {
-            entry.resolved_targets.remove(key);
         }
     }
 }

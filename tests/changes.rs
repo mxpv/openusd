@@ -1099,3 +1099,47 @@ fn clip_removal_resyncs_subtree() -> Result<()> {
     assert_eq!(notices.resynced, paths(&["/Model"]));
     Ok(())
 }
+
+/// A value edit is reported at every composed path that reads it, not only the
+/// one it was authored on: a prim referencing the edited site composes the same
+/// property, and a consumer watching it must be told (C++
+/// `_AddAffectedStagePaths` translates an info change through the dependency
+/// map before reporting it).
+#[test]
+fn info_change_names_referrer() {
+    let stage = open_in_memory();
+    stage.define_prim("/Source").unwrap();
+    stage.create_attribute("/Source.x", "double").unwrap();
+    stage
+        .override_prim("/Ref")
+        .unwrap()
+        .set_metadata(
+            sdf::FieldKey::References.as_str(),
+            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                prim_path: sdf::path("/Source").unwrap(),
+                ..Default::default()
+            }])),
+        )
+        .unwrap();
+    // Compose the referrer so the dependency map records what it reads.
+    assert_eq!(stage.attribute("/Ref.x").unwrap().get::<f64>().unwrap(), None);
+
+    let notices = capture_notices(&stage);
+    stage
+        .attribute("/Source.x")
+        .unwrap()
+        .set(sdf::Value::Double(4.0))
+        .unwrap();
+
+    let notices = notices.borrow();
+    assert!(
+        notices.changed_info_only.contains(&sdf::path("/Ref.x").unwrap()),
+        "the referrer's composed property must be reported, got {:?}",
+        notices.changed_info_only
+    );
+    assert!(
+        notices.changed_info_only.contains(&sdf::path("/Source.x").unwrap()),
+        "so must the authored path itself, got {:?}",
+        notices.changed_info_only
+    );
+}

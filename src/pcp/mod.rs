@@ -120,8 +120,9 @@
 //! 1. The authoring callsite returns an [`sdf::ChangeList`](crate::sdf::ChangeList)
 //!    describing what it just did (the path, flag bits for spec adds/removes,
 //!    field names in `info_changed`).
-//! 2. [`Changes::did_change`] reads the change list and classifies each
-//!    entry into one of three tiers:
+//! 2. [`Changes::did_change`] reads the change list and classifies each entry
+//!    into the effects it has — a set, not a single tier, since one edit can
+//!    restructure composition *and* move a schema identity:
 //!    - Significant — graph topology may be wrong. Drop the index and every
 //!      namespace descendant. Triggered by composition-arc fields
 //!      (`references`, `payload`, `inheritPaths`, `specializes`,
@@ -132,6 +133,13 @@
 //!    - Spec — graph topology is fine, only a spec stack changed. An inert spec
 //!      add/remove rescans `has_specs` in place over the memoized per-node spec
 //!      stack and keeps the index.
+//!    - Value — the graph is fine and the prim composes different values.
+//!      Nothing is dropped: each affected prim is stamped with a fresh
+//!      `PrimRevision`, which retires the answers cached against it (an
+//!      `AttributeQuery`'s resolved source) and clears the resolved-target memos
+//!      the edit restaled.
+//!    - Type — a prim's schema identity moved, through `typeName`, `apiSchemas`,
+//!      or the root's `fallbackPrimTypes`, whose reach no path can scope.
 //!
 //!    Layer-stack-tier flags (`subLayers`, sublayer offsets,
 //!    `timeCodesPerSecond`, `expressionVariables`, `layerRelocates`) recompose
@@ -154,11 +162,17 @@
 //! ancestors of the changed site, since an arc at `/Foo` makes `/Foo/Bar`'s
 //! composition transitively dependent on `/Foo`.
 //!
-//! Property-tier authoring (attribute values, time samples) never invalidates
-//! the prim graph: those queries read live layer data on every call. A
-//! `targetPaths`/`connectionPaths` edit likewise leaves the graph intact,
-//! clearing only the per-property resolved-target memo (keyed by path and
-//! target kind) so resolved targets recompute on next read.
+//! Property authoring (attribute values, time samples, `targetPaths` /
+//! `connectionPaths`) never invalidates the prim graph: those queries read live
+//! layer data on every call. What it does invalidate is what was cached *from*
+//! them — the value tier stamps the composing prims and clears the affected
+//! per-property resolved-target memos, so both recompute on next read.
+//!
+//! Where a dependent reads the edited site through an *ancestor* arc, the value
+//! tier restales that dependent's whole cached subtree rather than guessing the
+//! composed path: an arc can rename what lies below it, and the dependency map
+//! translates with an identity approximation (see `Dependencies`). Over-
+//! invalidating there is a cache miss; getting it wrong would be a stale read.
 //!
 //! An `expressionVariables` edit invalidates on two channels, as C++ does. The
 //! prims whose composition read a changed value are dropped, the ordinary
@@ -351,7 +365,8 @@ use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::{ApplyOutcome, Changes, LayerChanges};
 pub use index_cache::SpecSiteRecord;
-pub(crate) use index_cache::{AttributeValueSource, IndexCache};
+pub(crate) use index_cache::{AttributeValueSource, IndexCache, StampedValueSource};
+pub(crate) use index_store::PrimRevision;
 pub(crate) use instancing::is_prototype_namespace;
 pub use layer_graph::StackIdentity;
 pub(crate) use layer_graph::{LayerGraph, LoadFailure, MuteChange, SublayerDemand};

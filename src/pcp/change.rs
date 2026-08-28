@@ -1,14 +1,16 @@
-//! Three-tier change-processing pipeline for the composition cache.
+//! Change-processing pipeline for the composition cache.
 //!
 //! Mirrors C++ `PcpChanges`: a pure-analysis diff phase ([`Changes::did_change`])
-//! builds invalidation path-sets keyed by tier; the apply phase
-//! ([`Changes::apply`]) surgically blows the affected entries from the
-//! cache.
+//! classifies every [`ChangeEntry`] into the effects it has; the apply phase
+//! ([`Changes::apply`]) commits them — dropping the entries whose composition
+//! may have moved, and restaling the answers cached against the rest.
 //!
-//! Tiers (matching C++ `_didChange{Significantly,Prims,Specs}`):
+//! An entry produces a *set* of effects rather than one tier, since a single
+//! edit can restructure composition and move a schema identity, or change a
+//! value and restale a target memo. The effects:
 //!
 //! - Significant: graph topology may be wrong — drop the index AND every
-//!   namespace descendant.
+//!   namespace descendant (C++ `_didChangeSignificantly`).
 //! - Prim: this index's graph is wrong but descendants survive — drop only
 //!   this index. Currently dormant: the spec tier subsumes the one case C++
 //!   populates it for (see [`CacheChanges::did_change_prims`]).
@@ -18,8 +20,18 @@
 //!   (C++ `Pcp_RescanForSpecs`) refreshes the affected nodes' `has_specs`
 //!   flag in place instead of rebuilding, dropping the local index only when
 //!   it holds no node at the site (a brand-new spec needs a fresh build).
+//! - Value: the graph is fine and the prim composes different values. Nothing is
+//!   dropped; each affected prim is stamped with a fresh
+//!   [`PrimRevision`](super::PrimRevision), retiring the answers cached against
+//!   it, and the target memos the edit restales go with the stamp. The reach is
+//!   one prim, or its whole cached subtree where a namespace mapping puts the
+//!   exact composed path out of reach (see [`Changes::fanout_values`]).
+//! - Type: a prim's schema identity moved, which no path-keyed tier can scope
+//!   because the root's `fallbackPrimTypes` reaches every prim; the memo of
+//!   composed identities is retired wholesale.
+//! - Layer stack and `defaultPrim`: their own channels, below.
 //!
-//! Edit-type → tier, the audit behind the classifier:
+//! Edit-type → effects, the audit behind the classifier:
 //!
 //! - `references`, `payload`, `inheritPaths`, `specializes`, `variantSetNames`,
 //!   `variantSelection`, `instanceable` → significant: each is a
@@ -27,7 +39,8 @@
 //!   `Pcp_EntryRequiresPrimIndexChange`). `specifier`, `active`, `apiSchemas`,
 //!   and `relocates` are significant here too, slightly broader than C++ (which
 //!   routes `active` / `specifier` through separate mechanisms).
-//! - an inert `over` add or remove carrying no significant field → spec tier.
+//! - `typeName` → value + type. `apiSchemas` → significant + type.
+//! - an inert `over` add or remove carrying no significant field → spec.
 //! - `subLayers`, `subLayerOffsets`, `layerRelocates`, `timeCodesPerSecond` /
 //!   `framesPerSecond`, `expressionVariables` on the root → layer-stack tier.
 //! - `defaultPrim` on the root → its own channel: the prims whose builds recorded
@@ -35,20 +48,29 @@
 //!   to name are reported (`apply_default_prim_edits`). Neither half is the
 //!   layer-stack tier, and the report is not C++-identical — see the parity notes
 //!   in the module docs.
+//! - `fallbackPrimTypes` on the root → type.
 //! - `clips` / `clipSets` appearing or disappearing → significant, because a
 //!   prim index caches whether value clips can source it at all
 //!   ([`PrimIndex::authors_clips`](super::PrimIndex::authors_clips)) and every
-//!   descendant inherits that answer. Editing what the metadata holds is not:
-//!   the sets themselves are composed live on each clip query.
+//!   descendant inherits that answer. Editing what the metadata holds moves
+//!   neither bit, so it is a value effect over the anchor's whole subtree.
+//! - an attribute value, a time sample, `targetPaths` / `connectionPaths`, and
+//!   every other property field → value, plus the target memos for the last two.
 //! - `permission`, and non-composition metadata (`kind`, `colorConfiguration`,
-//!   `customData`, …) → no index drop. C++ does treat `permission` as
-//!   significant; this port deliberately diverges, because `permission` is
-//!   data-only here and composes no arc. The rest resolve live through the
-//!   cached index's spec sites, and every value view rebuilds against the
-//!   composition-revision bump [`apply`](Changes::apply) always makes, so the
-//!   new opinion is visible without invalidating the graph.
+//!   `customData`, …) → value on the prim alone; no index drop. C++ does treat
+//!   `permission` as significant; this port deliberately diverges, because
+//!   `permission` is data-only here and composes no arc. The rest resolve live
+//!   through the cached index's spec sites, so the new opinion is visible
+//!   without invalidating the graph.
+//! - a child-name list and nothing else → no effect: bookkeeping the spec add or
+//!   remove itself already accounts for.
+//!
+//! Reporting is classified separately from invalidation ([`ReportedPaths`]): an
+//! entry that authored anything names itself in the notice whichever channel
+//! invalidates it, so a layer-stack or type edit still reports the metadata it
+//! moved. Collected only when a sink is listening.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::mem;
 
 use bitflags::bitflags;
@@ -59,6 +81,7 @@ use crate::sdf::{ChangeEntry, ChangeList, Path};
 use crate::tf;
 
 use super::clip;
+use super::index_store::{ScopedInvalidation, ValueScope};
 use super::layer_graph::LayerGraph;
 use super::layer_stack::StackVarsDelta;
 use super::prim_index::{PropertyTargetKind, TargetMemoKey};
@@ -90,6 +113,21 @@ pub(crate) struct Changes {
     /// ([`IndexCache::invalidate_layers`]) scopes the layer-stack invalidation to
     /// exactly the affected stacks.
     layer_stack_layers: HashSet<LayerId>,
+    /// Every layer this round edited, whatever tier its entries fell into.
+    ///
+    /// Value clips are the consumer: a clip layer belongs to no layer stack and
+    /// so appears in no dependency record, and the tiers above key on sites
+    /// rather than layers — but the clip cache can say what a layer feeds, given
+    /// its identifier.
+    edited_layers: HashSet<LayerId>,
+    /// Whether this round touched a prim's schema identity — `typeName`,
+    /// `apiSchemas`, or the root's `fallbackPrimTypes`.
+    type_opinions: bool,
+    /// Whether to collect the reporting sets. Invalidation is never gated on
+    /// this; the paths a notice needs are, since deriving them costs a
+    /// dependency lookup per entry that a stage with no observer would throw
+    /// away.
+    report: bool,
 }
 
 /// One edited layer's committed record, with the prior field values the record
@@ -167,22 +205,86 @@ pub struct CacheChanges {
     /// opinion. [`Changes::apply`] feeds each entry to
     /// [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs).
     pub(crate) did_change_specs: BTreeSet<(LayerId, Path)>,
-    /// Memoized resolved targets that are stale — a `targetPaths` /
-    /// `connectionPaths` edit changed a relationship/connection a prim composes in
-    /// place, or one it reads through an arc (so a referenced site's edit fans out
-    /// to its dependents). Each entry pairs the dependent prim with the edited
-    /// property's [`TargetMemoKey`], so [`Changes::apply`] drops only that one
-    /// property's memo
-    /// ([`IndexCache::clear_target_memos`](super::IndexCache::clear_target_memos))
-    /// and the prim's other relationships and connections keep theirs. The graph is
-    /// intact, so the index survives; the next query recomposes the targets live.
-    pub(crate) did_change_targets: BTreeSet<(Path, TargetMemoKey)>,
+    /// Prims whose composed values may have moved, and what else to retire
+    /// where — the tier for a change that leaves the composition graph intact.
+    ///
+    /// Keyed by path so a round's entries accumulate onto one work item per
+    /// prim. Sorted, which is what lets [`Changes::apply`] absorb an item into
+    /// an ancestor's subtree in a single pass.
+    pub(crate) did_change_values: BTreeMap<Path, ScopedInvalidation>,
+    /// What a notice names, collected only when one is wanted. Empty otherwise,
+    /// and never read by invalidation.
+    pub(crate) reported: ReportedPaths,
+}
+
+/// How a composed-change notice names one edited entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Report {
+    /// The composed object changed value or metadata but still composes the
+    /// same way — C++ `changedInfoOnly`.
+    Info,
+    /// The object appeared or vanished, so a consumer must re-resolve it
+    /// outright (C++ `otherResyncChanges` for a property spec add or remove).
+    Resync,
+}
+
+/// The paths a composed-change notice names, in the two namespaces they arrive
+/// in.
+///
+/// A dependency lookup answers in the cache's composed namespace; a change list
+/// spells its paths in the edited layer's. Which of the two a consumer sees for
+/// the authored half is the reporting layer's decision (`usd::sink`), so both
+/// are kept apart here rather than merged early — a prefix comparison across
+/// namespaces means nothing.
+#[derive(Debug, Default)]
+pub(crate) struct ReportedPaths {
+    /// Composed paths that changed value or metadata.
+    pub stage_info: BTreeSet<Path>,
+    /// The edited layer's own paths that changed value or metadata.
+    pub authored_info: BTreeSet<Path>,
+    /// Composed paths whose object appeared or vanished.
+    pub stage_resync: BTreeSet<Path>,
+    /// The edited layer's own paths whose object appeared or vanished.
+    pub authored_resync: BTreeSet<Path>,
+}
+
+/// What one [`ChangeEntry`] invalidates.
+///
+/// A set of effects rather than a single tier: `apiSchemas` restructures
+/// composition, `connectionPaths` both moves a value and restales a memo, and a
+/// pseudo-root edit can rebuild the layer stack while still moving the
+/// pseudo-root's own metadata. Every entry produces one of these, so an entry
+/// with no effect at all is a recorded decision rather than a missing branch.
+#[derive(Default)]
+struct InvalidationEffects {
+    /// The prim's graph may be wrong: drop its index and its descendants'.
+    significant: bool,
+    /// Only whether a site contributes an opinion changed: refresh in place.
+    spec: bool,
+    /// The prim composes different values, as far as the scope reaches.
+    value: Option<ValueScope>,
+    /// Resolved-target memos the edit restales.
+    targets: Vec<TargetMemoKey>,
+    /// A prim's schema identity, or the stage's fallback map for one, moved.
+    type_opinion: bool,
+    /// How a notice names this entry, or `None` for one it says nothing about.
+    report: Option<Report>,
+    /// Layer-stack state the edit invalidates.
+    stack: LayerStackChanges,
+    /// The layer's `defaultPrim` moved.
+    default_prim: bool,
 }
 
 impl CacheChanges {
-    /// The resynced prim paths that are already composed stage paths — the
-    /// significant tier's stage half and the prim tier. These are the paths a
-    /// consumer must re-resolve (C++ `PcpCacheChanges` resync set).
+    /// The resynced paths that are already composed stage paths — the
+    /// significant tier's stage half, the prim tier, and the property specs
+    /// this round added or removed. These are the paths a consumer must
+    /// re-resolve (C++ `PcpCacheChanges` resync set).
+    ///
+    /// The property half is report-only: a property spec appearing or vanishing
+    /// leaves the prim's graph intact, so it names an object to re-resolve
+    /// without naming an index to drop — which is why it is absent from
+    /// [`all_significant`](Self::all_significant).
     ///
     /// The target tier is deliberately absent: a `targetPaths` / `connectionPaths`
     /// edit drops only a memo, leaving the prim graph intact, so it is a
@@ -190,7 +292,10 @@ impl CacheChanges {
     /// notice reports it through the property entry's relationship/connection-
     /// target flag instead.
     pub(crate) fn stage_resynced_paths(&self) -> impl Iterator<Item = &Path> {
-        self.did_change_significantly.iter().chain(self.did_change_prims.iter())
+        self.did_change_significantly
+            .iter()
+            .chain(self.did_change_prims.iter())
+            .chain(self.reported.stage_resync.iter())
     }
 
     /// The resynced paths expressed in the edited layer's namespace — the
@@ -204,6 +309,7 @@ impl CacheChanges {
         self.authored_significant
             .iter()
             .chain(self.did_change_specs.iter().map(|(_, path)| path))
+            .chain(self.reported.authored_resync.iter())
     }
 
     /// The subset of [`stage_resynced_paths`](Self::stage_resynced_paths) that
@@ -308,6 +414,12 @@ pub(crate) struct ApplyOutcome {
     /// evicting only the indices that actually compose differently, so a prim
     /// named here may still hold a valid cached index.
     pub(crate) resynced: Vec<Path>,
+    /// Composed prims this apply resynced without touching what lies beneath
+    /// them: the spec tier's dependents, whose site gained or lost an opinion.
+    /// Reported like [`resynced`](Self::resynced) but standing for themselves
+    /// alone, so they subsume nothing — an `over` added at `/A` on the way to
+    /// authoring `/A/B.x` says nothing about `/A/B.x`.
+    pub(crate) resynced_prims: Vec<Path>,
     /// The subtrees whose `asset` values may now resolve elsewhere, from
     /// [`asset_path_victims`] — the channel that covers what no dependency
     /// record can. Costs a dependency lookup per stack whose composed variables
@@ -318,99 +430,185 @@ pub(crate) struct ApplyOutcome {
 }
 
 impl Changes {
-    /// Creates an empty change plan.
+    /// An empty change plan that collects invalidation only.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty change plan that also collects the path-sets a composed-change
+    /// notice is built from. Invalidation is collected either way; the reporting
+    /// half costs a dependency lookup per entry, which a stage with no observer
+    /// would throw away.
+    pub fn reporting() -> Self {
+        Self {
+            report: true,
+            ..Self::default()
+        }
     }
 
     /// Diff phase: classify each [`ChangeEntry`] into the appropriate
     /// invalidation tier. Pure analysis — does not mutate `cache`.
     ///
-    /// Most property-path entries (attribute values, time samples) are ignored:
-    /// those queries read live layer data on every call, so a newly authored
-    /// value is visible without any cache mutation. A `targetPaths` /
-    /// `connectionPaths` edit is the exception — the cache memoizes resolved
-    /// relationship/connection targets, so it routes through
-    /// [`classify_property_entry`](Self::classify_property_entry) to the
-    /// [`did_change_targets`](CacheChanges::did_change_targets) set.
+    /// Every entry is classified and recorded; what an entry costs depends on
+    /// what it touches. A property-path entry — an attribute value, a time
+    /// sample, a target list — restales the prims composing it rather than
+    /// dropping anything, since the graph is untouched and only the answers
+    /// cached against those prims went stale.
     pub fn did_change(&mut self, cache: &IndexCache, changes: &[LayerChanges<'_>]) {
         for edit in changes {
+            self.edited_layers.insert(edit.layer);
             for (path, entry) in edit.changes.entries() {
-                if path.is_abs_root() {
-                    self.classify_root_entry(edit, entry);
-                } else if path.is_property_path() {
-                    self.classify_property_entry(cache, edit.layer, path, entry);
-                } else {
-                    self.classify_prim_entry(cache, edit.layer, path, entry);
-                }
+                self.apply_effects(cache, edit, path, Self::effects_of(path, entry));
             }
         }
     }
 
-    fn classify_prim_entry(&mut self, cache: &IndexCache, layer: LayerId, path: &Path, entry: &ChangeEntry) {
+    /// What one entry at `path` invalidates.
+    ///
+    /// Effects accumulate rather than compete: a `connectionPaths` edit both
+    /// moves a composed value and restales a target memo. Every entry is
+    /// classified — one that only reorders child names lands on no effect at
+    /// all, which is a decision rather than a gap.
+    fn effects_of(path: &Path, entry: &ChangeEntry) -> InvalidationEffects {
+        let mut effects = InvalidationEffects::default();
+        if entry.is_child_bookkeeping() {
+            return effects;
+        }
+        if path.is_abs_root() {
+            effects.stack = Self::stack_flags(entry);
+            effects.default_prim = entry.changed(FieldKey::DefaultPrim.as_str());
+            // `fallbackPrimTypes` maps an unknown authored type to a substitute,
+            // so editing it can move the schema identity of every prim on the
+            // stage — no path names its reach.
+            effects.type_opinion = entry.changed(FieldKey::FallbackPrimTypes.as_str());
+            // The pseudo-root's own composed metadata — `startTimeCode`,
+            // `customLayerData`, anything read off it — moves like any other
+            // value.
+            effects.value = Some(ValueScope::Prim);
+            effects.report = Some(Report::Info);
+            return effects;
+        }
+        if path.is_property_path() {
+            effects.value = Some(ValueScope::Prim);
+            effects.targets = Self::target_keys(path, entry);
+            // A property spec appearing or vanishing is not a value moving: a
+            // consumer holding the property must re-resolve the object itself
+            // (C++ routes both to `otherResyncChanges`).
+            let shape = entry
+                .flags
+                .intersects(sdf::ChangeFlags::ADD_PROPERTY | sdf::ChangeFlags::REMOVE_PROPERTY);
+            effects.report = Some(if shape { Report::Resync } else { Report::Info });
+            return effects;
+        }
+
+        // Every prim entry that authored something names itself in the notice.
+        // A significant one is named twice over — the resync tier reports it as
+        // well — and the reporting layer drops the weaker of the two.
+        effects.report = Some(Report::Info);
+
+        // The fields a prim's schema identity is composed from. `apiSchemas` is
+        // significant as well, so this rides alongside that effect rather than
+        // replacing it; `typeName` restructures nothing and moves only values
+        // and the identity.
+        effects.type_opinion =
+            entry.changed(FieldKey::TypeName.as_str()) || entry.changed(FieldKey::ApiSchemas.as_str());
+
+        // A field that can restructure composition drops the index outright,
+        // which retires its cached answers more thoroughly than any value effect
+        // could. Clip metadata *appearing* is such a field: the cache stores
+        // derived presence bits (`PrimIndex::authors_clips` and the inherited
+        // `CompositionContext::may_have_clips`) that only a rebuild recomputes.
         let significant = entry.flags.intersects(sdf::ChangeFlags::NON_INERT_PRIM)
             || entry.fields().any(|(field, change)| {
                 Self::field_promotes_to_significant(field.as_str())
                     || (change == sdf::FieldChange::Presence && clip::is_clip_field(field.as_str()))
             });
-
         if significant {
-            self.fanout_significant(cache, layer, path);
-            // An opinion authored inside a variant (`/Prim{set=sel}child`)
-            // composes into the variant-stripped prim (`/Prim/child`). That
-            // composed site is not on the authored path's ancestor chain
-            // (`/Prim{set=sel}child` → `/Prim{set=sel}` → `/Prim` → `/`), so
-            // fanning out from the variant path alone leaves a cached miss
-            // there stale; invalidate it too. Stripping the selections keeps the
-            // path in the edited layer's namespace — under an arc it is the
-            // referenced layer's `/Source/child`, not the stage's.
-            let stripped = path.strip_all_variant_selections();
-            if stripped != *path {
-                self.fanout_significant(cache, layer, &stripped);
-            }
-        } else if entry.flags.intersects(sdf::ChangeFlags::INERT_PRIM) {
+            effects.significant = true;
+            return effects;
+        }
+        if entry.flags.intersects(sdf::ChangeFlags::INERT_PRIM) {
             // An inert add or remove with no significant field flips only whether
             // `(layer, path)` contributes an opinion; the graph structure is
             // untouched. The change record surfaces the structural fields an
-            // `over` carries into `info_changed`, so an arc / instancing / activation
-            // opinion is already caught by the significant branch above; what
-            // reaches here is a genuinely inert change. The spec-tier rescan
-            // refreshes the affected nodes' `has_specs` flag across the local prim
-            // and every dependent that reads the site, rebuilding only the
-            // indices an in-place refresh cannot make current (see
-            // [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs)).
-            self.cache.did_change_specs.insert((layer, path.clone()));
+            // `over` carries into `info_changed`, so an arc / instancing /
+            // activation opinion is already caught above; what reaches here is a
+            // genuinely inert change. The spec-tier rescan refreshes the affected
+            // nodes' `has_specs` flag across the local prim and every dependent
+            // that reads the site, rebuilding only the indices an in-place
+            // refresh cannot make current (see
+            // [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs)), and
+            // stamps each index it refreshes.
+            effects.spec = true;
+            return effects;
         }
+        // Editing what clip metadata *holds* moves values while leaving those
+        // presence bits alone, and a descendant's values are sourced by an
+        // ancestor's clip set, so the reach follows namespace. C++ recomposes the
+        // whole subtree here (`stage.cpp`'s `UsdIsClipRelatedField`, with an
+        // `XXX` wishing it were narrower); restaling values is the narrower
+        // answer.
+        let clips = entry.authored_fields().any(|field| clip::is_clip_field(field.as_str()));
+        effects.value = Some(if clips { ValueScope::Subtree } else { ValueScope::Prim });
+        effects
     }
 
-    /// Routes a property-path edit. Only a `targetPaths` / `connectionPaths`
-    /// change matters to the cache — it memoizes resolved relationship/connection
-    /// targets; every other property edit (attribute value, time samples) reads
-    /// live and is ignored. The owning prim's memo is marked stale, as is each
-    /// dependent's: a prim that reads the property's site through an arc composes
-    /// a translated copy of those targets, so a referenced site's edit restales
-    /// them too.
-    fn classify_property_entry(&mut self, cache: &IndexCache, layer: LayerId, path: &Path, entry: &ChangeEntry) {
+    /// The layer-stack flags a pseudo-root entry raises.
+    fn stack_flags(entry: &ChangeEntry) -> LayerStackChanges {
+        let mut flags = LayerStackChanges::empty();
+        for key in entry.authored_fields() {
+            if *key == FieldKey::SubLayers.as_str() {
+                flags |= LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT;
+            } else if *key == FieldKey::SubLayerOffsets.as_str() {
+                flags |= LayerStackChanges::OFFSETS | LayerStackChanges::SIGNIFICANT;
+            } else if *key == FieldKey::LayerRelocates.as_str() {
+                flags |= LayerStackChanges::RELOCATES | LayerStackChanges::SIGNIFICANT;
+            } else if *key == FieldKey::TimeCodesPerSecond.as_str() || *key == FieldKey::FramesPerSecond.as_str() {
+                // The effective timeCodesPerSecond (authored rate, else
+                // framesPerSecond) retimes each sublayer edge offset by the
+                // per-hop ratio (spec 12.3.2, folded into `LayerNode::children`
+                // by `build_sublayer_edges`). `TIME_CODES` rebuilds those edges
+                // so the stale ratio is refreshed; `SIGNIFICANT` then drops the
+                // indices that read the re-offset stack.
+                flags |= LayerStackChanges::TIME_CODES | LayerStackChanges::SIGNIFICANT;
+            } else if *key == FieldKey::ExpressionVariables.as_str() {
+                // An `expressionVariables` edit restales the graph's
+                // `${VAR}`-expanded sublayer edges and any reference/payload/
+                // variant `${VAR}` expression a layer in the stack resolves
+                // against (C++ `PcpChanges::_DidChangeLayerStackExpressionVariables`).
+                // `EXPRESSION_VARS` rebuilds the expanded edges — the edited
+                // layer joins `layer_stack_layers` to scope that rebuild — and
+                // [`apply`](Changes::apply) consumes the rebuild's per-stack
+                // [`StackVarsDelta`]s to drop exactly the recorded dependents. A
+                // combined edit that also authors a `SIGNIFICANT`-tier field
+                // takes the blanket path through that field's own flag.
+                flags |= LayerStackChanges::EXPRESSION_VARS;
+            }
+        }
+        flags
+    }
+
+    /// The memo keys a property entry restales, empty for one that authored no
+    /// relationship or connection targets.
+    ///
+    /// The memo is keyed by the edited property within its prim, matching the
+    /// key `IndexCache::compose_property_paths` files results under. One edit
+    /// can replace a relationship with a same-named attribute (or the reverse),
+    /// surfacing both target fields on a single entry, so each signalled kind is
+    /// named — clearing only one would leave the prior kind's memo stale. Both
+    /// the flags and the field names are read, since an entry can carry either.
+    fn target_keys(path: &Path, entry: &ChangeEntry) -> Vec<TargetMemoKey> {
         let is_connection = entry.flags.contains(sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION)
             || entry.changed(FieldKey::ConnectionPaths.as_str());
         let is_relationship = entry.flags.contains(sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS)
             || entry.changed(FieldKey::TargetPaths.as_str());
+        // Measuring the suffix builds a path, and most property entries — a
+        // value, a time sample — author no targets at all.
         if !is_connection && !is_relationship {
-            return;
+            return Vec::new();
         }
-        let prim = path.prim_path();
-        // A target opinion authored inside a variant (`/P{v=x}child.r`) composes
-        // into the variant-stripped prim (`/P/child`), whose memo key is not on the
-        // authored path's ancestor chain, so the fanout from the variant path alone
-        // misses it; restale it too, as the significant tier does for the same reason.
-        let stripped = prim.strip_all_variant_selections();
         let suffix = path.property_suffix();
-        // The memo is keyed by the edited property within its prim, matching the key
-        // `IndexCache::compose_property_paths` files results under. One edit can
-        // replace a relationship with a same-named attribute (or the reverse),
-        // surfacing both target fields on a single entry, so restale each signalled
-        // kind — clearing only one would leave the prior kind's memo stale.
-        let keys: Vec<TargetMemoKey> = [
+        [
             is_relationship.then_some(PropertyTargetKind::Relationship),
             is_connection.then_some(PropertyTargetKind::Connection),
         ]
@@ -420,91 +618,133 @@ impl Changes {
             kind,
             property_suffix: suffix.to_owned(),
         })
-        .collect();
-        self.fanout_targets(cache, layer, &prim, &keys);
-        if stripped != prim {
-            self.fanout_targets(cache, layer, &stripped, &keys);
-        }
+        .collect()
     }
 
-    /// Marks every key in `keys` stale on `prim`'s resolved-target memo and on every
-    /// prim that composes its targets — anything reading its site, or an ancestor of
-    /// it, through an arc. A prim reading a *descendant* of `prim` does not compose
-    /// this property, so the fanout stays on the ancestor + self direction. The
-    /// literal prim is included via the dependency self-edge, and explicitly for a
-    /// prim not yet cached. The dependent set is the same for every key — an arc maps
-    /// prim namespaces, not property names — so the ancestor walk runs once and each
-    /// dependent is restaled under every key.
-    fn fanout_targets(&mut self, cache: &IndexCache, layer: LayerId, prim: &Path, keys: &[TargetMemoKey]) {
-        for dep in cache.dependencies().lookup_with_ancestors(layer, prim) {
-            self.restale_targets(dep, keys);
-        }
-        self.restale_targets(prim.clone(), keys);
-    }
-
-    /// Records `prim`'s memo as stale under each of `keys`, consuming `prim` on the
-    /// final key so the common single-key edit clones it not at all.
-    fn restale_targets(&mut self, prim: Path, keys: &[TargetMemoKey]) {
-        let Some((last, rest)) = keys.split_last() else {
-            return;
-        };
-        for key in rest {
-            self.cache.did_change_targets.insert((prim.clone(), key.clone()));
-        }
-        self.cache.did_change_targets.insert((prim, last.clone()));
-    }
-
-    fn classify_root_entry(&mut self, edit: &LayerChanges<'_>, entry: &ChangeEntry) {
+    /// Records `effects` against the tiers they belong to, fanning each out to
+    /// the prims that observe `path`.
+    ///
+    /// An opinion authored inside a variant (`/Prim{set=sel}child`) composes
+    /// into the variant-stripped prim (`/Prim/child`). That composed site is not
+    /// on the authored path's ancestor chain (`/Prim{set=sel}child` →
+    /// `/Prim{set=sel}` → `/Prim` → `/`), so fanning out from the variant path
+    /// alone leaves a cached miss there stale; every fanout is repeated for the
+    /// stripped spelling. Stripping keeps the path in the edited layer's
+    /// namespace — under an arc it is the referenced layer's `/Source/child`,
+    /// not the stage's.
+    fn apply_effects(
+        &mut self,
+        cache: &IndexCache,
+        edit: &LayerChanges<'_>,
+        path: &Path,
+        effects: InvalidationEffects,
+    ) {
         let layer = edit.layer;
-        let mut touches_stack = false;
-        for key in entry.info_changed() {
-            if *key == FieldKey::SubLayers.as_str() {
-                self.layer_stack |= LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT;
-                touches_stack = true;
-            } else if *key == FieldKey::SubLayerOffsets.as_str() {
-                self.layer_stack |= LayerStackChanges::OFFSETS | LayerStackChanges::SIGNIFICANT;
-                touches_stack = true;
-            } else if *key == FieldKey::LayerRelocates.as_str() {
-                self.layer_stack |= LayerStackChanges::RELOCATES | LayerStackChanges::SIGNIFICANT;
-                touches_stack = true;
-            } else if *key == FieldKey::TimeCodesPerSecond.as_str() || *key == FieldKey::FramesPerSecond.as_str() {
-                // The effective timeCodesPerSecond (authored rate, else
-                // framesPerSecond) retimes each sublayer edge offset by the
-                // per-hop ratio (spec 12.3.2, folded into `LayerNode::children` by
-                // `build_sublayer_edges`). `TIME_CODES` rebuilds those edges so the
-                // stale ratio is refreshed; `SIGNIFICANT` then drops the indices
-                // that read the re-offset stack.
-                self.layer_stack |= LayerStackChanges::TIME_CODES | LayerStackChanges::SIGNIFICANT;
-                touches_stack = true;
-            } else if *key == FieldKey::ExpressionVariables.as_str() {
-                // An `expressionVariables` edit restales the graph's
-                // `${VAR}`-expanded sublayer edges and any reference/payload/
-                // variant `${VAR}` expression a layer in the stack resolves
-                // against (C++ `PcpChanges::_DidChangeLayerStackExpressionVariables`).
-                // `EXPRESSION_VARS` rebuilds the expanded edges — the edited
-                // layer joins `layer_stack_layers` to scope that rebuild — and
-                // [`apply`](Changes::apply) consumes the rebuild's per-stack
-                // [`StackVarsDelta`]s to drop exactly the recorded dependents.
-                // A combined edit that also authors a `SIGNIFICANT`-tier field
-                // takes the blanket path through that field's own flag.
-                self.layer_stack |= LayerStackChanges::EXPRESSION_VARS;
-                touches_stack = true;
-            } else if *key == FieldKey::DefaultPrim.as_str() {
-                // Only a reference or payload naming no target prim resolves
-                // through the layer's default, and each such build records the
-                // layer it consulted, so nothing here needs the layer-stack tier.
-                // Queued for `apply`, which can compare the field's prior value
-                // against what it now holds (`apply_default_prim_edits`).
-                self.default_prim_edits.push((layer, edit.prior_default_prim.clone()));
+        if effects.significant {
+            self.fanout_significant(cache, layer, path);
+            if path.contains_prim_variant_selection() {
+                self.fanout_significant(cache, layer, &path.strip_all_variant_selections());
             }
         }
-        // Record the layer behind any layer-stack-tier flag so `apply` can scope the
-        // invalidation to the stacks this layer is a member of. Each edited layer in
-        // a round is attributed independently, so a multi-layer edit invalidates
-        // every affected stack.
-        if touches_stack {
+        if effects.spec {
+            self.cache.did_change_specs.insert((layer, path.clone()));
+        }
+        if let Some(scope) = effects.value {
+            let prim = path.prim_path();
+            self.fanout_values(cache, layer, &prim, scope, &effects.targets);
+            if prim.contains_prim_variant_selection() {
+                let stripped = prim.strip_all_variant_selections();
+                self.fanout_values(cache, layer, &stripped, scope, &effects.targets);
+            }
+        }
+        self.type_opinions |= effects.type_opinion;
+        if !effects.stack.is_empty() {
+            self.layer_stack |= effects.stack;
+            // Record the layer behind any layer-stack-tier flag so `apply` can
+            // scope the invalidation to the stacks this layer is a member of.
+            // Each edited layer in a round is attributed independently, so a
+            // multi-layer edit invalidates every affected stack.
             self.layer_stack_layers.insert(layer);
         }
+        if let Some(report) = effects.report.filter(|_| self.report) {
+            self.report_entry(cache, layer, path, report);
+        }
+        if effects.default_prim {
+            // Only a reference or payload naming no target prim resolves through
+            // the layer's default, and each such build records the layer it
+            // consulted, so nothing here needs the layer-stack tier. Queued for
+            // `apply`, which can compare the field's prior value against what it
+            // now holds (`apply_default_prim_edits`).
+            self.default_prim_edits.push((layer, edit.prior_default_prim.clone()));
+        }
+    }
+
+    /// Names `path` in the notice, in both the namespaces it reaches.
+    ///
+    /// The authored spelling is kept as it was written, for the reporting layer
+    /// to translate or leave alone according to how the edit was made. The
+    /// composed spellings come from the dependency map, which is what carries a
+    /// change in a referenced layer to the prims that read it (C++
+    /// `_AddAffectedStagePaths`). The whole path is translated, property suffix
+    /// included, since a consumer is told which object moved rather than which
+    /// prim owns it.
+    fn report_entry(&mut self, cache: &IndexCache, layer: LayerId, path: &Path, report: Report) {
+        let reported = &mut self.cache.reported;
+        let (stage, authored) = match report {
+            Report::Info => (&mut reported.stage_info, &mut reported.authored_info),
+            Report::Resync => (&mut reported.stage_resync, &mut reported.authored_resync),
+        };
+        authored.insert(path.clone());
+        stage.extend(cache.dependencies().graph_ancestor_lookup(layer, path));
+    }
+
+    /// Records that the prims observing `(layer, prim)` may compose different
+    /// values, and restales `keys` on their target memos.
+    ///
+    /// Split by how each dependent was found, because only one of the two can be
+    /// named precisely. An index reading the site *exactly* is affected at its
+    /// own path. An index reading it through an *ancestor* site is affected
+    /// somewhere below its own path — at a composed path only the arc's
+    /// namespace mapping can name, which this cache approximates with identity
+    /// (see the `MapFunction` `TODO` in
+    /// [`dependencies`](super::dependencies::Dependencies::ancestor_dependents)).
+    /// Guessing wrong would leave a value stale, so the dependent's whole cached
+    /// subtree is taken instead: whatever the arc renames on the way down, the
+    /// affected prim composes under it.
+    ///
+    /// A prim reading a *descendant* of the site does not compose it, so the
+    /// fanout stays on the exact + ancestor direction. The literal prim is
+    /// recorded too, for one no dependency registration names yet.
+    //
+    // TODO(perf): a batch that edits many properties of one prim repeats this
+    // whole walk per entry with identical inputs, and `report_entry` walks the
+    // same ancestor chain a third time. Change-list entries touching one prim
+    // are contiguous, so a one-slot `(layer, prim) -> dependents` memo across
+    // `apply_effects` calls would collapse both.
+    fn fanout_values(
+        &mut self,
+        cache: &IndexCache,
+        layer: LayerId,
+        prim: &Path,
+        scope: ValueScope,
+        keys: &[TargetMemoKey],
+    ) {
+        for dep in cache.dependencies().exact_lookup(layer, prim) {
+            self.record_scoped(dep, scope, keys);
+        }
+        for dep in cache.dependencies().ancestor_dependents(layer, prim) {
+            self.record_scoped(dep, ValueScope::Subtree, keys);
+        }
+        self.record_scoped(prim.clone(), scope, keys);
+    }
+
+    /// Accumulates one work item, widening what is already recorded at `path`
+    /// rather than replacing it: a subtree reach never narrows back to a single
+    /// prim, and the memo keys of separate entries in one round add up.
+    fn record_scoped(&mut self, path: Path, scope: ValueScope, keys: &[TargetMemoKey]) {
+        let item = self.cache.did_change_values.entry(path).or_default();
+        item.scope = item.scope.max(scope);
+        item.target_keys.extend(keys.iter().cloned());
     }
 
     /// Drops every index depending on `(layer, path)`, plus the literal `path`
@@ -583,10 +823,16 @@ impl Changes {
     }
 
     pub fn apply(mut self, cache: &mut IndexCache, graph: &mut LayerGraph) -> ApplyOutcome {
-        // Advance the composition revision so cached value views rebuild. This
-        // is the single funnel for every authoring and layer-stack edit, so a
-        // value-only change that drops no index still invalidates them.
-        cache.bump_revision();
+        // Retire the transient query diagnostics: this is the single funnel
+        // every authoring and layer-stack edit passes through, so a value-only
+        // change that drops no index still clears what it may have fixed.
+        cache.retire_query_errors();
+        // Schema identities are composed from fields no path-keyed tier can
+        // scope — the root's `fallbackPrimTypes` reaches every prim — so the
+        // memo of them is retired wholesale, once per batch that moved one.
+        if self.type_opinions {
+            cache.bump_type_opinion_epoch();
+        }
         // The population epoch moves only for a pass that can change which
         // prims exist. Stamped here, before anything is dropped, so it does not
         // depend on the invalidation finding a victim: a structural edit whose
@@ -639,6 +885,15 @@ impl Changes {
         // pseudo-root resync stands for every asset value on the stage, so the
         // notice discards what is collected here.
         let asset_paths_resynced = asset_path_victims(cache, &vars_deltas);
+        // A value-time `${VAR}` expression is re-evaluated per read and recorded
+        // as nobody's dependency, so no tier above names the prims it moved. The
+        // same victims the notice reports therefore restale here: a cached
+        // source holds the value it resolved to, and the prim composing it is
+        // otherwise untouched. The reach is the subtree, matching what the
+        // channel reports.
+        for victim in &asset_paths_resynced {
+            self.record_scoped(victim.clone(), ValueScope::Subtree, &[]);
+        }
         let mut resynced = if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
             cache.invalidate_layers(&affected);
             vec![Path::abs_root()]
@@ -692,27 +947,80 @@ impl Changes {
             .into_iter()
             .filter(|(_, path)| !self.cache.authored_significant.iter().any(|p| path.has_prefix(p)))
             .collect();
+        let mut resynced_prims = Vec::new();
         if !sites.is_empty() {
-            cache.rescan_specs(graph, &sites);
+            // Each dependent the rescan reached had a site gain or lose an
+            // opinion, so whether that prim composes at all may have moved — a
+            // resync of that prim, not a report that its info changed. It stands
+            // for itself alone: the refresh touches one site, not a subtree.
+            resynced_prims = cache.rescan_specs(graph, &sites);
         }
 
-        // Property tier: a `targetPaths` / `connectionPaths` edit leaves the graph
-        // intact, so drop only the edited property's resolved-target memo on each
-        // affected prim. Every entry is cleared; one naming a prim whose index the
-        // significant tier already dropped finds no memo left to clear.
+        // Value tier: the composition graph is intact, so nothing is dropped —
+        // each affected prim is stamped with a fresh revision, retiring the
+        // answers cached against it, and the resolved-target memos the edit
+        // restales go with it. Runs after the drops above, so a prim already
+        // dropped is not stamped on the way out.
         //
-        // TODO: `fanout_targets` puts both namespaces in one set — a dependency
-        // result and the literal edited prim — so no prefix test over it is sound
-        // against either half of the significant tier. Splitting it on namespace
-        // the way that tier is split would let the already-dropped prims be
-        // skipped.
-        cache.clear_target_memos(self.cache.did_change_targets.iter());
+        // TODO: the accumulated set puts both namespaces in one map — a
+        // dependency result and the literal edited prim — so no prefix test over
+        // it is sound against either half of the significant tier. Splitting it
+        // on namespace the way that tier is split would let the already-dropped
+        // prims be skipped.
+        cache.restale_values(normalize_scopes(mem::take(&mut self.cache.did_change_values)));
+
+        // Value-clip tier: an edited layer that a clip set reads restales the
+        // values it sources and the manifests synthesized from its content. This
+        // is keyed by layer rather than by site because a clip layer joins no
+        // layer stack, so the site-keyed tiers above never name it.
+        // A stage that has resolved no clip set keys nothing by layer, so the
+        // clip-free edit — the common one — skips this rather than paying a graph
+        // lookup and a hash probe per edited layer, as the interning seam skips
+        // deriving an identifier for the same reason.
+        if cache.has_clip_sources() {
+            for &layer in &self.edited_layers {
+                let Some(identifier) = graph.try_identifier(layer) else {
+                    continue;
+                };
+                // Each anchor stands for its whole subtree, the same reach the
+                // restale took: a clip set sources values anywhere below it.
+                resynced.extend(cache.invalidate_clip_source(identifier));
+            }
+        }
 
         ApplyOutcome {
             resynced,
+            resynced_prims,
             asset_paths_resynced,
         }
     }
+}
+
+/// Collapses a round's value-tier work items so no prim is stamped twice.
+///
+/// An item covered by an ancestor's subtree is absorbed into it — but its memo
+/// keys move with it, since the ancestor's subtree walk is what will clear them:
+/// dropping the item outright would leave `/Ref/Child`'s memo for `.r2` stale
+/// under a subtree at `/Ref` that only names `.r1`. Absorbing is coarser on the
+/// memos than keeping a separate item, and cannot lose one.
+///
+/// Relies on the map's sorted order to compare each item against the last one
+/// kept. That reaches every composed path, whose ancestors do sort before it. A
+/// variant spelling (`/P{v=x}Child`, recorded beside the stripped path the fanout
+/// also emits) can sort past its own ancestor and be kept uncollapsed — which
+/// costs a stamp on a path no entry is cached at, since variant spellings are
+/// never cache keys, and never a missed one: whatever it carries the stripped
+/// path carries too.
+fn normalize_scopes(items: BTreeMap<Path, ScopedInvalidation>) -> Vec<(Path, ScopedInvalidation)> {
+    let mut out: Vec<(Path, ScopedInvalidation)> = items.into_iter().collect();
+    out.dedup_by(|(path, item), (root, covering)| {
+        let absorbed = covering.scope == ValueScope::Subtree && path != root && path.has_prefix(root);
+        if absorbed {
+            covering.target_keys.append(&mut item.target_keys);
+        }
+        absorbed
+    });
+    out
 }
 
 /// The composed paths whose `asset` values may re-resolve after `deltas`, for
@@ -1049,6 +1357,36 @@ mod tests {
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
     }
 
+    /// The type-opinion epoch tracks the fields a prim's schema identity is
+    /// composed from, and nothing else: a value edit must leave a memo of those
+    /// identities standing, while authoring one — or the stage's fallback map
+    /// for unknown types — retires it.
+    #[test]
+    fn type_epoch_tracks_identity() {
+        for (path, field, advances) in [
+            ("/Foo", FieldKey::TypeName.as_str(), true),
+            ("/Foo", FieldKey::ApiSchemas.as_str(), true),
+            ("/", FieldKey::FallbackPrimTypes.as_str(), true),
+            ("/", FieldKey::StartTimeCode.as_str(), false),
+            ("/Foo", FieldKey::Kind.as_str(), false),
+            ("/Foo.x", FieldKey::Default.as_str(), false),
+        ] {
+            let (mut graph, mut cache) = empty_cache();
+            let before = cache.type_opinion_epoch();
+            let mut cl = ChangeList::new();
+            cl.entry_mut(&p(path)).note(field, sdf::FieldChange::Value);
+            let mut changes = Changes::new();
+            changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+            changes.apply(&mut cache, &mut graph);
+            assert_eq!(
+                cache.type_opinion_epoch() != before,
+                advances,
+                "authoring {field} at {path} must {} the type-opinion epoch",
+                if advances { "advance" } else { "leave" }
+            );
+        }
+    }
+
     /// The population epoch tracks what can change which prims exist, not every
     /// edit: a value-only change must leave a completed population walk — and
     /// the redirection and eligibility memos derived from it — standing, while
@@ -1063,13 +1401,11 @@ mod tests {
         ] {
             let (mut graph, mut cache) = empty_cache();
             let before = cache.population_epoch();
-            let revision = cache.revision();
             let mut cl = ChangeList::new();
             cl.entry_mut(&p(path)).flags = flags;
             let mut changes = Changes::new();
             changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
             changes.apply(&mut cache, &mut graph);
-            assert_ne!(cache.revision(), revision, "every edit advances the revision");
             assert_eq!(
                 cache.population_epoch() != before,
                 advances,
@@ -1189,8 +1525,8 @@ mod tests {
             kind: PropertyTargetKind::Relationship,
             property_suffix: ".r".to_owned(),
         };
-        assert!(changes.cache.did_change_targets.contains(&(p("/P/Child"), key.clone())));
-        assert!(changes.cache.did_change_targets.contains(&(p("/P{v=x}Child"), key)));
+        assert!(restaled_keys(&changes, "/P/Child").contains(&key));
+        assert!(restaled_keys(&changes, "/P{v=x}Child").contains(&key));
     }
 
     /// Replacing a relationship with a same-named attribute in one edit surfaces
@@ -1210,17 +1546,18 @@ mod tests {
             kind,
             property_suffix: ".x".to_owned(),
         };
-        assert!(
-            changes
-                .cache
-                .did_change_targets
-                .contains(&(p("/P"), key(PropertyTargetKind::Relationship)))
-        );
-        assert!(
-            changes
-                .cache
-                .did_change_targets
-                .contains(&(p("/P"), key(PropertyTargetKind::Connection)))
-        );
+        let restaled = restaled_keys(&changes, "/P");
+        assert!(restaled.contains(&key(PropertyTargetKind::Relationship)));
+        assert!(restaled.contains(&key(PropertyTargetKind::Connection)));
+    }
+
+    /// The memo keys the value tier recorded for the prim at `path`.
+    fn restaled_keys(changes: &Changes, path: &str) -> BTreeSet<TargetMemoKey> {
+        changes
+            .cache
+            .did_change_values
+            .get(&p(path))
+            .map(|item| item.target_keys.clone())
+            .unwrap_or_default()
     }
 }

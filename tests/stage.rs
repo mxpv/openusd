@@ -8442,17 +8442,20 @@ fn target_edit_is_info_only_not_resync() -> Result<()> {
 
 /// Removing an attribute is a structural removal, not a changed-info edit: the
 /// removed property must not appear in `changed_info_only`, where a consumer
-/// reading its value would find it gone.
+/// reading its value would find it gone. It is reported as a resync of the
+/// property instead (C++ `otherResyncChanges`).
 #[test]
 fn attr_removal_not_info_only() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.create_attribute("/P.size", "double")?;
 
     let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let _token = {
-        let info = info.clone();
+        let (info, resynced) = (info.clone(), resynced.clone());
         stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
             info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
         })
     };
     assert!(stage.remove_property("/P.size")?);
@@ -8460,6 +8463,11 @@ fn attr_removal_not_info_only() -> Result<()> {
     assert!(
         !info.borrow().contains(&sdf::path("/P.size")?),
         "a removed attribute must not be reported as a changed-info edit"
+    );
+    assert!(
+        resynced.borrow().contains(&sdf::path("/P.size")?),
+        "the removed attribute is reported as a resync, got {:?}",
+        resynced.borrow()
     );
     Ok(())
 }
@@ -10007,7 +10015,9 @@ fn remove_rejects_wrong_path_kind() -> Result<()> {
 /// A resync only subsumes the paths beneath it when it actually dropped the
 /// subtree. Creating an attribute over a sublayer-defined prim adds inert
 /// `over` specs on the way down, which land on the spec tier — a `has_specs`
-/// refresh, not a subtree drop — so the attribute's own info entry survives.
+/// refresh, not a subtree drop — so the attribute's own entry survives beside
+/// them. The property spec appearing is itself a resync of that property, not a
+/// value change on it (C++ `otherResyncChanges`).
 #[test]
 fn spec_tier_resync_keeps_info() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -10040,13 +10050,13 @@ def "A" {
 
     let notices = notices.borrow();
     assert!(
-        notices.changed_info_only.contains(&sdf::path("/A/B.x")?),
+        notices.resynced.contains(&sdf::path("/A/B.x")?),
         "the authored attribute must still be reported, got {:?}",
-        notices.changed_info_only
+        notices.resynced
     );
     assert_eq!(
         notices.resynced,
-        paths(&["/A", "/A/B"]),
+        paths(&["/A", "/A/B", "/A/B.x"]),
         "the spec tier reports both sites; neither stands for the other's subtree"
     );
     Ok(())

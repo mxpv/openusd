@@ -100,17 +100,15 @@ pub(crate) fn generate_manifest(
     Ok(manifest)
 }
 
-/// Which clip set a synthesized manifest was generated for: the prim carrying
-/// the set, and the set's name. Identifies the authored set — unlike the set's
-/// `primPath`, which addresses the clips' own namespace and which unrelated
-/// prims routinely share. The set it was generated from is stored alongside and
-/// compared on lookup, so any edit to the set supersedes the manifest (the C++
+/// Identity of one authored clip set: the prim carrying it, and its name in the
+/// `clips` dictionary. Distinct from the set's `primPath`, which addresses the
+/// clips' own namespace and which unrelated prims routinely share (the C++
 /// `Usd_ClipCache` manifest key).
 ///
 /// Deliberately cheap to build — no asset path is resolved to an identifier —
 /// because value resolution constructs one on every clipped attribute read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ManifestKey {
+pub(crate) struct ClipSetKey {
     /// The prim the clip set is composed on.
     pub prim: Path,
     /// The clip set's name, the key it holds in the `clips` dictionary.

@@ -376,6 +376,29 @@ impl Dependencies {
         Self::dedup_owned(self.translated_ancestors(layer_id, site_path))
     }
 
+    /// Prim indices reading a site *above* `site_path` in `layer_id`, as the
+    /// paths they are cached at — untranslated.
+    ///
+    /// The companion of [`exact_lookup`](Self::exact_lookup) for a change whose
+    /// site an index reads through an ancestor: `/Ref` reading `/Src` is reached
+    /// by a change at `/Src/Child`, at some composed path under `/Ref` that only
+    /// the arc's own namespace mapping can name. A caller that must not guess
+    /// that path — value invalidation, where guessing wrong means serving a
+    /// stale value — takes the dependent's own path and covers its subtree
+    /// instead. See the `MapFunction` `TODO` on
+    /// [`translated_ancestors`](Self::translated_ancestors), which is what
+    /// reconstructing the path exactly would need.
+    pub(super) fn ancestor_dependents(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+        let Some(map) = self.per_layer.get(&layer_id) else {
+            return Vec::new();
+        };
+        Self::dedup_paths(
+            map.ancestors(site_path)
+                .filter(|(site, _)| *site != site_path)
+                .flat_map(|(_, deps)| deps),
+        )
+    }
+
     /// Find prim indices whose graph reads exactly `(layer_id, site_path)`,
     /// with no ancestor or subtree walk. The spec-tier rescan uses this to
     /// reach the nodes sitting at that precise site whose `has_specs` flag an

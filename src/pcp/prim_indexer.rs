@@ -3250,6 +3250,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
 #[cfg(test)]
 mod tests {
     use super::super::VariantFallbackMap;
+    use super::super::index_store::PrimRevision;
     use super::super::prim_index::PrimIndex;
     use super::super::prim_index::tests::build_with_fallbacks;
     use super::*;
@@ -3875,6 +3876,7 @@ mod tests {
                 context: CompositionContext::default(),
                 errors: Vec::new(),
                 resolved_targets: Default::default(),
+                revision: PrimRevision::placeholder(),
             },
         );
         let child = Indexer::new(&s, &ctx, &cached, ambient, true)

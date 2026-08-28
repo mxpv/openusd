@@ -10,7 +10,7 @@
 //! child-name list (`compute_prim_child_names`), renaming or hiding relocated
 //! sources and exposing targets in place.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
 
 use crate::sdf;
@@ -22,7 +22,7 @@ use super::asset_resolve::{self, AssetSite};
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
 use super::dependencies::Dependencies;
-use super::index_store::IndexStore;
+use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::{LayerGraph, LayerStackIdentifier};
 use super::layer_stack::StackMarks;
@@ -127,6 +127,9 @@ pub struct IndexCache {
     /// which prims exist, so it must not retire the memos above or a completed
     /// population walk.
     population_epoch: u64,
+    /// Advanced once per change batch that authored a schema-identity opinion —
+    /// see [`Self::type_opinion_epoch`].
+    type_opinion_epoch: u64,
     /// One-shot errors from layer collection that the [`LayerGraph`](super::layer_graph::LayerGraph)
     /// cannot regenerate (e.g. `UnresolvedSublayer`). Set once at construction;
     /// never cleared, since nothing recomputes them.
@@ -172,23 +175,6 @@ pub struct IndexCache {
     /// instancing pass can detect a demand fired mid-redirect (see
     /// [`effective_path`](Self::effective_path)).
     pub(super) pending_loads: Vec<Demand>,
-    /// Monotonic counter bumped once per applied change batch
-    /// ([`Changes::apply`](super::Changes::apply)), the single funnel every
-    /// authoring and layer-stack edit passes through. Cached views that resolve
-    /// values once and replay them (e.g. [`Stage::attribute_query`]) snapshot
-    /// this and rebuild when it advances, so an edit to any opinion — even a
-    /// value-only edit that leaves the prim index intact — invalidates them.
-    ///
-    /// A single stage-wide counter is deliberately coarse: every edit rebuilds
-    /// every cached value view, even unaffected ones. A per-prim revision would
-    /// let an unrelated prim's view survive, but value-only edits skip change
-    /// classification today (no producer says which prim's value moved), so a
-    /// per-prim bump would risk a stale read where this coarse counter is always
-    /// safe. Refine only with a value-edit classifier and a profile showing the
-    /// blanket rebuild dominates.
-    ///
-    /// [`Stage::attribute_query`]: crate::usd::Stage::attribute_query
-    revision: u64,
 }
 
 /// The resolved source of an attribute's value at a time code, the cacheable
@@ -218,9 +204,10 @@ pub(crate) enum AttributeValueSource {
     /// ([`IndexCache::resolve_asset_values`]).
     ///
     /// The site's graph handles stay valid for as long as this source does. A
-    /// stale handle would panic rather than mislead, but the sweep that could
-    /// retire one runs only at an edit seam, and every seam bumps the
-    /// composition revision that discards this source.
+    /// stale handle would panic rather than mislead, but stack reclamation
+    /// retires only a stack no cached entry owns, and a live entry owns every
+    /// stack in its arena — so the handles are valid exactly while the prim's
+    /// [`PrimRevision`] stamp still validates, which is what gates the replay.
     TimeSamples {
         samples: sdf::TimeSampleMap,
         offset: LayerOffset,
@@ -237,6 +224,34 @@ impl Default for AttributeValueSource {
     fn default() -> Self {
         Self::Static(None)
     }
+}
+
+/// An [`AttributeValueSource`] with the stamp that says how long replaying it
+/// stays correct — what [`IndexCache::resolve_value_source`] hands back.
+///
+/// A cached view (`usd::AttributeQuery`) keeps all four together and replays the
+/// source only while the stamp still validates; resolving and stamping happen in
+/// one borrow, so no edit can land between the answer and the token that guards
+/// it.
+///
+/// The default — no value, no revision — is what a query gated out by the
+/// population mask resolves to (`Stage::masked`): a masked prim composes no
+/// index, so there is nothing to validate against and nothing to memoize.
+#[derive(Default)]
+pub(crate) struct StampedValueSource {
+    /// The composed prim the source resolved from. For an instance proxy this
+    /// is the prototype prim that answered, not the queried path.
+    pub prim: Path,
+    /// [`prim`](Self::prim)'s revision, or `None` when no index is cached
+    /// there. A `None` stamp can never validate, so its source must not be
+    /// memoized.
+    pub revision: Option<PrimRevision>,
+    /// The population epoch to re-check, set only when the answer came from a
+    /// prim other than the queried one — the redirection that reached it is
+    /// itself memoized per epoch.
+    pub redirect_epoch: Option<u64>,
+    /// The resolved source.
+    pub source: AttributeValueSource,
 }
 
 /// Collapses the spec sentinels for "no value" ([`Value::ValueBlock`] and
@@ -354,6 +369,10 @@ impl<'a> ClipTier<'a> {
                 if !set.source.applies_at(site.node, site.layer) || !offered.insert((anchor_index, set_index)) {
                     continue;
                 }
+                // Record what the set reads before it is consulted, so a clip
+                // that fails to open — or names no layer yet — is still a
+                // dependency the cache can be invalidated through.
+                cache.register_set_sources(graph, anchor, set);
                 let step = {
                     let mut probe = ClipProbe {
                         cache,
@@ -815,6 +834,14 @@ impl OpinionResolver for StackResolver<'_> {
     }
 }
 
+#[cfg(test)]
+impl IndexCache {
+    /// Every cached prim's stamp, for a test asserting how far an edit restaled.
+    pub(super) fn prim_revisions(&self) -> Vec<(Path, PrimRevision)> {
+        self.store.revisions()
+    }
+}
+
 impl IndexCache {
     /// Creates a new composition cache. The layer data lives in a separate
     /// [`LayerGraph`] owned by the [`Stage`](crate::usd::Stage) and passed to each
@@ -839,11 +866,11 @@ impl IndexCache {
             redirected_prims: HashMap::new(),
             populated_prims: HashMap::new(),
             population_epoch: 0,
+            type_opinion_epoch: 0,
             collection_errors,
             query_errors: Vec::new(),
             in_progress: HashSet::new(),
             pending_loads: Vec::new(),
-            revision: 0,
         }
     }
 
@@ -880,22 +907,69 @@ impl IndexCache {
         self.store.reset_ownership_lost();
     }
 
-    /// The current composition revision (see the [`revision`](Self::revision)
-    /// field). Advances once per applied change batch.
-    pub(crate) fn revision(&self) -> u64 {
-        self.revision
+    /// The [`PrimRevision`] stamped on the cached prim at `path`, or `None` when
+    /// no index is cached there — which no cached answer validates against.
+    pub(crate) fn prim_revision(&self, path: &Path) -> Option<PrimRevision> {
+        self.store.revision_at(path)
     }
 
-    /// Advances the composition revision, invalidating cached views that
-    /// snapshot it. Called once per [`Changes::apply`](super::Changes::apply).
+    /// Retires the cached answers of the prims a change round named: each is
+    /// stamped with a fresh [`PrimRevision`], and the resolved-target memos the
+    /// round restaled are dropped with it.
     ///
-    /// Also clears the query diagnostics. They are re-derived on the next query
-    /// and must not outlive the edit that fixed what they report — an edit that
-    /// drops no index still reaches here, which is the only clearing point a
-    /// value-time asset expression's failure has: nothing records it as a
-    /// dependency, so no invalidation is keyed to it.
-    pub(super) fn bump_revision(&mut self) {
-        self.revision += 1;
+    /// The graph is untouched — these prims still compose the way they did, they
+    /// merely resolve different values — so nothing is evicted. A named path
+    /// with no cached entry costs a lookup and nothing else.
+    pub(super) fn restale_values(&mut self, items: Vec<(Path, ScopedInvalidation)>) {
+        for (path, item) in items {
+            match item.scope {
+                ValueScope::Prim => self.store.restale(&path, &item.target_keys),
+                ValueScope::Subtree => self.store.restale_subtree(&path, &item.target_keys),
+            }
+        }
+    }
+
+    /// Invalidates what a change to the clip or manifest layer `identifier`
+    /// reaches: the synthesized manifests generated from its content, and the
+    /// composed values of every prim under an anchor whose clip sets read it.
+    /// Returns those anchor prims.
+    ///
+    /// A layer that feeds no clip set invalidates nothing here, so an ordinary
+    /// layer edit — or an unrelated layer joining the graph — costs one lookup
+    /// and clears no diagnostic. The clip diagnostics are retired when it does
+    /// match, since a clip that could not be read may now be readable.
+    ///
+    /// The anchors are returned for a caller to report: each stands for its
+    /// whole subtree, the same reach the restale took, since a clip set sources
+    /// values anywhere below its anchor.
+    pub(crate) fn invalidate_clip_source(&mut self, identifier: &str) -> Vec<Path> {
+        let anchors = self.clip_cache.invalidate_layer(identifier);
+        if anchors.is_empty() {
+            return anchors;
+        }
+        for anchor in &anchors {
+            self.store.restale_subtree(anchor, &BTreeSet::new());
+        }
+        self.retire_query_errors();
+        anchors
+    }
+
+    /// Whether any clip set has recorded the layers it reads, so asking about a
+    /// layer could answer anything. A stage with no value clips never does.
+    pub(crate) fn has_clip_sources(&self) -> bool {
+        self.clip_cache.has_clip_sources()
+    }
+
+    /// Discards the transient query diagnostics
+    /// ([`query_errors`](Self::query_errors)).
+    ///
+    /// They are re-derived on the next query and must not outlive the mutation
+    /// that fixed what they report — an edit that drops no index still reaches
+    /// here, which is the only retirement point a value-time asset expression's
+    /// failure has: nothing records it as a dependency, so no invalidation is
+    /// keyed to it. Its own seam, because a mutation that invalidates nothing
+    /// cached can still repair a diagnostic.
+    pub(super) fn retire_query_errors(&mut self) {
         self.query_errors.clear();
     }
 
@@ -906,12 +980,32 @@ impl IndexCache {
         self.population_epoch
     }
 
+    /// The current type-opinion epoch, which advances once per change batch that
+    /// authored `typeName`, `apiSchemas`, or the root's `fallbackPrimTypes`.
+    ///
+    /// A memo of composed schema identities stamps this *and*
+    /// [`population_epoch`](Self::population_epoch): those fields are what the
+    /// identity is composed from, and every structural change that can move
+    /// which opinion wins already advances the population epoch. Neither epoch
+    /// alone covers the other.
+    pub(crate) fn type_opinion_epoch(&self) -> u64 {
+        self.type_opinion_epoch
+    }
+
+    /// Records that a change batch moved a schema-identity opinion.
+    pub(super) fn bump_type_opinion_epoch(&mut self) {
+        self.type_opinion_epoch = self
+            .type_opinion_epoch
+            .checked_add(1)
+            .expect("type opinion epoch exhausted");
+    }
+
     /// Records that the composed population may now differ — a prim may have
     /// appeared or vanished, changed activeness, or moved in namespace — by
     /// advancing [`population_epoch`](Self::population_epoch) and retiring the
     /// memos derived from it.
     ///
-    /// Its own seam, separate from [`Self::bump_revision`], because the two
+    /// Its own seam, separate from [`Self::retire_query_errors`], because the two
     /// cover different equivalence classes: an edit that changes only a value
     /// leaves every prim, its ancestry, and its activeness exactly where they
     /// were, so the redirection and eligibility memos — and a completed
@@ -1165,9 +1259,9 @@ impl IndexCache {
         &mut self,
         graph: &LayerGraph,
         attr_path: &Path,
-    ) -> Result<AttributeValueSource, QueryError> {
+    ) -> Result<StampedValueSource, QueryError> {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
-            return Ok(AttributeValueSource::Static(None));
+            return Ok(self.stamp_source(AttributeValueSource::Static(None), attr_path, None));
         };
         let mut resolver = SourceResolver {
             graph,
@@ -1175,17 +1269,40 @@ impl IndexCache {
             default_site: None,
         };
         self.resolve_property(graph, &prim, &suffix, ResolveMode::Proximal, &mut resolver)?;
-        if let Some(source) = resolver.source {
-            return Ok(source);
-        }
-        // A winning `default` composes from the site the walk selected; with no
-        // site nothing was authored, which is the same static `None`.
-        let Some(site) = resolver.default_site else {
-            return Ok(AttributeValueSource::Static(None));
+        let source = match resolver.source {
+            Some(source) => source,
+            // A winning `default` composes from the site the walk selected; with
+            // no site nothing was authored, which is the same static `None`.
+            None => match resolver.default_site {
+                Some(site) => AttributeValueSource::Static(self.composed_default(graph, &prim, &suffix, &site)?),
+                None => AttributeValueSource::Static(None),
+            },
         };
-        Ok(AttributeValueSource::Static(
-            self.composed_default(graph, &prim, &suffix, &site)?,
-        ))
+        Ok(self.stamp_source(source, attr_path, Some(prim)))
+    }
+
+    /// Pairs a freshly resolved `source` with the stamp a cached view replays it
+    /// under, read in the same borrow that produced it so no edit can slip
+    /// between the answer and its validity token.
+    ///
+    /// `prim` is the composed prim the walk resolved from, or `None` when it
+    /// never reached one (the attribute has no spec anywhere) — that answer
+    /// still depends on the queried prim's composition, so it is stamped against
+    /// the queried path's own entry, and stays unmemoizable while none is
+    /// cached.
+    fn stamp_source(&self, source: AttributeValueSource, attr_path: &Path, prim: Option<Path>) -> StampedValueSource {
+        let queried = attr_path.prim_path();
+        let prim = prim.unwrap_or_else(|| queried.clone());
+        // The redirect that took an instance proxy to its prototype is memoized
+        // per population epoch (`redirected_prims`), so a stamp anchored at a
+        // path the query did not name must re-check that epoch too.
+        let redirect_epoch = (prim != queried).then(|| self.population_epoch());
+        StampedValueSource {
+            revision: self.prim_revision(&prim),
+            prim,
+            redirect_epoch,
+            source,
+        }
     }
 
     /// The composed `default` for a property whose winning site the shared walk
@@ -1458,7 +1575,7 @@ impl IndexCache {
     ///
     /// The transient query errors are left alone: dropping an index is not by
     /// itself an invalidation — a lazy prototype materialization drops one
-    /// mid-query — and [`Self::bump_revision`] is what retires them, at every
+    /// mid-query — and [`Self::retire_query_errors`] is what retires them, at every
     /// edit seam.
     pub(super) fn drop_index(&mut self, path: &Path) {
         self.store.remove(path);
@@ -1478,7 +1595,7 @@ impl IndexCache {
         for path in failed {
             self.store.remove(&path);
         }
-        self.bump_revision();
+        self.retire_query_errors();
         // A target that failed to read hid whatever it would have composed, so
         // repairing it can reveal prims — and instances — the population never
         // saw.
@@ -1492,14 +1609,20 @@ impl IndexCache {
     /// refresh; the latter are dropped for rebuild. Each in-place-refreshed index
     /// then finalizes its memoized spec stack once, however many of this round's
     /// sites reached it. The transient query errors are retired by
-    /// [`Self::bump_revision`] at the edit seam; they may
+    /// [`Self::retire_query_errors`] at the edit seam; they may
     /// reference a dropped prim.
     ///
     /// An added or removed spec can change whether a prim exists, so the caller
     /// must already have advanced the population epoch for these sites.
     /// `Changes::apply` has: the same `did_change_specs` paths reach
     /// [`Self::invalidate_prototypes`] in its change set, which owns the seam.
-    pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, sites: &[(LayerId, Path)]) {
+    /// Returns every composed prim the rescan reached, refreshed or dropped. A
+    /// spec appearing or disappearing at a site one of them reads is a change in
+    /// whether that prim contributes an opinion at all — a referenced site the
+    /// arc had culled as empty now composes — so the caller reports them as
+    /// resynced. Which of the two partitions a prim landed in says how the cache
+    /// caught up, not whether a consumer must.
+    pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, sites: &[(LayerId, Path)]) -> Vec<Path> {
         let mut refreshed: HashSet<Path> = HashSet::new();
         let mut rebuild: HashSet<Path> = HashSet::new();
         for (layer, path) in sites {
@@ -1513,32 +1636,21 @@ impl IndexCache {
         // skips a path with no cached entry, so an index that ended up in both sets
         // is already excluded — the refreshed set needs no further filtering.
         self.store.finalize_spec_stacks(graph, &refreshed);
+        rebuild.into_iter().chain(refreshed).collect()
     }
 
     /// Drop a prim's cached index and every namespace descendant. Used by
     /// [`change::Changes`](super::change::Changes) when a significant change
     /// touches `prefix` — the topology may have changed for the entire subtree,
     /// so every dependent index is invalidated. The transient query errors are
-    /// left to [`Self::bump_revision`], as in [`Self::drop_index`].
+    /// left to [`Self::retire_query_errors`], as in [`Self::drop_index`].
     pub(super) fn drop_index_subtree(&mut self, prefix: &Path) {
         self.store.remove_subtree(prefix);
     }
 
-    /// Drops one memoized `(prim, property)` resolved-target entry per item, for a
-    /// `targetPaths` / `connectionPaths` edit that leaves the graph intact (so the
-    /// index survives) but restales that property's composed targets. Keyed by the
-    /// edited property's [`TargetMemoKey`], so a prim's other relationships and
-    /// connections keep their memos. See
-    /// [`CacheChanges::did_change_targets`](super::change::CacheChanges).
-    pub(super) fn clear_target_memos<'p>(&mut self, memos: impl IntoIterator<Item = &'p (Path, TargetMemoKey)>) {
-        for (prim, key) in memos {
-            self.store.clear_target_memo(prim, key);
-        }
-    }
-
     /// Invalidates the cache after a layer-set change restructures only some
-    /// prims: advances the composition revision (so cached value views rebuild)
-    /// and drops just the cached indices that read one of the `affected` layers,
+    /// prims: retires the query diagnostics and drops just the cached indices
+    /// that read one of the `affected` layers,
     /// via [`drop_indices_touching_layers`](Self::drop_indices_touching_layers).
     /// Used for a layer-muting toggle, a
     /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables` edit
@@ -1552,14 +1664,14 @@ impl IndexCache {
     /// notice today. Widening it is the first half of the deferred demand-notice
     /// work — see the `TODO` beside `Payload::finish` in `usd::composition`.
     pub(crate) fn invalidate_layers(&mut self, affected: &HashSet<LayerId>) {
-        self.bump_revision();
+        self.retire_query_errors();
         self.invalidate_population();
         self.drop_indices_touching_layers(affected);
     }
 
     /// Invalidates the cache after a layer-muting toggle of the layer with
-    /// canonical identifier `canonical`: advances the revision, then drops the
-    /// cached indices the toggle can restructure (see
+    /// canonical identifier `canonical`: retires the query diagnostics, then
+    /// drops the cached indices the toggle can restructure (see
     /// [`Dependencies::indices_for_mute_toggle`](super::dependencies::Dependencies::indices_for_mute_toggle))
     /// — those reading one of the `affected` layers, plus those that only skipped
     /// the target and recorded `canonical` because it interned no reachable layer.
@@ -1569,7 +1681,7 @@ impl IndexCache {
     /// Returns everything the toggle dropped — the indices above and the
     /// prototype roots retired with them — for a caller to report as-is.
     pub(crate) fn invalidate_muting(&mut self, affected: &HashSet<LayerId>, canonical: &str) -> Vec<Path> {
-        self.bump_revision();
+        self.retire_query_errors();
         self.invalidate_population();
         let victims = self.store.dependencies().indices_for_mute_toggle(affected, canonical);
         self.drop_index_victims(victims)
@@ -2184,8 +2296,8 @@ impl IndexCache {
     /// Returns the set paired with whether any candidate was gathered — i.e.
     /// whether the resolution read cross-prim instance state by composing target
     /// prims. The target memo is unsafe in that case (a target prim's later
-    /// instance-status change is not tracked by the property's own
-    /// `did_change_targets`), so the caller skips memoization when it is `true`.
+    /// instance-status change is not tracked by the property's own value-tier
+    /// restale), so the caller skips memoization when it is `true`.
     fn compute_instance_targets(
         &mut self,
         graph: &LayerGraph,
@@ -3033,6 +3145,86 @@ mod tests {
                 Vec::new(),
             ),
         )
+    }
+
+    /// The blast radius of a value edit, pinned against a synthetic
+    /// reference-heavy graph.
+    ///
+    /// Editing `/Source/Inner.x` restales the prims that actually read it — the
+    /// authored prim and each referrer's copy — and leaves the rest of the cache
+    /// standing. The referrers themselves come along because their indices read
+    /// `/Source` as an ancestor site, which is the conservative subtree rule (an
+    /// arc can rename what lies below, so the exact composed path is not
+    /// reconstructible); everything outside those subtrees must survive.
+    #[test]
+    fn value_edit_restale_radius() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(
+            r#"#usda 1.0
+
+def "Source"
+{
+    def "Inner"
+    {
+        double x = 1
+    }
+}
+
+def "RefA" (
+    references = </Source>
+)
+{
+}
+
+def "RefB" (
+    references = </Source>
+)
+{
+}
+
+def "Unrelated"
+{
+    def "Deep"
+    {
+        double y = 2
+    }
+}
+"#,
+        );
+        for path in [
+            "/Source",
+            "/Source/Inner",
+            "/RefA",
+            "/RefA/Inner",
+            "/RefB",
+            "/RefB/Inner",
+            "/Unrelated",
+            "/Unrelated/Deep",
+        ] {
+            cache.ensure_index(&graph, &sdf::path(path)?)?;
+        }
+        let before: HashMap<Path, _> = cache.prim_revisions().into_iter().collect();
+
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/Source/Inner.x")?)
+            .note(FieldKey::Default.as_str(), sdf::FieldChange::Value);
+        let mut changes = Changes::new();
+        let layer = graph.all_ids()[0];
+        changes.did_change(&cache, &[crate::pcp::LayerChanges::plain(layer, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        let mut restaled: Vec<String> = cache
+            .prim_revisions()
+            .into_iter()
+            .filter(|(path, revision)| before.get(path) != Some(revision))
+            .map(|(path, _)| path.to_string())
+            .collect();
+        restaled.sort();
+        assert_eq!(
+            restaled,
+            ["/RefA", "/RefA/Inner", "/RefB", "/RefB/Inner", "/Source/Inner"],
+            "only the prims composing the edited site — and the referrer subtrees              whose composed paths an arc could rename — may be restaled"
+        );
+        Ok(())
     }
 
     /// `value_at` with the demand drain the stage's load barrier provides: a
@@ -4319,13 +4511,13 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = collected_stack(&root);
 
         assert!(matches!(
-            cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?,
+            cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?.source,
             AttributeValueSource::Clips
         ));
         // `extra` is not in the manifest, so the clip set does not own it; the
         // source is the reference's time samples, queryable on the fast path.
         let AttributeValueSource::TimeSamples { samples, .. } =
-            cache.resolve_value_source(&graph, &sdf::path("/Model.extra")?)?
+            cache.resolve_value_source(&graph, &sdf::path("/Model.extra")?)?.source
         else {
             panic!("undeclared clip attribute must resolve as arc time samples");
         };
@@ -4350,7 +4542,7 @@ def "Anchor" (inherits = </Rig>) {}
             Some(Value::Double(50.0))
         );
         assert!(matches!(
-            cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?,
+            cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?.source,
             AttributeValueSource::Clips
         ));
         Ok(())
