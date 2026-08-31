@@ -85,6 +85,14 @@ impl<V> PathTable<V> {
         self.nodes.get(path).and_then(|n| n.value.as_ref())
     }
 
+    /// Borrows the value at `path` together with the stored key, if any — for a
+    /// caller that walks a path chain of its own and needs the table's owned
+    /// path to hand on rather than the one it built.
+    pub fn get_key_value(&self, path: &Path) -> Option<(&Path, &V)> {
+        let (key, node) = self.nodes.get_key_value(path)?;
+        node.value.as_ref().map(|value| (key, value))
+    }
+
     /// Mutably borrows the value at `path`, if any.
     pub fn get_mut(&mut self, path: &Path) -> Option<&mut V> {
         self.nodes.get_mut(path).and_then(|n| n.value.as_mut())
@@ -162,10 +170,7 @@ impl<V> PathTable<V> {
     /// the entries an inserted value actually sits at. The companion of
     /// [`subtree`](Self::subtree), which fans out downward.
     pub fn ancestors<'a>(&'a self, path: &Path) -> impl Iterator<Item = (&'a Path, &'a V)> + use<'a, V> {
-        path.ancestors().filter_map(move |p| {
-            let (key, node) = self.nodes.get_key_value(&p)?;
-            node.value.as_ref().map(|v| (key, v))
-        })
+        path.ancestors().filter_map(move |p| self.get_key_value(&p))
     }
 
     /// Returns the nearest value-bearing entry at or above `path`, or `None`

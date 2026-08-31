@@ -441,6 +441,86 @@ impl IndexStore {
         touched
     }
 
+    /// The composed prim paths a change at `(layer_id, site_path)` affects,
+    /// through a dependency on that site or on an ancestor of it, each named in
+    /// the namespace of the prim it affects.
+    ///
+    /// Folds in the layer-agnostic self-registrations, which is what keeps an
+    /// empty or cache-miss index findable when a spec is first authored at its
+    /// path on a layer its graph does not yet touch. Such a registration
+    /// observes exactly its own path, so what it contributes is the changed path
+    /// itself, whatever depth the registration sits at.
+    pub(super) fn lookup_with_ancestors(&self, graph: &LayerGraph, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+        let mut found = self.translated_sites(graph, layer_id, site_path, Ancestry::AtOrAbove);
+        if self.deps.has_path_ancestor(site_path) {
+            found.push(site_path.clone());
+        }
+        dedup_owned(found)
+    }
+
+    /// [`lookup_with_ancestors`](Self::lookup_with_ancestors) without the
+    /// layer-agnostic self-registrations.
+    ///
+    /// Those exist so a cached prim stays findable on every layer, including
+    /// ones its graph never touched, which is right for invalidation and wrong
+    /// for a report about one layer's site: a prim merely cached at `/Source`
+    /// would answer a question about `/Source` in a layer it does not read.
+    pub(super) fn graph_ancestor_lookup(&self, graph: &LayerGraph, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+        dedup_owned(self.translated_sites(graph, layer_id, site_path, Ancestry::AtOrAbove))
+    }
+
+    /// The composed paths reached through a graph site *above* `site_path`,
+    /// translated into each dependent's own namespace.
+    ///
+    /// The site itself is left to [`exact_lookup`](Dependencies::exact_lookup),
+    /// whose dependents read the change at their own path.
+    pub(super) fn translated_ancestor_dependents(
+        &self,
+        graph: &LayerGraph,
+        layer_id: LayerId,
+        site_path: &Path,
+    ) -> Vec<Path> {
+        dedup_owned(self.translated_sites(graph, layer_id, site_path, Ancestry::StrictlyAbove))
+    }
+
+    /// Joins each registered `(site, dependent)` pair to the dependent's live
+    /// index and translates `site_path` through the nodes that registered it —
+    /// the port of C++ `PcpCache::FindSiteDependencies`, which likewise
+    /// re-finds the node and maps through it rather than storing a map function
+    /// per registration.
+    ///
+    /// One dependent can be reached through several of its own nodes — two
+    /// references to the same prim — and each names its own composed path, so
+    /// this yields a path per node rather than one per dependent.
+    fn translated_sites(&self, graph: &LayerGraph, layer_id: LayerId, site_path: &Path, reach: Ancestry) -> Vec<Path> {
+        let mut out = Vec::new();
+        // One scratch buffer for the whole walk: a site typically names a single
+        // node, and a fresh vector per pair would be the round's only allocation
+        // that scales with the number of dependents.
+        let mut nodes = Vec::new();
+        for (site, dep) in self.deps.ancestor_sites(layer_id, site_path) {
+            if reach == Ancestry::StrictlyAbove && site == site_path {
+                continue;
+            }
+            // A registration and its index are written and dropped together
+            // (`insert` / `remove`), so a pair naming no entry is a broken
+            // invariant. Silently skipping it would turn that into a missed
+            // invalidation — a stale read — so it is loud instead.
+            let index = &self
+                .entries
+                .get(dep)
+                .unwrap_or_else(|| panic!("dependency on {dep} has no cached index"))
+                .index;
+            index.dependency_nodes_at(dep, layer_id, site, graph, &mut nodes);
+            out.extend(
+                nodes
+                    .iter()
+                    .filter_map(|&node| index.translate_dependency_path(node, site_path)),
+            );
+        }
+        out
+    }
+
     /// The [`TargetMemo`] resolved for `prim`'s property at `key`, or `None` on a
     /// miss. See [`PrimEntry::resolved_targets`].
     pub(super) fn target_memo(&self, prim: &Path, key: &TargetMemoKey) -> Option<&TargetMemo> {
@@ -466,4 +546,225 @@ fn owned_stacks(index: &PrimIndex) -> HashSet<LayerStackId> {
         .map(|node| node.layer_stack_id())
         .filter(|&stack| stack != LayerStackId::ROOT)
         .collect()
+}
+
+/// How far up the namespace a lookup reaches for registered sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ancestry {
+    /// The changed site and every ancestor of it.
+    AtOrAbove,
+    /// Ancestors only, leaving the site itself to `Dependencies::exact_lookup`.
+    StrictlyAbove,
+}
+
+/// Deduplicates translated paths in place, keeping first-seen order.
+fn dedup_owned(mut paths: Vec<Path>) -> Vec<Path> {
+    let mut seen: HashSet<Path> = HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
+    paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::pcp::layer_graph::ExternalStack;
+    use crate::pcp::mapping::MapFunction;
+    use crate::pcp::prim_graph::{ArcType, Node};
+    use crate::pcp::prim_index::CompositionContext;
+
+    fn p(s: &str) -> Path {
+        sdf::path(s).expect("valid path")
+    }
+
+    fn graph(n: usize) -> LayerGraph {
+        let layers = (0..n)
+            .map(|i| sdf::Layer::new_in_memory(format!("l{i}.usda")))
+            .collect();
+        LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
+    }
+
+    /// A node whose map carries `source -> target`, so a synthetic index can
+    /// name exactly what a site translates to.
+    fn node(g: &LayerGraph, layer: LayerId, site: &Path, map: MapFunction) -> Node {
+        let stack = match g.external_stack_id(layer, LayerStackId::ROOT) {
+            ExternalStack::Ready(id) => id,
+            ExternalStack::Demand => panic!("no minted stack for test layer {layer:?}"),
+        };
+        Node::new(stack, layer, site.clone(), ArcType::Reference, map.clone(), map, false)
+    }
+
+    /// Registers `index` at `path` so the lookups can join it back.
+    fn register(store: &mut IndexStore, g: &LayerGraph, path: &Path, index: PrimIndex) {
+        store.insert(
+            g,
+            path,
+            index,
+            CompositionContext::default(),
+            Vec::new(),
+            ExprVarDeps::default(),
+        );
+    }
+
+    /// A one-layer graph plus a store holding a single index at `/Ref`, whose
+    /// nodes all sit at site `/Source` and map it to the given targets — the
+    /// shape every translation case below varies.
+    fn ref_reading_source(maps: impl IntoIterator<Item = MapFunction>) -> (LayerGraph, LayerId, IndexStore) {
+        let g = graph(1);
+        let l0 = g.all_ids()[0];
+        let site = p("/Source");
+        let mut index = PrimIndex::default();
+        for map in maps {
+            index.push_node(node(&g, l0, &site, map));
+        }
+        let mut store = IndexStore::default();
+        register(&mut store, &g, &p("/Ref"), index);
+        (g, l0, store)
+    }
+
+    /// The map a reference-shaped node carries: `source` composes at `target`.
+    fn renaming(source: &str, target: &str) -> MapFunction {
+        MapFunction::from_pair_identity(p(source), p(target))
+    }
+
+    /// The strict-ancestor lookup translates a change *below* an arc's site onto
+    /// the dependent's namespace, and reports nothing for the site itself —
+    /// which `exact_lookup` covers, at the dependent's own path.
+    #[test]
+    fn strict_ancestor_translates() {
+        let (g, l0, store) = ref_reading_source([renaming("/Source", "/Ref")]);
+
+        assert_eq!(
+            store.translated_ancestor_dependents(&g, l0, &p("/Source/Child")),
+            vec![p("/Ref/Child")],
+            "the change below the arc composes under the dependent"
+        );
+        assert!(
+            store.translated_ancestor_dependents(&g, l0, &p("/Source")).is_empty(),
+            "the site itself is `exact_lookup`'s to report"
+        );
+    }
+
+    /// Every matching node is translated, distinct results survive, and two
+    /// nodes translating to one place collapse to a single entry.
+    ///
+    /// Deliberately not an ordering test: `push_node` appends each handle to
+    /// both the arena and the strength order, so a synthetic index built with it
+    /// alone cannot tell the two apart. See `translation_follows_strength`.
+    #[test]
+    fn translation_expands_dedups() {
+        let (g, l0, store) = ref_reading_source(["/A", "/B", "/A"].map(|target| renaming("/Source", target)));
+
+        assert_eq!(
+            store.translated_ancestor_dependents(&g, l0, &p("/Source/Child")),
+            vec![p("/A/Child"), p("/B/Child")],
+            "three nodes, two distinct answers, first-seen order"
+        );
+    }
+
+    /// The walk visits a site's nodes strongest-first, as C++ does through
+    /// `PcpPrimIndex::GetNodeRange`. Arena order is a different permutation, so
+    /// the weaker node is pushed first and must come back second.
+    #[test]
+    fn translation_follows_strength() {
+        let g = graph(1);
+        let l0 = g.all_ids()[0];
+        let site = p("/Source");
+        let mut index = PrimIndex::default();
+        index.push_node(node(&g, l0, &site, renaming("/Source", "/Weak")));
+        index.push_node_strongest(node(&g, l0, &site, renaming("/Source", "/Strong")));
+        let mut store = IndexStore::default();
+        register(&mut store, &g, &p("/Ref"), index);
+
+        assert_eq!(
+            store.translated_ancestor_dependents(&g, l0, &p("/Source/Child")),
+            vec![p("/Strong/Child"), p("/Weak/Child")],
+            "strength order, not the arena order the nodes were pushed in"
+        );
+    }
+
+    /// A map whose result is shadowed by a closer inverse match is not a
+    /// translation at all: `translate_to_target`'s bijection check drops it,
+    /// where the bare prefix map would have kept it.
+    #[test]
+    fn shadowed_match_drops() {
+        let g = graph(1);
+        let l0 = g.all_ids()[0];
+        // `{ / -> /, /_class_Model -> /Model }`: mapping `/Model` through the
+        // identity is shadowed by the explicit pair's target.
+        let mut index = PrimIndex::default();
+        index.push_node(node(&g, l0, &p("/Model"), renaming("/_class_Model", "/Model")));
+        let mut store = IndexStore::default();
+        register(&mut store, &g, &p("/Ref"), index);
+
+        assert!(
+            store
+                .translated_ancestor_dependents(&g, l0, &p("/Model/Child"))
+                .is_empty(),
+            "a non-invertible mapping has no composed image to invalidate"
+        );
+    }
+
+    /// A blocked mapping — an empty target — carries nothing, so the node
+    /// contributes no path rather than falling back to the dependent's root.
+    #[test]
+    fn unmappable_site_drops() {
+        let (g, l0, store) = ref_reading_source([MapFunction::null()]);
+
+        assert!(
+            store
+                .translated_ancestor_dependents(&g, l0, &p("/Source/Child"))
+                .is_empty(),
+            "a null map has no image for the changed path"
+        );
+    }
+
+    /// The layer-agnostic self-registration contributes the *changed* path, not
+    /// the ancestor path it was registered at, and only the invalidation lookup
+    /// folds it in.
+    #[test]
+    fn self_path_translates() {
+        let g = graph(1);
+        let l0 = g.all_ids()[0];
+        let own = p("/Foo");
+        let mut index = PrimIndex::default();
+        index.push_node(node(&g, l0, &own, MapFunction::identity()));
+        let mut store = IndexStore::default();
+        register(&mut store, &g, &own, index);
+
+        let changed = p("/Foo/Child");
+        assert_eq!(
+            store.lookup_with_ancestors(&g, l0, &changed),
+            vec![changed.clone()],
+            "the self-registration answers with the changed path itself"
+        );
+    }
+
+    /// `lookup_with_ancestors` folds the layer-agnostic self-registration in;
+    /// `graph_ancestor_lookup` leaves it out while still returning the genuine
+    /// graph readers of that site.
+    #[test]
+    fn graph_lookup_skips_self() {
+        let g = graph(2);
+        let (l0, l1) = (g.all_ids()[0], g.all_ids()[1]);
+        let site = p("/Source");
+
+        // A prim cached at `/Source` that reads only its own layer.
+        let mut bystander = PrimIndex::default();
+        bystander.push_node(node(&g, l0, &site, MapFunction::identity()));
+        let mut store = IndexStore::default();
+        register(&mut store, &g, &site, bystander);
+
+        // A prim whose graph genuinely reads `/Source` on `l1`.
+        let user = p("/User");
+        let mut reader = PrimIndex::default();
+        reader.push_node(node(&g, l1, &site, renaming("/Source", "/User")));
+        register(&mut store, &g, &user, reader);
+
+        assert_eq!(store.graph_ancestor_lookup(&g, l1, &site), vec![user.clone()]);
+        assert!(
+            store.lookup_with_ancestors(&g, l1, &site).contains(&site),
+            "the invalidation lookup does fold the self-registration in"
+        );
+    }
 }

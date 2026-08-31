@@ -1813,6 +1813,13 @@ impl LayerGraph {
         self.root
     }
 
+    /// Whether `stack` resolves to a member set containing `layer` — the test
+    /// both the dependency registration walk and its lookup apply to decide
+    /// whether a node's site belongs to an edited layer.
+    pub(crate) fn stack_contains(&self, stack: LayerStackId, layer: LayerId) -> bool {
+        self.layer_stack(stack).iter().any(|&(member, _)| member == layer)
+    }
+
     /// The root layer (the first non-session layer), if any. Per spec 12.2.7,
     /// pseudo-root layer metadata resolves from this layer alone.
     pub(crate) fn root_layer(&self) -> Option<&sdf::Layer> {

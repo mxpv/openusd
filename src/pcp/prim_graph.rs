@@ -106,6 +106,9 @@ bitflags! {
         const RELOCATE_SOURCE = 1 << 9;
         /// Lies inside a selected variant branch.
         const VARIANT_BRANCH = 1 << 10;
+        /// A relocate node propagated up an ancestor arc rather than grafted at
+        /// the relocation itself. See [`RelocateKind`].
+        const PROPAGATED_RELOCATE = 1 << 11;
     }
 }
 
@@ -334,6 +337,40 @@ impl Node {
     pub(crate) fn is_relocate_source(&self) -> bool {
         self.flags.contains(NodeFlags::RELOCATE_SOURCE)
     }
+
+    /// Which of the two relocate shapes this node is, or `None` when it is not
+    /// a relocate arc at all.
+    ///
+    /// The kind is recorded when the node is built rather than inferred here,
+    /// because every property that would betray it — the map, inertness, the
+    /// parent link — is rewritten by grafting, propagation, or prototype
+    /// rebasing.
+    pub(crate) fn relocate_kind(&self) -> Option<RelocateKind> {
+        let propagated = self.flags.contains(NodeFlags::PROPAGATED_RELOCATE);
+        debug_assert!(
+            !propagated || self.arc == ArcType::Relocate,
+            "PROPAGATED_RELOCATE marks a node that is not a relocate arc",
+        );
+        (self.arc == ArcType::Relocate).then_some(if propagated {
+            RelocateKind::Propagated
+        } else {
+            RelocateKind::Direct
+        })
+    }
+}
+
+/// How a [`Relocate`](ArcType::Relocate) node came to be, which decides how a
+/// path translates through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelocateKind {
+    /// Grafted at the relocation itself, carrying the source-to-target rename
+    /// in its own map function.
+    Direct,
+    /// Propagated up an ancestor arc by `_EvalImpliedRelocations` so implied
+    /// class arcs keep crossing the relocation. It holds the identity map, so
+    /// the rename lives on the direct relocate it originated from and a path
+    /// translates by stepping out into the parent's namespace.
+    Propagated,
 }
 
 /// One contributing prim spec in a [`PrimIndex`](crate::pcp::PrimIndex)'s

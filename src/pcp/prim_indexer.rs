@@ -1428,7 +1428,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // Inert for value resolution, but its site is a relocation source, so
         // `RELOCATE_SOURCE` keeps it in `dependency_nodes`: an edit at the source
         // must recompose the prim reached through the relocation.
-        n.flags |= NodeFlags::INERT | NodeFlags::RELOCATE_SOURCE;
+        n.flags |= NodeFlags::INERT | NodeFlags::RELOCATE_SOURCE | NodeFlags::PROPAGATED_RELOCATE;
         // The placeholder contributes neither directly nor ancestrally (C++
         // `SetSpecContributionRestrictedDepth(1)`).
         n.restriction_depth = 1;

@@ -1143,3 +1143,120 @@ fn info_change_names_referrer() {
         notices.changed_info_only
     );
 }
+
+/// A relocate renames a referenced prim in the referrer's namespace, so a
+/// resync under the relocation source must be reported at the *relocated*
+/// composed path — the one a consumer watches — and not at the pre-relocation
+/// path an identity translation would produce.
+#[test]
+fn relocated_resync_notice() -> Result<()> {
+    let dir = relocated_reference()?;
+    let stage = usd::Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    // Compose the relocated prim so its index is cached and its dependency on
+    // the source site registered; nothing is registered for a prim never built.
+    assert!(stage.prim("/Ref/Moved")?.is_valid()?);
+
+    let notices = capture_notices(&stage);
+    // `active` is a significant field, so this goes through the significant
+    // tier rather than being reported as an info change. The edit targets the
+    // referenced layer, where the prim is actually authored.
+    let source = identifier_by_leaf(&stage, "source.usda");
+    stage.layer_mut(&source).expect("loaded").edit(|edit| {
+        edit.prim_mut(&sdf::path("/Source/Inner")?)
+            .expect("the source layer parsed")
+            .expect("the prim is authored there")
+            .set_active(false);
+        Ok(())
+    })?;
+
+    // The edit is queued; composing again publishes it to the sink.
+    let _ = stage.prim("/Ref/Moved")?.is_valid()?;
+    let notices = notices.borrow();
+    assert!(
+        notices.resynced.contains(&sdf::path("/Ref/Moved")?),
+        "the relocated composed path must be resynced, got {:?}",
+        notices.resynced
+    );
+    assert!(
+        !notices.resynced.contains(&sdf::path("/Ref/Inner")?),
+        "the pre-relocation path is not a composed path, got {:?}",
+        notices.resynced
+    );
+    Ok(())
+}
+
+/// The info-only channel translates the whole path, property suffix included,
+/// so a value edit under a relocation source is reported at the relocated
+/// property (C++ `_AddAffectedStagePaths`).
+#[test]
+fn relocated_info_notice() -> Result<()> {
+    let dir = relocated_reference()?;
+    let stage = usd::Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    // Warm the consumer: the dependency exists only for a cached index.
+    assert_eq!(stage.attribute("/Ref/Moved.x")?.get::<f64>()?, Some(1.0));
+
+    let notices = capture_notices(&stage);
+    let source = identifier_by_leaf(&stage, "source.usda");
+    stage.layer_mut(&source).expect("loaded").edit(|edit| {
+        edit.attribute_mut(&sdf::path("/Source/Inner.x")?)
+            .expect("the source layer parsed")
+            .expect("the attribute is authored there")
+            .set_default(sdf::Value::Double(2.0));
+        Ok(())
+    })?;
+
+    // The edit is queued; reading through it publishes the notice.
+    assert_eq!(stage.attribute("/Ref/Moved.x")?.get::<f64>()?, Some(2.0));
+    let notices = notices.borrow();
+    assert!(
+        notices.changed_info_only.contains(&sdf::path("/Ref/Moved.x")?),
+        "the relocated composed property must be named, got {:?}",
+        notices.changed_info_only
+    );
+    assert!(
+        !notices.changed_info_only.contains(&sdf::path("/Ref/Inner.x")?),
+        "the identity-derived path must not appear, got {:?}",
+        notices.changed_info_only
+    );
+    Ok(())
+}
+
+/// A reference whose target relocates `/Source/Inner` to `/Source/Moved`, so
+/// the referrer composes it at `/Ref/Moved` — a rename *below* the arc's own
+/// site, which is what an identity translation cannot reconstruct.
+fn relocated_reference() -> Result<tempfile::TempDir> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("source.usda"),
+        r#"#usda 1.0
+
+def "Source"
+{
+    def "Inner"
+    {
+        double x = 1
+    }
+}
+"#,
+    )?;
+    // The relocate is authored in the referrer's own layer stack, where the
+    // source carries no opinion of its own — an opinion at a relocation source
+    // is invalid in the stack that relocates it.
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+(
+    relocates = {
+        </Ref/Inner>: </Ref/Moved>
+    }
+)
+
+def "Ref" (
+    references = @./source.usda@</Source>
+)
+{
+}
+"#,
+    )?;
+    Ok(dir)
+}

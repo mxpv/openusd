@@ -288,8 +288,12 @@ def "Ref" (
 
 /// A relocate renames a referenced prim in the referrer's namespace, so the
 /// composed path an edit lands at is not the authored path with the arc's root
-/// swapped in — the identity translation the dependency map falls back on gets
-/// it wrong. The value tier must reach the query anyway.
+/// swapped in. The value tier follows the rename through the dependent's own
+/// composition graph, so the query at the relocated path sees the edit.
+///
+/// This is the public-query half: that the translated victim is *reached*. How
+/// narrowly it is reached — that nothing above it is swept in — is
+/// `value_edit_restale_radius`'s job.
 #[test]
 fn relocated_value_edit_reaches() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -603,6 +607,93 @@ def "Ref" (
     assert!(
         spliced.iter().any(|(layer, _)| layer == "source.usda"),
         "the referenced node kept its entry, got {spliced:?}",
+    );
+    Ok(())
+}
+
+/// The end-to-end case where instance-proxy redirection and a relocate meet: a
+/// query on an instance proxy replays a source resolved in the *prototype*
+/// namespace, so a translation that lands in the instance namespace instead
+/// would leave the revision that query holds unstamped, and it would replay a
+/// stale source forever.
+#[test]
+fn relocated_proxy_restales() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("source.usda"),
+        "#usda 1.0\n\ndef \"Source\"\n{\n    def \"Inner\"\n    {\n        double x = 1\n    }\n}\n",
+    )?;
+    // The relocate lives in the *referenced* stack so it is part of the shared
+    // content a prototype composes, and it renames a prim that stack references
+    // in turn — an opinion at a relocation source is invalid in the stack that
+    // relocates it.
+    fs::write(
+        dir.path().join("model.usda"),
+        r#"#usda 1.0
+(
+    relocates = {
+        </Model/Inner>: </Model/Moved>
+    }
+)
+
+def "Model" (
+    references = @./source.usda@</Source>
+)
+{
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+
+def "Inst" (
+    references = @./model.usda@</Model>
+    instanceable = true
+)
+{
+}
+"#,
+    )?;
+
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    let moved = stage.prim("/Inst/Moved")?;
+    assert!(
+        moved.is_instance_proxy()?,
+        "the query must resolve through a prototype for this to test the redirect"
+    );
+    let query = stage.attribute_query("/Inst/Moved.x")?;
+    assert_eq!(agreed(&stage, &query, "/Inst/Moved.x", 0.0)?, Some(1.0));
+
+    // The answer is resolved in the prototype's namespace: the proxy path has
+    // no cached index of its own, so a restale landing there would never reach
+    // the revision this query holds.
+    let attribute = stage.attribute("/Inst/Moved.x")?;
+    assert!(
+        attribute.resolve_info()?.node().is_some(),
+        "an authored opinion resolves through a composition node"
+    );
+
+    // A reference target is not in the root layer stack, so its identifier comes
+    // from the composed prim's own stack.
+    let source = moved
+        .prim_stack()?
+        .into_iter()
+        .map(|site| site.layer)
+        .find(|id| leaf_of(id) == "source.usda")
+        .expect("the reference target contributes a spec");
+    stage.layer_mut(&source).expect("loaded").edit(|edit| {
+        edit.attribute_mut(&sdf::path("/Source/Inner.x")?)
+            .expect("the source layer parsed")
+            .expect("the attribute is authored there")
+            .set_default(sdf::Value::Double(7.0));
+        Ok(())
+    })?;
+
+    assert_eq!(
+        agreed(&stage, &query, "/Inst/Moved.x", 0.0)?,
+        Some(7.0),
+        "the warmed proxy query must see the edit, not replay the prototype's old source"
     );
     Ok(())
 }

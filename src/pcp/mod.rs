@@ -168,11 +168,14 @@
 //! them — the value tier stamps the composing prims and clears the affected
 //! per-property resolved-target memos, so both recompute on next read.
 //!
-//! Where a dependent reads the edited site through an *ancestor* arc, the value
-//! tier restales that dependent's whole cached subtree rather than guessing the
-//! composed path: an arc can rename what lies below it, and the dependency map
-//! translates with an identity approximation (see `Dependencies`). Over-
-//! invalidating there is a cache miss; getting it wrong would be a stale read.
+//! Where a dependent reads the edited site through an *ancestor* arc, the
+//! composed path it is affected at comes from that dependent's own composition
+//! graph: the reverse index hands back the registrations a change reaches, and
+//! `IndexStore` maps the changed path through the very nodes that registered
+//! them (C++ `PcpCache::FindSiteDependencies`). An arc that renames what lies
+//! below it — a relocate inside a referenced subtree, an implied-class graft —
+//! is therefore followed rather than approximated, so a value edit restales the
+//! prim that actually composes it.
 //!
 //! An `expressionVariables` edit invalidates on two channels, as C++ does. The
 //! prims whose composition read a changed value are dropped, the ordinary

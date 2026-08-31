@@ -348,7 +348,8 @@ impl StageComposition {
         };
         {
             let cache = self.cache.borrow();
-            pcp_changes.did_change(&cache, edits);
+            let layers = self.layers.borrow();
+            pcp_changes.did_change(&cache, &layers, edits);
         }
         // Snapshot the after-commit payload before `apply` consumes
         // `pcp_changes`, and only when a sink is installed — the no-sink path

@@ -21,7 +21,6 @@ use crate::tf::Token;
 use super::asset_resolve::{self, AssetSite};
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
-use super::dependencies::Dependencies;
 use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::{LayerGraph, LayerStackIdentifier};
@@ -1500,9 +1499,10 @@ impl IndexCache {
         Ok(Some((prim, suffix)))
     }
 
-    /// Read-only access to the dependency map for change-driven invalidation.
-    pub(super) fn dependencies(&self) -> &Dependencies {
-        self.store.dependencies()
+    /// Read-only access to the cached indices and the dependency map they are
+    /// registered in — the pair change-driven invalidation reads.
+    pub(super) fn store(&self) -> &IndexStore {
+        &self.store
     }
 
     /// Whether value resolution has to consult value clips for `path`: clip
@@ -3092,6 +3092,7 @@ mod tests {
 
     use super::super::{Changes, ExpressionContext, LayerChanges};
     use super::*;
+    use crate::pcp::prim_graph::{NodeId, RelocateKind};
 
     fn manifest_dir() -> String {
         std::env::var("CARGO_MANIFEST_DIR").unwrap()
@@ -3110,15 +3111,7 @@ mod tests {
         let registry = sdf::LayerRegistry::default();
         let layers = registry.collect_with_arcs(path).expect("collect layers");
         let graph = LayerGraph::from_layers(layers, 0, registry);
-        (
-            graph,
-            IndexCache::new(
-                VariantFallbackMap::new(),
-                LoadRules::all(),
-                PopulationMask::all(),
-                Vec::new(),
-            ),
-        )
+        (graph, fresh_cache())
     }
 
     /// Parses in-memory USDA text into a single `root.usda` layer.
@@ -3137,15 +3130,7 @@ mod tests {
     /// composition cases that need no on-disk asset.
     fn in_memory_stack(text: &str) -> (LayerGraph, IndexCache) {
         let graph = LayerGraph::from_layers(vec![parse_layer(text)], 0, sdf::LayerRegistry::default());
-        (
-            graph,
-            IndexCache::new(
-                VariantFallbackMap::new(),
-                LoadRules::all(),
-                PopulationMask::all(),
-                Vec::new(),
-            ),
-        )
+        (graph, fresh_cache())
     }
 
     /// The blast radius of a value edit, pinned against a synthetic
@@ -3153,10 +3138,9 @@ mod tests {
     ///
     /// Editing `/Source/Inner.x` restales the prims that actually read it — the
     /// authored prim and each referrer's copy — and leaves the rest of the cache
-    /// standing. The referrers themselves come along because their indices read
-    /// `/Source` as an ancestor site, which is the conservative subtree rule (an
-    /// arc can rename what lies below, so the exact composed path is not
-    /// reconstructible); everything outside those subtrees must survive.
+    /// standing, the referrer roots included: each reads `/Source` as an
+    /// ancestor site, and the translated reach names the descendant that
+    /// composes the edit rather than sweeping the root's whole subtree.
     #[test]
     fn value_edit_restale_radius() -> Result<()> {
         let (mut graph, mut cache) = in_memory_stack(
@@ -3210,7 +3194,7 @@ def "Unrelated"
             .note(FieldKey::Default.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
         let layer = graph.all_ids()[0];
-        changes.did_change(&cache, &[crate::pcp::LayerChanges::plain(layer, &cl)]);
+        changes.did_change(&cache, &graph, &[crate::pcp::LayerChanges::plain(layer, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         let mut restaled: Vec<String> = cache
@@ -3222,9 +3206,21 @@ def "Unrelated"
         restaled.sort();
         assert_eq!(
             restaled,
-            ["/RefA", "/RefA/Inner", "/RefB", "/RefB/Inner", "/Source/Inner"],
-            "only the prims composing the edited site — and the referrer subtrees              whose composed paths an arc could rename — may be restaled"
+            ["/RefA/Inner", "/RefB/Inner", "/Source/Inner"],
+            "only the prims that compose the edited site may be restaled"
         );
+        // Named on their own: each referrer *root* reads `/Source` as an
+        // ancestor site, and translating that reach is what keeps its own
+        // composition — which the edit leaves alone — out of the radius.
+        let after: HashMap<Path, _> = cache.prim_revisions().into_iter().collect();
+        for root in ["/RefA", "/RefB"] {
+            let path = sdf::path(root)?;
+            assert_eq!(
+                after.get(&path),
+                before.get(&path),
+                "{root} composes nothing the edit moved, so it keeps its revision"
+            );
+        }
         Ok(())
     }
 
@@ -3279,15 +3275,7 @@ def "Unrelated"
         let id = registry.create_identifier(path, None);
         let (_, data) = registry.open(path).expect("open root").expect("root resolves");
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
-        (
-            graph,
-            IndexCache::new(
-                VariantFallbackMap::new(),
-                LoadRules::all(),
-                PopulationMask::all(),
-                Vec::new(),
-            ),
-        )
+        (graph, fresh_cache())
     }
 
     /// A prim inheriting its own grand-descendant (`/A` inherits `/A/B/C`) is a
@@ -3443,6 +3431,186 @@ def "A" (
         Ok(())
     }
 
+    /// The dependency nodes an index registers at a site, collected — the tests'
+    /// view of [`PrimIndex::dependency_nodes_at`], which appends into a caller's
+    /// buffer so a change round can reuse one.
+    fn nodes_at_site(index: &PrimIndex, prim: &Path, layer: LayerId, site: &Path, graph: &LayerGraph) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        index.dependency_nodes_at(prim, layer, site, graph, &mut out);
+        out
+    }
+
+    /// A relocate grafted at the relocation itself carries the source-to-target
+    /// rename in its own map, so a change at the source translates straight
+    /// through it (C++ `_ProcessDependentNode`'s ordinary path).
+    #[test]
+    fn direct_relocate_translates() -> Result<()> {
+        let root = format!("{}/fixtures/relocate_cross_hierarchy/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let dst = sdf::path("/Dest/Moved")?;
+        cache.ensure_index(&graph, &dst)?;
+        let index = cache.cached(&dst);
+
+        let src = sdf::path("/Source/Inner")?;
+        let node = *nodes_at_site(index, &dst, graph.root_id().unwrap(), &src, &graph)
+            .first()
+            .expect("the relocate node registers its source site");
+        assert_eq!(index.node(node).relocate_kind(), Some(RelocateKind::Direct));
+        assert_eq!(index.translate_dependency_path(node, &src), Some(dst.clone()));
+        assert_eq!(
+            index.translate_dependency_path(node, &sdf::path("/Source/Inner.op")?),
+            Some(sdf::path("/Dest/Moved.op")?),
+            "the property suffix rides along",
+        );
+        Ok(())
+    }
+
+    /// A relocate propagated up an ancestor arc holds the identity map, so a
+    /// path steps out into the parent's namespace instead of mapping through it
+    /// — the case C++ handles by walking out of relocate nodes before
+    /// translating.
+    #[test]
+    fn implied_relocate_translates() -> Result<()> {
+        let (graph, mut cache) = referenced_relocate_stack();
+        let scope = sdf::path("/Ref/Scope")?;
+        cache.ensure_index(&graph, &sdf::path("/Ref")?)?;
+        cache.ensure_index(&graph, &scope)?;
+        let index = cache.cached(&scope);
+
+        // The placeholder sits at the relocation source mapped into the
+        // referrer's namespace, which is the site a change names.
+        let rig = sdf::path("/Ref/Rig")?;
+        let node = *nodes_at_site(index, &scope, graph.root_id().unwrap(), &rig, &graph)
+            .first()
+            .expect("the propagated placeholder registers its source site");
+        assert_eq!(index.node(node).relocate_kind(), Some(RelocateKind::Propagated));
+        assert_eq!(index.translate_dependency_path(node, &rig), Some(scope.clone()));
+        Ok(())
+    }
+
+    /// The same placeholder reached inside a materialized prototype still
+    /// translates as a placeholder. Its kind is recorded on the node, so it
+    /// survives the map rewriting `rebase_root` performs — which is why the
+    /// kind is stored rather than read back off the map.
+    #[test]
+    fn prototype_relocate_translates() -> Result<()> {
+        let (graph, mut cache) = instanced_relocate_stack();
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        cache.ensure_index(&graph, &sdf::path("/Inst")?)?;
+        // Reading through the proxy mints and materializes the prototype.
+        cache.value_at(&graph, &sdf::path("/Inst/Scope.x")?, 0.0, &interp)?;
+
+        let scope = sdf::path("/__Prototype_0/Scope")?;
+        let index = cache.cached(&scope);
+        let rig = sdf::path("/__Prototype_0/Rig")?;
+        let node = *nodes_at_site(index, &scope, graph.root_id().unwrap(), &rig, &graph)
+            .first()
+            .expect("the placeholder is rebased into the prototype namespace");
+        assert_eq!(index.node(node).relocate_kind(), Some(RelocateKind::Propagated));
+        assert_eq!(index.translate_dependency_path(node, &rig), Some(scope.clone()));
+        Ok(())
+    }
+
+    /// The site map skips a prim's own root edge, so the lookup must not
+    /// re-find it: translating through it would name a path no registration
+    /// ever produced.
+    #[test]
+    fn self_root_site_skipped() -> Result<()> {
+        let (graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"A\" { custom int x = 1 }\n");
+        let a = sdf::path("/A")?;
+        cache.ensure_index(&graph, &a)?;
+        assert!(
+            nodes_at_site(cache.cached(&a), &a, graph.root_id().unwrap(), &a, &graph).is_empty(),
+            "the self-Root node registers no site, so it is never re-found",
+        );
+        Ok(())
+    }
+
+    /// A layer stack the node does not read is not its dependency, matching the
+    /// layer filter the registration walk applies.
+    #[test]
+    fn other_layer_no_match() -> Result<()> {
+        let (graph, mut cache) = referenced_relocate_stack();
+        let scope = sdf::path("/Ref/Scope")?;
+        cache.ensure_index(&graph, &sdf::path("/Ref")?)?;
+        cache.ensure_index(&graph, &scope)?;
+        let model = graph.id_of("model.usd").unwrap();
+        assert!(
+            nodes_at_site(cache.cached(&scope), &scope, model, &sdf::path("/Ref/Rig")?, &graph).is_empty(),
+            "the placeholder reads the root stack, not the referenced one",
+        );
+        Ok(())
+    }
+
+    /// A relocate under a reference: the referenced stack relocates `/Model/Rig`
+    /// to `/Model/Scope`, so composing `/Ref/Scope` grafts an implied relocate
+    /// placeholder onto the grandparent.
+    fn referenced_relocate_stack() -> (LayerGraph, IndexCache) {
+        relocate_stack("#usda 1.0\ndef \"Ref\" (\n    references = @model.usd@</Model>\n) {}\n")
+    }
+
+    /// [`referenced_relocate_stack`] with the referrer marked instanceable, so a
+    /// read through the proxy materializes a prototype.
+    fn instanced_relocate_stack() -> (LayerGraph, IndexCache) {
+        relocate_stack(
+            "#usda 1.0\ndef \"Inst\" (\n    references = @model.usd@</Model>\n    instanceable = true\n) {}\n",
+        )
+    }
+
+    fn relocate_stack(root: &str) -> (LayerGraph, IndexCache) {
+        const MODEL: &str = "#usda 1.0\n(\n    relocates = { </Model/Rig>: </Model/Scope> }\n)\ndef \"Model\" {\n    def \"Rig\" { custom double x = 1 }\n}\n";
+        two_layer_stack(root, MODEL)
+    }
+
+    /// A graph of `root.usd` over `model.usd`, so the root can reference
+    /// `@model.usd@` by name, plus an empty cache over it.
+    fn two_layer_stack(root: &str, model: &str) -> (LayerGraph, IndexCache) {
+        let graph = LayerGraph::from_layers(
+            vec![
+                parse_named_layer("root.usd", root),
+                parse_named_layer("model.usd", model),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        (graph, fresh_cache())
+    }
+
+    /// An index cache with no variant fallbacks, everything loaded, nothing
+    /// masked — the default every composition fixture in this module wants.
+    fn fresh_cache() -> IndexCache {
+        IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Vec::new(),
+        )
+    }
+
+    /// The TODO's other named renaming case: an implied-class graft. `/Ref`
+    /// references a prim that inherits a class, so the class node is grafted
+    /// into the referrer's namespace and a change under the class site composes
+    /// beneath the referrer, not beneath the class.
+    #[test]
+    fn translates_implied_class() -> Result<()> {
+        const ROOT: &str = "#usda 1.0\ndef \"Ref\" (\n    references = @model.usd@</Model>\n) {}\n";
+        const MODEL: &str =
+            "#usda 1.0\nclass \"Cls\" { custom double x = 1 }\ndef \"Model\" (\n    inherits = </Cls>\n) {}\n";
+        let (graph, mut cache) = two_layer_stack(ROOT, MODEL);
+        let refp = sdf::path("/Ref")?;
+        cache.ensure_index(&graph, &refp)?;
+
+        let model = graph.id_of("model.usd").unwrap();
+        assert_eq!(
+            cache
+                .store()
+                .graph_ancestor_lookup(&graph, model, &sdf::path("/Cls/Child")?),
+            vec![sdf::path("/Ref/Child")?],
+            "the inherited class composes under the referrer"
+        );
+        Ok(())
+    }
+
     /// A cross-hierarchy relocation source is registered as a dependency of the
     /// relocated prim even though its node is inert. `/Source/Inner` relocates to
     /// `/Dest/Moved`; the source's ancestors (`/Source`) are not ancestors of the
@@ -3458,8 +3626,8 @@ def "A" (
         let src = sdf::path("/Source/Inner")?;
         assert!(
             cache
-                .dependencies()
-                .lookup_with_ancestors(graph.root_id().unwrap(), &src)
+                .store()
+                .lookup_with_ancestors(&graph, graph.root_id().unwrap(), &src)
                 .contains(&dst),
             "an edit at relocation source /Source/Inner must invalidate /Dest/Moved"
         );
@@ -3486,12 +3654,7 @@ def "A" (
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
         let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
 
         let child = sdf::path("/A/B")?;
         cache.ensure_index(&graph, &child)?;
@@ -3565,12 +3728,7 @@ def "A" (
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
         let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
 
         let a = sdf::path("/A")?;
         cache.ensure_index(&graph, &a)?;
@@ -3663,12 +3821,7 @@ def "T" (
             0,
             sdf::LayerRegistry::default(),
         );
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.x")?, 0.0)?,
             Some(Value::Double(1.0)),
@@ -3848,12 +4001,7 @@ def "Anchor" (inherits = </Rig>) {}
         let a = parse_named_layer("a.usda", "#usda 1.0\ndef \"X\" { custom double y = 1 }\n");
         let b = parse_named_layer("b.usda", "#usda 1.0\ndef \"X\" { custom double y = 2 }\n");
         let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let root_id = graph.root_id().unwrap();
         let y = sdf::path("/R.y")?;
 
@@ -3867,7 +4015,7 @@ def "Anchor" (inherits = </Rig>) {}
             e.set_expression_variables(HashMap::from([("PICK".to_string(), Value::String("b".into()))]))
         })?;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert_eq!(
@@ -3891,12 +4039,7 @@ def "Anchor" (inherits = </Rig>) {}
         );
         let t = parse_named_layer("t.usda", target);
         let graph = LayerGraph::from_layers(vec![root, t], 0, sdf::LayerRegistry::default());
-        let cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let cache = fresh_cache();
         let target_id = graph.id_of("t.usda").expect("the target layer is interned");
         (graph, cache, target_id)
     }
@@ -3922,6 +4065,7 @@ def "Anchor" (inherits = </Rig>) {}
         let mut changes = Changes::new();
         changes.did_change(
             cache,
+            graph,
             &[LayerChanges {
                 layer,
                 changes: &cl,
@@ -4136,12 +4280,7 @@ def "Anchor" (inherits = </Rig>) {}
         );
         let t = parse_named_layer("t.usda", TWO_SOURCE_TARGET);
         let mut graph = LayerGraph::from_layers(vec![root, mid, t], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let target = graph.id_of("t.usda").expect("the target layer is interned");
         let y = sdf::path("/User.y")?;
         assert_eq!(
@@ -4178,12 +4317,7 @@ def "Anchor" (inherits = </Rig>) {}
         );
         let t = parse_named_layer("t.usda", TWO_SOURCE_TARGET);
         let mut graph = LayerGraph::from_layers(vec![root, t], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let target = graph.id_of("t.usda").expect("the target layer is interned");
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/A.y")?, 0.0)?,
@@ -4245,12 +4379,7 @@ def "Anchor" (inherits = </Rig>) {}
              def \"User\" (\n    references = <>\n) {}\n",
         );
         let mut graph = LayerGraph::from_layers(vec![session, root], 1, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let root_id = graph.root_id().unwrap();
         let session_id = graph.id_of("session.usda").expect("the session layer is interned");
         let y = sdf::path("/User.y")?;
@@ -4295,12 +4424,7 @@ def "Anchor" (inherits = </Rig>) {}
             "#usda 1.0\ndef \"B\" {\n    custom asset tex = @`${A}`@\n}\n",
         );
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let value = settled_value_at(&mut graph, &mut cache, &sdf::path("/M.tex")?, 0.0)?.expect("tex resolves");
         let asset = value.try_as_asset_path().expect("attribute is asset-typed");
         assert_eq!(
@@ -4323,12 +4447,7 @@ def "Anchor" (inherits = </Rig>) {}
         );
         let base = parse_named_layer("base.usda", "#usda 1.0\ndef \"Base\" {}\n");
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let base_id = graph.id_of("base.usda").unwrap();
         let local = sdf::path("/Local")?;
         let refp = sdf::path("/Ref")?;
@@ -4342,7 +4461,7 @@ def "Anchor" (inherits = </Rig>) {}
             e.set_expression_variables(HashMap::from([("V".to_string(), Value::String("x".into()))]))
         })?;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(base_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(base_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert!(
@@ -4386,7 +4505,7 @@ def "Anchor" (inherits = </Rig>) {}
             Ok(())
         })?;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert!(
@@ -4969,7 +5088,7 @@ def "Anchor" (inherits = </Rig>) {}
         cl.entry_mut(&sdf::path("/A")?)
             .note(sdf::FieldKey::Instanceable.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert!(cache.prototypes().is_empty());
@@ -4999,7 +5118,7 @@ def "Anchor" (inherits = </Rig>) {}
         let mut cl = sdf::ChangeList::new();
         cl.entry_mut(&sdf::path("/Foo")?).flags = sdf::ChangeFlags::ADD_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The spec-tier rescan made the new opinion visible.
@@ -5038,7 +5157,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The reference is composed, not skipped by an in-place spec refresh.
@@ -5066,7 +5185,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The arc is gone, not left dangling by an in-place spec refresh.
@@ -5084,12 +5203,7 @@ def "Anchor" (inherits = </Rig>) {}
         let weak = parse_named_layer("weak.usd", "#usda 1.0\ndef \"A\" { custom int x = 1 }\n");
         let mut graph = LayerGraph::from_layers(vec![root, weak], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let a = sdf::path("/A")?;
 
         // Before the edit only the weak sublayer authors /A.
@@ -5105,7 +5219,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         assert!(
             changes.cache.did_change_specs.contains(&(root_id, a.clone())),
             "an inert over add routes through the spec tier"
@@ -5120,12 +5234,7 @@ def "Anchor" (inherits = </Rig>) {}
             vec![("root.usd".to_string(), a.clone()), ("weak.usd".to_string(), a.clone())],
             "the spec-tier refresh adds the new strong site to the prim stack"
         );
-        let mut fresh = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut fresh = fresh_cache();
         assert_eq!(
             refreshed,
             fresh.prim_stack(&graph, &a)?,
@@ -5156,12 +5265,7 @@ def "Anchor" (inherits = </Rig>) {}
         let mut graph = LayerGraph::from_layers(vec![root, mid, src, srcmid], 0, sdf::LayerRegistry::default());
         let mid_id = graph.id_of("mid.usd").unwrap();
         let srcmid_id = graph.id_of("srcmid.usd").unwrap();
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let a = sdf::path("/A")?;
         let class = sdf::path("/SrcClass")?;
         let src_path = sdf::path("/Src")?;
@@ -5191,6 +5295,7 @@ def "Anchor" (inherits = </Rig>) {}
         let mut changes = Changes::new();
         changes.did_change(
             &cache,
+            &graph,
             &[
                 LayerChanges::plain(mid_id, &cl_mid),
                 LayerChanges::plain(srcmid_id, &cl_srcmid),
@@ -5234,12 +5339,7 @@ def "Anchor" (inherits = </Rig>) {}
         let src = parse_named_layer("src.usd", "#usda 1.0\ndef \"Src\" { custom int x = 1 }\n");
         let mut graph = LayerGraph::from_layers(vec![root, mid, src], 0, sdf::LayerRegistry::default());
         let mid_id = graph.id_of("mid.usd").unwrap();
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let a = sdf::path("/A")?;
         let src_path = sdf::path("/Src")?;
         assert_eq!(
@@ -5256,7 +5356,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(mid_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(mid_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert_eq!(
@@ -5291,7 +5391,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert!(
@@ -5318,12 +5418,7 @@ def "Anchor" (inherits = </Rig>) {}
         let mut graph = LayerGraph::from_layers(vec![root, mid, weak], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
         let mid_id = graph.id_of("mid.usd").unwrap();
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let a = sdf::path("/A")?;
 
         // Only the weakest sublayer authors /A before the edit.
@@ -5347,6 +5442,7 @@ def "Anchor" (inherits = </Rig>) {}
         let mut changes = Changes::new();
         changes.did_change(
             &cache,
+            &graph,
             &[
                 LayerChanges::plain(root_id, &cl_root),
                 LayerChanges::plain(mid_id, &cl_mid),
@@ -5368,12 +5464,7 @@ def "Anchor" (inherits = </Rig>) {}
             ],
             "the batched spec-tier refresh adds both new strong sites"
         );
-        let mut fresh = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut fresh = fresh_cache();
         assert_eq!(
             refreshed,
             fresh.prim_stack(&graph, &a)?,
@@ -5396,12 +5487,7 @@ def "Anchor" (inherits = </Rig>) {}
         let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
         let base_id = graph.id_of("base.usd").unwrap();
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let a = sdf::path("/A")?;
 
         // The empty target makes /A's reference culled — no composition arc.
@@ -5420,7 +5506,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(base_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(base_id, &cl)]);
         // The inert add routes through the spec tier (not a significant fanout),
         // so the rescan's un-cull path is what recomposes /A.
         assert!(
@@ -5447,12 +5533,7 @@ def "Anchor" (inherits = </Rig>) {}
         let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( inherits = </_class_Foo> ) {}\n");
         let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let a = sdf::path("/A")?;
 
         // The empty class makes /A's inherit culled — no composition arc.
@@ -5465,7 +5546,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         assert!(
             changes
                 .cache
@@ -5487,12 +5568,7 @@ def "Anchor" (inherits = </Rig>) {}
         let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( specializes = </_class_Foo> ) {}\n");
         let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let a = sdf::path("/A")?;
 
         assert!(!cache.has_composition_arc(&graph, &a)?);
@@ -5503,7 +5579,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         assert!(
             changes
                 .cache
@@ -5570,7 +5646,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
         assert!(
             changes
                 .cache
@@ -5603,12 +5679,7 @@ def "Anchor" (inherits = </Rig>) {}
         let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
         let base_id = graph.id_of("base.usd").unwrap();
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let a = sdf::path("/A")?;
 
         // The missing nested target makes /A's reference contribute nothing.
@@ -5622,7 +5693,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(base_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(base_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // /A now composes the reference.
@@ -5646,12 +5717,7 @@ def "Anchor" (inherits = </Rig>) {}
         let weak = parse_named_layer("weak.usda", "#usda 1.0\ndef \"World\" {\n  def \"Child\" {}\n}\n");
         let mut graph = LayerGraph::from_layers(vec![strong, weak], 0, sdf::LayerRegistry::default());
         let strong_id = graph.root_id().unwrap();
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
 
         let world = sdf::path("/World")?;
         let has_child = |cache: &mut IndexCache, graph: &LayerGraph| -> Result<bool> {
@@ -5676,7 +5742,7 @@ def "Anchor" (inherits = </Rig>) {}
         })
         .unwrap();
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(strong_id, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(strong_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The active=false opinion is gone — the prim reactivates by default —
@@ -5716,12 +5782,7 @@ def "Anchor" (inherits = </Rig>) {}
         }
 
         let graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         Ok(cache.resolve_field(&graph, &world, field)?)
     }
 
@@ -5812,12 +5873,7 @@ def "Anchor" (inherits = </Rig>) {}
         .unwrap();
 
         let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         assert_eq!(
             cache.resolve_field(&graph, &sdf::path("/Inst")?, "expr")?,
             Some(Value::PathExpression(sdf::PathExpression::parse(
@@ -5868,12 +5924,7 @@ def "Anchor" (inherits = </Rig>) {}
         .unwrap();
 
         let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         assert_eq!(
             cache.resolve_field(&graph, &sdf::path("/Inst")?, "exprs")?,
             Some(Value::PathExpressionVec(vec![
@@ -5898,12 +5949,7 @@ def "Anchor" (inherits = </Rig>) {}
             "#usda 1.0\ndef \"Class\"\n{\n    custom pathExpression e = \"/Class/child//\"\n}\n",
         );
         let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(
-            VariantFallbackMap::new(),
-            LoadRules::all(),
-            PopulationMask::all(),
-            Vec::new(),
-        );
+        let mut cache = fresh_cache();
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
             cache.value_at(&graph, &sdf::path("/Inst.e")?, 0.0, &interp)?,
@@ -5978,7 +6024,7 @@ def "Anchor" (inherits = </Rig>) {}
         cl.entry_mut(&Path::abs_root())
             .note(sdf::FieldKey::LayerRelocates.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(cache, &[LayerChanges::plain(root_id, &cl)]);
+        changes.did_change(cache, graph, &[LayerChanges::plain(root_id, &cl)]);
         changes.apply(cache, graph);
         graph.errors()
     }

@@ -2,9 +2,13 @@
 //!
 //! For each composed [`PrimIndex`], records the `(layer_index, site_path)`
 //! pairs read by its graph. When an authoring change reports "layer L
-//! changed at path P", [`Dependencies::lookup_with_ancestors`] (plus
+//! changed at path P", [`ancestor_sites`](Dependencies::ancestor_sites) (plus
 //! [`subtree_lookup`](Self::subtree_lookup) for fanout downward) returns
-//! the prim indices that need invalidating. A coarser `layer → indices` map
+//! the registrations that change reaches. The pairs are untranslated: naming
+//! the composed path a dependent is affected at needs that dependent's own
+//! composition graph, which this table does not hold, so
+//! [`IndexStore`](super::index_store::IndexStore) joins and translates them.
+//! A coarser `layer → indices` map
 //! ([`indices_for_layers`](Dependencies::indices_for_layers)) answers the
 //! whole-layer question a mute/unmute or layer-stack edit asks, without
 //! scanning every cached index.
@@ -15,11 +19,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::mem;
 
 use crate::sdf::{self, Path};
 
-use super::prim_graph::ArcType;
-use super::prim_index::PrimIndex;
+use super::prim_index::{PrimIndex, registers_site};
 use super::prim_indexer::ExprVarDeps;
 use super::{LayerGraph, LayerId, LayerStackId};
 
@@ -141,7 +145,7 @@ impl Dependencies {
         // nodes: authoring a spec at such a site must invalidate this prim so the
         // node un-culls / re-relocates on recomposition.
         for node in index.dependency_nodes() {
-            let is_self_root = node.arc == ArcType::Root && node.path == *prim_index_path;
+            let registers = registers_site(node, prim_index_path);
             layers.insert(node.layer_id());
             if node.layer_stack_id() != LayerStackId::ROOT {
                 stacks.insert(node.layer_stack_id());
@@ -150,7 +154,7 @@ impl Dependencies {
                 layers.insert(layer);
                 // The site map skips the self-Root edge to stay compact; the
                 // layer map keeps it (the prim reads its own root stack).
-                if is_self_root {
+                if !registers {
                     continue;
                 }
                 let key = (layer, node.path.clone());
@@ -294,109 +298,38 @@ impl Dependencies {
         }
     }
 
-    /// The composed prim paths a change at `(layer_id, site_path)` affects,
-    /// through a dependency on that site or on an ancestor of it.
+    /// The registered `(site, dependent)` pairs a change at `(layer_id,
+    /// site_path)` reaches — the site itself and every ancestor of it, each
+    /// paired with a prim index that reads it. Untranslated: this table holds no
+    /// composition graphs, so it cannot say what composed path a dependent is
+    /// affected at. [`IndexStore`](super::index_store::IndexStore) joins each
+    /// pair to the dependent's live index and translates there.
     ///
     /// The ancestor walk matches C++ `Pcp_DidChangeDependents` (changes.cpp):
     /// an arc introduced at `/Foo` makes `/Foo/Bar`'s composed index depend
     /// transitively on opinions at `/Foo`, so a change at `/Foo` reaches
     /// `/Foo/Bar` too.
-    pub(super) fn lookup_with_ancestors(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
-        // A self-registration observes exactly its own path, and is findable on
-        // every layer, so an ancestor holding one says only that the changed
-        // path itself is affected — which is what it translates to, at any
-        // depth.
-        let by_path = site_path
-            .ancestors()
-            .any(|anc| !self.path_dependents(&anc).is_empty())
-            .then(|| site_path.clone());
-        Self::dedup_owned(self.translated_ancestors(layer_id, site_path).chain(by_path))
-    }
-
-    /// The composed paths reached through a graph site at or above `site_path`,
-    /// each translated onto the dependent's namespace — the half
-    /// [`lookup_with_ancestors`](Self::lookup_with_ancestors) and
-    /// [`graph_ancestor_lookup`](Self::graph_ancestor_lookup) share.
-    ///
-    /// A dependent whose site is a *strict* ancestor is affected at the path the
-    /// change translates to, not at the dependent's own root: an index at `/Ref`
-    /// reading site `/Src` is affected at `/Ref/Child` by a change at
-    /// `/Src/Child`, its own composition being untouched. C++ translates the
-    /// same way, through the node's map function
-    /// (`_ProcessDependentNode`, cache.cpp); the identity map used here agrees
-    /// with it wherever an arc does not rename its namespace.
-    //
-    // TODO: carry each site's `MapFunction` (available on the `Node` that
-    // registered it, `Dependencies::add`) and translate with
-    // `MapFunction::map_source_to_target`, as C++ does. The identity map here
-    // reports the wrong path for an arc that renames namespace below its own
-    // site — a relocate inside a referenced subtree, an implied-class graft —
-    // where the site-level rename case works because the site is registered at
-    // its renamed path. Carrying the map also retires the variant strip below,
-    // which only exists because the translation is reassembled from an authored
-    // spelling.
-    ///
-    fn translated_ancestors<'a>(&'a self, layer_id: LayerId, site_path: &'a Path) -> impl Iterator<Item = Path> {
+    pub(super) fn ancestor_sites<'a>(
+        &'a self,
+        layer_id: LayerId,
+        site_path: &'a Path,
+    ) -> impl Iterator<Item = (&'a Path, &'a Path)> {
         self.per_layer
             .get(&layer_id)
             .into_iter()
-            .flat_map(move |map| map.ancestors(site_path))
-            .flat_map(move |(site, deps)| {
-                deps.iter().map(move |dep| {
-                    let translated = site_path
-                        .replace_prefix(site, dep)
-                        .expect("an ancestor site prefixes the changed path");
-                    // The suffix comes from the site's authored spelling, so a
-                    // `{set=sel}` segment inside it has to go: a dependent's
-                    // namespace is composed, where a variant is part of its
-                    // prim rather than a level of its own. C++'s map functions
-                    // drop selections for the same reason. The scan is free
-                    // where the strip copies, so only pay it when there is
-                    // something to strip.
-                    if translated.contains_prim_variant_selection() {
-                        translated.strip_all_variant_selections()
-                    } else {
-                        translated
-                    }
-                })
-            })
+            .flat_map(move |map| ancestors_to_variant_boundary(site_path).filter_map(|p| map.get_key_value(&p)))
+            .flat_map(|(site, deps)| deps.iter().map(move |dep| (site, dep)))
     }
 
-    /// Find prim indices whose graph reads `(layer_id, site_path)` or an
-    /// ancestor of it.
+    /// Whether `path` or an ancestor of it carries a layer-agnostic
+    /// [`by_path`](Self::by_path) self-registration, stopping at a
+    /// variant-selection boundary like [`ancestor_sites`](Self::ancestor_sites).
     ///
-    /// The graph-site half of
-    /// [`lookup_with_ancestors`](Self::lookup_with_ancestors), without the
-    /// layer-agnostic [`by_path`](Self::by_path) self-registrations. Those exist
-    /// so a cached prim stays findable on every layer, including ones its graph
-    /// never touched, which is right for invalidation and wrong for a report
-    /// about one layer's site: a prim merely cached at `/Source` would answer a
-    /// question about `/Source` in a layer it does not read.
-    pub(super) fn graph_ancestor_lookup(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
-        Self::dedup_owned(self.translated_ancestors(layer_id, site_path))
-    }
-
-    /// Prim indices reading a site *above* `site_path` in `layer_id`, as the
-    /// paths they are cached at — untranslated.
-    ///
-    /// The companion of [`exact_lookup`](Self::exact_lookup) for a change whose
-    /// site an index reads through an ancestor: `/Ref` reading `/Src` is reached
-    /// by a change at `/Src/Child`, at some composed path under `/Ref` that only
-    /// the arc's own namespace mapping can name. A caller that must not guess
-    /// that path — value invalidation, where guessing wrong means serving a
-    /// stale value — takes the dependent's own path and covers its subtree
-    /// instead. See the `MapFunction` `TODO` on
-    /// [`translated_ancestors`](Self::translated_ancestors), which is what
-    /// reconstructing the path exactly would need.
-    pub(super) fn ancestor_dependents(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
-        let Some(map) = self.per_layer.get(&layer_id) else {
-            return Vec::new();
-        };
-        Self::dedup_paths(
-            map.ancestors(site_path)
-                .filter(|(site, _)| *site != site_path)
-                .flat_map(|(_, deps)| deps),
-        )
+    /// A self-registration observes exactly its own path, so an ancestor holding
+    /// one says only that the changed path itself is affected — which is what
+    /// the caller contributes, at any depth.
+    pub(super) fn has_path_ancestor(&self, path: &Path) -> bool {
+        ancestors_to_variant_boundary(path).any(|p| self.by_path.contains(&p))
     }
 
     /// Find prim indices whose graph reads exactly `(layer_id, site_path)`,
@@ -504,10 +437,11 @@ impl Dependencies {
 
     /// Prim indices that observe exactly `path`, independent of layer.
     ///
-    /// [`exact_lookup`](Self::exact_lookup) and
-    /// [`lookup_with_ancestors`](Self::lookup_with_ancestors) fold this in so a
-    /// first opinion authored at `path` reaches the prims registered there
-    /// regardless of which layer carried it.
+    /// [`exact_lookup`](Self::exact_lookup) folds this in, as does the store's
+    /// `lookup_with_ancestors` through
+    /// [`has_path_ancestor`](Self::has_path_ancestor), so a first opinion
+    /// authored at `path` reaches the prims registered there regardless of
+    /// which layer carried it.
     fn path_dependents(&self, path: &Path) -> &[Path] {
         self.by_path.get(path).map_or(&[], std::slice::from_ref)
     }
@@ -524,23 +458,19 @@ impl Dependencies {
         }
         out
     }
+}
 
-    /// [`dedup_paths`](Self::dedup_paths) for a stream that already owns its
-    /// paths — the translated lookups, which derive a path per dependent rather
-    /// than handing back one the table holds. Keeping the borrowed form for
-    /// everything else is what stops the whole-cache scans
-    /// ([`indices_for_layers`](Self::indices_for_layers) and friends) from
-    /// cloning a path they were only going to discard.
-    fn dedup_owned(deps: impl Iterator<Item = Path>) -> Vec<Path> {
-        let mut out: Vec<Path> = Vec::new();
-        let mut seen: HashSet<Path> = HashSet::new();
-        for d in deps {
-            if seen.insert(d.clone()) {
-                out.push(d);
-            }
-        }
-        out
-    }
+/// `path` and its ancestors, stopping where a variant selection ends the
+/// namespace chain (C++ `Pcp_Dependencies::ForEachDependencyOnSite`, USD mode).
+///
+/// A variant-selection path is not a namespace child of the prim it sits under,
+/// so `/Model{lod=high}/Child` depends on opinions at `/Model{lod=high}` but not
+/// on those at `/Model`. The selection path is visited and then ends the walk;
+/// a `site_path` that is itself one yields only itself.
+fn ancestors_to_variant_boundary(path: &Path) -> impl Iterator<Item = Path> {
+    let mut past_boundary = false;
+    path.ancestors()
+        .take_while(move |p| !mem::replace(&mut past_boundary, p.is_prim_variant_selection_path()))
 }
 
 /// The prim indices registered under `key`, as an invalidation victim list.
@@ -571,6 +501,7 @@ mod tests {
     use crate::pcp::LayerStackId;
     use crate::pcp::layer_graph::ExternalStack;
     use crate::pcp::mapping::MapFunction;
+    use crate::pcp::prim_graph::ArcType;
     use crate::pcp::prim_graph::Node;
 
     fn p(s: &str) -> Path {
@@ -585,6 +516,18 @@ mod tests {
             .map(|i| sdf::Layer::new_in_memory(format!("l{i}.usda")))
             .collect();
         LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
+    }
+
+    /// The dependent paths `ancestor_sites` reports for a site, deduplicated
+    /// in first-seen order — what the table knows before any translation.
+    fn dependents(deps: &Dependencies, layer: LayerId, site: &Path) -> Vec<Path> {
+        let mut out: Vec<Path> = Vec::new();
+        for (_, dep) in deps.ancestor_sites(layer, site) {
+            if !out.contains(dep) {
+                out.push(dep.clone());
+            }
+        }
+        out
     }
 
     fn make_index(g: &LayerGraph, prim_path: &Path, nodes: Vec<(ArcType, LayerId, Path)>) -> PrimIndex {
@@ -631,7 +574,7 @@ mod tests {
     /// layer-agnostic self-registrations: a prim cached at `/Source` that never
     /// reads the edited layer is not a dependent of that layer's `/Source`.
     #[test]
-    fn ancestor_lookup_skips_by_path() {
+    fn ancestor_self_registration() {
         let g = graph(2);
         let (l0, l1) = (g.all_ids()[0], g.all_ids()[1]);
         let mut deps = Dependencies::default();
@@ -644,15 +587,19 @@ mod tests {
         let reader = make_index(&g, &user, vec![(ArcType::Reference, l1, source.clone())]);
         deps.add(&user, &reader, &g, ExprVarDeps::default());
 
-        assert_eq!(deps.graph_ancestor_lookup(l1, &source), vec![user.clone()]);
+        assert_eq!(
+            dependents(&deps, l1, &source),
+            vec![user.clone()],
+            "only the graph reader registers a site here"
+        );
         assert!(
-            deps.lookup_with_ancestors(l1, &source).contains(&source),
-            "the invalidation lookup does fold `by_path` in"
+            deps.has_path_ancestor(&source),
+            "the bystander's self-registration is what the invalidation lookup folds in"
         );
     }
 
     #[test]
-    fn by_path_covers_empty_index() {
+    fn empty_index_self_path() {
         // An index with only a self-Root edge contributes no graph-derived
         // dependencies (the Root-at-own-path is intentionally skipped to keep
         // the map compact). The layer-agnostic `by_path` entry ensures the
@@ -665,8 +612,14 @@ mod tests {
         let foo = p("/Foo");
         let index = make_index(&g, &foo, vec![(ArcType::Root, l0, foo.clone())]);
         deps.add(&foo, &index, &g, ExprVarDeps::default());
-        assert_eq!(deps.lookup_with_ancestors(l0, &foo), vec![foo.clone()]);
-        assert_eq!(deps.lookup_with_ancestors(l1, &foo), vec![foo.clone()]);
+        assert!(
+            dependents(&deps, l0, &foo).is_empty(),
+            "the self-Root edge registers no site"
+        );
+        assert!(
+            deps.has_path_ancestor(&foo),
+            "the layer-agnostic entry covers it instead"
+        );
         assert_eq!(deps.exact_lookup(l1, &foo), vec![foo.clone()]);
     }
 
@@ -686,7 +639,7 @@ mod tests {
             ],
         );
         deps.add(&here, &index, &g, ExprVarDeps::default());
-        assert_eq!(deps.lookup_with_ancestors(l1, &there), vec![here.clone()]);
+        assert_eq!(dependents(&deps, l1, &there), vec![here.clone()]);
     }
 
     /// `indices_for_layers` scopes a layer-set invalidation to the indices that
@@ -733,12 +686,12 @@ mod tests {
         assert_eq!(deps.indices_for_layers(&HashSet::from([l0])), vec![local]);
     }
 
-    /// A change below an arc's site reaches the dependent, translated onto its
-    /// namespace: `/A/B` inheriting `/X/Y` composes `/X/Y/Child` at
-    /// `/A/B/Child`, and it is that path — not `/A/B`, whose own composition
-    /// the change leaves alone — that must recompose.
+    /// A change below an arc's site reaches the dependent through the ancestor
+    /// walk: `/A/B` inheriting `/X/Y` is reported for a change at
+    /// `/X/Y/Child`. Which composed path it is affected at is the join's
+    /// question, not the table's.
     #[test]
-    fn ancestor_walk_translates() {
+    fn ancestor_walk_pairs() {
         let g = graph(1);
         let l0 = g.all_ids()[0];
         let mut deps = Dependencies::default();
@@ -753,9 +706,74 @@ mod tests {
             ],
         );
         deps.add(&here, &index, &g, ExprVarDeps::default());
-        assert_eq!(deps.lookup_with_ancestors(l0, &p("/X/Y/Child")), vec![p("/A/B/Child")]);
-        // The site itself still reaches the dependent unchanged.
-        assert_eq!(deps.lookup_with_ancestors(l0, &arc_site), vec![here]);
+        assert_eq!(dependents(&deps, l0, &p("/X/Y/Child")), vec![here.clone()]);
+        // The site itself reaches the dependent too.
+        assert_eq!(dependents(&deps, l0, &arc_site), vec![here]);
+    }
+
+    /// A variant selection ends the namespace chain: it is not a child of the
+    /// prim it sits under, so a change beneath `/Model{lod=high}` must not reach
+    /// a dependent registered on `/Model` (C++ `ForEachDependencyOnSite`, USD
+    /// mode). The selection path itself is still visited.
+    #[test]
+    fn variant_stops_ancestors() {
+        let g = graph(1);
+        let l0 = g.all_ids()[0];
+        let mut deps = Dependencies::default();
+        let plain = p("/Plain");
+        let sel = p("/Sel");
+        let model = p("/Model");
+        let variant = p("/Model{lod=high}");
+        deps.add(
+            &plain,
+            &make_index(&g, &plain, vec![(ArcType::Reference, l0, model.clone())]),
+            &g,
+            ExprVarDeps::default(),
+        );
+        deps.add(
+            &sel,
+            &make_index(&g, &sel, vec![(ArcType::Reference, l0, variant.clone())]),
+            &g,
+            ExprVarDeps::default(),
+        );
+
+        let under = p("/Model{lod=high}Child");
+        assert_eq!(
+            dependents(&deps, l0, &under),
+            vec![sel.clone()],
+            "the walk stops at the selection, so /Model's dependent is not reached"
+        );
+        assert_eq!(
+            dependents(&deps, l0, &variant),
+            vec![sel],
+            "a site that is itself a selection reaches only its own dependents"
+        );
+        assert_eq!(
+            dependents(&deps, l0, &p("/Model/Child")),
+            vec![plain],
+            "an ordinary child still walks up to /Model"
+        );
+    }
+
+    /// The same boundary through the layer-agnostic channel: a self-registered
+    /// `/Model` must not be folded in for a change beneath a variant selection.
+    #[test]
+    fn variant_stops_by_path() {
+        let g = graph(1);
+        let l0 = g.all_ids()[0];
+        let mut deps = Dependencies::default();
+        let model = p("/Model");
+        deps.add(
+            &model,
+            &make_index(&g, &model, vec![(ArcType::Root, l0, model.clone())]),
+            &g,
+            ExprVarDeps::default(),
+        );
+        assert!(deps.has_path_ancestor(&p("/Model/Child")));
+        assert!(
+            !deps.has_path_ancestor(&p("/Model{lod=high}Child")),
+            "the selection ends the chain before /Model's self-registration"
+        );
     }
 
     #[test]
@@ -798,8 +816,9 @@ mod tests {
             &g,
             ExprVarDeps::default(),
         );
-        assert!(!deps.lookup_with_ancestors(l0, &there).is_empty());
+        assert!(!dependents(&deps, l0, &there).is_empty());
         deps.remove(&here);
-        assert!(deps.lookup_with_ancestors(l0, &there).is_empty());
+        assert!(dependents(&deps, l0, &there).is_empty());
+        assert!(!deps.has_path_ancestor(&here), "the self-registration goes too");
     }
 }

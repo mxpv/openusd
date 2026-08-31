@@ -4,6 +4,7 @@
 //! contribute opinions to a single composed prim. See the
 //! [module-level docs](super) for the full composition overview.
 
+use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::{iter, mem};
@@ -16,7 +17,7 @@ use super::compose_site::evaluate_expression;
 use super::index_store::PrimRevision;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
-use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, SpecSite};
+use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
 use super::{CompositionError, ExpressionContext, LayerGraph, LayerId, VariantFallbackMap};
 
@@ -269,8 +270,67 @@ impl PrimIndex {
     /// edit there must recompose the relocated prim, so change tracking needs the
     /// reverse-map entry.
     pub(crate) fn dependency_nodes(&self) -> impl Iterator<Item = &Node> {
-        self.ordered_nodes()
-            .filter(|node| !node.is_inert() || node.is_relocate_source())
+        self.ordered_nodes().filter(|node| tracks_dependency(node))
+    }
+
+    /// Handles of the nodes at site `(layer, path)` whose dependency
+    /// registration this index would have made — the lookup counterpart of
+    /// [`Dependencies::add`](super::dependencies::Dependencies)'s registration
+    /// walk, and the set a change at that site must translate through.
+    ///
+    /// Appends handles rather than nodes so a caller can hand each straight to
+    /// [`translate_dependency_path`](Self::translate_dependency_path), which
+    /// borrows the whole index to climb parents, and so one scratch vector
+    /// serves a whole change round.
+    ///
+    /// Ordered strongest-first, matching the node range C++ rescans
+    /// (`PcpPrimIndex::GetNodeRange`). The site index is in path order, whose
+    /// ties fall in arena order — a different permutation.
+    pub(crate) fn dependency_nodes_at(
+        &self,
+        prim_path: &Path,
+        layer: LayerId,
+        path: &Path,
+        graph: &LayerGraph,
+        out: &mut Vec<NodeId>,
+    ) {
+        out.clear();
+        // The strength rank doubles as the membership test: the registration
+        // walk iterates the strength projection, so a node the projection omits
+        // was never registered and must not be re-found here.
+        //
+        // TODO(perf): scans the strength order per candidate. A site carrying
+        // several nodes is rare and each run is short, so a rank table on the
+        // graph would cost more than it saves here.
+        let rank = |id: NodeId| self.graph.strength_order.iter().position(|&s| s == id);
+        out.extend(self.nodes_at(path).iter().copied().filter(|&id| {
+            let node = &self.graph.nodes[id.idx()];
+            registers_site(node, prim_path) && graph.stack_contains(node.layer_stack_id(), layer) && rank(id).is_some()
+        }));
+        out.sort_by_cached_key(|&id| rank(id).expect("filtered to ranked nodes"));
+    }
+
+    /// The composed path a change at `changed` lands on for the node `node` —
+    /// this index's answer to C++ `_ProcessDependentNode`'s path translation.
+    /// `None` when the node's namespace cannot carry the path at all, which is
+    /// that function's `pathWasTranslated` gate: an unmappable path has no image
+    /// here, so there is nothing to invalidate.
+    ///
+    /// A [`Propagated`](RelocateKind::Propagated) relocate holds the identity
+    /// map, so the path first steps out into the parent's namespace and keeps
+    /// climbing while the parents are placeholders too; every other node —
+    /// a [`Direct`](RelocateKind::Direct) relocate included, whose own map
+    /// carries the rename — maps through `map_to_root` directly.
+    pub(crate) fn translate_dependency_path(&self, node: NodeId, changed: &Path) -> Option<Path> {
+        let mut id = node;
+        let mut path = Cow::Borrowed(changed);
+        while self.node(id).relocate_kind() == Some(RelocateKind::Propagated) {
+            let placeholder = self.node(id);
+            let parent = placeholder.parent?;
+            path = Cow::Owned(path.replace_prefix(&placeholder.path, &self.node(parent).path)?);
+            id = parent;
+        }
+        self.node(id).map_to_root().translate_to_target(&path)
     }
 
     /// Layer ids of reference/payload target roots this prim's composition
@@ -1150,6 +1210,24 @@ fn push_node_run(graph: &LayerGraph, node: &Node, id: NodeId, out: &mut Vec<Spec
     }
 }
 
+/// Whether `node`'s site belongs to its prim's dependency set: it contributes
+/// opinions, or it is an inert relocation source whose site an edit must still
+/// recompose the relocated prim through.
+fn tracks_dependency(node: &Node) -> bool {
+    !node.is_inert() || node.is_relocate_source()
+}
+
+/// Whether `node` is one the reverse dependency map records a *site* for.
+///
+/// [`tracks_dependency`] minus the self-Root edge — the node whose site is the
+/// prim's own path, which the site map skips to stay compact (C++
+/// `PcpDependencyTypeRoot`) while the layer map still counts it. Shared by the
+/// registration walk and the lookup, so a site can never be re-found that was
+/// never registered.
+pub(super) fn registers_site(node: &Node, prim_path: &Path) -> bool {
+    tracks_dependency(node) && !(node.arc == ArcType::Root && node.path == *prim_path)
+}
+
 /// Whether any layer in `stack` authors a spec at `path` (C++
 /// `PcpNode::HasSpecs`). The canonical definition of a node's `has_specs`, which
 /// the indexer asks directly while building a node.
@@ -1313,6 +1391,16 @@ fn resolve_variant_selections_in<'a>(
 
 #[cfg(test)]
 impl PrimIndex {
+    /// [`push_node`](Self::push_node) but strongest rather than weakest, so a
+    /// synthetic index can make its strength order disagree with its arena
+    /// order — which `push_node` alone cannot, since it appends each new handle
+    /// to both.
+    pub(crate) fn push_node_strongest(&mut self, node: Node) {
+        self.push_node(node);
+        let id = self.graph.strength_order.pop().expect("just pushed");
+        self.graph.strength_order.insert(0, id);
+    }
+
     /// Records `layer` as one whose `defaultPrim` this index's composition
     /// consulted, so a test can set the dependency up without a real build.
     pub(crate) fn record_default_prim(&mut self, layer: LayerId) {

@@ -454,11 +454,11 @@ impl Changes {
     /// sample, a target list — restales the prims composing it rather than
     /// dropping anything, since the graph is untouched and only the answers
     /// cached against those prims went stale.
-    pub fn did_change(&mut self, cache: &IndexCache, changes: &[LayerChanges<'_>]) {
+    pub fn did_change(&mut self, cache: &IndexCache, graph: &LayerGraph, changes: &[LayerChanges<'_>]) {
         for edit in changes {
             self.edited_layers.insert(edit.layer);
             for (path, entry) in edit.changes.entries() {
-                self.apply_effects(cache, edit, path, Self::effects_of(path, entry));
+                self.apply_effects(cache, graph, edit, path, Self::effects_of(path, entry));
             }
         }
     }
@@ -638,15 +638,16 @@ impl Changes {
     fn apply_effects(
         &mut self,
         cache: &IndexCache,
+        graph: &LayerGraph,
         edit: &LayerChanges<'_>,
         path: &Path,
         effects: InvalidationEffects,
     ) {
         let layer = edit.layer;
         if effects.significant {
-            self.fanout_significant(cache, layer, path);
+            self.fanout_significant(cache, graph, layer, path);
             if path.contains_prim_variant_selection() {
-                self.fanout_significant(cache, layer, &path.strip_all_variant_selections());
+                self.fanout_significant(cache, graph, layer, &path.strip_all_variant_selections());
             }
         }
         if effects.spec {
@@ -654,10 +655,10 @@ impl Changes {
         }
         if let Some(scope) = effects.value {
             let prim = path.prim_path();
-            self.fanout_values(cache, layer, &prim, scope, &effects.targets);
+            self.fanout_values(cache, graph, layer, &prim, scope, &effects.targets);
             if prim.contains_prim_variant_selection() {
                 let stripped = prim.strip_all_variant_selections();
-                self.fanout_values(cache, layer, &stripped, scope, &effects.targets);
+                self.fanout_values(cache, graph, layer, &stripped, scope, &effects.targets);
             }
         }
         self.type_opinions |= effects.type_opinion;
@@ -670,7 +671,7 @@ impl Changes {
             self.layer_stack_layers.insert(layer);
         }
         if let Some(report) = effects.report.filter(|_| self.report) {
-            self.report_entry(cache, layer, path, report);
+            self.report_entry(cache, graph, layer, path, report);
         }
         if effects.default_prim {
             // Only a reference or payload naming no target prim resolves through
@@ -691,29 +692,29 @@ impl Changes {
     /// `_AddAffectedStagePaths`). The whole path is translated, property suffix
     /// included, since a consumer is told which object moved rather than which
     /// prim owns it.
-    fn report_entry(&mut self, cache: &IndexCache, layer: LayerId, path: &Path, report: Report) {
+    fn report_entry(&mut self, cache: &IndexCache, graph: &LayerGraph, layer: LayerId, path: &Path, report: Report) {
         let reported = &mut self.cache.reported;
         let (stage, authored) = match report {
             Report::Info => (&mut reported.stage_info, &mut reported.authored_info),
             Report::Resync => (&mut reported.stage_resync, &mut reported.authored_resync),
         };
         authored.insert(path.clone());
-        stage.extend(cache.dependencies().graph_ancestor_lookup(layer, path));
+        stage.extend(cache.store().graph_ancestor_lookup(graph, layer, path));
     }
 
     /// Records that the prims observing `(layer, prim)` may compose different
     /// values, and restales `keys` on their target memos.
     ///
-    /// Split by how each dependent was found, because only one of the two can be
-    /// named precisely. An index reading the site *exactly* is affected at its
-    /// own path. An index reading it through an *ancestor* site is affected
-    /// somewhere below its own path — at a composed path only the arc's
-    /// namespace mapping can name, which this cache approximates with identity
-    /// (see the `MapFunction` `TODO` in
-    /// [`dependencies`](super::dependencies::Dependencies::ancestor_dependents)).
-    /// Guessing wrong would leave a value stale, so the dependent's whole cached
-    /// subtree is taken instead: whatever the arc renames on the way down, the
-    /// affected prim composes under it.
+    /// Both directions name the composed path exactly. An index reading the
+    /// site *exactly* is affected at its own path. An index reading it through
+    /// an *ancestor* site is affected below its own path, at whatever the arc's
+    /// namespace mapping renames it to, which `translated_ancestor_dependents`
+    /// answers from the dependent's own composition graph.
+    ///
+    /// Only the path is translated; the scope stays the entry's own. A
+    /// clip-metadata edit is classified [`ValueScope::Subtree`] because a
+    /// descendant's values are sourced by an ancestor's clip set, and that
+    /// reach has to survive the translation.
     ///
     /// A prim reading a *descendant* of the site does not compose it, so the
     /// fanout stays on the exact + ancestor direction. The literal prim is
@@ -727,16 +728,17 @@ impl Changes {
     fn fanout_values(
         &mut self,
         cache: &IndexCache,
+        graph: &LayerGraph,
         layer: LayerId,
         prim: &Path,
         scope: ValueScope,
         keys: &[TargetMemoKey],
     ) {
-        for dep in cache.dependencies().exact_lookup(layer, prim) {
+        for dep in cache.store().dependencies().exact_lookup(layer, prim) {
             self.record_scoped(dep, scope, keys);
         }
-        for dep in cache.dependencies().ancestor_dependents(layer, prim) {
-            self.record_scoped(dep, ValueScope::Subtree, keys);
+        for dep in cache.store().translated_ancestor_dependents(graph, layer, prim) {
+            self.record_scoped(dep, scope, keys);
         }
         self.record_scoped(prim.clone(), scope, keys);
     }
@@ -757,11 +759,11 @@ impl Changes {
     /// cache's composed namespace, while `path` comes from a change list and so
     /// is spelled in `layer`'s namespace — which stripping variant selections
     /// off it does not change.
-    fn fanout_significant(&mut self, cache: &IndexCache, layer: LayerId, path: &Path) {
-        for dep in cache.dependencies().lookup_with_ancestors(layer, path) {
+    fn fanout_significant(&mut self, cache: &IndexCache, graph: &LayerGraph, layer: LayerId, path: &Path) {
+        for dep in cache.store().lookup_with_ancestors(graph, layer, path) {
             self.cache.did_change_significantly.insert(dep);
         }
-        for dep in cache.dependencies().subtree_lookup(layer, path) {
+        for dep in cache.store().dependencies().subtree_lookup(layer, path) {
             self.cache.did_change_significantly.insert(dep);
         }
         // Include the literal path even with no current dependent — a
@@ -1041,7 +1043,7 @@ fn normalize_scopes(items: BTreeMap<Path, ScopedInvalidation>) -> Vec<(Path, Sco
 fn asset_path_victims(cache: &IndexCache, deltas: &[StackVarsDelta]) -> Vec<Path> {
     let mut victims = Vec::new();
     for delta in deltas.iter().filter(|delta| delta.old_expr != delta.new_expr) {
-        victims.extend(cache.dependencies().prims_for_stack(delta.stack));
+        victims.extend(cache.store().dependencies().prims_for_stack(delta.stack));
         // What the root stack answers with subsumes every path a later delta in
         // the cascade could add. Every `Stage::set_expression_variables` moves
         // it, so stopping here is the common case, not an edge one.
@@ -1099,14 +1101,13 @@ fn apply_default_prim_edits(
         if old == current {
             continue;
         }
-        let deps = cache.dependencies();
         // With a prior prim path, C++ fans out from its site; the consumers this
         // evicts are a subset of that, so they need no separate mention.
         if let Some(path) = &old {
-            reported.extend(deps.graph_ancestor_lookup(*layer, path));
-            reported.extend(deps.subtree_lookup(*layer, path));
+            reported.extend(cache.store().graph_ancestor_lookup(graph, *layer, path));
+            reported.extend(cache.store().dependencies().subtree_lookup(*layer, path));
         }
-        victims.extend(deps.prims_using_default_prim(*layer));
+        victims.extend(cache.store().dependencies().prims_using_default_prim(*layer));
     }
     // One drop for the round, as the expression-variable path batches for the
     // same reason: each pays a prototype scan per victim. It hands back the
@@ -1135,7 +1136,7 @@ fn apply_vars_deltas(cache: &mut IndexCache, graph: &LayerGraph, deltas: &[Stack
             if graph.stack_sublayer_var_deps(delta.stack).is_disjoint(&changed) {
                 // Step 4: a value-only change; resync exactly the prims whose
                 // builds recorded reading a changed name from this stack.
-                victims.extend(cache.dependencies().prims_using_vars(delta.stack, &changed));
+                victims.extend(cache.store().dependencies().prims_using_vars(delta.stack, &changed));
                 continue;
             }
             // Step 3: a changed name feeds one of the stack's own `${VAR}`
@@ -1150,7 +1151,7 @@ fn apply_vars_deltas(cache: &mut IndexCache, graph: &LayerGraph, deltas: &[Stack
         if delta.stack == LayerStackId::ROOT {
             return cache.drop_index_victims(vec![Path::abs_root()]);
         }
-        victims.extend(cache.dependencies().prims_for_stack(delta.stack));
+        victims.extend(cache.store().dependencies().prims_for_stack(delta.stack));
     }
     cache.drop_index_victims(victims.into_iter().collect())
 }
@@ -1229,7 +1230,7 @@ mod tests {
         cl.entry_mut(&p("/Foo"))
             .note(FieldKey::References.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
     }
 
@@ -1240,7 +1241,7 @@ mod tests {
         cl.entry_mut(&p("/Foo"))
             .note(FieldKey::VariantSelection.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
     }
 
@@ -1255,7 +1256,7 @@ mod tests {
         cl.entry_mut(&p("/Foo{set=sel}Bar"))
             .note(FieldKey::References.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert_eq!(
             changes.cache.authored_significant.iter().collect::<Vec<_>>(),
             [&p("/Foo/Bar"), &p("/Foo{set=sel}Bar")]
@@ -1277,7 +1278,7 @@ mod tests {
         cl.entry_mut(&p("/Foo"))
             .note(FieldKey::Permission.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
     }
@@ -1292,7 +1293,7 @@ mod tests {
         cl.entry_mut(&p("/Foo"))
             .note(FieldKey::Kind.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
     }
@@ -1311,7 +1312,7 @@ mod tests {
                 entry.note(FieldKey::Clips.as_str(), sdf::FieldChange::Presence);
             }
             let mut changes = Changes::new();
-            changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+            changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
             !changes.cache.authored_significant.is_empty()
         };
 
@@ -1331,7 +1332,7 @@ mod tests {
         entry.flags = ChangeFlags::ADD_INERT_PRIM;
         entry.note(FieldKey::Instanceable.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
 
         assert!(changes.cache.authored_significant.contains(&p("/X")));
     }
@@ -1343,7 +1344,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(layer, &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(layer, &cl)]);
         // An inert add reshapes no graph, so it stays out of the significant
         // tier and lands in the spec tier keyed by its authoring layer.
         assert!(!changes.cache.all_significant().any(|path| *path == p("/Foo")));
@@ -1356,7 +1357,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_NON_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.authored_significant.contains(&p("/Foo")));
     }
 
@@ -1379,7 +1380,7 @@ mod tests {
             let mut cl = ChangeList::new();
             cl.entry_mut(&p(path)).note(field, sdf::FieldChange::Value);
             let mut changes = Changes::new();
-            changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+            changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
             changes.apply(&mut cache, &mut graph);
             assert_eq!(
                 cache.type_opinion_epoch() != before,
@@ -1407,7 +1408,7 @@ mod tests {
             let mut cl = ChangeList::new();
             cl.entry_mut(&p(path)).flags = flags;
             let mut changes = Changes::new();
-            changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+            changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
             changes.apply(&mut cache, &mut graph);
             assert_eq!(
                 cache.population_epoch() != before,
@@ -1425,7 +1426,7 @@ mod tests {
         cl.entry_mut(&Path::abs_root())
             .note(FieldKey::SubLayers.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
         assert!(changes.layer_stack.contains(LayerStackChanges::LAYERS));
     }
@@ -1440,6 +1441,7 @@ mod tests {
         let mut changes = Changes::new();
         changes.did_change(
             &cache,
+            &graph,
             &[LayerChanges {
                 layer,
                 changes: &cl,
@@ -1467,7 +1469,7 @@ mod tests {
             cl.entry_mut(&Path::abs_root())
                 .note(field.as_str(), sdf::FieldChange::Value);
             let mut changes = Changes::new();
-            changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+            changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
             assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
         }
     }
@@ -1483,7 +1485,7 @@ mod tests {
         cl.entry_mut(&Path::abs_root())
             .note(FieldKey::ExpressionVariables.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::EXPRESSION_VARS));
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
@@ -1495,7 +1497,7 @@ mod tests {
         cl.entry_mut(&Path::abs_root())
             .note(FieldKey::LayerRelocates.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::RELOCATES));
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
@@ -1506,7 +1508,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo.attr")).flags = ChangeFlags::ADD_PROPERTY;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         assert!(changes.cache.all_significant().next().is_none());
         assert!(changes.cache.did_change_specs.is_empty());
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
@@ -1523,7 +1525,7 @@ mod tests {
         entry.flags = ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
         entry.note(FieldKey::TargetPaths.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         let key = TargetMemoKey {
             kind: PropertyTargetKind::Relationship,
             property_suffix: ".r".to_owned(),
@@ -1544,7 +1546,7 @@ mod tests {
         entry.note(FieldKey::TargetPaths.as_str(), sdf::FieldChange::Value);
         entry.note(FieldKey::ConnectionPaths.as_str(), sdf::FieldChange::Value);
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
         let key = |kind| TargetMemoKey {
             kind,
             property_suffix: ".x".to_owned(),
