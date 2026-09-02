@@ -123,7 +123,9 @@ fn unresolved_sublayer_count(stage: &Stage, asset_path: &str) -> usize {
     stage
         .composition_errors()
         .iter()
-        .filter(|e| matches!(e, pcp::CompositionError::UnresolvedSublayer { asset_path: a, .. } if a == asset_path))
+        .filter(
+            |e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { asset_path: a, .. } if a == asset_path),
+        )
         .count()
 }
 
@@ -211,7 +213,7 @@ fn missing_sublayer_retained() -> Result<()> {
     let stage = Stage::open(root.to_str().unwrap())?;
     assert!(stage.composition_errors().iter().any(|error| matches!(
         error,
-        pcp::CompositionError::UnresolvedSublayer {
+        pcp::CompositionDiagnostic::UnresolvedSublayer {
             asset_path,
             introduced_by,
         } if asset_path == "missing.usda" && introduced_by.ends_with("root.usda")
@@ -521,7 +523,7 @@ fn lazy_ref_missing_sublayer() -> Result<()> {
     assert!(
         stage.composition_errors().iter().any(|error| matches!(
             error,
-            pcp::CompositionError::UnresolvedSublayer { asset_path, introduced_by }
+            pcp::CompositionDiagnostic::UnresolvedSublayer { asset_path, introduced_by }
                 if asset_path == "missing.usda" && introduced_by.ends_with("target.usda")
         )),
         "expected UnresolvedSublayer, got {:?}",
@@ -548,7 +550,7 @@ fn lazy_ref_unreadable_target() -> Result<()> {
     assert!(
         stage.composition_errors().iter().any(|error| matches!(
             error,
-            pcp::CompositionError::MalformedLayer { asset_path, reason, .. }
+            pcp::CompositionDiagnostic::MalformedLayer { asset_path, reason, .. }
                 if asset_path.contains("broken.usda") && !reason.is_empty()
         )),
         "expected MalformedLayer carrying the parse error, got {:?}",
@@ -572,7 +574,7 @@ fn failed_load_retried_after_edit() -> Result<()> {
     assert!(
         stage.composition_errors().iter().any(|e| matches!(
             e,
-            pcp::CompositionError::MalformedLayer { asset_path, .. } if asset_path.contains("target.usda")
+            pcp::CompositionDiagnostic::MalformedLayer { asset_path, .. } if asset_path.contains("target.usda")
         )),
         "the unreadable target is reported malformed"
     );
@@ -1227,7 +1229,10 @@ fn session_missing_heals() -> Result<()> {
         1,
         "one missing session sublayer, one diagnostic: {errors:?}"
     );
-    assert!(matches!(&errors[0], pcp::CompositionError::UnresolvedSublayer { .. }));
+    assert!(matches!(
+        &errors[0],
+        pcp::CompositionDiagnostic::UnresolvedSublayer { .. }
+    ));
 
     fs::write(
         dir.path().join("late.usda"),
@@ -1404,7 +1409,7 @@ fn failed_selection_terminates() -> Result<()> {
     assert!(
         errors
             .iter()
-            .any(|e| matches!(e, pcp::CompositionError::UnresolvedSublayer { asset_path, .. } if asset_path == "missing.usda")),
+            .any(|e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { asset_path, .. } if asset_path == "missing.usda")),
         "the failed open is reported: {errors:?}"
     );
     assert_eq!(
@@ -1432,7 +1437,7 @@ fn failed_selection_terminates() -> Result<()> {
     assert!(
         !errors
             .iter()
-            .any(|e| matches!(e, pcp::CompositionError::UnresolvedSublayer { asset_path, .. } if asset_path == "missing.usda")),
+            .any(|e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { asset_path, .. } if asset_path == "missing.usda")),
         "the obsolete failure is dropped once the selection changes: {errors:?}"
     );
     Ok(())
@@ -1472,7 +1477,7 @@ fn shared_missing_per_referrer() -> Result<()> {
             .composition_errors()
             .into_iter()
             .filter_map(|e| match e {
-                pcp::CompositionError::UnresolvedSublayer {
+                pcp::CompositionDiagnostic::UnresolvedSublayer {
                     asset_path,
                     introduced_by,
                 } if asset_path == "shared_missing.usda" => Some(introduced_by),
@@ -1560,7 +1565,7 @@ fn sublayer_failure_keeps_arc_loadable() -> Result<()> {
     let errors = stage.composition_errors();
     assert!(
         errors.iter().any(
-            |e| matches!(e, pcp::CompositionError::UnresolvedSublayer { asset_path, .. } if asset_path == "late.usda")
+            |e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { asset_path, .. } if asset_path == "late.usda")
         ),
         "the missing sublayer is reported at open: {errors:?}"
     );
@@ -1578,7 +1583,7 @@ fn sublayer_failure_keeps_arc_loadable() -> Result<()> {
     assert!(
         !errors
             .iter()
-            .any(|e| matches!(e, pcp::CompositionError::UnresolvedSublayer { .. })),
+            .any(|e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { .. })),
         "the healed sublayer diagnostic drops: {errors:?}"
     );
     Ok(())
@@ -1597,7 +1602,7 @@ fn repaired_sublayer_reloads() -> Result<()> {
     let errors = stage.composition_errors();
     assert!(
         errors.iter().any(
-            |e| matches!(e, pcp::CompositionError::UnresolvedSublayer { asset_path, .. } if asset_path == "late.usda")
+            |e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { asset_path, .. } if asset_path == "late.usda")
         ),
         "the missing sublayer is reported at open: {errors:?}"
     );
@@ -1617,7 +1622,7 @@ fn repaired_sublayer_reloads() -> Result<()> {
     assert!(
         !errors
             .iter()
-            .any(|e| matches!(e, pcp::CompositionError::UnresolvedSublayer { .. })),
+            .any(|e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { .. })),
         "the healed diagnostic drops: {errors:?}"
     );
     Ok(())
@@ -1638,7 +1643,7 @@ fn mute_retries_resolvable() -> Result<()> {
     let stage = Stage::open(root.to_str().unwrap())?;
     assert!(
         stage.composition_errors().iter().any(
-            |e| matches!(e, pcp::CompositionError::UnresolvedSublayer { asset_path, .. } if asset_path == "late.usda")
+            |e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { asset_path, .. } if asset_path == "late.usda")
         ),
         "the missing sublayer is reported at open"
     );
@@ -1679,7 +1684,7 @@ fn dual_spelling_reports_once() -> Result<()> {
             .composition_errors()
             .into_iter()
             .filter(
-                |e| matches!(e, pcp::CompositionError::UnresolvedSublayer { asset_path, .. } if asset_path.contains("missing.usda")),
+                |e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { asset_path, .. } if asset_path.contains("missing.usda")),
             )
             .count()
     };
@@ -1708,7 +1713,10 @@ fn expr_failure_reported_once() -> Result<()> {
     let stage = Stage::open(root.to_str().unwrap())?;
     let errors = stage.composition_errors();
     assert_eq!(errors.len(), 1, "one failing expression, one diagnostic: {errors:?}");
-    assert!(matches!(&errors[0], pcp::CompositionError::InvalidExpression { .. }));
+    assert!(matches!(
+        &errors[0],
+        pcp::CompositionDiagnostic::InvalidExpression { .. }
+    ));
 
     stage.set_expression_variables(HashMap::from([(
         "WHICH".to_string(),
@@ -1771,7 +1779,7 @@ fn lazy_ref_inside_usdz_resolves() -> Result<()> {
 /// A reference authored inside a `.usdz` package targets a sibling layer that
 /// is not present in the archive: the missing entry is unresolved (not merely
 /// unreadable), so composition reports
-/// [`UnresolvedLayer`](pcp::CompositionError::UnresolvedLayer) and the rest of the prim
+/// [`UnresolvedLayer`](pcp::CompositionDiagnostic::UnresolvedLayer) and the rest of the prim
 /// still composes.
 #[test]
 fn lazy_ref_inside_usdz_missing() -> Result<()> {
@@ -1797,7 +1805,7 @@ fn lazy_ref_inside_usdz_missing() -> Result<()> {
     assert!(
         stage.composition_errors().iter().any(|error| matches!(
             error,
-            pcp::CompositionError::UnresolvedLayer { asset_path, .. } if asset_path.ends_with("other.usda]")
+            pcp::CompositionDiagnostic::UnresolvedLayer { asset_path, .. } if asset_path.ends_with("other.usda]")
         )),
         "expected UnresolvedLayer for the missing in-package target, got {:?}",
         stage.composition_errors()
@@ -1806,7 +1814,7 @@ fn lazy_ref_inside_usdz_missing() -> Result<()> {
 }
 
 /// A reference to a present-but-empty `.usdz` (no packaged USD layer) reports a
-/// [`MalformedLayer`](pcp::CompositionError::MalformedLayer) carrying the real reason —
+/// [`MalformedLayer`](pcp::CompositionDiagnostic::MalformedLayer) carrying the real reason —
 /// the package resolved but could not be read — rather than being silently
 /// dropped as a missing asset or surfacing a "failed to resolve" diagnostic.
 #[test]
@@ -1823,7 +1831,7 @@ fn lazy_ref_empty_usdz_malformed() -> Result<()> {
     assert!(
         stage.composition_errors().iter().any(|error| matches!(
             error,
-            pcp::CompositionError::MalformedLayer { asset_path, reason, .. }
+            pcp::CompositionDiagnostic::MalformedLayer { asset_path, reason, .. }
                 if asset_path.ends_with("empty.usdz") && reason.contains("USDZ archive")
         )),
         "expected MalformedLayer with the package read reason, got {:?}",
@@ -1908,7 +1916,7 @@ fn asset_value_usdz_is_package_path() -> Result<()> {
 }
 
 /// A reference target's present-but-corrupt sublayer is dropped on its own —
-/// reported [`MalformedSublayer`](pcp::CompositionError::MalformedSublayer) — while the
+/// reported [`MalformedSublayer`](pcp::CompositionDiagnostic::MalformedSublayer) — while the
 /// target itself still composes (its own opinion resolves). The bad sublayer
 /// must not fail the whole reference target.
 #[test]
@@ -1934,7 +1942,7 @@ fn lazy_ref_corrupt_sublayer() -> Result<()> {
     assert!(
         stage.composition_errors().iter().any(|error| matches!(
             error,
-            pcp::CompositionError::MalformedSublayer { asset_path, introduced_by, reason }
+            pcp::CompositionDiagnostic::MalformedSublayer { asset_path, introduced_by, reason }
                 if asset_path == "broken.usda" && introduced_by.ends_with("target.usda") && !reason.is_empty()
         )),
         "expected MalformedSublayer carrying the parse error, got {:?}",
@@ -3183,7 +3191,7 @@ fn muted_reference_target_not_opened() -> Result<()> {
         .filter(|e| {
             matches!(
                 e,
-                pcp::CompositionError::MutedAssetPath { arc: pcp::ArcType::Reference, asset_path, .. }
+                pcp::CompositionDiagnostic::MutedAssetPath { arc: pcp::ArcType::Reference, asset_path, .. }
                     if asset_path.contains("_stage.usda")
             )
         })
@@ -5480,7 +5488,7 @@ fn variant_ref_path_error() -> Result<()> {
         stage
             .composition_errors()
             .iter()
-            .any(|e| matches!(e, pcp::CompositionError::InvalidPrimPath { .. })),
+            .any(|e| matches!(e, pcp::CompositionDiagnostic::InvalidPrimPath { .. })),
         "the selection-bearing prim path is rejected, got {:?}",
         stage.composition_errors()
     );
@@ -6360,7 +6368,7 @@ def "Model" (
     assert_eq!(value_f64(&stage, "/Model.size", 10.0), None);
     assert_eq!(value_f64(&stage, "/Model.extra", 10.0), None);
     assert!(stage.composition_errors().iter().any(
-        |error| matches!(error, openusd::pcp::CompositionError::UnreadableClip { asset_path, .. }
+        |error| matches!(error, openusd::pcp::CompositionDiagnostic::UnreadableClip { asset_path, .. }
                                   if asset_path.contains("clip1.usda"))
     ));
 
@@ -10059,5 +10067,70 @@ def "A" {
         paths(&["/A", "/A/B", "/A/B.x"]),
         "the spec tier reports both sites; neither stands for the other's subtree"
     );
+    Ok(())
+}
+
+/// Diagnostics from different owners fold into one list in precedence order:
+/// the graph's first, since it regenerates them on every rebuild, then the
+/// cache's. Each reads once, and a distinct diagnostic keeps its place behind
+/// the one it followed.
+///
+/// The two halves have separate lifetimes — the graph replaces its buckets per
+/// rebuild, the cache drops per-prim entries with their indices — so the order
+/// is a property of the aggregation, not of when each was discovered.
+#[test]
+fn diagnostics_owner_order() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    // A sublayer cycle (graph) and a reference to a missing layer (per-prim
+    // build), so both owners contribute.
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0
+(
+    subLayers = [@loop.usda@]
+)
+
+def \"P\" (
+    references = @missing.usda@
+)
+{
+}
+",
+    )?;
+    fs::write(
+        dir.path().join("loop.usda"),
+        "#usda 1.0
+(
+    subLayers = [@root.usda@]
+)
+",
+    )?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    // Compose the prim so its build diagnostic is discovered.
+    let _ = stage.prim("/P")?.is_valid()?;
+
+    let held = stage.composition_errors();
+    let cycle = held
+        .iter()
+        .position(|e| matches!(e, pcp::CompositionDiagnostic::SublayerCycle { .. }))
+        .expect("the sublayer cycle is reported");
+    let unresolved = held
+        .iter()
+        .position(|e| matches!(e, pcp::CompositionDiagnostic::UnresolvedLayer { .. }))
+        .expect("the missing reference target is reported");
+    assert!(
+        cycle < unresolved,
+        "the graph's diagnostics precede the cache's, got {held:?}"
+    );
+
+    let cycles = held
+        .iter()
+        .filter(|e| matches!(e, pcp::CompositionDiagnostic::SublayerCycle { .. }))
+        .count();
+    let unresolved_count = held
+        .iter()
+        .filter(|e| matches!(e, pcp::CompositionDiagnostic::UnresolvedLayer { .. }))
+        .count();
+    assert_eq!((cycles, unresolved_count), (1, 1), "each reads once, got {held:?}");
     Ok(())
 }

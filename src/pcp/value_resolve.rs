@@ -16,6 +16,7 @@ use crate::sdf;
 use super::QueryError;
 use super::asset_resolve::AssetSite;
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
+use super::diagnostics::Diagnostics;
 use super::layer_graph::StackIdentity;
 use super::prim_graph::{ArcType, Node};
 use super::{LayerGraph, LayerId, LayerStackId, LayerStackIdentifier, MapFunction};
@@ -353,6 +354,10 @@ impl OpinionSite<'_> {
 pub(crate) struct ClipProbe<'a> {
     pub(crate) cache: &'a mut ClipCache,
     pub(crate) graph: &'a LayerGraph,
+    /// The channel a clip query's diagnostics report into, lent by the caller
+    /// for the length of the probe — a clip answers through a value, so its
+    /// diagnostics travel beside the walk rather than in its result.
+    pub(crate) diagnostics: &'a mut Diagnostics,
     pub(crate) set: &'a ResolvedClipSet,
     pub(crate) query: ClipQuery<'a>,
 }
@@ -406,7 +411,7 @@ impl ClipProbe<'_> {
     ) -> Result<ClipAnswer, QueryError> {
         match self
             .cache
-            .value_in_set(self.graph, self.set, &self.query, time, interp)?
+            .value_in_set(self.graph, self.diagnostics, self.set, &self.query, time, interp)?
         {
             None => Ok(ClipAnswer::Absent),
             Some(value) if is_block(&value) => Ok(ClipAnswer::Blocked),
@@ -416,20 +421,22 @@ impl ClipProbe<'_> {
 
     /// What the set contributes to a query that names no time.
     pub(crate) fn answer_untimed(&mut self) -> Result<ValueState, QueryError> {
-        self.cache.untimed_answer_in_set(self.graph, self.set, &self.query)
+        self.cache
+            .untimed_answer_in_set(self.graph, self.diagnostics, self.set, &self.query)
     }
 
     /// The stage sample times the set contributes, and whether its schedule
     /// alone can vary the value. `None` when it does not participate.
     pub(crate) fn introspection(&mut self) -> Result<Option<(Vec<f64>, bool)>, QueryError> {
-        self.cache.clip_introspection_in_set(self.graph, self.set, &self.query)
+        self.cache
+            .clip_introspection_in_set(self.graph, self.diagnostics, self.set, &self.query)
     }
 
     /// The layer a property stack lists for the set at `time`, with the property
     /// path inside it. `None` when the set does not source the property.
     pub(crate) fn spec_site_at(&mut self, time: f64) -> Result<Option<(String, sdf::Path)>, QueryError> {
         self.cache
-            .clip_spec_site_in_set(self.graph, self.set, &self.query, time)
+            .clip_spec_site_in_set(self.graph, self.diagnostics, self.set, &self.query, time)
     }
 }
 

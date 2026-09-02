@@ -21,6 +21,7 @@ use crate::tf::Token;
 use super::asset_resolve::{self, AssetSite};
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
+use super::diagnostics::Diagnostics;
 use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::{LayerGraph, LayerStackIdentifier};
@@ -40,7 +41,7 @@ use super::value_resolve::{
     SampleField, SelectedSite, Step, ValueState, Withheld,
 };
 use super::{
-    CompositionError, IncompleteClipManifest, LayerId, MapFunction, QueryError, StackIdentity, VariantFallbackMap,
+    CompositionDiagnostic, IncompleteClipManifest, LayerId, MapFunction, QueryError, StackIdentity, VariantFallbackMap,
 };
 
 /// What [`IndexCache::edit_target_node_info`] reports for an arc node: the target
@@ -133,32 +134,17 @@ pub struct IndexCache {
     /// One-shot errors from layer collection that the [`LayerGraph`](super::layer_graph::LayerGraph)
     /// cannot regenerate (e.g. `UnresolvedSublayer`). Set once at construction;
     /// never cleared, since nothing recomputes them.
-    collection_errors: Vec<CompositionError>,
-    /// Transient errors produced by on-demand target / property-stack queries
-    /// (invalid external targets, inconsistent property types). Cleared on any
-    /// index invalidation so they never go stale across an edit; they are
-    /// recomputed on the next query.
-    //
-    // A memoizable target query's invalid-target errors are memoized with its
-    // resolved targets (see
-    // [`PrimEntry::resolved_targets`](super::prim_index::PrimEntry)) and
-    // re-surfaced here, deduplicated, on a cache hit, so repeated reads of those
-    // properties no longer duplicate them. A non-memoizable target read (an
-    // instance proxy, the deleted-paths walk, or a resolution that read cross-prim
-    // instance state) still appends fresh each call.
-    //
-    // TODO: the `property_stack` inconsistent-property-type conflicts are still
-    // recomputed and re-appended on each call, so repeated stacks on the same
-    // conflicting property duplicate within a session. The per-pass double-report
-    // (one at prim build, one per `property_stack` query) is C++-faithful — the
-    // composition golden expects it — so a fix must preserve the per-pass count and
-    // collapse only the repeat `property_stack` calls. A `PrimEntry` memo (like the
-    // targets) would do that, but the conflict set depends on the prim's property
-    // specs, so it would need a property-add/remove invalidation branch in
-    // `classify_property_entry`; computing it eagerly at index build instead would
-    // add per-property work to every prim's build (a cost on Caldera-class stages).
-    // Deferred until a profile justifies one.
-    query_errors: Vec<CompositionError>,
+    collection_diagnostics: Diagnostics,
+    /// Transient diagnostics produced by on-demand target / property-stack
+    /// queries (invalid external targets, inconsistent property types).
+    ///
+    /// Retired at the change-generation boundary
+    /// ([`retire_query_errors`](Self::retire_query_errors)), so they
+    /// never outlive the edit that fixed what they report; the next query
+    /// re-derives whatever still holds. A repeatable query re-derives the same
+    /// diagnostic on every call — the walk that produces it is the one the
+    /// caller asked for — which the collection folds back into one report.
+    query_diagnostics: Diagnostics,
     /// Paths whose [`ensure_index`](Self::ensure_index) call is still on the
     /// stack. Pre-caching an inherit/specialize target (and that target's own
     /// targets) re-enters `ensure_index`; a cyclic class hierarchy (e.g. two
@@ -285,14 +271,14 @@ impl DefiningKind {
         path: &Path,
         prop_path: &Path,
         prim_path: &Path,
-    ) -> Option<CompositionError> {
+    ) -> Option<CompositionDiagnostic> {
         match &self.defining {
             None => {
                 self.defining = Some((spec_type, layer.to_string(), path.clone()));
                 None
             }
             Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
-                Some(CompositionError::InconsistentPropertyType {
+                Some(CompositionDiagnostic::InconsistentPropertyType {
                     property: prop_path.clone(),
                     defining_layer: def_layer.clone(),
                     defining_path: def_path.clone(),
@@ -332,17 +318,17 @@ struct ClipTier<'a> {
     offered: HashSet<(usize, usize)>,
     store: &'a IndexStore,
     cache: &'a mut ClipCache,
-    query_errors: &'a mut Vec<CompositionError>,
+    query_diagnostics: &'a mut Diagnostics,
 }
 
 impl<'a> ClipTier<'a> {
-    fn new(store: &'a IndexStore, cache: &'a mut ClipCache, query_errors: &'a mut Vec<CompositionError>) -> Self {
+    fn new(store: &'a IndexStore, cache: &'a mut ClipCache, query_diagnostics: &'a mut Diagnostics) -> Self {
         Self {
             anchors: None,
             offered: HashSet::new(),
             store,
             cache,
-            query_errors,
+            query_diagnostics,
         }
     }
 
@@ -361,7 +347,7 @@ impl<'a> ClipTier<'a> {
             anchors,
             offered,
             cache,
-            query_errors,
+            query_diagnostics,
             ..
         } = self;
         for (anchor_index, (anchor, sets)) in anchors.as_deref().unwrap_or_default().iter().enumerate() {
@@ -377,6 +363,7 @@ impl<'a> ClipTier<'a> {
                     let mut probe = ClipProbe {
                         cache,
                         graph,
+                        diagnostics: query_diagnostics,
                         set,
                         query: ClipQuery {
                             anchor,
@@ -386,7 +373,6 @@ impl<'a> ClipTier<'a> {
                     };
                     resolver.on_clips(&mut probe, site)
                 };
-                push_new(query_errors, cache.take_errors());
                 if step?.stop() {
                     return Ok(Step::Stop);
                 }
@@ -413,32 +399,15 @@ impl<'a> ClipTier<'a> {
             if !index.authors_clips() {
                 continue;
             }
-            let mut errors = Vec::new();
+            let mut errors = Diagnostics::default();
             let sets = index.resolve_clip_sets(graph, &mut errors)?;
-            push_new(self.query_errors, errors);
+            self.query_diagnostics.extend(errors);
             if !sets.is_empty() {
                 anchors.push((anchor, sets));
             }
         }
         self.anchors = Some(anchors);
         Ok(())
-    }
-}
-
-/// Appends the diagnostics a query produced to `held`, skipping any already
-/// there.
-///
-/// A value query answers through a value, not a diagnostic channel, so what it
-/// discovers lands in the cache's query errors to reach
-/// [`Stage::composition_errors`](crate::usd::Stage::composition_errors). The
-/// same failing opinion is re-derived on every read — a value-time asset
-/// expression is never cached — so the dedup is what keeps repeated reads from
-/// growing the list.
-fn push_new(held: &mut Vec<CompositionError>, produced: impl IntoIterator<Item = CompositionError>) {
-    for error in produced {
-        if !held.contains(&error) {
-            held.push(error);
-        }
     }
 }
 
@@ -758,7 +727,7 @@ struct StackResolver<'a> {
     /// them.
     time: Option<f64>,
     sites: Vec<SpecSiteRecord>,
-    conflicts: Vec<CompositionError>,
+    conflicts: Diagnostics,
     defining: DefiningKind,
 }
 
@@ -797,7 +766,7 @@ impl OpinionResolver for StackResolver<'_> {
                 path: site.query_path.clone(),
                 offset: site.offset,
             }),
-            Some(conflict) => self.conflicts.push(conflict),
+            Some(conflict) => self.conflicts.report(conflict),
         }
         Step::Continue
     }
@@ -845,7 +814,7 @@ impl IndexCache {
 impl IndexCache {
     /// Creates a new composition cache. The layer data lives in a separate
     /// [`LayerGraph`] owned by the [`Stage`](crate::usd::Stage) and passed to each
-    /// query. `collection_errors` are the one-shot errors from layer collection
+    /// query. `collection_diagnostics` are the one-shot errors from layer collection
     /// the graph cannot regenerate (e.g. `UnresolvedSublayer`); per-prim build
     /// errors join them as indices are composed. The regenerable layer-graph
     /// diagnostics (sublayer cycles, invalid relocates) live on the
@@ -854,7 +823,7 @@ impl IndexCache {
         variant_fallbacks: VariantFallbackMap,
         load_rules: LoadRules,
         population_mask: PopulationMask,
-        collection_errors: Vec<CompositionError>,
+        collection_diagnostics: Diagnostics,
     ) -> Self {
         Self {
             store: IndexStore::default(),
@@ -867,8 +836,8 @@ impl IndexCache {
             populated_prims: HashMap::new(),
             population_epoch: 0,
             type_opinion_epoch: 0,
-            collection_errors,
-            query_errors: Vec::new(),
+            collection_diagnostics,
+            query_diagnostics: Diagnostics::default(),
             in_progress: HashSet::new(),
             pending_loads: Vec::new(),
         }
@@ -920,13 +889,48 @@ impl IndexCache {
     /// The graph is untouched — these prims still compose the way they did, they
     /// merely resolve different values — so nothing is evicted. A named path
     /// with no cached entry costs a lookup and nothing else.
-    pub(super) fn restale_values(&mut self, items: Vec<(Path, ScopedInvalidation)>) {
+    pub(super) fn restale_values(&mut self, graph: &LayerGraph, items: Vec<(Path, ScopedInvalidation)>) {
+        // The property-derived diagnostics of every prim whose composed property
+        // set the round may have moved. Gathered first so the recomputation below
+        // runs against fully restaled entries.
+        let mut refresh: Vec<Path> = Vec::new();
         for (path, item) in items {
             match item.scope {
-                ValueScope::Prim => self.store.restale(&path, &item.target_keys),
-                ValueScope::Subtree => self.store.restale_subtree(&path, &item.target_keys),
+                ValueScope::Prim => {
+                    self.store.restale(&path, &item.target_keys);
+                    if item.properties {
+                        refresh.push(path);
+                    }
+                }
+                ValueScope::Subtree => {
+                    self.store.restale_subtree(&path, &item.target_keys);
+                    if item.properties {
+                        refresh.extend(self.store.subtree_paths(&path));
+                    }
+                }
             }
         }
+        for path in refresh {
+            self.refresh_property_type_conflicts(graph, &path);
+        }
+    }
+
+    /// Recomputes `path`'s inconsistent-property-type conflicts after an edit
+    /// that may have changed which property specs it composes, replacing what
+    /// the previous composition recorded.
+    ///
+    /// A prim the round left uncached needs nothing: its next build reports from
+    /// scratch. Recomposing the property names can fail (a demanded layer that
+    /// is not loaded), in which case the entry keeps what it had rather than
+    /// being left silently empty — the next build or query reports again.
+    fn refresh_property_type_conflicts(&mut self, graph: &LayerGraph, path: &Path) {
+        if !self.is_indexed(path) {
+            return;
+        }
+        let Ok(names) = self.composed_property_names(graph, path) else {
+            return;
+        };
+        self.report_property_type_conflicts(graph, path, &names);
     }
 
     /// Invalidates what a change to the clip or manifest layer `identifier`
@@ -961,7 +965,7 @@ impl IndexCache {
     }
 
     /// Discards the transient query diagnostics
-    /// ([`query_errors`](Self::query_errors)).
+    /// ([`query_diagnostics`](Self::query_diagnostics)).
     ///
     /// They are re-derived on the next query and must not outlive the mutation
     /// that fixed what they report — an edit that drops no index still reaches
@@ -970,7 +974,7 @@ impl IndexCache {
     /// keyed to it. Its own seam, because a mutation that invalidates nothing
     /// cached can still repair a diagnostic.
     pub(super) fn retire_query_errors(&mut self) {
-        self.query_errors.clear();
+        self.query_diagnostics.clear();
     }
 
     /// The current population epoch. A caller that completed a walk over the
@@ -1037,11 +1041,11 @@ impl IndexCache {
     /// Returns the recoverable composition errors encountered so far: the
     /// one-shot collection errors, the current per-prim build errors, and the
     /// transient query errors.
-    pub(crate) fn composition_errors(&self) -> Vec<CompositionError> {
-        self.collection_errors
+    pub(crate) fn composition_errors(&self) -> Diagnostics {
+        self.collection_diagnostics
             .iter()
             .chain(self.store.errors())
-            .chain(&self.query_errors)
+            .chain(&self.query_diagnostics)
             .cloned()
             .collect()
     }
@@ -1052,17 +1056,17 @@ impl IndexCache {
     /// double-report and outlive a later fix. Collection keeps what the loader
     /// alone knows, e.g. a failure under a branch muted at open, which the
     /// graph derives no diagnostic for.
-    pub(crate) fn discard_collection_errors(&mut self, superseded: &[CompositionError]) {
-        self.collection_errors.retain(|error| !superseded.contains(error));
+    pub(crate) fn discard_collection_errors(&mut self, superseded: &[CompositionDiagnostic]) {
+        self.collection_diagnostics.retain(|error| !superseded.contains(error));
     }
 
     #[cfg(test)]
-    fn take_composition_errors(&mut self) -> Vec<CompositionError> {
-        let errors = self.composition_errors();
-        self.collection_errors.clear();
-        self.query_errors.clear();
+    fn take_composition_errors(&mut self) -> Vec<CompositionDiagnostic> {
+        let held = self.composition_errors().into_vec();
+        self.collection_diagnostics.clear();
+        self.query_diagnostics.clear();
         self.store.clear_errors();
-        errors
+        held
     }
 
     /// Runs the shared value-resolution walk for the property at `prim +
@@ -1100,10 +1104,10 @@ impl IndexCache {
         let Self {
             store,
             clip_cache,
-            query_errors,
+            query_diagnostics,
             ..
         } = self;
-        let mut clips = ClipTier::new(store, clip_cache, query_errors);
+        let mut clips = ClipTier::new(store, clip_cache, query_diagnostics);
         let scope = match consults_clips {
             true => SiteScope::EveryLayer,
             false => SiteScope::SpecStack,
@@ -1427,9 +1431,9 @@ impl IndexCache {
     /// would bound both.
     fn clip_sets_for(&mut self, graph: &LayerGraph, anchor: &Path) -> Result<Vec<ResolvedClipSet>, QueryError> {
         self.ensure_index(graph, anchor)?;
-        let mut errors = Vec::new();
+        let mut errors = Diagnostics::default();
         let sets = self.cached(anchor).resolve_clip_sets(graph, &mut errors)?;
-        push_new(&mut self.query_errors, errors);
+        self.query_diagnostics.extend(errors);
         Ok(sets)
     }
 
@@ -1474,7 +1478,7 @@ impl IndexCache {
             clip_manifest::CLIP_MANIFEST_TAG,
             write_blocks,
         )?;
-        if let Some(error) = unread.first() {
+        if let Some(error) = unread.iter().next() {
             return Err(IncompleteClipManifest::new(clip_set, prim.clone(), error.clone()).into());
         }
         Ok(Some(manifest))
@@ -1552,7 +1556,7 @@ impl IndexCache {
         path: &Path,
         index: PrimIndex,
         context: CompositionContext,
-        errors: Vec<CompositionError>,
+        errors: Diagnostics,
         expr_var_deps: ExprVarDeps,
     ) {
         self.store.insert(graph, path, index, context, errors, expr_var_deps);
@@ -1583,7 +1587,7 @@ impl IndexCache {
     }
 
     /// Drops every cached index that recorded a
-    /// [`MalformedLayer`](CompositionError::MalformedLayer) error so it recomposes and
+    /// [`MalformedLayer`](CompositionDiagnostic::MalformedLayer) error so it recomposes and
     /// re-demands the target. The arc to an unreadable target was dropped, so
     /// these indices carry no dependency on it and an ordinary layer-stack
     /// invalidation misses them; the stage calls this when an edit clears the
@@ -2030,16 +2034,16 @@ impl IndexCache {
     /// provenance its resolver carries out, and a value replayed from a cached
     /// [`AttributeValueSource::TimeSamples`] through the stage. A clip resolves
     /// against its own layer inside the clip cache instead, and merges its
-    /// diagnostics here through [`Self::record_clip_errors`].
+    /// diagnostics here through [`Self::record_clip_diagnostics`].
     pub(crate) fn resolve_asset_values(
         &mut self,
         graph: &LayerGraph,
         value: Option<Value>,
         site: Option<&AssetSite>,
     ) -> Option<Value> {
-        let mut errors = Vec::new();
+        let mut errors = Diagnostics::default();
         let resolved = asset_resolve::resolve_values(graph, value?, site, &mut errors);
-        push_new(&mut self.query_errors, errors);
+        self.query_diagnostics.extend(errors);
         Some(resolved)
     }
 
@@ -2192,8 +2196,8 @@ impl IndexCache {
         {
             let TargetMemo { targets, errors } = hit.clone();
             // Re-surface the cached errors: an unrelated index invalidation may
-            // have cleared `query_errors` since, so push any it now lacks.
-            push_new(&mut self.query_errors, errors);
+            // have cleared `query_diagnostics` since, so push any it now lacks.
+            self.query_diagnostics.extend(errors);
             return Ok(targets);
         }
 
@@ -2231,10 +2235,10 @@ impl IndexCache {
         // Targets dropped during composition are reported in authored order, the
         // `invalid` list already honoring list-op composition (a target shadowed
         // by a stronger explicit, or retracted by a delete, is not reported).
-        let mut errs: Vec<CompositionError> = Vec::new();
+        let mut errs = Diagnostics::default();
         for inv in invalid {
-            errs.push(match inv.kind {
-                InvalidTargetKind::External => CompositionError::InvalidExternalTargetPath {
+            errs.report(match inv.kind {
+                InvalidTargetKind::External => CompositionDiagnostic::InvalidExternalTargetPath {
                     is_connection,
                     target: inv.target,
                     property: inv.property,
@@ -2243,7 +2247,7 @@ impl IndexCache {
                     arc_root: inv.arc_root,
                     composing: prim.clone(),
                 },
-                InvalidTargetKind::Instance => CompositionError::InvalidInstanceTargetPath {
+                InvalidTargetKind::Instance => CompositionDiagnostic::InvalidInstanceTargetPath {
                     is_connection,
                     target: inv.target,
                     property: inv.property,
@@ -2275,7 +2279,7 @@ impl IndexCache {
             };
             self.store.set_target_memo(&resolved_prim, key, memo);
         }
-        self.query_errors.append(&mut errs);
+        self.query_diagnostics.extend(errs);
         Ok(targets)
     }
 
@@ -2562,24 +2566,34 @@ impl IndexCache {
         self.composed_property_names(graph, path)
     }
 
-    /// Pushes a [`CompositionError::InconsistentPropertyType`] for each composed property of
-    /// `prim_path` whose specs mix attribute and relationship kinds (C++
-    /// `PcpErrorInconsistentPropertyType`). C++ reports the conflict on each
-    /// property-index composition; the dump's property-name pass (here) and
-    /// property-stack pass ([`property_stack`](Self::property_stack)) each compose
-    /// it, so the error surfaces once per pass.
+    /// Reports a [`CompositionDiagnostic::InconsistentPropertyType`] for each
+    /// composed property of `prim_path` whose specs mix attribute and
+    /// relationship kinds (C++ `PcpErrorInconsistentPropertyType`).
+    ///
+    /// Run from the index build, so a conflict is visible after composition even
+    /// when nobody asks for a property stack, and recorded on the entry the
+    /// build produced: the conflict is a fact about that composed prim and
+    /// lasts exactly as long as it does. A
+    /// [`property_stack`](Self::property_stack) query detects the same conflict
+    /// again from its own walk and reports it into the transient channel; the
+    /// two owners are folded through one collection, so the diagnostic reads
+    /// once however many passes found it.
     fn report_property_type_conflicts(&mut self, graph: &LayerGraph, prim_path: &Path, names: &[Token]) {
         let Some(index) = self.store.index_at(prim_path) else {
             return;
         };
-        let mut conflicts = Vec::new();
+        let mut conflicts = Diagnostics::default();
         for name in names {
             let Ok(prop_path) = prim_path.append_property(name) else {
                 continue;
             };
             conflicts.extend(Self::property_type_conflicts(graph, index, prim_path, &prop_path));
         }
-        self.query_errors.append(&mut conflicts);
+        let cached = self.store.replace_property_errors(prim_path, conflicts);
+        debug_assert!(
+            cached,
+            "property conflicts recorded against an uncached prim: {prim_path}"
+        );
     }
 
     /// Walks a property's specs strongest-first across the prim's composition
@@ -2598,8 +2612,8 @@ impl IndexCache {
         index: &PrimIndex,
         prim_path: &Path,
         prop_path: &Path,
-    ) -> Vec<CompositionError> {
-        let mut conflicts = Vec::new();
+    ) -> Diagnostics {
+        let mut conflicts = Diagnostics::default();
         let mut defining = DefiningKind::default();
         for (site, node) in index.live_spec_sites() {
             let Some(p) = prop_path.replace_prefix(prim_path, node.path()) else {
@@ -2610,7 +2624,7 @@ impl IndexCache {
             };
             let layer_id = graph.identifier(site.layer);
             if let Some(conflict) = defining.admit(spec_type, layer_id, &p, prop_path, prim_path) {
-                conflicts.push(conflict);
+                conflicts.report(conflict);
             }
         }
         conflicts
@@ -2678,18 +2692,15 @@ impl IndexCache {
             prim_path: &prim_path,
             time,
             sites: Vec::new(),
-            conflicts: Vec::new(),
+            conflicts: Diagnostics::default(),
             defining: DefiningKind::default(),
         };
         self.resolve_property(graph, &prim_path, &suffix, mode, &mut resolver)?;
-        let StackResolver {
-            sites, mut conflicts, ..
-        } = resolver;
-        // These transient conflicts are cleared on any index invalidation, so
-        // they never go stale across an edit; repeated `property_stack` queries
-        // on the same conflicting property without an intervening edit still
-        // re-append within a session (the `query_errors` TODO).
-        self.query_errors.append(&mut conflicts);
+        let StackResolver { sites, conflicts, .. } = resolver;
+        // The walk re-derives these on every call, and the prim build detects
+        // the same conflicts from its own pass; the channel keeps one copy of
+        // each, so the diagnostic reads once however often it is found.
+        self.query_diagnostics.extend(conflicts);
         Ok(sites)
     }
 
@@ -2903,14 +2914,22 @@ impl IndexCache {
         // relocation source is reported "while composing" this prim, so stamp its
         // path — the indexer may have recorded it deep in a sub-index build whose
         // own site path differs.
-        for error in &mut build_errors {
-            match error {
-                CompositionError::OpinionAtRelocationSource { composing, .. }
-                | CompositionError::ProhibitedRelocationSource { composing, .. } => *composing = path.clone(),
-                CompositionError::ArcCycle(info) => info.composing = path.clone(),
-                _ => {}
-            }
-        }
+        //
+        // Rebuilt through the collection, since stamping can make two
+        // diagnostics from different sub-builds equal and only a re-insertion
+        // applies uniqueness to the stamped values.
+        build_errors = build_errors
+            .into_iter()
+            .map(|mut error| {
+                match &mut error {
+                    CompositionDiagnostic::OpinionAtRelocationSource { composing, .. }
+                    | CompositionDiagnostic::ProhibitedRelocationSource { composing, .. } => *composing = path.clone(),
+                    CompositionDiagnostic::ArcCycle(info) => info.composing = path.clone(),
+                    _ => {}
+                }
+                error
+            })
+            .collect();
         // `build_errors` accumulates every error for this prim and is carried
         // into the prim's cache entry at the end, replacing any prior entry, so
         // a rebuild never duplicates and a fixed prim drops its stale errors.
@@ -2961,9 +2980,11 @@ impl IndexCache {
             parent_ctx.instance_depth
         };
         self.cache_index(graph, path, index, child_context, build_errors, expr_var_deps);
-        // Report inconsistent property types once per prim composition (C++
-        // `PcpErrorInconsistentPropertyType`); a later property-stack query
-        // reports the conflict again, matching C++'s per-pass reporting.
+        // Report inconsistent property types at prim composition (C++
+        // `PcpErrorInconsistentPropertyType`) so the conflict is visible without
+        // anyone asking for a property stack. Composed property names read back
+        // through the store, so this runs after the entry is cached and reports
+        // onto it.
         // TODO(perf): this composes property names on every prim build to find a
         // rare conflict; gate it on a cheaper signal (e.g. a node carrying both
         // attribute and relationship specs) before scanning.
@@ -3440,6 +3461,211 @@ def "A" (
         out
     }
 
+    /// A root prim whose reference declares the same property with the other
+    /// spec kind, so composing it reports one `InconsistentPropertyType`.
+    const CONFLICT_ROOT: &str =
+        "#usda 1.0\ndef \"P\" (\n    references = @model.usd@</R>\n)\n{\n    double x = 1.0\n}\n";
+
+    /// The property-type conflict is detected once at index build and again by
+    /// every `property_stack` query — the walk that produces the stack produces
+    /// it — so the diagnostic must be reported once however many times it is
+    /// detected.
+    #[test]
+    fn repeat_stack_reports_once() -> Result<()> {
+        let (graph, mut cache) = two_layer_stack(CONFLICT_ROOT, "#usda 1.0\ndef \"R\" {\n    add rel x\n}\n");
+        let prop = sdf::path("/P.x")?;
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        let after_build = conflict_count(&cache);
+        assert_eq!(after_build, 1, "the build pass detects it once");
+
+        for _ in 0..3 {
+            cache.property_stack(&graph, &prop, None)?;
+            assert_eq!(
+                conflict_count(&cache),
+                1,
+                "a repeated stack query re-detects the same conflict, which says nothing new"
+            );
+        }
+        Ok(())
+    }
+
+    /// Identity is the whole diagnostic, not the property it names: one property
+    /// with a defining attribute and two conflicting relationship specs in
+    /// different layers yields two diagnostics that share a variant and a
+    /// property path.
+    #[test]
+    fn distinct_conflicts_survive() -> Result<()> {
+        let root = "#usda 1.0\n(\n    subLayers = [@mid.usd@]\n)\ndef \"P\" (\n    references = @ref.usd@</R>\n) {\n    custom double x = 1\n}\n";
+        let graph = LayerGraph::from_layers(
+            vec![
+                parse_named_layer("root.usd", root),
+                parse_named_layer("mid.usd", "#usda 1.0\nover \"P\" {\n    add rel x\n}\n"),
+                parse_named_layer("ref.usd", "#usda 1.0\ndef \"R\" {\n    add rel x\n}\n"),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let mut cache = fresh_cache();
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        cache.property_stack(&graph, &sdf::path("/P.x")?, None)?;
+
+        assert_eq!(
+            conflict_count(&cache),
+            2,
+            "two conflicting specs are two failures, however alike, got {:?}",
+            cache.composition_errors().iter().collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    /// A build-detected conflict lives as long as the index that produced it.
+    /// The change round retires the transient query channel and leaves `/P`'s
+    /// index warm, so the conflict must still read — once — without anyone
+    /// asking for a property stack again.
+    #[test]
+    fn conflict_survives_edit() -> Result<()> {
+        let (mut graph, mut cache) = two_layer_stack(CONFLICT_ROOT, "#usda 1.0\ndef \"R\" {\n    add rel x\n}\n");
+        let prop = sdf::path("/P.x")?;
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        cache.property_stack(&graph, &prop, None)?;
+        assert_eq!(conflict_count(&cache), 1);
+
+        // A value edit on an unrelated prim: the round retires the query
+        // channel and leaves `/P`'s index standing.
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/P.other")?)
+            .note(FieldKey::Default.as_str(), sdf::FieldChange::Value);
+        let mut changes = Changes::new();
+        let layer = graph.all_ids()[0];
+        changes.did_change(&cache, &graph, &[crate::pcp::LayerChanges::plain(layer, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+        assert!(cache.is_indexed(&sdf::path("/P")?), "the index must stay warm");
+        assert_eq!(conflict_count(&cache), 1, "the entry still holds it");
+
+        cache.property_stack(&graph, &prop, None)?;
+        assert_eq!(conflict_count(&cache), 1, "and the query's own copy folds in");
+        Ok(())
+    }
+
+    /// A conflict the edit fixed must stop reporting. Removing the conflicting
+    /// relationship spec leaves `/P`'s graph — and so its index — standing, so
+    /// nothing drops the entry; the property-derived diagnostics are refreshed
+    /// because the composed property set is what moved.
+    #[test]
+    fn conflict_clears_on_removal() -> Result<()> {
+        let (mut graph, mut cache) = two_layer_stack(
+            CONFLICT_ROOT,
+            "#usda 1.0
+def \"R\" {
+    add rel x
+}
+",
+        );
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        assert_eq!(conflict_count(&cache), 1);
+
+        let model = graph.all_ids()[1];
+        let cl = edit_layer(&mut graph.get_mut(model).unwrap().layer, |e| {
+            e.data_mut().erase_spec(&sdf::path("/R.x").unwrap());
+            Ok(())
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(model, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(cache.is_indexed(&sdf::path("/P")?), "the index must stay warm");
+        assert_eq!(conflict_count(&cache), 0, "the conflicting spec is gone");
+        Ok(())
+    }
+
+    /// The same seam in the other direction: authoring a conflicting spec onto a
+    /// warm index reports the conflict without waiting for a rebuild or a query.
+    #[test]
+    fn conflict_appears_on_add() -> Result<()> {
+        let (mut graph, mut cache) = two_layer_stack(
+            CONFLICT_ROOT,
+            "#usda 1.0
+def \"R\" {
+}
+",
+        );
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        assert_eq!(conflict_count(&cache), 0, "nothing conflicts yet");
+
+        let model = graph.all_ids()[1];
+        let cl = edit_layer(&mut graph.get_mut(model).unwrap().layer, |e| {
+            e.data_mut()
+                .create_spec(sdf::path("/R.x").unwrap(), sdf::SpecType::Relationship);
+            Ok(())
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(model, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert_eq!(
+            conflict_count(&cache),
+            1,
+            "the new spec conflicts with the root's attribute"
+        );
+        Ok(())
+    }
+
+    /// How many inconsistent-property-type diagnostics the cache currently
+    /// reports.
+    fn conflict_count(cache: &IndexCache) -> usize {
+        cache
+            .composition_errors()
+            .iter()
+            .filter(|e| matches!(e, CompositionDiagnostic::InconsistentPropertyType { .. }))
+            .count()
+    }
+
+    /// The other repeatable producer: a target read through an *instance proxy*
+    /// is never memoized — the proxy maps results back per instance — so every
+    /// call re-resolves and re-derives the same diagnostic.
+    ///
+    /// `/Model/Child.r` targets a prim outside the referenced scope, which
+    /// cannot translate through the arc, and `/Inst` is instanceable, so the
+    /// read goes through the proxy path on each call.
+    #[test]
+    fn proxy_targets_report_once() -> Result<()> {
+        let (graph, mut cache) = two_layer_stack(
+            "#usda 1.0
+def \"Inst\" (
+    instanceable = true
+    references = @model.usd@</Model>
+) {}
+",
+            "#usda 1.0
+def \"Outside\" {}
+def \"Model\"
+{
+    def \"Child\"
+    {
+        add rel r = </Outside>
+    }
+}
+",
+        );
+        let proxy = sdf::path("/Inst/Child.r")?;
+        for _ in 0..3 {
+            assert!(
+                cache.relationship_targets(&graph, &proxy)?.is_empty(),
+                "the target cannot translate through the reference"
+            );
+            let reported = cache
+                .composition_errors()
+                .iter()
+                .filter(|e| matches!(e, CompositionDiagnostic::InvalidExternalTargetPath { .. }))
+                .count();
+            assert_eq!(
+                reported, 1,
+                "one untranslatable target is one failure, however often read"
+            );
+        }
+        Ok(())
+    }
+
     /// A relocate grafted at the relocation itself carries the source-to-target
     /// rename in its own map, so a change at the source translates straight
     /// through it (C++ `_ProcessDependentNode`'s ordinary path).
@@ -3583,7 +3809,7 @@ def "A" (
             VariantFallbackMap::new(),
             LoadRules::all(),
             PopulationMask::all(),
-            Vec::new(),
+            Diagnostics::default(),
         )
     }
 
@@ -3666,7 +3892,7 @@ def "A" (
             cache
                 .take_composition_errors()
                 .iter()
-                .any(|e| matches!(e, CompositionError::UnresolvedLayer { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::UnresolvedLayer { .. })),
             "the ancestor's unresolved reference is recorded"
         );
         Ok(())
@@ -3684,7 +3910,7 @@ def "A" (
         let unresolved = |c: &IndexCache| {
             c.composition_errors()
                 .iter()
-                .filter(|e| matches!(e, CompositionError::UnresolvedLayer { .. }))
+                .filter(|e| matches!(e, CompositionDiagnostic::UnresolvedLayer { .. }))
                 .count()
         };
 
@@ -3742,7 +3968,7 @@ def "A" (
             cache
                 .take_composition_errors()
                 .iter()
-                .any(|e| matches!(e, CompositionError::InvalidExpression { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::InvalidExpression { .. })),
             "the invalid asset-path expression is recorded as a recoverable error"
         );
         Ok(())
@@ -3774,7 +4000,7 @@ def "A" (
         assert!(
             cache.take_composition_errors().iter().any(|e| matches!(
                 e,
-                CompositionError::InvalidExpression {
+                CompositionDiagnostic::InvalidExpression {
                     context: ExpressionContext::Variant,
                     ..
                 }
@@ -3859,7 +4085,8 @@ def "Scope"
         assert!(
             !errors.iter().any(|e| matches!(
                 e,
-                CompositionError::InvalidInstanceTargetPath { .. } | CompositionError::InvalidExternalTargetPath { .. }
+                CompositionDiagnostic::InvalidInstanceTargetPath { .. }
+                    | CompositionDiagnostic::InvalidExternalTargetPath { .. }
             )),
             "a class target removed by a stronger delete must not be reported: {errors:?}"
         );
@@ -3900,7 +4127,7 @@ def "Scope"
         assert!(
             errors
                 .iter()
-                .any(|e| matches!(e, CompositionError::InvalidInstanceTargetPath { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::InvalidInstanceTargetPath { .. })),
             "the class node's instance-target contribution is still reported: {errors:?}"
         );
         Ok(())
@@ -4139,7 +4366,7 @@ def "Anchor" (inherits = </Rig>) {}
             cache
                 .composition_errors()
                 .iter()
-                .any(|e| matches!(e, CompositionError::UnresolvedDefaultPrim { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::UnresolvedDefaultPrim { .. })),
             "the unresolved arc is reported"
         );
         Ok(())
@@ -6017,7 +6244,7 @@ def "Anchor" (inherits = </Rig>) {}
 
     /// Authors a `layerRelocates` edit on the root layer and drives it through
     /// the change pipeline, returning the graph's diagnostics afterward.
-    fn relocate_edit(graph: &mut LayerGraph, cache: &mut IndexCache, text: &str) -> Vec<CompositionError> {
+    fn relocate_edit(graph: &mut LayerGraph, cache: &mut IndexCache, text: &str) -> Diagnostics {
         let root_id = graph.root_id().unwrap();
         graph.get_mut(root_id).expect("root layer exists").layer = parse_layer(text);
         let mut cl = sdf::ChangeList::new();
@@ -6047,7 +6274,7 @@ def "Anchor" (inherits = </Rig>) {}
         assert!(
             errors
                 .iter()
-                .any(|e| matches!(e, CompositionError::InvalidRelocate { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::InvalidRelocate { .. })),
             "an invalid relocate authored after construction must be retained"
         );
         Ok(())
@@ -6067,7 +6294,7 @@ def "Anchor" (inherits = </Rig>) {}
         assert_eq!(
             errors
                 .iter()
-                .filter(|e| matches!(e, CompositionError::InvalidRelocate { .. }))
+                .filter(|e| matches!(e, CompositionDiagnostic::InvalidRelocate { .. }))
                 .count(),
             1,
             "recomputing the same invalid relocate must not duplicate the diagnostic"
@@ -6079,7 +6306,7 @@ def "Anchor" (inherits = </Rig>) {}
         assert!(
             !errors
                 .iter()
-                .any(|e| matches!(e, CompositionError::InvalidRelocate { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::InvalidRelocate { .. })),
             "fixing the relocate must clear the diagnostic"
         );
         Ok(())

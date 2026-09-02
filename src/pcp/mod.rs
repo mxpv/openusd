@@ -49,7 +49,7 @@
 //! | `layer_stack` | `PcpLayerStack` identity | Composed-stack identity ([`LayerStackId`]) and the registry of source-keyed instances (`LayerStackRegistry`): a [`LayerId`] names a physical layer, a [`LayerStackId`] a composed view under an expression-variable override source (`VarsSource`, the C++ `PcpExpressionVariablesSource`), so a `${VAR}` sublayer reached from two var-authoring sources resolves independently. |
 //! | `index_cache` | `PcpCache` | Lazily-built composition cache (`IndexCache`). Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
 //! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that maps an instance proxy's subtree onto the shared `/__Prototype_N` namespace) as a second `IndexCache` impl. |
-//! | [`CompositionError`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
+//! | [`CompositionDiagnostic`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`) and the [`CompositionContext`](prim_index::CompositionContext) that flows parent-to-child. |
 //! | `compose_site` | `PcpComposeSite` | Site field composition: the list-op primitives (`compose_references_in`, `collect_payloads_in`, `compose_arc_list_in`) the `prim_indexer` drives to read a node's arc fields across its layer stack, plus the asset-path anchoring and time-codes retiming they fold in. |
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
@@ -65,6 +65,7 @@
 //! | `population_mask` | `UsdStagePopulationMask` | The prim paths a stage exposes ([`PopulationMask`]), as a sorted antichain. Sits here, like `load_rules`, because an instance-relative mask is part of a prototype's instancing key, so two instances the mask reaches differently share no prototype; `usd` re-exports it under its C++ name. |
 //! | `relocates` | — | Stateless relocate free functions (effective relocates, transitive chaining, child-name folding). Layer-authored pairs and stack-effective queries are read from `LayerGraph`; all data is passed through parameters. |
 //! | `dependencies` | `Pcp_Dependencies` | Reverse `(LayerId, site) → prim-index paths` map (`Dependencies`) driving surgical change fanout. |
+//! | `diagnostics` | `PcpErrorVector` | The `Diagnostics` collection every recoverable [`CompositionDiagnostic`] is reported into, holding the one insertion invariant its owners share. |
 //!
 //! Layer loading lives in [`sdf::LayerRegistry`](crate::sdf::LayerRegistry); the
 //! loaded layers and their sublayer DAG are held in [`layer_graph::LayerGraph`].
@@ -107,7 +108,7 @@
 //! takes only shared references, making it suitable for future parallel
 //! execution.
 //!
-//! Recoverable composition errors ([`CompositionError`]) are retained by the cache and
+//! Recoverable composition errors ([`CompositionDiagnostic`]) are retained by the cache and
 //! exposed through [`Stage::composition_errors`](crate::usd::Stage::composition_errors).
 //! Operational failures are returned to the caller.
 //!
@@ -323,7 +324,7 @@
 //! - Muted sublayer diagnostics: the loader (`LayerRegistry::open_stack`) reports
 //!   every missing/unreadable sublayer raw, unaware of muting; the stage reports
 //!   only those a muted-aware check finds contributing
-//!   (`LayerGraph::sublayer_error_contributes` over `effective_layers`, the members
+//!   (`LayerGraph::retain_contributing` over the effective layers, the members
 //!   of every live composed stack) and applies it at report time
 //!   (`Stage::composition_errors`). The effective set is a pure function of the
 //!   muted set and the live composed stacks: muting a branch suppresses its
@@ -348,6 +349,7 @@ pub(crate) mod clip;
 pub(crate) mod clip_manifest;
 mod compose_site;
 pub(crate) mod dependencies;
+pub(crate) mod diagnostics;
 pub(crate) mod index_cache;
 mod index_store;
 pub(crate) mod instancing;
@@ -367,6 +369,7 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::{ApplyOutcome, Changes, LayerChanges};
+pub(crate) use diagnostics::Diagnostics;
 pub use index_cache::SpecSiteRecord;
 pub(crate) use index_cache::{AttributeValueSource, IndexCache, StampedValueSource};
 pub(crate) use index_store::PrimRevision;
@@ -463,14 +466,14 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
 }
 
 /// The kind of authored field a variable expression came from, carried by
-/// [`CompositionError::InvalidExpression`] to name the failing site in diagnostics.
+/// [`CompositionDiagnostic::InvalidExpression`] to name the failing site in diagnostics.
 ///
 /// The composition-time kinds mirror C++ `PcpErrorVariableExpressionError`'s
 /// context. [`AssetValue`](Self::AssetValue) has no C++ counterpart there —
 /// value-time failures are reported from the Usd tier — and rides this channel
 /// because it is the crate's one diagnostic surface
 /// ([`Stage::composition_errors`](crate::usd::Stage::composition_errors)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
 #[strum(serialize_all = "lowercase")]
 #[non_exhaustive]
 pub enum ExpressionContext {
@@ -490,7 +493,7 @@ pub enum ExpressionContext {
 
 /// Operational failure answering a composed query or building a prim index.
 ///
-/// Recoverable composition problems are [`CompositionError`] diagnostics
+/// Recoverable composition problems are [`CompositionDiagnostic`] diagnostics
 /// collected on the side
 /// ([`Stage::composition_errors`](crate::usd::Stage::composition_errors));
 /// this type carries only operational failures, at most citing a diagnostic
@@ -572,12 +575,12 @@ pub struct IncompleteClipManifest {
     prim: Path,
     /// The diagnostic for the unreadable clip.
     #[source]
-    source: CompositionError,
+    source: CompositionDiagnostic,
 }
 
 impl IncompleteClipManifest {
     /// Wraps the unreadable-clip diagnostic with the requested set and prim.
-    pub(crate) fn new(clip_set: impl Into<String>, prim: Path, source: CompositionError) -> Self {
+    pub(crate) fn new(clip_set: impl Into<String>, prim: Path, source: CompositionDiagnostic) -> Self {
         Self {
             clip_set: clip_set.into(),
             prim,
@@ -625,9 +628,9 @@ impl From<ClipLoad> for QueryError {
 ///
 /// These errors represent composition diagnostics. Recoverable failures skip
 /// the broken opinion and are retained by [`Stage`](crate::usd::Stage).
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
-pub enum CompositionError {
+pub enum CompositionDiagnostic {
     /// A composition arc cycle was detected (C++ `PcpErrorArcCycle`). The arc
     /// closing the cycle is dropped so the rest of the prim still composes;
     /// `.0.hops` is the chain of arcs from the composing prim to the cycle-closing
@@ -977,30 +980,15 @@ pub enum CompositionError {
     },
 }
 
-impl CompositionError {
-    /// Records this diagnostic in `errors` unless an identical one is already
-    /// there.
-    ///
-    /// The same failing opinion can be evaluated more than once — the
-    /// variant-selection search re-runs per declaring node and on task retry,
-    /// and a value-time read re-evaluates on every read — so a repeat says
-    /// nothing new.
-    pub(crate) fn record(self, errors: &mut Vec<CompositionError>) {
-        if !errors.contains(&self) {
-            errors.push(self);
-        }
-    }
-}
-
-impl From<sdf::layer_registry::Error> for CompositionError {
+impl From<sdf::layer_registry::Error> for CompositionDiagnostic {
     /// Lifts a layer-registry load error into a composition error: a sublayer
     /// that failed to resolve while opening a layer stack (the root stack or a
     /// reference/payload target reached on demand) is an
-    /// [`UnresolvedSublayer`](CompositionError::UnresolvedSublayer); a sublayer that
+    /// [`UnresolvedSublayer`](CompositionDiagnostic::UnresolvedSublayer); a sublayer that
     /// resolved but could not be read is a
-    /// [`MalformedSublayer`](CompositionError::MalformedSublayer); a sublayer expression
+    /// [`MalformedSublayer`](CompositionDiagnostic::MalformedSublayer); a sublayer expression
     /// that failed to evaluate is an
-    /// [`InvalidExpression`](CompositionError::InvalidExpression) with the sublayer
+    /// [`InvalidExpression`](CompositionDiagnostic::InvalidExpression) with the sublayer
     /// context — field for field the diagnostic the layer graph regenerates
     /// for the same entry, so the two copies compare equal and report once.
     fn from(error: sdf::layer_registry::Error) -> Self {
@@ -1008,7 +996,7 @@ impl From<sdf::layer_registry::Error> for CompositionError {
             sdf::layer_registry::Error::UnresolvedAsset {
                 asset_path,
                 referencing_layer,
-            } => CompositionError::UnresolvedSublayer {
+            } => CompositionDiagnostic::UnresolvedSublayer {
                 asset_path,
                 introduced_by: referencing_layer,
             },
@@ -1016,7 +1004,7 @@ impl From<sdf::layer_registry::Error> for CompositionError {
                 asset_path,
                 referencing_layer,
                 reason,
-            } => CompositionError::MalformedSublayer {
+            } => CompositionDiagnostic::MalformedSublayer {
                 asset_path,
                 introduced_by: referencing_layer,
                 reason,
@@ -1025,7 +1013,7 @@ impl From<sdf::layer_registry::Error> for CompositionError {
                 expression,
                 referencing_layer,
                 reason,
-            } => CompositionError::InvalidExpression {
+            } => CompositionDiagnostic::InvalidExpression {
                 expression,
                 context: ExpressionContext::Sublayer,
                 source_layer: referencing_layer,
@@ -1037,7 +1025,7 @@ impl From<sdf::layer_registry::Error> for CompositionError {
 }
 
 /// Structural rule violated by an authored relocate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum InvalidRelocateReason {
     /// A root prim cannot be relocated.
     #[error("Root prims cannot be the source of a relocate.")]
@@ -1054,7 +1042,7 @@ pub enum InvalidRelocateReason {
 }
 
 /// Pairwise rule violated by two relocates in one layer stack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, thiserror::Error)]
 pub enum RelocateConflictReason {
     /// One relocate targets another relocate's source.
     #[error("The target of a relocate cannot be the source of another relocate in the same layer stack.")]
@@ -1070,10 +1058,10 @@ pub enum RelocateConflictReason {
     SourceDescendant,
 }
 
-/// A composition arc cycle ([`CompositionError::ArcCycle`]). The chain reads from the
+/// A composition arc cycle ([`CompositionDiagnostic::ArcCycle`]). The chain reads from the
 /// composing prim (`composing`, in the `root_layer`) through each `hops` site;
 /// the last hop is the arc that closes the cycle and is dropped.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CycleChain {
     /// The prim being composed when the cycle was detected (the chain root).
     pub composing: Path,
@@ -1086,7 +1074,7 @@ pub struct CycleChain {
 
 /// One arc in a composition cycle chain ([`CycleChain::hops`]): the arc type and
 /// the `(layer, path)` site it reaches.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CycleHop {
     /// The arc reaching this site (selects "references" / "inherits from" / …).
     pub arc: ArcType,
@@ -1172,7 +1160,7 @@ mod tests {
             graph
                 .errors()
                 .iter()
-                .any(|error| matches!(error, CompositionError::SameTargetRelocations { .. })),
+                .any(|error| matches!(error, CompositionDiagnostic::SameTargetRelocations { .. })),
             "relocates in one sublayer stack must conflict"
         );
         assert_eq!(
@@ -1206,7 +1194,7 @@ mod tests {
             !graph
                 .errors()
                 .iter()
-                .any(|error| matches!(error, CompositionError::SameTargetRelocations { .. })),
+                .any(|error| matches!(error, CompositionDiagnostic::SameTargetRelocations { .. })),
             "a repeated sublayer has one authored relocate occurrence"
         );
         assert_eq!(
@@ -1280,7 +1268,7 @@ mod tests {
             !graph
                 .errors()
                 .iter()
-                .any(|error| matches!(error, CompositionError::SameTargetRelocations { .. })),
+                .any(|error| matches!(error, CompositionDiagnostic::SameTargetRelocations { .. })),
             "relocates in unrelated layer stacks do not conflict"
         );
         assert_eq!(relocate_count(&graph), 2);

@@ -99,12 +99,13 @@ use crate::sdf::{self, LayerOffset, Path, Value};
 use crate::tf::Token;
 
 use super::compose_site::{collect_payloads_in, compose_arc_list_in, compose_references_in, evaluate_expression};
+use super::diagnostics::Diagnostics;
 use super::layer_graph::{ExternalStack, LoadFailure};
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, NodeFlags, NodeId, PrimIndexGraph, is_class_based_arc};
 use super::prim_index::{CompositionContext, Demand, PrimEntry, stack_has_spec};
-use super::{CompositionError, CycleChain, CycleHop, ExpressionContext, LayerGraph, LayerId, QueryError};
+use super::{CompositionDiagnostic, CycleChain, CycleHop, ExpressionContext, LayerGraph, LayerId, QueryError};
 
 /// Maximum composition-arc nesting before the prim is abandoned as a cycle,
 /// composing to an empty prim index. Matches C++ `MAX_COMPOSITION_DEPTH`.
@@ -371,6 +372,17 @@ enum TaskKind {
     EvalNodeRelocations,
 }
 
+/// What grafting an ancestral sub-index produced: the grafted node, and
+/// whether *that* sub-build hit an arc cycle.
+///
+/// The flag answers for *this* sub-build alone, which is what a sub-root
+/// reference needs: it is unresolved only when composing its own target hit a
+/// cycle that left nothing behind.
+struct GraftOutcome {
+    node: Option<NodeId>,
+    hit_cycle: bool,
+}
+
 /// The result of composing one prim: the graph and the recoverable composition
 /// errors recorded along the way (C++ `Pcp_PrimIndexer`'s `allErrors`).
 ///
@@ -382,7 +394,10 @@ enum TaskKind {
 /// `errors` into its own before using the `graph`.
 pub(crate) struct BuildOutput {
     pub(crate) graph: Option<PrimIndexGraph>,
-    pub(crate) errors: Vec<CompositionError>,
+    pub(crate) errors: Diagnostics,
+    /// Whether the build dropped a cycle-closing arc, so a sub-root reference
+    /// that grafted nothing can tell an unresolvable target from a cyclic one.
+    pub(crate) hit_cycle: bool,
     /// [`Demand`]s raised by a reference/payload arc whose target layer is not
     /// yet loaded. Non-empty means the build is incomplete and its `graph` must
     /// not be cached; the cache loads these and recomposes.
@@ -473,7 +488,12 @@ pub(crate) struct Indexer<'a, 'f> {
     /// records its error here and contributes nothing, so the rest of the prim
     /// still composes; the cache retains these as stage composition diagnostics.
     /// Errors from nested sub-builds are merged in at their call sites.
-    errors: Vec<CompositionError>,
+    errors: Diagnostics,
+    /// Whether this build dropped a cycle-closing arc, set where the arc is
+    /// dropped. A sub-root reference whose graft kept nothing is reported as
+    /// unresolved only when this is set, so it is composition state rather than
+    /// a property of the diagnostics the build happened to record.
+    hit_cycle: bool,
     /// [`Demand`]s a reference/payload arc raised for a target layer that is not
     /// yet loaded. Returned in [`BuildOutput`] (like [`errors`](Self::errors)) —
     /// a non-empty list means the build is incomplete and its graph must not be
@@ -490,7 +510,7 @@ pub(crate) struct Indexer<'a, 'f> {
     /// composed under a culled branch (an empty ancestral reference at the
     /// relocation target) reports no error, so only entries whose node survives
     /// (is not culled) are kept — matching C++'s per-contributing-arc reporting.
-    pending_relocation_errors: Vec<(NodeId, CompositionError)>,
+    pending_relocation_diagnostics: Vec<(NodeId, CompositionDiagnostic)>,
 }
 
 impl<'a, 'f> Indexer<'a, 'f> {
@@ -518,10 +538,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
             tasks: Vec::new(),
             implied_seen: HashSet::new(),
             root_contributes: true,
-            errors: Vec::new(),
+            errors: Diagnostics::default(),
+            hit_cycle: false,
             pending_loads: Vec::new(),
             expr_var_deps: ExprVarDeps::default(),
-            pending_relocation_errors: Vec::new(),
+            pending_relocation_diagnostics: Vec::new(),
         }
     }
 
@@ -533,6 +554,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         BuildOutput {
             graph,
             errors: self.errors,
+            hit_cycle: self.hit_cycle,
             pending_loads: self.pending_loads,
             expr_var_deps: self.expr_var_deps,
         }
@@ -550,7 +572,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// target cannot be resolved is recorded and skipped, so the rest of the prim
     /// still composes). The graph is `None` when the seed cannot be established or
     /// the runaway nesting backstop trips, which the cache treats as an empty prim
-    /// index. A composition cycle is likewise recorded as [`CompositionError::ArcCycle`] and
+    /// index. A composition cycle is likewise recorded as [`CompositionDiagnostic::ArcCycle`] and
     /// the cycle-closing arc dropped (by [`class_arc_is_cycle`](Self::class_arc_is_cycle)
     /// for inherits/specializes and [`arc_target_in_bounds`](Self::arc_target_in_bounds)
     /// for references/payloads), so the rest of the prim still composes.
@@ -648,9 +670,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // Keep only the relocation-source-opinion errors whose relocate node
         // survived composition; one composed under a culled branch (an empty
         // ancestral reference at the relocation target) reports nothing.
-        for (node, error) in mem::take(&mut self.pending_relocation_errors) {
+        for (node, error) in mem::take(&mut self.pending_relocation_diagnostics) {
             if !self.output.nodes[node.idx()].is_culled() {
-                self.errors.push(error);
+                self.errors.report(error);
             }
         }
 
@@ -830,6 +852,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// returns its graph, so each call site handles only the `Option<graph>`.
     fn merge_subindex(&mut self, out: BuildOutput) -> Option<PrimIndexGraph> {
         self.errors.extend(out.errors);
+        // A cycle a nested build hit is one this build hit: the arc it dropped
+        // is missing from the graph being merged in here.
+        self.hit_cycle |= out.hit_cycle;
         // A layer demanded only inside the sub-build is still needed to compose
         // this prim, so carry the demand up even when the sub-build's graph is
         // `None` (the sub-build was itself left incomplete by the missing layer).
@@ -860,12 +885,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Composes an arc target as its own ancestral sub-index and grafts it under
     /// `parent` (C++ `_AddArc`'s `includeAncestralOpinions` branch +
-    /// `InsertChildSubgraph`), returning the grafted arc node. The grafted
-    /// subtree's implied classes still need to cascade up the new arc, and its
-    /// variants were skipped in the nested build, so
-    /// [`add_grafted_subtree_tasks`](Self::add_grafted_subtree_tasks) enqueues
-    /// both. Returns `None` when the target cannot be composed (a cycle) or has
-    /// no single local root to graft.
+    /// `InsertChildSubgraph`). The grafted subtree's implied classes still need
+    /// to cascade up the new arc, and its variants were skipped in the nested
+    /// build, so [`add_grafted_subtree_tasks`](Self::add_grafted_subtree_tasks)
+    /// enqueues both.
+    ///
+    /// The outcome's node is `None` when the target cannot be composed (a
+    /// cycle) or has no single local root to graft; its `hit_cycle` reports
+    /// whether *this* sub-build closed one.
     #[allow(clippy::too_many_arguments)]
     fn compose_and_graft(
         &mut self,
@@ -877,15 +904,20 @@ impl<'a, 'f> Indexer<'a, 'f> {
         map: MapFunction,
         origin: NodeId,
         sibling: u16,
-    ) -> BuildResult<Option<NodeId>> {
-        let Some(sub) = self.merge_subindex(self.compose_subindex(target, ambient, skip, true, arc)?) else {
-            return Ok(None);
+    ) -> BuildResult<GraftOutcome> {
+        let out = self.compose_subindex(target, ambient, skip, true, arc)?;
+        let hit_cycle = out.hit_cycle;
+        let Some(sub) = self.merge_subindex(out) else {
+            return Ok(GraftOutcome { node: None, hit_cycle });
         };
         let Some(grafted) = self.graft_subindex(&sub, parent, arc, map, origin, sibling) else {
-            return Ok(None);
+            return Ok(GraftOutcome { node: None, hit_cycle });
         };
         self.add_grafted_subtree_tasks(grafted);
-        Ok(Some(grafted))
+        Ok(GraftOutcome {
+            node: Some(grafted),
+            hit_cycle,
+        })
     }
 
     /// Whether a node at the arc target site `(layer_stack, site_path)` already
@@ -1313,7 +1345,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
         }) {
             let site_layer = self.introducing_layer(node);
-            self.errors.push(CompositionError::ProhibitedRelocationSource {
+            self.errors.report(CompositionDiagnostic::ProhibitedRelocationSource {
                 arc: ArcType::Relocate,
                 site: node_path.clone(),
                 site_layer: site_layer.clone(),
@@ -1335,9 +1367,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         };
         self.output.nodes[grafted.idx()].flags |= NodeFlags::RELOCATE_SOURCE;
         if let Some(layer) = opinion_layer {
-            self.pending_relocation_errors.push((
+            self.pending_relocation_diagnostics.push((
                 grafted,
-                CompositionError::OpinionAtRelocationSource {
+                CompositionDiagnostic::OpinionAtRelocationSource {
                     source_path: source.clone(),
                     layer,
                     composing: self.site.path.clone(),
@@ -1545,7 +1577,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // variable names the `${VAR}` asset paths read are collected locally so
         // the immutable borrow of `self` taken by the composers is released
         // before they are recorded on `self` below.
-        let mut arc_errors: Vec<CompositionError> = Vec::new();
+        let mut arc_errors = Diagnostics::default();
         let mut used_vars: HashSet<String> = HashSet::new();
         let (arc, arcs) = match kind {
             TaskKind::EvalNodeReferences => {
@@ -1587,7 +1619,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // `eval_arcs` is dispatched only for reference and payload tasks.
             _ => unreachable!("eval_arcs handles only reference and payload tasks"),
         };
-        self.errors.append(&mut arc_errors);
+        self.errors.extend(arc_errors);
         self.expr_var_deps.record(node_stack, used_vars);
         for (asset_path, prim_path, offset) in &arcs {
             self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset)?;
@@ -1623,7 +1655,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // relocation, so the arc is dropped and reported.
             if let Some((reloc_source, reloc_layer)) = self.prohibiting_relocation_source(node_ambient, &resolved) {
                 let site_layer = self.introducing_layer(node);
-                self.errors.push(CompositionError::ProhibitedRelocationSource {
+                self.errors.report(CompositionDiagnostic::ProhibitedRelocationSource {
                     arc,
                     site: node_path.clone(),
                     site_layer: site_layer.clone(),
@@ -1797,7 +1829,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// boundary that blocks the mapping also blocks stronger frames' selections
     /// from leaking in. An expression-valued opinion evaluates against the
     /// reading node's own stack variables; a failed one records
-    /// [`CompositionError::InvalidExpression`] and falls through to the next-weaker
+    /// [`CompositionDiagnostic::InvalidExpression`] and falls through to the next-weaker
     /// opinion (C++ skip semantics), while one evaluating to the
     /// expression-language `None` is the accepted empty selection, deferring
     /// to the fallback like an authored empty selection. Returns the
@@ -1995,7 +2027,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let rep = n.layer_id();
         let site_path = n.path.clone();
         let Ok(var_path) = site_path.append_variant_selection(&vt.vset_name, vsel) else {
-            self.errors.push(CompositionError::InvalidVariantSelection {
+            self.errors.report(CompositionDiagnostic::InvalidVariantSelection {
                 set: vt.vset_name.to_string(),
                 selection: vsel.to_string(),
                 site_path,
@@ -2035,7 +2067,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let node_path = n.path.clone();
         let stack_id = n.layer_stack_id();
         let Ok(selected) = vt.vset_path.append_variant_selection(&vt.vset_name, vsel) else {
-            self.errors.push(CompositionError::InvalidVariantSelection {
+            self.errors.report(CompositionDiagnostic::InvalidVariantSelection {
                 set: vt.vset_name.to_string(),
                 selection: vsel.to_string(),
                 site_path: vt.vset_path.clone(),
@@ -2061,16 +2093,18 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if skip && self.find_duplicate(stack_id, &var_path) {
             return Ok(());
         }
-        let grafted = self.compose_and_graft(
-            &var_path,
-            stack_id,
-            skip,
-            node,
-            ArcType::Variant,
-            map,
-            node,
-            vt.vset_num,
-        )?;
+        let grafted = self
+            .compose_and_graft(
+                &var_path,
+                stack_id,
+                skip,
+                node,
+                ArcType::Variant,
+                map,
+                node,
+                vt.vset_num,
+            )?
+            .node;
         if grafted.is_some() {
             self.retry_variant_tasks();
         }
@@ -2166,7 +2200,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // which the cycle test would otherwise reject (C++ excludes implied
         // class-based arcs under relocates from the check).
         if !implied && self.class_arc_is_cycle(parent, parent_stack, &inherit_path) {
-            self.errors.push(CompositionError::ArcCycle(self.cycle_error(
+            self.hit_cycle = true;
+            self.errors.report(CompositionDiagnostic::ArcCycle(self.cycle_error(
                 parent,
                 arc,
                 rep,
@@ -2241,16 +2276,18 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A sub-root class needs the opinions above it: compose the target as its
         // own ancestral sub-index and graft it under the parent.
         if direct_should && !inherit_path.is_root_prim() {
-            let grafted = self.compose_and_graft(
-                &inherit_path,
-                parent_stack,
-                skip,
-                parent,
-                arc,
-                inherit_map,
-                origin,
-                arc_num,
-            )?;
+            let grafted = self
+                .compose_and_graft(
+                    &inherit_path,
+                    parent_stack,
+                    skip,
+                    parent,
+                    arc,
+                    inherit_map,
+                    origin,
+                    arc_num,
+                )?
+                .node;
             if implied && let Some(g) = grafted {
                 self.output.nodes[g.idx()].flags |= NodeFlags::IMPLIED_CLASS;
             }
@@ -2573,7 +2610,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A sub-root specialize target needs the opinions above it (C++
         // `includeAncestralOpinions = !IsRootPrimPath`).
         if !src_path.is_root_prim() {
-            return self.compose_and_graft(&src_path, src_stack, true, root, ArcType::Specialize, map, src, sibling);
+            return Ok(self
+                .compose_and_graft(&src_path, src_stack, true, root, ArcType::Specialize, map, src, sibling)?
+                .node);
         }
 
         let has_specs = self.stack_has_spec(src_stack, &src_path);
@@ -2644,7 +2683,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // unchecked selection would land on the arc map's source side, which
         // map functions never carry.
         if prim_path.contains_prim_variant_selection() {
-            self.errors.push(CompositionError::InvalidPrimPath {
+            self.errors.report(CompositionDiagnostic::InvalidPrimPath {
                 arc,
                 prim_path: prim_path.clone(),
                 site_path: parent_path,
@@ -2677,7 +2716,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 // read.
                 if let Some(canonical) = self.arc_target_muted(parent, asset_path) {
                     self.output.non_site_deps_mut().muted_unloaded.push(canonical);
-                    self.errors.push(CompositionError::MutedAssetPath {
+                    self.errors.report(CompositionDiagnostic::MutedAssetPath {
                         asset_path: asset_path.to_string(),
                         arc,
                         introduced_by: self.introducing_layer(parent),
@@ -2710,7 +2749,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 // A target the load barrier resolved but could not read or
                 // parse: report it with the underlying reason and skip the arc.
                 if let Some(reason) = unreadable {
-                    self.errors.push(CompositionError::MalformedLayer {
+                    self.errors.report(CompositionDiagnostic::MalformedLayer {
                         asset_path: asset_path.to_string(),
                         arc,
                         introduced_by: self.introducing_layer(parent),
@@ -2723,7 +2762,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 // open asset … for {arc}"): record it and skip the arc so the
                 // rest of the prim — including its own local opinions — still
                 // composes.
-                self.errors.push(CompositionError::UnresolvedLayer {
+                self.errors.report(CompositionDiagnostic::UnresolvedLayer {
                     asset_path: asset_path.to_string(),
                     arc,
                     introduced_by: self.introducing_layer(parent),
@@ -2759,7 +2798,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let Some(rep) = self.inputs.stack.layer_stack(target_stack).first().map(|&(li, _)| li) else {
             if let Some(layer_index) = external_target {
                 self.output.non_site_deps_mut().muted_external.push(layer_index);
-                self.errors.push(CompositionError::MutedAssetPath {
+                self.errors.report(CompositionDiagnostic::MutedAssetPath {
                     asset_path: asset_path.to_string(),
                     arc,
                     introduced_by: self.introducing_layer(parent),
@@ -2782,7 +2821,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let Some(p) = self.resolve_default_prim(default_layer)? else {
                 // An unusable target `defaultPrim` is recoverable: record it and
                 // skip the arc; the prim's other opinions still compose.
-                self.errors.push(CompositionError::UnresolvedDefaultPrim {
+                self.errors.report(CompositionDiagnostic::UnresolvedDefaultPrim {
                     layer_id: self.inputs.stack.layer(default_layer).identifier.clone(),
                     arc,
                     site_path: parent_path,
@@ -2805,15 +2844,17 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // whole prim. The reference diamond `GroupRoot → A → B → A` keeps its
         // `[GroupRoot, GroupA, GroupB]` stack and drops only the closing `B → A`.
         if !self.arc_target_in_bounds(parent, target_stack, &source) {
-            self.errors
-                .push(CompositionError::ArcCycle(self.cycle_error(parent, arc, rep, source)));
+            self.hit_cycle = true;
+            self.errors.report(CompositionDiagnostic::ArcCycle(
+                self.cycle_error(parent, arc, rep, source),
+            ));
             return Ok(());
         }
         // Referencing a prim that is a relocation source — or a child of one — is
         // prohibited (C++ `PcpErrorArcToProhibitedChild`, "CANNOT reference"): the
         // target is empty after relocation. Drop the arc and report it.
         if let Some((reloc_source, reloc_layer)) = self.prohibiting_relocation_source(target_stack, &source) {
-            self.errors.push(CompositionError::ProhibitedRelocationSource {
+            self.errors.report(CompositionDiagnostic::ProhibitedRelocationSource {
                 arc,
                 site: parent_path.clone(),
                 site_layer: self.introducing_layer(parent),
@@ -2848,18 +2889,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // cycle — leaving the reference prim path unresolved (C++
         // `PcpErrorUnresolvedPrimPath`).
         if !source.is_root_prim() {
-            let before = self.errors.len();
             let grafted =
                 self.compose_and_graft(&source, target_stack, self.frame_skip(), parent, arc, map, parent, 0)?;
             // The target is unresolved only when composing it hit a cycle (its own
             // ancestral chain loops back) that left nothing — not when it is merely
             // empty so far (e.g. a variant supplies its opinions later).
-            let hit_cycle = self.errors[before..]
-                .iter()
-                .any(|e| matches!(e, CompositionError::ArcCycle(_)));
-            let unresolved = hit_cycle && !grafted.is_some_and(|g| self.subtree_has_specs(g));
+            let unresolved = grafted.hit_cycle && !grafted.node.is_some_and(|g| self.subtree_has_specs(g));
             if unresolved {
-                self.errors.push(CompositionError::UnresolvedPrimPath {
+                self.errors.report(CompositionDiagnostic::UnresolvedPrimPath {
                     arc,
                     target_layer: self.inputs.stack.layer(rep).identifier.clone(),
                     prim_path: source.clone(),
@@ -2877,7 +2914,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `PcpErrorUnresolvedPrimPath`); the node is still culled.
         let empty = !self.stack_has_spec(target_stack, &source);
         if empty && !is_internal && arc == ArcType::Payload {
-            self.errors.push(CompositionError::UnresolvedPrimPath {
+            self.errors.report(CompositionDiagnostic::UnresolvedPrimPath {
                 arc,
                 target_layer: self.inputs.stack.layer(rep).identifier.clone(),
                 prim_path: source.clone(),
@@ -2978,7 +3015,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             .find_map(|&(layer, _)| graph.muted_asset_id(asset_path, graph.anchor_location(Some(layer)).as_ref()))
     }
 
-    /// Builds the cycle chain for a [`CompositionError::ArcCycle`]: the arcs from the
+    /// Builds the cycle chain for a [`CompositionDiagnostic::ArcCycle`]: the arcs from the
     /// composing prim down to the cycle-closing arc `(closing_arc, closing_layer,
     /// closing_path)`. Walks `parent`'s ancestry (the no-parent node is the chain
     /// root), records each intermediate site's arc, then appends the closing arc.
@@ -3479,7 +3516,7 @@ mod tests {
         assert!(
             out.errors.iter().any(|e| matches!(
                 e,
-                CompositionError::InvalidExpression {
+                CompositionDiagnostic::InvalidExpression {
                     context: ExpressionContext::Variant,
                     ..
                 }
@@ -3515,7 +3552,7 @@ mod tests {
         assert!(
             !out.errors
                 .iter()
-                .any(|e| matches!(e, CompositionError::InvalidExpression { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::InvalidExpression { .. })),
             "a successful `None` records no diagnostic, got {:?}",
             out.errors
         );
@@ -3543,7 +3580,7 @@ mod tests {
         assert_eq!(
             out.errors
                 .iter()
-                .filter(|e| matches!(e, CompositionError::InvalidExpression { .. }))
+                .filter(|e| matches!(e, CompositionDiagnostic::InvalidExpression { .. }))
                 .count(),
             1,
             "the re-run selection search does not repeat the diagnostic, got {:?}",
@@ -3731,7 +3768,9 @@ mod tests {
         let out = build_full(&mut s, "/Model");
         let graph = out.graph.expect("the self-reference converges to a composed graph");
         assert!(
-            out.errors.iter().any(|e| matches!(e, CompositionError::ArcCycle(_))),
+            out.errors
+                .iter()
+                .any(|e| matches!(e, CompositionDiagnostic::ArcCycle(_))),
             "the fixpoint context closes the site cycle, got {:?}",
             out.errors
         );
@@ -3772,7 +3811,9 @@ mod tests {
         let out = build_full(&mut s, "/Model");
         let graph = out.graph.expect("the coalesced chain converges to a composed graph");
         assert!(
-            out.errors.iter().any(|e| matches!(e, CompositionError::ArcCycle(_))),
+            out.errors
+                .iter()
+                .any(|e| matches!(e, CompositionDiagnostic::ArcCycle(_))),
             "equal contexts share the target site, closing the chain as a cycle, got {:?}",
             out.errors
         );
@@ -3874,7 +3915,8 @@ mod tests {
             PrimEntry {
                 index: root_index,
                 context: CompositionContext::default(),
-                errors: Vec::new(),
+                errors: Diagnostics::default(),
+                property_errors: Diagnostics::default(),
                 resolved_targets: Default::default(),
                 revision: PrimRevision::placeholder(),
             },

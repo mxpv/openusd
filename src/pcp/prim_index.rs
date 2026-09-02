@@ -14,12 +14,13 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path, Value};
 
 use super::compose_site::evaluate_expression;
+use super::diagnostics::Diagnostics;
 use super::index_store::PrimRevision;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
-use super::{CompositionError, ExpressionContext, LayerGraph, LayerId, VariantFallbackMap};
+use super::{ExpressionContext, LayerGraph, LayerId, VariantFallbackMap};
 
 /// How much of the composition graph a value-resolution walk visits
 /// ([`PrimIndex::live_sites`]) — C++ `Usd_Resolver`'s `skipEmptyNodes`.
@@ -78,8 +79,8 @@ pub struct PrimIndex {
 }
 
 /// The cache's per-prim composition record: the composed [`PrimIndex`], the
-/// [`CompositionContext`] its children inherit, and the recoverable errors
-/// recorded while building it.
+/// [`CompositionContext`] its children inherit, and the recoverable diagnostics
+/// its composition produced.
 ///
 /// [`IndexCache`](super::index_cache::IndexCache) stores one of these per
 /// composed prim in a single [`sdf::PathTable`], so a prim's index, its child
@@ -94,7 +95,16 @@ pub(crate) struct PrimEntry {
     /// Recoverable composition errors recorded while building [`index`](Self::index),
     /// replaced wholesale on each rebuild so they always reflect the current
     /// composition.
-    pub errors: Vec<CompositionError>,
+    pub errors: Diagnostics,
+    /// Diagnostics derived from this prim's composed *property set* rather than
+    /// from its graph — the inconsistent-property-type conflicts.
+    ///
+    /// Separate from [`errors`](Self::errors) because the two are refreshed by
+    /// different edits. A property spec appearing or vanishing changes the
+    /// composed property set while leaving the graph — and so the index —
+    /// standing, and these are replaced wholesale at that point; a rebuild
+    /// replaces both.
+    pub property_errors: Diagnostics,
     /// Lazily-memoized resolved property targets — cached composed query output,
     /// not authored data — keyed by property kind and suffix. Filled on the first
     /// [`relationship_targets`] / [`connection_paths`] query for a property whose
@@ -143,7 +153,7 @@ pub(crate) struct TargetMemoKey {
 #[derive(Clone)]
 pub(crate) struct TargetMemo {
     pub targets: Vec<Path>,
-    pub errors: Vec<CompositionError>,
+    pub errors: Diagnostics,
 }
 
 /// Outcome of [`PrimIndex::refresh_has_specs_at`]: what the spec-tier rescan
@@ -938,7 +948,7 @@ impl PrimIndex {
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimEntry>,
         load_payloads: bool,
-    ) -> BuildResult<(Self, Vec<CompositionError>, Vec<Demand>, ExprVarDeps)> {
+    ) -> BuildResult<(Self, Diagnostics, Vec<Demand>, ExprVarDeps)> {
         Self::build_with_cache_in(path, stack, ctx, cached_indices, LayerStackId::ROOT, load_payloads)
     }
 
@@ -958,7 +968,7 @@ impl PrimIndex {
         cached_indices: &sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
         load_payloads: bool,
-    ) -> BuildResult<(Self, Vec<CompositionError>, Vec<Demand>, ExprVarDeps)> {
+    ) -> BuildResult<(Self, Diagnostics, Vec<Demand>, ExprVarDeps)> {
         if ambient == LayerStackId::ROOT
             && let Some(cached) = cached_indices.get(path)
         {
@@ -968,10 +978,15 @@ impl PrimIndex {
             // this hit (`ensure_index` checks `is_indexed` first, and
             // `build_index` debug-asserts it), so the empty map is never
             // re-registered over it.
-            return Ok((cached.index.clone(), Vec::new(), Vec::new(), ExprVarDeps::default()));
+            return Ok((
+                cached.index.clone(),
+                Diagnostics::default(),
+                Vec::new(),
+                ExprVarDeps::default(),
+            ));
         }
         // The task-queue indexer is the sole composition path. A genuine cycle
-        // surfaces as `CompositionError::ArcCycle`; an unresolvable arc is recorded in the
+        // surfaces as `CompositionDiagnostic::ArcCycle`; an unresolvable arc is recorded in the
         // returned errors and skipped. A `None` graph means an unestablished seed
         // or the runaway nesting backstop, which composes to an empty prim index.
         let indexer = super::prim_indexer::Indexer::new(stack, ctx, cached_indices, ambient, load_payloads);
@@ -980,6 +995,9 @@ impl PrimIndex {
             errors,
             pending_loads,
             expr_var_deps,
+            // A cycle only steers the sub-build that hit it; at the top level
+            // the dropped arc is already recorded in `errors`.
+            hit_cycle: _,
         } = indexer.build(path)?;
         let mut index = PrimIndex {
             graph: graph.unwrap_or_default(),
@@ -1413,6 +1431,7 @@ pub(crate) mod tests {
     use std::cmp::Ordering;
 
     use super::*;
+    use crate::pcp::CompositionDiagnostic;
 
     use crate::Result;
 
@@ -1491,7 +1510,8 @@ pub(crate) mod tests {
                     PrimEntry {
                         index: index.clone(),
                         context: CompositionContext::default(),
-                        errors: Vec::new(),
+                        errors: Diagnostics::default(),
+                        property_errors: Diagnostics::default(),
                         resolved_targets: HashMap::new(),
                         revision: PrimRevision::placeholder(),
                     },
@@ -2100,7 +2120,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    // --- CompositionError reporting ---
+    // --- CompositionDiagnostic reporting ---
 
     fn parse_usda(text: &str) -> Box<dyn sdf::AbstractData> {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
@@ -2230,7 +2250,7 @@ def "World" (
         );
     }
 
-    /// A reference cycle is recorded as a recoverable `CompositionError::ArcCycle` and the
+    /// A reference cycle is recorded as a recoverable `CompositionDiagnostic::ArcCycle` and the
     /// cycle-closing arc is skipped, rather than aborting the whole build (C++
     /// `_CheckForCycle` drops the arc and continues).
     #[test]
@@ -2271,8 +2291,63 @@ def "Root" (
             true,
         )?;
         assert!(
-            errors.iter().any(|e| matches!(e, CompositionError::ArcCycle(_))),
+            errors.iter().any(|e| matches!(e, CompositionDiagnostic::ArcCycle(_))),
             "expected a recorded ArcCycle error, got {errors:?}"
+        );
+        Ok(())
+    }
+
+    /// A cyclic sub-root reference whose target composes *nothing* is reported
+    /// as `UnresolvedPrimPath` on top of the `ArcCycle` (C++
+    /// `PcpErrorUnresolvedPrimPath`). `/Outer` references back into `a.usd`, so
+    /// composing `/Outer/Inner`'s ancestral chain closes a cycle, and `Inner`
+    /// authors nothing of its own for the graft to keep.
+    ///
+    /// The pair is the point: the second diagnostic is gated on whether *that*
+    /// sub-build hit the cycle, which is why the signal travels with the graft
+    /// result rather than being read back off the accumulated diagnostics.
+    #[test]
+    fn cyclic_subroot_unresolved() -> Result<()> {
+        let a = parse_usda(
+            r#"#usda 1.0
+(
+    defaultPrim = "Root"
+)
+def "Root" (
+    references = @b.usd@</Outer/Inner>
+)
+{
+}
+"#,
+        );
+        let b = parse_usda(
+            r#"#usda 1.0
+def "Outer" (
+    references = @a.usd@
+)
+{
+}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+
+        let (_index, errors, _pending, _deps) = PrimIndex::build_with_cache(
+            &Path::new("/Root").unwrap(),
+            &stack,
+            &CompositionContext::default(),
+            &sdf::PathTable::new(),
+            true,
+        )?;
+        assert!(
+            errors.iter().any(|e| matches!(e, CompositionDiagnostic::ArcCycle(_))),
+            "expected the cycle itself, got {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, CompositionDiagnostic::UnresolvedPrimPath { .. })),
+            "the cyclic target composed nothing, so its prim path is unresolved, got {errors:?}"
         );
         Ok(())
     }
@@ -2319,7 +2394,7 @@ def "Outer"
             true,
         )?;
         assert!(
-            errors.iter().any(|e| matches!(e, CompositionError::ArcCycle(_))),
+            errors.iter().any(|e| matches!(e, CompositionDiagnostic::ArcCycle(_))),
             "expected a recorded ArcCycle error for a cross-frame cycle, got {errors:?}"
         );
         Ok(())
@@ -2353,7 +2428,7 @@ def "Prim" (
         assert!(
             errors
                 .iter()
-                .any(|e| matches!(e, CompositionError::UnresolvedLayer { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::UnresolvedLayer { .. })),
             "expected a recorded UnresolvedLayer error, got {errors:?}"
         );
         assert!(
@@ -2394,7 +2469,7 @@ def "Prim" (
         assert!(
             errors
                 .iter()
-                .any(|e| matches!(e, CompositionError::UnresolvedDefaultPrim { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::UnresolvedDefaultPrim { .. })),
             "expected a recorded UnresolvedDefaultPrim error, got {errors:?}"
         );
         assert!(

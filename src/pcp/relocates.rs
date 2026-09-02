@@ -16,12 +16,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::sdf::{self, Path, RelocateList, element_cmp};
 use crate::tf::Token;
 
+use super::diagnostics::Diagnostics;
 use super::layer_graph::LayerGraph;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::ArcType;
 use super::prim_index::PrimEntry;
-use super::{CompositionError, InvalidRelocateReason, LayerId, RelocateConflictReason};
+use super::{CompositionDiagnostic, InvalidRelocateReason, LayerId, RelocateConflictReason};
 
 /// Per-layer authored relocates, keyed by layer id.
 pub(crate) type LayerRelocates = HashMap<LayerId, RelocateList>;
@@ -173,11 +174,11 @@ pub(crate) fn apply_child_relocates(
 /// Validates each layer's authored `layerRelocates` against the
 /// [`LayerGraph`]: structurally valid pairs `(source, target)` are returned
 /// keyed by layer id (layers without valid relocates are omitted), and each
-/// invalid pair becomes a [`CompositionError::InvalidRelocate`] reported in authored order
+/// invalid pair becomes a [`CompositionDiagnostic::InvalidRelocate`] reported in authored order
 /// (C++ `PcpErrorInvalidAuthoredRelocates`). Conflicts are scoped to a single
 /// layer stack via [`LayerGraph::relocate_conflict_scopes`].
-pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, Vec<CompositionError>) {
-    let mut errors = Vec::new();
+pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, Diagnostics) {
+    let mut errors = Diagnostics::default();
     // Collect every structurally valid authored relocate, recording its layer.
     // Conflict diagnostics are computed over the layer-stack scopes below.
     let mut all: Vec<AuthoredRelocate> = Vec::new();
@@ -191,7 +192,7 @@ pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, V
         for (source, target) in layer.relocates() {
             match relocate_invalid_reason(&source, &target) {
                 None => all.push((source, target, id, layer.identifier().to_string())),
-                Some(reason) => errors.push(CompositionError::InvalidRelocate {
+                Some(reason) => errors.report(CompositionDiagnostic::InvalidRelocate {
                     source_path: source,
                     target_path: target,
                     layer: layer.identifier().to_string(),
@@ -243,7 +244,7 @@ pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, V
 /// sorted by `(source, reason, conflict source)`. Conflict and duplicate-source
 /// dropping happen when composing a specific layer stack; the layer cache keeps
 /// the structurally valid authored pairs.
-fn detect_relocate_conflicts(all: &[AuthoredRelocate], scopes: &[Vec<usize>], errors: &mut Vec<CompositionError>) {
+fn detect_relocate_conflicts(all: &[AuthoredRelocate], scopes: &[Vec<usize>], errors: &mut Diagnostics) {
     // Conflicts are reported over each stack's effective relocates. Only the
     // strongest occurrence of a given source contributes to composition, so a
     // weaker duplicate-source occurrence must not appear as a conflict
@@ -289,7 +290,7 @@ fn detect_relocate_conflicts(all: &[AuthoredRelocate], scopes: &[Vec<usize>], er
     for (target, group) in same_target_errors {
         let mut sources: Vec<(Path, String)> = group.iter().map(|&i| (all[i].0.clone(), all[i].3.clone())).collect();
         sources.sort_by(|a, b| a.0.cmp(&b.0));
-        errors.push(CompositionError::SameTargetRelocations { target, sources });
+        errors.report(CompositionDiagnostic::SameTargetRelocations { target, sources });
     }
 
     // Pairwise conflicts, emitted sorted by (source, reason, conflict source) —
@@ -318,7 +319,7 @@ fn detect_relocate_conflicts(all: &[AuthoredRelocate], scopes: &[Vec<usize>], er
             .then(all[a.1].0.cmp(&all[b.1].0))
     });
     for (i, j, reason) in pairwise {
-        errors.push(CompositionError::ConflictingRelocation {
+        errors.report(CompositionDiagnostic::ConflictingRelocation {
             source_path: all[i].0.clone(),
             target_path: all[i].1.clone(),
             layer: all[i].3.clone(),
@@ -760,7 +761,7 @@ mod tests {
     #[test]
     fn duplicate_source_not_conflict() {
         let (all, scopes) = conflict_scope(&[("/W/A", "/W/C"), ("/W/A", "/W/D"), ("/W/D", "/W/E")]);
-        let mut errors = Vec::new();
+        let mut errors = Diagnostics::default();
         detect_relocate_conflicts(&all, &scopes, &mut errors);
         assert!(
             errors.is_empty(),
@@ -774,13 +775,13 @@ mod tests {
     #[test]
     fn survivor_conflict_reported() {
         let (all, scopes) = conflict_scope(&[("/W/A", "/W/D"), ("/W/A", "/W/C"), ("/W/D", "/W/E")]);
-        let mut errors = Vec::new();
+        let mut errors = Diagnostics::default();
         detect_relocate_conflicts(&all, &scopes, &mut errors);
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(
             errors
                 .iter()
-                .all(|e| matches!(e, CompositionError::ConflictingRelocation { .. }))
+                .all(|e| matches!(e, CompositionDiagnostic::ConflictingRelocation { .. }))
         );
     }
 

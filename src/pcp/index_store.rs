@@ -17,11 +17,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::sdf::{self, Path};
 
 use super::dependencies::Dependencies;
+use super::diagnostics::Diagnostics;
 use super::layer_graph::LayerGraph;
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::prim_index::{CompositionContext, NodeRuns, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
 use super::prim_indexer::ExprVarDeps;
-use super::{CompositionError, LayerId};
+use super::{CompositionDiagnostic, LayerId};
 
 /// Per-prim composition index storage with dependency tracking. See the
 /// [module docs](self).
@@ -90,6 +91,11 @@ impl PrimRevision {
 pub(crate) struct ScopedInvalidation {
     /// How far from the recorded path the change reaches.
     pub scope: ValueScope,
+    /// Whether the prim's composed property set may have changed, so the
+    /// property-derived diagnostics recorded against it no longer describe it.
+    /// Set by a property spec appearing or vanishing; a value moving under an
+    /// unchanged spec leaves the set alone.
+    pub properties: bool,
     /// Resolved-target memos to drop — a `targetPaths` / `connectionPaths` edit
     /// changed a relationship or connection this prim composes in place, or one
     /// it reads through an arc. The prim's other relationships and connections
@@ -163,8 +169,10 @@ impl IndexStore {
 
     /// Every recoverable build error across all cached entries, for
     /// [`composition_errors`](super::index_cache::IndexCache::composition_errors).
-    pub(super) fn errors(&self) -> impl Iterator<Item = &CompositionError> {
-        self.entries.iter().flat_map(|(_, entry)| entry.errors.iter())
+    pub(super) fn errors(&self) -> impl Iterator<Item = &CompositionDiagnostic> {
+        self.entries
+            .iter()
+            .flat_map(|(_, entry)| entry.errors.iter().chain(entry.property_errors.iter()))
     }
 
     /// Marks every layer stack some cached prim index owns — the key set of
@@ -179,12 +187,32 @@ impl IndexStore {
         }
     }
 
+    /// Replaces a cached entry's property-derived diagnostics
+    /// ([`PrimEntry::property_errors`]), returning whether an entry was there to
+    /// hold them.
+    ///
+    /// Wholesale replacement, because these are recomputed from the prim's whole
+    /// composed property set every time that set may have moved: a conflict the
+    /// recomputation no longer finds is one the edit fixed. The build's
+    /// graph-derived diagnostics arrive separately, with
+    /// [`insert`](Self::insert).
+    pub(super) fn replace_property_errors(&mut self, path: &Path, diagnostics: Diagnostics) -> bool {
+        match self.entries.get_mut(path) {
+            Some(entry) => {
+                entry.property_errors = diagnostics;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Clears every entry's recorded build errors in place, keeping the indices —
     /// the test-only reset of accumulated diagnostics.
     #[cfg(test)]
     pub(super) fn clear_errors(&mut self) {
         for (_, entry) in self.entries.iter_mut() {
             entry.errors.clear();
+            entry.property_errors.clear();
         }
     }
 
@@ -199,7 +227,7 @@ impl IndexStore {
         path: &Path,
         index: PrimIndex,
         context: CompositionContext,
-        errors: Vec<CompositionError>,
+        errors: Diagnostics,
         expr_var_deps: ExprVarDeps,
     ) {
         // Owner counts pair one increment per entry with one decrement at its
@@ -216,6 +244,7 @@ impl IndexStore {
                 index,
                 context,
                 errors,
+                property_errors: Diagnostics::default(),
                 resolved_targets: HashMap::new(),
                 revision,
             },
@@ -280,6 +309,11 @@ impl IndexStore {
         }
     }
 
+    /// The cached prims in `prefix`'s subtree, `prefix` included.
+    pub(super) fn subtree_paths(&self, prefix: &Path) -> Vec<Path> {
+        self.entries.subtree(prefix).map(|(path, _)| path.clone()).collect()
+    }
+
     /// Releases a removed entry's stack ownership, flagging a reclamation
     /// pass when a stack loses its last cache owner.
     fn release_owned(&mut self, index: &PrimIndex) {
@@ -334,7 +368,7 @@ impl IndexStore {
         self.ownership_lost = false;
     }
 
-    /// The paths whose entry recorded a [`MalformedLayer`](CompositionError::MalformedLayer)
+    /// The paths whose entry recorded a [`MalformedLayer`](CompositionDiagnostic::MalformedLayer)
     /// build error — an arc to an unreadable target that may now be readable, so
     /// the index should be dropped and re-demanded. Such an index carries no
     /// dependency on the failed target, so an ordinary layer-stack invalidation
@@ -346,7 +380,7 @@ impl IndexStore {
                 entry
                     .errors
                     .iter()
-                    .any(|e| matches!(e, CompositionError::MalformedLayer { .. }))
+                    .any(|e| matches!(e, CompositionDiagnostic::MalformedLayer { .. }))
             })
             .map(|(path, _)| path.clone())
             .collect()
@@ -601,7 +635,7 @@ mod tests {
             path,
             index,
             CompositionContext::default(),
-            Vec::new(),
+            Diagnostics::default(),
             ExprVarDeps::default(),
         );
     }

@@ -539,7 +539,7 @@ mod pcp_txt {
     /// error is rendered, the dump ends with the framework's `ERROR:` footer.
     pub fn error_trailer(
         name: &str,
-        errors: &[pcp::CompositionError],
+        errors: &[pcp::CompositionDiagnostic],
         base: Option<&Path>,
         order: &[sdf::Path],
     ) -> String {
@@ -555,7 +555,7 @@ mod pcp_txt {
         let entries: Vec<(Option<&sdf::Path>, String)> = errors
         .iter()
         .filter_map(|e| match e {
-            pcp::CompositionError::UnresolvedLayer {
+            pcp::CompositionDiagnostic::UnresolvedLayer {
                 asset_path,
                 arc: pcp::ArcType::Payload,
                 introduced_by,
@@ -568,7 +568,7 @@ mod pcp_txt {
                     layer_id(introduced_by),
                 ),
             )),
-            pcp::CompositionError::UnresolvedPrimPath {
+            pcp::CompositionDiagnostic::UnresolvedPrimPath {
                 arc,
                 target_layer,
                 prim_path,
@@ -589,7 +589,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::CompositionError::ProhibitedRelocationSource {
+            pcp::CompositionDiagnostic::ProhibitedRelocationSource {
                 arc,
                 site,
                 site_layer,
@@ -612,7 +612,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::CompositionError::OpinionAtRelocationSource {
+            pcp::CompositionDiagnostic::OpinionAtRelocationSource {
                 source_path,
                 layer,
                 composing,
@@ -624,7 +624,7 @@ mod pcp_txt {
                     layer_id(layer),
                 ),
             )),
-            pcp::CompositionError::InvalidExternalTargetPath {
+            pcp::CompositionDiagnostic::InvalidExternalTargetPath {
                 is_connection,
                 target,
                 property,
@@ -657,7 +657,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::CompositionError::InvalidInstanceTargetPath {
+            pcp::CompositionDiagnostic::InvalidInstanceTargetPath {
                 is_connection,
                 target,
                 property,
@@ -680,7 +680,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::CompositionError::InconsistentPropertyType {
+            pcp::CompositionDiagnostic::InconsistentPropertyType {
                 property,
                 defining_layer,
                 defining_path,
@@ -707,7 +707,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::CompositionError::SublayerCycle { root_layer, seen_layer } => Some((
+            pcp::CompositionDiagnostic::SublayerCycle { root_layer, seen_layer } => Some((
                 None,
                 format!(
                     "Sublayer hierarchy with root layer @{}@ has cycles. \
@@ -716,7 +716,7 @@ mod pcp_txt {
                     layer_id(seen_layer),
                 ),
             )),
-            pcp::CompositionError::InvalidRelocate {
+            pcp::CompositionDiagnostic::InvalidRelocate {
                 source_path,
                 target_path,
                 layer,
@@ -729,7 +729,7 @@ mod pcp_txt {
                     layer_id(layer),
                 ),
             )),
-            pcp::CompositionError::ArcCycle(info) => {
+            pcp::CompositionDiagnostic::ArcCycle(info) => {
                 let mut msg = format!("Cycle detected:\n@{}@<{}>", layer_id(&info.root_layer), info.composing);
                 let last = info.hops.len() - 1;
                 for (i, hop) in info.hops.iter().enumerate() {
@@ -746,7 +746,7 @@ mod pcp_txt {
                 msg.push('\n');
                 Some((Some(&info.composing), msg))
             }
-            pcp::CompositionError::SameTargetRelocations { target, sources } => {
+            pcp::CompositionDiagnostic::SameTargetRelocations { target, sources } => {
                 let list = sources
                     .iter()
                     .map(|(s, l)| format!("relocation from <{s}> authored at @{}@</>", layer_id(l)))
@@ -761,7 +761,7 @@ mod pcp_txt {
                     ),
                 ))
             }
-            pcp::CompositionError::ConflictingRelocation {
+            pcp::CompositionDiagnostic::ConflictingRelocation {
                 source_path,
                 target_path,
                 layer,
@@ -833,6 +833,52 @@ mod pcp_txt {
     }
 }
 
+/// Collapses a baseline's repeated diagnostic lines, the one place these dumps
+/// diverge from their C++ originals.
+///
+/// C++ reports one line per *detection*, and several baselines detect one
+/// condition more than once for a single prim: its dumper composes prim and
+/// property names and then each property stack, so an inconsistent property
+/// type is found by both passes; and it emits an opinion-at-relocation-source
+/// line for each contributing relocate arc, so one layer's one bad opinion is
+/// reported once per arc that reached it. This project's retained stage
+/// diagnostics are unique per snapshot instead: one failure reads once,
+/// whichever queries ran and however many arcs found it.
+///
+/// Only those two kinds are collapsed, and only in the trailer, which begins
+/// at the first `Errors while ` line (covering both the per-prim sections and
+/// the layer-stack one). The composition body above, and every other
+/// diagnostic kind, is compared byte for byte, so a repeat this project emits
+/// wrongly still fails the comparison. Records keep their
+/// newlines and are rejoined by concatenation, so the blank lines separating
+/// sections and the file's trailing newline survive; a baseline with no
+/// repeats, or none of that header, comes back unchanged.
+fn collapse_repeated_diagnostics(expected: &str) -> String {
+    /// The rendered forms of the two diagnostic kinds C++ reports per
+    /// detection. Matched on the phrase alone, since each line also carries the
+    /// layer and path that vary per baseline.
+    const PER_DETECTION: [&str; 2] = [
+        "has inconsistent spec types.",
+        "has an invalid opinion at the relocation source",
+    ];
+
+    let Some(trailer) = expected.find("Errors while ") else {
+        return expected.to_string();
+    };
+    let (body, errors) = expected.split_at(trailer);
+    let mut out = String::with_capacity(expected.len());
+    out.push_str(body);
+    let mut previous: Option<&str> = None;
+    for record in errors.split_inclusive('\n') {
+        let repeat = previous == Some(record) && PER_DETECTION.iter().any(|phrase| record.contains(phrase));
+        if !repeat {
+            out.push_str(record);
+        }
+        previous = Some(record);
+    }
+    out
+}
+
 /// Regenerates the composition dump from the stage parsed by `format` and
 /// asserts it matches the vendor `pcp.txt` baseline byte-for-byte.
 ///
@@ -841,9 +887,11 @@ mod pcp_txt {
 /// taken relative to the entry layer's directory (`usda/` for text, the asset
 /// root for the `.usdc` copies), so the same baseline validates both parsers.
 fn assert_dump_matches(name: &str, format: Format, test_dir: &Path, baseline: &pcp_json::Baseline, entry: &Path) {
-    let expected = std::fs::read_to_string(test_dir.join("pcp.txt"))
-        .expect("read pcp.txt")
-        .replace("\r\n", "\n");
+    let expected = collapse_repeated_diagnostics(
+        &std::fs::read_to_string(test_dir.join("pcp.txt"))
+            .expect("read pcp.txt")
+            .replace("\r\n", "\n"),
+    );
 
     let stage = usd::Stage::builder()
         .variant_fallbacks(variant_fallbacks())
@@ -866,6 +914,13 @@ fn assert_dump_matches(name: &str, format: Format, test_dir: &Path, baseline: &p
         canonical_base.as_deref(),
         &order,
     ));
+    // The relaxation above only ever consumes C++'s repeats: if our own dump
+    // ever repeats a line, it would be silently absorbed rather than compared.
+    assert_eq!(
+        collapse_repeated_diagnostics(&actual),
+        actual,
+        "{name}: generated dump repeats a diagnostic line, which the baseline relaxation would hide"
+    );
     if actual != expected {
         // Persist the full generated dump so a failing case can be diffed
         // against its baseline without re-running; the panic message only shows

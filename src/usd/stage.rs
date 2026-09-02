@@ -899,6 +899,11 @@ impl Stage {
 
     /// Returns composition errors encountered while composing this stage.
     ///
+    /// Unique by structural equality: one failure reads once, however many
+    /// owners hold it and however many passes found it. Two prims failing the
+    /// same way at the same site are therefore one entry, so the length counts
+    /// distinct failures rather than affected prims.
+    ///
     /// Combines the layer graph's current diagnostics (sublayer cycles and
     /// invalid relocates, always reflecting present graph state) with the
     /// cache's per-prim build errors. Prim indices are built lazily, so the
@@ -910,43 +915,9 @@ impl Stage {
     /// contributes nothing, or the sublayer itself is muted — so muting suppresses
     /// the diagnostic and unmuting restores it, without the one-shot error ever
     /// being discarded.
-    pub fn composition_errors(&self) -> Vec<pcp::CompositionError> {
-        // Drain once, then read both together: routing through the
-        // `layers()`/`cache()` accessors would each re-run `process_pending`, and
-        // holding the graph borrow across the second run risks a re-entrant
-        // borrow-mut if a sink re-queues an edit during notification.
+    pub fn composition_errors(&self) -> Vec<pcp::CompositionDiagnostic> {
         self.process_pending();
-        let graph = self.composition.settled_graph();
-        let mut errors = graph.errors();
-        let mut cache_errors = self.composition.settled_cache().composition_errors();
-        // A diagnostic the graph regenerates per stack can coexist with an
-        // identical one-shot loader copy kept at open — a referrer the session
-        // prefix reaches, or a branch muted at open and unmuted later; the
-        // regenerable copy wins so one failure reads once.
-        cache_errors.retain(|error| !errors.contains(error));
-        // Only a muted stage suppresses anything, and only sublayer diagnostics; skip
-        // building the effective-layer set when there is nothing to filter.
-        if !graph.has_muted_layers() || !cache_errors.iter().any(is_sublayer_error) {
-            errors.extend(cache_errors);
-            return errors;
-        }
-        // The effectively-composed layers: every interned composed stack's
-        // members (the root stack and each reference/payload target stack),
-        // which muting has pruned muted subtrees from. This is a pure function
-        // of the muted set and the interned stacks: a stack and its diagnostics
-        // are removed together when a sweep reclaims it, so a diagnostic never
-        // outlives the membership that justified it. Ownership-scheduled
-        // reclamation keeps the set tight — a target whose last owning index
-        // drops (a mute or unload severing its only arc included) is swept at
-        // that same edit seam, and recomposition re-derives whatever still
-        // holds.
-        let effective = graph.effective_layers();
-        errors.extend(
-            cache_errors
-                .into_iter()
-                .filter(|error| graph.sublayer_error_contributes(error, &effective)),
-        );
-        errors
+        self.composition.settled_errors()
     }
 
     /// Returns the current edit target — the layer that authoring methods
@@ -2795,7 +2766,7 @@ impl Stage {
     /// If `layer` authors its own `subLayers` naming layers not yet loaded,
     /// the recompose records them as sublayer demands and the load barrier
     /// opens them from disk, with one that fails to resolve surfacing as an
-    /// [`UnresolvedSublayer`](pcp::CompositionError::UnresolvedSublayer) diagnostic — the
+    /// [`UnresolvedSublayer`](pcp::CompositionDiagnostic::UnresolvedSublayer) diagnostic — the
     /// same treatment the root layer's sublayers get at open.
     pub fn insert_layer(
         &self,
@@ -3033,16 +3004,7 @@ pub struct StageBuilder {
 #[derive(Default)]
 struct CollectedLayers {
     layers: Vec<sdf::Layer>,
-    errors: Vec<pcp::CompositionError>,
-}
-
-/// Whether a composition error is a sublayer load diagnostic — the only kind
-/// [`Stage::composition_errors`] filters against the muted-aware effective set.
-fn is_sublayer_error(error: &pcp::CompositionError) -> bool {
-    matches!(
-        error,
-        pcp::CompositionError::UnresolvedSublayer { .. } | pcp::CompositionError::MalformedSublayer { .. }
-    )
+    diagnostics: pcp::Diagnostics,
 }
 
 impl StageBuilder {
@@ -3198,8 +3160,8 @@ impl StageBuilder {
         let root = self.collect_layers(root_path, &root_stack_vars)?;
         let session_layer_count = session.layers.len();
         let layers = session.layers.into_iter().chain(root.layers).collect();
-        let errors = session.errors.into_iter().chain(root.errors).collect();
-        Ok(self.make_stage(layers, session_layer_count, errors))
+        let diagnostics = session.diagnostics.into_iter().chain(root.diagnostics).collect();
+        Ok(self.make_stage(layers, session_layer_count, diagnostics))
     }
 
     /// Create an in-memory stage backed by a single writable anonymous root
@@ -3230,7 +3192,7 @@ impl StageBuilder {
             .into_iter()
             .chain(std::iter::once(sdf::Layer::new_anonymous(identifier)))
             .collect();
-        Ok(self.make_stage(layers, session_layer_count, session.errors))
+        Ok(self.make_stage(layers, session_layer_count, session.diagnostics))
     }
 
     /// Open the root layer named by `path` and its sublayer stack.
@@ -3239,12 +3201,12 @@ impl StageBuilder {
     /// target layers on demand (see [`Stage::with_cache`]), so the population
     /// mask prunes them naturally: a culled prim is never composed, so its arc
     /// targets are never demanded. A missing sublayer is recorded as an
-    /// [`UnresolvedSublayer`](pcp::CompositionError::UnresolvedSublayer) collection error
+    /// [`UnresolvedSublayer`](pcp::CompositionDiagnostic::UnresolvedSublayer) collection error
     /// rather than aborting the open; one under a muted branch is filtered out
     /// later, once the muted-aware graph exists (see
     /// [`StageBuilder::make_stage`](Self::make_stage)).
     fn collect_layers(&self, path: &str, ancestor_expr_vars: &HashMap<String, sdf::Value>) -> Result<CollectedLayers> {
-        let errors = RefCell::new(Vec::new());
+        let diagnostics = RefCell::new(pcp::Diagnostics::default());
         // `ancestor_expr_vars` are the expression variables the enclosing context
         // contributes: the session layers' composed set for the root stack, empty
         // for the session stack itself (nothing sublayers it).
@@ -3256,7 +3218,7 @@ impl StageBuilder {
                 ancestor_expr_vars,
                 false,
                 &|error| {
-                    errors.borrow_mut().push(error.into());
+                    diagnostics.borrow_mut().report(error.into());
                     Ok(())
                 },
                 &|_| false,
@@ -3266,7 +3228,7 @@ impl StageBuilder {
             })?;
         Ok(CollectedLayers {
             layers,
-            errors: errors.into_inner(),
+            diagnostics: diagnostics.into_inner(),
         })
     }
 
@@ -3335,7 +3297,7 @@ impl StageBuilder {
         self,
         layers: Vec<sdf::Layer>,
         session_layer_count: usize,
-        collection_errors: Vec<pcp::CompositionError>,
+        collection_diagnostics: pcp::Diagnostics,
     ) -> Stage {
         let load_rules = match self.initial_load_set {
             InitialLoadSet::LoadAll => pcp::LoadRules::all(),
@@ -3363,14 +3325,14 @@ impl StageBuilder {
         // graph's failure memo below: the finalize drain then regenerates each
         // broken entry's per-stack diagnostic without re-attempting an open the
         // loader already ran.
-        let failure_seeds: Vec<(String, String, pcp::LoadFailure)> = collection_errors
+        let failure_seeds: Vec<(String, String, pcp::LoadFailure)> = collection_diagnostics
             .iter()
             .filter_map(|error| match error {
-                pcp::CompositionError::UnresolvedSublayer {
+                pcp::CompositionDiagnostic::UnresolvedSublayer {
                     asset_path,
                     introduced_by,
                 } => Some((asset_path.clone(), introduced_by.clone(), pcp::LoadFailure::Unresolved)),
-                pcp::CompositionError::MalformedSublayer {
+                pcp::CompositionDiagnostic::MalformedSublayer {
                     asset_path,
                     introduced_by,
                     reason,
@@ -3392,7 +3354,7 @@ impl StageBuilder {
                     self.variant_fallbacks,
                     load_rules,
                     self.population_mask,
-                    collection_errors,
+                    collection_diagnostics,
                 ),
             ),
             initial_load_set: self.initial_load_set,
@@ -4150,7 +4112,7 @@ mod tests {
             .unwrap();
         });
 
-        let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![strong, weak], 0, pcp::Diagnostics::default());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
 
         assert_eq!(attr.connections()?, vec![target.clone()]);
@@ -4200,7 +4162,7 @@ mod tests {
             .unwrap();
         });
 
-        let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![strong, weak], 0, pcp::Diagnostics::default());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
         let attr = attr.add_connection(target.clone())?;
 
@@ -4250,7 +4212,7 @@ mod tests {
             .unwrap();
         });
 
-        let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![strong, weak], 0, pcp::Diagnostics::default());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
 
         assert!(attr.remove_connection(&target)?);
@@ -4685,7 +4647,11 @@ def "T" {
         edit_layer(&mut root, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["./sub.usda"]);
         });
-        let stage = Stage::builder().make_stage(vec![root, opinion_layer("sub.usda", 5.0)?], 0, Vec::new());
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("sub.usda", 5.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
         assert_eq!(
             stage
                 .attribute("/A.x")?
@@ -4725,7 +4691,7 @@ def "T" {
         let stage = Stage::builder().make_stage(
             sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?,
             0,
-            Vec::new(),
+            pcp::Diagnostics::default(),
         );
         assert_eq!(read_ax(&stage)?, Some(9.0));
 
@@ -4751,7 +4717,7 @@ def "T" {
         edit_layer(&mut root, |e| {
             e.set_start_time_code(1.0).unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![session, root], 1, Vec::new());
+        let stage = Stage::builder().make_stage(vec![session, root], 1, pcp::Diagnostics::default());
         assert_eq!(stage.start_time_code(), 10.0, "the session opinion wins");
 
         stage.mute_layer("session.usda");
@@ -4773,7 +4739,7 @@ def "T" {
         });
         let subsession = opinion_layer("subsession.usda", 7.0)?;
         let root = sdf::Layer::new_in_memory("root.usda");
-        let stage = Stage::builder().make_stage(vec![session, subsession, root], 2, Vec::new());
+        let stage = Stage::builder().make_stage(vec![session, subsession, root], 2, pcp::Diagnostics::default());
         assert_eq!(read_ax(&stage)?, Some(7.0), "the session sublayer contributes");
 
         stage.mute_layer("session.usda");
@@ -4811,7 +4777,7 @@ def "T" {
                 opinion_layer("root.usda", 1.0)?,
             ],
             2,
-            Vec::new(),
+            pcp::Diagnostics::default(),
         );
         assert_eq!(
             read_ax(&stage)?,
@@ -4858,7 +4824,7 @@ def "T" {
                 opinion_layer("root.usda", 1.0)?,
             ],
             3,
-            Vec::new(),
+            pcp::Diagnostics::default(),
         );
         assert_eq!(
             read_ax(&stage)?,
@@ -4894,7 +4860,11 @@ def "T" {
                 .unwrap()
                 .set_default(sdf::Value::Double(5.0));
         });
-        let stage = Stage::builder().make_stage(vec![root, strong, opinion_layer("weak.usda", 1.0)?], 0, Vec::new());
+        let stage = Stage::builder().make_stage(
+            vec![root, strong, opinion_layer("weak.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
         assert!(
             stage.prim("/A/Child")?.is_valid()?,
             "the expression sublayer strong.usda contributes /A/Child"
@@ -4919,7 +4889,7 @@ def "T" {
     fn mute_session_layer() -> Result<()> {
         let session = opinion_layer("session.usda", 7.0)?;
         let root = sdf::Layer::new_in_memory("root.usda");
-        let stage = Stage::builder().make_stage(vec![session, root], 1, Vec::new());
+        let stage = Stage::builder().make_stage(vec![session, root], 1, pcp::Diagnostics::default());
         assert_eq!(read_ax(&stage)?, Some(7.0));
 
         stage.mute_layer("session.usda");
@@ -4931,7 +4901,7 @@ def "T" {
     /// unchanged.
     #[test]
     fn mute_root_rejected() -> Result<()> {
-        let stage = Stage::builder().make_stage(vec![opinion_layer("root.usda", 3.0)?], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![opinion_layer("root.usda", 3.0)?], 0, pcp::Diagnostics::default());
         let root_id = stage.root_layer().identifier().to_string();
 
         stage.mute_layer(root_id.clone());
@@ -4952,7 +4922,11 @@ def "T" {
         edit_layer(&mut mid, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["leaf.usda"]);
         });
-        let stage = Stage::builder().make_stage(vec![root, mid, opinion_layer("leaf.usda", 5.0)?], 0, Vec::new());
+        let stage = Stage::builder().make_stage(
+            vec![root, mid, opinion_layer("leaf.usda", 5.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
         assert_eq!(read_ax(&stage)?, Some(5.0));
 
         stage.mute_layer("mid.usda");
@@ -5017,7 +4991,7 @@ def "T" {
         let stage = Stage::builder().make_stage(
             sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?,
             0,
-            Vec::new(),
+            pcp::Diagnostics::default(),
         );
         let query = stage.attribute("/A.x")?.query();
         assert_eq!(query.get_at::<f64>(crate::usd::TimeCode::new(0.0))?, Some(9.0));
@@ -5035,7 +5009,7 @@ def "T" {
     /// and leaves composition unchanged.
     #[test]
     fn mute_unknown_identifier_noop() -> Result<()> {
-        let stage = Stage::builder().make_stage(vec![opinion_layer("root.usda", 3.0)?], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![opinion_layer("root.usda", 3.0)?], 0, pcp::Diagnostics::default());
         stage.mute_layer("nonexistent.usda");
         assert!(stage.is_layer_muted("nonexistent.usda"));
         assert_eq!(read_ax(&stage)?, Some(3.0), "an unmatched mute changes nothing");
@@ -5046,7 +5020,11 @@ def "T" {
     /// `muted_layers`.
     #[test]
     fn muted_layers_roundtrip() -> Result<()> {
-        let stage = Stage::builder().make_stage(sublayer_layers(&[("a.usda", 1.0), ("b.usda", 2.0)])?, 0, Vec::new());
+        let stage = Stage::builder().make_stage(
+            sublayer_layers(&[("a.usda", 1.0), ("b.usda", 2.0)])?,
+            0,
+            pcp::Diagnostics::default(),
+        );
         stage.mute_layer("a.usda");
         stage.mute_layer("b.usda");
         assert_eq!(stage.muted_layers(), vec!["a.usda".to_string(), "b.usda".to_string()]);
@@ -5148,7 +5126,7 @@ def "T" {
                 .set_default(sdf::Value::Double(5.0));
         });
 
-        let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, target], 0, pcp::Diagnostics::default());
         let read_px = |stage: &Stage| stage.attribute("/P.x")?.get_at::<f64>(crate::usd::TimeCode::new(0.0));
         assert_eq!(read_px(&stage)?, Some(5.0), "the reference brings /Target.x to /P.x");
 
@@ -5188,7 +5166,7 @@ def "T" {
             sdf::PrimSpec::new(e.data_mut(), "/Target", sdf::Specifier::Def, "").unwrap();
         });
 
-        let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, target], 0, pcp::Diagnostics::default());
         let (refp, indep) = (sdf::path("/Ref")?, sdf::path("/Indep")?);
         // Force both prim indices into the cache.
         assert!(stage.prim(refp.clone())?.is_valid()?);
@@ -5229,7 +5207,7 @@ def "T" {
 
         // session at index 0, root + its `child` sublayer after: /P's Root node
         // spans [session, root, child].
-        let stage = Stage::builder().make_stage(vec![session, root, child], 1, Vec::new());
+        let stage = Stage::builder().make_stage(vec![session, root, child], 1, pcp::Diagnostics::default());
         let p = sdf::path("/P")?;
         assert!(stage.prim(p.clone())?.is_valid()?);
         assert!(stage.is_indexed(&p), "the sublayer opinion composes and caches");
@@ -5268,7 +5246,7 @@ def "T" {
             sdf::PrimSpec::new(e.data_mut(), "/Target", sdf::Specifier::Def, "").unwrap();
         });
 
-        let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, target], 0, pcp::Diagnostics::default());
         let (refp, indep) = (sdf::path("/Ref")?, sdf::path("/Indep")?);
         // Force both prim indices into the cache (querying /Ref loads the target).
         assert!(stage.prim(refp.clone())?.is_valid()?);
@@ -5310,7 +5288,11 @@ def "T" {
             e.pseudo_root_mut().unwrap().set_sublayers(["base.usda"]);
         });
 
-        let stage = Stage::builder().make_stage(vec![root, target, opinion_layer("base.usda", 1.0)?], 0, Vec::new());
+        let stage = Stage::builder().make_stage(
+            vec![root, target, opinion_layer("base.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
         let ref_x = || stage.attribute("/Ref.x")?.get::<f64>();
         assert_eq!(ref_x()?, Some(1.0), "the reference target's sublayer opinion composes");
 
@@ -5336,7 +5318,7 @@ def "T" {
     #[test]
     fn edit_revives_missing_prim() -> Result<()> {
         let root = sdf::Layer::new_in_memory("root.usda");
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
         let newp = sdf::path("/New")?;
         // Query the absent prim, caching a negative (empty) index.
         assert!(!stage.prim(newp.clone())?.is_valid()?, "the prim is absent");
@@ -5379,7 +5361,7 @@ def "T" {
             sdf::PrimSpec::new(e.data_mut(), "/T", sdf::Specifier::Def, "").unwrap();
         });
 
-        let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, target], 0, pcp::Diagnostics::default());
         let missing = sdf::path("/Ref/Missing")?;
         assert!(
             !stage.prim(missing.clone())?.is_valid()?,
@@ -5421,7 +5403,7 @@ def "T" {
                 x.set_time_sample(0.0, sdf::Value::Double(0.0));
                 x.set_time_sample(20.0, sdf::Value::Double(200.0));
             });
-            Stage::builder().make_stage(vec![root, sub], 0, Vec::new())
+            Stage::builder().make_stage(vec![root, sub], 0, pcp::Diagnostics::default())
         };
         let read = |s: &Stage| s.attribute("/A.x")?.get_at::<f64>(crate::usd::TimeCode::new(8.0));
 
@@ -5454,7 +5436,7 @@ def "T" {
         let stage = Stage::builder().make_stage(
             vec![root, opinion_layer("a.usda", 1.0)?, opinion_layer("b.usda", 2.0)?],
             0,
-            Vec::new(),
+            pcp::Diagnostics::default(),
         );
 
         assert_eq!(
@@ -5495,7 +5477,7 @@ def "T" {
                 opinion_layer("b.usda", 2.0)?,
             ],
             1,
-            Vec::new(),
+            pcp::Diagnostics::default(),
         );
 
         assert_eq!(
@@ -5513,7 +5495,7 @@ def "T" {
         let stage = Stage::builder().mute(["strong.usda", "root.usda"]).make_stage(
             sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?,
             0,
-            Vec::new(),
+            pcp::Diagnostics::default(),
         );
         assert!(stage.is_layer_muted("strong.usda"));
         assert!(
@@ -5614,7 +5596,7 @@ def "T" {
                 opinion_layer("weak2.usda", 2.0)?,
             ],
             0,
-            Vec::new(),
+            pcp::Diagnostics::default(),
         );
         assert_eq!(
             stage.sub_layers("root.usda"),
@@ -5654,7 +5636,7 @@ def "T" {
         edit_layer(&mut target, |e| {
             sdf::PrimSpec::new(e.data_mut(), "/Target", sdf::Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, target], 0, pcp::Diagnostics::default());
 
         let seen: Rc<Cell<Option<&'static str>>> = Rc::new(Cell::new(None));
         {
@@ -5695,7 +5677,11 @@ def "T" {
         edit_layer(&mut root, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
         });
-        let stage = Stage::builder().make_stage(vec![root, opinion_layer("weak.usda", 1.0)?], 0, Vec::new());
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("weak.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
 
         let changed = stage.batch_edit(&["root.usda", "weak.usda"], |edits| {
             sdf::PrimSpec::new(edits[0].data_mut(), "/FromRoot", sdf::Specifier::Def, "")?;
@@ -5718,7 +5704,11 @@ def "T" {
         edit_layer(&mut root, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
         });
-        let stage = Stage::builder().make_stage(vec![root, opinion_layer("weak.usda", 1.0)?], 0, Vec::new());
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("weak.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
         let recorder = crate::usd::ReplayStage::from(stage);
         recorder.batch_edit(&["root.usda", "weak.usda"], |edits| {
             sdf::PrimSpec::new(edits[0].data_mut(), "/FromRoot", sdf::Specifier::Def, "")?;
@@ -5747,7 +5737,11 @@ def "T" {
         edit_layer(&mut root, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
         });
-        let stage = Stage::builder().make_stage(vec![root, opinion_layer("weak.usda", 1.0)?], 0, Vec::new());
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("weak.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
 
         let result = stage.batch_edit(&["root.usda", "weak.usda"], |edits| {
             sdf::PrimSpec::new(edits[0].data_mut(), "/FromRoot", sdf::Specifier::Def, "")?;

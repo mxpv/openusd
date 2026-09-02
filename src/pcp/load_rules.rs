@@ -465,6 +465,7 @@ impl IndexCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pcp::Diagnostics;
     use crate::pcp::PopulationMask;
 
     fn p(s: &str) -> Path {
@@ -743,7 +744,7 @@ mod tests {
             VariantFallbackMap::new(),
             LoadRules::all(),
             PopulationMask::all(),
-            Vec::new(),
+            Diagnostics::default(),
         );
         let mut rules = cache.load_rules().clone();
         rules.unload(p("/A"));
@@ -756,7 +757,7 @@ mod tests {
             VariantFallbackMap::new(),
             LoadRules::all(),
             PopulationMask::all(),
-            Vec::new(),
+            Diagnostics::default(),
         );
         let rules = cache.load_rules().clone();
         assert!(cache.set_load_rules(rules).is_empty());
@@ -773,7 +774,7 @@ mod tests {
             VariantFallbackMap::new(),
             LoadRules::all(),
             PopulationMask::all(),
-            Vec::new(),
+            Diagnostics::default(),
         );
         let mut explicit_all = LoadRules::all();
         explicit_all.add_rule(p("/"), Rule::All);
@@ -787,7 +788,7 @@ mod tests {
             VariantFallbackMap::new(),
             LoadRules::all(),
             PopulationMask::all(),
-            Vec::new(),
+            Diagnostics::default(),
         );
         let mut rules = cache.load_rules().clone();
         rules.load_with_descendants(p("/World"));
@@ -812,7 +813,7 @@ mod tests {
             VariantFallbackMap::new(),
             LoadRules::all(),
             PopulationMask::all(),
-            Vec::new(),
+            Diagnostics::default(),
         );
         let mut rules = cache.load_rules().clone();
         rules.load_without_descendants(p("/World"));

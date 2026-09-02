@@ -14,8 +14,9 @@ use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
+use super::diagnostics::Diagnostics;
 use super::prim_graph::Node;
-use super::{CompositionError, ExpressionContext, LayerGraph, LayerId, QueryError};
+use super::{CompositionDiagnostic, ExpressionContext, LayerGraph, LayerId, QueryError};
 
 /// Composes the `references` list-op, folding each authoring sublayer's offset
 /// into its references' layer offsets (C++ `PcpComposeSiteReferences`). A
@@ -29,7 +30,7 @@ pub(super) fn compose_references_in(
     graph: &LayerGraph,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
-    errors: &mut Vec<CompositionError>,
+    errors: &mut Diagnostics,
     used_vars: &mut HashSet<String>,
 ) -> Result<Vec<Reference>, QueryError> {
     let mut refs = compose_list_op_in(
@@ -76,7 +77,7 @@ pub(super) fn collect_payloads_in(
     graph: &LayerGraph,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
-    errors: &mut Vec<CompositionError>,
+    errors: &mut Diagnostics,
     used_vars: &mut HashSet<String>,
 ) -> Result<Vec<Payload>, QueryError> {
     let mut payloads = compose_list_op_in(
@@ -248,7 +249,7 @@ fn resolve_arc_asset_path(
     expr_vars: &HashMap<String, Value>,
     context: ExpressionContext,
     site: &Path,
-    errors: &mut Vec<CompositionError>,
+    errors: &mut Diagnostics,
     used_vars: &mut HashSet<String>,
 ) -> Option<f64> {
     if expr::is_expression(asset_path) {
@@ -304,7 +305,7 @@ impl EvaluatedExpression {
 
 /// Evaluates a possibly-expression-valued field against a stack's composed
 /// variables (C++ `Pcp_EvaluateVariableExpression`), recording a failure as
-/// [`CompositionError::InvalidExpression`] when an error sink is given — the indexing-time
+/// [`CompositionDiagnostic::InvalidExpression`] when an error sink is given — the indexing-time
 /// pass emits diagnostics, re-resolution passes stay silent.
 ///
 /// Composing an arc's asset path and composing a variant selection both come
@@ -327,7 +328,7 @@ pub(super) fn evaluate_expression(
     context: ExpressionContext,
     source_layer: &str,
     site_path: &Path,
-    errors: Option<&mut Vec<CompositionError>>,
+    errors: Option<&mut Diagnostics>,
     used_vars: Option<&mut HashSet<String>>,
 ) -> EvaluatedExpression {
     let evaluated = expr::evaluate_string(expression, expr_vars);
@@ -339,14 +340,13 @@ pub(super) fn evaluate_expression(
         None if evaluated.errors.is_empty() => EvaluatedExpression::None,
         None => {
             if let Some(errors) = errors {
-                CompositionError::InvalidExpression {
+                errors.report(CompositionDiagnostic::InvalidExpression {
                     expression: expression.to_string(),
                     context,
                     source_layer: source_layer.to_string(),
                     site_path: site_path.clone(),
                     message: evaluated.errors.join("; "),
-                }
-                .record(errors);
+                });
             }
             EvaluatedExpression::Failed
         }

@@ -17,8 +17,9 @@ use std::collections::HashMap;
 use crate::ar;
 use crate::sdf::{self, Path, Value};
 
+use super::diagnostics::Diagnostics;
 use super::layer_graph::LayerGraph;
-use super::{CompositionError, ExpressionContext, LayerId, LayerStackId};
+use super::{CompositionDiagnostic, ExpressionContext, LayerId, LayerStackId};
 
 /// Where an `asset` value was authored: what to anchor a relative path against,
 /// whose `expressionVariables` are in scope, and the site to name in a
@@ -40,7 +41,7 @@ pub(crate) struct AssetSite {
     /// against; a named layer that failed to resolve still anchors on its
     /// identifier, since that is what [`sdf::Layer::real_path`] falls back to.
     anchor: Option<ar::ResolvedPath>,
-    /// Identifier of the source layer, for [`CompositionError::InvalidExpression`].
+    /// Identifier of the source layer, for [`CompositionDiagnostic::InvalidExpression`].
     source_layer: String,
     /// The layer stack whose composed variables an expression evaluates against.
     stack: LayerStackId,
@@ -105,7 +106,7 @@ pub(super) fn resolve_values(
     graph: &LayerGraph,
     value: Value,
     site: Option<&AssetSite>,
-    errors: &mut Vec<CompositionError>,
+    errors: &mut Diagnostics,
 ) -> Value {
     let mut failures = Vec::new();
     let anchor = site.and_then(AssetSite::anchor);
@@ -131,7 +132,7 @@ pub(super) fn evaluate_values(
     graph: &LayerGraph,
     value: Value,
     site: Option<&AssetSite>,
-    errors: &mut Vec<CompositionError>,
+    errors: &mut Diagnostics,
 ) -> (Value, sdf::AssetOutcome) {
     let mut failures = Vec::new();
     let variables = site.map(|site| site.variables(graph));
@@ -141,32 +142,27 @@ pub(super) fn evaluate_values(
 }
 
 /// Names the site every expression failure was authored at and records it as
-/// [`CompositionError::InvalidExpression`], as a reference or payload arc's asset path
+/// [`CompositionDiagnostic::InvalidExpression`], as a reference or payload arc's asset path
 /// does.
 ///
 /// No variable dependency is recorded: the read carries no prim index to
 /// register one against, so no per-variable invalidation could name it.
 /// `Changes::apply` covers these reads wholesale through its asset-path channel
 /// instead.
-fn record_failures(
-    site: Option<&AssetSite>,
-    failures: Vec<sdf::AssetExpressionFailure>,
-    errors: &mut Vec<CompositionError>,
-) {
+fn record_failures(site: Option<&AssetSite>, failures: Vec<sdf::AssetExpressionFailure>, errors: &mut Diagnostics) {
     // Only a site supplies variables, and only an evaluation against variables
     // can fail, so a caller with no site has nothing to report.
     let Some(site) = site else {
         return;
     };
     for failure in failures {
-        CompositionError::InvalidExpression {
+        errors.report(CompositionDiagnostic::InvalidExpression {
             expression: failure.expression,
             context: ExpressionContext::AssetValue,
             source_layer: site.source_layer.clone(),
             site_path: site.query_path.clone(),
             message: failure.message,
-        }
-        .record(errors);
+        });
     }
 }
 
@@ -180,7 +176,7 @@ mod tests {
     #[test]
     fn expr_asset_without_site() {
         let graph = LayerGraph::from_layers(Vec::new(), 0, sdf::LayerRegistry::default());
-        let mut errors = Vec::new();
+        let mut errors = Diagnostics::default();
         let value = Value::AssetPath(sdf::AssetPath::new("`${A}`"));
         let resolved = resolve_values(&graph, value, None, &mut errors)
             .try_as_asset_path()

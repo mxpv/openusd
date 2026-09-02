@@ -434,7 +434,7 @@ pub(crate) struct PrimIndexGraph {
 ///
 /// [`Dependencies`](super::dependencies::Dependencies) registers all three so a
 /// later edit can still find the index to recompose; each skipped arc is
-/// separately surfaced as its own [`CompositionError`](super::CompositionError).
+/// separately surfaced as its own [`CompositionDiagnostic`](super::CompositionDiagnostic).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NonSiteDeps {
     /// Layer ids of reference/payload target roots a composition arc resolved to

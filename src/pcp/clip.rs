@@ -24,7 +24,6 @@
 //! the evaluation and carries the same note.
 
 use std::collections::{HashMap, HashSet};
-use std::mem;
 
 use crate::gf;
 use crate::sdf::schema::FieldKey;
@@ -33,11 +32,12 @@ use crate::tf;
 
 use super::asset_resolve::{self, AssetSite};
 use super::clip_manifest::{self, ClipSetKey};
+use super::diagnostics::Diagnostics;
 use super::index_cache::block_to_none;
 use super::layer_graph::LayerGraph;
 use super::prim_graph::Node;
 use super::value_resolve::ValueState;
-use super::{ClipLoad, CompositionError, LayerId, LayerStackId, QueryError};
+use super::{ClipLoad, CompositionDiagnostic, LayerId, LayerStackId, QueryError};
 
 /// Dictionary keys inside a single clip set's metadata (spec 12.3.4.1).
 pub(crate) mod keys {
@@ -649,10 +649,6 @@ pub(crate) struct ClipCache {
     /// (prim, clip set), superseded in place whenever the set it was generated
     /// from no longer matches.
     manifests: HashMap<ClipSetKey, ManifestEntry>,
-    /// Clips a synthesized manifest could not read, for the cache above to
-    /// merge into its composition diagnostics. Held here because a clip query
-    /// answers through a value, not a diagnostic channel.
-    clip_errors: Vec<CompositionError>,
     /// The clip and manifest identifiers each clip set names, recorded as the
     /// set is offered to value resolution — whether or not any of them opened,
     /// since an identifier that resolves to nothing today is exactly the one a
@@ -731,6 +727,7 @@ impl ClipCache {
     pub(super) fn value_in_set(
         &mut self,
         graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
         time: f64,
@@ -751,7 +748,7 @@ impl ClipCache {
         // attribute's time-varying value, so a gap in the active clip
         // resolves to a manifest default or a value block, never to a
         // weaker value source.
-        let manifest = self.manifest_id(graph, resolved, query.anchor)?;
+        let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
         if !self.manifest_declares(graph, manifest.as_deref(), &clip_path)? {
             return Ok(None);
         }
@@ -773,9 +770,14 @@ impl ClipCache {
             && let Some((clip_id, value)) =
                 self.clip_sample_at(graph, resolved, asset.asset_path(), &clip_path, clip_time, interp)?
         {
-            return Ok(Some(
-                self.resolve_asset_in(graph, &clip_id, resolved, &clip_path, value),
-            ));
+            return Ok(Some(self.resolve_asset_in(
+                graph,
+                diagnostics,
+                &clip_id,
+                resolved,
+                &clip_path,
+                value,
+            )));
         }
 
         // The active clip has no sample at `clip_time`, and this set owns
@@ -787,16 +789,28 @@ impl ClipCache {
         if let Some(manifest) = manifest.as_deref()
             && let Some(value) = self.manifest_default(graph, manifest, &clip_path)?
         {
-            return Ok(Some(
-                self.resolve_asset_in(graph, manifest, resolved, &clip_path, value),
-            ));
+            return Ok(Some(self.resolve_asset_in(
+                graph,
+                diagnostics,
+                manifest,
+                resolved,
+                &clip_path,
+                value,
+            )));
         }
 
         // (b) interpolateMissingClipValues: interpolate the gap across the
         //     nearest surrounding clips (spec 12.3.4.7).
         if set.interpolate_missing
-            && let Some(value) =
-                self.interpolate_missing_value(graph, resolved, manifest.as_deref(), &clip_path, time, interp)?
+            && let Some(value) = self.interpolate_missing_value(
+                graph,
+                diagnostics,
+                resolved,
+                manifest.as_deref(),
+                &clip_path,
+                time,
+                interp,
+            )?
         {
             return Ok(Some(value));
         }
@@ -818,6 +832,7 @@ impl ClipCache {
     pub(super) fn clip_spec_site_in_set(
         &mut self,
         graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
         time: f64,
@@ -827,7 +842,7 @@ impl ClipCache {
             return Ok(None);
         };
         let clip_path = clip_attr_path(query, &set.clip_prim_path(query.anchor))?;
-        let manifest = self.manifest_id(graph, resolved, query.anchor)?;
+        let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
         if !self.manifest_declares(graph, manifest.as_deref(), &clip_path)? {
             return Ok(None);
         }
@@ -860,17 +875,18 @@ impl ClipCache {
     pub(super) fn untimed_answer_in_set(
         &mut self,
         graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
     ) -> Result<ValueState, QueryError> {
         let clip_path = clip_attr_path(query, &resolved.set.clip_prim_path(query.anchor))?;
-        let Some(per_clip) = self.clip_set_participates(graph, resolved, query.anchor, &clip_path)? else {
+        let Some(per_clip) = self.clip_set_participates(graph, diagnostics, resolved, query.anchor, &clip_path)? else {
             return Ok(ValueState::Absent);
         };
         if per_clip.iter().any(|times| !times.is_empty()) {
             return Ok(ValueState::Present);
         }
-        let manifest = self.manifest_id(graph, resolved, query.anchor)?;
+        let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
         let default = match manifest.as_deref() {
             Some(manifest) => self.manifest_default(graph, manifest, &clip_path)?,
             None => None,
@@ -889,11 +905,12 @@ impl ClipCache {
     pub(super) fn clip_introspection_in_set(
         &mut self,
         graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
     ) -> Result<Option<(Vec<f64>, bool)>, QueryError> {
         let clip_path = clip_attr_path(query, &resolved.set.clip_prim_path(query.anchor))?;
-        let Some(per_clip) = self.clip_set_participates(graph, resolved, query.anchor, &clip_path)? else {
+        let Some(per_clip) = self.clip_set_participates(graph, diagnostics, resolved, query.anchor, &clip_path)? else {
             return Ok(None);
         };
         let set = &resolved.set;
@@ -922,9 +939,9 @@ impl ClipCache {
         prim: &Path,
         tag: &str,
         write_blocks: bool,
-    ) -> Result<(sdf::Layer, Vec<CompositionError>), QueryError> {
+    ) -> Result<(sdf::Layer, Diagnostics), QueryError> {
         let mut scheduled: Vec<(String, Option<f64>)> = Vec::with_capacity(resolved.set.active.len());
-        let mut unread = Vec::new();
+        let mut unread = Diagnostics::default();
         for &(stage_time, index) in &resolved.set.active {
             let Some(asset) = resolved.set.asset_paths.get(index) else {
                 continue;
@@ -937,7 +954,7 @@ impl ClipCache {
                 Ok(None) => "asset path did not resolve".to_owned(),
                 Err(error) => tf::error_chain(&error),
             };
-            unread.push(CompositionError::UnreadableClip {
+            unread.report(CompositionDiagnostic::UnreadableClip {
                 asset_path: asset.asset_path().to_owned(),
                 clip_set: resolved.set.name.clone(),
                 prim_path: prim.clone(),
@@ -968,11 +985,12 @@ impl ClipCache {
     ///
     /// A manifest generated while a scheduled clip could not be read is recorded
     /// but never reused, so the next read regenerates and picks that clip up
-    /// once it becomes readable; the clips that failed are reported through
-    /// [`Self::take_errors`].
+    /// once it becomes readable; the clips that failed are reported into
+    /// `diagnostics`.
     fn manifest_id(
         &mut self,
         graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         prim: &Path,
     ) -> Result<Option<String>, QueryError> {
@@ -1001,17 +1019,11 @@ impl ClipCache {
             layer: layer.clone(),
             complete: unread.is_empty(),
         };
-        self.clip_errors.extend(unread);
+        diagnostics.extend(unread);
         if let Some(superseded) = self.manifests.insert(key, entry) {
             self.clip_layers.remove(&superseded.layer);
         }
         Ok(Some(layer))
-    }
-
-    /// Drains the diagnostics recorded while synthesizing manifests, for the
-    /// cache above to merge into its composition errors.
-    pub(super) fn take_errors(&mut self) -> Vec<CompositionError> {
-        mem::take(&mut self.clip_errors)
     }
 
     /// Records the clip and manifest layers the set `resolved` reads, so a
@@ -1268,6 +1280,7 @@ impl ClipCache {
     fn clip_set_participates(
         &mut self,
         graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         prim: &Path,
         clip_path: &Path,
@@ -1278,7 +1291,7 @@ impl ClipCache {
         if set.active.is_empty() {
             return Ok(None);
         }
-        let manifest = self.manifest_id(graph, resolved, prim)?;
+        let manifest = self.manifest_id(graph, diagnostics, resolved, prim)?;
         if !self.manifest_declares(graph, manifest.as_deref(), clip_path)? {
             return Ok(None);
         }
@@ -1373,6 +1386,7 @@ impl ClipCache {
     fn resolve_asset_in(
         &mut self,
         graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
         identifier: &str,
         resolved: &ResolvedClipSet,
         clip_path: &Path,
@@ -1387,7 +1401,7 @@ impl ClipCache {
             return value;
         };
         let site = AssetSite::in_clip(layer, resolved.source.stack, clip_path);
-        asset_resolve::resolve_values(graph, value, Some(&site), &mut self.clip_errors)
+        asset_resolve::resolve_values(graph, value, Some(&site), diagnostics)
     }
 
     /// Reads the authored `default` for `clip_path` from the manifest layer
@@ -1429,9 +1443,16 @@ impl ClipCache {
     /// being opened: the block is the author's statement that it carries no
     /// samples for the attribute (C++
     /// `Usd_ClipSet::_ClipContributesTimeSamples`).
+    // TODO: the clip context (graph, diagnostics, resolved set, manifest) is
+    // threaded through eight `ClipCache` methods, six of which only pass it on
+    // to reach `manifest_id`. Bundling it into a `ClipEval<'_>` — the shape
+    // `ClipProbe` already has one layer up — would collapse the arity here and
+    // at every one of them.
+    #[allow(clippy::too_many_arguments)]
     fn interpolate_missing_value(
         &mut self,
         graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         manifest: Option<&str>,
         clip_path: &Path,
@@ -1487,13 +1508,13 @@ impl ClipCache {
         Ok(match (lower, upper) {
             (Some((lt, (lid, lv))), Some((ut, (_, uv)))) => {
                 if lv.is_asset_valued() || uv.is_asset_valued() {
-                    Some(self.resolve_asset_in(graph, &lid, resolved, clip_path, lv))
+                    Some(self.resolve_asset_in(graph, diagnostics, &lid, resolved, clip_path, lv))
                 } else {
                     interp(&vec![(lt, lv), (ut, uv)], time)
                 }
             }
             (Some((_, (id, value))), None) | (None, Some((_, (id, value)))) => {
-                Some(self.resolve_asset_in(graph, &id, resolved, clip_path, value))
+                Some(self.resolve_asset_in(graph, diagnostics, &id, resolved, clip_path, value))
             }
             (None, None) => None,
         })
@@ -1711,9 +1732,16 @@ mod tests {
         };
 
         let mut clips = ClipCache::default();
-        let first = clips.manifest_id(&graph, &resolved, &model)?.expect("synthesized");
+        let first = clips
+            .manifest_id(&graph, &mut Diagnostics::default(), &resolved, &model)?
+            .expect("synthesized");
         let layers = clips.clip_layers.len();
-        assert_eq!(clips.manifest_id(&graph, &resolved, &model)?.as_deref(), Some(&*first));
+        assert_eq!(
+            clips
+                .manifest_id(&graph, &mut Diagnostics::default(), &resolved, &model)?
+                .as_deref(),
+            Some(&*first)
+        );
         assert_eq!(clips.clip_layers.len(), layers);
 
         // clip0 samples `size`, so the synthesized manifest declares it as
@@ -1727,14 +1755,18 @@ mod tests {
         // accumulate a layer per edit.
         let mut retimed = resolved.clone();
         retimed.set.active = vec![(0.0, 0), (5.0, 1)];
-        let second = clips.manifest_id(&graph, &retimed, &model)?.expect("synthesized");
+        let second = clips
+            .manifest_id(&graph, &mut Diagnostics::default(), &retimed, &model)?
+            .expect("synthesized");
         assert_ne!(second, first);
         assert!(!clips.clip_layers.contains_key(&first));
         assert_eq!(clips.clip_layers.len(), layers);
 
         let mut repathed = retimed.clone();
         repathed.set.prim_path = Some(sdf::path("/Other")?);
-        let third = clips.manifest_id(&graph, &repathed, &model)?.expect("synthesized");
+        let third = clips
+            .manifest_id(&graph, &mut Diagnostics::default(), &repathed, &model)?
+            .expect("synthesized");
         assert_ne!(third, second);
         assert!(!clips.clip_layers.contains_key(&second));
         assert_eq!(clips.clip_layers.len(), layers);
@@ -1746,14 +1778,23 @@ mod tests {
         let mut elsewhere = resolved.clone();
         elsewhere.set.asset_paths = vec![AssetPath::new("./clip1.usda")];
         elsewhere.set.active = vec![(0.0, 0)];
-        let mine = clips.manifest_id(&graph, &resolved, &model)?.expect("synthesized");
+        let mine = clips
+            .manifest_id(&graph, &mut Diagnostics::default(), &resolved, &model)?
+            .expect("synthesized");
         let theirs = clips
-            .manifest_id(&graph, &elsewhere, &other_prim)?
+            .manifest_id(&graph, &mut Diagnostics::default(), &elsewhere, &other_prim)?
             .expect("synthesized");
         assert_ne!(mine, theirs);
-        assert_eq!(clips.manifest_id(&graph, &resolved, &model)?.as_deref(), Some(&*mine));
         assert_eq!(
-            clips.manifest_id(&graph, &elsewhere, &other_prim)?.as_deref(),
+            clips
+                .manifest_id(&graph, &mut Diagnostics::default(), &resolved, &model)?
+                .as_deref(),
+            Some(&*mine)
+        );
+        assert_eq!(
+            clips
+                .manifest_id(&graph, &mut Diagnostics::default(), &elsewhere, &other_prim)?
+                .as_deref(),
             Some(&*theirs)
         );
         Ok(())

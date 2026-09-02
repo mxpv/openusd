@@ -166,6 +166,30 @@ impl StageComposition {
         self.cache.borrow()
     }
 
+    /// Every recoverable diagnostic the composed stage currently holds, in one
+    /// list with no repeats.
+    ///
+    /// The graph and the cache each hold buckets with their own lifetimes, and
+    /// one failure can sit in more than one of them — a sublayer the loader
+    /// recorded once at open and the graph regenerates per stack. Folding them
+    /// through one collection drops the repeat; since the two copies are equal,
+    /// what the fold order decides is only where the survivor reads:
+    ///
+    /// 1. the graph's, replaced on every rebuild;
+    /// 2. the cache's, in its own order — one-shot collection diagnostics,
+    ///    then per-prim build diagnostics, then the transient query channel.
+    ///
+    /// Both borrows are taken here, beside the two `RefCell`s, so no caller has
+    /// to hold one across the other. The caller still owes the other half of
+    /// the settled protocol — pending edits drained first — which
+    /// [`assert_settled`](Self::assert_settled) checks in debug builds.
+    pub(super) fn settled_errors(&self) -> Vec<pcp::CompositionDiagnostic> {
+        let graph = self.settled_graph();
+        let mut held = graph.errors();
+        held.extend(graph.retain_contributing(self.settled_cache().composition_errors()));
+        held.into_vec()
+    }
+
     /// The composition cache mutably, for a settled mutation that touches the
     /// cache alone (installing load rules).
     fn settled_cache_mut(&self) -> RefMut<'_, pcp::IndexCache> {
@@ -511,8 +535,8 @@ impl StageComposition {
     /// whose failed open records the per-referrer, per-stack diagnostic the
     /// graph regenerates on each rebuild. A target that cannot be opened is
     /// marked failed with what went wrong, so the next composition pass
-    /// reports it — [`MalformedLayer`](pcp::CompositionError::MalformedLayer) for a
-    /// read/parse failure, [`UnresolvedLayer`](pcp::CompositionError::UnresolvedLayer)
+    /// reports it — [`MalformedLayer`](pcp::CompositionDiagnostic::MalformedLayer) for a
+    /// read/parse failure, [`UnresolvedLayer`](pcp::CompositionDiagnostic::UnresolvedLayer)
     /// for a resolve failure — rather than demanding it again; otherwise the
     /// demanding prim's index would never cache.
     ///
@@ -988,7 +1012,7 @@ impl StageComposition {
         // per rebuild — as per-stack regenerable diagnostics; the loader's
         // one-shot copies of those would double-report and outlive a later fix,
         // so they are dropped.
-        let superseded: Vec<pcp::CompositionError> = {
+        let superseded: Vec<pcp::CompositionDiagnostic> = {
             let graph = self.layers.borrow();
             graph
                 .errors()
@@ -996,9 +1020,9 @@ impl StageComposition {
                 .filter(|error| {
                     matches!(
                         error,
-                        pcp::CompositionError::UnresolvedSublayer { .. }
-                            | pcp::CompositionError::MalformedSublayer { .. }
-                            | pcp::CompositionError::InvalidExpression { .. }
+                        pcp::CompositionDiagnostic::UnresolvedSublayer { .. }
+                            | pcp::CompositionDiagnostic::MalformedSublayer { .. }
+                            | pcp::CompositionDiagnostic::InvalidExpression { .. }
                     )
                 })
                 .collect()
@@ -1066,7 +1090,7 @@ mod tests {
                 pcp::VariantFallbackMap::new(),
                 pcp::LoadRules::all(),
                 pcp::PopulationMask::all(),
-                Vec::new(),
+                pcp::Diagnostics::default(),
             ),
         )
     }

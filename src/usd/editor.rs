@@ -1845,7 +1845,7 @@ mod tests {
                 }])),
             );
         });
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
 
         NamespaceEditor::new(&stage)
             .rename_prim(&stage.prim(path("/A").unwrap()).unwrap(), "B")
@@ -1879,7 +1879,7 @@ mod tests {
                 sdf::Value::PathListOp(sdf::PathListOp::prepended([path("/A").unwrap()])),
             );
         });
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
 
         NamespaceEditor::new(&stage)
             .rename_prim(&stage.prim(path("/A").unwrap()).unwrap(), "B")
@@ -2056,7 +2056,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
         });
-        Stage::builder().make_stage(vec![root, model], 0, Vec::new())
+        Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default())
     }
 
     #[test]
@@ -2338,7 +2338,7 @@ mod tests {
 "#;
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
-        let stage = Stage::builder().make_stage(vec![layer], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![layer], 0, pcp::Diagnostics::default());
         // The prim composes from both the direct opinion and the variant.
         assert!(valid(&stage, "/Prim/child"));
         let root = stage.root_layer().identifier().to_string();
@@ -2380,7 +2380,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/B", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
             .unwrap();
@@ -2460,7 +2460,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/A"));
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
@@ -2518,7 +2518,7 @@ mod tests {
                 sdf::Value::PathListOp(sdf::PathListOp::explicit([path("/Model/A").unwrap()])),
             );
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
             .unwrap();
@@ -2613,7 +2613,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Deep", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Deep/Inner", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model, deep], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model, deep], 0, pcp::Diagnostics::default());
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
             .unwrap();
@@ -2712,7 +2712,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Deep", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Deep/Inner", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/Inner"));
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
@@ -2772,7 +2772,7 @@ mod tests {
             sdf::PrimSpec::over(e.data_mut(), "/Model/A").unwrap();
             sdf::AttributeSpec::new(e.data_mut(), "/Model/A.attr", "double", Variability::Varying, false).unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, pcp::Diagnostics::default());
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
             .unwrap();
@@ -2838,7 +2838,7 @@ mod tests {
             sdf::PrimSpec::over(e.data_mut(), "/Model/A").unwrap();
             sdf::AttributeSpec::new(e.data_mut(), "/Model/A.attr", "double", Variability::Varying, false).unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, pcp::Diagnostics::default());
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
             .unwrap();
@@ -2926,7 +2926,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Deep/Inner", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Deep/Inner/Grand", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model, deep], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model, deep], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/Inner/Grand"));
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
@@ -3025,7 +3025,7 @@ mod tests {
                 sdf::Value::PathListOp(sdf::PathListOp::explicit([path("/Model/A").unwrap()])),
             );
         });
-        let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, pcp::Diagnostics::default());
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
             .unwrap();
@@ -3066,7 +3066,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
             .unwrap();
@@ -3187,7 +3187,7 @@ mod tests {
             ])
             .unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
         let mut editor = NamespaceEditor::new(&stage);
         editor.move_prim(path("/B").unwrap(), path("/D").unwrap()).unwrap();
         assert!(matches!(
@@ -3227,7 +3227,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap())
@@ -3288,7 +3288,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom/Sub", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
 
         NamespaceEditor::new(&stage)
             .delete_prim(path("/Ref/Geom").unwrap())
@@ -3450,7 +3450,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom/Sub", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
@@ -3514,7 +3514,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
             sdf::AttributeSpec::new(e.data_mut(), "/Model/Geom.attr", "double", Variability::Varying, false).unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
@@ -3550,7 +3550,7 @@ mod tests {
                 sdf::PrimSpec::new(e.data_mut(), format!("/Model/Geom/{c}").as_str(), Specifier::Def, "").unwrap();
             }
         });
-        Stage::builder().make_stage(vec![root, model], 0, Vec::new())
+        Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default())
     }
 
     /// Moving a descendant onto a destination occupied by a referenced sibling
@@ -3651,7 +3651,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/X", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
 
         let mut editor = NamespaceEditor::new(&stage);
         editor
@@ -3713,7 +3713,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::AttributeSpec::new(e.data_mut(), "/Model.attr", "double", Variability::Varying, false).unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         // /Ref.attr composes from the referenced /Model.attr (no local spec).
         let mut editor = NamespaceEditor::new(&stage);
         editor
@@ -3750,7 +3750,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/Geom"));
         // Move the relocated prim back to its original source: the relocate folds
         // to a no-op and the metadata must be cleared.
@@ -3793,7 +3793,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Local/Geom"));
         // A purely local move of /Local must carry the relocate target with it.
         NamespaceEditor::new(&stage)
@@ -3829,7 +3829,7 @@ mod tests {
             e.set_relocates(vec![(path("/B").unwrap(), path("/C").unwrap())])
                 .unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
         NamespaceEditor::new(&stage)
             .move_prim(path("/Local").unwrap(), path("/Moved").unwrap())
             .unwrap()
@@ -3848,7 +3848,7 @@ mod tests {
             e.set_relocates(vec![(path("/A/X").unwrap(), path("/A").unwrap())])
                 .unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
         let mut editor = NamespaceEditor::new(&stage);
         editor.move_prim(path("/A").unwrap(), path("/C").unwrap()).unwrap();
         assert!(matches!(
@@ -3898,7 +3898,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/Geom"), "sublayer relocate should compose");
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap())
@@ -3949,7 +3949,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/X", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, pcp::Diagnostics::default());
         let mut editor = NamespaceEditor::new(&stage);
         editor
             .move_prim(path("/Ref/X").unwrap(), path("/Ref/C").unwrap())
@@ -3987,7 +3987,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/X", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/X").unwrap(), path("/B").unwrap())
             .unwrap()
@@ -4023,7 +4023,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref/Geom").unwrap(), path("/Final").unwrap())
             .unwrap()
@@ -4064,7 +4064,7 @@ mod tests {
             ])
             .unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Other/X"));
 
         NamespaceEditor::new(&stage)
@@ -4125,7 +4125,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/Strong"));
         assert!(valid(&stage, "/Ref/Geom"));
 
@@ -4199,7 +4199,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom/Sub", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
 
         let mut editor = NamespaceEditor::new(&stage);
         editor
@@ -4250,7 +4250,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/Geom"));
         NamespaceEditor::new(&stage)
             .delete_prim(path("/Ref/Geom").unwrap())
@@ -4295,7 +4295,7 @@ mod tests {
                 sdf::PrimSpec::new(e.data_mut(), format!("/Model/{c}").as_str(), Specifier::Def, "").unwrap();
             }
         });
-        Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new())
+        Stage::builder().make_stage(vec![root, sub, model], 0, pcp::Diagnostics::default())
     }
 
     /// Deleting a prim whose relocated child (described by a sublayer pair) was
@@ -4361,7 +4361,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "Xform").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         NamespaceEditor::new(&stage)
             .move_prim(path("/Ref").unwrap(), path("/Ref2").unwrap())
             .unwrap()
@@ -4390,7 +4390,7 @@ mod tests {
                 sdf::Value::Relocates(vec![(path("/A/X").unwrap(), path("/A/Y").unwrap())]),
             );
         });
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
         NamespaceEditor::new(&stage)
             .move_prim(path("/A").unwrap(), path("/Moved").unwrap())
             .unwrap()
@@ -4423,7 +4423,7 @@ mod tests {
             e.set_relocates(vec![(path("/X/Keep").unwrap(), path("/X/Keep").unwrap())])
                 .unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
         NamespaceEditor::new(&stage)
             .move_prim(path("/A").unwrap(), path("/Moved").unwrap())
             .unwrap()
@@ -4449,7 +4449,7 @@ mod tests {
             e.set_relocates(vec![(path("/A/X").unwrap(), path("/A/X").unwrap())])
                 .unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
         NamespaceEditor::new(&stage)
             .move_prim(path("/A").unwrap(), path("/B").unwrap())
             .unwrap()
@@ -4481,7 +4481,7 @@ mod tests {
             e.set_relocates(vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())])
                 .unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, sub], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, sub], 0, pcp::Diagnostics::default());
 
         NamespaceEditor::new(&stage)
             .move_prim(path("/A").unwrap(), path("/Moved").unwrap())
@@ -4539,7 +4539,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
         });
-        Stage::builder().make_stage(vec![root, model], 0, Vec::new())
+        Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default())
     }
 
     /// Moving a relocate target that masks its own referenced content is
@@ -4617,7 +4617,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Deep/Orig", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Deep/Geom", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model, deep], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model, deep], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/Geom"));
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
@@ -4667,7 +4667,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/B", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/Geom"));
         let mut editor = NamespaceEditor::new(&stage);
         editor
@@ -4711,7 +4711,7 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/X", Specifier::Def, "").unwrap();
         });
-        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
         assert!(valid(&stage, "/Ref/Geom"));
         let mut editor = NamespaceEditor::new(&stage);
         editor.delete_prim(path("/Ref/Geom").unwrap()).unwrap();

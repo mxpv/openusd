@@ -23,6 +23,7 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{Path, PathElement, Value};
 use crate::tf::Token;
 
+use super::diagnostics::Diagnostics;
 use super::index_cache::IndexCache;
 use super::layer_graph::LayerGraph;
 use super::load_rules::LoadRules;
@@ -601,7 +602,14 @@ impl IndexCache {
         let (mut context, _) = index.context_for_children(graph, &self.root_parent_context());
         context.instance_depth = None;
 
-        self.cache_index(graph, prototype, index, context, Vec::new(), ExprVarDeps::default());
+        self.cache_index(
+            graph,
+            prototype,
+            index,
+            context,
+            Diagnostics::default(),
+            ExprVarDeps::default(),
+        );
     }
 
     /// Returns the synthetic prototype path (`/__Prototype_N`) shared by

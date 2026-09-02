@@ -654,7 +654,7 @@ mod tests {
     /// manifest that would silently de-source that clip's attributes is never
     /// handed back for export.
     #[test]
-    fn generate_manifest_unreadable_clip_errors() -> Result<()> {
+    fn generate_manifest_unreadable_clip_diagnostics() -> Result<()> {
         let dir = tempfile::tempdir()?;
         std::fs::write(
             dir.path().join("clip.usda"),

@@ -265,6 +265,9 @@ struct InvalidationEffects {
     value: Option<ValueScope>,
     /// Resolved-target memos the edit restales.
     targets: Vec<TargetMemoKey>,
+    /// A property spec appeared or vanished, so the prim's composed property
+    /// set — and anything derived from it — must be recomputed.
+    properties: bool,
     /// A prim's schema identity, or the stage's fallback map for one, moved.
     type_opinion: bool,
     /// How a notice names this entry, or `None` for one it says nothing about.
@@ -497,6 +500,7 @@ impl Changes {
             let shape = entry
                 .flags
                 .intersects(sdf::ChangeFlags::ADD_PROPERTY | sdf::ChangeFlags::REMOVE_PROPERTY);
+            effects.properties = shape;
             effects.report = Some(if shape { Report::Resync } else { Report::Info });
             return effects;
         }
@@ -654,11 +658,16 @@ impl Changes {
             self.cache.did_change_specs.insert((layer, path.clone()));
         }
         if let Some(scope) = effects.value {
+            let work = ScopedInvalidation {
+                scope,
+                properties: effects.properties,
+                target_keys: effects.targets.into_iter().collect(),
+            };
             let prim = path.prim_path();
-            self.fanout_values(cache, graph, layer, &prim, scope, &effects.targets);
+            self.fanout_values(cache, graph, layer, &prim, &work);
             if prim.contains_prim_variant_selection() {
                 let stripped = prim.strip_all_variant_selections();
-                self.fanout_values(cache, graph, layer, &stripped, scope, &effects.targets);
+                self.fanout_values(cache, graph, layer, &stripped, &work);
             }
         }
         self.type_opinions |= effects.type_opinion;
@@ -731,25 +740,26 @@ impl Changes {
         graph: &LayerGraph,
         layer: LayerId,
         prim: &Path,
-        scope: ValueScope,
-        keys: &[TargetMemoKey],
+        work: &ScopedInvalidation,
     ) {
         for dep in cache.store().dependencies().exact_lookup(layer, prim) {
-            self.record_scoped(dep, scope, keys);
+            self.record_scoped(dep, work);
         }
         for dep in cache.store().translated_ancestor_dependents(graph, layer, prim) {
-            self.record_scoped(dep, scope, keys);
+            self.record_scoped(dep, work);
         }
-        self.record_scoped(prim.clone(), scope, keys);
+        self.record_scoped(prim.clone(), work);
     }
 
     /// Accumulates one work item, widening what is already recorded at `path`
     /// rather than replacing it: a subtree reach never narrows back to a single
-    /// prim, and the memo keys of separate entries in one round add up.
-    fn record_scoped(&mut self, path: Path, scope: ValueScope, keys: &[TargetMemoKey]) {
+    /// prim, the memo keys of separate entries in one round add up, and a
+    /// property-set change in any of them stands for all.
+    fn record_scoped(&mut self, path: Path, work: &ScopedInvalidation) {
         let item = self.cache.did_change_values.entry(path).or_default();
-        item.scope = item.scope.max(scope);
-        item.target_keys.extend(keys.iter().cloned());
+        item.scope = item.scope.max(work.scope);
+        item.target_keys.extend(work.target_keys.iter().cloned());
+        item.properties |= work.properties;
     }
 
     /// Drops every index depending on `(layer, path)`, plus the literal `path`
@@ -897,7 +907,14 @@ impl Changes {
         // otherwise untouched. The reach is the subtree, matching what the
         // channel reports.
         for victim in &asset_paths_resynced {
-            self.record_scoped(victim.clone(), ValueScope::Subtree, &[]);
+            // A re-resolved expression moves values under specs that stay put.
+            self.record_scoped(
+                victim.clone(),
+                &ScopedInvalidation {
+                    scope: ValueScope::Subtree,
+                    ..ScopedInvalidation::default()
+                },
+            );
         }
         let mut resynced = if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
             cache.invalidate_layers(&affected);
@@ -972,7 +989,7 @@ impl Changes {
         // it is sound against either half of the significant tier. Splitting it
         // on namespace the way that tier is split would let the already-dropped
         // prims be skipped.
-        cache.restale_values(normalize_scopes(mem::take(&mut self.cache.did_change_values)));
+        cache.restale_values(graph, normalize_scopes(mem::take(&mut self.cache.did_change_values)));
 
         // Value-clip tier: an edited layer that a clip set reads restales the
         // values it sources and the manifests synthesized from its content. This
@@ -1022,6 +1039,7 @@ fn normalize_scopes(items: BTreeMap<Path, ScopedInvalidation>) -> Vec<(Path, Sco
         let absorbed = covering.scope == ValueScope::Subtree && path != root && path.has_prefix(root);
         if absorbed {
             covering.target_keys.append(&mut item.target_keys);
+            covering.properties |= item.properties;
         }
         absorbed
     });
@@ -1161,6 +1179,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::pcp::Diagnostics;
     use crate::pcp::layer_stack::{ExprVarId, ExprVarInterner, VarsSource};
     use crate::pcp::{LoadRules, PopulationMask, VariantFallbackMap};
     use crate::sdf::{ChangeFlags, ChangeList, Value};
@@ -1182,7 +1201,7 @@ mod tests {
                 VariantFallbackMap::new(),
                 LoadRules::all(),
                 PopulationMask::all(),
-                Vec::new(),
+                Diagnostics::default(),
             ),
         )
     }

@@ -193,7 +193,7 @@ impl Relationship {
     /// layer, apply `f`, and return `self` for chaining. The layer records
     /// whatever fields `f` writes, setting `CHANGE_RELATIONSHIP_TARGETS` when
     /// the write touches `targetPaths`. That flag is what routes the edit to
-    /// `pcp::Changes::classify_property_entry`, which drops the affected prims'
+    /// `pcp::Changes::effects_of`'s property branch, which drops the affected prims'
     /// memoized resolved targets (the owner and each dependent that reads the
     /// site through an arc) so the next query recomposes them.
     /// Returns `InvalidPath` if no relationship spec exists at the path.

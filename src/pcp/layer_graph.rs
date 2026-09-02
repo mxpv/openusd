@@ -38,11 +38,12 @@ use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 use crate::tf;
 
 use super::compose_site::{EvaluatedExpression, evaluate_expression};
+use super::diagnostics::Diagnostics;
 use super::layer_stack::{ExprVarId, LayerStackId, LayerStackRegistry, StackMarks, StackVarsDelta, VarsSource};
 use super::mapping::MapFunction;
 use super::prim_index::Demand;
 use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
-use super::{CompositionError, ExpressionContext, effective_time_codes_per_second};
+use super::{CompositionDiagnostic, ExpressionContext, effective_time_codes_per_second};
 
 /// A cheap, `Copy` handle identifying a layer within a `LayerGraph`.
 ///
@@ -214,16 +215,11 @@ pub(crate) struct LayerGraph {
     /// Whether any node keeps structurally valid authored relocates. The indexer
     /// reads this to gate its relocate passes without rescanning.
     has_relocates: bool,
-    /// Sublayer-cycle diagnostics reachable from the root layer, replaced wholesale
-    /// by [`build_sublayer_edges`](Self::build_sublayer_edges) on every edge
-    /// rebuild so a fixed cycle stops being reported and a recompute never
-    /// duplicates one.
-    cycle_errors: Vec<CompositionError>,
-    /// Validated-relocate diagnostics, replaced wholesale by
-    /// [`recompute_relocates`](Self::recompute_relocates) on every relocate
-    /// rebuild. Independent of [`cycle_errors`](Self::cycle_errors): a
-    /// relocate-only edit refreshes these alone.
-    relocate_errors: Vec<CompositionError>,
+    /// The diagnostics this graph owns outright — see [`GraphDiagnostics`].
+    /// The per-stack sublayer buckets are not here: they belong to
+    /// [`SublayerState`], which replaces a stack's diagnostics and its pending
+    /// demands together.
+    diagnostics: GraphDiagnostics,
     /// Loads layers: the resolver that anchors relative asset paths (its
     /// [`identity`](Resolver::identity) is the resolver component of the stack's
     /// [`layer_stack_id`](Self::layer_stack_id)) and the format registry.
@@ -232,7 +228,7 @@ pub(crate) struct LayerGraph {
     /// Anchored asset paths whose on-demand open failed, each mapped to what
     /// went wrong ([`LoadFailure`]). Consulted at the reference/payload demand
     /// point so a target that cannot be opened is reported
-    /// [`MalformedLayer`](CompositionError::MalformedLayer) once (with the arc's site
+    /// [`MalformedLayer`](CompositionDiagnostic::MalformedLayer) once (with the arc's site
     /// context and the failure's reason) rather than re-demanded every pass —
     /// without it the demanding prim's index would never cache — and at
     /// sublayer-demand derivation
@@ -257,6 +253,33 @@ pub(crate) struct LayerGraph {
     /// permanently marked in every sweep: their layers stay open for the
     /// graph's life and nothing else re-mints them.
     eager_stacks: Vec<LayerStackId>,
+}
+
+/// The diagnostic buckets a [`LayerGraph`] replaces on its own rebuilds.
+///
+/// Two buckets rather than one because they refresh independently: an edge
+/// rebuild replaces the cycles, a relocate recompute replaces the relocates,
+/// and a relocate-only edit must not disturb the other. Sublayer diagnostics
+/// are absent by the same reasoning — theirs is a *per-stack* lifetime that
+/// [`SublayerState`] refreshes alongside that stack's pending demands.
+#[derive(Debug, Default)]
+struct GraphDiagnostics {
+    /// Sublayer cycles reachable from the root layer, replaced wholesale by
+    /// [`build_sublayer_edges`](LayerGraph::build_sublayer_edges) on every edge
+    /// rebuild so a fixed cycle stops being reported.
+    cycles: Diagnostics,
+    /// Validated-relocate diagnostics, replaced wholesale by
+    /// [`recompute_relocates`](LayerGraph::recompute_relocates) on every
+    /// relocate rebuild.
+    relocates: Diagnostics,
+}
+
+impl GraphDiagnostics {
+    /// Both buckets, cycles first. A cycle is why a relocate went unvalidated
+    /// far more often than the reverse, so it reads first.
+    fn iter(&self) -> impl Iterator<Item = &CompositionDiagnostic> {
+        self.cycles.iter().chain(&self.relocates)
+    }
 }
 
 /// The [`LayerGraph`]'s sublayer-resolution subsystem: everything the
@@ -305,16 +328,16 @@ struct SublayerState {
     /// reflect its latest rebuild ([`replace_stack`](Self::replace_stack)).
     pending_demands: Vec<SublayerDemand>,
     /// Per-stack sublayer diagnostics: `${VAR}` expression failures
-    /// ([`CompositionError::InvalidExpression`] with the sublayer context) and the
+    /// ([`CompositionDiagnostic::InvalidExpression`] with the sublayer context) and the
     /// per-referrer load failures of unresolved entries
-    /// ([`CompositionError::UnresolvedSublayer`] / [`CompositionError::MalformedSublayer`]). Each
+    /// ([`CompositionDiagnostic::UnresolvedSublayer`] / [`CompositionDiagnostic::MalformedSublayer`]). Each
     /// stack's bucket is replaced on its contextual re-resolution — load
     /// failures re-derived from `LayerGraph::failed_loads` — so a fixed
     /// expression or a removed entry stops being reported; the load barrier
     /// appends a freshly discovered failure between rebuilds
     /// ([`record_error`](Self::record_error)). Keyed by stack in mint order, so
     /// the [`diagnostics`](Self::diagnostics) listing is deterministic.
-    errors: BTreeMap<LayerStackId, Vec<CompositionError>>,
+    errors: BTreeMap<LayerStackId, Diagnostics>,
 }
 
 impl SublayerState {
@@ -322,7 +345,7 @@ impl SublayerState {
     /// bucket — with a fresh re-resolution's. The supersession invariant: a
     /// stale demand or diagnostic could name an entry a mute or edit just
     /// removed, so both always reflect the stack's latest rebuild.
-    fn replace_stack(&mut self, stack: LayerStackId, demands: Vec<SublayerDemand>, errors: Vec<CompositionError>) {
+    fn replace_stack(&mut self, stack: LayerStackId, demands: Vec<SublayerDemand>, errors: Diagnostics) {
         self.pending_demands.retain(|demand| demand.stack != stack);
         self.pending_demands.extend(demands);
         if errors.is_empty() {
@@ -335,13 +358,9 @@ impl SublayerState {
     /// Appends a diagnostic to `stack`'s bucket — the load barrier's channel
     /// for a failure discovered between rebuilds; the stack's next
     /// re-resolution re-derives or drops it
-    /// ([`replace_stack`](Self::replace_stack)). An identical already-recorded
-    /// diagnostic is not repeated.
-    fn record_error(&mut self, stack: LayerStackId, error: CompositionError) {
-        let bucket = self.errors.entry(stack).or_default();
-        if !bucket.contains(&error) {
-            bucket.push(error);
-        }
+    /// ([`replace_stack`](Self::replace_stack)).
+    fn record_error(&mut self, stack: LayerStackId, error: CompositionDiagnostic) {
+        self.errors.entry(stack).or_default().report(error);
     }
 
     /// Marks the stack of every pending demand live for a sweep: the load
@@ -377,7 +396,7 @@ impl SublayerState {
     }
 
     /// Every per-stack diagnostic, in stack mint order.
-    fn diagnostics(&self) -> impl Iterator<Item = &CompositionError> {
+    fn diagnostics(&self) -> impl Iterator<Item = &CompositionDiagnostic> {
         self.errors.values().flatten()
     }
 }
@@ -463,13 +482,13 @@ impl LoadFailure {
     /// The per-referrer sublayer diagnostic for this failure: the entry
     /// `asset_path`, authored by `introduced_by`, names an asset that did not
     /// resolve or could not be read.
-    pub(crate) fn sublayer_error(&self, asset_path: &str, introduced_by: &str) -> CompositionError {
+    pub(crate) fn sublayer_error(&self, asset_path: &str, introduced_by: &str) -> CompositionDiagnostic {
         match self {
-            LoadFailure::Unresolved => CompositionError::UnresolvedSublayer {
+            LoadFailure::Unresolved => CompositionDiagnostic::UnresolvedSublayer {
                 asset_path: asset_path.to_string(),
                 introduced_by: introduced_by.to_string(),
             },
-            LoadFailure::Unreadable(reason) => CompositionError::MalformedSublayer {
+            LoadFailure::Unreadable(reason) => CompositionDiagnostic::MalformedSublayer {
                 asset_path: asset_path.to_string(),
                 introduced_by: introduced_by.to_string(),
                 reason: reason.clone(),
@@ -499,8 +518,11 @@ struct EdgeSink {
 /// being a dependency too.
 #[derive(Default)]
 struct ContextualSink {
-    /// Expression diagnostics as `(parent, error)`.
-    errors: Vec<(LayerId, CompositionError)>,
+    /// Expression diagnostics as `(parent, diagnostic)`. Tagged staging state:
+    /// the key is needed until `drain` keeps only the entries whose parent
+    /// composes into the stack's members, which is where they become a
+    /// [`Diagnostics`].
+    diagnostics: Vec<(LayerId, CompositionDiagnostic)>,
     /// Variable names the `${VAR}` evaluations requested, as `(parent, name)`.
     used_vars: Vec<(LayerId, String)>,
 }
@@ -522,7 +544,7 @@ impl EdgeSink {
         self,
         stack: LayerStackId,
         members: &HashSet<LayerId>,
-    ) -> (Vec<SublayerDemand>, Vec<CompositionError>, HashSet<String>) {
+    ) -> (Vec<SublayerDemand>, Diagnostics, HashSet<String>) {
         let demands = self
             .demands
             .into_iter()
@@ -533,11 +555,11 @@ impl EdgeSink {
                 evaluated,
             })
             .collect();
-        let ContextualSink { errors, used_vars } = self.contextual.unwrap_or_default();
-        let errors = errors
+        let ContextualSink { diagnostics, used_vars } = self.contextual.unwrap_or_default();
+        let errors = diagnostics
             .into_iter()
             .filter(|(parent, _)| members.contains(parent))
-            .map(|(_, error)| error)
+            .map(|(_, diagnostic)| diagnostic)
             .collect();
         let used_vars = used_vars
             .into_iter()
@@ -569,8 +591,7 @@ impl LayerGraph {
             muted_identifiers: HashSet::new(),
             muted: HashSet::new(),
             has_relocates: false,
-            cycle_errors: Vec::new(),
-            relocate_errors: Vec::new(),
+            diagnostics: GraphDiagnostics::default(),
             registry,
             failed_loads: HashMap::new(),
             stacks: LayerStackRegistry::default(),
@@ -627,7 +648,7 @@ impl LayerGraph {
 
     /// Resolves every layer's `subLayers` into [`LayerNode::children`] — the
     /// context-free edges — folding the per-hop time-codes-per-second retiming into
-    /// each edge offset. Replaces [`cycle_errors`](Self::cycle_errors) with the
+    /// each edge offset. Replaces [`cycles`](GraphDiagnostics::cycles) with the
     /// sublayer-cycle errors reachable from the root layer (C++
     /// `PcpErrorSublayerCycle`).
     ///
@@ -704,7 +725,7 @@ impl LayerGraph {
         };
 
         let vars_deltas = self.rebuild_sublayer_stacks(affected.as_ref());
-        self.recompute_cycle_errors();
+        self.recompute_cycle_diagnostics();
         (affected, vars_deltas)
     }
 
@@ -756,7 +777,7 @@ impl LayerGraph {
                 // `_BuildLayerStack`) and the variable names the evaluation
                 // read. A successful expression-language `None` selects no
                 // sublayer and stays silent; either outcome resolves to no edge.
-                let mut expr_errors = Vec::new();
+                let mut expr_errors = Diagnostics::default();
                 let mut expr_used = HashSet::new();
                 let record = sink.as_deref_mut().is_some_and(|s| s.contextual.is_some());
                 let outcome = evaluate_expression(
@@ -770,8 +791,8 @@ impl LayerGraph {
                 );
                 if let Some(contextual) = sink.as_deref_mut().and_then(|s| s.contextual.as_mut()) {
                     contextual
-                        .errors
-                        .extend(expr_errors.into_iter().map(|error| (id, error)));
+                        .diagnostics
+                        .extend(expr_errors.into_iter().map(|diagnostic| (id, diagnostic)));
                     contextual
                         .used_vars
                         .extend(expr_used.into_iter().map(|name| (id, name)));
@@ -841,12 +862,12 @@ impl LayerGraph {
         sub_id
     }
 
-    /// Replaces [`cycle_errors`](Self::cycle_errors) with the sublayer cycles
+    /// Replaces [`cycles`](GraphDiagnostics::cycles) with the sublayer cycles
     /// reachable from the root layer through non-muted edges. Run after an edge
     /// rebuild and after a mute change, since muting a layer breaks any cycle
     /// running through it.
-    fn recompute_cycle_errors(&mut self) {
-        let mut errors = Vec::new();
+    fn recompute_cycle_diagnostics(&mut self) {
+        let mut errors = Diagnostics::default();
         // Detect over the same edges the root stack's members are built from,
         // one scan per region root — the session root's subtree and the root
         // layer's: a region with an expression sublayer resolves against the
@@ -889,17 +910,10 @@ impl LayerGraph {
                 );
             }
         }
-        // A sublayer reached twice off-path (a diamond) — or from both region
-        // roots — can report the same cycle twice; report each physical
-        // `(root_layer, seen_layer)` pair once.
-        let mut seen = HashSet::new();
-        errors.retain(|error| match error {
-            CompositionError::SublayerCycle { root_layer, seen_layer } => {
-                seen.insert((root_layer.clone(), seen_layer.clone()))
-            }
-            _ => true,
-        });
-        self.cycle_errors = errors;
+        // A sublayer reached twice off-path (a diamond), or from both region
+        // roots, reaches the same cycle twice; the `(root_layer, seen_layer)`
+        // pair is the whole diagnostic, so it is reported once.
+        self.diagnostics.cycles = errors;
     }
 
     /// Refreshes the registry's composed stacks from the current edges. Run after
@@ -1077,10 +1091,7 @@ impl LayerGraph {
                         self.failed_loads.remove(anchored.as_str());
                     } else if let Some(failure) = self.failed_loads.get(anchored) {
                         if seen.insert((demand.parent, anchored.clone())) {
-                            let error = failure.sublayer_error(&demand.evaluated, self.identifier(demand.parent));
-                            if !errors.contains(&error) {
-                                errors.push(error);
-                            }
+                            errors.report(failure.sublayer_error(&demand.evaluated, self.identifier(demand.parent)));
                         }
                         continue;
                     }
@@ -1094,7 +1105,7 @@ impl LayerGraph {
     /// Appends a sublayer diagnostic to `stack`'s bucket
     /// ([`SublayerState::record_error`]) — the load barrier's channel for a
     /// failure discovered between rebuilds.
-    pub(crate) fn record_sublayer_error(&mut self, stack: LayerStackId, error: CompositionError) {
+    pub(crate) fn record_sublayer_error(&mut self, stack: LayerStackId, error: CompositionDiagnostic) {
         self.sublayers.record_error(stack, error);
     }
 
@@ -1118,11 +1129,11 @@ impl LayerGraph {
         for (&stack, bucket) in &self.sublayers.errors {
             for error in bucket {
                 let (asset_path, introduced_by) = match error {
-                    CompositionError::UnresolvedSublayer {
+                    CompositionDiagnostic::UnresolvedSublayer {
                         asset_path,
                         introduced_by,
                     }
-                    | CompositionError::MalformedSublayer {
+                    | CompositionDiagnostic::MalformedSublayer {
                         asset_path,
                         introduced_by,
                         ..
@@ -1202,7 +1213,7 @@ impl LayerGraph {
         }
     }
 
-    /// Depth-first cycle scan recording [`CompositionError::SublayerCycle`] for any edge
+    /// Depth-first cycle scan recording [`CompositionDiagnostic::SublayerCycle`] for any edge
     /// that re-enters a layer already on the path from the root. Runs on an
     /// explicit work stack so a deep chain does not overflow the native stack; an
     /// `Exit` frame pops the layer back out of the `ancestors` path after its
@@ -1214,7 +1225,7 @@ impl LayerGraph {
         root: LayerId,
         children_of: impl Fn(LayerId) -> &'e [(LayerId, LayerOffset)],
         ancestors: &mut HashSet<LayerId>,
-        errors: &mut Vec<CompositionError>,
+        errors: &mut Diagnostics,
     ) {
         enum Step {
             Enter(LayerId),
@@ -1242,7 +1253,7 @@ impl LayerGraph {
                     continue;
                 }
                 if ancestors.contains(&child) {
-                    errors.push(CompositionError::SublayerCycle {
+                    errors.report(CompositionDiagnostic::SublayerCycle {
                         root_layer: self.nodes[&id].layer.identifier().to_string(),
                         seen_layer: self.nodes[&child].layer.identifier().to_string(),
                     });
@@ -1324,7 +1335,7 @@ impl LayerGraph {
     }
 
     /// Records that an on-demand open of `asset_path` failed, so composition
-    /// stops demanding it and reports it — [`MalformedLayer`](CompositionError::MalformedLayer)
+    /// stops demanding it and reports it — [`MalformedLayer`](CompositionDiagnostic::MalformedLayer)
     /// at a reference/payload arc, a per-referrer sublayer diagnostic at each
     /// stack rebuild. Called from the stage's load barriers.
     pub(crate) fn mark_load_failed(&mut self, asset_path: &str, failure: LoadFailure) {
@@ -1983,8 +1994,8 @@ impl LayerGraph {
     }
 
     /// Rebuilds the sublayer edges and relocate data from the current layer
-    /// data, refreshing both [`cycle_errors`](Self::cycle_errors) and
-    /// [`relocate_errors`](Self::relocate_errors). Called after a
+    /// data, refreshing both [`cycles`](GraphDiagnostics::cycles) and
+    /// [`relocates`](GraphDiagnostics::relocates). Called after a
     /// `subLayers`/`subLayerOffsets` edit, where the graph's edges may be stale.
     ///
     /// `edited` names the layers whose root metadata the edit authored; together
@@ -2025,7 +2036,7 @@ impl LayerGraph {
     }
 
     /// Re-derives every node's structurally valid relocate pairs from its
-    /// current layer data, replacing [`relocate_errors`](Self::relocate_errors)
+    /// current layer data, replacing [`relocates`](GraphDiagnostics::relocates)
     /// with the recoverable relocate diagnostics (C++
     /// `PcpErrorInvalidAuthoredRelocates` and conflict diagnostics). Run once at
     /// construction and again whenever a `subLayers`/`layerRelocates` edit
@@ -2050,29 +2061,24 @@ impl LayerGraph {
             }
             node.relocates = pairs;
         }
-        self.relocate_errors = errors;
+        self.diagnostics.relocates = errors;
         changed
     }
 
     /// The current layer-graph diagnostics — sublayer cycles
-    /// ([`cycle_errors`](Self::cycle_errors)), relocate errors
-    /// ([`relocate_errors`](Self::relocate_errors)), then per-stack sublayer
-    /// errors ([`SublayerState::errors`]). Always reflects the
+    /// ([`cycles`](GraphDiagnostics::cycles)), relocate errors
+    /// ([`relocates`](GraphDiagnostics::relocates)), then per-stack sublayer
+    /// errors ([`SublayerState::diagnostics`]). Always reflects the
     /// present graph state: a fixed cycle, relocate, expression, or removed
     /// entry stops appearing and a recompute never duplicates one, since each
     /// bucket is replaced on rebuild.
-    pub(crate) fn errors(&self) -> Vec<CompositionError> {
-        let mut errors: Vec<CompositionError> =
-            self.cycle_errors.iter().chain(&self.relocate_errors).cloned().collect();
+    pub(crate) fn errors(&self) -> Diagnostics {
+        let mut held: Diagnostics = self.diagnostics.iter().cloned().collect();
         // A parent composing into several stacks derives the same per-referrer
-        // diagnostic into each stack's bucket; report each distinct diagnostic
-        // once.
-        for error in self.sublayers.diagnostics() {
-            if !errors.contains(error) {
-                errors.push(error.clone());
-            }
-        }
-        errors
+        // diagnostic into each stack's bucket, which the collection folds back
+        // into one.
+        held.extend(self.sublayers.diagnostics().cloned());
+        held
     }
 
     /// The ordered layer-id stacks, one per sublayer stack (one rooted at each
@@ -2529,36 +2535,49 @@ impl LayerGraph {
 
     /// The layers of every composed stack — the effectively-present set the stage
     /// filters muted collection diagnostics against (see
-    /// [`sublayer_error_contributes`](Self::sublayer_error_contributes)). Read from
+    /// [`retain_contributing`](Self::retain_contributing)). Read from
     /// the composed stacks (muting has pruned their muted subtrees), so it is a
     /// pure function of the muted set and the live stacks. Like the rest of the
     /// lazily composed state, the set reflects the composition performed so far:
     /// reclamation removes an unreferenced stack's members, and recomposition
     /// re-derives them.
-    pub(crate) fn effective_layers(&self) -> HashSet<LayerId> {
+    fn effective_layers(&self) -> HashSet<LayerId> {
         self.stacks.member_layers()
     }
 
-    /// Whether a collection diagnostic still contributes to composition once muting
-    /// is applied, so the stage keeps it (the loader reports every load failure raw,
-    /// unaware of muting). A non-sublayer error always survives. A missing or
-    /// unreadable sublayer survives only when its referencing layer is `effective`
-    /// (a member of some composed stack) and the sublayer it names is not itself
-    /// muted; otherwise muting prunes it and the raw diagnostic is spurious. The
-    /// `effective` set is a pure function of the muted set and the live stacks
-    /// (see [`effective_layers`](Self::effective_layers)).
-    pub(crate) fn sublayer_error_contributes(&self, error: &CompositionError, effective: &HashSet<LayerId>) -> bool {
-        let (asset_path, introduced_by) = match error {
-            CompositionError::UnresolvedSublayer {
-                asset_path,
-                introduced_by,
-            }
-            | CompositionError::MalformedSublayer {
-                asset_path,
-                introduced_by,
-                ..
-            } => (asset_path, introduced_by),
-            _ => return true,
+    /// Keeps only the collection diagnostics that still describe the composed
+    /// state once muting is applied. The loader reports every load failure raw,
+    /// unaware of muting, so a sublayer failure under a muted branch has to be
+    /// filtered out here rather than discarded at load; unmuting restores it
+    /// because the raw copy was never dropped.
+    ///
+    /// Whether anything can be suppressed is this graph's own knowledge — an
+    /// unmuted stage suppresses nothing, and muting only ever reaches sublayer
+    /// diagnostics — so the effective-layer set is built only once something in
+    /// `diagnostics` could be affected by it.
+    pub(crate) fn retain_contributing(&self, mut diagnostics: Diagnostics) -> Diagnostics {
+        if !self.has_muted_layers() || !diagnostics.iter().any(|d| sublayer_source(d).is_some()) {
+            return diagnostics;
+        }
+        let effective = self.effective_layers();
+        diagnostics.retain(|diagnostic| self.sublayer_diagnostic_contributes(diagnostic, &effective));
+        diagnostics
+    }
+
+    /// Whether one diagnostic survives the muting filter. A non-sublayer
+    /// diagnostic always does. A missing or unreadable sublayer survives only
+    /// when its referencing layer is `effective` (a member of some composed
+    /// stack) and the sublayer it names is not itself muted; otherwise muting
+    /// prunes it and the raw diagnostic is spurious. The `effective` set is a
+    /// pure function of the muted set and the live stacks (see
+    /// [`effective_layers`](Self::effective_layers)).
+    fn sublayer_diagnostic_contributes(
+        &self,
+        diagnostic: &CompositionDiagnostic,
+        effective: &HashSet<LayerId>,
+    ) -> bool {
+        let Some((asset_path, introduced_by)) = sublayer_source(diagnostic) else {
+            return true;
         };
         let Some(referrer) = self.id_of(introduced_by) else {
             return true;
@@ -2612,7 +2631,7 @@ impl LayerGraph {
         // publishes for a composed-variable move could name only indices the mute
         // has already dropped.
         let _ = self.rebuild_sublayer_stacks(None);
-        self.recompute_cycle_errors();
+        self.recompute_cycle_diagnostics();
         self.recompute_relocates()
     }
 
@@ -2769,6 +2788,23 @@ impl LayerGraph {
     /// asserting reclamation retires diagnostics with their stacks.
     pub(crate) fn diagnostic_bucket_count(&self) -> usize {
         self.sublayers.errors.len()
+    }
+}
+
+/// The asset path a sublayer load diagnostic names and the identifier of the
+/// layer that authored it, or `None` for any other diagnostic.
+fn sublayer_source(diagnostic: &CompositionDiagnostic) -> Option<(&String, &String)> {
+    match diagnostic {
+        CompositionDiagnostic::UnresolvedSublayer {
+            asset_path,
+            introduced_by,
+        }
+        | CompositionDiagnostic::MalformedSublayer {
+            asset_path,
+            introduced_by,
+            ..
+        } => Some((asset_path, introduced_by)),
+        _ => None,
     }
 }
 
@@ -2971,7 +3007,7 @@ mod tests {
             graph
                 .errors()
                 .iter()
-                .any(|e| matches!(e, CompositionError::SublayerCycle { .. })),
+                .any(|e| matches!(e, CompositionDiagnostic::SublayerCycle { .. })),
             "the session-resolved self-sublayer is reported as a cycle: {:?}",
             graph.errors()
         );
@@ -2997,7 +3033,7 @@ mod tests {
             .filter(|e| {
                 matches!(
                     e,
-                    CompositionError::InvalidExpression {
+                    CompositionDiagnostic::InvalidExpression {
                         context: ExpressionContext::Sublayer,
                         ..
                     }
@@ -4018,7 +4054,7 @@ mod tests {
         let cycles = graph
             .errors()
             .iter()
-            .filter(|e| matches!(e, CompositionError::SublayerCycle { .. }))
+            .filter(|e| matches!(e, CompositionDiagnostic::SublayerCycle { .. }))
             .count();
         assert_eq!(cycles, 1, "the root<->a cycle is reported once: {:?}", graph.errors());
 

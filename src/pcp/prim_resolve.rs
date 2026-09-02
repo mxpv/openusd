@@ -14,11 +14,12 @@ use crate::sdf::{self, LayerOffset, Path, Specifier, Value};
 
 use super::asset_resolve::{self, AssetSite};
 use super::clip;
+use super::diagnostics::Diagnostics;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
 use super::value_resolve::SelectedSite;
-use super::{CompositionError, LayerGraph, LayerId, QueryError};
+use super::{LayerGraph, LayerId, QueryError};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
 ///
@@ -801,7 +802,7 @@ impl PrimIndex {
     ///
     /// The three asset-valued fields have any `` `${VAR}` `` evaluated against
     /// the variables in scope at the opinion that supplied them, and a set whose
-    /// expression fails is dropped with [`CompositionError::InvalidExpression`] in `errors`.
+    /// expression fails is dropped with [`CompositionDiagnostic::InvalidExpression`] in `errors`.
     /// C++ diverges here: `clipSetDefinition.cpp` reads all three through plain
     /// dictionary lookups, and `UsdStage::_MakeResolvedAssetPaths` never descends
     /// into a `VtDictionary`, so an expression is inert there. The Sdf
@@ -810,7 +811,7 @@ impl PrimIndex {
     pub(crate) fn resolve_clip_sets(
         &self,
         stack: &LayerGraph,
-        errors: &mut Vec<CompositionError>,
+        errors: &mut Diagnostics,
     ) -> Result<Vec<clip::ResolvedClipSet>, QueryError> {
         let mut sets: HashMap<String, HashMap<String, Value>> = HashMap::new();
         let mut blocked_sets: HashSet<String> = HashSet::new();
@@ -1092,7 +1093,7 @@ fn evaluate_clip_assets(
     sets: &mut HashMap<String, HashMap<String, Value>>,
     order: Option<&[String]>,
     asset_sites: &HashMap<String, ClipAssetSites>,
-    errors: &mut Vec<CompositionError>,
+    errors: &mut Diagnostics,
 ) {
     if asset_sites.is_empty() {
         return;
