@@ -15,7 +15,7 @@ that broader spec behavior can be considered fully covered.
 | Scalar types (bool, int, float, double, half, string, token, asset, timecode, int64, uint, uint64, uchar) | `6.2` | :white_check_mark: | `0.1.1` | `sdf::Value` enum |
 | Dimensioned types (vectors, matrices, quaternions) | `6.3` | :white_check_mark: | `0.1.2` | float2..4, double2..4, matrix2d..4d, quath/f/d, int2..4, half2..4 |
 | Algebraic types (opaque) | `6.4` | :white_check_mark: | `0.2.0` | An `opaque` attribute carries no value, so it is stored as its `typeName` alone |
-| Semantic aliases (color, normal, point, vector, texCoord, frame) | `6.5` | :thinking: | | Parsed as underlying types; semantic role not tracked separately |
+| Semantic aliases (color, normal, point, vector, texCoord, frame) | `6.5` | :white_check_mark: | `main` | `sdf::Role`, `sdf::ValueTypeName::role` / `agrees_with` (§6.5.1), `usd::Attribute::role` |
 | Arrays | `6.6.1` | :white_check_mark: | `main` | Every scalar and dimensioned array form of the §16.3.10.1 type table, round-tripping through both formats |
 | Dictionaries | `6.6.2` | :white_check_mark: | `0.1.2` | Including nested dictionaries |
 | Dictionary combining | `6.6.2.1` | :white_check_mark: | `0.4.0` | Recursive merge of stronger/weaker dictionaries during value resolution |
@@ -142,7 +142,7 @@ that broader spec behavior can be considered fully covered.
 | Schema inclusions (built-ins, auto-applies) | `13.3.2.1` | :white_check_mark: | `main` | A class prim's `apiSchemas` expand recursively into its definition, cycle-guarded, with multiple-apply templates instantiated per instance name and one version per (family, instance)<br>`apiSchemaAutoApplyTo` and `usd::SchemaRegistryBuilder::auto_apply` declarations resolve into built-ins at registry build |
 | Prim definitions (property fallbacks) | `13.3` | :white_check_mark: | `main` | `usd::PrimDefinition` composes typed and applied tiers per §13.3.2.3 — first-writer-wins, weaker fill-in, `propertyOrder` append and recursive dictionary merge, `apiSchemaOverridePropertyNames` composed over the property they override |
 | Core schema types | `13.4` | :construction: | | |
-| [Value type names](https://openusd.org/release/api/class_sdf_value_type_name.html) | `13.3` | :construction: | | Attribute type validation |
+| [Value type names](https://openusd.org/release/api/class_sdf_value_type_name.html) | `13.3` | :white_check_mark: | `main` | `sdf::ValueTypeName`, `sdf::ValueKind`, `sdf::Dimensions`, `Value::coerce_to_kind`; the parser, writer, spec setters and stage authoring all resolve a type through the one table<br>Remaining — default units (C++ `SdfDefaultUnit`); recording an unknown type's literal as `sdf::Value::UnregisteredValue` |
 | Extension metadata fields (fallbackPrimTypes, apiSchemas, clips, clipSets) | `13.2` | :white_check_mark: | `main` | Fields readable; `apiSchemas` list-op composition + value-clip semantics for `clips`/`clipSets` resolved (§12.3.4)<br>A `typeName` the registry does not know resolves through the root layer's `fallbackPrimTypes` to the first substitute it does know (C++ `ComputeInvalidPrimTypeToFallbackMap`) |
 | [Schema codegen](https://openusd.org/release/tut_generating_new_schema.html) | `13.3` | :construction: | | Generate typed APIs from schema definitions |
 
