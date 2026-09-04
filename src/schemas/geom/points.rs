@@ -42,7 +42,9 @@ impl Points {
 
     /// Author `widths` (`float[]`) (C++ `CreateWidthsAttr`).
     pub fn create_widths_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_WIDTHS, "float[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_WIDTHS, sdf::ValueTypeName::FLOAT_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// Optional persistent identifiers that track each point across time samples
@@ -56,7 +58,9 @@ impl Points {
 
     /// Author `ids` (`int64[]`) (C++ `CreateIdsAttr`).
     pub fn create_ids_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_IDS, "int64[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_IDS, sdf::ValueTypeName::INT64_ARRAY)?
+            .set_custom(false)?)
     }
 }
 
@@ -94,7 +98,7 @@ impl TetMesh {
     /// (C++ `CreateTetVertexIndicesAttr`).
     pub fn create_tet_vertex_indices_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_TET_VERTEX_INDICES, "int4[]")?
+            .create_attribute(tok::A_TET_VERTEX_INDICES, sdf::ValueTypeName::INT4_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -111,7 +115,7 @@ impl TetMesh {
     /// (C++ `CreateSurfaceFaceVertexIndicesAttr`).
     pub fn create_surface_face_vertex_indices_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_SURFACE_FACE_VERTEX_INDICES, "int3[]")?
+            .create_attribute(tok::A_SURFACE_FACE_VERTEX_INDICES, sdf::ValueTypeName::INT3_ARRAY)?
             .set_custom(false)?)
     }
 }

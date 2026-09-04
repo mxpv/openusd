@@ -35,7 +35,7 @@ pub trait Curves: PointBased {
     fn create_curve_vertex_counts_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_CURVE_VERTEX_COUNTS, "int[]")?
+            .create_attribute(tok::A_CURVE_VERTEX_COUNTS, sdf::ValueTypeName::INT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -53,7 +53,7 @@ pub trait Curves: PointBased {
     fn create_widths_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_WIDTHS, "float[]")?
+            .create_attribute(tok::A_WIDTHS, sdf::ValueTypeName::FLOAT_ARRAY)?
             .set_custom(false)?)
     }
 }
@@ -88,7 +88,7 @@ impl BasisCurves {
     /// Author `type` (`uniform token`) (C++ `CreateTypeAttr`).
     pub fn create_type_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_TYPE, "token")?
+            .create_attribute(tok::A_TYPE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -105,7 +105,7 @@ impl BasisCurves {
     /// Author `basis` (`uniform token`) (C++ `CreateBasisAttr`).
     pub fn create_basis_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_BASIS, "token")?
+            .create_attribute(tok::A_BASIS, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -123,7 +123,7 @@ impl BasisCurves {
     /// Author `wrap` (`uniform token`) (C++ `CreateWrapAttr`).
     pub fn create_wrap_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_WRAP, "token")?
+            .create_attribute(tok::A_WRAP, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -160,7 +160,9 @@ impl NurbsCurves {
 
     /// Author `order` (`int[]`) (C++ `CreateOrderAttr`).
     pub fn create_order_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_ORDER, "int[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_ORDER, sdf::ValueTypeName::INT_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// The knot vectors for all curves concatenated end to end; each curve contributes
@@ -174,7 +176,9 @@ impl NurbsCurves {
 
     /// Author `knots` (`double[]`) (C++ `CreateKnotsAttr`).
     pub fn create_knots_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_KNOTS, "double[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_KNOTS, sdf::ValueTypeName::DOUBLE_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// The parametric range `(uMin, uMax)` over which each curve is evaluated, one pair per curve;
@@ -188,7 +192,9 @@ impl NurbsCurves {
 
     /// Author `ranges` (`double2[]`) (C++ `CreateRangesAttr`).
     pub fn create_ranges_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_RANGES, "double2[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_RANGES, sdf::ValueTypeName::DOUBLE2_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// The rational weight of each control point, making the geometry a rational NURBS; one value
@@ -203,7 +209,7 @@ impl NurbsCurves {
     /// Author `pointWeights` (`double[]`) (C++ `CreatePointWeightsAttr`).
     pub fn create_point_weights_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_POINT_WEIGHTS, "double[]")?
+            .create_attribute(tok::A_POINT_WEIGHTS, sdf::ValueTypeName::DOUBLE_ARRAY)?
             .set_custom(false)?)
     }
 }
@@ -240,7 +246,7 @@ impl HermiteCurves {
     /// Author `tangents` (`vector3f[]`) (C++ `CreateTangentsAttr`).
     pub fn create_tangents_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_TANGENTS, "vector3f[]")?
+            .create_attribute(tok::A_TANGENTS, sdf::ValueTypeName::VECTOR3F_ARRAY)?
             .set_custom(false)?)
     }
 }
@@ -277,7 +283,9 @@ impl NurbsPatch {
 
     /// Author `uVertexCount` (`int`) (C++ `CreateUVertexCountAttr`).
     pub fn create_u_vertex_count_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_U_VERTEX_COUNT, "int")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_U_VERTEX_COUNT, sdf::ValueTypeName::INT)?
+            .set_custom(false)?)
     }
 
     /// The number of control points along the V (column) direction of the control net; the inner
@@ -291,7 +299,9 @@ impl NurbsPatch {
 
     /// Author `vVertexCount` (`int`) (C++ `CreateVVertexCountAttr`).
     pub fn create_v_vertex_count_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_V_VERTEX_COUNT, "int")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_V_VERTEX_COUNT, sdf::ValueTypeName::INT)?
+            .set_custom(false)?)
     }
 
     /// The order of the surface in the U direction, equal to degree plus one (e.g. 4 for bicubic
@@ -305,7 +315,9 @@ impl NurbsPatch {
 
     /// Author `uOrder` (`int`) (C++ `CreateUOrderAttr`).
     pub fn create_u_order_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_U_ORDER, "int")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_U_ORDER, sdf::ValueTypeName::INT)?
+            .set_custom(false)?)
     }
 
     /// The order of the surface in the V direction, equal to degree plus one.
@@ -318,7 +330,9 @@ impl NurbsPatch {
 
     /// Author `vOrder` (`int`) (C++ `CreateVOrderAttr`).
     pub fn create_v_order_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_V_ORDER, "int")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_V_ORDER, sdf::ValueTypeName::INT)?
+            .set_custom(false)?)
     }
 
     /// The knot vector along the U direction; its length must be `uVertexCount + uOrder` and its
@@ -332,7 +346,9 @@ impl NurbsPatch {
 
     /// Author `uKnots` (`double[]`) (C++ `CreateUKnotsAttr`).
     pub fn create_u_knots_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_U_KNOTS, "double[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_U_KNOTS, sdf::ValueTypeName::DOUBLE_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// The knot vector along the V direction; its length must be `vVertexCount + vOrder` and its
@@ -346,7 +362,9 @@ impl NurbsPatch {
 
     /// Author `vKnots` (`double[]`) (C++ `CreateVKnotsAttr`).
     pub fn create_v_knots_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_V_KNOTS, "double[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_V_KNOTS, sdf::ValueTypeName::DOUBLE_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// The topological form of the surface in the U direction: `open`, `closed` (the surface
@@ -361,7 +379,7 @@ impl NurbsPatch {
     /// Author `uForm` (`uniform token`) (C++ `CreateUFormAttr`).
     pub fn create_u_form_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_U_FORM, "token")?
+            .create_attribute(tok::A_U_FORM, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -377,7 +395,7 @@ impl NurbsPatch {
     /// Author `vForm` (`uniform token`) (C++ `CreateVFormAttr`).
     pub fn create_v_form_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_V_FORM, "token")?
+            .create_attribute(tok::A_V_FORM, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -393,7 +411,9 @@ impl NurbsPatch {
 
     /// Author `uRange` (`double2`) (C++ `CreateURangeAttr`).
     pub fn create_u_range_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_U_RANGE, "double2")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_U_RANGE, sdf::ValueTypeName::DOUBLE2)?
+            .set_custom(false)?)
     }
 
     /// The parametric range `(vMin, vMax)` over which the surface is evaluated in V; the patch is
@@ -407,7 +427,9 @@ impl NurbsPatch {
 
     /// Author `vRange` (`double2`) (C++ `CreateVRangeAttr`).
     pub fn create_v_range_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_V_RANGE, "double2")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_V_RANGE, sdf::ValueTypeName::DOUBLE2)?
+            .set_custom(false)?)
     }
 
     /// The rational weight of each control point, making the surface a rational NURBS; one value
@@ -422,7 +444,7 @@ impl NurbsPatch {
     /// Author `pointWeights` (`double[]`) (C++ `CreatePointWeightsAttr`).
     pub fn create_point_weights_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_POINT_WEIGHTS, "double[]")?
+            .create_attribute(tok::A_POINT_WEIGHTS, sdf::ValueTypeName::DOUBLE_ARRAY)?
             .set_custom(false)?)
     }
 }

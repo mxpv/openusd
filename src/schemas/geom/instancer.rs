@@ -58,7 +58,7 @@ impl PointInstancer {
     /// Author `protoIndices` (`int[]`) (C++ `CreateProtoIndicesAttr`).
     pub fn create_proto_indices_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_PROTO_INDICES, "int[]")?
+            .create_attribute(tok::A_PROTO_INDICES, sdf::ValueTypeName::INT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -74,7 +74,7 @@ impl PointInstancer {
     /// Author `positions` (`point3f[]`) (C++ `CreatePositionsAttr`).
     pub fn create_positions_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_POSITIONS, "point3f[]")?
+            .create_attribute(tok::A_POSITIONS, sdf::ValueTypeName::POINT3F_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -90,7 +90,7 @@ impl PointInstancer {
     /// Author `orientations` (`quath[]`) (C++ `CreateOrientationsAttr`).
     pub fn create_orientations_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_ORIENTATIONS, "quath[]")?
+            .create_attribute(tok::A_ORIENTATIONS, sdf::ValueTypeName::QUATH_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -107,7 +107,7 @@ impl PointInstancer {
     /// Author `orientationsf` (`quatf[]`) (C++ `CreateOrientationsfAttr`).
     pub fn create_orientationsf_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_ORIENTATIONS_F, "quatf[]")?
+            .create_attribute(tok::A_ORIENTATIONS_F, sdf::ValueTypeName::QUATF_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -122,7 +122,9 @@ impl PointInstancer {
 
     /// Author `scales` (`float3[]`) (C++ `CreateScalesAttr`).
     pub fn create_scales_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_SCALES, "float3[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_SCALES, sdf::ValueTypeName::FLOAT3_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// The linear velocity of each instance in units per second, used to
@@ -138,7 +140,7 @@ impl PointInstancer {
     /// Author `velocities` (`vector3f[]`) (C++ `CreateVelocitiesAttr`).
     pub fn create_velocities_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_VELOCITIES, "vector3f[]")?
+            .create_attribute(tok::A_VELOCITIES, sdf::ValueTypeName::VECTOR3F_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -154,7 +156,7 @@ impl PointInstancer {
     /// Author `accelerations` (`vector3f[]`) (C++ `CreateAccelerationsAttr`).
     pub fn create_accelerations_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_ACCELERATIONS, "vector3f[]")?
+            .create_attribute(tok::A_ACCELERATIONS, sdf::ValueTypeName::VECTOR3F_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -172,7 +174,7 @@ impl PointInstancer {
     /// (C++ `CreateAngularVelocitiesAttr`).
     pub fn create_angular_velocities_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_ANGULAR_VELOCITIES, "vector3f[]")?
+            .create_attribute(tok::A_ANGULAR_VELOCITIES, sdf::ValueTypeName::VECTOR3F_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -188,7 +190,9 @@ impl PointInstancer {
 
     /// Author `ids` (`int64[]`) (C++ `CreateIdsAttr`).
     pub fn create_ids_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_IDS, "int64[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_IDS, sdf::ValueTypeName::INT64_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// The `ids` of instances to hide at a given time; typically time-sampled
@@ -204,7 +208,7 @@ impl PointInstancer {
     /// Author `invisibleIds` (`int64[]`) (C++ `CreateInvisibleIdsAttr`).
     pub fn create_invisible_ids_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_INVISIBLE_IDS, "int64[]")?
+            .create_attribute(tok::A_INVISIBLE_IDS, sdf::ValueTypeName::INT64_ARRAY)?
             .set_custom(false)?)
     }
 }

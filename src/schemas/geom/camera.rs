@@ -40,7 +40,9 @@ impl Camera {
 
     /// Author `focalLength` (`float`, mm) (C++ `CreateFocalLengthAttr`).
     pub fn create_focal_length_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_FOCAL_LENGTH, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_FOCAL_LENGTH, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// The width of the camera's film gate (aperture), in tenths of a scene
@@ -55,7 +57,7 @@ impl Camera {
     /// Author `horizontalAperture` (`float`, mm).
     pub fn create_horizontal_aperture_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_HORIZONTAL_APERTURE, "float")?
+            .create_attribute(tok::A_HORIZONTAL_APERTURE, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -71,7 +73,7 @@ impl Camera {
     /// Author `verticalAperture` (`float`, mm).
     pub fn create_vertical_aperture_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_VERTICAL_APERTURE, "float")?
+            .create_attribute(tok::A_VERTICAL_APERTURE, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -88,7 +90,7 @@ impl Camera {
     /// Author `horizontalApertureOffset` (`float`, mm).
     pub fn create_horizontal_aperture_offset_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_HORIZONTAL_APERTURE_OFFSET, "float")?
+            .create_attribute(tok::A_HORIZONTAL_APERTURE_OFFSET, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -105,7 +107,7 @@ impl Camera {
     /// Author `verticalApertureOffset` (`float`, mm).
     pub fn create_vertical_aperture_offset_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_VERTICAL_APERTURE_OFFSET, "float")?
+            .create_attribute(tok::A_VERTICAL_APERTURE_OFFSET, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -120,7 +122,9 @@ impl Camera {
 
     /// Author `fStop` (`float`).
     pub fn create_f_stop_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_F_STOP, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_F_STOP, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// The distance from the camera to the focus plane, in scene units, around
@@ -135,7 +139,7 @@ impl Camera {
     /// Author `focusDistance` (`float`, scene units).
     pub fn create_focus_distance_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_FOCUS_DISTANCE, "float")?
+            .create_attribute(tok::A_FOCUS_DISTANCE, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -150,7 +154,9 @@ impl Camera {
 
     /// Author `exposure` (`float`, stops).
     pub fn create_exposure_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_EXPOSURE, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_EXPOSURE, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// The ISO speed rating of the sensor or film used in the physical exposure
@@ -164,7 +170,9 @@ impl Camera {
 
     /// Author `exposure:iso` (`float`).
     pub fn create_exposure_iso_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_EXPOSURE_ISO, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_EXPOSURE_ISO, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// The sensor exposure time in seconds used in the physical exposure
@@ -179,7 +187,7 @@ impl Camera {
     /// Author `exposure:time` (`float`, seconds).
     pub fn create_exposure_time_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_EXPOSURE_TIME, "float")?
+            .create_attribute(tok::A_EXPOSURE_TIME, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -195,7 +203,7 @@ impl Camera {
     /// Author `exposure:fStop` (`float`).
     pub fn create_exposure_f_stop_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_EXPOSURE_F_STOP, "float")?
+            .create_attribute(tok::A_EXPOSURE_F_STOP, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -211,7 +219,7 @@ impl Camera {
     /// Author `exposure:responsivity` (`float`).
     pub fn create_exposure_responsivity_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_EXPOSURE_RESPONSIVITY, "float")?
+            .create_attribute(tok::A_EXPOSURE_RESPONSIVITY, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -227,7 +235,7 @@ impl Camera {
     /// Author `shutter:open` (`double`, frame-relative seconds).
     pub fn create_shutter_open_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_SHUTTER_OPEN, "double")?
+            .create_attribute(tok::A_SHUTTER_OPEN, sdf::ValueTypeName::DOUBLE)?
             .set_custom(false)?)
     }
 
@@ -243,7 +251,7 @@ impl Camera {
     /// Author `shutter:close` (`double`, frame-relative seconds).
     pub fn create_shutter_close_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_SHUTTER_CLOSE, "double")?
+            .create_attribute(tok::A_SHUTTER_CLOSE, sdf::ValueTypeName::DOUBLE)?
             .set_custom(false)?)
     }
 
@@ -258,7 +266,7 @@ impl Camera {
     /// Author `projection` (`uniform token`).
     pub fn create_projection_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_PROJECTION, "token")?
+            .create_attribute(tok::A_PROJECTION, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -275,7 +283,7 @@ impl Camera {
     /// Author `stereoRole` (`uniform token`).
     pub fn create_stereo_role_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_STEREO_ROLE, "token")?
+            .create_attribute(tok::A_STEREO_ROLE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -292,7 +300,7 @@ impl Camera {
     /// Author `clippingRange` (`float2`).
     pub fn create_clipping_range_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CLIPPING_RANGE, "float2")?
+            .create_attribute(tok::A_CLIPPING_RANGE, sdf::ValueTypeName::FLOAT2)?
             .set_custom(false)?)
     }
 
@@ -308,7 +316,7 @@ impl Camera {
     /// Author `clippingPlanes` (`float4[]`).
     pub fn create_clipping_planes_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CLIPPING_PLANES, "float4[]")?
+            .create_attribute(tok::A_CLIPPING_PLANES, sdf::ValueTypeName::FLOAT4_ARRAY)?
             .set_custom(false)?)
     }
 }

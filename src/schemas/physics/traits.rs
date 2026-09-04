@@ -52,7 +52,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     fn create_local_pos0_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_LOCAL_POS_0, "point3f")?
+            .create_attribute(tok::A_LOCAL_POS_0, sdf::ValueTypeName::POINT3F)?
             .set_custom(false)?)
     }
 
@@ -68,7 +68,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     fn create_local_rot0_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_LOCAL_ROT_0, "quatf")?
+            .create_attribute(tok::A_LOCAL_ROT_0, sdf::ValueTypeName::QUATF)?
             .set_custom(false)?)
     }
 
@@ -84,7 +84,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     fn create_local_pos1_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_LOCAL_POS_1, "point3f")?
+            .create_attribute(tok::A_LOCAL_POS_1, sdf::ValueTypeName::POINT3F)?
             .set_custom(false)?)
     }
 
@@ -100,7 +100,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     fn create_local_rot1_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_LOCAL_ROT_1, "quatf")?
+            .create_attribute(tok::A_LOCAL_ROT_1, sdf::ValueTypeName::QUATF)?
             .set_custom(false)?)
     }
 
@@ -116,7 +116,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     fn create_joint_enabled_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_JOINT_ENABLED, "bool")?
+            .create_attribute(tok::A_JOINT_ENABLED, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?)
     }
 
@@ -132,7 +132,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     fn create_collision_enabled_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_JOINT_COLLISION_ENABLED, "bool")?
+            .create_attribute(tok::A_JOINT_COLLISION_ENABLED, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?)
     }
 
@@ -149,7 +149,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     fn create_exclude_from_articulation_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_EXCLUDE_FROM_ARTICULATION, "bool")?
+            .create_attribute(tok::A_EXCLUDE_FROM_ARTICULATION, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -166,7 +166,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     fn create_break_force_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_BREAK_FORCE, "float")?
+            .create_attribute(tok::A_BREAK_FORCE, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -182,7 +182,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     fn create_break_torque_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_BREAK_TORQUE, "float")?
+            .create_attribute(tok::A_BREAK_TORQUE, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 }

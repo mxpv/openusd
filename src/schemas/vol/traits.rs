@@ -8,6 +8,7 @@
 //! through the `impl_vol_schema!(field_asset ...)` macro arm.
 
 use crate::Result;
+use crate::sdf;
 
 use crate::schemas::geom;
 use crate::usd::Attribute;
@@ -38,7 +39,7 @@ pub trait FieldAsset: FieldBase {
     fn create_file_path_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_FILE_PATH, "asset")?
+            .create_attribute(tok::A_FILE_PATH, sdf::ValueTypeName::ASSET)?
             .set_custom(false)?)
     }
 
@@ -54,7 +55,7 @@ pub trait FieldAsset: FieldBase {
     fn create_field_name_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_FIELD_NAME, "token")?
+            .create_attribute(tok::A_FIELD_NAME, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(crate::sdf::Variability::Uniform)?)
     }
@@ -72,7 +73,7 @@ pub trait FieldAsset: FieldBase {
     fn create_field_index_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_FIELD_INDEX, "int")?
+            .create_attribute(tok::A_FIELD_INDEX, sdf::ValueTypeName::INT)?
             .set_custom(false)?
             .set_variability(crate::sdf::Variability::Uniform)?)
     }
@@ -90,7 +91,7 @@ pub trait FieldAsset: FieldBase {
     fn create_field_data_type_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_FIELD_DATA_TYPE, "token")?
+            .create_attribute(tok::A_FIELD_DATA_TYPE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(crate::sdf::Variability::Uniform)?)
     }
@@ -111,7 +112,7 @@ pub trait FieldAsset: FieldBase {
     fn create_vector_data_role_hint_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_VECTOR_DATA_ROLE_HINT, "token")?
+            .create_attribute(tok::A_VECTOR_DATA_ROLE_HINT, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(crate::sdf::Variability::Uniform)?)
     }

@@ -47,7 +47,7 @@ pub trait Xformable: Imageable {
     fn create_xform_op_order_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_XFORM_OP_ORDER, "token[]")?
+            .create_attribute(tok::A_XFORM_OP_ORDER, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -113,7 +113,7 @@ pub trait Xformable: Imageable {
     {
         let tokens: Vec<String> = order.into_iter().map(Into::into).collect();
         self.prim()
-            .create_attribute(tok::A_XFORM_OP_ORDER, "token[]")?
+            .create_attribute(tok::A_XFORM_OP_ORDER, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_variability(sdf::Variability::Uniform)?
             .set_custom(false)?
             .set(sdf::Value::token_vec(tokens))?;

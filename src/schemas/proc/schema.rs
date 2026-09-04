@@ -46,7 +46,7 @@ impl GenerativeProcedural {
     /// (C++ `CreateProceduralSystemAttr`).
     pub fn create_procedural_system_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_PROCEDURAL_SYSTEM, "token")?
+            .create_attribute(tok::A_PROCEDURAL_SYSTEM, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }

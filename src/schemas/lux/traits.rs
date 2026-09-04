@@ -10,6 +10,7 @@
 //! directly.
 
 use crate::Result;
+use crate::sdf;
 
 use crate::schemas::geom;
 use crate::usd::{Attribute, Relationship, SchemaBase};
@@ -33,7 +34,7 @@ pub trait Light: SchemaBase {
     fn create_intensity_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_INTENSITY, "float")?
+            .create_attribute(tok::A_INTENSITY, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -49,7 +50,7 @@ pub trait Light: SchemaBase {
     fn create_exposure_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_EXPOSURE, "float")?
+            .create_attribute(tok::A_EXPOSURE, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -65,7 +66,7 @@ pub trait Light: SchemaBase {
     fn create_diffuse_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_DIFFUSE, "float")?
+            .create_attribute(tok::A_DIFFUSE, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -81,7 +82,7 @@ pub trait Light: SchemaBase {
     fn create_specular_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_SPECULAR, "float")?
+            .create_attribute(tok::A_SPECULAR, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -97,7 +98,7 @@ pub trait Light: SchemaBase {
     fn create_normalize_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_NORMALIZE, "bool")?
+            .create_attribute(tok::A_NORMALIZE, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?)
     }
 
@@ -113,7 +114,7 @@ pub trait Light: SchemaBase {
     fn create_color_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_COLOR, "color3f")?
+            .create_attribute(tok::A_COLOR, sdf::ValueTypeName::COLOR3F)?
             .set_custom(false)?)
     }
 
@@ -130,7 +131,7 @@ pub trait Light: SchemaBase {
     fn create_enable_color_temperature_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_ENABLE_COLOR_TEMPERATURE, "bool")?
+            .create_attribute(tok::A_ENABLE_COLOR_TEMPERATURE, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?)
     }
 
@@ -147,7 +148,7 @@ pub trait Light: SchemaBase {
     fn create_color_temperature_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_COLOR_TEMPERATURE, "float")?
+            .create_attribute(tok::A_COLOR_TEMPERATURE, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 

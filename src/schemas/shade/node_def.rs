@@ -25,28 +25,28 @@ struct SourceAttr {
     implementation: ImplementationSource,
     universal_name: &'static str,
     suffix: &'static str,
-    type_name: &'static str,
+    type_name: sdf::ValueTypeName,
 }
 
 const SOURCE_ASSET: SourceAttr = SourceAttr {
     implementation: ImplementationSource::SourceAsset,
     universal_name: tok::A_INFO_SOURCE_ASSET,
     suffix: tok::IMPL_SOURCE_SOURCE_ASSET,
-    type_name: "asset",
+    type_name: sdf::ValueTypeName::ASSET,
 };
 
 const SOURCE_ASSET_SUBIDENTIFIER: SourceAttr = SourceAttr {
     implementation: ImplementationSource::SourceAsset,
     universal_name: tok::A_INFO_SOURCE_ASSET_SUBIDENTIFIER,
     suffix: tok::SOURCE_ASSET_SUBIDENTIFIER,
-    type_name: "token",
+    type_name: sdf::ValueTypeName::TOKEN,
 };
 
 const SOURCE_CODE: SourceAttr = SourceAttr {
     implementation: ImplementationSource::SourceCode,
     universal_name: tok::A_INFO_SOURCE_CODE,
     suffix: tok::IMPL_SOURCE_SOURCE_CODE,
-    type_name: "string",
+    type_name: sdf::ValueTypeName::STRING,
 };
 
 impl Shader {
@@ -280,7 +280,7 @@ fn set_source_value(
 
     let name = source_property_name(attr, source_type);
     Ok(shader
-        .create_attribute(name.as_ref(), attr.type_name)?
+        .create_attribute(name.as_ref(), attr.type_name.clone())?
         .set_custom(false)?
         .set_variability(sdf::Variability::Uniform)?
         .set(value)?)

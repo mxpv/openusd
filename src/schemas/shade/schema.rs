@@ -46,7 +46,7 @@ impl Shader {
     /// latter is left unauthored unless set explicitly.
     pub fn create_id_attr(&self) -> Result<usd::Attribute> {
         Ok(self
-            .create_attribute(tok::A_INFO_ID, "token")?
+            .create_attribute(tok::A_INFO_ID, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -77,7 +77,7 @@ impl Shader {
     /// [`ImplementationSource`](super::ImplementationSource) to `set`.
     pub fn create_implementation_source_attr(&self) -> Result<usd::Attribute> {
         Ok(self
-            .create_attribute(tok::A_INFO_IMPLEMENTATION_SOURCE, "token")?
+            .create_attribute(tok::A_INFO_IMPLEMENTATION_SOURCE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -94,7 +94,7 @@ impl Shader {
     /// Author `info:sourceAsset` (`uniform asset`) (C++ `SetSourceAsset`).
     pub fn create_source_asset_attr(&self) -> Result<usd::Attribute> {
         Ok(self
-            .create_attribute(tok::A_INFO_SOURCE_ASSET, "asset")?
+            .create_attribute(tok::A_INFO_SOURCE_ASSET, sdf::ValueTypeName::ASSET)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -110,7 +110,7 @@ impl Shader {
     /// Author `info:sourceAsset:subIdentifier` (`uniform token`).
     pub fn create_source_asset_subidentifier_attr(&self) -> Result<usd::Attribute> {
         Ok(self
-            .create_attribute(tok::A_INFO_SOURCE_ASSET_SUBIDENTIFIER, "token")?
+            .create_attribute(tok::A_INFO_SOURCE_ASSET_SUBIDENTIFIER, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -127,7 +127,7 @@ impl Shader {
     /// Author `info:sourceCode` (`uniform string`) (C++ `SetSourceCode`).
     pub fn create_source_code_attr(&self) -> Result<usd::Attribute> {
         Ok(self
-            .create_attribute(tok::A_INFO_SOURCE_CODE, "string")?
+            .create_attribute(tok::A_INFO_SOURCE_CODE, sdf::ValueTypeName::STRING)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }

@@ -1,6 +1,7 @@
 //! The UsdShade connectable interface shared across shading prims.
 
 use crate::Result;
+use crate::sdf;
 
 use crate::usd::SchemaBase;
 
@@ -20,7 +21,7 @@ pub trait Connectable: SchemaBase {
     }
 
     /// Author `inputs:<base>` with `type_name` and `custom = false`.
-    fn create_input(&self, base: &str, type_name: &str) -> Result<Input> {
+    fn create_input(&self, base: &str, type_name: impl Into<sdf::ValueTypeName>) -> Result<Input> {
         Ok(Input::new(
             self.prim()
                 .create_attribute(input_name(base), type_name)?
@@ -40,7 +41,7 @@ pub trait Connectable: SchemaBase {
     }
 
     /// Author `outputs:<base>` with `type_name` and `custom = false`.
-    fn create_output(&self, base: &str, type_name: &str) -> Result<Output> {
+    fn create_output(&self, base: &str, type_name: impl Into<sdf::ValueTypeName>) -> Result<Output> {
         Ok(Output::new(
             self.prim()
                 .create_attribute(output_name(base), type_name)?

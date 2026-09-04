@@ -45,7 +45,7 @@ impl Mesh {
     /// Author `faceVertexCounts` (`int[]`) (C++ `CreateFaceVertexCountsAttr`).
     pub fn create_face_vertex_counts_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_FACE_VERTEX_COUNTS, "int[]")?
+            .create_attribute(tok::A_FACE_VERTEX_COUNTS, sdf::ValueTypeName::INT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -62,7 +62,7 @@ impl Mesh {
     /// (C++ `CreateFaceVertexIndicesAttr`).
     pub fn create_face_vertex_indices_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_FACE_VERTEX_INDICES, "int[]")?
+            .create_attribute(tok::A_FACE_VERTEX_INDICES, sdf::ValueTypeName::INT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -80,7 +80,7 @@ impl Mesh {
     /// (C++ `CreateSubdivisionSchemeAttr`).
     pub fn create_subdivision_scheme_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_SUBDIVISION_SCHEME, "token")?
+            .create_attribute(tok::A_SUBDIVISION_SCHEME, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -98,7 +98,7 @@ impl Mesh {
     /// (C++ `CreateInterpolateBoundaryAttr`).
     pub fn create_interpolate_boundary_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_INTERPOLATE_BOUNDARY, "token")?
+            .create_attribute(tok::A_INTERPOLATE_BOUNDARY, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -117,7 +117,7 @@ impl Mesh {
     /// (C++ `CreateFaceVaryingLinearInterpolationAttr`).
     pub fn create_face_varying_linear_interpolation_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_FACE_VARYING_LINEAR_INTERPOLATION, "token")?
+            .create_attribute(tok::A_FACE_VARYING_LINEAR_INTERPOLATION, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -135,7 +135,7 @@ impl Mesh {
     /// (C++ `CreateTriangleSubdivisionRuleAttr`).
     pub fn create_triangle_subdivision_rule_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_TRIANGLE_SUBDIVISION_RULE, "token")?
+            .create_attribute(tok::A_TRIANGLE_SUBDIVISION_RULE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -151,7 +151,9 @@ impl Mesh {
 
     /// Author `holeIndices` (`int[]`) (C++ `CreateHoleIndicesAttr`).
     pub fn create_hole_indices_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_HOLE_INDICES, "int[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_HOLE_INDICES, sdf::ValueTypeName::INT_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// The point indices marked as sharp corners during subdivision; pairs
@@ -166,7 +168,7 @@ impl Mesh {
     /// Author `cornerIndices` (`int[]`) (C++ `CreateCornerIndicesAttr`).
     pub fn create_corner_indices_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CORNER_INDICES, "int[]")?
+            .create_attribute(tok::A_CORNER_INDICES, sdf::ValueTypeName::INT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -184,7 +186,7 @@ impl Mesh {
     /// (C++ `CreateCornerSharpnessesAttr`).
     pub fn create_corner_sharpnesses_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CORNER_SHARPNESSES, "float[]")?
+            .create_attribute(tok::A_CORNER_SHARPNESSES, sdf::ValueTypeName::FLOAT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -200,7 +202,7 @@ impl Mesh {
     /// Author `creaseIndices` (`int[]`) (C++ `CreateCreaseIndicesAttr`).
     pub fn create_crease_indices_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CREASE_INDICES, "int[]")?
+            .create_attribute(tok::A_CREASE_INDICES, sdf::ValueTypeName::INT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -216,7 +218,7 @@ impl Mesh {
     /// Author `creaseLengths` (`int[]`) (C++ `CreateCreaseLengthsAttr`).
     pub fn create_crease_lengths_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CREASE_LENGTHS, "int[]")?
+            .create_attribute(tok::A_CREASE_LENGTHS, sdf::ValueTypeName::INT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -233,7 +235,7 @@ impl Mesh {
     /// (C++ `CreateCreaseSharpnessesAttr`).
     pub fn create_crease_sharpnesses_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CREASE_SHARPNESSES, "float[]")?
+            .create_attribute(tok::A_CREASE_SHARPNESSES, sdf::ValueTypeName::FLOAT_ARRAY)?
             .set_custom(false)?)
     }
 }
@@ -271,7 +273,7 @@ impl GeomSubset {
     /// Author `elementType` (`uniform token`) (C++ `CreateElementTypeAttr`).
     pub fn create_element_type_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_ELEMENT_TYPE, "token")?
+            .create_attribute(tok::A_ELEMENT_TYPE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -289,7 +291,7 @@ impl GeomSubset {
     /// Author `familyName` (`uniform token`) (C++ `CreateFamilyNameAttr`).
     pub fn create_family_name_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_FAMILY_NAME, "token")?
+            .create_attribute(tok::A_FAMILY_NAME, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -305,7 +307,9 @@ impl GeomSubset {
 
     /// Author `indices` (`int[]`) (C++ `CreateIndicesAttr`).
     pub fn create_indices_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_INDICES, "int[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_INDICES, sdf::ValueTypeName::INT_ARRAY)?
+            .set_custom(false)?)
     }
 }
 

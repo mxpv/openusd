@@ -13,7 +13,7 @@ use crate::Result;
 
 use std::collections::HashMap;
 
-use crate::sdf::{FieldKey, Path, Value};
+use crate::sdf::{self, FieldKey, Path, Value};
 use crate::usd::{Attribute, Relationship, Stage};
 
 use super::conform::apply_aspect_ratio_policy;
@@ -221,7 +221,7 @@ fn collect_var_indices(
             data_type: var
                 .data_type_attr()
                 .cast::<String>()?
-                .unwrap_or_else(|| "color3f".to_string()),
+                .unwrap_or_else(|| sdf::ValueTypeName::COLOR3F.as_str().to_string()),
             source_name: var.source_name_attr().get::<String>()?.unwrap_or_default(),
             source_type: var.source_type_attr().get::<SourceType>()?.unwrap_or_default(),
             namespaced_settings: compute_namespaced_settings(stage, &var_path, namespaces)?,

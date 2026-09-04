@@ -32,7 +32,7 @@ pub trait Imageable: SchemaBase {
     fn create_visibility_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_VISIBILITY, "token")?
+            .create_attribute(tok::A_VISIBILITY, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?)
     }
 
@@ -51,7 +51,7 @@ pub trait Imageable: SchemaBase {
     fn create_purpose_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_PURPOSE, "token")?
+            .create_attribute(tok::A_PURPOSE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }

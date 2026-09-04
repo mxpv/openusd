@@ -9,7 +9,7 @@
 
 use crate::Result;
 
-use crate::sdf::Variability;
+use crate::sdf::{self, Variability};
 use crate::usd::{Attribute, Relationship, SchemaBase};
 
 use super::tokens as tok;
@@ -33,7 +33,7 @@ pub trait RenderSettingsBase: SchemaBase {
     fn create_resolution_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_RESOLUTION, "int2")?
+            .create_attribute(tok::A_RESOLUTION, sdf::ValueTypeName::INT2)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -51,7 +51,7 @@ pub trait RenderSettingsBase: SchemaBase {
     fn create_pixel_aspect_ratio_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_PIXEL_ASPECT_RATIO, "float")?
+            .create_attribute(tok::A_PIXEL_ASPECT_RATIO, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -71,7 +71,7 @@ pub trait RenderSettingsBase: SchemaBase {
     fn create_aspect_ratio_conform_policy_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_ASPECT_RATIO_CONFORM_POLICY, "token")?
+            .create_attribute(tok::A_ASPECT_RATIO_CONFORM_POLICY, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -88,7 +88,7 @@ pub trait RenderSettingsBase: SchemaBase {
     fn create_data_window_ndc_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_DATA_WINDOW_NDC, "float4")?
+            .create_attribute(tok::A_DATA_WINDOW_NDC, sdf::ValueTypeName::FLOAT4)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -108,7 +108,7 @@ pub trait RenderSettingsBase: SchemaBase {
     fn create_instantaneous_shutter_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_INSTANTANEOUS_SHUTTER, "bool")?
+            .create_attribute(tok::A_INSTANTANEOUS_SHUTTER, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -126,7 +126,7 @@ pub trait RenderSettingsBase: SchemaBase {
     fn create_disable_motion_blur_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_DISABLE_MOTION_BLUR, "bool")?
+            .create_attribute(tok::A_DISABLE_MOTION_BLUR, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -144,7 +144,7 @@ pub trait RenderSettingsBase: SchemaBase {
     fn create_disable_depth_of_field_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_DISABLE_DEPTH_OF_FIELD, "bool")?
+            .create_attribute(tok::A_DISABLE_DEPTH_OF_FIELD, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }

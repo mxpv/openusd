@@ -42,7 +42,7 @@ impl SpatialAudio {
     /// Author `filePath` (`uniform asset`) (C++ `CreateFilePathAttr`).
     pub fn create_file_path_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_FILE_PATH, "asset")?
+            .create_attribute(tok::A_FILE_PATH, sdf::ValueTypeName::ASSET)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -60,7 +60,7 @@ impl SpatialAudio {
     /// Author `auralMode` (`uniform token`) (C++ `CreateAuralModeAttr`).
     pub fn create_aural_mode_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_AURAL_MODE, "token")?
+            .create_attribute(tok::A_AURAL_MODE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -78,7 +78,7 @@ impl SpatialAudio {
     /// Author `playbackMode` (`uniform token`) (C++ `CreatePlaybackModeAttr`).
     pub fn create_playback_mode_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_PLAYBACK_MODE, "token")?
+            .create_attribute(tok::A_PLAYBACK_MODE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -95,7 +95,7 @@ impl SpatialAudio {
     /// Set its value as an [`sdf::TimeCode`].
     pub fn create_start_time_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_START_TIME, "timecode")?
+            .create_attribute(tok::A_START_TIME, sdf::ValueTypeName::TIME_CODE)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -111,7 +111,7 @@ impl SpatialAudio {
     /// Author `endTime` (`uniform timecode`) (C++ `CreateEndTimeAttr`).
     pub fn create_end_time_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_END_TIME, "timecode")?
+            .create_attribute(tok::A_END_TIME, sdf::ValueTypeName::TIME_CODE)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -127,7 +127,7 @@ impl SpatialAudio {
     /// Author `mediaOffset` (`uniform double`) (C++ `CreateMediaOffsetAttr`).
     pub fn create_media_offset_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_MEDIA_OFFSET, "double")?
+            .create_attribute(tok::A_MEDIA_OFFSET, sdf::ValueTypeName::DOUBLE)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -142,7 +142,9 @@ impl SpatialAudio {
 
     /// Author `gain` (`double`) (C++ `CreateGainAttr`).
     pub fn create_gain_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_GAIN, "double")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_GAIN, sdf::ValueTypeName::DOUBLE)?
+            .set_custom(false)?)
     }
 }
 

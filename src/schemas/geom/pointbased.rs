@@ -1,6 +1,7 @@
 //! `UsdGeomPointBased` — gprims whose geometry is a point cloud.
 
 use crate::Result;
+use crate::sdf;
 
 use crate::usd::Attribute;
 
@@ -31,7 +32,7 @@ pub trait PointBased: Gprim {
     fn create_points_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_POINTS, "point3f[]")?
+            .create_attribute(tok::A_POINTS, sdf::ValueTypeName::POINT3F_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -49,7 +50,7 @@ pub trait PointBased: Gprim {
     fn create_normals_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_NORMALS, "normal3f[]")?
+            .create_attribute(tok::A_NORMALS, sdf::ValueTypeName::NORMAL3F_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -67,7 +68,7 @@ pub trait PointBased: Gprim {
     fn create_velocities_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_VELOCITIES, "vector3f[]")?
+            .create_attribute(tok::A_VELOCITIES, sdf::ValueTypeName::VECTOR3F_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -85,7 +86,7 @@ pub trait PointBased: Gprim {
     fn create_accelerations_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_ACCELERATIONS, "vector3f[]")?
+            .create_attribute(tok::A_ACCELERATIONS, sdf::ValueTypeName::VECTOR3F_ARRAY)?
             .set_custom(false)?)
     }
 }

@@ -69,7 +69,7 @@ impl RenderSettings {
     /// (C++ `CreateIncludedPurposesAttr`).
     pub fn create_included_purposes_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_INCLUDED_PURPOSES, "token[]")?
+            .create_attribute(tok::A_INCLUDED_PURPOSES, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -87,7 +87,7 @@ impl RenderSettings {
     /// (C++ `CreateMaterialBindingPurposesAttr`).
     pub fn create_material_binding_purposes_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_MATERIAL_BINDING_PURPOSES, "token[]")?
+            .create_attribute(tok::A_MATERIAL_BINDING_PURPOSES, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -104,7 +104,7 @@ impl RenderSettings {
     /// (C++ `CreateRenderingColorSpaceAttr`).
     pub fn create_rendering_color_space_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_RENDERING_COLOR_SPACE, "token")?
+            .create_attribute(tok::A_RENDERING_COLOR_SPACE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -145,7 +145,7 @@ impl RenderProduct {
     /// Pass a [`ProductType`](super::ProductType) to `set`.
     pub fn create_product_type_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_PRODUCT_TYPE, "token")?
+            .create_attribute(tok::A_PRODUCT_TYPE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -161,7 +161,9 @@ impl RenderProduct {
 
     /// Author `productName` (`token`) (C++ `CreateProductNameAttr`).
     pub fn create_product_name_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_PRODUCT_NAME, "token")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_PRODUCT_NAME, sdf::ValueTypeName::TOKEN)?
+            .set_custom(false)?)
     }
 
     /// The `orderedVars` relationship — the `RenderVar` prims composited into
@@ -206,7 +208,7 @@ impl RenderVar {
     /// Author `dataType` (`uniform token`) (C++ `CreateDataTypeAttr`).
     pub fn create_data_type_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_DATA_TYPE, "token")?
+            .create_attribute(tok::A_DATA_TYPE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -222,7 +224,7 @@ impl RenderVar {
     /// Author `sourceName` (`uniform string`) (C++ `CreateSourceNameAttr`).
     pub fn create_source_name_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_SOURCE_NAME, "string")?
+            .create_attribute(tok::A_SOURCE_NAME, sdf::ValueTypeName::STRING)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -240,7 +242,7 @@ impl RenderVar {
     /// a [`SourceType`](super::SourceType) to `set`.
     pub fn create_source_type_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_SOURCE_TYPE, "token")?
+            .create_attribute(tok::A_SOURCE_TYPE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -281,7 +283,7 @@ impl RenderPass {
     /// Author `passType` (`uniform token`) (C++ `CreatePassTypeAttr`).
     pub fn create_pass_type_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_PASS_TYPE, "token")?
+            .create_attribute(tok::A_PASS_TYPE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -298,7 +300,7 @@ impl RenderPass {
     /// Author `command` (`uniform string[]`) (C++ `CreateCommandAttr`).
     pub fn create_command_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_COMMAND, "string[]")?
+            .create_attribute(tok::A_COMMAND, sdf::ValueTypeName::STRING_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -314,7 +316,7 @@ impl RenderPass {
     /// Author `fileName` (`uniform asset`) (C++ `CreateFileNameAttr`).
     pub fn create_file_name_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_FILE_NAME, "asset")?
+            .create_attribute(tok::A_FILE_NAME, sdf::ValueTypeName::ASSET)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -353,7 +355,7 @@ impl RenderPass {
     /// Author `collection:renderVisibility:includeRoot` (`uniform bool`).
     pub fn create_render_visibility_include_root_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_RENDER_VISIBILITY_INCLUDE_ROOT, "bool")?
+            .create_attribute(tok::A_RENDER_VISIBILITY_INCLUDE_ROOT, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -370,7 +372,7 @@ impl RenderPass {
     /// Author `collection:cameraVisibility:includeRoot` (`uniform bool`).
     pub fn create_camera_visibility_include_root_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CAMERA_VISIBILITY_INCLUDE_ROOT, "bool")?
+            .create_attribute(tok::A_CAMERA_VISIBILITY_INCLUDE_ROOT, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }

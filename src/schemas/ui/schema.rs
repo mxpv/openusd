@@ -40,7 +40,7 @@ impl Backdrop {
     /// Author `ui:description` (`uniform token`) (C++ `CreateDescriptionAttr`).
     pub fn create_description_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_DESCRIPTION, "token")?
+            .create_attribute(tok::A_DESCRIPTION, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -98,7 +98,7 @@ impl SceneGraphPrimAPI {
 
     fn uniform_token(&self, name: impl Into<tf::Token>) -> Result<Attribute> {
         Ok(self
-            .create_attribute(name, "token")?
+            .create_attribute(name, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -137,7 +137,7 @@ impl NodeGraphNodeAPI {
 
     /// Author `ui:nodegraph:node:pos` (`uniform float2`) (C++ `CreatePosAttr`).
     pub fn create_pos_attr(&self) -> Result<Attribute> {
-        self.uniform(tok::A_NODE_POS, "float2")
+        self.uniform(tok::A_NODE_POS, sdf::ValueTypeName::FLOAT2)
     }
 
     /// The node's size in the editor canvas, in editor units.
@@ -150,7 +150,7 @@ impl NodeGraphNodeAPI {
 
     /// Author `ui:nodegraph:node:size` (`uniform float2`) (C++ `CreateSizeAttr`).
     pub fn create_size_attr(&self) -> Result<Attribute> {
-        self.uniform(tok::A_NODE_SIZE, "float2")
+        self.uniform(tok::A_NODE_SIZE, sdf::ValueTypeName::FLOAT2)
     }
 
     /// The node's draw order among overlapping nodes; higher draws on top.
@@ -164,7 +164,7 @@ impl NodeGraphNodeAPI {
     /// Author `ui:nodegraph:node:stackingOrder` (`uniform int`)
     /// (C++ `CreateStackingOrderAttr`).
     pub fn create_stacking_order_attr(&self) -> Result<Attribute> {
-        self.uniform(tok::A_NODE_STACKING_ORDER, "int")
+        self.uniform(tok::A_NODE_STACKING_ORDER, sdf::ValueTypeName::INT)
     }
 
     /// The node's background tint in the editor.
@@ -178,7 +178,7 @@ impl NodeGraphNodeAPI {
     /// Author `ui:nodegraph:node:displayColor` (`uniform color3f`)
     /// (C++ `CreateDisplayColorAttr`).
     pub fn create_display_color_attr(&self) -> Result<Attribute> {
-        self.uniform(tok::A_NODE_DISPLAY_COLOR, "color3f")
+        self.uniform(tok::A_NODE_DISPLAY_COLOR, sdf::ValueTypeName::COLOR3F)
     }
 
     /// An icon image shown on the collapsed node.
@@ -191,7 +191,7 @@ impl NodeGraphNodeAPI {
 
     /// Author `ui:nodegraph:node:icon` (`uniform asset`) (C++ `CreateIconAttr`).
     pub fn create_icon_attr(&self) -> Result<Attribute> {
-        self.uniform(tok::A_NODE_ICON, "asset")
+        self.uniform(tok::A_NODE_ICON, sdf::ValueTypeName::ASSET)
     }
 
     /// How the node renders (open / closed / minimized).
@@ -207,7 +207,7 @@ impl NodeGraphNodeAPI {
     /// (C++ `CreateExpansionStateAttr`). Pass an
     /// [`ExpansionState`](super::ExpansionState) to `set`.
     pub fn create_expansion_state_attr(&self) -> Result<Attribute> {
-        self.uniform(tok::A_NODE_EXPANSION_STATE, "token")
+        self.uniform(tok::A_NODE_EXPANSION_STATE, sdf::ValueTypeName::TOKEN)
     }
 
     /// A documentation URI for the node.
@@ -221,10 +221,10 @@ impl NodeGraphNodeAPI {
     /// Author `ui:nodegraph:node:docURI` (`uniform string`)
     /// (C++ `CreateDocURIAttr`).
     pub fn create_doc_uri_attr(&self) -> Result<Attribute> {
-        self.uniform(tok::A_NODE_DOC_URI, "string")
+        self.uniform(tok::A_NODE_DOC_URI, sdf::ValueTypeName::STRING)
     }
 
-    fn uniform(&self, name: impl Into<tf::Token>, type_name: &str) -> Result<Attribute> {
+    fn uniform(&self, name: impl Into<tf::Token>, type_name: sdf::ValueTypeName) -> Result<Attribute> {
         Ok(self
             .create_attribute(name, type_name)?
             .set_custom(false)?

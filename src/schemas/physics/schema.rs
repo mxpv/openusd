@@ -37,7 +37,7 @@ impl Scene {
     /// Author `physics:gravityDirection` (`vector3f`) (C++ `CreateGravityDirectionAttr`).
     pub fn create_gravity_direction_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_GRAVITY_DIRECTION, "vector3f")?
+            .create_attribute(tok::A_GRAVITY_DIRECTION, sdf::ValueTypeName::VECTOR3F)?
             .set_custom(false)?)
     }
 
@@ -52,7 +52,7 @@ impl Scene {
     /// Author `physics:gravityMagnitude` (`float`) (C++ `CreateGravityMagnitudeAttr`).
     pub fn create_gravity_magnitude_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_GRAVITY_MAGNITUDE, "float")?
+            .create_attribute(tok::A_GRAVITY_MAGNITUDE, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 }
@@ -102,7 +102,7 @@ impl CollisionGroup {
     /// Author `physics:mergeGroup` (`uniform token`) (C++ `CreateMergeGroupNameAttr`).
     pub fn create_merge_group_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_MERGE_GROUP, "token")?
+            .create_attribute(tok::A_MERGE_GROUP, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -119,7 +119,7 @@ impl CollisionGroup {
     /// (C++ `CreateInvertFilteredGroupsAttr`).
     pub fn create_invert_filtered_groups_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_INVERT_FILTERED_GROUPS, "bool")?
+            .create_attribute(tok::A_INVERT_FILTERED_GROUPS, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -204,7 +204,7 @@ impl RevoluteJoint {
     /// Author `physics:axis` (`uniform token`) (C++ `CreateAxisAttr`).
     pub fn create_axis_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_AXIS, "token")?
+            .create_attribute(tok::A_AXIS, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -219,7 +219,9 @@ impl RevoluteJoint {
 
     /// Author `physics:lowerLimit` (`float`, degrees) (C++ `CreateLowerLimitAttr`).
     pub fn create_lower_limit_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_LOWER_LIMIT, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_LOWER_LIMIT, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// The upper rotation limit in degrees. C++ `UsdPhysicsRevoluteJoint::GetUpperLimitAttr`.
@@ -231,7 +233,9 @@ impl RevoluteJoint {
 
     /// Author `physics:upperLimit` (`float`, degrees) (C++ `CreateUpperLimitAttr`).
     pub fn create_upper_limit_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_UPPER_LIMIT, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_UPPER_LIMIT, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 }
 
@@ -268,7 +272,7 @@ impl PrismaticJoint {
     /// Author `physics:axis` (`uniform token`) (C++ `CreateAxisAttr`).
     pub fn create_axis_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_AXIS, "token")?
+            .create_attribute(tok::A_AXIS, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -283,7 +287,9 @@ impl PrismaticJoint {
 
     /// Author `physics:lowerLimit` (`float`, scene units) (C++ `CreateLowerLimitAttr`).
     pub fn create_lower_limit_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_LOWER_LIMIT, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_LOWER_LIMIT, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// The upper translation limit in scene units.
@@ -296,7 +302,9 @@ impl PrismaticJoint {
 
     /// Author `physics:upperLimit` (`float`, scene units) (C++ `CreateUpperLimitAttr`).
     pub fn create_upper_limit_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_UPPER_LIMIT, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_UPPER_LIMIT, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 }
 
@@ -333,7 +341,7 @@ impl SphericalJoint {
     /// Author `physics:axis` (`uniform token`) (C++ `CreateAxisAttr`).
     pub fn create_axis_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_AXIS, "token")?
+            .create_attribute(tok::A_AXIS, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -349,7 +357,7 @@ impl SphericalJoint {
     /// Author `physics:coneAngle0Limit` (`float`, degrees) (C++ `CreateConeAngle0LimitAttr`).
     pub fn create_cone_angle0_limit_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CONE_ANGLE_0_LIMIT, "float")?
+            .create_attribute(tok::A_CONE_ANGLE_0_LIMIT, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -364,7 +372,7 @@ impl SphericalJoint {
     /// Author `physics:coneAngle1Limit` (`float`, degrees) (C++ `CreateConeAngle1LimitAttr`).
     pub fn create_cone_angle1_limit_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CONE_ANGLE_1_LIMIT, "float")?
+            .create_attribute(tok::A_CONE_ANGLE_1_LIMIT, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 }
@@ -401,7 +409,9 @@ impl DistanceJoint {
 
     /// Author `physics:minDistance` (`float`) (C++ `CreateMinDistanceAttr`).
     pub fn create_min_distance_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_MIN_DISTANCE, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_MIN_DISTANCE, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// The maximum allowed distance between the attachment points; a negative
@@ -414,7 +424,9 @@ impl DistanceJoint {
 
     /// Author `physics:maxDistance` (`float`) (C++ `CreateMaxDistanceAttr`).
     pub fn create_max_distance_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_MAX_DISTANCE, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_MAX_DISTANCE, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 }
 
@@ -451,7 +463,7 @@ impl RigidBodyAPI {
     /// Author `physics:rigidBodyEnabled` (`bool`) (C++ `CreateRigidBodyEnabledAttr`).
     pub fn create_rigid_body_enabled_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_RIGID_BODY_ENABLED, "bool")?
+            .create_attribute(tok::A_RIGID_BODY_ENABLED, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?)
     }
 
@@ -466,7 +478,7 @@ impl RigidBodyAPI {
     /// Author `physics:kinematicEnabled` (`bool`) (C++ `CreateKinematicEnabledAttr`).
     pub fn create_kinematic_enabled_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_KINEMATIC_ENABLED, "bool")?
+            .create_attribute(tok::A_KINEMATIC_ENABLED, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?)
     }
 
@@ -481,7 +493,7 @@ impl RigidBodyAPI {
     /// Author `physics:startsAsleep` (`uniform bool`) (C++ `CreateStartsAsleepAttr`).
     pub fn create_starts_asleep_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_STARTS_ASLEEP, "bool")?
+            .create_attribute(tok::A_STARTS_ASLEEP, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -496,7 +508,9 @@ impl RigidBodyAPI {
 
     /// Author `physics:velocity` (`vector3f`) (C++ `CreateVelocityAttr`).
     pub fn create_velocity_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_VELOCITY, "vector3f")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_VELOCITY, sdf::ValueTypeName::VECTOR3F)?
+            .set_custom(false)?)
     }
 
     /// The body's initial angular velocity in degrees per second.
@@ -511,7 +525,7 @@ impl RigidBodyAPI {
     /// (C++ `CreateAngularVelocityAttr`).
     pub fn create_angular_velocity_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_ANGULAR_VELOCITY, "vector3f")?
+            .create_attribute(tok::A_ANGULAR_VELOCITY, sdf::ValueTypeName::VECTOR3F)?
             .set_custom(false)?)
     }
 
@@ -557,7 +571,9 @@ impl MassAPI {
 
     /// Author `physics:mass` (`float`) (C++ `CreateMassAttr`).
     pub fn create_mass_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_MASS, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_MASS, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// Material density used to derive mass when `mass` is unauthored, in scene
@@ -570,7 +586,9 @@ impl MassAPI {
 
     /// Author `physics:density` (`float`) (C++ `CreateDensityAttr`).
     pub fn create_density_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_DENSITY, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_DENSITY, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// The center of mass in the body's local space.
@@ -584,7 +602,7 @@ impl MassAPI {
     /// Author `physics:centerOfMass` (`point3f`) (C++ `CreateCenterOfMassAttr`).
     pub fn create_center_of_mass_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_CENTER_OF_MASS, "point3f")?
+            .create_attribute(tok::A_CENTER_OF_MASS, sdf::ValueTypeName::POINT3F)?
             .set_custom(false)?)
     }
 
@@ -599,7 +617,7 @@ impl MassAPI {
     /// Author `physics:diagonalInertia` (`float3`) (C++ `CreateDiagonalInertiaAttr`).
     pub fn create_diagonal_inertia_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_DIAGONAL_INERTIA, "float3")?
+            .create_attribute(tok::A_DIAGONAL_INERTIA, sdf::ValueTypeName::FLOAT3)?
             .set_custom(false)?)
     }
 
@@ -614,7 +632,7 @@ impl MassAPI {
     /// Author `physics:principalAxes` (`quatf`) (C++ `CreatePrincipalAxesAttr`).
     pub fn create_principal_axes_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_PRINCIPAL_AXES, "quatf")?
+            .create_attribute(tok::A_PRINCIPAL_AXES, sdf::ValueTypeName::QUATF)?
             .set_custom(false)?)
     }
 }
@@ -650,7 +668,7 @@ impl CollisionAPI {
     /// Author `physics:collisionEnabled` (`bool`) (C++ `CreateCollisionEnabledAttr`).
     pub fn create_collision_enabled_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_COLLISION_ENABLED, "bool")?
+            .create_attribute(tok::A_COLLISION_ENABLED, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?)
     }
 }
@@ -689,7 +707,7 @@ impl MeshCollisionAPI {
     /// Author `physics:approximation` (`uniform token`) (C++ `CreateApproximationAttr`).
     pub fn create_approximation_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_APPROXIMATION, "token")?
+            .create_attribute(tok::A_APPROXIMATION, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -730,7 +748,7 @@ impl MaterialAPI {
     /// Author `physics:dynamicFriction` (`float`) (C++ `CreateDynamicFrictionAttr`).
     pub fn create_dynamic_friction_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_DYNAMIC_FRICTION, "float")?
+            .create_attribute(tok::A_DYNAMIC_FRICTION, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -745,7 +763,7 @@ impl MaterialAPI {
     /// Author `physics:staticFriction` (`float`) (C++ `CreateStaticFrictionAttr`).
     pub fn create_static_friction_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_STATIC_FRICTION, "float")?
+            .create_attribute(tok::A_STATIC_FRICTION, sdf::ValueTypeName::FLOAT)?
             .set_custom(false)?)
     }
 
@@ -759,7 +777,9 @@ impl MaterialAPI {
 
     /// Author `physics:restitution` (`float`) (C++ `CreateRestitutionAttr`).
     pub fn create_restitution_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_RESTITUTION, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_RESTITUTION, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 
     /// The material's mass density, used to derive body mass from collision
@@ -772,7 +792,9 @@ impl MaterialAPI {
 
     /// Author `physics:density` (`float`) (C++ `CreateDensityAttr`).
     pub fn create_density_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_DENSITY, "float")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_DENSITY, sdf::ValueTypeName::FLOAT)?
+            .set_custom(false)?)
     }
 }
 

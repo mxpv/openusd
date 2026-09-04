@@ -26,7 +26,7 @@ pub trait Gprim: Boundable {
     fn create_double_sided_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_DOUBLE_SIDED, "bool")?
+            .create_attribute(tok::A_DOUBLE_SIDED, sdf::ValueTypeName::BOOL)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -45,7 +45,7 @@ pub trait Gprim: Boundable {
     fn create_orientation_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_ORIENTATION, "token")?
+            .create_attribute(tok::A_ORIENTATION, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -65,7 +65,7 @@ pub trait Gprim: Boundable {
     fn create_display_color_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_DISPLAY_COLOR, "color3f[]")?
+            .create_attribute(tok::A_DISPLAY_COLOR, sdf::ValueTypeName::COLOR3F_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -83,7 +83,7 @@ pub trait Gprim: Boundable {
     fn create_display_opacity_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_DISPLAY_OPACITY, "float[]")?
+            .create_attribute(tok::A_DISPLAY_OPACITY, sdf::ValueTypeName::FLOAT_ARRAY)?
             .set_custom(false)?)
     }
 }

@@ -1,6 +1,7 @@
 //! `UsdGeomBoundable` — prims with a computable bounding extent.
 
 use crate::Result;
+use crate::sdf;
 
 use crate::usd::Attribute;
 
@@ -24,7 +25,7 @@ pub trait Boundable: Xformable {
     fn create_extent_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(tok::A_EXTENT, "float3[]")?
+            .create_attribute(tok::A_EXTENT, sdf::ValueTypeName::FLOAT3_ARRAY)?
             .set_custom(false)?)
     }
 }

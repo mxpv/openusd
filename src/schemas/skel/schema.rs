@@ -73,7 +73,7 @@ impl Skeleton {
     /// Author `joints` (`uniform token[]`) (C++ `CreateJointsAttr`).
     pub fn create_joints_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_JOINTS, "token[]")?
+            .create_attribute(tok::A_JOINTS, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -88,7 +88,7 @@ impl Skeleton {
     /// Author `jointNames` (`uniform token[]`) (C++ `CreateJointNamesAttr`).
     pub fn create_joint_names_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_JOINT_NAMES, "token[]")?
+            .create_attribute(tok::A_JOINT_NAMES, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -105,7 +105,7 @@ impl Skeleton {
     /// (C++ `CreateBindTransformsAttr`).
     pub fn create_bind_transforms_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_BIND_TRANSFORMS, "matrix4d[]")?
+            .create_attribute(tok::A_BIND_TRANSFORMS, sdf::ValueTypeName::MATRIX4D_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -123,7 +123,7 @@ impl Skeleton {
     /// (C++ `CreateRestTransformsAttr`).
     pub fn create_rest_transforms_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_REST_TRANSFORMS, "matrix4d[]")?
+            .create_attribute(tok::A_REST_TRANSFORMS, sdf::ValueTypeName::MATRIX4D_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -208,7 +208,7 @@ impl SkelAnimation {
     /// Author `joints` (`uniform token[]`) (C++ `CreateJointsAttr`).
     pub fn create_joints_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_JOINTS, "token[]")?
+            .create_attribute(tok::A_JOINTS, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -224,7 +224,7 @@ impl SkelAnimation {
     /// Author `blendShapes` (`uniform token[]`) (C++ `CreateBlendShapesAttr`).
     pub fn create_blend_shapes_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_BLEND_SHAPES, "token[]")?
+            .create_attribute(tok::A_BLEND_SHAPES, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -239,7 +239,7 @@ impl SkelAnimation {
     /// Author `translations` (`float3[]`) (C++ `CreateTranslationsAttr`).
     pub fn create_translations_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_TRANSLATIONS, "float3[]")?
+            .create_attribute(tok::A_TRANSLATIONS, sdf::ValueTypeName::FLOAT3_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -253,7 +253,9 @@ impl SkelAnimation {
 
     /// Author `rotations` (`quatf[]`) (C++ `CreateRotationsAttr`).
     pub fn create_rotations_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_ROTATIONS, "quatf[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_ROTATIONS, sdf::ValueTypeName::QUATF_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// Per-joint scales (C++ `GetScalesAttr`, authored `half3[]`). Time-sampled.
@@ -265,7 +267,9 @@ impl SkelAnimation {
 
     /// Author `scales` (`half3[]`) (C++ `CreateScalesAttr`).
     pub fn create_scales_attr(&self) -> Result<Attribute> {
-        Ok(self.create_attribute(tok::A_SCALES, "half3[]")?.set_custom(false)?)
+        Ok(self
+            .create_attribute(tok::A_SCALES, sdf::ValueTypeName::HALF3_ARRAY)?
+            .set_custom(false)?)
     }
 
     /// Per-blend-shape weights, parallel to `blendShapes` (C++
@@ -280,7 +284,7 @@ impl SkelAnimation {
     /// (C++ `CreateBlendShapeWeightsAttr`).
     pub fn create_blend_shape_weights_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_BLEND_SHAPE_WEIGHTS, "float[]")?
+            .create_attribute(tok::A_BLEND_SHAPE_WEIGHTS, sdf::ValueTypeName::FLOAT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -342,7 +346,7 @@ impl BlendShape {
     /// Author `offsets` (`uniform vector3f[]`) (C++ `CreateOffsetsAttr`).
     pub fn create_offsets_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_OFFSETS, "vector3f[]")?
+            .create_attribute(tok::A_OFFSETS, sdf::ValueTypeName::VECTOR3F_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -359,7 +363,7 @@ impl BlendShape {
     /// (C++ `CreateNormalOffsetsAttr`).
     pub fn create_normal_offsets_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_NORMAL_OFFSETS, "vector3f[]")?
+            .create_attribute(tok::A_NORMAL_OFFSETS, sdf::ValueTypeName::VECTOR3F_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -376,7 +380,7 @@ impl BlendShape {
     /// Author `pointIndices` (`uniform int[]`) (C++ `CreatePointIndicesAttr`).
     pub fn create_point_indices_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_POINT_INDICES, "int[]")?
+            .create_attribute(tok::A_POINT_INDICES, sdf::ValueTypeName::INT_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -514,7 +518,7 @@ impl SkelBindingAPI {
     /// (C++ `CreateJointIndicesAttr`).
     pub fn create_joint_indices_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_JOINT_INDICES, "int[]")?
+            .create_attribute(tok::A_JOINT_INDICES, sdf::ValueTypeName::INT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -530,7 +534,7 @@ impl SkelBindingAPI {
     /// (C++ `CreateJointWeightsAttr`).
     pub fn create_joint_weights_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_JOINT_WEIGHTS, "float[]")?
+            .create_attribute(tok::A_JOINT_WEIGHTS, sdf::ValueTypeName::FLOAT_ARRAY)?
             .set_custom(false)?)
     }
 
@@ -545,7 +549,7 @@ impl SkelBindingAPI {
     /// Author `skel:joints` (`uniform token[]`) (C++ `CreateJointsAttr`).
     pub fn create_joints_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_SKEL_JOINTS, "token[]")?
+            .create_attribute(tok::A_SKEL_JOINTS, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -562,7 +566,7 @@ impl SkelBindingAPI {
     /// (C++ `CreateBlendShapesAttr`).
     pub fn create_blend_shapes_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_SKEL_BLEND_SHAPES, "token[]")?
+            .create_attribute(tok::A_SKEL_BLEND_SHAPES, sdf::ValueTypeName::TOKEN_ARRAY)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }
@@ -579,7 +583,7 @@ impl SkelBindingAPI {
     /// (C++ `CreateGeomBindTransformAttr`).
     pub fn create_geom_bind_transform_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_GEOM_BIND_TRANSFORM, "matrix4d")?
+            .create_attribute(tok::A_GEOM_BIND_TRANSFORM, sdf::ValueTypeName::MATRIX4D)?
             .set_custom(false)?)
     }
 
@@ -596,7 +600,7 @@ impl SkelBindingAPI {
     /// (C++ `CreateSkinningMethodAttr`).
     pub fn create_skinning_method_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_SKINNING_METHOD, "token")?
+            .create_attribute(tok::A_SKINNING_METHOD, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(Variability::Uniform)?)
     }

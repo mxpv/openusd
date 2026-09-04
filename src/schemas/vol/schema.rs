@@ -108,7 +108,7 @@ impl OpenVDBAsset {
     /// Author `fieldClass` (`uniform token`) (C++ `CreateFieldClassAttr`).
     pub fn create_field_class_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_FIELD_CLASS, "token")?
+            .create_attribute(tok::A_FIELD_CLASS, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -145,7 +145,7 @@ impl Field3DAsset {
     /// Author `fieldPurpose` (`uniform token`) (C++ `CreateFieldPurposeAttr`).
     pub fn create_field_purpose_attr(&self) -> Result<Attribute> {
         Ok(self
-            .create_attribute(tok::A_FIELD_PURPOSE, "token")?
+            .create_attribute(tok::A_FIELD_PURPOSE, sdf::ValueTypeName::TOKEN)?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
