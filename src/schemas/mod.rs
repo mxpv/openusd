@@ -57,6 +57,14 @@ pub enum SchemaError {
     #[error(transparent)]
     Core(#[from] crate::Error),
 
+    /// An xformOp names no kind this schema knows, so it has no value type
+    /// and would contribute nothing to the transform stack.
+    #[error("`{op}` is not an xformOp kind")]
+    UnknownXformOp {
+        /// The op token as given, without its `xformOp:` prefix.
+        op: String,
+    },
+
     /// An xformOp's matrix is singular, so the transform stack cannot be
     /// inverted through it.
     #[error("xformOp `{op}` matrix is singular and cannot be inverted")]
@@ -124,6 +132,14 @@ impl From<sdf::PathParseError> for SchemaError {
 impl From<sdf::CastError> for SchemaError {
     fn from(error: sdf::CastError) -> Self {
         Self::Core(error.into())
+    }
+}
+
+/// A value that does not fit its attribute's declared type surfaces as the
+/// authoring error it is.
+impl From<sdf::ValueTypeError> for SchemaError {
+    fn from(error: sdf::ValueTypeError) -> Self {
+        Self::Core(crate::usd::StageAuthoringError::from(error).into())
     }
 }
 

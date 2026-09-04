@@ -24,6 +24,21 @@ const TOKEN_INVERT_PREFIX: &str = "!invert!";
 const TOKEN_RESET_XFORM_STACK: &str = "!resetXformStack!";
 const NS_XFORM_OP: &str = "xformOp:";
 
+/// The precision an xform op's value is authored at (C++
+/// `UsdGeomXformOp::Precision`).
+///
+/// Together with the op's kind it fixes the op attribute's value type: a
+/// `translate` is `double3`, `float3` or `half3`, a single-axis `rotateX` is
+/// `double`, `float` or `half`, and an `orient` is `quatd`, `quatf` or
+/// `quath`. A `transform` is always `matrix4d`, since Sdf has no
+/// single-precision matrix type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum XformOpPrecision {
+    Double,
+    Float,
+    Half,
+}
+
 /// A prim that carries a transform stack (C++ `UsdGeomXformable`). Inherits
 /// [`Imageable`].
 ///
@@ -120,90 +135,106 @@ pub trait Xformable: Imageable {
         Ok(self)
     }
 
-    /// Author `xformOp:translate` (`double3`) and append it to the stack.
-    fn set_translate(self, value: gf::Vec3d) -> Result<Self>
+    /// Author `xformOp:<op>` at `precision` and append it to the stack (C++
+    /// `UsdGeomXformable::AddXformOp`). `op` is the op token without the
+    /// `xformOp:` prefix, and may carry a `:suffix` naming one instance of it
+    /// (`"translate:pivot"`), which the per-op setters below have no spelling
+    /// for.
+    ///
+    /// An op the stage already declares keeps the precision it was declared
+    /// at, as C++ does when the two disagree; only an op nothing declares is
+    /// created at `precision`. `value` is then converted to whichever type
+    /// the op holds, so a `float3` scale authors into an asset's `double3`
+    /// op and that asset's precision survives the round trip.
+    ///
+    /// Two divergences from C++, which reports both as coding errors and
+    /// this crate performs silently: converting the value at all, where
+    /// `UsdGeomXformOp::Set` refuses one of another type outright; and
+    /// re-authoring an op already in `xformOpOrder`, where `AddXformOp`
+    /// authors nothing. A `transform` is `matrix4d` whatever `precision`
+    /// asks for, which C++ also reports. An op token naming no kind is
+    /// [`SchemaError::UnknownXformOp`], since it would contribute nothing to
+    /// the stack.
+    fn set_xform_op(
+        self,
+        op: &str,
+        precision: XformOpPrecision,
+        value: impl Into<sdf::Value>,
+    ) -> Result<Self, SchemaError>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "translate", "double3", sdf::Value::from(value))?;
-        append_op(self.prim(), "translate")?;
+        author_xform_op(self.prim(), op, precision, value.into())?;
+        append_op(self.prim(), op)?;
         Ok(self)
     }
 
-    /// Author `xformOp:scale` (`float3`) and append it to the stack.
-    fn set_scale(self, value: gf::Vec3f) -> Result<Self>
+    /// Author `xformOp:translate` (`double3` when new) and append it to the
+    /// stack.
+    fn set_translate(self, value: gf::Vec3d) -> Result<Self, SchemaError>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "scale", "float3", sdf::Value::from(value))?;
-        append_op(self.prim(), "scale")?;
-        Ok(self)
+        self.set_xform_op("translate", XformOpPrecision::Double, value)
+    }
+
+    /// Author `xformOp:scale` (`float3` when new) and append it to the stack.
+    fn set_scale(self, value: gf::Vec3f) -> Result<Self, SchemaError>
+    where
+        Self: Sized,
+    {
+        self.set_xform_op("scale", XformOpPrecision::Float, value)
     }
 
     /// Author `xformOp:rotateX` in degrees and append it to the stack.
-    fn set_rotate_x(self, degrees: f32) -> Result<Self>
+    fn set_rotate_x(self, degrees: f32) -> Result<Self, SchemaError>
     where
         Self: Sized,
     {
-        self.set_rotate_single("rotateX", degrees)
+        self.set_xform_op("rotateX", XformOpPrecision::Float, degrees)
     }
 
     /// Author `xformOp:rotateY` in degrees and append it to the stack.
-    fn set_rotate_y(self, degrees: f32) -> Result<Self>
+    fn set_rotate_y(self, degrees: f32) -> Result<Self, SchemaError>
     where
         Self: Sized,
     {
-        self.set_rotate_single("rotateY", degrees)
+        self.set_xform_op("rotateY", XformOpPrecision::Float, degrees)
     }
 
     /// Author `xformOp:rotateZ` in degrees and append it to the stack.
-    fn set_rotate_z(self, degrees: f32) -> Result<Self>
+    fn set_rotate_z(self, degrees: f32) -> Result<Self, SchemaError>
     where
         Self: Sized,
     {
-        self.set_rotate_single("rotateZ", degrees)
+        self.set_xform_op("rotateZ", XformOpPrecision::Float, degrees)
     }
 
-    /// Author `xformOp:rotateXYZ` (Euler degrees, applied X → Y → Z) and
-    /// append it to the stack.
-    fn set_rotate_xyz(self, degrees: gf::Vec3f) -> Result<Self>
+    /// Author `xformOp:rotateXYZ` (Euler degrees, applied X → Y → Z,
+    /// `float3` when new) and append it to the stack.
+    fn set_rotate_xyz(self, degrees: gf::Vec3f) -> Result<Self, SchemaError>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "rotateXYZ", "float3", sdf::Value::from(degrees))?;
-        append_op(self.prim(), "rotateXYZ")?;
-        Ok(self)
+        self.set_xform_op("rotateXYZ", XformOpPrecision::Float, degrees)
     }
 
-    /// Author `xformOp:orient` (`quatf`, `(w, x, y, z)`) and append it.
-    fn set_orient(self, q: gf::Quatf) -> Result<Self>
+    /// Author `xformOp:orient` (`quatf` when new, `(w, x, y, z)`) and append
+    /// it.
+    fn set_orient(self, q: gf::Quatf) -> Result<Self, SchemaError>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "orient", "quatf", sdf::Value::from(q))?;
-        append_op(self.prim(), "orient")?;
-        Ok(self)
+        self.set_xform_op("orient", XformOpPrecision::Float, q)
     }
 
     /// Author `xformOp:transform` (`matrix4d`, row-major flattened) and
     /// append it — for an exact 4×4 that does not decompose into T·R·S.
-    fn set_transform(self, matrix: gf::Matrix4d) -> Result<Self>
+    fn set_transform(self, matrix: gf::Matrix4d) -> Result<Self, SchemaError>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "transform", "matrix4d", sdf::Value::from(matrix))?;
-        append_op(self.prim(), "transform")?;
-        Ok(self)
-    }
-
-    /// Shared body for the single-axis rotate setters.
-    fn set_rotate_single(self, op: &str, degrees: f32) -> Result<Self>
-    where
-        Self: Sized,
-    {
-        author_xform_op(self.prim(), op, "float", sdf::Value::Float(degrees))?;
-        append_op(self.prim(), op)?;
-        Ok(self)
+        self.set_xform_op("transform", XformOpPrecision::Double, matrix)
     }
 }
 
@@ -219,8 +250,7 @@ fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Mat
         return Ok(gf::Matrix4d::IDENTITY);
     };
 
-    let after_ns = base.strip_prefix(NS_XFORM_OP).unwrap_or(base);
-    let kind = after_ns.split(':').next().unwrap_or(after_ns);
+    let kind = op_kind(base);
 
     let m = match kind {
         "translate" => gf::Matrix4d::translation(value_to_vec3_f64(&raw).unwrap_or([0.0, 0.0, 0.0])),
@@ -270,17 +300,84 @@ fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Mat
     }
 }
 
-/// Author a single `xformOp:<kind>` attribute (does not touch `xformOpOrder`).
-fn author_xform_op(prim: &Prim, kind: &str, type_name: &str, value: sdf::Value) -> Result<()> {
-    prim.create_attribute(format!("{NS_XFORM_OP}{kind}"), type_name)?
-        .set_custom(false)?
-        .set(value)?;
+/// Author a single `xformOp:<kind>` attribute (does not touch
+/// `xformOpOrder`), on the terms [`Xformable::set_xform_op`] states.
+///
+/// The value is converted before the attribute is touched, so a value the op
+/// cannot hold leaves nothing behind.
+// TODO(perf): the declared type is resolved here and again by the value
+// write (see the `TODO(perf)` on `usd::Attribute::plan_authoring`).
+fn author_xform_op(prim: &Prim, kind: &str, precision: XformOpPrecision, value: sdf::Value) -> Result<(), SchemaError> {
+    let name = op_attr_name(kind);
+    // The composed declaration is what the write validates against, so it is
+    // what the value converts to; an op nothing declares takes `precision`.
+    let declared = match prim.attribute(name.as_str()).type_name()? {
+        Some(declared) => declared,
+        None => op_value_type(kind, precision)?,
+    };
+    let value = declared.coerce(value)?;
+    prim.create_attribute(name, declared)?.set_custom(false)?.set(value)?;
     Ok(())
+}
+
+/// The attribute name of the op `kind`, which may already carry the
+/// `xformOp:` prefix — `xform_op_order` hands back prefixed names, so one
+/// fed straight back in must not be prefixed twice (C++ `_MakeNamespaced`).
+fn op_attr_name(kind: &str) -> String {
+    match kind.starts_with(NS_XFORM_OP) {
+        true => kind.to_string(),
+        false => format!("{NS_XFORM_OP}{kind}"),
+    }
+}
+
+/// The op token of `name`, without the `xformOp:` prefix and without the
+/// `:suffix` that names one instance of the op rather than a kind of its own.
+fn op_kind(name: &str) -> &str {
+    let after_ns = name.strip_prefix(NS_XFORM_OP).unwrap_or(name);
+    after_ns.split(':').next().unwrap_or(after_ns)
+}
+
+/// The value type an op of `kind` holds at `precision` (C++
+/// `UsdGeomXformOp::GetValueTypeName`); a token naming no op kind has none.
+// TODO: the op vocabulary is spelled here and again in `build_op_matrix`.
+// C++ parses the token into one `XformOp::Type` that every switch keys off;
+// an `XformOpKind` enum parsed once — taking the `!invert!` and
+// `!resetXformStack!` sentinels with it, which have no authoring spelling
+// today — would replace both string matches.
+fn op_value_type(kind: &str, precision: XformOpPrecision) -> Result<sdf::ValueTypeName, SchemaError> {
+    use XformOpPrecision as P;
+
+    Ok(match op_kind(kind) {
+        // A matrix has only the one precision in Sdf, which C++ reports when
+        // another is asked for and this crate accepts silently.
+        "transform" => sdf::ValueTypeName::MATRIX4D,
+        "orient" => match precision {
+            P::Double => sdf::ValueTypeName::QUATD,
+            P::Float => sdf::ValueTypeName::QUATF,
+            P::Half => sdf::ValueTypeName::QUATH,
+        },
+        "translateX" | "translateY" | "translateZ" | "scaleX" | "scaleY" | "scaleZ" | "rotateX" | "rotateY"
+        | "rotateZ" => match precision {
+            P::Double => sdf::ValueTypeName::DOUBLE,
+            P::Float => sdf::ValueTypeName::FLOAT,
+            P::Half => sdf::ValueTypeName::HALF,
+        },
+        "translate" | "scale" | "rotateXYZ" | "rotateXZY" | "rotateYXZ" | "rotateYZX" | "rotateZXY" | "rotateZYX" => {
+            match precision {
+                P::Double => sdf::ValueTypeName::DOUBLE3,
+                P::Float => sdf::ValueTypeName::FLOAT3,
+                P::Half => sdf::ValueTypeName::HALF3,
+            }
+        }
+        other => {
+            return Err(SchemaError::UnknownXformOp { op: other.to_string() });
+        }
+    })
 }
 
 /// Append `xformOp:<kind>` to `xformOpOrder`, de-duplicating re-authored ops.
 fn append_op(prim: &Prim, kind: &str) -> Result<()> {
-    prim.append_to_uniform_token_array(tok::A_XFORM_OP_ORDER, format!("{NS_XFORM_OP}{kind}"))?;
+    prim.append_to_uniform_token_array(tok::A_XFORM_OP_ORDER, op_attr_name(kind))?;
     Ok(())
 }
 
@@ -320,7 +417,7 @@ fn value_to_quat_wxyz(v: &sdf::Value) -> Option<[f64; 4]> {
 
 #[cfg(test)]
 mod tests {
-    use super::Xformable;
+    use super::{XformOpPrecision, Xformable};
     use crate::Result;
     use crate::gf;
     use crate::schemas::SchemaError;
@@ -328,8 +425,126 @@ mod tests {
     use crate::sdf;
     use crate::usd::Stage;
 
+    /// An asset that declares an op at another precision keeps it: the
+    /// setter converts the value rather than failing on the mismatch.
     #[test]
-    fn translate_appears_in_order() -> Result<()> {
+    fn scale_into_double_op() -> Result<(), SchemaError> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+        stage.create_attribute("/X.xformOp:scale", sdf::ValueTypeName::DOUBLE3)?;
+
+        x.set_scale(gf::vec3f(2.0, 2.0, 2.0))?;
+
+        assert_eq!(
+            stage.attribute("/X.xformOp:scale")?.type_name()?,
+            Some(sdf::ValueTypeName::DOUBLE3),
+            "the declared precision survives"
+        );
+        assert_eq!(
+            stage.field::<sdf::Value>("/X.xformOp:scale", sdf::FieldKey::Default)?,
+            Some(sdf::Value::Vec3d(gf::vec3d(2.0, 2.0, 2.0)))
+        );
+        Ok(())
+    }
+
+    /// The precision picks a new op's value type, as C++ `AddXformOp` does;
+    /// a `transform` has only the one matrix spelling whatever is asked for.
+    #[test]
+    fn op_precision_selects_type() -> Result<(), SchemaError> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        Xform::define(&stage, "/X")?
+            .set_xform_op("scale", XformOpPrecision::Double, gf::vec3f(2.0, 2.0, 2.0))?
+            .set_xform_op("rotateX", XformOpPrecision::Half, 90.0_f32)?
+            .set_xform_op("orient", XformOpPrecision::Double, gf::Quatf::IDENTITY)?
+            .set_xform_op("transform", XformOpPrecision::Half, gf::Matrix4d::IDENTITY)?;
+
+        let declared = |path: &str| stage.attribute(path)?.type_name();
+        assert_eq!(declared("/X.xformOp:scale")?, Some(sdf::ValueTypeName::DOUBLE3));
+        assert_eq!(declared("/X.xformOp:rotateX")?, Some(sdf::ValueTypeName::HALF));
+        assert_eq!(declared("/X.xformOp:orient")?, Some(sdf::ValueTypeName::QUATD));
+        assert_eq!(declared("/X.xformOp:transform")?, Some(sdf::ValueTypeName::MATRIX4D));
+
+        // Each value converted to the precision its op was created at.
+        let default = |path: &str| stage.field::<sdf::Value>(path, sdf::FieldKey::Default);
+        assert_eq!(
+            default("/X.xformOp:scale")?,
+            Some(sdf::Value::Vec3d(gf::vec3d(2.0, 2.0, 2.0)))
+        );
+        assert_eq!(
+            default("/X.xformOp:rotateX")?,
+            Some(sdf::Value::Half(gf::f16::from_f32(90.0)))
+        );
+        assert_eq!(
+            default("/X.xformOp:orient")?,
+            Some(sdf::Value::Quatd(gf::Quatd::IDENTITY)),
+            "a quaternion converts component-wise in (w, x, y, z) order"
+        );
+        Ok(())
+    }
+
+    /// A suffix names one instance of an op, not a different kind, so the op
+    /// takes its kind's value type.
+    #[test]
+    fn suffixed_op_typed_by_kind() -> Result<(), SchemaError> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?.set_xform_op(
+            "translate:pivot",
+            XformOpPrecision::Float,
+            gf::vec3f(1.0, 2.0, 3.0),
+        )?;
+
+        assert_eq!(
+            stage.attribute("/X.xformOp:translate:pivot")?.type_name()?,
+            Some(sdf::ValueTypeName::FLOAT3)
+        );
+        assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate:pivot".to_string()]));
+        Ok(())
+    }
+
+    /// A token naming no op kind has no value type, so it is refused rather
+    /// than authored into a stack that would evaluate it as identity. The
+    /// `!invert!` sentinel has no authoring spelling and lands here too.
+    #[test]
+    fn unknown_op_rejected() -> Result<(), SchemaError> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+        for op in ["bogusOp", "!invert!translate"] {
+            let error = x
+                .clone()
+                .set_xform_op(op, XformOpPrecision::Float, gf::vec3f(1.0, 2.0, 3.0))
+                .err()
+                .unwrap_or_else(|| panic!("{op} was accepted"));
+            assert!(matches!(error, SchemaError::UnknownXformOp { .. }), "{op}: {error:?}");
+        }
+        assert_eq!(x.xform_op_order()?, None, "nothing was appended to the stack");
+        assert_eq!(
+            stage.field::<sdf::Value>("/X.xformOp:bogusOp", sdf::FieldKey::Default)?,
+            None,
+            "and nothing was authored for it"
+        );
+        Ok(())
+    }
+
+    /// `xform_op_order` hands back prefixed names, so one fed straight back
+    /// in names the same op rather than a doubly-prefixed one.
+    #[test]
+    fn prefixed_op_not_doubled() -> Result<(), SchemaError> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?.set_xform_op(
+            "xformOp:translate",
+            XformOpPrecision::Double,
+            gf::vec3d(1.0, 2.0, 3.0),
+        )?;
+        assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate".to_string()]));
+        assert_eq!(
+            stage.field::<sdf::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
+            Some(sdf::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn translate_appears_in_order() -> Result<(), SchemaError> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let x = Xform::define(&stage, "/X")?.set_translate(gf::vec3d(1.0, 2.0, 3.0))?;
         assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate".to_string()]));
@@ -341,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn trs_preserves_insertion_order() -> Result<()> {
+    fn trs_preserves_insertion_order() -> Result<(), SchemaError> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
@@ -370,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn re_authoring_op_does_not_duplicate() -> Result<()> {
+    fn re_authoring_op_does_not_duplicate() -> Result<(), SchemaError> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(1.0, 0.0, 0.0))?
@@ -380,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_xyz_authors_float3() -> Result<()> {
+    fn rotate_xyz_authors_float3() -> Result<(), SchemaError> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         Xform::define(&stage, "/X")?.set_rotate_xyz(gf::vec3f(30.0, 45.0, 60.0))?;
         assert_eq!(
@@ -391,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn orient_writes_quatf() -> Result<()> {
+    fn orient_writes_quatf() -> Result<(), SchemaError> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         Xform::define(&stage, "/X")?.set_orient(gf::quatf(1.0, 0.0, 0.0, 0.0))?;
         assert_eq!(
@@ -402,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn transform_writes_matrix4d() -> Result<()> {
+    fn transform_writes_matrix4d() -> Result<(), SchemaError> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let m = gf::Matrix4d([
             1.0, 0.0, 0.0, 0.0, //

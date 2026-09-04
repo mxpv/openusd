@@ -11,6 +11,12 @@
 //! shape: a scalar stays a scalar, an array an array, a tuple keeps its
 //! component count.
 //!
+//! Quaternions convert across those same three precisions, which C++ does
+//! not register — an omission rather than a rule, since a `quatf` is a
+//! `quatd`'s value at another precision exactly as a `float3` is a
+//! `double3`'s. Authoring an `xformOp:orient` at the precision its asset
+//! declares needs it, and routing it here is what range-checks it.
+//!
 //! Every numeric component and element is range- and finite-checked. That is
 //! stricter than C++, which checks only scalar casts and lets compound and
 //! array conversions saturate or wrap through their conversion constructors;
@@ -74,6 +80,7 @@ const fn allowed(source: ValueKind, target: ValueKind) -> bool {
                 K::Vec4i | K::Vec4h | K::Vec4f | K::Vec4d,
                 K::Vec4h | K::Vec4f | K::Vec4d
             )
+            | (K::Quath | K::Quatf | K::Quatd, K::Quath | K::Quatf | K::Quatd)
             | (
                 K::HalfVec | K::FloatVec | K::DoubleVec,
                 K::HalfVec | K::FloatVec | K::DoubleVec
@@ -133,6 +140,12 @@ fn convert(value: Value, target: ValueKind) -> Result<Value, CastError> {
         (value, K::Vec4h) => Value::Vec4h(vector::<f16, _, 4>(vec4_as_f64(&value), actual, no_conversion)?),
         (value, K::Vec4f) => Value::Vec4f(vector::<f32, _, 4>(vec4_as_f64(&value), actual, no_conversion)?),
         (value, K::Vec4d) => Value::Vec4d(vector::<f64, _, 4>(vec4_as_f64(&value), actual, no_conversion)?),
+
+        // `vec4_as_f64` reads a quaternion in `(w, x, y, z)` order, which is
+        // the order `From<[T; 4]>` builds one from.
+        (value, K::Quath) => Value::Quath(vector::<f16, _, 4>(vec4_as_f64(&value), actual, no_conversion)?),
+        (value, K::Quatf) => Value::Quatf(vector::<f32, _, 4>(vec4_as_f64(&value), actual, no_conversion)?),
+        (value, K::Quatd) => Value::Quatd(vector::<f64, _, 4>(vec4_as_f64(&value), actual, no_conversion)?),
 
         (value, K::HalfVec) => Value::HalfVec(array::<f16>(scalar_array(value), actual, no_conversion)?),
         (value, K::FloatVec) => Value::FloatVec(array::<f32>(scalar_array(value), actual, no_conversion)?),
@@ -305,6 +318,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn coerce_kind_quat() {
+        let one = f16::from_f32(1.0);
+        assert_eq!(
+            Value::Quatf(gf::Quatf::IDENTITY).coerce_to_kind(ValueKind::Quatd),
+            Ok(Value::Quatd(gf::Quatd::IDENTITY))
+        );
+        assert_eq!(
+            Value::Quatd(gf::Quatd::IDENTITY).coerce_to_kind(ValueKind::Quath),
+            Ok(Value::Quath(gf::Quath::IDENTITY))
+        );
+        assert_eq!(
+            Value::Quath(gf::Quath::IDENTITY).coerce_to_kind(ValueKind::Quatf),
+            Ok(Value::Quatf(gf::Quatf::IDENTITY))
+        );
+        assert_eq!(one.to_f32(), 1.0, "the identity's real part survives the narrowing");
+        // Nothing normalizes an authored quaternion, so a component out of
+        // the target's range is reported rather than saturated.
+        assert!(matches!(
+            Value::Quatf(gf::Quatf {
+                w: 70000.0,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0
+            })
+            .coerce_to_kind(ValueKind::Quath),
+            Err(CastError::OutOfRange { .. })
+        ));
+        assert!(matches!(
+            Value::vec4f(1.0, 0.0, 0.0, 0.0).coerce_to_kind(ValueKind::Quatf),
+            Err(CastError::TypeMismatch { .. })
+        ));
     }
 
     #[test]

@@ -104,7 +104,7 @@ pub use mesh::{GeomSubset, Mesh};
 pub use pointbased::PointBased;
 pub use points::{Points, TetMesh};
 pub use shapes::{Capsule, Cone, Cube, Cylinder, Plane, Sphere};
-pub use xformable::Xformable;
+pub use xformable::{XformOpPrecision, Xformable};
 
 /// Implement the schema-trait chain for a concrete `struct $ty(Prim)` newtype,
 /// up to the membership named by the first token. Every concrete UsdGeom view
