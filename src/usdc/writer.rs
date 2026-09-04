@@ -677,6 +677,10 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 self.write_string_vec(Type::PathExpression, &texts)
             }
 
+            Value::Opaque => Err(FormatError::Encode {
+                reason: "an opaque value is never serialized".into(),
+            }),
+
             // Heterogeneous arrays are produced only by the USDA spline parser;
             // the USDC binary format has no native representation for them.
             Value::ValueVec(_) => Err(FormatError::Encode {

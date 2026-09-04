@@ -1015,6 +1015,12 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
             });
         }
 
+        Value::Opaque => {
+            return Err(FormatError::Encode {
+                reason: "an opaque value is never serialized".into(),
+            });
+        }
+
         Value::LayerOffsetVec(offsets) => {
             format_vec(s, offsets, |s, o| {
                 format_layer_offset(s, o);

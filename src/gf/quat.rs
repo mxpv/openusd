@@ -151,6 +151,14 @@ pub struct Quath {
 }
 
 impl Quath {
+    /// The identity rotation, `(1, 0, 0, 0)`.
+    pub const IDENTITY: Quath = Quath {
+        w: f16::ONE,
+        x: f16::ZERO,
+        y: f16::ZERO,
+        z: f16::ZERO,
+    };
+
     /// Returns a normalized copy, or the identity quaternion if the
     /// magnitude is zero.
     pub fn normalize(self) -> Self {

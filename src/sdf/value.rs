@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use crate::gf::f16;
-use strum::{EnumIs, EnumTryAs, IntoStaticStr};
+use strum::{Display, EnumDiscriminants, EnumIs, EnumIter, EnumTryAs, IntoStaticStr};
 
 use crate::gf;
 use crate::tf::Token;
@@ -23,7 +23,16 @@ use super::*;
 ///
 /// Type-safe extraction is supported via [`TryFrom<Value>`] implementations for common Rust
 /// types (e.g. `f32`, `String`, `gf::Vec3f`).
-#[derive(Debug, Clone, PartialEq, EnumIs, EnumTryAs, IntoStaticStr, derive_more::From)]
+#[derive(Debug, Clone, PartialEq, EnumIs, EnumTryAs, IntoStaticStr, EnumDiscriminants, derive_more::From)]
+#[strum_discriminants(
+    name(ValueKind),
+    vis(pub),
+    derive(Hash, Display, IntoStaticStr, EnumIter),
+    doc = "The variant a [`Value`] holds, without its payload — the Rust analog of the C++ type a `VtValue` \
+           carries. One kind per variant, so a scene-description value type (`float3`, `float3[]`) maps to \
+           exactly one kind, which [`ValueTypeName::kind`](super::ValueTypeName::kind) names. Generated from \
+           [`Value`] by strum, so the two can never disagree; `ValueKind::from(&value)` reads a value's kind."
+)]
 pub enum Value {
     /// None value, only produced by expressions (not directly assignable).
     #[from(skip)]
@@ -64,6 +73,13 @@ pub enum Value {
 
     AssetPath(AssetPath),
     AssetPathVec(Vec<AssetPath>),
+
+    /// The value of an `opaque` or `group` attribute (C++ `SdfOpaqueValue`).
+    /// Such an attribute never authors a value: this variant exists so the
+    /// type has a kind and a default, and every authoring tier rejects it.
+    /// It is never serialized; each writer reports an error for it.
+    #[from(skip)]
+    Opaque,
 
     Quath(gf::Quath),
     Quatf(gf::Quatf),
@@ -159,10 +175,11 @@ impl serde::Serialize for Value {
     // together would scatter that correspondence.
     #[allow(clippy::match_same_arms)]
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
+        use serde::ser::{Error, SerializeMap};
 
         match self {
             Value::None | Value::ValueBlock | Value::Value => serializer.serialize_none(),
+            Value::Opaque => Err(S::Error::custom("an opaque value is never serialized")),
 
             Value::Bool(v) => v.serialize(serializer),
             Value::BoolVec(v) => v.serialize(serializer),
@@ -742,7 +759,7 @@ impl CastError {
         }
     }
 
-    fn out_of_range<T>(actual: &'static str) -> Self {
+    pub(super) fn out_of_range<T>(actual: &'static str) -> Self {
         Self::OutOfRange {
             target: std::any::type_name::<T>(),
             actual,
@@ -758,7 +775,7 @@ impl CastError {
 /// `NumCast` — they saturate to infinity instead of returning `None` — so a
 /// finite source that produces a non-finite result is reported as out of range
 /// too. An already-infinite source legitimately stays infinite.
-fn cast_numeric<T: num_traits::NumCast>(value: Value) -> Result<T, CastError> {
+pub(super) fn cast_numeric<T: num_traits::NumCast>(value: Value) -> Result<T, CastError> {
     use num_traits::NumCast;
     let actual: &'static str = (&value).into();
     let src_finite = match &value {
@@ -767,7 +784,7 @@ fn cast_numeric<T: num_traits::NumCast>(value: Value) -> Result<T, CastError> {
         Value::Double(v) => v.is_finite(),
         _ => true,
     };
-    let out: T = match value {
+    let out: Option<T> = match value {
         Value::Uchar(v) => NumCast::from(v),
         Value::Int(v) => NumCast::from(v),
         Value::Uint(v) => NumCast::from(v),
@@ -778,8 +795,19 @@ fn cast_numeric<T: num_traits::NumCast>(value: Value) -> Result<T, CastError> {
         Value::Double(v) => NumCast::from(v),
         Value::Bool(v) => NumCast::from(v as u8),
         _ => return Err(CastError::mismatch::<T>(actual)),
-    }
-    .ok_or_else(|| CastError::out_of_range::<T>(actual))?;
+    };
+    finite_checked(out, src_finite, actual)
+}
+
+/// The tail of every range-checked numeric cast: a `None` from `NumCast` is
+/// out of range, and so is a finite source that came out non-finite, since a
+/// narrowing float conversion saturates to infinity instead of failing.
+pub(super) fn finite_checked<T: num_traits::ToPrimitive>(
+    out: Option<T>,
+    src_finite: bool,
+    actual: &'static str,
+) -> Result<T, CastError> {
+    let out = out.ok_or_else(|| CastError::out_of_range::<T>(actual))?;
     if src_finite && out.to_f64().is_some_and(|f| !f.is_finite()) {
         return Err(CastError::out_of_range::<T>(actual));
     }
@@ -845,30 +873,34 @@ fn require<R, U>(value: &Value, converted: Option<U>) -> Result<U, CastError> {
     converted.ok_or_else(|| CastError::mismatch::<R>(value.into()))
 }
 
-/// Widens a 3-component vector (`f`/`d`/`h`/`i`) to `[f64; 3]`. The `f`/`d`
-/// arms reuse gf's `Into<[f64; 3]>`; `h`/`i` have no such impl and widen here.
-fn vec3_as_f64(value: &Value) -> Option<[f64; 3]> {
+/// Widens a vector's components to `f64`, lossless for every element type.
+pub(super) fn widen<S: Into<f64>, const N: usize>(components: [S; N]) -> [f64; N] {
+    components.map(Into::into)
+}
+
+/// Widens a 3-component vector (`i`/`h`/`f`/`d`) to `[f64; 3]`.
+pub(super) fn vec3_as_f64(value: &Value) -> Option<[f64; 3]> {
     Some(match value {
-        Value::Vec3f(v) => (*v).into(),
+        Value::Vec3i(v) => widen(<[i32; 3]>::from(*v)),
+        Value::Vec3h(v) => widen(<[f16; 3]>::from(*v)),
+        Value::Vec3f(v) => widen(<[f32; 3]>::from(*v)),
         Value::Vec3d(v) => (*v).into(),
-        Value::Vec3h(v) => [f64::from(v.x), f64::from(v.y), f64::from(v.z)],
-        Value::Vec3i(v) => [v.x as f64, v.y as f64, v.z as f64],
         _ => return None,
     })
 }
 
 /// Widens a 4-component vector or quaternion to `[f64; 4]`. Quaternions extract
-/// in `(w, x, y, z)` order; the `Vec4d`/`Quatf`/`Quatd` arms reuse gf's
-/// `Into<[f64; 4]>` (which encodes that order), and the rest widen here.
-fn vec4_as_f64(value: &Value) -> Option<[f64; 4]> {
+/// in `(w, x, y, z)` order, which gf's `Into<[f64; 4]>` encodes for `Quatf` /
+/// `Quatd`; `Quath` widens component by component in that same order.
+pub(super) fn vec4_as_f64(value: &Value) -> Option<[f64; 4]> {
     Some(match value {
-        Value::Vec4f(v) => [v.x as f64, v.y as f64, v.z as f64, v.w as f64],
+        Value::Vec4i(v) => widen(<[i32; 4]>::from(*v)),
+        Value::Vec4h(v) => widen(<[f16; 4]>::from(*v)),
+        Value::Vec4f(v) => widen(<[f32; 4]>::from(*v)),
         Value::Vec4d(v) => (*v).into(),
-        Value::Vec4h(v) => [f64::from(v.x), f64::from(v.y), f64::from(v.z), f64::from(v.w)],
-        Value::Vec4i(v) => [v.x as f64, v.y as f64, v.z as f64, v.w as f64],
         Value::Quatf(q) => (*q).into(),
         Value::Quatd(q) => (*q).into(),
-        Value::Quath(q) => [f64::from(q.w), f64::from(q.x), f64::from(q.y), f64::from(q.z)],
+        Value::Quath(q) => widen([q.w, q.x, q.y, q.z]),
         _ => return None,
     })
 }
@@ -957,6 +989,15 @@ pub fn dictionary_over(stronger: &mut super::Dictionary, weaker: super::Dictiona
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kind_of_value() {
+        assert_eq!(ValueKind::from(&Value::Float(1.0)), ValueKind::Float);
+        assert_eq!(ValueKind::from(&Value::Vec3fVec(Vec::new())), ValueKind::Vec3fVec);
+        assert_eq!(ValueKind::from(&Value::Opaque), ValueKind::Opaque);
+        assert_eq!(<&'static str>::from(ValueKind::Vec3f), "Vec3f");
+        assert_eq!(ValueKind::Opaque.to_string(), "Opaque");
+    }
 
     #[test]
     fn test_is() {

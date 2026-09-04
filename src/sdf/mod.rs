@@ -57,7 +57,7 @@ pub use spec::{
     PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,
     RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
-pub use value::{CastError, FromValueCast, Value, dictionary_over};
+pub use value::{CastError, FromValueCast, Value, ValueKind, dictionary_over};
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]
