@@ -26,7 +26,7 @@
 //! for a "blocked" sample.
 
 use crate::gf;
-use crate::sdf::Value;
+use crate::sdf::{self, Value};
 
 /// Stage-level interpolation mode for time-sampled attributes.
 ///
@@ -43,28 +43,31 @@ pub enum InterpolationType {
     Linear,
 }
 
-/// Evaluate a sorted `(timeCode, Value)` sample list at `time` under
-/// the requested interpolation `mode`.
+/// Evaluate a sample list at `time` under the requested interpolation
+/// `mode`.
 ///
-/// `samples` MUST be sorted ascending by time code — `usdc` and
-/// `usda` readers both produce them in that order. Returns `None`
-/// when the list is empty or when the bracketing samples encode a
-/// blocked value (`Value::ValueBlock` / `Value::None`).
+/// `samples` MUST be ordered as an [`sdf::TimeSampleMap`] is, and `time` is
+/// compared in that same order, so a query outside the sampled range takes
+/// the nearest end sample. A NaN is such a query: the order puts it past
+/// every number on its sign bit's side, so a positive one takes the last
+/// sample and a negative one the first. Returns `None` when the list is
+/// empty or when the bracketing samples encode a blocked value
+/// (`Value::ValueBlock` / `Value::None`).
 pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) -> Option<Value> {
     if samples.is_empty() {
         return None;
     }
     let (first_t, first_v) = &samples[0];
-    if time <= *first_t {
+    if sdf::compare_sample_times(time, *first_t).is_le() {
         return clean(first_v.clone());
     }
     let (last_t, last_v) = samples.last().unwrap();
-    if time >= *last_t {
+    if sdf::compare_sample_times(time, *last_t).is_ge() {
         return clean(last_v.clone());
     }
 
     // `samples` is sorted; locate the bracketing pair.
-    let idx = samples.binary_search_by(|(t, _)| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = samples.binary_search_by(|(t, _)| sdf::compare_sample_times(*t, time));
     let (lo, hi) = match idx {
         Ok(i) => return clean(samples[i].1.clone()),
         Err(i) => (i - 1, i),
@@ -91,20 +94,23 @@ pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) ->
 /// the pair collapses to a single repeated time when `time` is at or beyond an
 /// end sample, or lands exactly on a sample; otherwise `lower < time < upper`.
 ///
-/// `times` MUST be sorted ascending.
+/// `times` MUST be ordered as the times of an [`sdf::TimeSampleMap`] are,
+/// and `time` is compared in that same order, so a query outside the
+/// sampled range — a NaN included, on its sign bit's side — pairs with an
+/// end time.
 pub fn bracketing_time_samples(times: &[f64], time: f64) -> Option<(f64, f64)> {
     if times.is_empty() {
         return None;
     }
     let first = times[0];
-    if time <= first {
+    if sdf::compare_sample_times(time, first).is_le() {
         return Some((first, first));
     }
     let last = times[times.len() - 1];
-    if time >= last {
+    if sdf::compare_sample_times(time, last).is_ge() {
         return Some((last, last));
     }
-    match times.binary_search_by(|t| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Equal)) {
+    match times.binary_search_by(|t| sdf::compare_sample_times(*t, time)) {
         Ok(i) => Some((times[i], times[i])),
         Err(i) => Some((times[i - 1], times[i])),
     }
@@ -228,6 +234,28 @@ mod tests {
 
     fn samples_f64(pairs: &[(f64, f64)]) -> Vec<(f64, Value)> {
         pairs.iter().map(|(t, v)| (*t, Value::Double(*v))).collect()
+    }
+
+    #[test]
+    fn nan_query_clamps() {
+        let samples = samples_f64(&[(0.0, 1.0), (10.0, 3.0)]);
+        assert_eq!(
+            evaluate(&samples, f64::NAN, InterpolationType::Linear),
+            Some(Value::Double(3.0)),
+            "a positive NaN orders past every time"
+        );
+        assert_eq!(
+            evaluate(&samples, -f64::NAN, InterpolationType::Linear),
+            Some(Value::Double(1.0)),
+            "a negative NaN orders before every time"
+        );
+        assert_eq!(bracketing_time_samples(&[0.0, 10.0], f64::NAN), Some((10.0, 10.0)));
+        assert_eq!(bracketing_time_samples(&[0.0, 10.0], -f64::NAN), Some((0.0, 0.0)));
+        assert_eq!(
+            evaluate(&samples, -0.0, InterpolationType::Linear),
+            Some(Value::Double(1.0)),
+            "the two zeros are one time"
+        );
     }
 
     #[test]

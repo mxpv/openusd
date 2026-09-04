@@ -143,6 +143,8 @@ pub enum Value {
     /// Layer-level relocates: `(source, target)` path pairs for namespace remapping.
     Relocates(RelocateList),
     VariantSelectionMap(HashMap<String, String>),
+    /// A sample map, ordered as a
+    /// [`TimeSampleMap`](super::TimeSampleMap) is.
     TimeSamples(TimeSampleMap),
 
     LayerOffsetVec(Vec<LayerOffset>),

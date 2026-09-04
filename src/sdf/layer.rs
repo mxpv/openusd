@@ -1906,7 +1906,8 @@ mod tests {
         let finite: Vec<f64> = samples.iter().map(|(t, _)| *t).filter(|t| t.is_finite()).collect();
         assert_eq!(finite, vec![1.0, 2.0]);
 
-        // erase_time_sample(NaN) can find the NaN entry via total_cmp.
+        // erase_time_sample(NaN) finds the NaN entry: the sample-time order
+        // places a NaN, so it is a locatable time like any other.
         let mut erased = false;
         edit_layer(&mut layer, |e| {
             erased = e

@@ -925,9 +925,10 @@ where
         self.get(sdf::FieldKey::Default)
     }
 
-    /// Time-sample map, if authored, in storage order. Samples authored
-    /// through [`AttributeSpecMut::set_time_sample`] are kept sorted by time;
-    /// samples loaded from a parsed layer reflect on-disk ordering.
+    /// Time-sample map, if authored. Ordered as an [`sdf::TimeSampleMap`] is
+    /// whenever a reader or [`AttributeSpecMut::set_time_sample`] established
+    /// the field; this reads it back as stored, so a raw field write is
+    /// returned as it was written.
     pub fn time_samples(&self) -> Option<Vec<(f64, sdf::Value)>> {
         self.get(sdf::FieldKey::TimeSamples)
     }
@@ -1039,10 +1040,7 @@ where
         let TimeSamplesField::Samples(mut map) = self.time_samples_field()? else {
             return Ok(false);
         };
-        // `total_cmp` gives a deterministic total ordering for `f64` (including
-        // NaN and signed zero), so a NaN sample inserted via `set_time_sample`
-        // can be located here.
-        let Some(idx) = map.iter().position(|(t, _)| t.total_cmp(&time).is_eq()) else {
+        let Ok(idx) = map.binary_search_by(|(t, _)| sdf::compare_sample_times(*t, time)) else {
             return Ok(false);
         };
         map.remove(idx);
@@ -1234,12 +1232,11 @@ where
     }
 }
 
+/// Inserts or replaces the sample at `time` in `map`'s order (see
+/// [`sdf::TimeSampleMap`]); a replaced sample keeps the time as it was
+/// spelled.
 fn upsert_time_sample(map: &mut Vec<(f64, sdf::Value)>, time: f64, value: sdf::Value) {
-    // `total_cmp` provides a deterministic total ordering over `f64`,
-    // including NaN and signed zero. `partial_cmp` would return `None` for
-    // NaN, which (with `unwrap_or(Equal)`) collapses NaN keys with every
-    // existing sample and silently corrupts the sorted invariant.
-    match map.binary_search_by(|(t, _)| t.total_cmp(&time)) {
+    match map.binary_search_by(|(t, _)| sdf::compare_sample_times(*t, time)) {
         Ok(idx) => map[idx].1 = value,
         Err(idx) => map.insert(idx, (time, value)),
     }
@@ -2389,6 +2386,29 @@ mod tests {
             field_of(&data, &path, sdf::FieldKey::Default),
             Some(sdf::Value::Double(2.0))
         );
+    }
+
+    #[test]
+    fn sample_signed_zero() {
+        let (mut data, path) = typed_attr("int");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_time_sample(0.0, sdf::Value::Int(1)).expect("int fits");
+        attr.set_time_sample(-0.0, sdf::Value::Int(2)).expect("int fits");
+        let samples = field_of(&data, &path, sdf::FieldKey::TimeSamples)
+            .expect("samples")
+            .try_as_time_samples()
+            .expect("a sample map");
+        assert_eq!(samples.len(), 1, "the two zeros are one time");
+        // Compared by bits: `-0.0 == 0.0` would accept a rewritten time.
+        assert_eq!(
+            samples[0].0.to_bits(),
+            0.0_f64.to_bits(),
+            "the time keeps its first spelling"
+        );
+        assert_eq!(samples[0].1, sdf::Value::Int(2), "the later sample wins");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        assert!(attr.erase_time_sample(-0.0).expect("readable"));
+        assert_eq!(field_of(&data, &path, sdf::FieldKey::TimeSamples), None);
     }
 
     #[test]

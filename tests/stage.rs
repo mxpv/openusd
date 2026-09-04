@@ -10167,3 +10167,25 @@ def \"P\" (
     assert_eq!((cycles, unresolved_count), (1, 1), "each reads once, got {held:?}");
     Ok(())
 }
+
+/// A text layer may list its samples in any order and repeat a time; the
+/// reader sorts them and keeps the last value of a repeated time, so reads
+/// and writes see the ordered map they rely on.
+#[test]
+fn unsorted_samples_normalized() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"A\" {\n    double x.timeSamples = { 10: 1.0, 0: 2.0, 10: 5.0 }\n}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let attr = stage.attribute("/A.x")?;
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(2.0));
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(5.0))?, Some(3.5));
+
+    let attr = attr.set_at(3.0_f64, usd::TimeCode::new(10.0))?;
+    assert_eq!(attr.num_time_samples()?, 2, "the write replaces the sample at its time");
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(10.0))?, Some(3.0));
+    Ok(())
+}

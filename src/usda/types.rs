@@ -315,7 +315,7 @@ pub(super) fn parse_time_samples(
         samples.push((time, value));
         Ok(())
     })?;
-    Ok(samples)
+    Ok(sdf::normalize_time_samples(samples))
 }
 
 /// Parse a spline value: `{ curveType, knots... }`.

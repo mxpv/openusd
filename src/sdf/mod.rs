@@ -3,7 +3,8 @@
 //! This module contains common data types used by parsers.
 //! Roughly this correspond to C++ SDF module <https://openusd.org/dev/api/sdf_page_front.html>
 
-use std::{collections::HashMap, fmt::Debug};
+use std::cmp::Ordering;
+use std::{collections::HashMap, fmt::Debug, mem};
 
 use bytemuck::{Pod, Zeroable};
 use strum::FromRepr;
@@ -414,7 +415,50 @@ pub type PathListOp = ListOp<Path>;
 pub type ReferenceListOp = ListOp<Reference>;
 pub type PayloadListOp = ListOp<Payload>;
 
+/// A time-sample map: `(time, value)` pairs sorted ascending by
+/// [`compare_sample_times`] with one entry per time, the order C++
+/// `SdfTimeSampleMap` (a `std::map`) keeps. The readers establish it through
+/// [`normalize_time_samples`] as they decode a layer and
+/// [`AttributeSpecMut::set_time_sample`] keeps it, so value resolution and
+/// interpolation can binary-search a map. A raw field write (`Spec::set`, a
+/// replayed diff) must supply an ordered map.
+// TODO: a `TimeSampleMap` newtype whose constructors order it would make the
+// invariant unbreakable; today any `Vec<(f64, Value)>` is accepted.
 pub type TimeSampleMap = Vec<(f64, Value)>;
+
+/// The order a [`TimeSampleMap`] keeps its times in: [`f64::total_cmp`],
+/// except that the two zeros are one time, as they are one key of C++'s
+/// `std::map<double, VtValue>`.
+#[inline]
+pub fn compare_sample_times(a: f64, b: f64) -> Ordering {
+    let zero_folded = |t: f64| if t == 0.0 { 0.0 } else { t };
+    zero_folded(a).total_cmp(&zero_folded(b))
+}
+
+/// Orders `samples` as a [`TimeSampleMap`] requires. A repeated time keeps
+/// the spelling it was first given and the sample it was last given, as
+/// assigning into C++'s `std::map` does, so the two zeros collapse the way
+/// [`AttributeSpecMut::set_time_sample`] collapses them. C++ builds such a
+/// map for a crate file too, so it orders one as well, but it emplaces and
+/// so keeps a repeated time's first sample; applying one rule to both
+/// formats is a deliberate divergence there. A map already in order, as
+/// every file a conforming writer produced holds, is returned untouched.
+pub fn normalize_time_samples(mut samples: Vec<(f64, Value)>) -> TimeSampleMap {
+    if samples.is_sorted_by(|a, b| compare_sample_times(a.0, b.0).is_lt()) {
+        return samples;
+    }
+    // The sort is stable, so each repeated time's run stays in authoring
+    // order and the dedup carries the last sample back onto the first entry.
+    samples.sort_by(|a, b| compare_sample_times(a.0, b.0));
+    samples.dedup_by(|later, kept| {
+        if compare_sample_times(kept.0, later.0).is_ne() {
+            return false;
+        }
+        mem::swap(&mut kept.1, &mut later.1);
+        true
+    });
+    samples
+}
 
 /// A single namespace relocation `(source, target)`: the prim at `source` is
 /// moved to `target` in composed namespace. An empty `target` is a deletion
@@ -432,6 +476,41 @@ pub type LayerData = Box<dyn AbstractData>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_time_samples_order() {
+        let samples = normalize_time_samples(vec![
+            (10.0, Value::Int(1)),
+            (-0.0, Value::Int(2)),
+            (0.0, Value::Int(3)),
+            (10.0, Value::Int(4)),
+            (f64::NAN, Value::Int(5)),
+        ]);
+        let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
+        // Compared by bits: `-0.0 == 0.0` would accept an unfolded zero.
+        assert_eq!(
+            times[0].to_bits(),
+            (-0.0_f64).to_bits(),
+            "the time keeps its first spelling"
+        );
+        assert_eq!(times[1], 10.0);
+        assert!(times[2].is_nan(), "a positive NaN orders past every number");
+        let values: Vec<&Value> = samples.iter().map(|(_, v)| v).collect();
+        assert_eq!(
+            values,
+            [&Value::Int(3), &Value::Int(4), &Value::Int(5)],
+            "the last sample of a repeated time wins, the two zeros being one time"
+        );
+        assert_eq!(
+            normalize_time_samples(vec![(f64::NAN, Value::Int(1)), (-f64::NAN, Value::Int(2))]).len(),
+            2,
+            "the order separates the NaNs by sign, so they are two times"
+        );
+        assert_eq!(
+            normalize_time_samples(vec![(0.0, Value::Int(1)), (1.0, Value::Int(2))]),
+            vec![(0.0, Value::Int(1)), (1.0, Value::Int(2))]
+        );
+    }
 
     #[test]
     fn layer_offset_identity_is_identity() {

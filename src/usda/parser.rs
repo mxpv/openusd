@@ -2308,6 +2308,20 @@ def Xform "Anim"
     }
 
     #[test]
+    fn unsorted_samples_sorted() {
+        let text = "#usda 1.0\ndef \"P\" {\n    double x.timeSamples = { 10: 1, 0: 2, 10: 5 }\n}\n";
+        let samples = field(text, "/P.x", FieldKey::TimeSamples.as_str())
+            .expect("samples")
+            .try_as_time_samples()
+            .expect("a sample map");
+        assert_eq!(
+            samples,
+            vec![(0.0, sdf::Value::Double(2.0)), (10.0, sdf::Value::Double(5.0))],
+            "sorted, and the last value of a repeated time wins"
+        );
+    }
+
+    #[test]
     fn scalar_samples_typed() {
         let text = "#usda 1.0\ndef \"P\" {\n    float f.timeSamples = { 1: 4, 2: None }\n    token t.timeSamples = { 1: \"on\" }\n    int[] i.timeSamples = { 1: [3] }\n}\n";
         let samples = |path: &str| {

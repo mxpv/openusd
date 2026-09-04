@@ -1415,14 +1415,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let value_reps = self.reader.read_vec::<ValueRep>(count)?;
                 debug_assert_eq!(value_reps.len(), count);
 
-                let values = value_reps
+                let samples = times
                     .into_iter()
-                    .map(|value| self.value(value))
+                    .zip(value_reps)
+                    .map(|(time, rep)| Ok((time, self.value(rep)?)))
                     .collect::<Result<Vec<_>, ReadError>>()?;
 
-                let samples = times.into_iter().zip(values).collect();
-
-                sdf::Value::TimeSamples(samples)
+                sdf::Value::TimeSamples(sdf::normalize_time_samples(samples))
             }
 
             // Empty dictionary.

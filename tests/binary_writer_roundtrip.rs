@@ -359,3 +359,34 @@ fn quat_write_read_preserves_wxyz_convention() {
 //
 // - `gen_splines.usdc`: the crate spline type (59, crate 0.12.0) has no
 //   `Type` enum entry, so the `spline` field fails to decode.
+
+/// A crate file may store its samples in any order and repeat a time; the
+/// reader orders them as every `sdf::TimeSampleMap` is ordered, keeping the
+/// last value of a repeated time.
+#[test]
+fn unsorted_samples_sorted() {
+    let mut data = Data::new();
+    let attr = path("/A.x").unwrap();
+    sdf::AttributeSpec::new(&mut data, attr.clone(), "double", sdf::Variability::Varying, false)
+        .expect("attribute spec")
+        .set(
+            FieldKey::TimeSamples.as_str(),
+            Value::TimeSamples(vec![
+                (10.0, Value::Double(1.0)),
+                (0.0, Value::Double(2.0)),
+                (10.0, Value::Double(5.0)),
+            ]),
+        );
+
+    let mut buf = Vec::new();
+    CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("write");
+    let round = CrateData::open(Cursor::new(&buf), true).expect("re-parse");
+    let samples = (&round as &dyn AbstractData)
+        .get_field(&attr, "timeSamples")
+        .expect("samples")
+        .into_owned();
+    assert_eq!(
+        samples,
+        Value::TimeSamples(vec![(0.0, Value::Double(2.0)), (10.0, Value::Double(5.0))])
+    );
+}

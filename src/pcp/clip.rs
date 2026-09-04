@@ -1200,7 +1200,8 @@ impl ClipCache {
             return false;
         };
         samples.iter().any(|(time, value)| {
-            *value == Value::ValueBlock && resolved.active_offset.apply(*time).total_cmp(&stage_time).is_eq()
+            *value == Value::ValueBlock
+                && sdf::compare_sample_times(resolved.active_offset.apply(*time), stage_time).is_eq()
         })
     }
 
