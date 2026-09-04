@@ -238,8 +238,11 @@ impl<W: Write> Emitter<'_, W> {
             self.out.write_all(b"uniform ")?;
         }
 
+        // The declared spelling is written back as its standard spelling (C++
+        // `GetSerializationName`): `Color` in, `color3d` out; an unregistered
+        // spelling stays as authored.
         let type_name = match get_value(data, path, FieldKey::TypeName.as_str()) {
-            Some(Value::Token(t)) => String::from(t),
+            Some(Value::Token(t)) => sdf::ValueTypeName::from(t).serialization_name(),
             _ => {
                 return Err(FormatError::Encode {
                     reason: format!("attribute {path} missing typeName").into(),
@@ -1175,10 +1178,16 @@ fn format_dictionary(s: &mut String, dict: &HashMap<String, Value>) -> Result<()
     s.push('\n');
     for k in &keys {
         let value = &dict[k.as_str()];
-        let type_name = dict_value_type_name(value);
+        // A nested dictionary is introduced by the `dictionary` keyword; any
+        // other entry carries the role-blind name of its value's kind, as C++
+        // emits it.
+        let type_name = match value {
+            Value::Dictionary(_) => Some(Token::new("dictionary")),
+            other => sdf::ValueKind::from(other).type_name().map(|ty| ty.as_token()),
+        };
         s.push_str("    ");
         if let Some(ty) = type_name {
-            s.push_str(ty);
+            s.push_str(ty.as_str());
             s.push(' ');
         }
         if is_bare_dict_key(k) {
@@ -1292,79 +1301,6 @@ fn specifier_keyword(s: Specifier) -> &'static str {
         Specifier::Over => "over",
         Specifier::Class => "class",
     }
-}
-
-/// Name of the USD type that describes this value variant, for dict entries.
-/// Returns `None` for types that don't have a plain typed form (e.g. list ops).
-fn dict_value_type_name(v: &Value) -> Option<&'static str> {
-    Some(match v {
-        Value::Bool(_) => "bool",
-        Value::BoolVec(_) => "bool[]",
-        Value::Uchar(_) => "uchar",
-        Value::UcharVec(_) => "uchar[]",
-        Value::Int(_) => "int",
-        Value::IntVec(_) => "int[]",
-        Value::Uint(_) => "uint",
-        Value::UintVec(_) => "uint[]",
-        Value::Int64(_) => "int64",
-        Value::Int64Vec(_) => "int64[]",
-        Value::Uint64(_) => "uint64",
-        Value::Uint64Vec(_) => "uint64[]",
-        Value::Half(_) => "half",
-        Value::HalfVec(_) => "half[]",
-        Value::Float(_) => "float",
-        Value::FloatVec(_) => "float[]",
-        Value::Double(_) => "double",
-        Value::DoubleVec(_) => "double[]",
-        Value::String(_) => "string",
-        Value::StringVec(_) => "string[]",
-        Value::Token(_) => "token",
-        Value::TokenVec(_) => "token[]",
-        Value::AssetPath(_) => "asset",
-        Value::AssetPathVec(_) => "asset[]",
-        Value::Vec2h(_) => "half2",
-        Value::Vec3h(_) => "half3",
-        Value::Vec4h(_) => "half4",
-        Value::Vec2hVec(_) => "half2[]",
-        Value::Vec3hVec(_) => "half3[]",
-        Value::Vec4hVec(_) => "half4[]",
-        Value::Vec2f(_) => "float2",
-        Value::Vec3f(_) => "float3",
-        Value::Vec4f(_) => "float4",
-        Value::Vec2fVec(_) => "float2[]",
-        Value::Vec3fVec(_) => "float3[]",
-        Value::Vec4fVec(_) => "float4[]",
-        Value::Vec2d(_) => "double2",
-        Value::Vec3d(_) => "double3",
-        Value::Vec4d(_) => "double4",
-        Value::Vec2dVec(_) => "double2[]",
-        Value::Vec3dVec(_) => "double3[]",
-        Value::Vec4dVec(_) => "double4[]",
-        Value::Vec2i(_) => "int2",
-        Value::Vec3i(_) => "int3",
-        Value::Vec4i(_) => "int4",
-        Value::Vec2iVec(_) => "int2[]",
-        Value::Vec3iVec(_) => "int3[]",
-        Value::Vec4iVec(_) => "int4[]",
-        Value::Quath(_) => "quath",
-        Value::Quatf(_) => "quatf",
-        Value::Quatd(_) => "quatd",
-        Value::QuathVec(_) => "quath[]",
-        Value::QuatfVec(_) => "quatf[]",
-        Value::QuatdVec(_) => "quatd[]",
-        Value::Matrix2d(_) => "matrix2d",
-        Value::Matrix3d(_) => "matrix3d",
-        Value::Matrix4d(_) => "matrix4d",
-        Value::Matrix2dVec(_) => "matrix2d[]",
-        Value::Matrix3dVec(_) => "matrix3d[]",
-        Value::Matrix4dVec(_) => "matrix4d[]",
-        Value::TimeCode(_) => "timecode",
-        Value::TimeCodeVec(_) => "timecode[]",
-        Value::PathExpression(_) => "pathExpression",
-        Value::PathExpressionVec(_) => "pathExpression[]",
-        Value::Dictionary(_) => "dictionary",
-        _ => return None,
-    })
 }
 
 fn get_value(data: &dyn AbstractData, path: &Path, field: &str) -> Option<Value> {
@@ -1522,6 +1458,118 @@ def "Mesh"
             .get(&path("/M.inputs:files").unwrap())
             .and_then(|s| s.get(FieldKey::Default.as_str()));
         assert!(matches!(files, Some(Value::AssetPathVec(_))), "re-parsed as {files:?}");
+    }
+
+    /// A legacy spelling is read and written back as its standard twin (C++
+    /// `GetSerializationName`).
+    #[test]
+    fn legacy_name_canonicalized() {
+        use crate::usda::parser::Parser;
+
+        let src = "#usda 1.0\ndef \"P\"\n{\n    Color c = (1, 2, 3)\n    Vec3f[] v = [(1, 2, 3)]\n}\n";
+        let parsed = Parser::new(src).parse().expect("parse legacy spellings");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert!(emitted.contains("color3d c = "), "emitted: {emitted}");
+        assert!(emitted.contains("float3[] v = "), "emitted: {emitted}");
+
+        let reparsed = Parser::new(&emitted).parse().expect("re-parse emitted");
+        let type_name = |attr: &str| {
+            reparsed
+                .get(&path(attr).unwrap())
+                .and_then(|s| s.get(FieldKey::TypeName.as_str()))
+                .cloned()
+        };
+        assert_eq!(type_name("/P.c"), Some(Value::token("color3d")));
+        assert_eq!(type_name("/P.v"), Some(Value::token("float3[]")));
+    }
+
+    /// An unregistered spelling is written back as authored.
+    #[test]
+    fn unknown_name_verbatim() {
+        use crate::usda::parser::Parser;
+
+        let src = "#usda 1.0\ndef \"P\"\n{\n    custom double3d[] baz\n}\n";
+        let parsed = Parser::new(src).parse().expect("parse unregistered declaration");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert!(emitted.contains("custom double3d[] baz"), "emitted: {emitted}");
+
+        let reparsed = Parser::new(&emitted).parse().expect("re-parse emitted");
+        let type_name = reparsed
+            .get(&path("/P.baz").unwrap())
+            .and_then(|s| s.get(FieldKey::TypeName.as_str()))
+            .cloned();
+        assert_eq!(type_name, Some(Value::token("double3d[]")));
+    }
+
+    /// Dictionary entries carry the role-blind name of their value's kind, and
+    /// a nested dictionary the `dictionary` keyword.
+    #[test]
+    fn dict_entry_type_names() {
+        let mut data = Data::new();
+        data.create_spec(Path::abs_root(), SpecType::PseudoRoot)
+            .add(ChildrenKey::PrimChildren, Value::TokenVec(vec!["P".into()]));
+        let prim = data.create_spec(path("/P").unwrap(), SpecType::Prim);
+        prim.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
+        let mut sub = HashMap::new();
+        sub.insert("n".to_owned(), Value::Int(1));
+        let mut custom = HashMap::new();
+        custom.insert("v".to_owned(), Value::vec3f(1.0, 2.0, 3.0));
+        custom.insert("sub".to_owned(), Value::Dictionary(sub));
+        prim.add(FieldKey::CustomData, Value::Dictionary(custom));
+
+        let emitted = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
+        assert!(emitted.contains("float3 v = "), "emitted: {emitted}");
+        assert!(emitted.contains("dictionary sub = {"), "emitted: {emitted}");
+        assert!(emitted.contains("int n = "), "emitted: {emitted}");
+    }
+
+    /// Time samples of every shape keep their declared kind through parse →
+    /// emit → re-parse.
+    #[test]
+    fn typed_samples_round_trip() {
+        use crate::usda::parser::Parser;
+
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typed_timesamples.usda"))
+            .expect("fixture readable");
+        let parsed = Parser::new(&src).parse().expect("parse fixture");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        let reparsed = Parser::new(&emitted).parse().expect("re-parse emitted");
+        let samples = |attr: &str| {
+            reparsed
+                .get(&path(attr).unwrap())
+                .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
+                .cloned()
+                .expect("samples")
+                .try_as_time_samples()
+                .expect("a sample map")
+        };
+        assert_eq!(
+            samples("/Anim.weight"),
+            vec![
+                (0.0, Value::Float(4.0)),
+                (1.0, Value::Float(0.5)),
+                (2.0, Value::ValueBlock)
+            ]
+        );
+        assert_eq!(
+            samples("/Anim.mode"),
+            vec![(0.0, Value::token("on")), (1.0, Value::token("off"))]
+        );
+        assert_eq!(
+            samples("/Anim.indices"),
+            vec![(0.0, Value::IntVec(vec![1, 2, 3])), (1.0, Value::IntVec(Vec::new()))]
+        );
+        assert_eq!(
+            samples("/Anim.velocity"),
+            vec![(0.0, Value::vec3f(1.0, 0.0, 0.0)), (1.0, Value::vec3f(0.0, 1.0, 0.0))]
+        );
+        assert_eq!(
+            samples("/Anim.cue"),
+            vec![
+                (0.0, Value::TimeCode(sdf::TimeCode(24.0))),
+                (1.0, Value::TimeCode(sdf::TimeCode(48.5)))
+            ]
+        );
     }
 
     /// Emit `text` via `write_quoted` then re-tokenize the output and return
