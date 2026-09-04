@@ -878,6 +878,17 @@ pub(super) fn widen<S: Into<f64>, const N: usize>(components: [S; N]) -> [f64; N
     components.map(Into::into)
 }
 
+/// Widens a 2-component vector (`i`/`h`/`f`/`d`) to `[f64; 2]`.
+pub(super) fn vec2_as_f64(value: &Value) -> Option<[f64; 2]> {
+    Some(match value {
+        Value::Vec2i(v) => widen(<[i32; 2]>::from(*v)),
+        Value::Vec2h(v) => widen(<[f16; 2]>::from(*v)),
+        Value::Vec2f(v) => widen(<[f32; 2]>::from(*v)),
+        Value::Vec2d(v) => (*v).into(),
+        _ => return None,
+    })
+}
+
 /// Widens a 3-component vector (`i`/`h`/`f`/`d`) to `[f64; 3]`.
 pub(super) fn vec3_as_f64(value: &Value) -> Option<[f64; 3]> {
     Some(match value {

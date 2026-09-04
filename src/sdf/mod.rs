@@ -12,6 +12,7 @@ use crate::tf::Token;
 
 mod asset_path;
 mod change;
+mod coerce;
 mod copy;
 mod data;
 pub mod expr;
@@ -26,6 +27,7 @@ pub mod schema;
 pub mod sink;
 mod spec;
 mod value;
+mod value_type;
 
 pub use asset_path::AssetPath;
 pub(crate) use asset_path::{
@@ -58,6 +60,7 @@ pub use spec::{
     RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
 pub use value::{CastError, FromValueCast, Value, ValueKind, dictionary_over};
+pub use value_type::{Dimensions, Role, ValueTypeError, ValueTypeName};
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]

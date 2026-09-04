@@ -52,7 +52,8 @@ use super::schema::FieldKey;
 use super::{
     AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, FormatError, IntoPath,
     LayerData, Patch, Path, PathParseError, PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef,
-    RelationshipSpecMut, RelationshipSpecRef, RelocateList, SpecError, SpecType, Value, sink, try_into_path,
+    RelationshipSpecMut, RelationshipSpecRef, RelocateList, SpecError, SpecType, Value, ValueTypeError, sink,
+    try_into_path,
 };
 
 /// A [`sink::Id`] for a [`LayerSink`] installed on a [`Layer`].
@@ -482,6 +483,11 @@ pub enum AuthoringError {
     /// not decode an authored value while copying it).
     #[error(transparent)]
     Data(#[from] DataError),
+
+    /// A value does not fit the attribute's declared type, or the declaration
+    /// itself is unusable.
+    #[error(transparent)]
+    ValueType(#[from] ValueTypeError),
 
     /// The given path is not valid for the requested authoring operation.
     /// Prim authoring requires an absolute, non-root, non-property path;
