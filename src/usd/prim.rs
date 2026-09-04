@@ -129,10 +129,10 @@ impl Prim {
     pub fn add_applied_schema(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let name = name.into();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            super::edit_spec(
+            super::authoring::edit_spec(
                 layer.data_mut(),
                 path,
-                "no prim spec at path on the edit target layer",
+                sdf::SpecType::Prim,
                 sdf::PrimSpecMut::get,
                 |spec| {
                     spec.add_applied_schema(name)?;
@@ -263,7 +263,7 @@ impl Prim {
     /// `value` is in stage time, so any `timecode` it holds is mapped into the
     /// edit target's own time frame (C++ `_StageValueToFieldXf`).
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
-        let value = self.stage.map_to_spec_value(value);
+        let value = self.stage.map_to_spec_value(&self.path, value);
         self.update_metadata(key, |_| Some(value))
     }
 
@@ -296,6 +296,7 @@ impl Prim {
     where
         F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
     {
+        super::authoring::check_reserved(sdf::SpecType::Prim, key)?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
             let local = layer.data_mut().try_field(&path, key)?.map(Cow::into_owned);
             match f(local) {
@@ -320,14 +321,15 @@ impl Prim {
         Ok(self)
     }
 
-    /// Author an attribute spec named `name` under this prim. Mirrors C++
-    /// `UsdPrim::CreateAttribute`. Defaults `variability = Varying`,
-    /// `custom = true` — override via the returned [`Attribute`] handle's
-    /// fluent setters.
+    /// Author an attribute spec named `name` under this prim (C++
+    /// `UsdPrim::CreateAttribute`); see [`Stage::create_attribute`] for the
+    /// contract, under which `type_name` applies only to an attribute nothing
+    /// declares yet. Defaults `variability = Varying`, `custom = true` —
+    /// override via the returned [`Attribute`] handle's fluent setters.
     pub fn create_attribute(
         &self,
         name: impl Into<Token>,
-        type_name: impl Into<String>,
+        type_name: impl Into<sdf::ValueTypeName>,
     ) -> Result<Attribute, StageAuthoringError> {
         let name = name.into();
         let attr_path = self.path.append_property(&name)?;
@@ -1069,10 +1071,10 @@ impl Prim {
         F: FnOnce(&mut sdf::PrimSpecMut<'_>),
     {
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            super::edit_spec(
+            super::authoring::edit_spec(
                 layer.data_mut(),
                 path,
-                "no prim spec at path on the edit target layer",
+                sdf::SpecType::Prim,
                 sdf::PrimSpecMut::get,
                 |spec| {
                     f(spec);

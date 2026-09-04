@@ -12,7 +12,6 @@ use std::collections::HashSet;
 
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AttributeSpec, AttributeSpecMut, Path, Value, Variability};
-use crate::tf;
 
 use super::QueryError;
 
@@ -92,7 +91,7 @@ pub(crate) fn generate_manifest(
             for path in declared.iter().filter(|path| !has_time_samples(clip, path)) {
                 AttributeSpecMut::get(data, path.clone())
                     .expect("declared above")
-                    .set_time_sample(time, Value::ValueBlock);
+                    .set_time_sample(time, Value::ValueBlock)?;
             }
         }
         Ok(())
@@ -131,7 +130,7 @@ pub(crate) struct ClipSetKey {
 fn sampled_attributes(
     clip: &sdf::Layer,
     clip_prim_path: &Path,
-) -> Result<Vec<(Path, tf::Token, Variability)>, sdf::PathParseError> {
+) -> Result<Vec<(Path, sdf::ValueTypeName, Variability)>, sdf::PathParseError> {
     let mut out = Vec::new();
     for path in clip.data().spec_paths() {
         if !path.is_property_path() || !path.has_prefix(clip_prim_path) {
@@ -238,7 +237,7 @@ def "Clip"
         assert_eq!(declared(&manifest), ["/Clip/A.a", "/Clip/A.b", "/Clip/A.z"]);
         // Declarations only: no default, no samples carried over.
         let a = manifest.attribute("/Clip/A.a")?.expect("declared");
-        assert_eq!(a.type_name().as_deref(), Some("double"));
+        assert_eq!(a.type_name(), Some(sdf::ValueTypeName::DOUBLE));
         assert!(a.default().is_none());
         assert!(a.time_samples().is_none());
         Ok(())

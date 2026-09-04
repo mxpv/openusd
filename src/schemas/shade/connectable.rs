@@ -100,7 +100,7 @@ pub struct ConnectionSource {
     source_path: sdf::Path,
     source_name: tf::Token,
     source_type: AttributeType,
-    type_name: Option<tf::Token>,
+    type_name: Option<sdf::ValueTypeName>,
     source_is_container: bool,
 }
 
@@ -133,9 +133,10 @@ impl ConnectionSource {
         self.source_type
     }
 
-    /// The source attribute's composed USD value type, absent when the
-    /// attribute is defined without one.
-    pub fn type_name(&self) -> Option<&tf::Token> {
+    /// The source attribute's composed value type (C++
+    /// `UsdShadeConnectionSourceInfo::typeName`), absent when the attribute
+    /// is defined without a registered one.
+    pub fn type_name(&self) -> Option<&sdf::ValueTypeName> {
         self.type_name.as_ref()
     }
 
@@ -303,7 +304,7 @@ mod tests {
         assert_eq!(source.source_name().as_str(), "rgb");
         assert_eq!(source.full_name(), "outputs:rgb");
         assert_eq!(source.source_type(), AttributeType::Output);
-        assert_eq!(source.type_name().map(tf::Token::as_str), Some("float3"));
+        assert_eq!(source.type_name(), Some(&sdf::ValueTypeName::FLOAT3));
         Ok(())
     }
 

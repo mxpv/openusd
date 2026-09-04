@@ -511,8 +511,17 @@ impl<'a> DefProperty<'a> {
         self.store()?.spec(&self.entry.path)?.get(name)
     }
 
-    /// The property's declared value type, as its `typeName` token.
-    pub fn type_name(&self) -> Option<tf::Token> {
+    /// The property's declared value type (C++
+    /// `UsdPrimDefinition::Attribute::GetTypeName`): `None` when the
+    /// schematics declare none, or a spelling the type table does not know.
+    /// A code generator consumes this and refuses a property without one.
+    pub fn type_name(&self) -> Option<sdf::ValueTypeName> {
+        sdf::ValueTypeName::find(self.type_name_token()?.as_str())
+    }
+
+    /// The `typeName` token as the schematics author it, whatever its
+    /// spelling (C++ `GetTypeNameToken`).
+    pub fn type_name_token(&self) -> Option<tf::Token> {
         self.field(sdf::FieldKey::TypeName)?.clone().try_as_token()
     }
 
@@ -917,7 +926,7 @@ class Thing "Thing" (
             .property(&tf::Token::new("inputs:intensity"))
             .expect("intensity");
         assert_eq!(intensity.variability(), sdf::Variability::Varying);
-        assert_eq!(intensity.type_name(), Some(tf::Token::new("float")));
+        assert_eq!(intensity.type_name(), Some(sdf::ValueTypeName::from("float")));
 
         let include_root = distant
             .property(&tf::Token::new("collection:lightLink:includeRoot"))
@@ -983,14 +992,14 @@ class Thing "Thing" (
         let expansion = collection
             .property(&tf::Token::new("collection:__INSTANCE_NAME__:expansionRule"))
             .expect("expansionRule");
-        assert_eq!(expansion.type_name(), Some(tf::Token::new("token")));
+        assert_eq!(expansion.type_name(), Some(sdf::ValueTypeName::from("token")));
         assert_eq!(expansion.variability(), sdf::Variability::Uniform);
 
         let light = registry
             .api_prim_definition(&tf::Token::new("LightAPI"))
             .expect("LightAPI");
         let intensity = light.property(&tf::Token::new("inputs:intensity")).expect("intensity");
-        assert_eq!(intensity.type_name(), Some(tf::Token::new("float")));
+        assert_eq!(intensity.type_name(), Some(sdf::ValueTypeName::from("float")));
         assert_eq!(intensity.variability(), sdf::Variability::Varying);
     }
 
@@ -1086,7 +1095,7 @@ class Thing "Thing" (
         // WeakAPI declares `mismatched` as a token; Thing's float declaration
         // wins whole rather than absorbing fields from a different type.
         let mismatched = thing.property(&tf::Token::new("mismatched")).expect("mismatched");
-        assert_eq!(mismatched.type_name(), Some(tf::Token::new("float")));
+        assert_eq!(mismatched.type_name(), Some(sdf::ValueTypeName::from("float")));
         assert_eq!(
             thing.attribute_fallback(&tf::Token::new("mismatched")),
             Some(sdf::Value::Float(2.0))

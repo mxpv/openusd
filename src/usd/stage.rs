@@ -377,19 +377,33 @@ impl EditTarget {
         self.spec_time_offset().apply(stage_time)
     }
 
-    /// Maps a stage (scene) value to the one an authoring write should put in
-    /// the source layer, retiming every `timecode` it holds (C++
-    /// `_StageValueToFieldXf`).
+    /// Maps a stage (scene) value authored on the object at `object_path` (a
+    /// prim or one of its properties) to the one the write should put in the
+    /// source layer, retiming every `timecode` it holds and mapping every path
+    /// expression (C++ `_StageValueToFieldXf` and `_PathExprToField`).
     ///
     /// A `timecode` is a time coordinate in the same frame as the key a sample
     /// is authored at, so it runs through the same inverse offset and likewise
     /// reads back unchanged once composition re-applies the arc's offset. A
-    /// value holding no timecode passes through, as does any value through a
-    /// local or variant target, which carries the identity offset.
-    pub fn map_to_spec_value(&self, value: impl Into<sdf::Value>) -> sdf::Value {
+    /// `pathExpression`, wherever it sits — the value itself, an element, a
+    /// dictionary entry, a time sample — is made absolute against the owning
+    /// prim, then each pattern prefix and reference path is mapped
+    /// target-to-source through this target's namespace mapping; an atom the
+    /// mapping cannot reach becomes the empty expression, and a `%_` or
+    /// `%:name` reference keeps its empty path. Any other value passes
+    /// through, as does everything through a local or variant target, which
+    /// carries the identity offset and mapping.
+    pub fn map_to_spec_value(&self, object_path: &sdf::Path, value: impl Into<sdf::Value>) -> sdf::Value {
         let mut value = value.into();
         self.spec_time_offset().apply_to_value(&mut value);
-        value
+        if !value.holds_path_expressions() {
+            return value;
+        }
+        let anchor_prim = object_path.prim_path();
+        value.map_path_expressions(&mut |expr| {
+            expr.make_absolute(&anchor_prim)
+                .map_paths(|path| self.mapping.map_target_to_source(path))
+        })
     }
 
     /// The offset that maps a stage time into the time frame of the layer this
@@ -499,7 +513,43 @@ pub enum StageAuthoringError {
 
     /// The layer at the current edit target rejected the authoring call.
     #[error(transparent)]
-    Layer(#[from] sdf::AuthoringError),
+    Layer(sdf::AuthoringError),
+
+    /// A value does not fit the attribute's declared type, or the declaration
+    /// itself is unusable — whether the composed declaration said so, before
+    /// the write, or the edit target's own, as the spec was written. Every
+    /// path into this error lifts the layer tier's
+    /// [`AuthoringError::ValueType`](sdf::AuthoringError::ValueType) here, so
+    /// there is one variant to match.
+    #[error(transparent)]
+    ValueType(#[from] sdf::ValueTypeError),
+
+    /// The edit-target layer declares the attribute as a type that does not
+    /// agree with the composed one, so writing the composed-type value would
+    /// leave the layer inconsistent with its own declaration.
+    #[error(transparent)]
+    LocalTypeConflict(Box<TypeConflict>),
+
+    /// The edit target, or a declaration it would copy, holds a property of
+    /// the other kind at the path: an attribute where a relationship was asked
+    /// for, or the reverse.
+    #[error("{path} is a {found} spec where a {expected} spec was expected")]
+    SpecKindMismatch {
+        /// The property path.
+        path: sdf::Path,
+        /// The kind the call needed.
+        expected: sdf::SpecType,
+        /// The kind found instead.
+        found: sdf::SpecType,
+    },
+
+    /// The field is authored only through its dedicated, validated setter,
+    /// never through the generic metadata calls.
+    #[error("field {field} is authored through its own setter, not as metadata")]
+    ReservedField {
+        /// The refused field.
+        field: &'static str,
+    },
 
     /// A [`sdf::LayerSink`] rejected the staged edit from its
     /// [`before_commit`](sdf::LayerSink::before_commit), so the whole edit rolled
@@ -593,10 +643,46 @@ pub enum StageAuthoringError {
     },
 }
 
+/// The payload of [`StageAuthoringError::LocalTypeConflict`]: which
+/// declaration composition found and which the edit-target layer holds.
+#[derive(Debug, thiserror::Error)]
+#[error("{path} composes as {effective} but the edit-target layer declares it {local}")]
+pub struct TypeConflict {
+    /// The attribute path.
+    pub path: sdf::Path,
+    /// The composed declaration the value was validated against.
+    pub effective: Token,
+    /// The edit-target layer's own declaration.
+    pub local: Token,
+}
+
+/// Lifts a value-type failure to its own stage variant and keeps every other
+/// layer failure under [`Layer`](StageAuthoringError::Layer).
+impl From<sdf::AuthoringError> for StageAuthoringError {
+    fn from(error: sdf::AuthoringError) -> Self {
+        match error {
+            sdf::AuthoringError::ValueType(error) => Self::ValueType(error),
+            other => Self::Layer(other),
+        }
+    }
+}
+
+impl From<sdf::DataError> for StageAuthoringError {
+    fn from(error: sdf::DataError) -> Self {
+        Self::Layer(error.into())
+    }
+}
+
+impl From<sdf::SpecError> for StageAuthoringError {
+    fn from(error: sdf::SpecError) -> Self {
+        Self::Layer(error.into())
+    }
+}
+
 impl From<sdf::EditError> for StageAuthoringError {
     fn from(error: sdf::EditError) -> Self {
         match error {
-            sdf::EditError::Author(e) => Self::Layer(e),
+            sdf::EditError::Author(e) => Self::from(e),
             sdf::EditError::Rejected(e) => Self::Rejected(e),
         }
     }
@@ -933,11 +1019,41 @@ impl Stage {
         self.edit_target.borrow().map_to_spec_time(stage_time)
     }
 
-    /// Maps a stage value to the one the current edit target authors, borrowing
-    /// the target rather than cloning it. See
-    /// [`EditTarget::map_to_spec_value`].
-    pub(super) fn map_to_spec_value(&self, value: impl Into<sdf::Value>) -> sdf::Value {
-        self.edit_target.borrow().map_to_spec_value(value)
+    /// Maps a stage value authored on the object at `object_path` to the one
+    /// the current edit target authors, borrowing the target rather than
+    /// cloning it. See [`EditTarget::map_to_spec_value`].
+    pub(super) fn map_to_spec_value(&self, object_path: &sdf::Path, value: impl Into<sdf::Value>) -> sdf::Value {
+        self.edit_target.borrow().map_to_spec_value(object_path, value)
+    }
+
+    /// The current edit target's layer identifier and the spec path
+    /// `scene_path` maps to on it, read under a short borrow of the target
+    /// (which owns a heap `MapFunction`) so no layer borrow overlaps it.
+    /// `OutsideEditTarget` when the mapping does not reach `scene_path`.
+    fn target_spec_path(&self, scene_path: &sdf::Path) -> Result<(String, sdf::Path), StageAuthoringError> {
+        let target = self.edit_target.borrow();
+        let spec_path = target
+            .map_to_spec_path(scene_path)
+            .ok_or_else(|| StageAuthoringError::OutsideEditTarget {
+                path: scene_path.clone(),
+            })?;
+        Ok((target.layer_identifier.clone(), spec_path))
+    }
+
+    /// The kind of spec the current edit target's layer holds at the mapped
+    /// `scene_path`, or `None` when it holds none. Read outside any
+    /// transaction, under a short borrow of the layer graph: the first step of
+    /// [`plan_property_spec`](super::authoring::plan_property_spec).
+    // TODO(perf): a planned write maps `scene_path` here and again in
+    // `with_target_layer_at`; carrying the resolved site in the plan would
+    // spare the second mapping.
+    pub(super) fn local_spec_type(&self, scene_path: &sdf::Path) -> Result<Option<sdf::SpecType>, StageAuthoringError> {
+        let (identifier, spec_path) = self.target_spec_path(scene_path)?;
+        let layers = self.layers();
+        let id = layers
+            .id_of(&identifier)
+            .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
+        Ok(layers.layer(id).data().spec_type(&spec_path))
     }
 
     /// This stage's cached root layer stack identity, stamped onto stage-bound
@@ -1107,35 +1223,54 @@ impl Stage {
     }
 
     /// Author an attribute spec at a property path (e.g. `/World/Mesh.points`)
-    /// on the edit target's layer with default variability `Varying` and
-    /// `custom = true`, matching C++ `UsdPrim::CreateAttribute`'s generic
-    /// overloads. Override the defaults via the returned
-    /// [`Attribute`](super::Attribute) handle's fluent setters.
+    /// on the edit target's layer, following C++ `UsdPrim::CreateAttribute`'s
+    /// contract: a spec already at the edit target is returned untouched,
+    /// whatever type it declares; otherwise the declaration composition
+    /// finds — the schema's, else the strongest authored spec's — is stamped;
+    /// only an attribute nothing declares is created with `type_name`,
+    /// variability `Varying` and `custom = true`, the supplied type being
+    /// checked (an empty spelling is rejected) only in that case. Override
+    /// the defaults via the returned [`Attribute`](super::Attribute) handle's
+    /// fluent setters. A relationship at the path is
+    /// [`SpecKindMismatch`](StageAuthoringError::SpecKindMismatch).
     pub fn create_attribute(
         &self,
         path: impl sdf::IntoPath,
-        type_name: impl Into<String>,
+        type_name: impl Into<sdf::ValueTypeName>,
     ) -> Result<super::Attribute, StageAuthoringError> {
         let path = sdf::try_into_path(path)?;
-        let type_name = type_name.into();
+        let fallback = super::authoring::PropertyDeclaration::Attribute {
+            type_name: type_name.into(),
+            variability: sdf::Variability::Varying,
+            custom: true,
+        };
+        let plan = super::authoring::plan_property_spec(self, &path, sdf::SpecType::Attribute, Some(fallback))?;
         self.with_target_layer_at(&path, |layer, layer_path| {
             // The owning prim and any missing ancestors are auto-created as
             // `over` specs; the layer records them and the property add.
-            sdf::AttributeSpec::new(layer.data_mut(), layer_path, type_name, sdf::Variability::Varying, true)?;
-            Ok(())
+            super::authoring::apply_plan(layer.data_mut(), &layer_path, sdf::SpecType::Attribute, &plan)
         })?;
         Ok(super::Attribute::new(self, path))
     }
 
     /// Author a relationship spec at a property path on the edit target's
-    /// layer with default variability `Varying` and `custom = true`, matching
-    /// C++ `UsdPrim::CreateRelationship`. Override the defaults and add targets
-    /// via the returned [`Relationship`] handle's fluent setters.
+    /// layer, following C++ `UsdPrim::CreateRelationship`'s contract: a
+    /// relationship already at the edit target is returned untouched;
+    /// otherwise the declaration composition finds — the schema's, else the
+    /// strongest authored spec's — is stamped; only a relationship nothing
+    /// declares is created `custom` and `Uniform` (a relationship is always
+    /// uniform). Add targets via the returned [`Relationship`] handle's
+    /// fluent setters. An attribute at the path is
+    /// [`SpecKindMismatch`](StageAuthoringError::SpecKindMismatch).
     pub fn create_relationship(&self, path: impl sdf::IntoPath) -> Result<super::Relationship, StageAuthoringError> {
         let path = sdf::try_into_path(path)?;
+        let fallback = super::authoring::PropertyDeclaration::Relationship {
+            variability: sdf::Variability::Uniform,
+            custom: true,
+        };
+        let plan = super::authoring::plan_property_spec(self, &path, sdf::SpecType::Relationship, Some(fallback))?;
         self.with_target_layer_at(&path, |layer, layer_path| {
-            sdf::RelationshipSpec::new(layer.data_mut(), layer_path, sdf::Variability::Uniform, true)?;
-            Ok(())
+            super::authoring::apply_plan(layer.data_mut(), &layer_path, sdf::SpecType::Relationship, &plan)
         })?;
         Ok(super::Relationship::new(self, path))
     }
@@ -1335,30 +1470,17 @@ impl Stage {
     /// the cache stays valid and no invalidation is needed.
     pub(super) fn with_target_layer_at<F>(&self, scene_path: &sdf::Path, f: F) -> Result<bool, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::LayerEdit<'_>, sdf::Path) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::LayerEdit<'_>, sdf::Path) -> Result<(), StageAuthoringError>,
     {
-        // Read the target identifier and mapped spec path under a short borrow
-        // of `edit_target` (which owns a heap `MapFunction`), releasing it
-        // before the layer borrow below. The mapping is cloned out (rather than
-        // borrowed across the authoring call) because the sinks it ultimately
-        // feeds can re-author and re-target the stage; clone it only when a sink
-        // is installed to consume it, keeping the common no-sink authoring path
+        // The target is read under short borrows released before the layer
+        // borrow below. The mapping is cloned out (rather than borrowed across
+        // the authoring call) because the sinks it ultimately feeds can
+        // re-author and re-target the stage; clone it only when a sink is
+        // installed to consume it, keeping the common no-sink authoring path
         // allocation-free.
+        let (identifier, spec_path) = self.target_spec_path(scene_path)?;
         let notify = !self.sinks.borrow().is_empty();
-        let (identifier, spec_path, mapping) = {
-            let target = self.edit_target.borrow();
-            let spec_path =
-                target
-                    .map_to_spec_path(scene_path)
-                    .ok_or_else(|| StageAuthoringError::OutsideEditTarget {
-                        path: scene_path.clone(),
-                    })?;
-            (
-                target.layer_identifier.clone(),
-                spec_path,
-                notify.then(|| target.mapping.clone()),
-            )
-        };
+        let mapping = notify.then(|| self.edit_target.borrow().mapping.clone());
         let edited = {
             let mut layers = self.composition.authoring_graph_mut();
             let layer_id = layers
@@ -1560,7 +1682,7 @@ impl Stage {
         f: F,
     ) -> Result<bool, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), StageAuthoringError>,
     {
         // Publish the provenance for the aggregator firing inside `edit`'s commit,
         // under a guard that clears it on the way out — including if the edit
@@ -1574,7 +1696,9 @@ impl Stage {
             .map(|m| Provenance::EditTarget(m.clone()));
         self.edit_provenance.replace(provenance);
         let _clear = ClearEditProvenance(&self.edit_provenance);
-        layer.edit(f).map_err(StageAuthoringError::from)
+        // The stage's own closure error rides through the layer transaction, so
+        // a stage-only failure inside it rolls the layer back like a layer one.
+        sdf::edit_layers(&mut [layer], |edits| f(&mut edits[0]))
     }
 
     /// The layer ids of the root (local) layer stack, strongest first — the
@@ -2788,6 +2912,7 @@ impl Stage {
             self.edit_layer(&mut node.layer, None, |l| {
                 l.pseudo_root_mut()
                     .map(|mut root| root.insert_sublayer(pos, identifier, offset))
+                    .map_err(StageAuthoringError::from)
             })
         };
         // Add the child node only once the parent edit succeeded, so a failed
@@ -2837,6 +2962,7 @@ impl Stage {
                     l.pseudo_root_mut()
                         .map(|mut root| root.remove_sublayer(&entry))
                         .map(|_| ())
+                        .map_err(StageAuthoringError::from)
                 })
             })
         };
@@ -4293,7 +4419,8 @@ mod tests {
         edit_layer(&mut layer, |e| {
             sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)
                 .unwrap()
-                .set_default(sdf::Value::Double(value));
+                .set_default(sdf::Value::Double(value))
+                .expect("value fits the declared type");
         });
         Ok(layer)
     }
@@ -4858,7 +4985,8 @@ def "T" {
         edit_layer(&mut strong, |e| {
             sdf::AttributeSpec::new(e.data_mut(), "/A/Child.y", "double", sdf::Variability::Varying, true)
                 .unwrap()
-                .set_default(sdf::Value::Double(5.0));
+                .set_default(sdf::Value::Double(5.0))
+                .expect("value fits the declared type");
         });
         let stage = Stage::builder().make_stage(
             vec![root, strong, opinion_layer("weak.usda", 1.0)?],
@@ -5079,7 +5207,8 @@ def "T" {
         edit_layer(&mut anon, |e| {
             sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)
                 .unwrap()
-                .set_default(sdf::Value::Double(5.0));
+                .set_default(sdf::Value::Double(5.0))
+                .expect("value fits the declared type");
         });
         let anon_id = anon.identifier().to_string();
         stage.insert_layer(&root_id, 0, anon, sdf::LayerOffset::IDENTITY)?;
@@ -5123,7 +5252,8 @@ def "T" {
             sdf::PrimSpec::new(e.data_mut(), "/Target", sdf::Specifier::Def, "").unwrap();
             sdf::AttributeSpec::new(e.data_mut(), "/Target.x", "double", sdf::Variability::Varying, true)
                 .unwrap()
-                .set_default(sdf::Value::Double(5.0));
+                .set_default(sdf::Value::Double(5.0))
+                .expect("value fits the declared type");
         });
 
         let stage = Stage::builder().make_stage(vec![root, target], 0, pcp::Diagnostics::default());
@@ -5400,8 +5530,10 @@ def "T" {
                 e.pseudo_root_mut().unwrap().set_time_codes_per_second(2.0);
                 let mut x =
                     sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true).unwrap();
-                x.set_time_sample(0.0, sdf::Value::Double(0.0));
-                x.set_time_sample(20.0, sdf::Value::Double(200.0));
+                x.set_time_sample(0.0, sdf::Value::Double(0.0))
+                    .expect("value fits the declared type");
+                x.set_time_sample(20.0, sdf::Value::Double(200.0))
+                    .expect("value fits the declared type");
             });
             Stage::builder().make_stage(vec![root, sub], 0, pcp::Diagnostics::default())
         };

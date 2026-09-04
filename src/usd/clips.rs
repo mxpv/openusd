@@ -585,7 +585,7 @@ mod tests {
         );
         // Declarations only — the clips' sample values are not copied.
         let a = manifest.attribute("/Clip/A.a")?.expect("declared");
-        assert_eq!(a.type_name().as_deref(), Some("double"));
+        assert_eq!(a.type_name(), Some(sdf::ValueTypeName::DOUBLE));
         assert!(a.time_samples().is_none());
         assert!(a.default().is_none());
         Ok(())
@@ -695,7 +695,7 @@ def "Model" (
         let mut clip = sdf::Layer::new_anonymous("clip.usda");
         clip.edit(|l| {
             sdf::AttributeSpec::new(l.data_mut(), "/A.sampled", "double", sdf::Variability::Varying, false)?
-                .set_time_sample(0.0, Value::Double(1.0));
+                .set_time_sample(0.0, Value::Double(1.0))?;
             sdf::AttributeSpec::new(l.data_mut(), "/A.bare", "double", sdf::Variability::Varying, false)?;
             Ok(())
         })?;

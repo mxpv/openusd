@@ -5164,6 +5164,22 @@ fn custom_predicate() -> Result<()> {
 
 // --- Stage-tier authoring ---
 
+/// Author `value` as the raw `field` of `attr`'s spec on the root layer, the
+/// edit target of every stage here. The attribute setters refuse the value
+/// fields, so a whole-field `timeSamples` block, an empty sample map, or a
+/// malformed field is authored the way a text layer would carry it.
+fn author_raw_field(attr: &usd::Attribute, field: &str, value: sdf::Value) -> Result<()> {
+    let stage = attr.stage();
+    let root_id = stage.root_layer().identifier().to_string();
+    stage.layer_mut(&root_id).expect("root layer is live").edit(|e| {
+        e.attribute_mut(attr.path())?
+            .expect("the attribute spec is on the root layer")
+            .set(field, value);
+        Ok(())
+    })?;
+    Ok(())
+}
+
 fn in_memory_stage() -> Result<Stage> {
     Stage::builder().in_memory("anon.usda")
 }
@@ -6044,10 +6060,8 @@ def \"S\"
 #[test]
 fn blocked_field_is_authored() -> Result<()> {
     let stage = in_memory_stage()?;
-    stage
-        .define_prim("/A")?
-        .create_attribute("x", "double")?
-        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+    let attr = stage.define_prim("/A")?.create_attribute("x", "double")?;
+    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
 
     let info = stage.attribute("/A.x")?.resolve_info()?;
     assert!(info.has_authored_value_opinion());
@@ -6062,11 +6076,11 @@ fn blocked_field_is_authored() -> Result<()> {
 #[test]
 fn blocked_samples_fall_through() -> Result<()> {
     let stage = in_memory_stage()?;
-    stage
+    let attr = stage
         .define_prim("/A")?
         .create_attribute("x", "double")?
-        .set(sdf::Value::Double(5.0))?
-        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+        .set(sdf::Value::Double(5.0))?;
+    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
 
     let attr = stage.attribute("/A.x")?;
     assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(5.0));
@@ -6142,10 +6156,11 @@ fn default_time_sees_samples() -> Result<()> {
 #[test]
 fn mixed_blocks_track_time() -> Result<()> {
     let stage = in_memory_stage()?;
-    stage.define_prim("/A")?.create_attribute("x", "double")?.set_metadata(
-        sdf::FieldKey::TimeSamples.as_str(),
-        sdf::Value::TimeSamples(vec![(0.0, sdf::Value::Double(1.0)), (10.0, sdf::Value::ValueBlock)]),
-    )?;
+    stage
+        .define_prim("/A")?
+        .create_attribute("x", "double")?
+        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
+        .set_at(sdf::Value::ValueBlock, usd::TimeCode::new(10.0))?;
 
     let attr = stage.attribute("/A.x")?;
     let live = attr.resolve_info_at(usd::TimeCode::new(0.0))?;
@@ -6218,9 +6233,8 @@ def \"A\"
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    stage
-        .create_attribute("/A.x", "double")?
-        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+    let attr = stage.create_attribute("/A.x", "double")?;
+    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
 
     let attr = stage.attribute("/A.x")?;
     assert_eq!(attr.time_samples()?, None);
@@ -6235,11 +6249,15 @@ def \"A\"
 #[test]
 fn empty_samples_no_source() -> Result<()> {
     let stage = in_memory_stage()?;
-    stage
+    let attr = stage
         .define_prim("/B")?
         .create_attribute("y", "double")?
-        .set(sdf::Value::Double(7.0))?
-        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(vec![]))?;
+        .set(sdf::Value::Double(7.0))?;
+    author_raw_field(
+        &attr,
+        sdf::FieldKey::TimeSamples.as_str(),
+        sdf::Value::TimeSamples(vec![]),
+    )?;
 
     let attr = stage.attribute("/B.y")?;
     assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(7.0));
@@ -6255,11 +6273,16 @@ fn time_sample_times_masked() -> Result<()> {
     let stage = Stage::builder()
         .mask(StagePopulationMask::new(["/B"])?)
         .in_memory("anon.usda")?;
-    stage
-        .define_prim("/A")?
-        .create_attribute("x", "double")?
-        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
-        .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
+    // The stage composes nothing at `/A`, so a stage-tier write there has no
+    // declaration to validate against; the samples go onto the layer.
+    let root_id = stage.root_layer().identifier().to_string();
+    stage.layer_mut(&root_id).expect("root layer is live").edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Def, "")?;
+        let mut x = sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?;
+        x.set_time_sample(0.0, sdf::Value::Double(1.0))?;
+        x.set_time_sample(10.0, sdf::Value::Double(3.0))?;
+        Ok(())
+    })?;
     stage.define_prim("/B")?.create_attribute("y", "double")?;
 
     let masked = stage.attribute("/A.x")?;
@@ -7075,8 +7098,7 @@ fn value_queries_agree() -> Result<()> {
         (
             "blocked default",
             authored_shape(|attr| {
-                attr.set(sdf::Value::Double(1.0))?
-                    .set_metadata(sdf::FieldKey::Default.as_str(), sdf::Value::ValueBlock)?;
+                attr.set(sdf::Value::Double(1.0))?.set(sdf::Value::ValueBlock)?;
                 Ok(())
             })?,
             "/A.x",
@@ -7084,8 +7106,8 @@ fn value_queries_agree() -> Result<()> {
         (
             "blocked timeSamples field",
             authored_shape(|attr| {
-                attr.set(sdf::Value::Double(5.0))?
-                    .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+                let attr = attr.set(sdf::Value::Double(5.0))?;
+                author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
                 Ok(())
             })?,
             "/A.x",
@@ -7103,10 +7125,8 @@ fn value_queries_agree() -> Result<()> {
         (
             "mixed blocked samples",
             authored_shape(|attr| {
-                attr.set_metadata(
-                    sdf::FieldKey::TimeSamples.as_str(),
-                    sdf::Value::TimeSamples(vec![(0.0, sdf::Value::Double(1.0)), (10.0, sdf::Value::ValueBlock)]),
-                )?;
+                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(sdf::Value::ValueBlock, usd::TimeCode::new(10.0))?;
                 Ok(())
             })?,
             "/A.x",
@@ -7114,8 +7134,12 @@ fn value_queries_agree() -> Result<()> {
         (
             "empty sample map",
             authored_shape(|attr| {
-                attr.set(sdf::Value::Double(1.0))?
-                    .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(Vec::new()))?;
+                let attr = attr.set(sdf::Value::Double(1.0))?;
+                author_raw_field(
+                    &attr,
+                    sdf::FieldKey::TimeSamples.as_str(),
+                    sdf::Value::TimeSamples(Vec::new()),
+                )?;
                 Ok(())
             })?,
             "/A.x",
@@ -7212,10 +7236,8 @@ fn unusable_samples_unauthored() -> Result<()> {
         sdf::Value::String("not a sample map".into()),
     ] {
         let stage = in_memory_stage()?;
-        stage
-            .define_prim("/A")?
-            .create_attribute("x", "double")?
-            .set_metadata(sdf::FieldKey::TimeSamples.as_str(), field.clone())?;
+        let attr = stage.define_prim("/A")?.create_attribute("x", "double")?;
+        author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), field.clone())?;
 
         let attr = stage.attribute("/A.x")?;
         let modes = [
@@ -7243,10 +7265,8 @@ fn unusable_samples_unauthored() -> Result<()> {
 #[test]
 fn blocked_samples_every_mode() -> Result<()> {
     let stage = in_memory_stage()?;
-    stage
-        .define_prim("/A")?
-        .create_attribute("x", "double")?
-        .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+    let attr = stage.define_prim("/A")?.create_attribute("x", "double")?;
+    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
 
     let attr = stage.attribute("/A.x")?;
     for (mode, info) in [
@@ -7439,8 +7459,7 @@ fn source_answers_conform() -> Result<()> {
                 authored: true,
             },
             authored_shape(|attr| {
-                attr.set(sdf::Value::Double(1.0))?
-                    .set_metadata(sdf::FieldKey::Default.as_str(), sdf::Value::ValueBlock)?;
+                attr.set(sdf::Value::Double(1.0))?.set(sdf::Value::ValueBlock)?;
                 Ok(())
             })?,
             "/A.x",
@@ -8043,7 +8062,7 @@ fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
     let mut layer = sdf::Layer::new_anonymous(identifier);
     layer.edit(|e| {
         sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?
-            .set_default(sdf::Value::Double(value));
+            .set_default(sdf::Value::Double(value))?;
         Ok(())
     })?;
     Ok(layer)
@@ -8991,7 +9010,7 @@ fn create_attribute() -> Result<()> {
     stage.create_attribute("/Sphere.radius", "double")?;
 
     let attr = stage.attribute("/Sphere.radius")?;
-    assert_eq!(attr.type_name()?.as_deref(), Some("double"));
+    assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::DOUBLE));
     assert!(attr.is_custom()?, "generic attributes are authored custom");
     // The property composes as an attribute (not a relationship).
     let radius = sdf::Path::new("/Sphere.radius")?;
@@ -9222,12 +9241,26 @@ fn listener_info_under_variant_target() -> Result<()> {
     let root = stage.edit_target().layer_identifier().to_string();
     stage.define_prim("/Prim")?;
     stage.set_edit_target(EditTarget::for_local_direct_variant(
-        root,
+        root.clone(),
         sdf::path("/Prim{set=sel}")?,
     )?)?;
-    // Create the attribute inside the variant before installing the listener, so
-    // the listener only observes the info-only `set` below.
+    // Create the attribute inside the variant and select that variant before
+    // installing the listener, so the listener only observes the info-only
+    // `set` below, and so the attribute composes: the value write validates
+    // against its declaration.
     let attr = stage.create_attribute("/Prim.size", "double")?;
+    stage.layer_mut(&root).expect("root layer is live").edit(|e| {
+        let mut prim = e.prim_mut("/Prim")?.expect("the prim spec is on the root layer");
+        prim.set(
+            sdf::FieldKey::VariantSetNames.as_str(),
+            sdf::Value::TokenListOp(sdf::TokenListOp::prepended([tf::Token::new("set")])),
+        );
+        prim.set(
+            sdf::FieldKey::VariantSelection.as_str(),
+            sdf::Value::VariantSelectionMap(HashMap::from([("set".to_string(), "sel".to_string())])),
+        );
+        Ok(())
+    })?;
 
     let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let has_default = Rc::new(Cell::new(false));
@@ -9894,7 +9927,7 @@ def \"P\" {
     stage.layer_mut(&payload_id).expect("payload layer is live").edit(|e| {
         e.attribute_mut("/P.v")?
             .expect("authored attribute")
-            .set_default(sdf::Value::Double(7.0));
+            .set_default(sdf::Value::Double(7.0))?;
         Ok(())
     })?;
     assert_eq!(

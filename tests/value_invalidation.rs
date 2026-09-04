@@ -164,7 +164,7 @@ def "Model" (
             edit.attribute_mut(&sdf::path("/Clip.size")?)
                 .expect("the clip layer parsed")
                 .expect("the clip authors the attribute")
-                .set_time_sample(0.0, sdf::Value::Double(7.0));
+                .set_time_sample(0.0, sdf::Value::Double(7.0))?;
             Ok(())
         })?;
 
@@ -235,7 +235,7 @@ def "Model" (
                 sdf::Variability::Varying,
                 false,
             )?
-            .set_time_sample(0.0, sdf::Value::Double(7.0));
+            .set_time_sample(0.0, sdf::Value::Double(7.0))?;
             Ok(())
         })?;
 
@@ -378,7 +378,7 @@ def "P" (
         edit.attribute_mut(&sdf::path("/P{v=x}Child.size")?)
             .expect("the root layer parsed")
             .expect("the variant declares the attribute")
-            .set_default(sdf::Value::Double(3.0));
+            .set_default(sdf::Value::Double(3.0))?;
         Ok(())
     })?;
 
@@ -686,7 +686,7 @@ def "Inst" (
         edit.attribute_mut(&sdf::path("/Source/Inner.x")?)
             .expect("the source layer parsed")
             .expect("the attribute is authored there")
-            .set_default(sdf::Value::Double(7.0));
+            .set_default(sdf::Value::Double(7.0))?;
         Ok(())
     })?;
 

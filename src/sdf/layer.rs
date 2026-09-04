@@ -1696,16 +1696,18 @@ mod tests {
         edit_layer(&mut layer, |e| {
             sdf::RelationshipSpec::new(e.data_mut(), "/Mesh.material:binding", sdf::Variability::Uniform, false)
                 .unwrap();
+            // A declaration is never rewritten: creating over the spec is an error.
+            let error =
+                sdf::RelationshipSpec::new(e.data_mut(), "/Mesh.material:binding", sdf::Variability::Varying, false)
+                    .expect_err("a spec already at the path");
+            assert!(matches!(error, sdf::AuthoringError::InvalidPath { .. }));
+            sdf::RelationshipSpec::new(e.data_mut(), "/Mesh.varying", sdf::Variability::Varying, false).unwrap();
         });
 
         let rel = layer.relationship("/Mesh.material:binding")?.expect("relationship");
         assert_eq!(rel.variability(), sdf::Variability::Uniform);
-
-        edit_layer(&mut layer, |e| {
-            sdf::RelationshipSpec::new(e.data_mut(), "/Mesh.material:binding", sdf::Variability::Varying, false)
-                .unwrap();
-        });
-        let rel = layer.relationship("/Mesh.material:binding")?.expect("relationship");
+        // Varying is the fallback, so it is never written out.
+        let rel = layer.relationship("/Mesh.varying")?.expect("relationship");
         assert_eq!(rel.variability(), sdf::Variability::Varying);
         assert!(rel.field(sdf::FieldKey::Variability.as_str()).ok().flatten().is_none());
         Ok(())
@@ -1790,15 +1792,23 @@ mod tests {
                 false,
             )
             .unwrap();
-            radius.set_default(sdf::Value::Double(2.5));
-            radius.set_time_sample(0.0, sdf::Value::Double(1.0));
-            radius.set_time_sample(10.0, sdf::Value::Double(3.0));
+            radius
+                .set_default(sdf::Value::Double(2.5))
+                .expect("value fits the declared type");
+            radius
+                .set_time_sample(0.0, sdf::Value::Double(1.0))
+                .expect("value fits the declared type");
+            radius
+                .set_time_sample(10.0, sdf::Value::Double(3.0))
+                .expect("value fits the declared type");
             // Out-of-order insert lands in sorted position.
-            radius.set_time_sample(5.0, sdf::Value::Double(2.0));
+            radius
+                .set_time_sample(5.0, sdf::Value::Double(2.0))
+                .expect("value fits the declared type");
         });
 
         let read = layer.attribute("/Sphere.radius")?.expect("attr");
-        assert_eq!(read.type_name().as_deref(), Some("double"));
+        assert_eq!(read.type_name(), Some(sdf::ValueTypeName::DOUBLE));
         assert_eq!(read.default(), Some(sdf::Value::Double(2.5)));
         let samples = read.time_samples().expect("samples authored");
         let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
@@ -1879,9 +1889,12 @@ mod tests {
                 false,
             )
             .unwrap();
-            r.set_time_sample(1.0, sdf::Value::Double(1.0));
-            r.set_time_sample(f64::NAN, sdf::Value::Double(99.0));
-            r.set_time_sample(2.0, sdf::Value::Double(2.0));
+            r.set_time_sample(1.0, sdf::Value::Double(1.0))
+                .expect("value fits the declared type");
+            r.set_time_sample(f64::NAN, sdf::Value::Double(99.0))
+                .expect("value fits the declared type");
+            r.set_time_sample(2.0, sdf::Value::Double(2.0))
+                .expect("value fits the declared type");
         });
         // NaN does not collide with finite samples — both finite values survive.
         let samples = layer
@@ -1900,7 +1913,8 @@ mod tests {
                 .attribute_mut("/Sphere.radius")
                 .unwrap()
                 .unwrap()
-                .erase_time_sample(f64::NAN);
+                .erase_time_sample(f64::NAN)
+                .expect("samples readable");
         });
         assert!(erased);
         let times: Vec<f64> = layer
@@ -2124,7 +2138,9 @@ mod tests {
                 false,
             )
             .unwrap();
-            radius.set_default(sdf::Value::Double(1.5));
+            radius
+                .set_default(sdf::Value::Double(1.5))
+                .expect("value fits the declared type");
             sdf::PrimSpec::new(e.data_mut(), &material, sdf::Specifier::Def, "Material").unwrap();
             let mut binding = sdf::RelationshipSpec::new(
                 e.data_mut(),

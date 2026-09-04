@@ -261,6 +261,29 @@ where
         self.field(key.as_ref()).ok().flatten()?.get()
     }
 
+    /// Reads `key` as `T` for authoring, keeping every failure: `Ok(None)`
+    /// when unauthored, a decode failure as a `DataError`, and a field
+    /// holding any variant but the one `expected` names as
+    /// `SpecError::FieldType`. The read behind every declaration field an
+    /// authoring path consults, so a malformed field is never mistaken for
+    /// absent.
+    pub(crate) fn typed_field<T: TryFrom<sdf::Value>>(
+        &self,
+        key: sdf::FieldKey,
+        expected: &'static str,
+    ) -> Result<Option<T>, sdf::AuthoringError> {
+        let Some(value) = self.field(key.as_str())? else {
+            return Ok(None);
+        };
+        T::try_from(value).map(Some).map_err(|_| {
+            SpecError::FieldType {
+                field: key.as_str(),
+                expected,
+            }
+            .into()
+        })
+    }
+
     /// Whether `key` is authored on this spec.
     pub fn has_field(&self, key: &str) -> bool {
         self.data.has_field(&self.path, key)
@@ -816,28 +839,85 @@ impl<'a> AttributeSpecMut<'a> {
     /// Create an attribute spec at `path` (a property path like
     /// `/World/Mesh.points`), mirroring C++ `SdfAttributeSpec::New`. The owning
     /// prim is auto-created as `over` if missing and its `propertyChildren` is
-    /// updated. `type_name` and `variability` are construction parameters.
+    /// updated. `type_name` and `variability` are construction parameters; the
+    /// type is stored as spelled, and only an empty spelling is rejected (an
+    /// unregistered one is carried, as C++'s `FindOrCreateType` temporary is).
+    /// A spec already at `path` is an error: a declaration is never rewritten.
     pub fn new(
         data: &'a mut dyn sdf::AbstractData,
         path: impl sdf::IntoPath,
-        type_name: impl Into<String>,
+        type_name: impl Into<sdf::ValueTypeName>,
         variability: sdf::Variability,
         custom: bool,
     ) -> Result<Self, sdf::AuthoringError> {
         let path = sdf::try_into_path(path)?;
-        let type_name = Some(type_name.into());
-        create_property_spec(data, &path, sdf::SpecType::Attribute, type_name, variability, custom)?;
-        Ok(Self::get(data, path).expect("type guaranteed by require_spec_type_or_absent"))
+        let type_name = type_name.into();
+        if type_name.as_str().is_empty() {
+            return Err(sdf::ValueTypeError::Empty.into());
+        }
+        create_property_spec(
+            data,
+            &path,
+            sdf::SpecType::Attribute,
+            Some(type_name),
+            variability,
+            custom,
+        )?;
+        Ok(Self::get(data, path).expect("created above"))
     }
+}
+
+/// The states an attribute's `timeSamples` field can legitimately be in.
+///
+/// A whole-field value block is a valid opinion that blocks weaker layers'
+/// samples (the resolver honours it, and C++ authors it through
+/// `SdfLayer::SetTimeSample`), so it is distinct from a malformed field.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TimeSamplesField {
+    Absent,
+    Blocked,
+    Samples(sdf::TimeSampleMap),
 }
 
 impl<'a, B> AttributeSpec<'a, B>
 where
     B: Deref<Target = dyn sdf::AbstractData + 'a>,
 {
-    /// Attribute value type name (e.g. `"double"`, `"float3[]"`).
-    pub fn type_name(&self) -> Option<tf::Token> {
-        self.get(sdf::FieldKey::TypeName)
+    /// Attribute value type name (e.g. `double`, `float3[]`) as spelled in the
+    /// `typeName` field; a spelling the type table does not know reads back as
+    /// an unregistered name (C++ `SdfPropertySpec::GetTypeName`).
+    pub fn type_name(&self) -> Option<sdf::ValueTypeName> {
+        self.get::<tf::Token>(sdf::FieldKey::TypeName)
+            .map(sdf::ValueTypeName::from)
+    }
+
+    /// The declared type, read fallibly for authoring: `Ok(None)` when the
+    /// spec has no `typeName`, a decode failure as a `DataError`, and a field
+    /// holding anything but a token as `SpecError::FieldType`. The
+    /// read-modify-write setters and stage authoring read this, so a malformed
+    /// declaration is an error.
+    pub(crate) fn declared_type(&self) -> Result<Option<sdf::ValueTypeName>, sdf::AuthoringError> {
+        Ok(self
+            .typed_field::<tf::Token>(sdf::FieldKey::TypeName, "token")?
+            .map(sdf::ValueTypeName::from))
+    }
+
+    /// The `timeSamples` field in its three legitimate states, read fallibly:
+    /// a decode failure is a `DataError`, and a value that is neither a sample
+    /// map nor a block is `SpecError::FieldType`.
+    pub(crate) fn time_samples_field(&self) -> Result<TimeSamplesField, sdf::AuthoringError> {
+        Ok(match self.field(sdf::FieldKey::TimeSamples.as_str())? {
+            None => TimeSamplesField::Absent,
+            Some(sdf::Value::ValueBlock | sdf::Value::None) => TimeSamplesField::Blocked,
+            Some(sdf::Value::TimeSamples(map)) => TimeSamplesField::Samples(map),
+            Some(_) => {
+                return Err(SpecError::FieldType {
+                    field: sdf::FieldKey::TimeSamples.as_str(),
+                    expected: "TimeSamples",
+                }
+                .into());
+            }
+        })
     }
 
     /// Default value, if authored.
@@ -872,9 +952,16 @@ impl<'a, B> AttributeSpec<'a, B>
 where
     B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
 {
-    /// Set the `default` value.
-    pub fn set_default(&mut self, value: impl Into<sdf::Value>) {
-        self.set(sdf::FieldKey::Default.as_str(), value.into());
+    /// Set the `default` value, coerced to the declared type (C++
+    /// `SdfPropertySpec::SetDefaultValue`): a block always passes, a value of
+    /// the declared kind is stored as is, a convertible one is converted
+    /// through [`Value::coerce_to_kind`](sdf::Value::coerce_to_kind), and a
+    /// relative path expression is anchored against the owning prim. Fails
+    /// when the spec declares no usable type or the value does not fit.
+    pub fn set_default(&mut self, value: impl Into<sdf::Value>) -> Result<(), sdf::AuthoringError> {
+        let value = self.coerce_for_declared(value.into())?;
+        self.set_default_raw(value);
+        Ok(())
     }
 
     /// Clear any authored `default`.
@@ -882,39 +969,81 @@ where
         self.erase(sdf::FieldKey::Default.as_str());
     }
 
-    /// Insert or replace a time sample at `time`. Samples are kept sorted
-    /// by time so consumers can binary-search. A pre-existing value of a
-    /// non-`TimeSamples` variant is overwritten — debug builds assert.
-    pub fn set_time_sample(&mut self, time: f64, value: impl Into<sdf::Value>) {
-        let value = value.into();
-        // An undecodable `timeSamples` must not be silently overwritten.
-        let Ok(existing) = self.field(sdf::FieldKey::TimeSamples.as_str()) else {
-            return;
-        };
-        let mut map = match existing {
-            Some(sdf::Value::TimeSamples(map)) => map,
-            None => Vec::new(),
-            Some(other) => {
-                debug_assert!(false, "timeSamples field is not a TimeSamples (got {other:?})");
-                Vec::new()
+    /// Insert or replace a time sample at `time`, coerced like
+    /// [`set_default`](Self::set_default) (C++ `SdfLayer::SetTimeSample`).
+    /// Samples are kept sorted by time so consumers can binary-search.
+    pub fn set_time_sample(&mut self, time: f64, value: impl Into<sdf::Value>) -> Result<(), sdf::AuthoringError> {
+        let value = self.coerce_for_declared(value.into())?;
+        self.set_time_sample_raw(time, value)
+    }
+
+    /// Redeclare the value type (C++ `SdfAttributeSpec::SetTypeName`). An
+    /// empty spelling is rejected, and the spec's `default` and every time
+    /// sample must pass the new type's
+    /// [`validate`](sdf::ValueTypeName::validate) — a block passes, an opaque
+    /// value never does — so the spec stays self-consistent with the values it
+    /// holds. C++ writes the token as plain metadata; the validation is this
+    /// crate's divergence. A whole-field sample block is accepted without
+    /// decoding a sample.
+    pub fn set_type_name(&mut self, type_name: impl Into<sdf::ValueTypeName>) -> Result<(), sdf::AuthoringError> {
+        let type_name = type_name.into();
+        if type_name.as_str().is_empty() {
+            return Err(sdf::ValueTypeError::Empty.into());
+        }
+        if let Some(default) = self.field(sdf::FieldKey::Default.as_str())? {
+            type_name.validate(&default)?;
+        }
+        // TODO(perf): `time_samples_field` clones the map to classify it; a
+        // borrowed classification would validate the samples in place.
+        if let TimeSamplesField::Samples(samples) = self.time_samples_field()? {
+            for (_, sample) in &samples {
+                type_name.validate(sample)?;
             }
+        }
+        self.set(
+            sdf::FieldKey::TypeName.as_str(),
+            sdf::Value::Token(type_name.as_token()),
+        );
+        Ok(())
+    }
+
+    /// Writes `default` as given, with no coercion. For the stage tier, which
+    /// validates against the composed declaration before it writes.
+    pub(crate) fn set_default_raw(&mut self, value: sdf::Value) {
+        self.set(sdf::FieldKey::Default.as_str(), value);
+    }
+
+    /// Inserts or replaces the sample at `time` as given, with no coercion. A
+    /// whole-field block starts a fresh map, like an absent field (C++
+    /// `SdfData::SetTimeSample` replaces a non-map field the same way). For
+    /// the stage tier, which validates against the composed declaration
+    /// before it writes.
+    pub(crate) fn set_time_sample_raw(&mut self, time: f64, value: sdf::Value) -> Result<(), sdf::AuthoringError> {
+        // TODO(perf): the upsert reads, clones and rewrites the whole map, so
+        // authoring n samples is quadratic; an in-place sample insert on
+        // `AbstractData` would make it linear.
+        let mut map = match self.time_samples_field()? {
+            TimeSamplesField::Samples(map) => map,
+            TimeSamplesField::Absent | TimeSamplesField::Blocked => Vec::new(),
         };
         upsert_time_sample(&mut map, time, value);
         self.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(map));
+        Ok(())
     }
 
-    /// Erase the time sample at `time`. Returns `true` if a sample was removed.
+    /// Erase the time sample at `time`. Returns `Ok(true)` if a sample was
+    /// removed; an absent or blocked field is `Ok(false)` and stays as it is.
     /// If this was the last sample, the `timeSamples` field is cleared entirely
     /// so the spec round-trips identically to one that never authored samples.
-    pub fn erase_time_sample(&mut self, time: f64) -> bool {
-        let Some(mut map) = self.time_samples() else {
-            return false;
+    pub fn erase_time_sample(&mut self, time: f64) -> Result<bool, sdf::AuthoringError> {
+        let TimeSamplesField::Samples(mut map) = self.time_samples_field()? else {
+            return Ok(false);
         };
         // `total_cmp` gives a deterministic total ordering for `f64` (including
         // NaN and signed zero), so a NaN sample inserted via `set_time_sample`
         // can be located here.
         let Some(idx) = map.iter().position(|(t, _)| t.total_cmp(&time).is_eq()) else {
-            return false;
+            return Ok(false);
         };
         map.remove(idx);
         if map.is_empty() {
@@ -922,7 +1051,22 @@ where
         } else {
             self.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(map));
         }
-        true
+        Ok(true)
+    }
+
+    /// The value the declared type accepts for `value`: the declaration read
+    /// fallibly (a spec with none declares no usable type), a relative path
+    /// expression anchored against the owning prim, then the declared type's
+    /// coercion.
+    fn coerce_for_declared(&self, value: sdf::Value) -> Result<sdf::Value, sdf::AuthoringError> {
+        let declared = self.declared_type()?.ok_or(sdf::ValueTypeError::Empty)?;
+        let value = if value.holds_path_expressions() {
+            let prim_path = self.path().prim_path();
+            value.map_path_expressions(&mut |expr| expr.make_absolute(&prim_path))
+        } else {
+            value
+        };
+        Ok(declared.coerce(value)?)
     }
 
     /// Set the `colorSpace` token.
@@ -1144,7 +1288,7 @@ impl<'a> RelationshipSpecMut<'a> {
     ) -> Result<Self, sdf::AuthoringError> {
         let path = sdf::try_into_path(path)?;
         create_property_spec(data, &path, sdf::SpecType::Relationship, None, variability, custom)?;
-        Ok(Self::get(data, path).expect("type guaranteed by require_spec_type_or_absent"))
+        Ok(Self::get(data, path).expect("created above"))
     }
 }
 
@@ -1249,26 +1393,36 @@ fn remove_path(paths: &mut Vec<sdf::Path>, path: &sdf::Path) -> bool {
 /// Create the property spec at `path` (a property path), shared by
 /// [`AttributeSpec::new`] and [`RelationshipSpec::new`]. Auto-creates the owning
 /// prim chain as `over`, registers `property_name` in `propertyChildren`, then
-/// authors `typeName` (attributes only), `variability`, and `custom`.
-fn create_property_spec(
+/// authors `typeName` (attributes only), `variability`, and `custom`. A spec
+/// already at `path`, of either kind, is an error (C++ `SdfLayer::_CreateSpec`):
+/// a declaration is never rewritten, and a caller that wants get-or-create
+/// looks the spec up first.
+pub(crate) fn create_property_spec(
     data: &mut dyn sdf::AbstractData,
     path: &sdf::Path,
     spec_type: sdf::SpecType,
-    type_name: Option<String>,
+    type_name: Option<sdf::ValueTypeName>,
     variability: sdf::Variability,
     custom: bool,
 ) -> Result<(), sdf::AuthoringError> {
     let (prim_path, property_name) = split_property_path(path)?;
-    require_spec_type_or_absent(data, path, spec_type)?;
+    if data.has_spec(path) {
+        return Err(sdf::AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "a property spec already exists here",
+        });
+    }
     validate_token_vec(data, &prim_path, sdf::ChildrenKey::PropertyChildren)?;
     ensure_prim_chain(data, &prim_path)?;
     add_to_token_vec(data, &prim_path, sdf::ChildrenKey::PropertyChildren, &property_name)?;
 
-    if !data.has_spec(path) {
-        data.create_spec(path.clone(), spec_type);
-    }
+    data.create_spec(path.clone(), spec_type);
     if let Some(type_name) = type_name {
-        data.set_field(path, sdf::FieldKey::TypeName.as_str(), sdf::Value::token(type_name));
+        data.set_field(
+            path,
+            sdf::FieldKey::TypeName.as_str(),
+            sdf::Value::Token(type_name.as_token()),
+        );
     }
     let varying = variability != sdf::Variability::Varying;
     set_or_erase(
@@ -1658,21 +1812,6 @@ fn try_child_field<'a>(
     Ok(data.try_field(path, key.as_str())?)
 }
 
-/// Verify that `path` either holds no spec or holds one of type `expected`.
-fn require_spec_type_or_absent(
-    data: &dyn sdf::AbstractData,
-    path: &sdf::Path,
-    expected: sdf::SpecType,
-) -> Result<(), sdf::AuthoringError> {
-    match data.spec_type(path) {
-        Some(existing) if existing != expected => Err(sdf::AuthoringError::InvalidPath {
-            path: path.clone(),
-            reason: "spec exists with the wrong SpecType",
-        }),
-        _ => Ok(()),
-    }
-}
-
 /// Validate that `path` is an absolute, non-root, non-property path suitable
 /// for prim authoring. Each prim component must be a USD identifier, optionally
 /// carrying `{set=sel}` variant selections whose set and selection names are
@@ -1724,6 +1863,8 @@ fn split_property_path(path: &sdf::Path) -> Result<(sdf::Path, String), sdf::Aut
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use crate::sdf::{AbstractData, Data};
 
@@ -1924,8 +2065,9 @@ mod tests {
     fn attribute_mut_reads() {
         let (mut data, path) = data_with_spec("/A.x", sdf::SpecType::Attribute);
         let mut attr = AttributeSpecMut::get(&mut data, path).expect("attribute spec");
+        attr.set(sdf::FieldKey::TypeName.as_str(), sdf::Value::token("int"));
 
-        attr.set_default(sdf::Value::Int(42));
+        attr.set_default(sdf::Value::Int(42)).expect("an int fits");
         attr.set_custom(true);
 
         assert_eq!(attr.default(), Some(sdf::Value::Int(42)));
@@ -2058,5 +2200,220 @@ mod tests {
             .try_as_layer_offset_vec()
             .expect("layer-offset vec");
         assert_eq!(offsets, vec![sdf::LayerOffset::IDENTITY]);
+    }
+
+    /// A [`Data`] holding an attribute spec at `/A.x` declared as `type_name`.
+    fn typed_attr(type_name: &str) -> (Data, sdf::Path) {
+        let path = sdf::path("/A.x").expect("valid path");
+        let mut data = Data::new();
+        AttributeSpec::new(&mut data, path.clone(), type_name, sdf::Variability::Varying, false)
+            .expect("attribute spec");
+        (data, path)
+    }
+
+    fn field_of(data: &Data, path: &sdf::Path, key: sdf::FieldKey) -> Option<sdf::Value> {
+        data.try_field(path, key.as_str())
+            .expect("readable")
+            .map(Cow::into_owned)
+    }
+
+    #[test]
+    fn default_numeric_cast() {
+        let (mut data, path) = typed_attr("float");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_default(sdf::Value::Int(4)).expect("int casts to float");
+        assert_eq!(
+            field_of(&data, &path, sdf::FieldKey::Default),
+            Some(sdf::Value::Float(4.0))
+        );
+    }
+
+    #[test]
+    fn default_mismatch_rejected() {
+        let (mut data, path) = typed_attr("float");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        let error = attr
+            .set_default(sdf::Value::Token(tf::Token::from("x")))
+            .expect_err("a token is no float");
+        assert!(matches!(
+            error,
+            sdf::AuthoringError::ValueType(sdf::ValueTypeError::Mismatch { .. })
+        ));
+        assert_eq!(field_of(&data, &path, sdf::FieldKey::Default), None);
+    }
+
+    #[test]
+    fn unknown_block_only() {
+        let (mut data, path) = typed_attr("double3d[]");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_default(sdf::Value::ValueBlock)
+            .expect("a block fits any declaration");
+        assert_eq!(
+            field_of(&data, &path, sdf::FieldKey::Default),
+            Some(sdf::Value::ValueBlock)
+        );
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        let error = attr
+            .set_default(sdf::Value::Double(1.0))
+            .expect_err("no value fits an unknown type");
+        assert!(matches!(
+            error,
+            sdf::AuthoringError::ValueType(sdf::ValueTypeError::Unregistered { .. })
+        ));
+    }
+
+    #[test]
+    fn opaque_rejects_default() {
+        let (mut data, path) = typed_attr("opaque");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        let error = attr.set_default(sdf::Value::Opaque).expect_err("opaque holds no value");
+        assert!(matches!(
+            error,
+            sdf::AuthoringError::ValueType(sdf::ValueTypeError::Opaque)
+        ));
+        attr.set_default(sdf::Value::ValueBlock)
+            .expect("a block is the one value opaque takes");
+        assert_eq!(
+            field_of(&data, &path, sdf::FieldKey::Default),
+            Some(sdf::Value::ValueBlock)
+        );
+    }
+
+    #[test]
+    fn empty_type_rejected() {
+        let path = sdf::path("/A.x").expect("valid path");
+        let mut data = Data::new();
+        let error = AttributeSpec::new(&mut data, path.clone(), "", sdf::Variability::Varying, false)
+            .expect_err("an attribute needs a type");
+        assert!(matches!(
+            error,
+            sdf::AuthoringError::ValueType(sdf::ValueTypeError::Empty)
+        ));
+        assert!(!data.has_spec(&path));
+    }
+
+    #[test]
+    fn path_expression_anchored() {
+        let (mut data, path) = typed_attr("pathExpression");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_default(sdf::Value::PathExpression(sdf::PathExpression::parse("Child")))
+            .expect("a path expression fits");
+        let default = field_of(&data, &path, sdf::FieldKey::Default).expect("default authored");
+        let expr = default.try_as_path_expression().expect("a path expression");
+        assert_eq!(expr.to_string(), "/A/Child");
+    }
+
+    #[test]
+    fn bad_time_samples_kept() {
+        let (mut data, path) = typed_attr("float");
+        let junk = sdf::Value::String("not a sample map".into());
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set(sdf::FieldKey::TimeSamples.as_str(), junk.clone());
+        let error = attr
+            .set_time_sample(1.0, sdf::Value::Float(1.0))
+            .expect_err("a malformed field is reported");
+        assert!(matches!(
+            error,
+            sdf::AuthoringError::Spec(SpecError::FieldType {
+                field: "timeSamples",
+                ..
+            })
+        ));
+        assert!(matches!(
+            attr.time_samples_field(),
+            Err(sdf::AuthoringError::Spec(SpecError::FieldType { .. }))
+        ));
+        assert_eq!(field_of(&data, &path, sdf::FieldKey::TimeSamples), Some(junk));
+    }
+
+    #[test]
+    fn declared_type_missing() {
+        let (mut data, path) = data_with_spec("/A.x", sdf::SpecType::Attribute);
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        assert_eq!(attr.declared_type().expect("readable"), None);
+        let error = attr
+            .set_default(sdf::Value::Float(1.0))
+            .expect_err("no declaration to check against");
+        assert!(matches!(
+            error,
+            sdf::AuthoringError::ValueType(sdf::ValueTypeError::Empty)
+        ));
+        assert_eq!(field_of(&data, &path, sdf::FieldKey::Default), None);
+    }
+
+    #[test]
+    fn declared_type_not_token() {
+        let (mut data, path) = data_with_spec("/A.x", sdf::SpecType::Attribute);
+        let mut attr = AttributeSpecMut::get(&mut data, path).expect("attr spec");
+        attr.set(sdf::FieldKey::TypeName.as_str(), sdf::Value::Int(3));
+        assert!(matches!(
+            attr.declared_type(),
+            Err(sdf::AuthoringError::Spec(SpecError::FieldType {
+                field: "typeName",
+                expected: "token",
+            }))
+        ));
+        assert_eq!(attr.type_name(), None, "the lenient accessor reads nothing");
+    }
+
+    #[test]
+    fn spec_new_exists() {
+        let (mut data, path) = typed_attr("float");
+        AttributeSpecMut::get(&mut data, path.clone())
+            .expect("attr spec")
+            .set_default(sdf::Value::Float(1.0))
+            .expect("float fits");
+        let error = AttributeSpec::new(&mut data, path.clone(), "double", sdf::Variability::Varying, false)
+            .expect_err("creation never rewrites a declaration");
+        assert!(matches!(error, sdf::AuthoringError::InvalidPath { .. }));
+        let attr = AttributeSpecRef::get(&data, path.clone()).expect("attr spec");
+        assert_eq!(attr.type_name(), Some(sdf::ValueTypeName::FLOAT));
+        assert_eq!(
+            field_of(&data, &path, sdf::FieldKey::Default),
+            Some(sdf::Value::Float(1.0))
+        );
+    }
+
+    #[test]
+    fn raw_skips_coercion() {
+        let (mut data, path) = typed_attr("double");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_default_raw(sdf::Value::Float(1.0));
+        assert_eq!(
+            field_of(&data, &path, sdf::FieldKey::Default),
+            Some(sdf::Value::Float(1.0))
+        );
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_default(sdf::Value::Float(2.0)).expect("float casts to double");
+        assert_eq!(
+            field_of(&data, &path, sdf::FieldKey::Default),
+            Some(sdf::Value::Double(2.0))
+        );
+    }
+
+    #[test]
+    fn sample_field_states() {
+        let (mut data, path) = typed_attr("float");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        assert!(matches!(attr.time_samples_field(), Ok(TimeSamplesField::Absent)));
+        assert!(!attr.erase_time_sample(1.0).expect("nothing to erase"));
+
+        attr.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock);
+        assert!(matches!(attr.time_samples_field(), Ok(TimeSamplesField::Blocked)));
+        assert!(!attr.erase_time_sample(1.0).expect("a block holds no sample"));
+        assert_eq!(
+            field_of(&data, &path, sdf::FieldKey::TimeSamples),
+            Some(sdf::Value::ValueBlock),
+            "the block stays"
+        );
+
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_time_sample(1.0, sdf::Value::Int(3))
+            .expect("int casts to float");
+        match attr.time_samples_field().expect("readable") {
+            TimeSamplesField::Samples(samples) => assert_eq!(samples, vec![(1.0, sdf::Value::Float(3.0))]),
+            other => panic!("expected samples, got {other:?}"),
+        }
+        assert!(attr.erase_time_sample(1.0).expect("the sample goes"));
     }
 }

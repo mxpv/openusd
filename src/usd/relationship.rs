@@ -6,9 +6,9 @@
 //! fluent setters take `self` by value and return `Self`, so writes chain in a
 //! single statement that ends with the final handle bound.
 
-use super::{Prim, SpecSite, Stage, StageAuthoringError};
+use super::{Prim, SpecSite, Stage, StageAuthoringError, authoring};
 use crate::Result;
-use crate::sdf;
+use crate::{pcp, sdf};
 
 /// Stage-composed relationship handle. Mirrors C++ `UsdRelationship`.
 ///
@@ -73,13 +73,24 @@ impl Relationship {
         // A property a schema declares is never custom — that is what `custom`
         // means — so an authored opinion on one is ignored, exactly as for an
         // attribute (C++ `UsdStage::_GetPropCustomImpl` covers both).
-        if self.declared_variability()?.is_some() {
+        if self.schema_declared()? {
             return Ok(false);
         }
         Ok(self
             .stage
             .field::<bool>(&self.path, sdf::FieldKey::Custom)?
             .unwrap_or(false))
+    }
+
+    /// Whether a schema of the owning prim declares this relationship.
+    fn schema_declared(&self) -> Result<bool, pcp::QueryError> {
+        let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
+            return Ok(false);
+        };
+        Ok(info
+            .prim_definition()
+            .property(&name)
+            .is_some_and(|property| property.spec_type() == sdf::SpecType::Relationship))
     }
 
     /// Append a target path. No-op if already present.
@@ -109,11 +120,33 @@ impl Relationship {
     ///
     /// [`Attribute::set_metadata`]: crate::usd::Attribute::set_metadata
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
-        let value = self.stage.map_to_spec_value(value);
+        authoring::check_reserved(sdf::SpecType::Relationship, key)?;
+        let value = self.stage.map_to_spec_value(&self.path, value);
         self.edit(|spec| {
             spec.set(key, value);
             Ok(())
         })
+    }
+
+    /// Erase the local `targetPaths` opinion on the edit target (C++
+    /// `UsdRelationship::ClearTargets` without removing the spec): the targets
+    /// weaker layers author compose again, unlike after `set_targets([])`,
+    /// which authors an explicit empty list that blocks them. A target
+    /// holding no spec is left alone; an attribute at the path is an error.
+    pub fn clear_targets(self) -> Result<Self, StageAuthoringError> {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
+            authoring::edit_existing_spec(
+                layer.data_mut(),
+                path,
+                sdf::SpecType::Relationship,
+                sdf::RelationshipSpecMut::get,
+                |spec| {
+                    spec.erase(sdf::FieldKey::TargetPaths.as_str());
+                    Ok(())
+                },
+            )
+        })?;
+        Ok(self)
     }
 
     /// Remove a target path. Returns `Ok(true)` if it was present. Takes
@@ -196,56 +229,38 @@ impl Relationship {
     /// `pcp::Changes::effects_of`'s property branch, which drops the affected prims'
     /// memoized resolved targets (the owner and each dependent that reads the
     /// site through an arc) so the next query recomposes them.
-    /// Returns `InvalidPath` if no relationship spec exists at the path.
+    /// Returns `InvalidPath` if nothing declares the relationship at all.
     fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
         self.edit_spec(f)?;
         Ok(self)
     }
 
     /// Runs `f` on this relationship's spec at the edit target's layer,
-    /// stamping one from the schema declaration first when the target has none
-    /// (C++ `UsdStage::_CreateNewSpecFromSchemaRelationship`).
+    /// stamping one from the declaration composition finds — the schema's,
+    /// else the strongest authored spec's — when the target has none (C++
+    /// `UsdStage::_CreatePropertySpecForEditing`).
     ///
-    /// Every mutation goes through here, so a relationship a schema declares is
-    /// authorable on the handle `Prim::relationships` hands back.
+    /// Every creating mutation goes through here, so a relationship a schema
+    /// declares is authorable on the handle `Prim::relationships` hands back.
     fn edit_spec<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
-        let declared = self.declared_variability().map_err(StageAuthoringError::Composition)?;
+        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Relationship, None)?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            if let Some(variability) = declared
-                && sdf::RelationshipSpecMut::get(layer.data_mut(), path.clone()).is_none()
-            {
-                sdf::RelationshipSpec::new(layer.data_mut(), path.clone(), variability, false)?;
-            }
-            super::edit_spec(
+            authoring::apply_plan(layer.data_mut(), &path, sdf::SpecType::Relationship, &ensure)?;
+            authoring::edit_spec(
                 layer.data_mut(),
                 path,
-                "no relationship spec at path on the edit target layer",
+                sdf::SpecType::Relationship,
                 sdf::RelationshipSpecMut::get,
                 f,
             )
         })?;
         Ok(())
-    }
-
-    /// The variability a schema declares for this relationship, if a schema
-    /// declares it at all — which is also the test for whether a spec may be
-    /// stamped for it.
-    fn declared_variability(&self) -> Result<Option<sdf::Variability>, crate::pcp::QueryError> {
-        let Some((prim, name)) = self.path.split_property() else {
-            return Ok(None);
-        };
-        let info = self.stage.prim_type_info_composed(prim)?;
-        let definition = info.prim_definition();
-        let Some(property) = definition.property(&crate::tf::Token::from(name)) else {
-            return Ok(None);
-        };
-        Ok((property.spec_type() == sdf::SpecType::Relationship).then(|| property.variability()))
     }
 }
 

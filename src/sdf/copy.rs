@@ -230,10 +230,13 @@ where
         if !is_copyable(spec_type) {
             return Ok(());
         }
-        create_dst_spec(self.dst, dst_path, spec_type)?;
+        // An upsert: a destination spec of the same kind keeps its state and
+        // takes the copied fields over its own.
+        if self.dst.spec_type(dst_path) != Some(spec_type) {
+            create_dst_spec(self.dst, dst_path, spec_type)?;
+        }
 
         let fields = self.src.list_fields(src_path).unwrap_or_default();
-        let mut authored_type_name = false;
         for field in &fields {
             if is_children_field(field) {
                 continue;
@@ -248,26 +251,11 @@ where
                 src_path,
                 dst_path,
             };
-            let authored = match (self.value_policy)(args) {
-                CopyValue::Skip => false,
-                CopyValue::Copy => {
-                    self.dst.set_field(dst_path, field, value.into_owned());
-                    true
-                }
-                CopyValue::Replace(value) => {
-                    self.dst.set_field(dst_path, field, value);
-                    true
-                }
-            };
-            authored_type_name |= authored && field == sdf::FieldKey::TypeName.as_str();
-        }
-
-        // The attribute constructor stamps a placeholder `typeName`; drop it
-        // unless the policy actually authored one, so the copy never leaves the
-        // empty placeholder behind (a source `typeName` the policy skipped, or a
-        // source that authored none at all).
-        if spec_type == sdf::SpecType::Attribute && !authored_type_name {
-            self.dst.erase_field(dst_path, sdf::FieldKey::TypeName.as_str());
+            match (self.value_policy)(args) {
+                CopyValue::Skip => {}
+                CopyValue::Copy => self.dst.set_field(dst_path, field, value.into_owned()),
+                CopyValue::Replace(value) => self.dst.set_field(dst_path, field, value),
+            }
         }
 
         for &key in child_fields(spec_type) {
@@ -402,11 +390,10 @@ fn create_dst_spec(
 ) -> Result<(), sdf::AuthoringError> {
     match spec_type {
         sdf::SpecType::Prim | sdf::SpecType::Variant => sdf::spec::ensure_prim_chain(dst, dst_path)?,
-        sdf::SpecType::Attribute => {
-            sdf::AttributeSpecMut::new(dst, dst_path.clone(), "", sdf::Variability::Varying, false)?;
-        }
-        sdf::SpecType::Relationship => {
-            sdf::RelationshipSpecMut::new(dst, dst_path.clone(), sdf::Variability::Varying, false)?;
+        // A property spec is created bare: the copied fields, `typeName`
+        // included, land on it afterwards like any other field.
+        sdf::SpecType::Attribute | sdf::SpecType::Relationship => {
+            sdf::spec::create_property_spec(dst, dst_path, spec_type, None, sdf::Variability::Varying, false)?;
         }
         sdf::SpecType::VariantSet => sdf::spec::ensure_variant_set(dst, dst_path)?,
         sdf::SpecType::PseudoRoot => {}

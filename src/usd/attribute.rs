@@ -11,7 +11,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use super::{
-    Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, TimeCode, interp,
+    Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, TimeCode, TypeConflict,
+    authoring, interp,
 };
 use crate::Result;
 use crate::pcp;
@@ -82,6 +83,17 @@ impl Attribute {
     /// Set the attribute's value at `time`. Mirrors C++
     /// `UsdAttribute::Set(value, time)`.
     ///
+    /// The value is validated against the composed declaration — exactly, no
+    /// coercion, a block always passing — and the edit-target layer's own
+    /// declaration must agree with the composed one (§6.5.1 of the core spec:
+    /// a `color3f` value may land in a local `float3`, not in a local
+    /// `point3f` or `double`), so a layer never holds a value of a kind it
+    /// does not declare. The value is then written as validated, never
+    /// recast against the local declaration. A spec the target lacks is
+    /// stamped first from the declaration composition finds — the schema's,
+    /// else the strongest authored spec's (C++
+    /// `UsdStage::_CreatePropertySpecForEditing`).
+    ///
     /// `time` is `None` to author the default value, or `Some(tc)` (a
     /// [`usd::TimeCode`](super::TimeCode), which a bare `TimeCode` coerces
     /// into) to author a time sample. A numeric time is in stage (composed)
@@ -91,45 +103,90 @@ impl Attribute {
     /// composition re-applies the offset.
     ///
     /// A `timecode` value is a time coordinate in that same frame, so it is
-    /// inverse-mapped alongside the key it is authored at (C++
-    /// `_StageValueToFieldXf`) and likewise reads back unchanged.
+    /// inverse-mapped alongside the key it is authored at, and a relative
+    /// `pathExpression` is anchored against the owning prim and mapped into
+    /// the target's namespace (C++ `_StageValueToFieldXf`); both read back
+    /// unchanged.
     pub fn set_at(
         self,
         value: impl Into<sdf::Value>,
         time: impl Into<Option<super::TimeCode>>,
     ) -> Result<Self, StageAuthoringError> {
-        let value = self.stage.map_to_spec_value(value);
-        match time.into() {
-            None => self.edit(|spec| {
-                spec.set_default(value);
-                Ok(())
-            }),
-            Some(time) => {
-                let spec_time = self.stage.map_to_spec_time(time.value());
-                self.edit(|spec| {
-                    spec.set_time_sample(spec_time, value);
-                    Ok(())
-                })
-            }
-        }
-    }
-
-    /// Block opinions from weaker layers by authoring a value block on the
-    /// default and every authored time sample. Mirrors C++
-    /// `UsdAttribute::Block()`.
-    pub fn block(self) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| {
-            spec.set_default(sdf::Value::ValueBlock);
-            // Block every authored time sample too — otherwise `get_at` would
-            // still resolve weaker opinions through the cached samples.
-            if let Some(mut samples) = spec.time_samples() {
-                for (_, value) in samples.iter_mut() {
-                    *value = sdf::Value::ValueBlock;
-                }
-                spec.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(samples));
+        let plan = self.plan_authoring(value.into(), time.into())?;
+        self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
+            let mut spec = plan.prepare(layer.data_mut(), &spec_path)?;
+            match plan.spec_time {
+                None => spec.set_default_raw(plan.value),
+                Some(time) => spec.set_time_sample_raw(time, plan.value)?,
             }
             Ok(())
+        })?;
+        Ok(self)
+    }
+
+    /// Block opinions from weaker layers: every local value opinion is
+    /// removed and `default` becomes a value block, so nothing weaker resolves
+    /// through (C++ `UsdAttribute::Block`, which is `Clear` followed by a
+    /// block). The spec is prepared like a write — stamped when the target
+    /// lacks it, its local declaration read fallibly — and the `timeSamples`
+    /// field is erased whole, without decoding samples the block discards.
+    pub fn block(self) -> Result<Self, StageAuthoringError> {
+        let plan = self.plan_authoring(sdf::Value::ValueBlock, None)?;
+        self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
+            let mut spec = plan.prepare(layer.data_mut(), &spec_path)?;
+            spec.erase(sdf::FieldKey::TimeSamples.as_str());
+            spec.set_default_raw(sdf::Value::ValueBlock);
+            Ok(())
+        })?;
+        Ok(self)
+    }
+
+    /// Remove every local value opinion — `default` and the whole
+    /// `timeSamples` field — from the edit target (C++ `UsdAttribute::Clear`),
+    /// so weaker layers' opinions resolve again. A target holding no spec is
+    /// left alone, and the sample field is erased without decoding it.
+    pub fn clear(self) -> Result<Self, StageAuthoringError> {
+        self.edit_existing(|spec| {
+            spec.clear_default();
+            spec.erase(sdf::FieldKey::TimeSamples.as_str());
+            Ok(())
         })
+    }
+
+    /// Remove the local `default` opinion (C++ `UsdAttribute::ClearDefault`);
+    /// a target holding no spec is left alone.
+    pub fn clear_default(self) -> Result<Self, StageAuthoringError> {
+        self.edit_existing(|spec| {
+            spec.clear_default();
+            Ok(())
+        })
+    }
+
+    /// Remove the local opinion at `time` (C++ `UsdAttribute::ClearAtTime`):
+    /// the `default` for `None`, otherwise the one sample keyed at the
+    /// inverse-mapped time, through the fallible sample-map update, so a
+    /// malformed map is an error. A missing sample, a
+    /// whole-field block and a target holding no spec are left alone.
+    pub fn clear_at(self, time: impl Into<Option<super::TimeCode>>) -> Result<Self, StageAuthoringError> {
+        let Some(time) = time.into() else {
+            return self.clear_default();
+        };
+        let spec_time = self.stage.map_to_spec_time(time.value());
+        self.edit_existing(|spec| {
+            spec.erase_time_sample(spec_time)?;
+            Ok(())
+        })
+    }
+
+    /// Redeclare the attribute's value type on the edit target (C++
+    /// `UsdAttribute::SetTypeName`). It authors at the edit target like every
+    /// setter: a schema- or weaker-defined attribute with no local spec gets
+    /// one stamped from its declaration first, and a handle nothing defines
+    /// is an error. The local spec's values must fit the new type, on the
+    /// terms [`sdf::AttributeSpecMut::set_type_name`] states.
+    pub fn set_type_name(self, type_name: impl Into<sdf::ValueTypeName>) -> Result<Self, StageAuthoringError> {
+        let type_name = type_name.into();
+        self.edit(|spec| Ok(spec.set_type_name(type_name)?))
     }
 
     /// Set the `colorSpace` token.
@@ -156,9 +213,16 @@ impl Attribute {
     /// a runtime-built string.
     ///
     /// `value` is in stage time, so any `timecode` it holds is mapped into the
-    /// edit target's own time frame (C++ `_StageValueToFieldXf`).
+    /// edit target's own time frame, and any path expression into its
+    /// namespace (C++ `_StageValueToFieldXf`).
+    ///
+    /// A field with a dedicated setter — `default`, `timeSamples`,
+    /// `typeName`, `connectionPaths`, `variability`, `custom` — is refused as
+    /// [`ReservedField`](StageAuthoringError::ReservedField): those setters
+    /// validate what they write, and this call must not bypass them.
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
-        let value = self.stage.map_to_spec_value(value);
+        authoring::check_reserved(sdf::SpecType::Attribute, key)?;
+        let value = self.stage.map_to_spec_value(&self.path, value);
         self.edit(|spec| {
             spec.set(key, value);
             Ok(())
@@ -172,11 +236,11 @@ impl Attribute {
     /// Erasing reaches only an attribute spec the layer already holds, so a
     /// property it says nothing about stays absent from it.
     pub fn clear_metadata(self, key: &'static str) -> Result<Self, StageAuthoringError> {
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            erase_attribute_field(layer.data_mut(), path, key);
+        authoring::check_reserved(sdf::SpecType::Attribute, key)?;
+        self.edit_existing(|spec| {
+            spec.erase(key);
             Ok(())
-        })?;
-        Ok(self)
+        })
     }
 
     /// Read-modify-write a metadata field on the attribute's spec at the edit
@@ -203,22 +267,31 @@ impl Attribute {
     where
         F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
     {
-        let declared = self.declared_spec().map_err(StageAuthoringError::Composition)?;
+        authoring::check_reserved(sdf::SpecType::Attribute, key)?;
+        // Resolved before the transaction, consulted only when there is a
+        // value to author: an erase never stamps a spec.
+        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, None);
         self.stage.with_target_layer_at(&self.path, |layer, path| {
             let local = layer.data_mut().try_field(&path, key)?.map(Cow::into_owned);
             // Erasing reaches only an attribute spec this layer already holds,
             // so a property it says nothing about stays absent from it.
             let Some(value) = f(local) else {
-                erase_attribute_field(layer.data_mut(), path, key);
-                return Ok(());
+                return authoring::edit_existing_spec(
+                    layer.data_mut(),
+                    path,
+                    sdf::SpecType::Attribute,
+                    sdf::AttributeSpecMut::get,
+                    |spec| {
+                        spec.erase(key);
+                        Ok(())
+                    },
+                );
             };
-            // Authoring needs a spec, which the schema declaration supplies when
-            // the layer has none.
-            declare_spec(layer.data_mut(), &path, &declared)?;
-            super::edit_spec(
+            authoring::apply_plan(layer.data_mut(), &path, sdf::SpecType::Attribute, &ensure?)?;
+            authoring::edit_spec(
                 layer.data_mut(),
                 path,
-                "no attribute spec at path on the edit target layer",
+                sdf::SpecType::Attribute,
                 sdf::AttributeSpecMut::get,
                 |spec| {
                     spec.set(key, value);
@@ -283,7 +356,10 @@ impl Attribute {
         if self.connections_composed()?.iter().any(|p| p == &target) {
             return Ok(self);
         }
-        self.edit_connection(move |spec| Ok(spec.add_connection_path(target, prepend)?))
+        self.edit(move |spec| {
+            spec.add_connection_path(target, prepend)?;
+            Ok(())
+        })
     }
 
     /// Remove a single connection target. Returns `Ok(true)` if it was
@@ -297,56 +373,24 @@ impl Attribute {
         if !self.connections_composed()?.iter().any(|p| p == &target) {
             return Ok(false);
         }
-        let type_name = self.stage.field::<tf::Token>(&self.path, sdf::FieldKey::TypeName)?;
+        // A delete list-op still needs a property spec to carry it, stamped
+        // as any other write stamps it.
         let mut removed = false;
-        self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
-            if !layer.data().has_spec(&spec_path) {
-                // A delete list-op still needs a property spec to carry it.
-                // Use the composed type name and leave `custom` unauthored so
-                // the spec is only as strong as needed for the connection edit.
-                let type_name = type_name.clone().ok_or_else(|| sdf::AuthoringError::InvalidPath {
-                    path: spec_path.clone(),
-                    reason: "cannot author connection delete for typeless composed attribute",
-                })?;
-                sdf::AttributeSpec::new(
-                    layer.data_mut(),
-                    spec_path.clone(),
-                    type_name,
-                    sdf::Variability::Varying,
-                    false,
-                )?;
-            }
-            super::edit_spec(
-                layer.data_mut(),
-                spec_path,
-                "no attribute spec at path on the edit target layer",
-                sdf::AttributeSpecMut::get,
-                |spec| {
-                    removed = spec.delete_connection_path(&target)?;
-                    Ok(())
-                },
-            )
+        self.edit_spec(|spec| {
+            removed = spec.delete_connection_path(&target)?;
+            Ok(())
         })?;
         Ok(removed)
     }
 
-    /// Clear all authored `connectionPaths` on the edit target. Skips
-    /// cache invalidation when no opinion was authored. Mirrors C++
-    /// `UsdAttribute::ClearConnections`.
+    /// Clear all authored `connectionPaths` on the edit target (C++
+    /// `UsdAttribute::ClearConnections`). A target holding no spec is left
+    /// alone, and the layer records a change only when an opinion went away.
     pub fn clear_connections(self) -> Result<Self, StageAuthoringError> {
-        self.edit_connection(|spec| Ok(spec.clear_connection_paths()))
-    }
-
-    /// Run `f` on the attribute spec at the edit target's layer. The layer
-    /// records a `connectionPaths` change (driving cache invalidation) only
-    /// when `f` actually mutates the field. The shared
-    /// helper for the connection authoring methods above.
-    fn edit_connection<F>(self, f: F) -> Result<Self, StageAuthoringError>
-    where
-        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<bool, sdf::AuthoringError>,
-    {
-        self.edit_spec(|spec| f(spec).map(|_| ()))?;
-        Ok(self)
+        self.edit_existing(|spec| {
+            spec.clear_connection_paths();
+            Ok(())
+        })
     }
 
     /// `true` when any connection opinion is authored — including an
@@ -447,16 +491,34 @@ impl Attribute {
         Ok(spec_type == Some(sdf::SpecType::Attribute))
     }
 
-    /// Composed value type (the `typeName` field), if set. Mirrors C++
-    /// `UsdAttribute::GetTypeName`.
+    /// Composed value type (the `typeName` field) as a registered type name
+    /// (C++ `UsdAttribute::GetTypeName`): `None` when nothing declares one, or
+    /// the declared spelling is not in the type table. The spelling itself is
+    /// metadata, `get_metadata::<tf::Token>(sdf::FieldKey::TypeName)`.
     ///
     /// A schema that declares this attribute wins outright, as it does for
     /// [`variability`](Self::variability): the value type is part of the
     /// declaration, so an authored `typeName` cannot redeclare a schema
     /// attribute as a different type. Composition answers only for an
-    /// attribute no schema declares. `typeName` is a token; a value of any
-    /// other type is treated as untyped (`None`).
-    pub fn type_name(&self) -> Result<Option<tf::Token>> {
+    /// attribute no schema declares.
+    pub fn type_name(&self) -> Result<Option<sdf::ValueTypeName>> {
+        Ok(self
+            .declared_type_token()?
+            .and_then(|token| sdf::ValueTypeName::find(token.as_str())))
+    }
+
+    /// The semantic role of the composed value type (C++
+    /// `UsdAttribute::GetRoleName`): `Some(Role::Color)` for a `color3f`,
+    /// `None` for a foundational type or an attribute with no registered type.
+    pub fn role(&self) -> Result<Option<sdf::Role>> {
+        Ok(self.type_name()?.and_then(|type_name| type_name.role()))
+    }
+
+    /// The `typeName` token as declared — by the schema first, else by the
+    /// strongest composed opinion — whatever its spelling. The read behind
+    /// [`type_name`](Self::type_name), [`role`](Self::role) and the value
+    /// checks; it never feeds spec creation.
+    fn declared_type_token(&self) -> Result<Option<tf::Token>, pcp::QueryError> {
         if let Some(declared) = self.definition_field(sdf::FieldKey::TypeName)? {
             return Ok(declared.try_as_token());
         }
@@ -464,6 +526,38 @@ impl Attribute {
             .stage
             .field::<sdf::Value>(&self.path, sdf::FieldKey::TypeName)?
             .and_then(sdf::Value::try_as_token))
+    }
+
+    /// The read phase of a value write (see [`AttributeAuthoringPlan`]): the
+    /// value validated against the composed declaration, the spec plan, and
+    /// the value and time mapped for the edit target. Runs outside any
+    /// transaction, so every composition query happens here.
+    // TODO(perf): for an attribute no schema declares, the declaration read
+    // and the spec plan each walk the property stack; a `Stamp` plan already
+    // carries the composed declaration, so validating against it would spare
+    // the second walk.
+    fn plan_authoring(
+        &self,
+        value: sdf::Value,
+        time: Option<super::TimeCode>,
+    ) -> Result<AttributeAuthoringPlan, StageAuthoringError> {
+        let effective = if value.is_value_block() {
+            None
+        } else {
+            let token = self.declared_type_token()?.ok_or(sdf::ValueTypeError::Empty)?;
+            let effective = sdf::ValueTypeName::from(token);
+            effective.validate(&value)?;
+            Some(effective)
+        };
+        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, None)?;
+        let value = self.stage.map_to_spec_value(&self.path, value);
+        let spec_time = time.map(|time| self.stage.map_to_spec_time(time.value()));
+        Ok(AttributeAuthoringPlan {
+            effective,
+            ensure,
+            value,
+            spec_time,
+        })
     }
 
     /// Composed default value decoded to `T`. The convenience spelling of
@@ -520,7 +614,7 @@ impl Attribute {
     /// on the terms
     /// [`resolved_location`](super::FamilySource::resolved_location) states.
     pub fn fallback_value(&self) -> Result<Option<sdf::Value>> {
-        let Some((info, name)) = self.declaring_definition()? else {
+        let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
             return Ok(None);
         };
         let Some(property) = info.prim_definition().property(&name) else {
@@ -545,7 +639,7 @@ impl Attribute {
     /// about a property — its type, its variability, its display metadata —
     /// lives on the same declaration, whether or not any layer authors a spec.
     fn definition_field(&self, field: impl AsRef<str>) -> Result<Option<sdf::Value>, pcp::QueryError> {
-        let Some((info, name)) = self.declaring_definition()? else {
+        let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
             return Ok(None);
         };
         let Some(property) = info.prim_definition().property(&name) else {
@@ -560,7 +654,7 @@ impl Attribute {
     /// property can retract an inherited fallback by authoring a value block,
     /// which leaves the field present but supplies nothing.
     fn has_schema_fallback(&self) -> Result<bool, pcp::QueryError> {
-        let Some((info, name)) = self.declaring_definition()? else {
+        let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
             return Ok(false);
         };
         Ok(info.prim_definition().attribute_fallback(&name).is_some())
@@ -569,7 +663,7 @@ impl Attribute {
     /// The spec type the owning prim's schema declares for this property, or
     /// `None` when no schema declares it.
     fn declared_spec_type(&self) -> Result<Option<sdf::SpecType>, pcp::QueryError> {
-        let Some((info, name)) = self.declaring_definition()? else {
+        let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
             return Ok(None);
         };
         Ok(info
@@ -579,18 +673,9 @@ impl Attribute {
     }
 
     /// The schema of the prim this attribute hangs off, with the attribute's
-    /// own name — the pair every declaration lookup starts from.
-    fn declaring_definition(&self) -> Result<Option<(Arc<PrimTypeInfo>, tf::Token)>, pcp::QueryError> {
-        let Some((prim, name)) = self.path.split_property() else {
-            return Ok(None);
-        };
-        Ok(Some((self.stage.prim_type_info_composed(prim)?, tf::Token::from(name))))
-    }
-
-    /// Like [`declaring_definition`](Self::declaring_definition), but `None`
-    /// unless a schema actually declares this property.
+    /// own name, but `None` unless a schema actually declares this property.
     fn declaring_property(&self) -> Result<Option<(Arc<PrimTypeInfo>, tf::Token)>, pcp::QueryError> {
-        let Some((info, name)) = self.declaring_definition()? else {
+        let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
             return Ok(None);
         };
         Ok(info.prim_definition().has_property(&name).then_some((info, name)))
@@ -696,7 +781,7 @@ impl Attribute {
     /// `None` when `key` is an ordinary metadata field.
     fn special_metadata(&self, key: &str) -> Result<Option<sdf::Value>> {
         if key == sdf::FieldKey::TypeName.as_str() {
-            return Ok(self.type_name()?.map(sdf::Value::Token));
+            return Ok(self.declared_type_token()?.map(sdf::Value::Token));
         }
         if key == sdf::FieldKey::Variability.as_str() {
             return Ok(self.variability()?.map(sdf::Value::Variability));
@@ -813,35 +898,33 @@ impl Attribute {
     /// apply `f`, and return `self` for chaining. The layer records whatever
     /// fields `f` writes.
     ///
-    /// When the edit target has no spec but a schema declares the attribute,
-    /// one is stamped from the declaration first (C++
-    /// `UsdStage::_CreateNewPropertySpecFromSchema`), so a property that reads
-    /// back a fallback can also be authored. Returns `InvalidPath` when neither
-    /// a spec nor a declaration exists.
+    /// When the edit target has no spec, one is stamped first from the
+    /// declaration composition finds — the schema's, else the strongest
+    /// authored spec's (C++ `UsdStage::_CreatePropertySpecForEditing`) — so a
+    /// property that reads back a fallback can also be authored. Returns
+    /// `InvalidPath` when nothing declares the attribute at all.
     fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
         self.edit_spec(f)?;
         Ok(self)
     }
 
     /// Runs `f` on this attribute's spec at the edit target's layer, stamping
-    /// one from the schema declaration first when the target has none.
-    ///
-    /// Every mutation goes through here, so a property that reads back a
-    /// fallback can be authored whichever setter the caller reaches for.
+    /// one from the declaration composition finds when the target has none.
+    /// Every creating mutation goes through here.
     fn edit_spec<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
-        let declared = self.declared_spec().map_err(StageAuthoringError::Composition)?;
+        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, None)?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            declare_spec(layer.data_mut(), &path, &declared)?;
-            super::edit_spec(
+            authoring::apply_plan(layer.data_mut(), &path, sdf::SpecType::Attribute, &ensure)?;
+            authoring::edit_spec(
                 layer.data_mut(),
                 path,
-                "no attribute spec at path on the edit target layer",
+                sdf::SpecType::Attribute,
                 sdf::AttributeSpecMut::get,
                 f,
             )
@@ -849,51 +932,66 @@ impl Attribute {
         Ok(())
     }
 
-    /// The type and variability a schema declares for this attribute, which is
-    /// what a spec authored for it has to be created with.
-    fn declared_spec(&self) -> Result<Option<(tf::Token, sdf::Variability)>, pcp::QueryError> {
-        let Some((info, name)) = self.declaring_property()? else {
-            return Ok(None);
-        };
-        let definition = info.prim_definition();
-        let Some(property) = definition.property(&name) else {
-            return Ok(None);
-        };
-        if property.spec_type() != sdf::SpecType::Attribute {
-            return Ok(None);
-        }
-        Ok(property
-            .type_name()
-            .map(|type_name| (type_name, property.variability())))
-    }
-}
-
-/// Removes `key` from the attribute spec at `path`, when `data` holds one.
-///
-/// Going through the typed view keeps the erase to an attribute: a path
-/// addressing a prim, a relationship, or nothing at all owns fields this handle
-/// has no business removing.
-fn erase_attribute_field(data: &mut dyn sdf::AbstractData, path: sdf::Path, key: &str) {
-    if let Some(mut spec) = sdf::AttributeSpecMut::get(data, path) {
-        spec.erase(key);
-    }
-}
-
-/// Stamps a spec for the attribute at `path` from `declared`, the type and
-/// variability a schema states for it, when `data` holds none. Mirrors C++
-/// `UsdStage::_CreateNewPropertySpecFromSchema`, so a property that reads back a
-/// fallback can be authored.
-fn declare_spec(
-    data: &mut dyn sdf::AbstractData,
-    path: &sdf::Path,
-    declared: &Option<(tf::Token, sdf::Variability)>,
-) -> Result<(), sdf::AuthoringError> {
-    if let Some((type_name, variability)) = declared
-        && sdf::AttributeSpecMut::get(&mut *data, path.clone()).is_none()
+    /// Runs `f` on this attribute's spec at the edit target's layer when the
+    /// layer holds one, and does nothing when it holds none: the path every
+    /// clear takes, so removing an opinion never stamps a spec to remove it
+    /// from. A relationship at the path is an error.
+    fn edit_existing<F>(self, f: F) -> Result<Self, StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
-        sdf::AttributeSpec::new(data, path.clone(), type_name.as_str(), *variability, false)?;
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
+            authoring::edit_existing_spec(
+                layer.data_mut(),
+                path,
+                sdf::SpecType::Attribute,
+                sdf::AttributeSpecMut::get,
+                f,
+            )
+        })?;
+        Ok(self)
     }
-    Ok(())
+}
+
+/// The read phase of a value write ([`Attribute::set_at`],
+/// [`Attribute::block`]), resolved before the transaction: the composed
+/// declaration the value was validated against (`None` only for a block,
+/// which every declaration takes), the spec plan, and the value and time
+/// already mapped for the edit target. The transaction closure receives only
+/// this, which is what keeps a composition query out of it.
+struct AttributeAuthoringPlan {
+    effective: Option<sdf::ValueTypeName>,
+    ensure: authoring::EnsurePlan,
+    value: sdf::Value,
+    spec_time: Option<f64>,
+}
+
+impl AttributeAuthoringPlan {
+    /// The write phase, inside the transaction: apply the spec plan, read the
+    /// edit-target spec's own declaration fallibly (a missing `typeName` is
+    /// rejected, never repaired), and unless the value is a block require it
+    /// to agree with the composed declaration (§6.5.1 of the core spec).
+    /// Returns the spec ready for the raw write.
+    fn prepare<'a>(
+        &self,
+        data: &'a mut dyn sdf::AbstractData,
+        path: &sdf::Path,
+    ) -> Result<sdf::AttributeSpecMut<'a>, StageAuthoringError> {
+        authoring::apply_plan(data, path, sdf::SpecType::Attribute, &self.ensure)?;
+        let spec = sdf::AttributeSpecMut::get(data, path.clone())
+            .ok_or_else(|| authoring::missing_spec(path, sdf::SpecType::Attribute))?;
+        let local = spec.declared_type()?.ok_or(sdf::ValueTypeError::Empty)?;
+        if let Some(effective) = &self.effective
+            && !effective.agrees_with(&local)
+        {
+            return Err(StageAuthoringError::LocalTypeConflict(Box::new(TypeConflict {
+                path: path.clone(),
+                effective: effective.as_token(),
+                local: local.as_token(),
+            })));
+        }
+        Ok(spec)
+    }
 }
 
 /// Cached value query for one attribute. Mirrors C++ `UsdAttributeQuery`.
@@ -1142,8 +1240,17 @@ mod tests {
         assert!(matches!(error, crate::Error::Convert(_)), "got: {error}");
         Ok(())
     }
-    use crate::usd::{AttributeQuery, ResolveInfoSource, Stage, TimeCode};
-    use crate::{sdf, tf};
+    use std::borrow::Cow;
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::rc::Rc;
+
+    use crate::usd::{
+        Attribute, AttributeQuery, CommittedChange, EditTarget, EditTargetArc, ResolveInfoSource, Stage,
+        StageAuthoringError, TimeCode, TypeConflict,
+    };
+    use crate::{gf, sdf, tf};
 
     fn stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
@@ -1296,11 +1403,11 @@ mod tests {
         // Nothing is authored, so the type and variability come from the
         // schema's declaration alongside the fallback value.
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
-        assert_eq!(intensity.type_name()?, Some(tf::Token::new("float")));
+        assert_eq!(intensity.type_name()?, Some(sdf::ValueTypeName::from("float")));
         assert_eq!(intensity.variability()?, Some(sdf::Variability::Varying));
 
         let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
-        assert_eq!(rule.type_name()?, Some(tf::Token::new("token")));
+        assert_eq!(rule.type_name()?, Some(sdf::ValueTypeName::from("token")));
         assert_eq!(rule.variability()?, Some(sdf::Variability::Uniform));
         Ok(())
     }
@@ -1357,7 +1464,7 @@ mod tests {
 
         let angle = stage.attribute("/Sun.inputs:angle")?;
         assert_eq!(angle.get::<f32>()?, Some(1.5));
-        assert_eq!(angle.type_name()?, Some(tf::Token::new("float")));
+        assert_eq!(angle.type_name()?, Some(sdf::ValueTypeName::from("float")));
         // A schema property is not custom, however it was created.
         assert!(!angle.is_custom()?);
         Ok(())
@@ -1447,12 +1554,12 @@ mod tests {
         // redeclare a schema attribute as a different type.
         assert_eq!(
             stage.attribute("/Sun.inputs:angle")?.type_name()?,
-            Some(tf::Token::new("float"))
+            Some(sdf::ValueTypeName::FLOAT)
         );
         // A property no schema declares still reports what layers author.
         assert_eq!(
             stage.create_attribute("/Sun.mine", "double")?.type_name()?,
-            Some(tf::Token::new("double"))
+            Some(sdf::ValueTypeName::DOUBLE)
         );
         Ok(())
     }
@@ -1475,7 +1582,7 @@ mod tests {
         );
         assert_eq!(
             rule.get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?,
-            rule.type_name()?
+            rule.type_name()?.map(|type_name| type_name.as_token())
         );
         assert_eq!(
             rule.get_metadata::<bool>(sdf::FieldKey::Custom.as_str())?,
@@ -1669,8 +1776,13 @@ mod tests {
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
             .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
-            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?
-            .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+        root_edit(&stage, |e| {
+            e.attribute_mut(attr.path())?
+                .expect("the attribute spec is on the root layer")
+                .set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock);
+            Ok(())
+        })?;
         assert!(attr.time_samples()?.is_none());
         assert!(attr.time_sample_times()?.is_empty());
         assert_eq!(attr.num_time_samples()?, 0);
@@ -2073,6 +2185,1187 @@ mod tests {
         stage.attribute("/P.nope")?.clear_metadata("documentation")?;
 
         assert!(!stage.root_layer().export_to_string()?.contains("nope"));
+        Ok(())
+    }
+
+    // Value-type validation and stage-tier authoring.
+
+    /// A session layer, a root layer with one sublayer, each holding `def "A"`
+    /// with the given property declaration (empty for none). The edit target
+    /// is the root. The directory keeps the files alive for the stage.
+    fn stack(session: &str, root: &str, sub: &str) -> Result<(tempfile::TempDir, Stage)> {
+        let dir = tempfile::tempdir()?;
+        let prim = |decl: &str| format!("#usda 1.0\ndef \"A\" {{\n    {decl}\n}}\n");
+        fs::write(dir.path().join("session.usda"), prim(session))?;
+        fs::write(dir.path().join("sub.usda"), prim(sub))?;
+        fs::write(
+            dir.path().join("root.usda"),
+            format!("#usda 1.0\n(\n    subLayers = [@sub.usda@]\n)\ndef \"A\" {{\n    {root}\n}}\n"),
+        )?;
+        let stage = Stage::builder()
+            .session_layer(dir.path().join("session.usda").to_str().expect("utf-8 path"))
+            .open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        Ok((dir, stage))
+    }
+
+    /// Edit the root layer directly, below the stage-tier setters.
+    fn root_edit(
+        stage: &Stage,
+        f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
+    ) -> Result<()> {
+        let root_id = stage.root_layer().identifier().to_string();
+        stage.layer_mut(&root_id).expect("root layer is live").edit(f)?;
+        Ok(())
+    }
+
+    /// The raw `field` of the spec at `path` on the layer `layer_id`.
+    fn layer_field(stage: &Stage, layer_id: &str, path: &str, field: &str) -> Option<sdf::Value> {
+        let layer = stage.layer(layer_id).expect("layer is live");
+        layer
+            .data()
+            .try_field(&sdf::path(path).expect("valid path"), field)
+            .expect("readable")
+            .map(Cow::into_owned)
+    }
+
+    /// The raw `field` of the spec at `path` on the root layer.
+    fn root_field(stage: &Stage, path: &str, field: &str) -> Option<sdf::Value> {
+        let root_id = stage.root_layer().identifier().to_string();
+        layer_field(stage, &root_id, path, field)
+    }
+
+    fn root_has_spec(stage: &Stage, path: &str) -> bool {
+        stage
+            .root_layer()
+            .data()
+            .has_spec(&sdf::path(path).expect("valid path"))
+    }
+
+    fn type_conflict(error: StageAuthoringError) -> TypeConflict {
+        match error {
+            StageAuthoringError::LocalTypeConflict(conflict) => *conflict,
+            other => panic!("expected a local type conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_mismatch_rejected() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        let error = attr
+            .clone()
+            .set(tf::Token::from("x"))
+            .err()
+            .expect("a token is no float");
+        assert!(matches!(
+            error,
+            StageAuthoringError::ValueType(sdf::ValueTypeError::Mismatch { .. })
+        ));
+        // Exact: the stage tier never coerces.
+        let error = attr.clone().set(4_i32).err().expect("an int is no float");
+        assert!(matches!(
+            error,
+            StageAuthoringError::ValueType(sdf::ValueTypeError::Mismatch { .. })
+        ));
+        assert_eq!(attr.get::<sdf::Value>()?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_block_allowed() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", "double3d[]")?;
+        attr.clone().set(sdf::Value::ValueBlock)?;
+        assert!(attr.resolve_info()?.value_is_blocked());
+        let error = attr.set(1.0_f64).err().expect("no value fits an unknown type");
+        assert!(matches!(
+            error,
+            StageAuthoringError::ValueType(sdf::ValueTypeError::Unregistered { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn set_opaque_rejected() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::OPAQUE)?;
+        for value in [sdf::Value::Opaque, sdf::Value::Float(1.0)] {
+            let error = attr.clone().set(value).err().expect("opaque holds no value");
+            assert!(matches!(
+                error,
+                StageAuthoringError::ValueType(sdf::ValueTypeError::Opaque)
+            ));
+        }
+        attr.set(sdf::Value::ValueBlock)?;
+        Ok(())
+    }
+
+    #[test]
+    fn role_of_color_attr() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let color = stage.create_attribute("/A.c", sdf::ValueTypeName::COLOR3F)?;
+        assert_eq!(color.role()?, Some(sdf::Role::Color));
+        let plain = stage.create_attribute("/A.f", sdf::ValueTypeName::FLOAT3)?;
+        assert_eq!(plain.role()?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_type_reads_none() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", "double3d[]")?;
+        assert_eq!(attr.type_name()?, None);
+        assert_eq!(attr.role()?, None);
+        assert_eq!(
+            attr.get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?,
+            Some(tf::Token::from("double3d[]"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn raw_spelling_via_metadata() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", "Color")?;
+        assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::COLOR3D));
+        assert_eq!(
+            attr.get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?,
+            Some(tf::Token::from("Color")),
+            "the spelling is kept as authored"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_type_conflict() -> Result<()> {
+        let (_dir, stage) = stack("float x", "double x", "")?;
+        let error = stage
+            .attribute("/A.x")?
+            .set(2.0_f32)
+            .err()
+            .expect("double does not agree with float");
+        let conflict = type_conflict(error);
+        assert_eq!(conflict.effective, tf::Token::from("float"));
+        assert_eq!(conflict.local, tf::Token::from("double"));
+        assert_eq!(root_field(&stage, "/A.x", "default"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn local_agrees_writes_raw() -> Result<()> {
+        let (_dir, stage) = stack("color3f x", "float3 x", "")?;
+        stage.attribute("/A.x")?.set(gf::Vec3f::from([1.0, 0.5, 0.0]))?;
+        assert_eq!(
+            root_field(&stage, "/A.x", "default"),
+            Some(sdf::Value::Vec3f(gf::Vec3f::from([1.0, 0.5, 0.0])))
+        );
+        assert_eq!(
+            root_field(&stage, "/A.x", "typeName"),
+            Some(sdf::Value::Token(tf::Token::from("float3"))),
+            "the local declaration is untouched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_roles_conflict() -> Result<()> {
+        let (_dir, stage) = stack("color3f x", "point3f x", "")?;
+        let error = stage
+            .attribute("/A.x")?
+            .set(gf::Vec3f::from([1.0, 0.5, 0.0]))
+            .err()
+            .expect("two roles never agree");
+        let conflict = type_conflict(error);
+        assert_eq!(conflict.local, tf::Token::from("point3f"));
+        assert_eq!(root_field(&stage, "/A.x", "default"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn local_type_missing() -> Result<()> {
+        let (_dir, stage) = stack("float x", "double x", "")?;
+        root_edit(&stage, |e| {
+            e.attribute_mut("/A.x")?.expect("root spec").erase("typeName");
+            Ok(())
+        })?;
+        let error = stage
+            .attribute("/A.x")?
+            .set(1.0_f32)
+            .err()
+            .expect("a spec without a type is not repaired");
+        assert!(matches!(
+            error,
+            StageAuthoringError::ValueType(sdf::ValueTypeError::Empty)
+        ));
+        assert_eq!(root_field(&stage, "/A.x", "default"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn local_type_not_token() -> Result<()> {
+        let (_dir, stage) = stack("float x", "double x", "")?;
+        root_edit(&stage, |e| {
+            e.attribute_mut("/A.x")?
+                .expect("root spec")
+                .set("typeName", sdf::Value::Int(3));
+            Ok(())
+        })?;
+        let error = stage
+            .attribute("/A.x")?
+            .set(1.0_f32)
+            .err()
+            .expect("a malformed declaration is reported");
+        assert!(matches!(
+            error,
+            StageAuthoringError::Layer(sdf::AuthoringError::Spec(sdf::SpecError::FieldType {
+                field: "typeName",
+                ..
+            }))
+        ));
+        assert_eq!(root_field(&stage, "/A.x", "default"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn local_type_unregistered() -> Result<()> {
+        let (_dir, stage) = stack("float x", "custom double3d[] x", "")?;
+        let error = stage
+            .attribute("/A.x")?
+            .set(1.0_f32)
+            .err()
+            .expect("an unknown local type agrees with nothing");
+        assert_eq!(type_conflict(error).local, tf::Token::from("double3d[]"));
+        stage.attribute("/A.x")?.set(sdf::Value::ValueBlock)?;
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        Ok(())
+    }
+
+    #[test]
+    fn block_over_conflict() -> Result<()> {
+        let (_dir, stage) = stack("float x", "double x", "")?;
+        stage.attribute("/A.x")?.set(sdf::Value::ValueBlock)?;
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        Ok(())
+    }
+
+    #[test]
+    fn new_spec_effective_type() -> Result<()> {
+        let (_dir, stage) = stack("float x", "", "")?;
+        assert!(!root_has_spec(&stage, "/A.x"));
+        stage.attribute("/A.x")?.set(1.0_f32)?;
+        assert_eq!(
+            root_field(&stage, "/A.x", "typeName"),
+            Some(sdf::Value::Token(tf::Token::from("float")))
+        );
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::Float(1.0)));
+        Ok(())
+    }
+
+    #[test]
+    fn block_missing_type() -> Result<()> {
+        let (_dir, stage) = stack("float x", "double x", "")?;
+        root_edit(&stage, |e| {
+            e.attribute_mut("/A.x")?.expect("root spec").erase("typeName");
+            Ok(())
+        })?;
+        let error = stage
+            .attribute("/A.x")?
+            .block()
+            .err()
+            .expect("a block still needs a declaration");
+        assert!(matches!(
+            error,
+            StageAuthoringError::ValueType(sdf::ValueTypeError::Empty)
+        ));
+        assert_eq!(root_field(&stage, "/A.x", "default"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn block_type_not_token() -> Result<()> {
+        let (_dir, stage) = stack("float x", "double x", "")?;
+        root_edit(&stage, |e| {
+            e.attribute_mut("/A.x")?
+                .expect("root spec")
+                .set("typeName", sdf::Value::Int(3));
+            Ok(())
+        })?;
+        let error = stage
+            .attribute("/A.x")?
+            .block()
+            .err()
+            .expect("a malformed declaration is reported");
+        assert!(matches!(
+            error,
+            StageAuthoringError::Layer(sdf::AuthoringError::Spec(sdf::SpecError::FieldType { .. }))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn block_unknown_type() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        stage.create_attribute("/A.x", "double3d[]")?.block()?;
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        Ok(())
+    }
+
+    #[test]
+    fn block_bad_samples() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        root_edit(&stage, |e| {
+            e.attribute_mut("/A.x")?
+                .expect("root spec")
+                .set("timeSamples", sdf::Value::String("junk".into()));
+            Ok(())
+        })?;
+        attr.block()?;
+        assert_eq!(
+            root_field(&stage, "/A.x", "timeSamples"),
+            None,
+            "the field is erased whole"
+        );
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        Ok(())
+    }
+
+    #[test]
+    fn block_erases_samples() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage
+            .create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?
+            .set_at(1.0_f32, TimeCode::new(0.0))?
+            .set_at(3.0_f32, TimeCode::new(10.0))?
+            .block()?;
+        assert_eq!(root_field(&stage, "/A.x", "timeSamples"), None);
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        assert_eq!(attr.num_time_samples()?, 0);
+        assert_eq!(attr.get_at::<f32>(TimeCode::new(0.0))?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn clear_default() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage
+            .create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?
+            .set(1.0_f32)?
+            .set_at(2.0_f32, TimeCode::new(5.0))?
+            .clear_default()?;
+        assert_eq!(root_field(&stage, "/A.x", "default"), None);
+        assert_eq!(attr.get_at::<f32>(TimeCode::new(5.0))?, Some(2.0), "samples survive");
+        Ok(())
+    }
+
+    #[test]
+    fn clear_at() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage
+            .create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?
+            .set(1.0_f32)?
+            .set_at(2.0_f32, TimeCode::new(0.0))?
+            .set_at(3.0_f32, TimeCode::new(10.0))?
+            .clear_at(TimeCode::new(0.0))?;
+        assert_eq!(attr.time_samples()?, Some(vec![(10.0, sdf::Value::Float(3.0))]));
+        let attr = attr.clear_at(None)?;
+        assert_eq!(root_field(&stage, "/A.x", "default"), None);
+
+        root_edit(&stage, |e| {
+            e.attribute_mut("/A.x")?
+                .expect("root spec")
+                .set("timeSamples", sdf::Value::String("junk".into()));
+            Ok(())
+        })?;
+        let error = attr
+            .clear_at(TimeCode::new(10.0))
+            .err()
+            .expect("a malformed map is reported");
+        assert!(matches!(
+            error,
+            StageAuthoringError::Layer(sdf::AuthoringError::Spec(sdf::SpecError::FieldType { .. }))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn clear_all() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage
+            .create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?
+            .set(1.0_f32)?
+            .set_at(2.0_f32, TimeCode::new(0.0))?
+            .clear()?;
+        assert_eq!(root_field(&stage, "/A.x", "default"), None);
+        assert_eq!(root_field(&stage, "/A.x", "timeSamples"), None);
+        assert!(root_has_spec(&stage, "/A.x"), "the spec itself stays");
+        assert_eq!(attr.resolve_info()?.source(), ResolveInfoSource::None);
+        Ok(())
+    }
+
+    #[test]
+    fn set_type_name() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage
+            .create_attribute("/A.x", sdf::ValueTypeName::DOUBLE)?
+            .set(1.0_f64)?;
+        let error = attr
+            .clone()
+            .set_type_name(sdf::ValueTypeName::FLOAT)
+            .err()
+            .expect("the stored double does not fit float");
+        assert!(matches!(
+            error,
+            StageAuthoringError::ValueType(sdf::ValueTypeError::Mismatch { .. })
+        ));
+        assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::DOUBLE));
+
+        let attr = attr.clear_default()?.set_type_name(sdf::ValueTypeName::FLOAT)?;
+        assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::FLOAT));
+
+        let attr = attr.set(sdf::Value::ValueBlock)?.set_type_name("double3d[]")?;
+        assert_eq!(attr.type_name()?, None, "blocks fit even an unknown type");
+        let attr = attr.set_type_name(sdf::ValueTypeName::FLOAT)?.set(1.0_f32)?;
+        let error = attr
+            .set_type_name("double3d[]")
+            .err()
+            .expect("a value never fits an unknown type");
+        assert!(matches!(error, StageAuthoringError::ValueType(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn set_type_name_opaque() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage
+            .create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?
+            .set(1.0_f32)?;
+        let error = attr
+            .clone()
+            .set_type_name(sdf::ValueTypeName::OPAQUE)
+            .err()
+            .expect("a value never fits opaque");
+        assert!(matches!(
+            error,
+            StageAuthoringError::ValueType(sdf::ValueTypeError::Opaque)
+        ));
+        let attr = attr
+            .set(sdf::Value::ValueBlock)?
+            .set_type_name(sdf::ValueTypeName::OPAQUE)?;
+        assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::OPAQUE));
+        Ok(())
+    }
+
+    #[test]
+    fn create_attribute_repeat() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        stage
+            .create_attribute("/A.x", sdf::ValueTypeName::DOUBLE)?
+            .set(1.0_f64)?;
+        let again = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        assert_eq!(again.type_name()?, Some(sdf::ValueTypeName::DOUBLE));
+        assert_eq!(again.get::<f64>()?, Some(1.0));
+        Ok(())
+    }
+
+    #[test]
+    fn create_attribute_schema_type() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let attr = stage.create_attribute("/Sun.inputs:intensity", sdf::ValueTypeName::DOUBLE)?;
+        assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::FLOAT));
+        assert_eq!(
+            root_field(&stage, "/Sun.inputs:intensity", "typeName"),
+            Some(sdf::Value::Token(tf::Token::from("float"))),
+            "the schema's declaration is stamped"
+        );
+        assert!(!attr.is_custom()?);
+        Ok(())
+    }
+
+    #[test]
+    fn create_attribute_strongest_type() -> Result<()> {
+        let (_dir, stage) = stack("", "", "double x")?;
+        assert!(!root_has_spec(&stage, "/A.x"));
+        stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        assert_eq!(
+            root_field(&stage, "/A.x", "typeName"),
+            Some(sdf::Value::Token(tf::Token::from("double"))),
+            "the sublayer's declaration is copied"
+        );
+        assert_eq!(root_field(&stage, "/A.x", "custom"), None, "absent means not custom");
+        assert!(!stage.attribute("/A.x")?.is_custom()?);
+        Ok(())
+    }
+
+    #[test]
+    fn create_attribute_new() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::FLOAT));
+        assert!(attr.is_custom()?);
+        assert_eq!(root_field(&stage, "/A.x", "custom"), Some(sdf::Value::Bool(true)));
+        assert_eq!(root_field(&stage, "/A.x", "variability"), None, "absent means varying");
+        Ok(())
+    }
+
+    #[test]
+    fn create_attribute_wrong_kind() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        stage.create_relationship("/A.r")?;
+        let error = stage
+            .create_attribute("/A.r", sdf::ValueTypeName::FLOAT)
+            .err()
+            .expect("a relationship is at the path");
+        assert!(matches!(
+            error,
+            StageAuthoringError::SpecKindMismatch {
+                expected: sdf::SpecType::Attribute,
+                found: sdf::SpecType::Relationship,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn create_relationship_repeat() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        stage.create_relationship("/A.r")?.add_target("/A")?;
+        let again = stage.create_relationship("/A.r")?;
+        assert_eq!(again.targets()?, vec![sdf::path("/A")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn create_relationship_schema() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let rel = stage.create_relationship("/Sun.collection:lightLink:includes")?;
+        assert_eq!(
+            stage
+                .root_layer()
+                .data()
+                .spec_type(&sdf::path("/Sun.collection:lightLink:includes")?),
+            Some(sdf::SpecType::Relationship),
+            "the schema declaration is stamped"
+        );
+        assert!(!rel.is_custom()?);
+        Ok(())
+    }
+
+    #[test]
+    fn create_relationship_strongest() -> Result<()> {
+        let (_dir, stage) = stack("", "", "rel r")?;
+        stage.create_relationship("/A.r")?;
+        assert_eq!(
+            stage.root_layer().data().spec_type(&sdf::path("/A.r")?),
+            Some(sdf::SpecType::Relationship)
+        );
+        assert_eq!(root_field(&stage, "/A.r", "custom"), None, "absent means not custom");
+        assert!(!stage.relationship("/A.r")?.is_custom()?);
+        Ok(())
+    }
+
+    #[test]
+    fn create_relationship_wrong_kind() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        let error = stage
+            .create_relationship("/A.x")
+            .err()
+            .expect("an attribute is at the path");
+        assert!(matches!(
+            error,
+            StageAuthoringError::SpecKindMismatch {
+                expected: sdf::SpecType::Relationship,
+                found: sdf::SpecType::Attribute,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn attribute_schema_conflict() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let error = stage
+            .create_attribute("/Sun.collection:lightLink:includes", sdf::ValueTypeName::FLOAT)
+            .err()
+            .expect("the schema declares a relationship");
+        assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
+        assert!(!root_has_spec(&stage, "/Sun.collection:lightLink:includes"));
+        Ok(())
+    }
+
+    #[test]
+    fn relationship_schema_conflict() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let error = stage
+            .create_relationship("/Sun.inputs:intensity")
+            .err()
+            .expect("the schema declares an attribute");
+        assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn attribute_stack_conflict() -> Result<()> {
+        let (_dir, stage) = stack("rel x", "", "float x")?;
+        let error = stage
+            .create_attribute("/A.x", sdf::ValueTypeName::FLOAT)
+            .err()
+            .expect("the strongest spec is a relationship");
+        assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
+        assert!(!root_has_spec(&stage, "/A.x"));
+        Ok(())
+    }
+
+    #[test]
+    fn relationship_stack_conflict() -> Result<()> {
+        let (_dir, stage) = stack("float x", "", "rel x")?;
+        let error = stage
+            .create_relationship("/A.x")
+            .err()
+            .expect("the strongest spec is an attribute");
+        assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
+        assert!(!root_has_spec(&stage, "/A.x"));
+        Ok(())
+    }
+
+    #[test]
+    fn set_type_name_creates_spec() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        assert!(!root_has_spec(&stage, "/Sun.inputs:intensity"));
+        stage
+            .attribute("/Sun.inputs:intensity")?
+            .set_type_name(sdf::ValueTypeName::DOUBLE)?;
+        assert_eq!(
+            root_field(&stage, "/Sun.inputs:intensity", "typeName"),
+            Some(sdf::Value::Token(tf::Token::from("double")))
+        );
+        assert_eq!(
+            root_field(&stage, "/Sun.inputs:intensity", "custom"),
+            None,
+            "the rest of the declaration is stamped: absent means not custom"
+        );
+        assert!(!stage.attribute("/Sun.inputs:intensity")?.is_custom()?);
+        Ok(())
+    }
+
+    #[test]
+    fn set_type_name_undefined() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let error = stage
+            .attribute("/A.nope")?
+            .set_type_name(sdf::ValueTypeName::FLOAT)
+            .err()
+            .expect("nothing defines the attribute");
+        assert!(matches!(
+            error,
+            StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_local_wins() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let path = "/Sun.collection:lightLink:includes";
+        root_edit(&stage, |e| {
+            sdf::AttributeSpec::new(e.data_mut(), path, "float", sdf::Variability::Varying, true)?;
+            Ok(())
+        })?;
+        // The local attribute spec is used even though the schema declares a
+        // relationship of that name.
+        stage.attribute(path)?.set(1.0_f32)?;
+        assert_eq!(root_field(&stage, path, "default"), Some(sdf::Value::Float(1.0)));
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_one_transaction() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let path = "/Sun.inputs:intensity";
+        let commits = Rc::new(Cell::new(0));
+        let _token = {
+            let commits = commits.clone();
+            stage.add_sink(move |_stage: &Stage, _change: &CommittedChange<'_>| commits.set(commits.get() + 1))
+        };
+
+        // The mutation fails after the spec plan says to stamp one: nothing is
+        // committed, so no spec and no notice survive.
+        let error = stage
+            .attribute(path)?
+            .edit_spec(|_spec| Err(StageAuthoringError::ReservedField { field: "probe" }))
+            .expect_err("the closure's error");
+        assert!(matches!(error, StageAuthoringError::ReservedField { field: "probe" }));
+        assert!(!root_has_spec(&stage, path));
+        assert_eq!(commits.get(), 0);
+
+        // A succeeding retype stamps and retypes the spec in one commit.
+        stage.attribute(path)?.set_type_name(sdf::ValueTypeName::DOUBLE)?;
+        assert!(root_has_spec(&stage, path));
+        assert_eq!(commits.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn strongest_declaration_malformed() -> Result<()> {
+        for (bad, kind) in [(None, "missing"), (Some(sdf::Value::Int(3)), "not a token")] {
+            let (_dir, stage) = stack("", "float x", "double x")?;
+            root_edit(&stage, |e| {
+                let mut spec = e.attribute_mut("/A.x")?.expect("root spec");
+                match bad.clone() {
+                    None => spec.erase("typeName"),
+                    Some(value) => spec.set("typeName", value),
+                }
+                Ok(())
+            })?;
+            // Author on the session layer, where no spec exists: the strongest
+            // authored spec (the root's) is malformed, and the weaker sublayer's
+            // sound declaration is never consulted.
+            let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+            stage.set_edit_target(EditTarget::for_layer(session_id.clone()))?;
+            let error = stage
+                .create_attribute("/A.x", sdf::ValueTypeName::FLOAT)
+                .err()
+                .expect("the strongest declaration is malformed");
+            match bad {
+                None => assert!(
+                    matches!(error, StageAuthoringError::ValueType(sdf::ValueTypeError::Empty)),
+                    "{kind}: {error:?}"
+                ),
+                Some(_) => assert!(
+                    matches!(
+                        error,
+                        StageAuthoringError::Layer(sdf::AuthoringError::Spec(sdf::SpecError::FieldType { .. }))
+                    ),
+                    "{kind}: {error:?}"
+                ),
+            }
+            assert!(
+                !stage
+                    .layer(&session_id)
+                    .expect("session layer")
+                    .data()
+                    .has_spec(&sdf::path("/A.x")?),
+                "{kind}: no spec is stamped"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn create_ignores_empty() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let attr = stage.create_attribute("/Sun.inputs:intensity", "")?;
+        assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::FLOAT));
+        Ok(())
+    }
+
+    #[test]
+    fn create_rejects_empty() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let error = stage
+            .create_attribute("/A.x", "")
+            .err()
+            .expect("a new attribute needs a type");
+        assert!(matches!(
+            error,
+            StageAuthoringError::ValueType(sdf::ValueTypeError::Empty)
+        ));
+        assert!(!root_has_spec(&stage, "/A.x"));
+        Ok(())
+    }
+
+    /// An attribute whose `timeSamples` field is a whole-field block.
+    fn field_blocked() -> Result<(Stage, Attribute)> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        root_edit(&stage, |e| {
+            e.attribute_mut("/A.x")?
+                .expect("root spec")
+                .set("timeSamples", sdf::Value::ValueBlock);
+            Ok(())
+        })?;
+        Ok((stage, attr))
+    }
+
+    #[test]
+    fn retype_over_field_block() -> Result<()> {
+        let (stage, attr) = field_blocked()?;
+        attr.set_type_name(sdf::ValueTypeName::DOUBLE)?;
+        assert_eq!(root_field(&stage, "/A.x", "timeSamples"), Some(sdf::Value::ValueBlock));
+        Ok(())
+    }
+
+    #[test]
+    fn set_over_field_block() -> Result<()> {
+        let (stage, attr) = field_blocked()?;
+        attr.set_at(1.0_f32, TimeCode::new(1.0))?;
+        assert_eq!(
+            root_field(&stage, "/A.x", "timeSamples"),
+            Some(sdf::Value::TimeSamples(vec![(1.0, sdf::Value::Float(1.0))]))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clear_at_field_block() -> Result<()> {
+        let (stage, attr) = field_blocked()?;
+        attr.clear_at(TimeCode::new(1.0))?;
+        assert_eq!(root_field(&stage, "/A.x", "timeSamples"), Some(sdf::Value::ValueBlock));
+        Ok(())
+    }
+
+    #[test]
+    fn update_metadata_uses_plan() -> Result<()> {
+        let (_dir, stage) = stack("", "", "custom double x")?;
+        stage
+            .attribute("/A.x")?
+            .update_metadata("documentation", |_| Some(sdf::Value::String("doc".into())))?;
+        assert_eq!(
+            root_field(&stage, "/A.x", "typeName"),
+            Some(sdf::Value::Token(tf::Token::from("double")))
+        );
+        assert_eq!(root_field(&stage, "/A.x", "custom"), Some(sdf::Value::Bool(true)));
+        Ok(())
+    }
+
+    #[test]
+    fn remove_connection_uses_plan() -> Result<()> {
+        let (_dir, stage) = stack("", "", "custom double x.connect = </A.y>")?;
+        assert!(stage.attribute("/A.x")?.remove_connection("/A.y")?);
+        assert_eq!(
+            root_field(&stage, "/A.x", "typeName"),
+            Some(sdf::Value::Token(tf::Token::from("double"))),
+            "the sublayer's declaration carries the delete opinion"
+        );
+        assert_eq!(root_field(&stage, "/A.x", "custom"), Some(sdf::Value::Bool(true)));
+        assert_eq!(stage.attribute("/A.x")?.connections()?, vec![]);
+
+        let (_dir, stage) = stack("", "rel x", "custom double x.connect = </A.y>")?;
+        let error = stage
+            .attribute("/A.x")?
+            .remove_connection("/A.y")
+            .expect_err("a relationship is at the path");
+        assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn value_type_error_normalized() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        let error = attr.clone().set(tf::Token::from("x")).err().expect("mismatch");
+        assert!(matches!(error, StageAuthoringError::ValueType(_)), "{error:?}");
+
+        root_edit(&stage, |e| {
+            e.attribute_mut("/A.x")?.expect("root spec").erase("typeName");
+            Ok(())
+        })?;
+        let error = attr.set(sdf::Value::ValueBlock).err().expect("missing local type");
+        assert!(matches!(error, StageAuthoringError::ValueType(_)), "{error:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn clear_connections_no_spec() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        stage.attribute("/Sun.inputs:intensity")?.clear_connections()?;
+        assert!(!root_has_spec(&stage, "/Sun.inputs:intensity"));
+        Ok(())
+    }
+
+    #[test]
+    fn clear_targets() -> Result<()> {
+        let (_dir, stage) = stack("", "rel r = [</B>]", "rel r = [</C>]")?;
+        let rel = stage.relationship("/A.r")?;
+        assert_eq!(
+            rel.targets()?,
+            vec![sdf::path("/B")?],
+            "the explicit root list blocks the sublayer"
+        );
+        let rel = rel.clear_targets()?;
+        assert_eq!(
+            rel.targets()?,
+            vec![sdf::path("/C")?],
+            "the sublayer's targets compose again"
+        );
+        assert!(root_has_spec(&stage, "/A.r"));
+        let rel = rel.set_targets(Vec::<sdf::Path>::new())?;
+        assert_eq!(rel.targets()?, vec![], "an explicit empty list blocks again");
+        Ok(())
+    }
+
+    #[test]
+    fn clear_targets_no_spec() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        stage
+            .relationship("/Sun.collection:lightLink:includes")?
+            .clear_targets()?;
+        assert!(!root_has_spec(&stage, "/Sun.collection:lightLink:includes"));
+        Ok(())
+    }
+
+    #[test]
+    fn clear_existing_wrong_kind() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        stage.create_relationship("/A.r")?;
+        let error = stage
+            .attribute("/A.r")?
+            .clear()
+            .err()
+            .expect("a relationship is at the path");
+        assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_field_rejected() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        for key in [
+            "default",
+            "timeSamples",
+            "typeName",
+            "connectionPaths",
+            "variability",
+            "custom",
+        ] {
+            let reserved = |error: StageAuthoringError| {
+                assert!(
+                    matches!(error, StageAuthoringError::ReservedField { field } if field == key),
+                    "{key}: {error:?}"
+                );
+            };
+            reserved(attr.clone().set_metadata(key, 1.0_f32).err().expect(key));
+            reserved(attr.clone().update_metadata(key, |_| None).err().expect(key));
+            reserved(attr.clone().clear_metadata(key).err().expect(key));
+        }
+        let rel = stage.create_relationship("/A.r")?;
+        for key in ["targetPaths", "variability", "custom"] {
+            let error = rel.clone().set_metadata(key, true).err().expect(key);
+            assert!(
+                matches!(error, StageAuthoringError::ReservedField { field } if field == key),
+                "{key}: {error:?}"
+            );
+        }
+        // An ordinary field still goes through.
+        attr.set_metadata("documentation", sdf::Value::String("doc".into()))?;
+        Ok(())
+    }
+
+    // Path-expression normalization for the edit target.
+
+    /// The reference fixture with the edit target on the referenced layer,
+    /// where `/World/MyPrim` maps to `/Source`.
+    fn referenced_target() -> Result<(Stage, String)> {
+        let stage = Stage::open(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/ref_external.usda"))?;
+        let target = stage.edit_target_for_node(&sdf::path("/World/MyPrim")?, EditTargetArc::Reference)?;
+        let layer_id = target.layer_identifier().to_string();
+        stage.set_edit_target(target)?;
+        Ok((stage, layer_id))
+    }
+
+    fn expr_field(stage: &Stage, layer_id: &str, path: &str, field: &str) -> String {
+        layer_field(stage, layer_id, path, field)
+            .expect("field authored")
+            .try_as_path_expression()
+            .expect("a path expression")
+            .to_string()
+    }
+
+    #[test]
+    fn path_expr_arc_target() -> Result<()> {
+        let (stage, layer_id) = referenced_target()?;
+        stage
+            .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
+            .set(sdf::Value::PathExpression(sdf::PathExpression::parse("Child")))?;
+        assert_eq!(
+            expr_field(&stage, &layer_id, "/Source.expr", "default"),
+            "/Source/Child"
+        );
+        // The absolute form is anchored in stage namespace, then mapped.
+        stage
+            .attribute("/World/MyPrim.expr")?
+            .set(sdf::Value::PathExpression(sdf::PathExpression::parse(
+                "/World/MyPrim/Child//",
+            )))?;
+        assert_eq!(
+            expr_field(&stage, &layer_id, "/Source.expr", "default"),
+            "/Source/Child//"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_expr_variant_target() -> Result<()> {
+        let stage = stage()?;
+        let root = stage.edit_target().layer_identifier().to_string();
+        stage.define_prim("/Prim")?;
+        stage.set_edit_target(EditTarget::for_local_direct_variant(
+            root.clone(),
+            sdf::path("/Prim{set=sel}")?,
+        )?)?;
+        let attr = stage.create_attribute("/Prim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?;
+        // Select the variant so the attribute composes. The anchor is the
+        // stage-namespace prim; the mapping then moves the pattern into the
+        // variant's namespace, where the spec itself lives.
+        root_edit(&stage, |e| {
+            let mut prim = e.prim_mut("/Prim")?.expect("the prim spec");
+            prim.set(
+                sdf::FieldKey::VariantSetNames.as_str(),
+                sdf::Value::TokenListOp(sdf::TokenListOp::prepended([tf::Token::from("set")])),
+            );
+            prim.set(
+                sdf::FieldKey::VariantSelection.as_str(),
+                sdf::Value::VariantSelectionMap(HashMap::from([("set".to_string(), "sel".to_string())])),
+            );
+            Ok(())
+        })?;
+        attr.set(sdf::Value::PathExpression(sdf::PathExpression::parse("Child")))?;
+        assert_eq!(
+            expr_field(&stage, &root, "/Prim{set=sel}.expr", "default"),
+            "/Prim{set=sel}Child"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_expr_vec() -> Result<()> {
+        let (stage, layer_id) = referenced_target()?;
+        stage
+            .create_attribute("/World/MyPrim.exprs", sdf::ValueTypeName::PATH_EXPRESSION_ARRAY)?
+            .set(sdf::Value::PathExpressionVec(vec![
+                sdf::PathExpression::parse("Child"),
+                sdf::PathExpression::parse("/World/MyPrim"),
+            ]))?;
+        let exprs = layer_field(&stage, &layer_id, "/Source.exprs", "default")
+            .expect("authored")
+            .try_as_path_expression_vec()
+            .expect("an expression array");
+        let spelled: Vec<String> = exprs.iter().map(ToString::to_string).collect();
+        assert_eq!(spelled, ["/Source/Child", "/Source"]);
+        Ok(())
+    }
+
+    #[test]
+    fn path_expr_metadata() -> Result<()> {
+        let (stage, layer_id) = referenced_target()?;
+        stage.prim("/World/MyPrim")?.set_metadata(
+            "customExpr",
+            sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+        )?;
+        assert_eq!(expr_field(&stage, &layer_id, "/Source", "customExpr"), "/Source/Child");
+
+        stage.create_relationship("/World/MyPrim.rel")?.set_metadata(
+            "customExpr",
+            sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+        )?;
+        assert_eq!(
+            expr_field(&stage, &layer_id, "/Source.rel", "customExpr"),
+            "/Source/Child"
+        );
+
+        stage
+            .create_attribute("/World/MyPrim.x", sdf::ValueTypeName::FLOAT)?
+            .set_metadata(
+                "customExpr",
+                sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+            )?;
+        assert_eq!(
+            expr_field(&stage, &layer_id, "/Source.x", "customExpr"),
+            "/Source/Child"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_expr_nested_dict() -> Result<()> {
+        let (stage, layer_id) = referenced_target()?;
+        stage.prim("/World/MyPrim")?.set_metadata(
+            "customData",
+            sdf::Value::Dictionary(HashMap::from([(
+                "expr".to_string(),
+                sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+            )])),
+        )?;
+        let dict = layer_field(&stage, &layer_id, "/Source", "customData").expect("authored");
+        let entries = dict.try_as_dictionary().expect("a dictionary");
+        let expr = entries["expr"]
+            .clone()
+            .try_as_path_expression()
+            .expect("a path expression");
+        assert_eq!(expr.to_string(), "/Source/Child");
+        Ok(())
+    }
+
+    #[test]
+    fn path_expr_time_samples() -> Result<()> {
+        let (stage, layer_id) = referenced_target()?;
+        stage
+            .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
+            .set_at(
+                sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+                TimeCode::new(1.0),
+            )?;
+        let samples = layer_field(&stage, &layer_id, "/Source.expr", "timeSamples").expect("authored");
+        let samples = samples.try_as_time_samples().expect("a sample map");
+        let expr = samples[0]
+            .1
+            .clone()
+            .try_as_path_expression()
+            .expect("a path expression");
+        assert_eq!(expr.to_string(), "/Source/Child");
+        Ok(())
+    }
+
+    #[test]
+    fn path_expr_named_ref() -> Result<()> {
+        let (stage, layer_id) = referenced_target()?;
+        stage
+            .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
+            .set(sdf::Value::PathExpression(sdf::PathExpression::parse("%:lights Child")))?;
+        assert_eq!(
+            expr_field(&stage, &layer_id, "/Source.expr", "default"),
+            "%:lights /Source/Child",
+            "a named reference keeps its empty path"
+        );
         Ok(())
     }
 }

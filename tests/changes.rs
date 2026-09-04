@@ -1201,7 +1201,7 @@ fn relocated_info_notice() -> Result<()> {
         edit.attribute_mut(&sdf::path("/Source/Inner.x")?)
             .expect("the source layer parsed")
             .expect("the attribute is authored there")
-            .set_default(sdf::Value::Double(2.0));
+            .set_default(sdf::Value::Double(2.0))?;
         Ok(())
     })?;
 
