@@ -10,7 +10,7 @@ use crate::tf;
 use super::cursor::Cursor;
 use super::error::ParseError;
 use super::token::Token;
-use super::types::{self, Type, TypeInfo};
+use super::types;
 
 /// Parser translates a list of tokens into structured data.
 pub struct Parser<'a> {
@@ -132,17 +132,17 @@ impl<'a> Parser<'a> {
             return Ok(root);
         }
 
-        const KNOWN_PROPS: &[(&str, TypeInfo<'_>)] = &[
-            (FieldKey::DefaultPrim.as_str(), TypeInfo::scalar(Type::Token)),
-            (FieldKey::StartTimeCode.as_str(), TypeInfo::scalar(Type::Double)),
-            (FieldKey::HasOwnedSubLayers.as_str(), TypeInfo::scalar(Type::Bool)),
-            ("doc", TypeInfo::scalar(Type::String)),
-            ("endTimeCode", TypeInfo::scalar(Type::Double)),
-            ("framePrecision", TypeInfo::scalar(Type::Int)),
-            ("framesPerSecond", TypeInfo::scalar(Type::Double)),
-            ("metersPerUnit", TypeInfo::scalar(Type::Double)),
-            ("timeCodesPerSecond", TypeInfo::scalar(Type::Double)),
-            ("upAxis", TypeInfo::scalar(Type::Token)),
+        const KNOWN_PROPS: &[(&str, sdf::ValueTypeName)] = &[
+            (FieldKey::DefaultPrim.as_str(), sdf::ValueTypeName::TOKEN),
+            (FieldKey::StartTimeCode.as_str(), sdf::ValueTypeName::DOUBLE),
+            (FieldKey::HasOwnedSubLayers.as_str(), sdf::ValueTypeName::BOOL),
+            ("doc", sdf::ValueTypeName::STRING),
+            ("endTimeCode", sdf::ValueTypeName::DOUBLE),
+            ("framePrecision", sdf::ValueTypeName::INT),
+            ("framesPerSecond", sdf::ValueTypeName::DOUBLE),
+            ("metersPerUnit", sdf::ValueTypeName::DOUBLE),
+            ("timeCodesPerSecond", sdf::ValueTypeName::DOUBLE),
+            ("upAxis", sdf::ValueTypeName::TOKEN),
         ];
 
         self.parse_block('(', ')', |this| {
@@ -174,8 +174,8 @@ impl<'a> Parser<'a> {
                 }
                 Token::Identifier(name) => {
                     this.cursor.expect_punctuation('=')?;
-                    if let Some(&(known_name, info)) = KNOWN_PROPS.iter().find(|(n, _)| *n == name) {
-                        let value = types::parse_value(&mut this.cursor, info)
+                    if let Some((known_name, ty)) = KNOWN_PROPS.iter().find(|(n, _)| *n == name) {
+                        let value = types::parse_value(&mut this.cursor, ty)
                             .with_context(|| format!("Unable to parse value for {known_name}"))?;
                         root.add(known_name, value);
                     } else {
@@ -403,10 +403,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Create an attribute spec with the standard type/custom/variability fields.
-    fn make_attribute_spec(type_info: &TypeInfo<'_>, custom: bool, variability: sdf::Variability) -> sdf::SpecData {
+    /// Create an attribute spec with the standard type/custom/variability
+    /// fields. The `typeName` keeps the declared spelling (`Color`,
+    /// `double3d[]`), as C++ stores it.
+    fn make_attribute_spec(
+        type_name: &sdf::ValueTypeName,
+        custom: bool,
+        variability: sdf::Variability,
+    ) -> sdf::SpecData {
         let mut spec = sdf::SpecData::new(sdf::SpecType::Attribute);
-        spec.add(FieldKey::TypeName, sdf::Value::token(type_info.to_string()));
+        spec.add(FieldKey::TypeName, sdf::Value::Token(type_name.as_token()));
         if custom {
             spec.add(FieldKey::Custom, sdf::Value::Bool(true));
         }
@@ -448,7 +454,7 @@ impl<'a> Parser<'a> {
             variability = sdf::Variability::Uniform;
         }
 
-        let type_info = types::parse_type(&mut self.cursor)?.context("attribute type expected")?;
+        let type_name = types::parse_type(&mut self.cursor)?.context("attribute type expected")?;
 
         let name = self.expect_name().context("attribute name expected")?;
 
@@ -485,7 +491,7 @@ impl<'a> Parser<'a> {
 
                 let spec = data
                     .entry(path)
-                    .or_insert_with(|| Self::make_attribute_spec(&type_info, custom, variability));
+                    .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
 
                 let list_op = apply_list_op(list_op, targets).context("Unable to build connection listOp")?;
                 spec.add_list_op(FieldKey::ConnectionPaths, sdf::Value::PathListOp(list_op));
@@ -496,12 +502,12 @@ impl<'a> Parser<'a> {
         if matches!(suffix, Some(Token::TimeSamples)) {
             push_unique(suffixed_properties, name);
             self.cursor.expect_punctuation('=')?;
-            let samples = types::parse_time_samples(&mut self.cursor, type_info)?;
+            let samples = types::parse_time_samples(&mut self.cursor, &type_name)?;
             let path = current_path.append_property(name)?;
 
             let spec = data
                 .entry(path)
-                .or_insert_with(|| Self::make_attribute_spec(&type_info, custom, variability));
+                .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
             spec.add(FieldKey::TimeSamples, sdf::Value::TimeSamples(samples));
             return Ok(());
         }
@@ -514,7 +520,7 @@ impl<'a> Parser<'a> {
 
             let spec = data
                 .entry(path)
-                .or_insert_with(|| Self::make_attribute_spec(&type_info, custom, variability));
+                .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
             spec.add("spline", spline);
             return Ok(());
         }
@@ -528,14 +534,14 @@ impl<'a> Parser<'a> {
             let path = current_path.append_property(name)?;
             push_unique(properties, name);
 
-            let mut base = Self::make_attribute_spec(&type_info, custom, variability);
+            let mut base = Self::make_attribute_spec(&type_name, custom, variability);
             base.extend_from(spec);
             Self::merge_spec(data, path, base);
             return Ok(());
         }
 
         self.cursor.expect_punctuation('=')?;
-        let value = types::parse_value(&mut self.cursor, type_info)?;
+        let value = types::parse_value(&mut self.cursor, &type_name)?;
         let path = current_path.append_property(name)?;
 
         if self.cursor.at_punctuation('(')? {
@@ -545,7 +551,7 @@ impl<'a> Parser<'a> {
 
         push_unique(properties, name);
 
-        let mut base = Self::make_attribute_spec(&type_info, custom, variability);
+        let mut base = Self::make_attribute_spec(&type_name, custom, variability);
         base.extend_from(spec);
         base.add(FieldKey::Default, value);
         Self::merge_spec(data, path, base);
@@ -2187,37 +2193,185 @@ def Xform "Anim"
         }
     }
 
-    /// Regression: bare scalars and `None` authored against a typed
-    /// vector property's `.timeSamples` must still parse — the spec
-    /// corpus's `attributes.usda` tests parser tolerance with
-    /// `vector3f my:attribute.timeSamples = { 3 : 5.67, 6.78 : None, ... }`,
-    /// and we don't want the type-aware tuple dispatch to regress
-    /// that.
-    #[test]
-    fn parse_lenient_time_samples_keep_scalar_and_none() {
-        let parser = Parser::new(
-            r#"#usda 1.0
-def Xform "X"
-{
-    custom uniform vector3f my:attribute.timeSamples = {
-        3 : 5.67,
-        6.78 : None,
-        3567.234: -7,
+    /// One field of one parsed spec.
+    fn field(text: &str, path: &str, key: &str) -> Option<sdf::Value> {
+        let specs = Parser::new(text).parse().expect("parses");
+        specs
+            .get(&sdf::Path::new(path).unwrap())
+            .and_then(|s| s.get(key))
+            .cloned()
     }
-}
-"#,
+
+    /// The rendered error of a rejected layer.
+    fn parse_error(text: &str) -> String {
+        format!("{:#}", Parser::new(text).parse().expect_err("rejected"))
+    }
+
+    #[test]
+    fn legacy_color_parses() {
+        let text = "#usda 1.0\ndef \"P\" {\n    Color c = (1, 2, 3)\n    Vec3f v = (1, 2, 3)\n}\n";
+        assert_eq!(
+            field(text, "/P.c", FieldKey::Default.as_str()),
+            Some(sdf::Value::vec3d(1.0, 2.0, 3.0))
         );
-        let specs = parser.parse().expect("lenient timeSamples parsed");
-        let value = specs
-            .get(&sdf::Path::new("/X.my:attribute").unwrap())
-            .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
-            .expect("timeSamples present");
-        let samples = match value {
-            sdf::Value::TimeSamples(s) => s,
-            other => panic!("expected TimeSamples, got {other:?}"),
+        assert_eq!(
+            field(text, "/P.c", FieldKey::TypeName.as_str()),
+            Some(sdf::Value::token("Color"))
+        );
+        assert_eq!(
+            field(text, "/P.v", FieldKey::Default.as_str()),
+            Some(sdf::Value::vec3f(1.0, 2.0, 3.0))
+        );
+    }
+
+    #[test]
+    fn opaque_no_value() {
+        let text = "#usda 1.0\ndef \"P\" {\n    opaque o\n    group g\n    opaque blocked = None\n}\n";
+        assert_eq!(
+            field(text, "/P.o", FieldKey::TypeName.as_str()),
+            Some(sdf::Value::token("opaque"))
+        );
+        assert_eq!(field(text, "/P.o", FieldKey::Default.as_str()), None);
+        assert_eq!(
+            field(text, "/P.g", FieldKey::TypeName.as_str()),
+            Some(sdf::Value::token("group"))
+        );
+        // A block is the one value an opaque attribute takes.
+        assert_eq!(
+            field(text, "/P.blocked", FieldKey::Default.as_str()),
+            Some(sdf::Value::ValueBlock)
+        );
+    }
+
+    #[test]
+    fn opaque_value_rejected() {
+        assert!(parse_error("#usda 1.0\ndef \"P\" {\n    opaque o = 1\n}\n").contains("opaque"));
+    }
+
+    #[test]
+    fn array_given_scalar() {
+        assert!(parse_error("#usda 1.0\ndef \"P\" {\n    int[] x = 3\n}\n").contains("array type"));
+    }
+
+    #[test]
+    fn tuple_arity_rejected() {
+        let text = "#usda 1.0\ndef \"P\" {\n    double4 zero = (0.0, 0.0, 0.0)\n}\n";
+        assert!(parse_error(text).contains("too few"));
+    }
+
+    #[test]
+    fn matrix_list_rejected() {
+        let text =
+            "#usda 1.0\ndef \"P\" {\n    matrix4d m = [(1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)]\n}\n";
+        assert!(parse_error(text).contains("tuple type"));
+    }
+
+    #[test]
+    fn scalar_coerces() {
+        let text = "#usda 1.0\ndef \"P\" {\n    float f = 4\n    double d = 4\n    half h = 4\n}\n";
+        assert_eq!(
+            field(text, "/P.f", FieldKey::Default.as_str()),
+            Some(sdf::Value::Float(4.0))
+        );
+        assert_eq!(
+            field(text, "/P.d", FieldKey::Default.as_str()),
+            Some(sdf::Value::Double(4.0))
+        );
+        assert_eq!(
+            field(text, "/P.h", FieldKey::Default.as_str()),
+            Some(sdf::Value::Half(gf::f16::from_f32(4.0)))
+        );
+    }
+
+    #[test]
+    fn unknown_value_rejected() {
+        assert!(parse_error("#usda 1.0\ndef \"P\" {\n    myType x = \"v\"\n}\n").contains("unregistered"));
+    }
+
+    #[test]
+    fn unregistered_declaration() {
+        let text = "#usda 1.0\ndef \"P\" {\n    custom double3d[] baz\n}\n";
+        assert_eq!(
+            field(text, "/P.baz", FieldKey::TypeName.as_str()),
+            Some(sdf::Value::token("double3d[]"))
+        );
+        assert_eq!(
+            field(text, "/P.baz", FieldKey::Custom.as_str()),
+            Some(sdf::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn vector_scalar_sample_rejected() {
+        let text = "#usda 1.0\ndef \"P\" {\n    vector3f v.timeSamples = {\n        3: 5.67,\n    }\n}\n";
+        assert!(parse_error(text).contains("vector3f"));
+    }
+
+    #[test]
+    fn scalar_samples_typed() {
+        let text = "#usda 1.0\ndef \"P\" {\n    float f.timeSamples = { 1: 4, 2: None }\n    token t.timeSamples = { 1: \"on\" }\n    int[] i.timeSamples = { 1: [3] }\n}\n";
+        let samples = |path: &str| {
+            field(text, path, FieldKey::TimeSamples.as_str())
+                .expect("samples")
+                .try_as_time_samples()
+                .expect("a sample map")
         };
-        assert_eq!(samples.len(), 3);
-        assert!(matches!(samples[1].1, sdf::Value::ValueBlock));
+        assert_eq!(
+            samples("/P.f"),
+            vec![(1.0, sdf::Value::Float(4.0)), (2.0, sdf::Value::ValueBlock)]
+        );
+        assert_eq!(samples("/P.t"), vec![(1.0, sdf::Value::token("on"))]);
+        assert_eq!(samples("/P.i"), vec![(1.0, sdf::Value::IntVec(vec![3]))]);
+        assert!(parse_error("#usda 1.0\ndef \"P\" {\n    int[] i.timeSamples = { 1: 3 }\n}\n").contains("array type"));
+    }
+
+    #[test]
+    fn connect_none() {
+        let text = "#usda 1.0\ndef \"P\" {\n    custom uniform vector3f a.connect = None\n}\n";
+        let op = field(text, "/P.a", FieldKey::ConnectionPaths.as_str())
+            .expect("connectionPaths authored")
+            .try_as_path_list_op()
+            .expect("a path list op");
+        assert!(op.explicit && op.explicit_items.is_empty());
+        assert_eq!(
+            field(text, "/P.a", FieldKey::TypeName.as_str()),
+            Some(sdf::Value::token("vector3f"))
+        );
+        assert_eq!(
+            field(text, "/P.a", FieldKey::Custom.as_str()),
+            Some(sdf::Value::Bool(true))
+        );
+        assert_eq!(
+            field(text, "/P.a", FieldKey::Variability.as_str()),
+            Some(sdf::Value::Variability(sdf::Variability::Uniform))
+        );
+    }
+
+    #[test]
+    fn delete_connect() {
+        let text =
+            "#usda 1.0\ndef \"P\" {\n    color4f a.connect = [</x>, </y>]\n    delete color4f a.connect = None\n}\n";
+        assert!(matches!(
+            field(text, "/P.a", FieldKey::ConnectionPaths.as_str()),
+            Some(sdf::Value::PathListOp(_))
+        ));
+        assert_eq!(
+            field(text, "/P.a", FieldKey::TypeName.as_str()),
+            Some(sdf::Value::token("color4f"))
+        );
+    }
+
+    #[test]
+    fn default_none_block() {
+        let text = "#usda 1.0\ndef \"P\" {\n    float a = None\n    float[] b = None\n}\n";
+        assert_eq!(
+            field(text, "/P.a", FieldKey::Default.as_str()),
+            Some(sdf::Value::ValueBlock)
+        );
+        assert_eq!(
+            field(text, "/P.b", FieldKey::Default.as_str()),
+            Some(sdf::Value::ValueBlock)
+        );
     }
 
     /// A composition-arc target path containing a variant selection is rejected

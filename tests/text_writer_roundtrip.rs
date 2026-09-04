@@ -100,10 +100,9 @@ fn roundtrip_simple() {
     assert_roundtrip("simple");
 }
 
-#[test]
-fn roundtrip_attributes() {
-    assert_roundtrip("attributes");
-}
+// `attributes.usda` authors bare scalars as `vector3f` time samples, which the
+// parser rejects (see `attributes_malformed` in `text_format`); the typed
+// constructs it also carries round-trip through `fixture_typed_timesamples`.
 
 #[test]
 fn roundtrip_relations() {
@@ -180,6 +179,7 @@ fixture_tests! {
     fixture_sublayer_base,
     fixture_sublayer_override,
     fixture_timesamples,
+    fixture_typed_timesamples,
     fixture_variant_fallback,
 }
 

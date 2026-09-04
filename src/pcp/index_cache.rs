@@ -4760,8 +4760,8 @@ def "Anchor" (inherits = </Rig>) {}
 
         let size =
             |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &interp);
-        assert_eq!(size(&mut cache, 1.0)?, Some(sdf::Value::Double(10.0)));
-        assert_eq!(size(&mut cache, 2.0)?, Some(sdf::Value::Double(20.0)));
+        assert_eq!(size(&mut cache, 1.0)?, Some(sdf::Value::Float(10.0)));
+        assert_eq!(size(&mut cache, 2.0)?, Some(sdf::Value::Float(20.0)));
         Ok(())
     }
 
@@ -4774,8 +4774,8 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = collected_stack(&root);
         let size =
             |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
-        assert_eq!(size(&mut cache, 11.0)?, Some(Value::Double(10.0)));
-        assert_eq!(size(&mut cache, 12.0)?, Some(Value::Double(20.0)));
+        assert_eq!(size(&mut cache, 11.0)?, Some(Value::Float(10.0)));
+        assert_eq!(size(&mut cache, 12.0)?, Some(Value::Float(20.0)));
         Ok(())
     }
 
@@ -4789,7 +4789,7 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = collected_stack(&root);
         let size =
             |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
-        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Double(42.0)));
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(42.0)));
         Ok(())
     }
 
@@ -4815,7 +4815,9 @@ def "Anchor" (inherits = </Rig>) {}
         }
         let w = samples.windows(2).find(|w| t >= w[0].0 && t <= w[1].0)?;
         let f = (t - w[0].0) / (w[1].0 - w[0].0);
-        Some(Value::Double(as_f(&w[0].1) + (as_f(&w[1].1) - as_f(&w[0].1)) * f))
+        Some(Value::Float(
+            (as_f(&w[0].1) + (as_f(&w[1].1) - as_f(&w[0].1)) * f) as f32,
+        ))
     }
 
     /// A gap in the active clip falls to the manifest's authored default
@@ -4827,7 +4829,7 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = single_layer_stack(&root);
         let size =
             |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
-        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Double(5.0)));
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(5.0)));
         assert_eq!(size(&mut cache, 10.0)?, Some(Value::Float(99.0)));
         Ok(())
     }
@@ -4842,7 +4844,7 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = collected_stack(&root);
         let size =
             |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
-        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Double(5.0)));
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(5.0)));
         assert_eq!(size(&mut cache, 10.0)?, None);
         Ok(())
     }
@@ -4868,7 +4870,7 @@ def "Anchor" (inherits = </Rig>) {}
         else {
             panic!("undeclared clip attribute must resolve as arc time samples");
         };
-        assert_eq!(samples.as_slice(), &[(3.0, Value::Double(42.0))]);
+        assert_eq!(samples.as_slice(), &[(3.0, Value::Float(42.0))]);
         Ok(())
     }
 
@@ -4886,7 +4888,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         assert_eq!(
             cache.value_at(&graph, &sdf::path("/Model.size")?, 5.0, &lerp)?,
-            Some(Value::Double(50.0))
+            Some(Value::Float(50.0))
         );
         assert!(matches!(
             cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?.source,
@@ -4926,9 +4928,9 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = single_layer_stack(&root);
         let size =
             |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &lerp);
-        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Double(0.0)));
-        assert_eq!(size(&mut cache, 15.0)?, Some(Value::Double(75.0)));
-        assert_eq!(size(&mut cache, 20.0)?, Some(Value::Double(100.0)));
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(0.0)));
+        assert_eq!(size(&mut cache, 15.0)?, Some(Value::Float(75.0)));
+        assert_eq!(size(&mut cache, 20.0)?, Some(Value::Float(100.0)));
         Ok(())
     }
 

@@ -1,0 +1,26 @@
+#usda 1.0
+
+def Xform "Anim"
+{
+    float weight.timeSamples = {
+        0: 4,
+        1: 0.5,
+        2: None,
+    }
+    token mode.timeSamples = {
+        0: "on",
+        1: "off",
+    }
+    int[] indices.timeSamples = {
+        0: [1, 2, 3],
+        1: [],
+    }
+    vector3f velocity.timeSamples = {
+        0: (1, 0, 0),
+        1: (0, 1, 0),
+    }
+    timecode cue.timeSamples = {
+        0: 24,
+        1: 48.5,
+    }
+}

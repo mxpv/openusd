@@ -227,18 +227,18 @@ fn animated_intensity_via_get_at() -> Result<()> {
     // Default-time read ignores timeSamples → None (no authored default).
     assert_eq!(light.intensity_attr().get::<sdf::Value>()?, None);
     // At-time reads pick / interpolate the samples (stage default is linear).
-    // The unsuffixed sample literals parse as `double`.
+    // The samples decode as `float`, the declared type.
     assert_eq!(
         light.intensity_attr().get_at(openusd::usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(100.0))
+        Some(sdf::Value::Float(100.0))
     );
     assert_eq!(
         light.intensity_attr().get_at(openusd::usd::TimeCode::new(10.0))?,
-        Some(sdf::Value::Double(1000.0))
+        Some(sdf::Value::Float(1000.0))
     );
     assert_eq!(
         light.intensity_attr().get_at(openusd::usd::TimeCode::new(5.0))?,
-        Some(sdf::Value::Double(550.0))
+        Some(sdf::Value::Float(550.0))
     );
     Ok(())
 }

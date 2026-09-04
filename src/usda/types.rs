@@ -5,13 +5,7 @@
 //! children, and anchoring paths against the current prim stay in
 //! [`super::parser`].
 
-use std::{
-    any::type_name,
-    borrow::Cow,
-    collections::HashMap,
-    fmt::{self, Debug},
-    str::FromStr,
-};
+use std::{any::type_name, borrow::Cow, collections::HashMap, fmt::Debug, str::FromStr};
 
 use super::error::{Ctx, RawError, bail, ensure};
 
@@ -20,216 +14,182 @@ use crate::{gf, sdf};
 use super::cursor::Cursor;
 use super::token::Token;
 
-/// Base data type without array semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Type {
-    Bool,
-    Uchar,
-    Int,
-    Int2,
-    Int3,
-    Int4,
-    Uint,
-    Int64,
-    Uint64,
-    Half,
-    Half2,
-    Half3,
-    Half4,
-    Float,
-    Float2,
-    Float3,
-    Float4,
-    Double,
-    Double2,
-    Double3,
-    Double4,
-    Quath,
-    Quatf,
-    Quatd,
-    String,
-    Token,
-    Asset,
-    TimeCode,
-    PathExpression,
-    Matrix2d,
-    Matrix3d,
-    Matrix4d,
-    Dictionary,
-    /// Unrecognized type name; the raw name is preserved in `TypeInfo::type_name`.
-    Custom,
-}
-
-/// Result of parsing a type declaration, holding the parsed base type,
-/// the original token text, and whether `[]` was present.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct TypeInfo<'a> {
-    ty: Type,
-    type_name: &'a str,
-    is_array: bool,
-}
-
-impl<'a> TypeInfo<'a> {
-    pub(super) const fn scalar(ty: Type) -> Self {
-        TypeInfo {
-            ty,
-            type_name: "",
-            is_array: false,
-        }
-    }
-}
-
-impl fmt::Display for TypeInfo<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_array {
-            write!(f, "{}[]", self.type_name)
-        } else {
-            write!(f, "{}", self.type_name)
-        }
-    }
-}
-
-/// Tries to parse a type declaration: a recognized type name optionally followed by `[]`.
+/// Tries to parse a type declaration: an identifier optionally followed by
+/// `[]`.
 ///
-/// Returns `Ok(None)` if the next token is not a known type (without consuming it).
-pub(super) fn parse_type<'source>(cursor: &mut Cursor<'source>) -> Result<Option<TypeInfo<'source>>, RawError> {
-    let base = match cursor.peek()? {
-        Some(Token::Identifier(name)) => *name,
-        Some(Token::Dictionary) => "dictionary",
-        _ => return Ok(None),
+/// Returns `Ok(None)` if the next token is not an identifier (without
+/// consuming it). A spelling the type table does not know is carried as an
+/// unregistered [`sdf::ValueTypeName`], so it reaches the `typeName` field
+/// verbatim; a registered spelling with `[]` resolves to its array type, and
+/// `opaque[]`, which has none, stays unregistered.
+pub(super) fn parse_type(cursor: &mut Cursor<'_>) -> Result<Option<sdf::ValueTypeName>, RawError> {
+    let Some(Token::Identifier(base)) = cursor.peek()? else {
+        return Ok(None);
     };
-
-    let ty = parse_base_type(base).unwrap_or(Type::Custom);
+    let base = *base;
     cursor.bump()?;
 
-    let mut is_array = false;
-    if cursor.at_punctuation('[')? {
-        cursor.bump()?;
-        cursor.expect_punctuation(']')?;
-        is_array = true;
+    if !cursor.at_punctuation('[')? {
+        return Ok(Some(sdf::ValueTypeName::from(base)));
     }
-
-    Ok(Some(TypeInfo {
-        ty,
-        type_name: base,
-        is_array,
-    }))
+    cursor.bump()?;
+    cursor.expect_punctuation(']')?;
+    Ok(Some(sdf::ValueTypeName::from(format!("{base}[]"))))
 }
 
-/// Decode a typed value based on USD's scalar/array/role type tables.
-pub(super) fn parse_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<sdf::Value, RawError> {
+/// Decode a value of the declared type `ty`, dispatching on the
+/// [`sdf::ValueKind`] the type table assigns it.
+///
+/// `None` is a value block whatever the type. A registered type's literal
+/// must have the type's shape (§16.2.16.6 of the core spec); an unregistered
+/// type and an `opaque` type have no value to parse.
+pub(super) fn parse_value(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> Result<sdf::Value, RawError> {
     // None means "value block" (explicitly unset) regardless of type.
     if cursor.eat(&Token::None)? {
         return Ok(sdf::Value::ValueBlock);
     }
 
-    let value = match (info.ty, info.is_array) {
-        (Type::Bool, false) => sdf::Value::Bool(parse_bool(cursor)?),
-        (Type::Bool, true) => sdf::Value::BoolVec(parse_array_with(cursor, parse_bool)?),
+    // TODO: record the literal of an unregistered type's value as
+    // `sdf::Value::UnregisteredValue` (C++ `SdfUnregisteredValue`), which the
+    // writer would then emit verbatim; the writer quotes that variant today.
+    let Some(kind) = ty.kind() else {
+        bail!("Cannot parse a value for unregistered type `{ty}`");
+    };
+    ensure!(kind != sdf::ValueKind::Opaque, "`{ty}` attributes cannot have a value");
+    check_shape(cursor, ty)?;
 
-        (Type::Asset, false) => sdf::Value::AssetPath(cursor.expect_asset_ref()?.into()),
-        (Type::Asset, true) => {
+    let value = match kind {
+        sdf::ValueKind::Bool => sdf::Value::Bool(parse_bool(cursor)?),
+        sdf::ValueKind::BoolVec => sdf::Value::BoolVec(parse_array_with(cursor, parse_bool)?),
+
+        sdf::ValueKind::AssetPath => sdf::Value::AssetPath(cursor.expect_asset_ref()?.into()),
+        sdf::ValueKind::AssetPathVec => {
             sdf::Value::AssetPathVec(parse_array_with(cursor, |c| Ok(c.expect_asset_ref()?.into()))?)
         }
 
-        (Type::TimeCode, false) => sdf::Value::TimeCode(parse_token::<f64>(cursor)?.into()),
-        (Type::TimeCode, true) => sdf::Value::TimeCodeVec(
+        sdf::ValueKind::TimeCode => sdf::Value::TimeCode(parse_token::<f64>(cursor)?.into()),
+        sdf::ValueKind::TimeCodeVec => sdf::Value::TimeCodeVec(
             parse_array::<f64>(cursor)?
                 .into_iter()
                 .map(sdf::TimeCode::from)
                 .collect(),
         ),
 
-        (Type::Uchar, false) => sdf::Value::Uchar(parse_token(cursor)?),
-        (Type::Uchar, true) => sdf::Value::UcharVec(parse_array(cursor)?),
+        sdf::ValueKind::Uchar => sdf::Value::Uchar(parse_token(cursor)?),
+        sdf::ValueKind::UcharVec => sdf::Value::UcharVec(parse_array(cursor)?),
 
-        (Type::Int, false) => sdf::Value::Int(parse_token(cursor)?),
-        (Type::Int, true) => sdf::Value::IntVec(parse_array(cursor)?),
-        (Type::Int2, false) => sdf::Value::Vec2i(parse_gf::<i32, _, 2>(cursor)?),
-        (Type::Int2, true) => sdf::Value::Vec2iVec(parse_gf_array::<i32, _, 2>(cursor)?),
-        (Type::Int3, false) => sdf::Value::Vec3i(parse_gf::<i32, _, 3>(cursor)?),
-        (Type::Int3, true) => sdf::Value::Vec3iVec(parse_gf_array::<i32, _, 3>(cursor)?),
-        (Type::Int4, false) => sdf::Value::Vec4i(parse_gf::<i32, _, 4>(cursor)?),
-        (Type::Int4, true) => sdf::Value::Vec4iVec(parse_gf_array::<i32, _, 4>(cursor)?),
-        (Type::Uint, false) => sdf::Value::Uint(parse_token(cursor)?),
-        (Type::Uint, true) => sdf::Value::UintVec(parse_array(cursor)?),
-        (Type::Int64, false) => sdf::Value::Int64(parse_token(cursor)?),
-        (Type::Int64, true) => sdf::Value::Int64Vec(parse_array(cursor)?),
-        (Type::Uint64, false) => sdf::Value::Uint64(parse_token(cursor)?),
-        (Type::Uint64, true) => sdf::Value::Uint64Vec(parse_array(cursor)?),
+        sdf::ValueKind::Int => sdf::Value::Int(parse_token(cursor)?),
+        sdf::ValueKind::IntVec => sdf::Value::IntVec(parse_array(cursor)?),
+        sdf::ValueKind::Vec2i => sdf::Value::Vec2i(parse_gf::<i32, _, 2>(cursor)?),
+        sdf::ValueKind::Vec2iVec => sdf::Value::Vec2iVec(parse_gf_array::<i32, _, 2>(cursor)?),
+        sdf::ValueKind::Vec3i => sdf::Value::Vec3i(parse_gf::<i32, _, 3>(cursor)?),
+        sdf::ValueKind::Vec3iVec => sdf::Value::Vec3iVec(parse_gf_array::<i32, _, 3>(cursor)?),
+        sdf::ValueKind::Vec4i => sdf::Value::Vec4i(parse_gf::<i32, _, 4>(cursor)?),
+        sdf::ValueKind::Vec4iVec => sdf::Value::Vec4iVec(parse_gf_array::<i32, _, 4>(cursor)?),
+        sdf::ValueKind::Uint => sdf::Value::Uint(parse_token(cursor)?),
+        sdf::ValueKind::UintVec => sdf::Value::UintVec(parse_array(cursor)?),
+        sdf::ValueKind::Int64 => sdf::Value::Int64(parse_token(cursor)?),
+        sdf::ValueKind::Int64Vec => sdf::Value::Int64Vec(parse_array(cursor)?),
+        sdf::ValueKind::Uint64 => sdf::Value::Uint64(parse_token(cursor)?),
+        sdf::ValueKind::Uint64Vec => sdf::Value::Uint64Vec(parse_array(cursor)?),
 
-        (Type::Half, false) => sdf::Value::Half(parse_token(cursor)?),
-        (Type::Half, true) => sdf::Value::HalfVec(parse_array(cursor)?),
-        (Type::Half2, false) => sdf::Value::Vec2h(parse_gf::<gf::f16, _, 2>(cursor)?),
-        (Type::Half2, true) => sdf::Value::Vec2hVec(parse_gf_array::<gf::f16, _, 2>(cursor)?),
-        (Type::Half3, false) => sdf::Value::Vec3h(parse_gf::<gf::f16, _, 3>(cursor)?),
-        (Type::Half3, true) => sdf::Value::Vec3hVec(parse_gf_array::<gf::f16, _, 3>(cursor)?),
-        (Type::Half4, false) => sdf::Value::Vec4h(parse_gf::<gf::f16, _, 4>(cursor)?),
-        (Type::Half4, true) => sdf::Value::Vec4hVec(parse_gf_array::<gf::f16, _, 4>(cursor)?),
+        sdf::ValueKind::Half => sdf::Value::Half(parse_token(cursor)?),
+        sdf::ValueKind::HalfVec => sdf::Value::HalfVec(parse_array(cursor)?),
+        sdf::ValueKind::Vec2h => sdf::Value::Vec2h(parse_gf::<gf::f16, _, 2>(cursor)?),
+        sdf::ValueKind::Vec2hVec => sdf::Value::Vec2hVec(parse_gf_array::<gf::f16, _, 2>(cursor)?),
+        sdf::ValueKind::Vec3h => sdf::Value::Vec3h(parse_gf::<gf::f16, _, 3>(cursor)?),
+        sdf::ValueKind::Vec3hVec => sdf::Value::Vec3hVec(parse_gf_array::<gf::f16, _, 3>(cursor)?),
+        sdf::ValueKind::Vec4h => sdf::Value::Vec4h(parse_gf::<gf::f16, _, 4>(cursor)?),
+        sdf::ValueKind::Vec4hVec => sdf::Value::Vec4hVec(parse_gf_array::<gf::f16, _, 4>(cursor)?),
 
-        (Type::Float, false) => sdf::Value::Float(parse_token(cursor)?),
-        (Type::Float, true) => sdf::Value::FloatVec(parse_array(cursor)?),
-        (Type::Float2, false) => sdf::Value::Vec2f(parse_gf::<f32, _, 2>(cursor)?),
-        (Type::Float2, true) => sdf::Value::Vec2fVec(parse_gf_array::<f32, _, 2>(cursor)?),
-        (Type::Float3, false) => sdf::Value::Vec3f(parse_gf::<f32, _, 3>(cursor)?),
-        (Type::Float3, true) => sdf::Value::Vec3fVec(parse_gf_array::<f32, _, 3>(cursor)?),
-        (Type::Float4, false) => sdf::Value::Vec4f(parse_gf::<f32, _, 4>(cursor)?),
-        (Type::Float4, true) => sdf::Value::Vec4fVec(parse_gf_array::<f32, _, 4>(cursor)?),
+        sdf::ValueKind::Float => sdf::Value::Float(parse_token(cursor)?),
+        sdf::ValueKind::FloatVec => sdf::Value::FloatVec(parse_array(cursor)?),
+        sdf::ValueKind::Vec2f => sdf::Value::Vec2f(parse_gf::<f32, _, 2>(cursor)?),
+        sdf::ValueKind::Vec2fVec => sdf::Value::Vec2fVec(parse_gf_array::<f32, _, 2>(cursor)?),
+        sdf::ValueKind::Vec3f => sdf::Value::Vec3f(parse_gf::<f32, _, 3>(cursor)?),
+        sdf::ValueKind::Vec3fVec => sdf::Value::Vec3fVec(parse_gf_array::<f32, _, 3>(cursor)?),
+        sdf::ValueKind::Vec4f => sdf::Value::Vec4f(parse_gf::<f32, _, 4>(cursor)?),
+        sdf::ValueKind::Vec4fVec => sdf::Value::Vec4fVec(parse_gf_array::<f32, _, 4>(cursor)?),
 
-        (Type::Double, false) => sdf::Value::Double(parse_token(cursor)?),
-        (Type::Double, true) => sdf::Value::DoubleVec(parse_array(cursor)?),
-        (Type::Double2, false) => sdf::Value::Vec2d(parse_gf::<f64, _, 2>(cursor)?),
-        (Type::Double2, true) => sdf::Value::Vec2dVec(parse_gf_array::<f64, _, 2>(cursor)?),
-        (Type::Double3, false) => sdf::Value::Vec3d(parse_gf::<f64, _, 3>(cursor)?),
-        (Type::Double3, true) => sdf::Value::Vec3dVec(parse_gf_array::<f64, _, 3>(cursor)?),
-        (Type::Double4, false) => sdf::Value::Vec4d(parse_gf::<f64, _, 4>(cursor)?),
-        (Type::Double4, true) => sdf::Value::Vec4dVec(parse_gf_array::<f64, _, 4>(cursor)?),
+        sdf::ValueKind::Double => sdf::Value::Double(parse_token(cursor)?),
+        sdf::ValueKind::DoubleVec => sdf::Value::DoubleVec(parse_array(cursor)?),
+        sdf::ValueKind::Vec2d => sdf::Value::Vec2d(parse_gf::<f64, _, 2>(cursor)?),
+        sdf::ValueKind::Vec2dVec => sdf::Value::Vec2dVec(parse_gf_array::<f64, _, 2>(cursor)?),
+        sdf::ValueKind::Vec3d => sdf::Value::Vec3d(parse_gf::<f64, _, 3>(cursor)?),
+        sdf::ValueKind::Vec3dVec => sdf::Value::Vec3dVec(parse_gf_array::<f64, _, 3>(cursor)?),
+        sdf::ValueKind::Vec4d => sdf::Value::Vec4d(parse_gf::<f64, _, 4>(cursor)?),
+        sdf::ValueKind::Vec4dVec => sdf::Value::Vec4dVec(parse_gf_array::<f64, _, 4>(cursor)?),
 
         // Quaternion fields in USDA are (w, x, y, z) — same as gf::Quat* field order.
-        (Type::Quath, false) => sdf::Value::Quath(parse_gf::<gf::f16, _, 4>(cursor)?),
-        (Type::Quatf, false) => sdf::Value::Quatf(parse_gf::<f32, _, 4>(cursor)?),
-        (Type::Quatd, false) => sdf::Value::Quatd(parse_gf::<f64, _, 4>(cursor)?),
-        (Type::Quath, true) => sdf::Value::QuathVec(parse_gf_array::<gf::f16, _, 4>(cursor)?),
-        (Type::Quatf, true) => sdf::Value::QuatfVec(parse_gf_array::<f32, _, 4>(cursor)?),
-        (Type::Quatd, true) => sdf::Value::QuatdVec(parse_gf_array::<f64, _, 4>(cursor)?),
+        sdf::ValueKind::Quath => sdf::Value::Quath(parse_gf::<gf::f16, _, 4>(cursor)?),
+        sdf::ValueKind::Quatf => sdf::Value::Quatf(parse_gf::<f32, _, 4>(cursor)?),
+        sdf::ValueKind::Quatd => sdf::Value::Quatd(parse_gf::<f64, _, 4>(cursor)?),
+        sdf::ValueKind::QuathVec => sdf::Value::QuathVec(parse_gf_array::<gf::f16, _, 4>(cursor)?),
+        sdf::ValueKind::QuatfVec => sdf::Value::QuatfVec(parse_gf_array::<f32, _, 4>(cursor)?),
+        sdf::ValueKind::QuatdVec => sdf::Value::QuatdVec(parse_gf_array::<f64, _, 4>(cursor)?),
 
-        (Type::String, false) => sdf::Value::String(cursor.expect_string()?.into_owned()),
-        (Type::String, true) => sdf::Value::StringVec(parse_array(cursor)?),
-        (Type::Token, false) => sdf::Value::token(cursor.expect_string()?.as_ref()),
-        (Type::Token, true) => sdf::Value::token_vec(parse_array::<String>(cursor)?),
+        sdf::ValueKind::String => sdf::Value::String(cursor.expect_string()?.into_owned()),
+        sdf::ValueKind::StringVec => sdf::Value::StringVec(parse_array(cursor)?),
+        sdf::ValueKind::Token => sdf::Value::token(cursor.expect_string()?.as_ref()),
+        sdf::ValueKind::TokenVec => sdf::Value::token_vec(parse_array::<String>(cursor)?),
 
-        (Type::PathExpression, false) => {
+        sdf::ValueKind::PathExpression => {
             sdf::Value::PathExpression(sdf::PathExpression::parse(cursor.expect_string()?.as_ref()))
         }
-        (Type::PathExpression, true) => sdf::Value::PathExpressionVec(
+        sdf::ValueKind::PathExpressionVec => sdf::Value::PathExpressionVec(
             parse_array::<String>(cursor)?
                 .iter()
                 .map(|text| sdf::PathExpression::parse(text))
                 .collect(),
         ),
 
-        (Type::Matrix2d, false) => sdf::Value::Matrix2d(gf::Mat2d(parse_matrix::<2, 4>(cursor)?)),
-        (Type::Matrix3d, false) => sdf::Value::Matrix3d(gf::Mat3d(parse_matrix::<3, 9>(cursor)?)),
-        (Type::Matrix4d, false) => sdf::Value::Matrix4d(gf::Matrix4d(parse_matrix::<4, 16>(cursor)?)),
-        (Type::Matrix2d, true) => {
+        sdf::ValueKind::Matrix2d => sdf::Value::Matrix2d(gf::Mat2d(parse_matrix::<2, 4>(cursor)?)),
+        sdf::ValueKind::Matrix3d => sdf::Value::Matrix3d(gf::Mat3d(parse_matrix::<3, 9>(cursor)?)),
+        sdf::ValueKind::Matrix4d => sdf::Value::Matrix4d(gf::Matrix4d(parse_matrix::<4, 16>(cursor)?)),
+        sdf::ValueKind::Matrix2dVec => {
             sdf::Value::Matrix2dVec(parse_matrix_array::<2, 4>(cursor)?.into_iter().map(gf::Mat2d).collect())
         }
-        (Type::Matrix3d, true) => {
+        sdf::ValueKind::Matrix3dVec => {
             sdf::Value::Matrix3dVec(parse_matrix_array::<3, 9>(cursor)?.into_iter().map(gf::Mat3d).collect())
         }
-        (Type::Matrix4d, true) => sdf::Value::Matrix4dVec(
+        sdf::ValueKind::Matrix4dVec => sdf::Value::Matrix4dVec(
             parse_matrix_array::<4, 16>(cursor)?
                 .into_iter()
                 .map(gf::Matrix4d)
                 .collect(),
         ),
 
-        (Type::Dictionary, _) => parse_dictionary(cursor)?,
-
-        (Type::Custom, _) => bail!("Cannot parse value for unrecognized type: {}", info.type_name),
+        // The table never assigns a metadata-only kind to an attribute type.
+        other => bail!("`{ty}` ({other}) is not an attribute value type"),
     };
 
     Ok(value)
+}
+
+/// Checks that the literal about to be parsed opens with the shape `ty`
+/// requires (§16.2.16.6 of the core spec): a `[` for an array type, a `(`
+/// for a tuple or matrix type, neither for a scalar. Arity inside the
+/// literal is checked by the tuple and matrix parsers.
+fn check_shape(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> Result<(), RawError> {
+    let opens_list = cursor.at_punctuation('[')?;
+    let opens_tuple = cursor.at_punctuation('(')?;
+    if ty.is_array() {
+        ensure!(
+            opens_list,
+            "`{ty}` is an array type, so its value must be a `[...]` list"
+        );
+    } else if ty.dimensions() != Some(sdf::Dimensions::Scalar) {
+        ensure!(
+            opens_tuple,
+            "`{ty}` is a tuple type, so its value must be a `(...)` tuple"
+        );
+    } else {
+        ensure!(
+            !opens_list && !opens_tuple,
+            "`{ty}` is a scalar type, so its value can be neither a list nor a tuple"
+        );
+    }
+    Ok(())
 }
 
 /// Parse a single attribute metadata value (scalar or array) from within a metadata block.
@@ -301,8 +261,11 @@ pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value, Ra
     let mut dict = HashMap::new();
 
     parse_block(cursor, '{', '}', |c| {
-        // Try optional type hint, then read the key.
-        let type_hint = parse_type(c)?;
+        // A nested dictionary is introduced by the `dictionary` keyword (a
+        // keyword in the grammar, not a value type); any other entry declares
+        // a value type, then the key.
+        let nested = c.eat(&Token::Dictionary)?;
+        let type_hint = if nested { None } else { parse_type(c)? };
 
         let key_token = c.bump()?;
         let key = match key_token {
@@ -316,8 +279,10 @@ pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value, Ra
 
         c.expect_punctuation('=')?;
 
-        let value = if let Some(info) = type_hint {
-            parse_value(c, info)?
+        let value = if nested {
+            parse_dictionary(c)?
+        } else if let Some(ty) = type_hint {
+            parse_value(c, &ty)?
         } else {
             parse_untyped_value(c)?
         };
@@ -330,21 +295,14 @@ pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value, Ra
 
 /// Parse a time sample map: `{ time : value, time : value, ... }`.
 ///
-/// Per-time values are dispatched two ways:
-///
-/// - When the property's declared type and the next token agree
-///   on shape (a tuple type opening with `(` or `[`, or any
-///   array type opening with `[`), route through [`parse_value`]
-///   so the value lands in the matching typed variant
-///   (`gf::Vec3f` / `QuatfVec` / `gf::Matrix4d` / `IntVec` / `FloatVec` /
-///   `TokenVec` / …).
-///
-/// - Otherwise fall through to [`parse_untyped_value`]
-///   so malformed-but-historically-accepted samples still load
-///   — the spec corpus's `attributes.usda` deliberately authors
-///   bare scalars (`5.67`, `-7`) and `None` against typed
-///   `vector3f` properties to verify the parser's tolerance.
-pub(super) fn parse_time_samples(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<sdf::TimeSampleMap, RawError> {
+/// Every sample is decoded under the property's declared type through
+/// [`parse_value`], so a `float` sample written `4` lands as `Float`, a
+/// `token` sample as `Token`, a `None` as a value block, and a literal of
+/// the wrong shape is an error (§16.2.16.6 of the core spec).
+pub(super) fn parse_time_samples(
+    cursor: &mut Cursor<'_>,
+    ty: &sdf::ValueTypeName,
+) -> Result<sdf::TimeSampleMap, RawError> {
     let mut samples = Vec::new();
     parse_block(cursor, '{', '}', |c| {
         let time_str = c.bump()?;
@@ -353,11 +311,7 @@ pub(super) fn parse_time_samples(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) ->
             other => bail!("Expected time value, got {other:?}"),
         };
         c.expect_punctuation(':')?;
-        let value = if next_is_typed_value(c, info)? {
-            parse_value(c, info)?
-        } else {
-            parse_untyped_value(c)?
-        };
+        let value = parse_value(c, ty)?;
         samples.push((time, value));
         Ok(())
     })?;
@@ -603,7 +557,7 @@ pub(super) fn parse_sublayers(cursor: &mut Cursor<'_>) -> Result<(Vec<String>, V
             parse_block(c, '(', ')', |entry| {
                 let token = entry.bump()?;
                 entry.expect_punctuation('=')?;
-                let value = parse_value(entry, TypeInfo::scalar(Type::Double))?;
+                let value = parse_value(entry, &sdf::ValueTypeName::DOUBLE)?;
                 match token {
                     Token::Offset => {
                         offset = Some(value);
@@ -645,98 +599,6 @@ pub(super) fn reject_variant_selection_in_path(path: &sdf::Path, arc: &str) -> R
     Ok(())
 }
 
-/// Parses a scalar type name into a `Type`. Does not handle arrays.
-///
-/// See
-/// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Basic_Datatypes>
-/// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Roles>
-fn parse_base_type(name: &str) -> Result<Type, RawError> {
-    let ty = match name {
-        "bool" => Type::Bool,
-        "uchar" => Type::Uchar,
-        "int" => Type::Int,
-        "int2" => Type::Int2,
-        "int3" => Type::Int3,
-        "int4" => Type::Int4,
-        "uint" => Type::Uint,
-        "int64" => Type::Int64,
-        "uint64" => Type::Uint64,
-        "half" => Type::Half,
-        "half2" | "texCoord2h" => Type::Half2,
-        "half3" | "point3h" | "normal3h" | "vector3h" | "color3h" | "texCoord3h" => Type::Half3,
-        "half4" | "color4h" => Type::Half4,
-        "float" => Type::Float,
-        "float2" | "texCoord2f" => Type::Float2,
-        "float3" | "point3f" | "normal3f" | "vector3f" | "color3f" | "texCoord3f" => Type::Float3,
-        "float4" | "color4f" => Type::Float4,
-        "double" => Type::Double,
-        "double2" | "texCoord2d" => Type::Double2,
-        "double3" | "point3d" | "normal3d" | "vector3d" | "color3d" | "texCoord3d" => Type::Double3,
-        "double4" | "color4d" => Type::Double4,
-        "matrix2d" => Type::Matrix2d,
-        "matrix3d" => Type::Matrix3d,
-        "matrix4d" | "frame4d" => Type::Matrix4d,
-        "quatd" => Type::Quatd,
-        "quatf" => Type::Quatf,
-        "quath" => Type::Quath,
-        "string" => Type::String,
-        "token" => Type::Token,
-        "asset" => Type::Asset,
-        "timecode" => Type::TimeCode,
-        "pathExpression" => Type::PathExpression,
-        "dictionary" => Type::Dictionary,
-        _ => bail!("Unsupported type: {name}"),
-    };
-    Ok(ty)
-}
-
-/// Heuristic: should the next token be parsed under [`parse_value`]
-/// for `info`, or is the type-blind metadata-value path safer?
-///
-/// Returns `true` when the next token opens a literal whose shape
-/// matches the declared type:
-///
-/// - `(` for a tuple type (vector / quat / matrix row / matrix).
-/// - `[` for any array type (scalar arrays like `int[]`,
-///   `float[]`, `token[]`, as well as arrays of tuples like
-///   `quatf[]` or `matrix4d[]`).
-/// - a bare number for a scalar `timecode`, so a sample like
-///   `1: 24` resolves to [`sdf::Value::TimeCode`] rather than the
-///   type-blind path's `Int64` / `Double`.
-///
-/// Anything else (scalar literal, `None`, identifier) flows
-/// through the type-blind path so the spec corpus's lenient
-/// `vector3f`-with-bare-scalar samples keep parsing.
-fn next_is_typed_value(cursor: &mut Cursor<'_>, info: TypeInfo<'_>) -> Result<bool, RawError> {
-    let is_tuple_type = matches!(
-        info.ty,
-        Type::Int2
-            | Type::Int3
-            | Type::Int4
-            | Type::Half2
-            | Type::Half3
-            | Type::Half4
-            | Type::Float2
-            | Type::Float3
-            | Type::Float4
-            | Type::Double2
-            | Type::Double3
-            | Type::Double4
-            | Type::Quath
-            | Type::Quatf
-            | Type::Quatd
-            | Type::Matrix2d
-            | Type::Matrix3d
-            | Type::Matrix4d
-    );
-    Ok(match cursor.peek()? {
-        Some(Token::Punctuation('(')) => is_tuple_type,
-        Some(Token::Punctuation('[')) => is_tuple_type || info.is_array,
-        Some(Token::Number(_)) => info.ty == Type::TimeCode && !info.is_array,
-        _ => false,
-    })
-}
-
 /// Parse an extrapolation mode: `mode [(slope)]`.
 fn parse_extrapolation(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawError> {
     let mode = cursor.expect_identifier()?;
@@ -771,11 +633,11 @@ fn parse_reference_layer_offset(
 
         match token {
             Token::Offset => {
-                let value = parse_value(c, TypeInfo::scalar(Type::Double))?;
+                let value = parse_value(c, &sdf::ValueTypeName::DOUBLE)?;
                 layer_offset.offset = value.try_as_double().context("Expected double for offset")?;
             }
             Token::Scale => {
-                let value = parse_value(c, TypeInfo::scalar(Type::Double))?;
+                let value = parse_value(c, &sdf::ValueTypeName::DOUBLE)?;
                 layer_offset.scale = value.try_as_double().context("Expected double for scale")?;
             }
             Token::CustomData => {
@@ -929,16 +791,9 @@ where
     parse_array_with(cursor, parse_token)
 }
 
-/// Parse a single matrix literal, flattening rows in row-major order.
-///
-/// Handles both bare `(row), (row), ...` and bracket-wrapped `[ (row), ... ]` forms.
+/// Parse a single matrix literal `((row), (row), ...)`, flattening rows in
+/// row-major order.
 fn parse_matrix<const N: usize, const M: usize>(cursor: &mut Cursor<'_>) -> Result<[f64; M], RawError> {
-    if cursor.at_punctuation('[')? {
-        let mut arr = parse_matrix_array::<N, M>(cursor)?;
-        ensure!(arr.len() == 1, "expected a single matrix value");
-        return Ok(arr.remove(0));
-    }
-
     let mut values = [0_f64; M];
     let mut idx = 0;
     parse_block(cursor, '(', ')', |c| {
@@ -1024,65 +879,69 @@ mod tests {
     #[test]
     fn type_scalar() {
         let mut cursor = Cursor::new("float x");
-        let info = parse_type(&mut cursor).unwrap().unwrap();
-        assert_eq!(info.ty, Type::Float);
-        assert_eq!(info.type_name, "float");
-        assert!(!info.is_array);
-        assert_eq!(info.to_string(), "float");
+        let ty = parse_type(&mut cursor).unwrap().unwrap();
+        assert_eq!(ty, sdf::ValueTypeName::FLOAT);
+        assert_eq!(ty.as_str(), "float");
+        assert!(ty.is_scalar());
+        assert!(matches!(cursor.peek().unwrap(), Some(Token::Identifier("x"))));
     }
 
     #[test]
-    fn type_array_no_space() {
-        // `float[]` lexes as three tokens: float [ ]
-        let mut cursor = Cursor::new("float[] x");
-        let info = parse_type(&mut cursor).unwrap().unwrap();
-        assert_eq!(info.ty, Type::Float);
-        assert_eq!(info.type_name, "float");
-        assert!(info.is_array);
-        assert_eq!(info.to_string(), "float[]");
-    }
-
-    #[test]
-    fn type_array_spaced() {
-        let mut cursor = Cursor::new("int [] x");
-        let info = parse_type(&mut cursor).unwrap().unwrap();
-        assert_eq!(info.ty, Type::Int);
-        assert!(info.is_array);
-        assert_eq!(info.to_string(), "int[]");
+    fn type_array() {
+        // `float[]` lexes as three tokens: float [ ]; a space before `[]` is
+        // the same declaration.
+        for text in ["float[] x", "float [] x"] {
+            let mut cursor = Cursor::new(text);
+            let ty = parse_type(&mut cursor).unwrap().unwrap();
+            assert_eq!(ty, sdf::ValueTypeName::FLOAT_ARRAY);
+            assert_eq!(ty.as_str(), "float[]");
+            assert!(ty.is_array());
+        }
+        let mut cursor = Cursor::new("matrix4d[] x");
+        let ty = parse_type(&mut cursor).unwrap().unwrap();
+        assert_eq!(ty, sdf::ValueTypeName::MATRIX4D_ARRAY);
+        assert_eq!(ty.dimensions(), Some(sdf::Dimensions::Matrix(4, 4)));
     }
 
     #[test]
     fn type_alias() {
         let mut cursor = Cursor::new("point3f x");
-        let info = parse_type(&mut cursor).unwrap().unwrap();
-        assert_eq!(info.ty, Type::Float3);
-        assert_eq!(info.type_name, "point3f");
-        assert_eq!(info.to_string(), "point3f");
+        let ty = parse_type(&mut cursor).unwrap().unwrap();
+        assert_eq!(ty, sdf::ValueTypeName::POINT3F);
+        assert_eq!(ty.kind(), Some(sdf::ValueKind::Vec3f));
+        assert_eq!(ty.role(), Some(sdf::Role::Point));
+        assert_eq!(ty.as_str(), "point3f");
+        let mut cursor = Cursor::new("Color x");
+        let legacy = parse_type(&mut cursor).unwrap().unwrap();
+        assert_eq!(legacy, sdf::ValueTypeName::COLOR3D);
+        assert_eq!(legacy.as_str(), "Color");
     }
 
     #[test]
-    fn type_dictionary() {
+    fn dictionary_not_type() {
         let mut cursor = Cursor::new("dictionary x");
-        let info = parse_type(&mut cursor).unwrap().unwrap();
-        assert_eq!(info.ty, Type::Dictionary);
-        assert!(!info.is_array);
+        assert!(parse_type(&mut cursor).unwrap().is_none());
+        assert!(matches!(cursor.peek().unwrap(), Some(Token::Dictionary)));
+
+        let mut cursor = Cursor::new("{ dictionary sub = { int a = 1 }, string s = \"x\" }");
+        let dict = parse_dictionary(&mut cursor).unwrap().try_as_dictionary().unwrap();
+        let sub = dict["sub"].clone().try_as_dictionary().unwrap();
+        assert_eq!(sub["a"], sdf::Value::Int(1));
+        assert_eq!(dict["s"], sdf::Value::String("x".into()));
     }
 
     #[test]
-    fn type_unknown_name() {
-        let mut cursor = Cursor::new("foobar x");
-        let info = parse_type(&mut cursor).unwrap().unwrap();
-        assert_eq!(info.ty, Type::Custom);
-        assert_eq!(info.type_name, "foobar");
-    }
-
-    #[test]
-    fn type_matrix_array() {
-        let mut cursor = Cursor::new("matrix4d[] x");
-        let info = parse_type(&mut cursor).unwrap().unwrap();
-        assert_eq!(info.ty, Type::Matrix4d);
-        assert!(info.is_array);
-        assert_eq!(info.to_string(), "matrix4d[]");
+    fn type_unknown() {
+        for (text, spelling) in [
+            ("foobar x", "foobar"),
+            ("foobar[] x", "foobar[]"),
+            ("opaque[] x", "opaque[]"),
+        ] {
+            let mut cursor = Cursor::new(text);
+            let ty = parse_type(&mut cursor).unwrap().unwrap();
+            assert!(!ty.is_registered(), "{spelling}");
+            assert_eq!(ty.as_str(), spelling);
+        }
     }
 
     #[test]

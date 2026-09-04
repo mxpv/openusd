@@ -144,9 +144,21 @@ mod text_parser {
         assert_text_format("simple");
     }
 
+    // The corpus authors bare scalars (`3 : 5.67`) and `None` as `vector3f`
+    // time samples. §16.2.16.6 of the core spec requires a resolvable type's value
+    // to have the declared shape, so the parser rejects the file; this records
+    // the deliberate disagreement with the Python baseline. The well-formed
+    // constructs the file also exercises are covered by the parser's unit
+    // tests and `fixtures/typed_timesamples.usda`.
     #[test]
-    fn test_attributes() {
-        assert_text_format("attributes");
+    fn attributes_malformed() {
+        let usda = Path::new(ASSETS).join("usda").join("attributes.usda");
+        let error = usda::read_file(&usda).expect_err("bare scalars against vector3f samples are rejected");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("vector3f"),
+            "the error names the offending declaration: {message}"
+        );
     }
 
     #[test]

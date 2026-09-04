@@ -113,7 +113,6 @@ macro_rules! cross_tests {
 cross_tests! {
     cross_empty,
     cross_simple,
-    cross_attributes,
     cross_relations,
     cross_primmetadata,
     cross_layermetadata,
@@ -122,6 +121,15 @@ cross_tests! {
     cross_dictionaries,
 }
 
+// Typed time samples of every shape (scalar, token, array, tuple, timecode)
+// survive both formats.
+#[test]
+fn cross_typed_timesamples() {
+    assert_cross("typed_timesamples", Path::new("fixtures/typed_timesamples.usda"));
+}
+
 // Skipped fixtures:
+//   - `attributes.usda`: authors bare scalars as `vector3f` time samples, which
+//     the parser rejects (see `attributes_malformed` in `text_format`).
 //   - `splines.usda`: splines materialise as `Value::ValueVec`, which the USDC
 //     writer rejects (no native heterogeneous-array type).
