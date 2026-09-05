@@ -23,14 +23,14 @@ bitflags.workspace = true
 bytemuck.workspace = true
 derive_more.workspace = true
 half.workspace = true
-logos.workspace = true
-lz4_flex.workspace = true
+logos = "0.16.0"
+lz4_flex = "0.14.0"
 num-traits.workspace = true
-regex-lite.workspace = true
+regex-lite = "0.1.9"
 serde = { workspace = true, optional = true }
 strum.workspace = true
 thiserror.workspace = true
-zip.workspace = true
+zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 diff_json.workspace = true
