@@ -23,6 +23,10 @@ pub fn encoded_buffer_size<T: PrimInt>(count: usize) -> usize {
     }
 }
 
+// One arm per (code, width) pair of the crate integer encoding, matching the
+// layout the writer emits. Merging the arms that happen to read the same
+// width would break that row-per-case correspondence.
+#[allow(clippy::match_same_arms)]
 pub fn decode_ints<T: PrimInt + 'static>(data: &[u8], count: usize) -> Result<Vec<T>, ReadError>
 where
     i64: AsPrimitive<T>,

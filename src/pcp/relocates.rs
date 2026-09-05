@@ -11,6 +11,7 @@
 //! cached indices) is passed in through parameters, and nothing references
 //! [`IndexCache`](super::index_cache::IndexCache) directly.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::sdf::{self, Path, RelocateList, element_cmp};
@@ -560,7 +561,7 @@ pub(crate) fn effective_relocates(
     }
 
     // Sort by target length descending for longest-prefix-first matching.
-    result.sort_by(|a, b| b.1.as_str().len().cmp(&a.1.as_str().len()));
+    result.sort_by_key(|(_, tgt)| Reverse(tgt.as_str().len()));
 
     // Shift each endpoint through a single ancestor rename: when an ancestor
     // prim is relocated, a relocate authored below it sits under the renamed
@@ -623,7 +624,7 @@ fn collect_stack_maps(
     // Sort for deterministic iteration: the collected layer-map order feeds
     // downstream relocate composition, so it must not depend on hash order.
     let mut entries: Vec<(&Path, &PrimEntry)> = indices.iter().collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries.sort_by_key(|&(path, _)| path);
     for (cached_path, cached_index) in entries {
         if cached_path.root_prim_name() != root_name {
             continue;

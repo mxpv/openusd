@@ -1,4 +1,4 @@
-msrv = "1.89"
+msrv = "1.96"
 
 # OpenUSD domain vocabulary — C++ schema families, prim/API schema type names,
 # and third-party formats and renderers. These appear in doc comments as prose

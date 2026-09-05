@@ -856,6 +856,10 @@ impl<W: Write> Emitter<'_, W> {
 
 // ---------- value formatter (string-producing) ----------
 
+// One arm per variant, grouped by value type family so a new variant has an
+// obvious home. Folding together the distinct variants that happen to share
+// a formatter would scatter that grouping.
+#[allow(clippy::match_same_arms)]
 fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
     match v {
         // The USDA parser reads the `None` token as `Value::ValueBlock`. Emitting

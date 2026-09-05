@@ -289,7 +289,7 @@ mod pcp_txt {
         if groups.is_empty() {
             return;
         }
-        groups.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        groups.sort_by_key(|(path, _)| path.to_string());
         let _ = writeln!(out, "{header}:");
         for (prop_path, items) in &groups {
             let _ = writeln!(out, "{prop_path}:");
