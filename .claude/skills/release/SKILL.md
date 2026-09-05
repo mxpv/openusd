@@ -30,7 +30,15 @@ Follow these steps:
    - Filter out noise (formatting, CI, README updates, CLAUDE.md).
    - Wrap code identifiers (types, functions, methods, traits, modules, flags, etc.) and crate names/versions in backticks, e.g. `- Add \`ListOp::compose_over\` for list-edit composition (82845fd)`.
    - Write the changelog to a temp file (e.g. `/tmp/CHANGELOG-<version>.md`), NOT to the repo. It is only used for the GitHub release notes.
-   - Show the changelog to the user and wait for confirmation before proceeding.
+   - Show the changelog to the user **in full and verbatim** — every section and every
+     bullet, exactly as it will appear in the release — and wait for confirmation.
+     Do NOT substitute a digest: a paraphrase of the summary, a count of the
+     bullets, or a list of section names is not the changelog. The user is
+     approving text that will be published under their name, so they have to
+     see all of it. Length is not a reason to abbreviate; print it anyway.
+   - Before showing it, verify every commit in the range is either present in the
+     changelog or deliberately filtered as noise, and that no listed hash is one
+     the range does not contain.
 
 4. **Bump version and commit**: The version lives in two places in the root Cargo.toml and both must move together:
    - `[workspace.package] version` — the version every crate inherits.
@@ -42,7 +50,11 @@ Follow these steps:
 
 6. **Update roadmap**: In ROADMAP.md, replace every occurrence of the literal string `` `main` `` with `` `<version>` `` — this includes both the Version column cells and any `` `main` — `` annotations inside the Notes column. Use the Edit tool to make each replacement individually and precisely; do NOT use sed, awk, or any shell one-liner (they mangle backticks on macOS). After editing, run `grep -n '`main`' ROADMAP.md` to confirm zero matches remain, then show the full `git diff ROADMAP.md` to the user and wait for confirmation before staging or committing anything. Commit with message `Update ROADMAP` only after the user approves the diff.
 
-7. **Publish to crates.io**: Run `cargo publish --workspace` from the repository root. It publishes every member in dependency order, so `openusd` lands before `openusd-schemas`. Publishing is NOT atomic: if the registry fails partway, some crates are published at the new version and others are not — report exactly which succeeded rather than retrying blindly, since a published version cannot be replaced. Wait for confirmation from the user before running this step.
+7. **Publish to crates.io**: Run `cargo publish --workspace` from the repository root. It publishes every member in dependency order, so `openusd` lands before `openusd-schemas`. Wait for confirmation from the user before running this step.
+
+   If any workspace member has never been published, warn the user first: creating a crate needs a crates.io token with the `publish-new` scope, and a token restricted to a crate list must include the new name. A token that can update the existing crates will publish those and then fail the new one with `403 Forbidden: this token does not have the required permissions`.
+
+   Publishing is NOT atomic. If it fails partway, some crates are published at the new version and others are not. Report exactly which succeeded, and resume with `cargo publish -p <crate>` for each one that did not — do NOT re-run `cargo publish --workspace`, which fails on the members already uploaded, and never retry blindly: a published version cannot be replaced or re-uploaded, only yanked.
 
 8. **Push**: Run `git push --atomic origin HEAD v<version>` to push commits and tag together. Wait for confirmation from the user before running this step.
 
