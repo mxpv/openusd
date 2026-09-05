@@ -61,7 +61,8 @@ pub enum SchemaError {
     /// and would contribute nothing to the transform stack.
     #[error("`{op}` is not an xformOp kind")]
     UnknownXformOp {
-        /// The op token as given, without its `xformOp:` prefix.
+        /// The kind the op token named, with its `xformOp:` prefix and any
+        /// `:suffix` removed.
         op: String,
     },
 
@@ -135,7 +136,7 @@ impl From<sdf::CastError> for SchemaError {
     }
 }
 
-/// A value that does not fit its attribute's declared type surfaces as the
+/// A value that does not fit an attribute's declared type surfaces as the
 /// authoring error it is.
 impl From<sdf::ValueTypeError> for SchemaError {
     fn from(error: sdf::ValueTypeError) -> Self {

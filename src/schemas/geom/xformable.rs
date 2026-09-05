@@ -15,6 +15,7 @@ use crate::schemas::SchemaError;
 
 use crate::gf;
 use crate::sdf;
+use crate::tf;
 use crate::usd::{Attribute, Prim, TimeCode};
 
 use super::Imageable;
@@ -34,8 +35,12 @@ const NS_XFORM_OP: &str = "xformOp:";
 /// single-precision matrix type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum XformOpPrecision {
+    /// `double`, `double3`, `quatd` — and the only precision a `transform`
+    /// has, since its `matrix4d` is the one matrix type Sdf carries.
     Double,
+    /// `float`, `float3`, `quatf`.
     Float,
+    /// `half`, `half3`, `quath`.
     Half,
 }
 
@@ -136,10 +141,11 @@ pub trait Xformable: Imageable {
     }
 
     /// Author `xformOp:<op>` at `precision` and append it to the stack (C++
-    /// `UsdGeomXformable::AddXformOp`). `op` is the op token without the
-    /// `xformOp:` prefix, and may carry a `:suffix` naming one instance of it
-    /// (`"translate:pivot"`), which the per-op setters below have no spelling
-    /// for.
+    /// `UsdGeomXformable::AddXformOp`). `op` is the op token, with or without
+    /// the `xformOp:` prefix that [`xform_op_order`](Self::xform_op_order)
+    /// hands back, and may carry a `:suffix` naming one instance of it
+    /// (`"translate:pivot"`), which the per-op setters below have no
+    /// spelling for.
     ///
     /// An op the stage already declares keeps the precision it was declared
     /// at, as C++ does when the two disagree; only an op nothing declares is
@@ -303,30 +309,39 @@ fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Mat
 /// Author a single `xformOp:<kind>` attribute (does not touch
 /// `xformOpOrder`), on the terms [`Xformable::set_xform_op`] states.
 ///
-/// The value is converted before the attribute is touched, so a value the op
-/// cannot hold leaves nothing behind.
-// TODO(perf): the declared type is resolved here and again by the value
-// write (see the `TODO(perf)` on `usd::Attribute::plan_authoring`).
-fn author_xform_op(prim: &Prim, kind: &str, precision: XformOpPrecision, value: sdf::Value) -> Result<(), SchemaError> {
-    let name = op_attr_name(kind);
-    // The composed declaration is what the write validates against, so it is
-    // what the value converts to; an op nothing declares takes `precision`.
-    let declared = match prim.attribute(name.as_str()).type_name()? {
-        Some(declared) => declared,
-        None => op_value_type(kind, precision)?,
+/// An op the stage already declares keeps that declaration; one nothing
+/// declares takes `precision`. The value is converted to whichever of the two
+/// applies before the attribute is authored, so a value the op cannot hold
+/// leaves the stage untouched rather than a declaration that a later write at
+/// another precision would find and keep.
+///
+/// The op's kind is resolved whatever the stage declares, so a token naming
+/// no kind is refused even where a layer already declares an attribute for
+/// it. The declaration is read as the raw spelling it was authored with, so
+/// one the type table does not know is refused by the conversion rather than
+/// mistaken for an op nothing declares.
+fn author_xform_op(prim: &Prim, op: &str, precision: XformOpPrecision, value: sdf::Value) -> Result<(), SchemaError> {
+    let fallback = op_value_type(op, precision)?;
+    let name = op_attr_name(op);
+    let declared = match prim
+        .attribute(name.as_str())
+        .get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?
+    {
+        Some(token) => sdf::ValueTypeName::from(token),
+        None => fallback,
     };
     let value = declared.coerce(value)?;
     prim.create_attribute(name, declared)?.set_custom(false)?.set(value)?;
     Ok(())
 }
 
-/// The attribute name of the op `kind`, which may already carry the
-/// `xformOp:` prefix — `xform_op_order` hands back prefixed names, so one
-/// fed straight back in must not be prefixed twice (C++ `_MakeNamespaced`).
-fn op_attr_name(kind: &str) -> String {
-    match kind.starts_with(NS_XFORM_OP) {
-        true => kind.to_string(),
-        false => format!("{NS_XFORM_OP}{kind}"),
+/// The attribute name of `op`, which may already carry the `xformOp:`
+/// prefix — `xform_op_order` hands back prefixed names, so one fed straight
+/// back in must not be prefixed twice (C++ `_MakeNamespaced`).
+fn op_attr_name(op: &str) -> String {
+    match op.starts_with(NS_XFORM_OP) {
+        true => op.to_string(),
+        false => format!("{NS_XFORM_OP}{op}"),
     }
 }
 
@@ -337,17 +352,17 @@ fn op_kind(name: &str) -> &str {
     after_ns.split(':').next().unwrap_or(after_ns)
 }
 
-/// The value type an op of `kind` holds at `precision` (C++
+/// The value type `op` holds at `precision` (C++
 /// `UsdGeomXformOp::GetValueTypeName`); a token naming no op kind has none.
 // TODO: the op vocabulary is spelled here and again in `build_op_matrix`.
 // C++ parses the token into one `XformOp::Type` that every switch keys off;
 // an `XformOpKind` enum parsed once — taking the `!invert!` and
 // `!resetXformStack!` sentinels with it, which have no authoring spelling
 // today — would replace both string matches.
-fn op_value_type(kind: &str, precision: XformOpPrecision) -> Result<sdf::ValueTypeName, SchemaError> {
+fn op_value_type(op: &str, precision: XformOpPrecision) -> Result<sdf::ValueTypeName, SchemaError> {
     use XformOpPrecision as P;
 
-    Ok(match op_kind(kind) {
+    Ok(match op_kind(op) {
         // A matrix has only the one precision in Sdf, which C++ reports when
         // another is asked for and this crate accepts silently.
         "transform" => sdf::ValueTypeName::MATRIX4D,
@@ -375,9 +390,9 @@ fn op_value_type(kind: &str, precision: XformOpPrecision) -> Result<sdf::ValueTy
     })
 }
 
-/// Append `xformOp:<kind>` to `xformOpOrder`, de-duplicating re-authored ops.
-fn append_op(prim: &Prim, kind: &str) -> Result<()> {
-    prim.append_to_uniform_token_array(tok::A_XFORM_OP_ORDER, op_attr_name(kind))?;
+/// Append `op` to `xformOpOrder`, de-duplicating re-authored ops.
+fn append_op(prim: &Prim, op: &str) -> Result<()> {
+    prim.append_to_uniform_token_array(tok::A_XFORM_OP_ORDER, op_attr_name(op))?;
     Ok(())
 }
 
@@ -485,7 +500,7 @@ mod tests {
     /// A suffix names one instance of an op, not a different kind, so the op
     /// takes its kind's value type.
     #[test]
-    fn suffixed_op_typed_by_kind() -> Result<(), SchemaError> {
+    fn suffix_keeps_kind() -> Result<(), SchemaError> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let x = Xform::define(&stage, "/X")?.set_xform_op(
             "translate:pivot",
@@ -521,6 +536,70 @@ mod tests {
             stage.field::<sdf::Value>("/X.xformOp:bogusOp", sdf::FieldKey::Default)?,
             None,
             "and nothing was authored for it"
+        );
+
+        // A layer already declaring an attribute for the token does not make
+        // the token an op kind, so the answer is the same.
+        stage.create_attribute("/X.xformOp:bogusOp", sdf::ValueTypeName::FLOAT3)?;
+        let error = x
+            .set_xform_op("bogusOp", XformOpPrecision::Float, gf::vec3f(1.0, 2.0, 3.0))
+            .err()
+            .unwrap_or_else(|| panic!("a declared bogus op was accepted"));
+        assert!(matches!(error, SchemaError::UnknownXformOp { .. }), "{error:?}");
+        Ok(())
+    }
+
+    /// An op declared with a spelling the type table does not know has no
+    /// kind to convert to, so the write is refused rather than treated as an
+    /// op nothing declares.
+    #[test]
+    fn unregistered_op_type_rejected() -> Result<(), SchemaError> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+        stage.create_attribute("/X.xformOp:scale", "double3d[]")?;
+
+        let error = x
+            .clone()
+            .set_xform_op("scale", XformOpPrecision::Float, gf::vec3f(2.0, 2.0, 2.0))
+            .err()
+            .unwrap_or_else(|| panic!("the unregistered declaration was accepted"));
+        assert!(matches!(error, SchemaError::Core(_)), "{error:?}");
+        assert_eq!(
+            stage.field::<sdf::Value>("/X.xformOp:scale", sdf::FieldKey::Default)?,
+            None,
+            "no value was authored"
+        );
+        assert_eq!(x.xform_op_order()?, None);
+        Ok(())
+    }
+
+    /// A value the op cannot hold is refused before anything is authored, so
+    /// no declaration is left for a later write at another precision to find
+    /// and keep.
+    #[test]
+    fn failed_conversion_authors_nothing() -> Result<(), SchemaError> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+
+        // 70000 is past the half range, so the conversion to `half3` fails.
+        let error = x
+            .clone()
+            .set_xform_op("scale", XformOpPrecision::Half, gf::vec3f(70000.0, 1.0, 1.0))
+            .err()
+            .unwrap_or_else(|| panic!("the out-of-range value was accepted"));
+        assert!(matches!(error, SchemaError::Core(_)), "{error:?}");
+        assert_eq!(
+            stage.field::<sdf::Value>("/X.xformOp:scale", sdf::FieldKey::TypeName)?,
+            None,
+            "no declaration was left behind"
+        );
+        assert_eq!(x.xform_op_order()?, None);
+
+        // So the op takes the precision the next write asks for.
+        x.set_xform_op("scale", XformOpPrecision::Double, gf::vec3f(2.0, 2.0, 2.0))?;
+        assert_eq!(
+            stage.attribute("/X.xformOp:scale")?.type_name()?,
+            Some(sdf::ValueTypeName::DOUBLE3)
         );
         Ok(())
     }
