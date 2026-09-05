@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/mxpv/openusd/main/docs/logo.svg" alt="openusd logo" width="300px">
-</p>
-
 # openusd
 
 [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)

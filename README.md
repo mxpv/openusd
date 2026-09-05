@@ -14,10 +14,12 @@ For a detailed comparison with the C++ reference implementation and current prog
 
 ## Crates
 
+This repository contains the following crates:
+
 | Crate | Description | |
 |-------|-------------|-|
-| [`openusd`](crates/openusd) | Core USD library — the `.usda` / `.usdc` / `.usdz` file formats, the composition engine, and the composed `Stage` API. | [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd) [![docs.rs](https://img.shields.io/docsrs/openusd)](https://docs.rs/crate/openusd/latest) |
-| [`openusd-schemas`](crates/openusd-schemas) | Domain schemas layered on the composed stage — `UsdGeom`, `UsdLux`, `UsdPhysics`, `UsdShade`, `UsdSkel`, and friends. Opt-in per family. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-schemas)](https://crates.io/crates/openusd-schemas) [![docs.rs](https://img.shields.io/docsrs/openusd-schemas)](https://docs.rs/crate/openusd-schemas/latest) |
+| [`openusd`](crates/openusd) | Core USD library — file formats, composition engine, and the composed `Stage` API. | [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)<br>[![docs.rs](https://img.shields.io/docsrs/openusd)](https://docs.rs/crate/openusd/latest) |
+| [`openusd-schemas`](crates/openusd-schemas) | Typed views for USD's standard schemas — `UsdGeom`, `UsdShade`, `UsdSkel`, and more. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-schemas)](https://crates.io/crates/openusd-schemas)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-schemas)](https://docs.rs/crate/openusd-schemas/latest) |
 
 ## Features
 
