@@ -11,7 +11,8 @@
 //! shape: a scalar stays a scalar, an array an array, a tuple keeps its
 //! component count.
 //!
-//! Quaternions convert across those same three precisions, which C++ does
+//! Quaternions and quaternion arrays convert across those same three
+//! precisions, which C++ does
 //! not register — an omission rather than a rule, since a `quatf` is a
 //! `quatd`'s value at another precision exactly as a `float3` is a
 //! `double3`'s. Authoring an `xformOp:orient` at the precision its asset
@@ -82,6 +83,10 @@ const fn allowed(source: ValueKind, target: ValueKind) -> bool {
             )
             | (K::Quath | K::Quatf | K::Quatd, K::Quath | K::Quatf | K::Quatd)
             | (
+                K::QuathVec | K::QuatfVec | K::QuatdVec,
+                K::QuathVec | K::QuatfVec | K::QuatdVec
+            )
+            | (
                 K::HalfVec | K::FloatVec | K::DoubleVec,
                 K::HalfVec | K::FloatVec | K::DoubleVec
             )
@@ -150,6 +155,10 @@ fn convert(value: Value, target: ValueKind) -> Result<Value, CastError> {
         (value, K::HalfVec) => Value::HalfVec(array::<f16>(scalar_array(value), actual, no_conversion)?),
         (value, K::FloatVec) => Value::FloatVec(array::<f32>(scalar_array(value), actual, no_conversion)?),
         (value, K::DoubleVec) => Value::DoubleVec(array::<f64>(scalar_array(value), actual, no_conversion)?),
+
+        (value, K::QuathVec) => Value::QuathVec(vector_array::<f16, _, 4>(quat_array(value), actual, no_conversion)?),
+        (value, K::QuatfVec) => Value::QuatfVec(vector_array::<f32, _, 4>(quat_array(value), actual, no_conversion)?),
+        (value, K::QuatdVec) => Value::QuatdVec(vector_array::<f64, _, 4>(quat_array(value), actual, no_conversion)?),
 
         (value, K::Vec2hVec) => Value::Vec2hVec(vector_array::<f16, _, 2>(vec2_array(value), actual, no_conversion)?),
         (value, K::Vec2fVec) => Value::Vec2fVec(vector_array::<f32, _, 2>(vec2_array(value), actual, no_conversion)?),
@@ -272,6 +281,7 @@ macro_rules! vec_array {
 vec_array!(vec2_array, 2, Vec2hVec, Vec2fVec, Vec2dVec);
 vec_array!(vec3_array, 3, Vec3hVec, Vec3fVec, Vec3dVec);
 vec_array!(vec4_array, 4, Vec4hVec, Vec4fVec, Vec4dVec);
+vec_array!(quat_array, 4, QuathVec, QuatfVec, QuatdVec);
 
 /// The `f64` elements of a floating-point scalar array.
 fn scalar_array(value: Value) -> Option<Vec<f64>> {
@@ -322,7 +332,6 @@ mod tests {
 
     #[test]
     fn coerce_kind_quat() {
-        let one = f16::from_f32(1.0);
         assert_eq!(
             Value::Quatf(gf::Quatf::IDENTITY).coerce_to_kind(ValueKind::Quatd),
             Ok(Value::Quatd(gf::Quatd::IDENTITY))
@@ -335,7 +344,11 @@ mod tests {
             Value::Quath(gf::Quath::IDENTITY).coerce_to_kind(ValueKind::Quatf),
             Ok(Value::Quatf(gf::Quatf::IDENTITY))
         );
-        assert_eq!(one.to_f32(), 1.0, "the identity's real part survives the narrowing");
+        assert_eq!(
+            Value::QuatfVec(vec![gf::Quatf::IDENTITY]).coerce_to_kind(ValueKind::QuatdVec),
+            Ok(Value::QuatdVec(vec![gf::Quatd::IDENTITY])),
+            "an array converts element-wise like its scalar"
+        );
         // Nothing normalizes an authored quaternion, so a component out of
         // the target's range is reported rather than saturated.
         assert!(matches!(
