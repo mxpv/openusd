@@ -1,0 +1,58 @@
+[package]
+name = "openusd"
+description = "Rust native USD library"
+keywords = ["usd", "usda", "usdc", "usdz", "pxr"]
+readme = "README.md"
+exclude = ["/fixtures"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+categories.workspace = true
+
+[features]
+serde = ["dep:serde", "half/serde"]
+
+# Feature-gated surface only renders if docs.rs turns the features on.
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+bitflags.workspace = true
+bytemuck.workspace = true
+derive_more.workspace = true
+half.workspace = true
+logos.workspace = true
+lz4_flex.workspace = true
+num-traits.workspace = true
+regex-lite.workspace = true
+serde = { workspace = true, optional = true }
+strum.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+diff_json.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "text_format"
+required-features = ["serde"]
+
+[[test]]
+name = "text_writer_roundtrip"
+required-features = ["serde"]
+
+[[test]]
+name = "binary_writer_roundtrip"
+required-features = ["serde"]
+
+[[test]]
+name = "cross_format_roundtrip"
+required-features = ["serde"]

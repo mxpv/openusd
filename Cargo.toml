@@ -1,54 +1,38 @@
-[package]
-name = "openusd"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# Properties every member shares. A crate inherits one with
+# `field.workspace = true`, so a release moves a single line rather than one
+# per crate, and the members can never drift apart on the edition or the MSRV.
+[workspace.package]
 version = "0.6.0"
 edition = "2024"
+rust-version = "1.96"
 repository = "https://github.com/mxpv/openusd"
 license = "MIT"
-exclude = ["/vendor", "/fixtures", "/docs", "/.github", "/.claude"]
-description = "Rust native USD library"
 categories = ["graphics", "rendering", "rendering::data-formats"]
-keywords = ["usd", "usda", "usdc", "usdz", "pxr"]
 
-[features]
-geom = []
-# UsdLux lights are UsdGeom Xformable / Boundable prims, so the lux views
-# build on the geom schema traits.
-lux = ["geom"]
-# UsdMediaSpatialAudio is a UsdGeomXformable-derived prim, so the media views
-# build on the geom schema traits.
-media = ["geom"]
-physics = []
-# UsdProcGenerativeProcedural is a UsdGeomBoundable-derived prim, so the proc
-# views build on the geom schema traits.
-proc = ["geom"]
-render = []
-shade = []
-# UsdSkelRoot and UsdSkelSkeleton are UsdGeomBoundable-derived prims, so the
-# skel views build on the geom schema traits.
-skel = ["geom"]
-ui = []
-# UsdVolVolume is a UsdGeomGprim and the field prims are UsdGeomXformable, so
-# the vol views build on the geom schema traits.
-vol = ["geom"]
-serde = ["dep:serde", "half/serde"]
+# Every dependency version lives here, including the ones a single crate uses
+# today, so a member picks a dependency up with `workspace = true` and no
+# version of its own to keep in sync.
+[workspace.dependencies]
+openusd = { version = "0.6.0", path = "crates/openusd" }
 
-[dependencies]
 bitflags = "2.11.1"
 bytemuck = { version = "1.14.0", features = ["derive"] }
-strum = { version = "0.28.0", features = ["derive"] }
-thiserror = "2"
-lz4_flex = "0.14.0"
-num-traits = "0.2.17"
+derive_more = { version = "2.1.1", features = ["deref", "deref_mut", "add", "add_assign", "mul", "mul_assign", "not", "sum", "from"] }
 half = { version = "2.3.1", features = ["bytemuck", "num-traits"] }
 logos = "0.16.0"
-serde = { version = "1", features = ["derive"], optional = true }
-zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
-derive_more = { version = "2.1.1", features = ["deref", "deref_mut", "add", "add_assign", "mul", "mul_assign", "not", "sum", "from"] }
+lz4_flex = "0.14.0"
+num-traits = "0.2.17"
 regex-lite = "0.1.9"
-
-[dev-dependencies]
-diff_json = "0.1"
 serde = { version = "1", features = ["derive"] }
+strum = { version = "0.28.0", features = ["derive"] }
+thiserror = "2"
+zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
+
+diff_json = "0.1"
 serde_json = "1"
 tempfile = "3"
 
@@ -56,18 +40,18 @@ tempfile = "3"
 # from EmbarkStudios/rust-ecosystem#75). Findings are mandatory: every lint is
 # `deny`, so a plain `cargo build` fails rather than accumulating warnings.
 # Lint groups carry `priority = -1` so an individual lint below can override
-# the group it belongs to.
-[lints.rust]
+# the group it belongs to. Members opt in with `[lints] workspace = true`.
+[workspace.lints.rust]
 future_incompatible = { level = "deny", priority = -1 }
 nonstandard_style = { level = "deny", priority = -1 }
 rust_2018_idioms = { level = "deny", priority = -1 }
 trivial_numeric_casts = "deny"
 unsafe_code = "deny"
 
-[lints.rustdoc]
+[workspace.lints.rustdoc]
 missing_crate_level_docs = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 await_holding_lock = "deny"
 char_lit_as_u8 = "deny"
@@ -140,59 +124,3 @@ unused_self = "deny"
 useless_transmute = "deny"
 verbose_file_reads = "deny"
 zero_sized_map_values = "deny"
-
-[[test]]
-name = "text_format"
-required-features = ["serde"]
-
-[[test]]
-name = "text_writer_roundtrip"
-required-features = ["serde"]
-
-[[test]]
-name = "binary_writer_roundtrip"
-required-features = ["serde"]
-
-[[test]]
-name = "cross_format_roundtrip"
-required-features = ["serde"]
-
-[[test]]
-name = "physics_reader"
-required-features = ["physics"]
-
-[[test]]
-name = "skel_reader"
-required-features = ["skel"]
-
-[[test]]
-name = "geom_reader"
-required-features = ["geom"]
-
-[[test]]
-name = "lux_reader"
-required-features = ["lux"]
-
-[[test]]
-name = "shade_reader"
-required-features = ["shade"]
-
-[[test]]
-name = "render_reader"
-required-features = ["render"]
-
-[[test]]
-name = "ui_reader"
-required-features = ["ui"]
-
-[[test]]
-name = "vol_reader"
-required-features = ["vol"]
-
-[[test]]
-name = "media_reader"
-required-features = ["media"]
-
-[[test]]
-name = "proc_reader"
-required-features = ["proc"]

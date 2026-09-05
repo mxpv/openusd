@@ -1,0 +1,6 @@
+# The workspace root, as an absolute path with a trailing separator. Cargo does
+# not provide it, and tests need it to reach the shared `vendor/` assets without
+# encoding their own depth under `crates/`. An empty relative value resolves
+# against this file's directory.
+[env]
+CARGO_WORKSPACE_DIR = { value = "", relative = true }

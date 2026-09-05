@@ -1,0 +1,6316 @@
+//! Lazily-built cache of per-prim composition indices.
+//!
+//! The [`IndexCache`] is the primary interface between [`Stage`](crate::usd::Stage)
+//! and the composition engine. It caches one [`PrimEntry`] per composed prim —
+//! the [`PrimIndex`] plus the [`CompositionContext`] its children inherit — so
+//! ancestor composition is never recomputed.
+//!
+//! Relocates (`layerRelocates`) are composed by the indexer as `ArcType::Relocate`
+//! nodes; the cache applies each node's layer-stack relocates while folding the
+//! child-name list (`compute_prim_child_names`), renaming or hiding relocated
+//! sources and exposing targets in place.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::mem;
+
+use crate::sdf;
+use crate::sdf::schema::{ChildrenKey, FieldKey};
+use crate::sdf::{LayerOffset, Path, SpecType, Value};
+use crate::tf::Token;
+
+use super::asset_resolve::{self, AssetSite};
+use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
+use super::clip_manifest;
+use super::diagnostics::Diagnostics;
+use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
+use super::instancing::PrototypeRegistry;
+use super::layer_graph::{LayerGraph, LayerStackIdentifier};
+use super::layer_stack::StackMarks;
+use super::load_rules::LoadRules;
+use super::population_mask::PopulationMask;
+use super::prim_graph::ArcType;
+use super::prim_index::{
+    AncestorArc, CompositionContext, Demand, NodeRuns, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo,
+    TargetMemoKey,
+};
+use super::prim_indexer::ExprVarDeps;
+use super::prim_resolve::InvalidTargetKind;
+use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
+use super::value_resolve::{
+    self, ClipProbe, OpinionResolver, OpinionSite, Resolution, ResolveMode, ResolveNode, ResolveSourceKind,
+    SampleField, SelectedSite, Step, ValueState, Withheld,
+};
+use super::{
+    CompositionDiagnostic, IncompleteClipManifest, LayerId, MapFunction, QueryError, StackIdentity, VariantFallbackMap,
+};
+
+/// What [`IndexCache::edit_target_node_info`] reports for an arc node: the target
+/// layer's identifier, the node's spec-to-scene mapping, and the value identity
+/// of the layer stack it composes in, so an edit target resolves the same
+/// (possibly contextual) stack wherever it is installed.
+type EditTargetNodeInfo = (String, MapFunction, StackIdentity);
+
+/// Lazily-built composition graph.
+///
+/// Caches a [`PrimEntry`] per composed prim. When a prim is queried for the
+/// first time, its index is built using the parent's cached context (if
+/// available). During depth-first traversal, parents are always composed before
+/// children, so the context chain is always populated.
+///
+/// An optional [`VariantFallbackMap`] provides fallback selections for variant
+/// sets that have no authored opinion. Authored selections always take priority;
+/// fallbacks are tried in order, and a set with no applicable fallback stays
+/// unselected.
+///
+/// Recoverable composition errors are retained in
+/// [`Self::composition_errors`], while operational failures are returned to the
+/// caller.
+pub struct IndexCache {
+    /// The per-prim composition index storage and its dependency map (see
+    /// [`IndexStore`]). The instancing pass and the builder reach composed
+    /// indices through [`Self::cached`] and the store's accessors.
+    store: IndexStore,
+    /// Variant fallback selections tried when no authored selection exists.
+    variant_fallbacks: VariantFallbackMap,
+    /// Per-path payload-inclusion policy (C++ `UsdStageLoadRules`), seeded at
+    /// construction from the stage's
+    /// [`InitialLoadSet`](crate::usd::InitialLoadSet) and mutated at runtime
+    /// through [`Self::set_load_rules`]. `IndexCache::build_index` consults it
+    /// per path, via [`Self::is_loaded`].
+    pub(super) load_rules: LoadRules,
+    /// The prims this stage exposes (C++ `UsdStagePopulationMask`), fixed when
+    /// the stage opens. Index building never consults it — it gates queries
+    /// through [`Self::mask_includes`] and keys instancing through
+    /// [`Self::scoped_mask`], so a build stays a pure function of its
+    /// `&`-inputs.
+    pub(super) population_mask: PopulationMask,
+    /// Value-clip resolution and its layer cache ([`ClipCache`], spec 12.3.4) —
+    /// an independently-owned entity that the clip orchestration methods
+    /// ([`resolve_clip_value`](Self::resolve_clip_value) and friends) delegate
+    /// per-anchor clip work to once they have ensured the relevant indices.
+    clip_cache: ClipCache,
+    /// Shared-prototype registry for scene-graph instancing (spec 11.3.3),
+    /// internal machinery driven by the instancing glue in
+    /// [`super::instancing`] (a second `impl IndexCache`). Callers go through
+    /// the cache's facade methods (`is_instance` / `prototype_of` /
+    /// `is_prototype` / …), never this field. Affected entries are dropped by
+    /// [`Self::invalidate_prototypes`] on a prim-level change, or through
+    /// [`Self::invalidate_layers`] on a layer-stack edit.
+    pub(super) prototypes: PrototypeRegistry,
+    /// Memoized instance-proxy / prototype-descendant redirections (spec
+    /// 11.3.3): a prim path mapped to the path that actually composes it
+    /// ([`effective_path`](Self::effective_path) walks the namespace to find an
+    /// enclosing instance, which is otherwise repeated on every descendant
+    /// query). A non-redirected prim caches an identity entry, so the common
+    /// non-instanced case skips the walk too. An entry holds only while the
+    /// prototype registry that produced it is unchanged: it is cleared wholesale
+    /// when prototypes are invalidated ([`Self::invalidate_prototypes`]), and the
+    /// subtree under a freshly
+    /// minted `/__Prototype_N` is dropped at registration (a synthetic
+    /// descendant queried before the mint cached an identity that must now
+    /// redirect into the prototype namespace).
+    //
+    // TODO(rayon): a per-prim parallel composition driver would share this map
+    // read-mostly; the entries are write-once until invalidation, so a
+    // concurrent reader needs only a shared snapshot rather than a lock on the
+    // hot path. Keep population off the critical section when that lands.
+    pub(super) redirected_prims: HashMap<Path, Path>,
+    /// Memoized population eligibility (see [`Self::is_populated`]): whether the
+    /// mask exposes a prim, it exists, and it and every ancestor are active.
+    /// Defined recursively over the parent, so the memo turns a per-query
+    /// O(depth) ancestor walk into O(1) amortized. Retired alongside
+    /// `redirected_prims` by [`Self::invalidate_population`].
+    pub(super) populated_prims: HashMap<Path, bool>,
+    /// Advanced whenever the composed population may differ — see
+    /// [`Self::invalidate_population`]. Distinct from
+    /// [`revision`](Self::revision), which every edit batch advances: a
+    /// value-only edit changes what an attribute resolves to but cannot change
+    /// which prims exist, so it must not retire the memos above or a completed
+    /// population walk.
+    population_epoch: u64,
+    /// Advanced once per change batch that authored a schema-identity opinion —
+    /// see [`Self::type_opinion_epoch`].
+    type_opinion_epoch: u64,
+    /// One-shot errors from layer collection that the [`LayerGraph`](super::layer_graph::LayerGraph)
+    /// cannot regenerate (e.g. `UnresolvedSublayer`). Set once at construction;
+    /// never cleared, since nothing recomputes them.
+    collection_diagnostics: Diagnostics,
+    /// Transient diagnostics produced by on-demand target / property-stack
+    /// queries (invalid external targets, inconsistent property types).
+    ///
+    /// Retired at the change-generation boundary
+    /// ([`retire_query_errors`](Self::retire_query_errors)), so they
+    /// never outlive the edit that fixed what they report; the next query
+    /// re-derives whatever still holds. A repeatable query re-derives the same
+    /// diagnostic on every call — the walk that produces it is the one the
+    /// caller asked for — which the collection folds back into one report.
+    query_diagnostics: Diagnostics,
+    /// Paths whose [`ensure_index`](Self::ensure_index) call is still on the
+    /// stack. Pre-caching an inherit/specialize target (and that target's own
+    /// targets) re-enters `ensure_index`; a cyclic class hierarchy (e.g. two
+    /// prims that inherit each other) would otherwise recurse forever before any
+    /// of them is cached. Re-entry for an in-progress path
+    /// returns early, so the cycle-closing arc simply finds no cached target and
+    /// drops out of composition.
+    in_progress: HashSet<Path>,
+    /// [`Demand`]s a build raised for a target layer that is not yet loaded,
+    /// returned up from the indexer (via `BuildOutput`) and accumulated here
+    /// across the builds run in a pass. [`Stage::with_cache`](crate::usd::Stage)
+    /// drains it, opens the layers, and recomposes. A plain `Vec` mutated through
+    /// `&mut self` — pcp keeps no interior mutability. `pub(super)` so the
+    /// instancing pass can detect a demand fired mid-redirect (see
+    /// [`effective_path`](Self::effective_path)).
+    pub(super) pending_loads: Vec<Demand>,
+}
+
+/// The resolved source of an attribute's value at a time code, the cacheable
+/// half of [`IndexCache::value_at`]. A cached view
+/// ([`Stage::attribute_query`](crate::usd::Stage::attribute_query)) resolves
+/// this once — paying the opinion walk and the one sample-map clone — then
+/// replays it across many time codes.
+pub(crate) enum AttributeValueSource {
+    /// A time-independent value: a `default` opinion (local or fallback), or
+    /// `None` when the attribute is unauthored, masked out, or blocked. The
+    /// same value resolves at every time code.
+    ///
+    /// `Static(None)` is the default source — "this attribute resolves to
+    /// nothing" — which is what a query gated out by the population mask
+    /// returns.
+    Static(Option<Value>),
+    /// A time-sampled source — the matched map, its node's layer offset, and
+    /// where it was authored. The map is in the node's layer time frame and is
+    /// replayed per query through
+    /// [`sdf::LayerOffset::sample_in_stage_time`], which both selects the
+    /// samples and returns the value in stage time.
+    ///
+    /// The site travels with the map so a replayed read resolves an `asset`
+    /// value exactly as a direct one does. Only the interpolated value is
+    /// resolved, never the whole map: an expression authored at one time must
+    /// not be reported by a read that selected another
+    /// ([`IndexCache::resolve_asset_values`]).
+    ///
+    /// The site's graph handles stay valid for as long as this source does. A
+    /// stale handle would panic rather than mislead, but stack reclamation
+    /// retires only a stack no cached entry owns, and a live entry owns every
+    /// stack in its arena — so the handles are valid exactly while the prim's
+    /// [`PrimRevision`] stamp still validates, which is what gates the replay.
+    TimeSamples {
+        samples: sdf::TimeSampleMap,
+        offset: LayerOffset,
+        site: AssetSite,
+    },
+    /// Value clips are authoritative for this attribute (spec 12.3.4). Clip
+    /// resolution selects a different clip layer per time, so a cached view
+    /// falls back to [`IndexCache::value_at`] for every query rather than
+    /// snapshotting a single source.
+    Clips,
+}
+
+impl Default for AttributeValueSource {
+    fn default() -> Self {
+        Self::Static(None)
+    }
+}
+
+/// An [`AttributeValueSource`] with the stamp that says how long replaying it
+/// stays correct — what [`IndexCache::resolve_value_source`] hands back.
+///
+/// A cached view (`usd::AttributeQuery`) keeps all four together and replays the
+/// source only while the stamp still validates; resolving and stamping happen in
+/// one borrow, so no edit can land between the answer and the token that guards
+/// it.
+///
+/// The default — no value, no revision — is what a query gated out by the
+/// population mask resolves to (`Stage::masked`): a masked prim composes no
+/// index, so there is nothing to validate against and nothing to memoize.
+#[derive(Default)]
+pub(crate) struct StampedValueSource {
+    /// The composed prim the source resolved from. For an instance proxy this
+    /// is the prototype prim that answered, not the queried path.
+    pub prim: Path,
+    /// [`prim`](Self::prim)'s revision, or `None` when no index is cached
+    /// there. A `None` stamp can never validate, so its source must not be
+    /// memoized.
+    pub revision: Option<PrimRevision>,
+    /// The population epoch to re-check, set only when the answer came from a
+    /// prim other than the queried one — the redirection that reached it is
+    /// itself memoized per epoch.
+    pub redirect_epoch: Option<u64>,
+    /// The resolved source.
+    pub source: AttributeValueSource,
+}
+
+/// Collapses the spec sentinels for "no value" ([`Value::ValueBlock`] and
+/// [`Value::None`]) to `None`, passing any real value through as `Some`. An
+/// authored block stops fall-through to weaker sources yet presents as absent.
+pub(super) fn block_to_none(value: Value) -> Option<Value> {
+    match value {
+        Value::ValueBlock | Value::None => None,
+        other => Some(other),
+    }
+}
+
+/// The property-kind rule a spec stack applies: the strongest spec's kind
+/// (attribute vs relationship) defines the property, and a weaker spec of the
+/// other kind is inconsistent (C++ `PcpErrorInconsistentPropertyType`) — it is
+/// dropped from the stack and reported.
+///
+/// Driven by both walks that build a property stack, so the rule is stated once.
+#[derive(Default)]
+struct DefiningKind {
+    defining: Option<(SpecType, String, Path)>,
+}
+
+impl DefiningKind {
+    /// Offers one spec to the rule. `None` admits it to the stack; `Some`
+    /// rejects it and carries the conflict to report.
+    fn admit(
+        &mut self,
+        spec_type: SpecType,
+        layer: &str,
+        path: &Path,
+        prop_path: &Path,
+        prim_path: &Path,
+    ) -> Option<CompositionDiagnostic> {
+        match &self.defining {
+            None => {
+                self.defining = Some((spec_type, layer.to_string(), path.clone()));
+                None
+            }
+            Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
+                Some(CompositionDiagnostic::InconsistentPropertyType {
+                    property: prop_path.clone(),
+                    defining_layer: def_layer.clone(),
+                    defining_path: def_path.clone(),
+                    defining_is_attribute: *def_type == SpecType::Attribute,
+                    conflicting_layer: layer.to_string(),
+                    conflicting_path: path.clone(),
+                    conflicting_is_attribute: spec_type == SpecType::Attribute,
+                    composing: prim_path.clone(),
+                })
+            }
+            Some(_) => None,
+        }
+    }
+}
+
+/// The clip tier of one value-resolution walk: the sets that can source the
+/// property, and the cache fields consulting them needs while the site walk
+/// holds the store.
+struct ClipTier<'a> {
+    /// The anchor prims carrying clip sets — the property's own prim and each
+    /// ancestor, nearest first, so a nearer set overrides one on an ancestor
+    /// (spec 12.3.4.5).
+    ///
+    /// Composed on the first site that consults clips rather than ahead of the
+    /// walk, so a read a stronger opinion answers raises none of the diagnostics
+    /// composing them would. Once that site is reached every clip-bearing
+    /// ancestor composes, since a nearer set overriding a further one is decided
+    /// per property rather than per anchor.
+    anchors: Option<Vec<(Path, Vec<ResolvedClipSet>)>>,
+    /// The `(anchor, set)` positions already offered to the resolver.
+    ///
+    /// One layer stack can reach the walk through several nodes — a variant
+    /// branch beside its own root, an arc grafted twice — and a set introduced
+    /// in that stack applies at each of them. A set is one source and answers
+    /// the same wherever it is reached, so it is consulted at the strongest site
+    /// it matches and not again.
+    offered: HashSet<(usize, usize)>,
+    store: &'a IndexStore,
+    cache: &'a mut ClipCache,
+    query_diagnostics: &'a mut Diagnostics,
+}
+
+impl<'a> ClipTier<'a> {
+    fn new(store: &'a IndexStore, cache: &'a mut ClipCache, query_diagnostics: &'a mut Diagnostics) -> Self {
+        Self {
+            anchors: None,
+            offered: HashSet::new(),
+            store,
+            cache,
+            query_diagnostics,
+        }
+    }
+
+    /// Offers every clip set introduced at `site` to `resolver`, nearest anchor
+    /// first, until one answers.
+    fn visit<R: OpinionResolver>(
+        &mut self,
+        graph: &LayerGraph,
+        prim: &Path,
+        suffix: &str,
+        site: &OpinionSite<'_>,
+        resolver: &mut R,
+    ) -> Result<Step, QueryError> {
+        self.compose_anchors(graph, prim)?;
+        let Self {
+            anchors,
+            offered,
+            cache,
+            query_diagnostics,
+            ..
+        } = self;
+        for (anchor_index, (anchor, sets)) in anchors.as_deref().unwrap_or_default().iter().enumerate() {
+            for (set_index, set) in sets.iter().enumerate() {
+                if !set.source.applies_at(site.node, site.layer) || !offered.insert((anchor_index, set_index)) {
+                    continue;
+                }
+                // Record what the set reads before it is consulted, so a clip
+                // that fails to open — or names no layer yet — is still a
+                // dependency the cache can be invalidated through.
+                cache.register_set_sources(graph, anchor, set);
+                let step = {
+                    let mut probe = ClipProbe {
+                        cache,
+                        graph,
+                        diagnostics: query_diagnostics,
+                        set,
+                        query: ClipQuery {
+                            anchor,
+                            attr_prim: prim,
+                            suffix,
+                        },
+                    };
+                    resolver.on_clips(&mut probe, site)
+                };
+                if step?.stop() {
+                    return Ok(Step::Stop);
+                }
+            }
+        }
+        Ok(Step::Continue)
+    }
+
+    /// Composes the anchors on the first call, leaving them in place after.
+    ///
+    /// Only a prim that authors clip metadata can carry a set, and the presence
+    /// flag is monotone down the namespace, so an ancestor that reports none
+    /// ends the walk: nothing above it can carry one either.
+    fn compose_anchors(&mut self, graph: &LayerGraph, prim: &Path) -> Result<(), QueryError> {
+        if self.anchors.is_some() {
+            return Ok(());
+        }
+        let mut anchors = Vec::new();
+        for anchor in prim.ancestors_below_root() {
+            if !self.store.context_at(&anchor).is_some_and(|ctx| ctx.may_have_clips) {
+                break;
+            }
+            let index = self.store.cached(&anchor);
+            if !index.authors_clips() {
+                continue;
+            }
+            let mut errors = Diagnostics::default();
+            let sets = index.resolve_clip_sets(graph, &mut errors)?;
+            self.query_diagnostics.extend(errors);
+            if !sets.is_empty() {
+                anchors.push((anchor, sets));
+            }
+        }
+        self.anchors = Some(anchors);
+        Ok(())
+    }
+}
+
+/// Which source answered the shared walk. The tier that won is decided by the
+/// walk; extracting a `default`'s value is left to composed field resolution,
+/// which merges dictionaries and path expressions across weaker opinions.
+enum Winner {
+    /// Nothing authored survived.
+    None,
+    /// A `timeSamples` map won, already interpolated into stage time.
+    Samples {
+        value: Option<Value>,
+        site: Option<AssetSite>,
+    },
+    /// A `default` won at this site; its composed value is read separately,
+    /// starting there.
+    Default { site: SelectedSite },
+    /// A value-clip set owns the property.
+    Clips { value: Option<Value> },
+}
+
+/// Resolves an attribute's value at one time (the resolver behind
+/// [`IndexCache::value_at`]).
+struct ValueAtResolver<'a> {
+    graph: &'a LayerGraph,
+    time: f64,
+    interp: &'a dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    winner: Winner,
+}
+
+impl OpinionResolver for ValueAtResolver<'_> {
+    fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        let value = site.offset.sample_in_stage_time(samples, self.time, self.interp);
+        // Only an asset-valued result needs provenance, and building it copies
+        // two strings, so an ordinary read never asks for one.
+        let asset_site = value
+            .as_ref()
+            .is_some_and(Value::is_asset_valued)
+            .then(|| site.asset_site(self.graph));
+        self.winner = Winner::Samples {
+            value,
+            site: asset_site,
+        };
+        Step::Stop
+    }
+
+    fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
+        self.winner = Winner::Default { site: site.select() };
+        Step::Stop
+    }
+
+    fn on_withheld(&mut self, kind: Withheld, site: &OpinionSite<'_>) -> Step {
+        if !matches!(kind, Withheld::DefaultBlock) {
+            // Only samples were withheld: resolution carries on to this site's
+            // own `default` and then to weaker sources.
+            return Step::Continue;
+        }
+        // The block is a `default` opinion like any other, and composing from it
+        // is what turns it back into "no value".
+        self.winner = Winner::Default { site: site.select() };
+        Step::Stop
+    }
+
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        let answer = probe.answer_at(self.time, self.interp)?;
+        if matches!(answer.value_state(), ValueState::Absent) {
+            return Ok(Step::Continue);
+        }
+        // A set that owns the property answers even where it supplies no value,
+        // so nothing weaker contributes.
+        self.winner = Winner::Clips {
+            value: answer.into_value(),
+        };
+        Ok(Step::Stop)
+    }
+}
+
+/// Resolves the cacheable value source for an attribute (the resolver behind
+/// [`IndexCache::resolve_value_source`]).
+struct SourceResolver<'a> {
+    graph: &'a LayerGraph,
+    source: Option<AttributeValueSource>,
+    /// The site a winning `default` was found at, whose composed value the
+    /// cached source holds. `None` when samples or clips won, or when nothing
+    /// was authored.
+    default_site: Option<SelectedSite>,
+}
+
+impl OpinionResolver for SourceResolver<'_> {
+    /// TODO(perf): the asset site copies two strings for every sampled
+    /// attribute, where the per-time read builds one only for a value that turns
+    /// out to hold asset paths. The samples are not yet interpolated here, so
+    /// the same guard does not apply; carrying the site's `layer` and stack id
+    /// instead and resolving them when a replayed value first needs them would
+    /// pay the copies only where they are read.
+    fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        self.source = Some(AttributeValueSource::TimeSamples {
+            samples: samples.clone(),
+            offset: site.offset,
+            site: site.asset_site(self.graph),
+        });
+        Step::Stop
+    }
+
+    /// A `default` answers through composed field resolution, so only the site
+    /// it won at is recorded; the value is composed from there below.
+    fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
+        self.default_site = Some(site.select());
+        Step::Stop
+    }
+
+    fn on_withheld(&mut self, kind: Withheld, site: &OpinionSite<'_>) -> Step {
+        match matches!(kind, Withheld::DefaultBlock) {
+            true => {
+                self.default_site = Some(site.select());
+                Step::Stop
+            }
+            false => Step::Continue,
+        }
+    }
+
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        // Participation alone decides: clip values are time-dependent, so the
+        // query replays them through `value_at` per time code.
+        match probe.introspection()? {
+            Some(_) => {
+                self.source = Some(AttributeValueSource::Clips);
+                Ok(Step::Stop)
+            }
+            None => Ok(Step::Continue),
+        }
+    }
+}
+
+/// Resolves an attribute's composed sample times and whether its winning source
+/// can vary over time (the resolver behind [`IndexCache::time_sample_times`] and
+/// [`IndexCache::time_sample_summary`]).
+struct SampleTimesResolver {
+    /// `None` until a source answers; the empty vector is a real answer for a
+    /// participating clip set with no discrete times.
+    times: Option<Vec<f64>>,
+    /// The winning source's sample map, retimed into stage time. Only filled
+    /// for [`Want::Map`], and only when a `timeSamples` opinion won: a clip set
+    /// answers with a schedule rather than a map (see
+    /// [`IndexCache::time_samples`]).
+    map: Option<sdf::TimeSampleMap>,
+    /// Whether the winning source is a clip set whose schedule alone can vary
+    /// the value.
+    clip_may_vary: bool,
+    /// How many samples the winning source holds, which the count-only
+    /// consumers read instead of `times`.
+    count: usize,
+    /// How much of the winning source the caller reads.
+    want: Want,
+}
+
+/// How much of the winning `timeSamples` source a sample query needs, so the
+/// walk retimes and clones only what is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// The sample count alone. An offset maps times one-for-one, so nothing has
+    /// to be retimed to answer it.
+    Count,
+    /// The retimed sample times.
+    Times,
+    /// The retimed sample map, values included.
+    Map,
+}
+
+impl OpinionResolver for SampleTimesResolver {
+    fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        // A map supplying no value is not a value source, so it contributes no
+        // times — the same judgement the value read and the resolve info make of
+        // it. It still answers, blocking weaker sources.
+        if !value_resolve::samples_supply_any_value(samples) {
+            self.times = Some(Vec::new());
+            return Step::Stop;
+        }
+        self.times = Some(match self.want {
+            Want::Count => Vec::new(),
+            Want::Times | Want::Map => samples.iter().map(|(t, _)| site.offset.apply(*t)).collect(),
+        });
+        if self.want == Want::Map {
+            let mut map = samples.clone();
+            site.offset.apply_to_samples(&mut map);
+            self.map = Some(map);
+        }
+        self.count = samples.len();
+        Step::Stop
+    }
+
+    /// A `default` is a constant: it answers, contributing no sample times.
+    fn on_default(&mut self, _value: &Value, _site: &OpinionSite<'_>) -> Step {
+        Step::Stop
+    }
+
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        // TODO(perf): the count-only consumers materialize every clip's stage
+        // times to read the length. `ClipSet::stage_sample_times` builds the
+        // vector; a count-only form over the same per-clip times would answer
+        // `num_time_samples` and `value_might_be_time_varying` without it.
+        match probe.introspection()? {
+            Some((times, may_vary)) => {
+                self.count = times.len();
+                self.times = Some(times);
+                self.clip_may_vary = may_vary;
+                Ok(Step::Stop)
+            }
+            None => Ok(Step::Continue),
+        }
+    }
+}
+
+/// Collects where value resolution found its answer (the resolver behind
+/// [`IndexCache::resolve_info`]).
+struct InfoResolver<'a> {
+    graph: &'a LayerGraph,
+    stage: &'a LayerStackIdentifier,
+    /// The stage time the query names, if any. A numeric query evaluates the
+    /// samples that answer *there*; without one the map is judged as a whole.
+    time: Option<f64>,
+    /// The stage's interpolation policy, so a numeric query decides which
+    /// samples answer exactly as the value read does.
+    interp: &'a dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    resolution: Resolution,
+}
+
+impl InfoResolver<'_> {
+    /// Records the source that answered and the site it answered at.
+    fn select(&mut self, kind: ResolveSourceKind, site: &OpinionSite<'_>) {
+        self.resolution.source = kind;
+        self.resolution.node = Some(ResolveNode::capture(self.graph, site.node, self.stage));
+    }
+}
+
+impl OpinionResolver for InfoResolver<'_> {
+    fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        self.resolution.authored = true;
+        // A map that supplies no value here is not a value source: the read
+        // falls through to the schema tier, and reporting `TimeSamples` would
+        // disagree with it. It still answers the walk, blocking weaker sources.
+        if !value_resolve::samples_supply_value(samples, site.offset, self.time, self.interp) {
+            self.resolution.value = ValueState::Blocked;
+            return Step::Stop;
+        }
+        self.select(ResolveSourceKind::TimeSamples, site);
+        self.resolution.value = ValueState::Present;
+        Step::Stop
+    }
+
+    fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
+        self.resolution.authored = true;
+        self.select(ResolveSourceKind::Default, site);
+        self.resolution.value = ValueState::Present;
+        Step::Stop
+    }
+
+    fn on_withheld(&mut self, kind: Withheld, _site: &OpinionSite<'_>) -> Step {
+        // A blocked `default` answers, withholding the value: resolution reverts
+        // to whatever follows the authored tiers. A blocked `timeSamples` field
+        // withholds samples alone, so the walk carries on and this site's own
+        // `default`, or a weaker opinion, may still answer. Either way the
+        // opinion is on record.
+        self.resolution.authored = true;
+        match kind {
+            Withheld::DefaultBlock => {
+                self.resolution.value = ValueState::Blocked;
+                Step::Stop
+            }
+            Withheld::TimeSamplesFieldBlock => Step::Continue,
+        }
+    }
+
+    /// The samples are authored even though a default-time walk resolves from
+    /// `default` alone, so the opinion is recorded without becoming the source.
+    fn on_unresolved_samples(&mut self, _site: &OpinionSite<'_>) {
+        self.resolution.authored = true;
+    }
+
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        // A set that sources the property does not necessarily supply a value:
+        // at a numeric time it may be inactive or blocked, and without one it
+        // may carry nothing for the property anywhere. Both forms decide that
+        // the way the value read does.
+        let state = match self.time {
+            Some(time) => probe.answer_at(time, self.interp)?.value_state(),
+            None => probe.answer_untimed()?,
+        };
+        if matches!(state, ValueState::Absent) {
+            return Ok(Step::Continue);
+        }
+        // The set answers here. It becomes the reported source only where it
+        // supplied a value: a clip that owns the property but blocks it there
+        // sends the read to the schema tier, and naming the clip would disagree
+        // with that — C++ reports the clip either way.
+        self.resolution.authored = true;
+        self.resolution.value = state;
+        if matches!(state, ValueState::Present) {
+            self.select(ResolveSourceKind::ValueClips, site);
+        }
+        Ok(Step::Stop)
+    }
+}
+
+/// Collects the spec sites contributing to a property, strongest first (the
+/// resolver behind [`IndexCache::property_stack`]).
+///
+/// Unlike the value resolvers this never stops the walk and never claims a
+/// site: every contributing spec is wanted, which is also why a site that
+/// authors a value does not suppress a clip at the same anchor.
+struct StackResolver<'a> {
+    graph: &'a LayerGraph,
+    prop_path: &'a Path,
+    prim_path: &'a Path,
+    /// The stage time the stack was asked for, when it named one. Value clips
+    /// contribute nothing at the default time, so only a numeric query lists
+    /// them.
+    time: Option<f64>,
+    sites: Vec<SpecSiteRecord>,
+    conflicts: Diagnostics,
+    defining: DefiningKind,
+}
+
+/// One spec contributing to a composed property or prim, resolved out of the
+/// graph's arena handles (C++ `SdfPropertySpecHandle` / `SdfPrimSpecHandle`
+/// paired with its cumulative layer offset).
+///
+/// The resolved counterpart of the internal [`SpecSite`](super::prim_graph::SpecSite),
+/// which holds handles only meaningful inside the owning graph. C++ splits the
+/// offset-bearing stack queries from the plain ones for compatibility; a site
+/// here always carries its offset, so there is one spelling to keep in step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpecSiteRecord {
+    /// Canonical identifier of the layer holding the spec.
+    pub layer: String,
+    /// The spec's path within that layer, which under a reference or variant
+    /// differs from the composed stage path.
+    pub path: Path,
+    /// The cumulative offset from the stage's root layer to this one, composing
+    /// the arc's offset with the layer's own sublayer offset.
+    pub offset: LayerOffset,
+}
+
+impl OpinionResolver for StackResolver<'_> {
+    fn on_site(&mut self, site: &OpinionSite<'_>) -> Step {
+        let Some(spec_type) = self.graph.layer(site.layer).data().spec_type(&site.query_path) else {
+            return Step::Continue;
+        };
+        let layer = self.graph.identifier(site.layer);
+        match self
+            .defining
+            .admit(spec_type, layer, &site.query_path, self.prop_path, self.prim_path)
+        {
+            None => self.sites.push(SpecSiteRecord {
+                layer: layer.to_string(),
+                path: site.query_path.clone(),
+                offset: site.offset,
+            }),
+            Some(conflict) => self.conflicts.report(conflict),
+        }
+        Step::Continue
+    }
+
+    /// Every contributing spec is wanted, so a withheld value neither answers
+    /// nor truncates the stack.
+    fn on_withheld(&mut self, _kind: Withheld, _site: &OpinionSite<'_>) -> Step {
+        Step::Continue
+    }
+
+    /// A site that authors a spec may also introduce a clip set, and the stack
+    /// wants both.
+    fn claims_sites(&self) -> bool {
+        false
+    }
+
+    /// A clip set that sources the property at the queried time contributes the
+    /// clip layer it sources it from, on top of whatever spec this site authors.
+    /// The offset is the site's own, since a set is only reached at the layer
+    /// that introduced it (C++ reports `sourceLayer`'s offset for the same
+    /// reason).
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        let Some(time) = self.time else {
+            return Ok(Step::Continue);
+        };
+        if let Some((layer, path)) = probe.spec_site_at(time)? {
+            self.sites.push(SpecSiteRecord {
+                layer,
+                path,
+                offset: site.offset,
+            });
+        }
+        Ok(Step::Continue)
+    }
+}
+
+#[cfg(test)]
+impl IndexCache {
+    /// Every cached prim's stamp, for a test asserting how far an edit restaled.
+    pub(super) fn prim_revisions(&self) -> Vec<(Path, PrimRevision)> {
+        self.store.revisions()
+    }
+}
+
+impl IndexCache {
+    /// Creates a new composition cache. The layer data lives in a separate
+    /// [`LayerGraph`] owned by the [`Stage`](crate::usd::Stage) and passed to each
+    /// query. `collection_diagnostics` are the one-shot errors from layer collection
+    /// the graph cannot regenerate (e.g. `UnresolvedSublayer`); per-prim build
+    /// errors join them as indices are composed. The regenerable layer-graph
+    /// diagnostics (sublayer cycles, invalid relocates) live on the
+    /// [`LayerGraph`] and are read through [`LayerGraph::errors`].
+    pub(crate) fn new(
+        variant_fallbacks: VariantFallbackMap,
+        load_rules: LoadRules,
+        population_mask: PopulationMask,
+        collection_diagnostics: Diagnostics,
+    ) -> Self {
+        Self {
+            store: IndexStore::default(),
+            variant_fallbacks,
+            load_rules,
+            population_mask,
+            clip_cache: ClipCache::default(),
+            prototypes: PrototypeRegistry::default(),
+            redirected_prims: HashMap::new(),
+            populated_prims: HashMap::new(),
+            population_epoch: 0,
+            type_opinion_epoch: 0,
+            collection_diagnostics,
+            query_diagnostics: Diagnostics::default(),
+            in_progress: HashSet::new(),
+            pending_loads: Vec::new(),
+        }
+    }
+
+    /// Hands the [`Demand`]s the builds run so far raised (for target layers not
+    /// yet loaded) to `buf`, taking `buf`'s storage in exchange. The stage's
+    /// query loop passes a buffer it reuses across passes, so the two queues
+    /// ping-pong without reallocating: it opens the returned layers and
+    /// recomposes until a pass demands nothing.
+    pub(crate) fn swap_pending_loads(&mut self, buf: &mut Vec<Demand>) {
+        mem::swap(&mut self.pending_loads, buf);
+    }
+
+    /// Marks every layer stack the cache holds live for a registry sweep
+    /// (`LayerGraph::sweep_stacks`): each cached prim index's nodes and the
+    /// contexts of pending arc-load demands, whose stacks the load barrier is
+    /// about to read.
+    pub(crate) fn mark_live_stacks(&self, marks: &mut StackMarks) {
+        self.store.mark_live_stacks(marks);
+        for demand in &self.pending_loads {
+            marks.mark(demand.context);
+        }
+    }
+
+    /// Whether some stack lost its last cache owner since the last sweep —
+    /// the signal that schedules reclamation at the stage's next edit seam.
+    /// Unthresholded: a single deletion, mute, or unload that orphans a stack
+    /// must retire it (and its diagnostics) promptly.
+    pub(crate) fn ownership_lost(&self) -> bool {
+        self.store.ownership_lost()
+    }
+
+    /// Clears the ownership-loss flag after a sweep consumed it.
+    pub(crate) fn reset_ownership_lost(&mut self) {
+        self.store.reset_ownership_lost();
+    }
+
+    /// The [`PrimRevision`] stamped on the cached prim at `path`, or `None` when
+    /// no index is cached there — which no cached answer validates against.
+    pub(crate) fn prim_revision(&self, path: &Path) -> Option<PrimRevision> {
+        self.store.revision_at(path)
+    }
+
+    /// Retires the cached answers of the prims a change round named: each is
+    /// stamped with a fresh [`PrimRevision`], and the resolved-target memos the
+    /// round restaled are dropped with it.
+    ///
+    /// The graph is untouched — these prims still compose the way they did, they
+    /// merely resolve different values — so nothing is evicted. A named path
+    /// with no cached entry costs a lookup and nothing else.
+    pub(super) fn restale_values(&mut self, graph: &LayerGraph, items: Vec<(Path, ScopedInvalidation)>) {
+        // The property-derived diagnostics of every prim whose composed property
+        // set the round may have moved. Gathered first so the recomputation below
+        // runs against fully restaled entries.
+        let mut refresh: Vec<Path> = Vec::new();
+        for (path, item) in items {
+            match item.scope {
+                ValueScope::Prim => {
+                    self.store.restale(&path, &item.target_keys);
+                    if item.properties {
+                        refresh.push(path);
+                    }
+                }
+                ValueScope::Subtree => {
+                    self.store.restale_subtree(&path, &item.target_keys);
+                    if item.properties {
+                        refresh.extend(self.store.subtree_paths(&path));
+                    }
+                }
+            }
+        }
+        for path in refresh {
+            self.refresh_property_type_conflicts(graph, &path);
+        }
+    }
+
+    /// Recomputes `path`'s inconsistent-property-type conflicts after an edit
+    /// that may have changed which property specs it composes, replacing what
+    /// the previous composition recorded.
+    ///
+    /// A prim the round left uncached needs nothing: its next build reports from
+    /// scratch. Recomposing the property names can fail (a demanded layer that
+    /// is not loaded), in which case the entry keeps what it had rather than
+    /// being left silently empty — the next build or query reports again.
+    fn refresh_property_type_conflicts(&mut self, graph: &LayerGraph, path: &Path) {
+        if !self.is_indexed(path) {
+            return;
+        }
+        let Ok(names) = self.composed_property_names(graph, path) else {
+            return;
+        };
+        self.report_property_type_conflicts(graph, path, &names);
+    }
+
+    /// Invalidates what a change to the clip or manifest layer `identifier`
+    /// reaches: the synthesized manifests generated from its content, and the
+    /// composed values of every prim under an anchor whose clip sets read it.
+    /// Returns those anchor prims.
+    ///
+    /// A layer that feeds no clip set invalidates nothing here, so an ordinary
+    /// layer edit — or an unrelated layer joining the graph — costs one lookup
+    /// and clears no diagnostic. The clip diagnostics are retired when it does
+    /// match, since a clip that could not be read may now be readable.
+    ///
+    /// The anchors are returned for a caller to report: each stands for its
+    /// whole subtree, the same reach the restale took, since a clip set sources
+    /// values anywhere below its anchor.
+    pub(crate) fn invalidate_clip_source(&mut self, identifier: &str) -> Vec<Path> {
+        let anchors = self.clip_cache.invalidate_layer(identifier);
+        if anchors.is_empty() {
+            return anchors;
+        }
+        for anchor in &anchors {
+            self.store.restale_subtree(anchor, &BTreeSet::new());
+        }
+        self.retire_query_errors();
+        anchors
+    }
+
+    /// Whether any clip set has recorded the layers it reads, so asking about a
+    /// layer could answer anything. A stage with no value clips never does.
+    pub(crate) fn has_clip_sources(&self) -> bool {
+        self.clip_cache.has_clip_sources()
+    }
+
+    /// Discards the transient query diagnostics
+    /// ([`query_diagnostics`](Self::query_diagnostics)).
+    ///
+    /// They are re-derived on the next query and must not outlive the mutation
+    /// that fixed what they report — an edit that drops no index still reaches
+    /// here, which is the only retirement point a value-time asset expression's
+    /// failure has: nothing records it as a dependency, so no invalidation is
+    /// keyed to it. Its own seam, because a mutation that invalidates nothing
+    /// cached can still repair a diagnostic.
+    pub(super) fn retire_query_errors(&mut self) {
+        self.query_diagnostics.clear();
+    }
+
+    /// The current population epoch. A caller that completed a walk over the
+    /// populated namespace stamps this and re-runs when it no longer matches
+    /// (`Stage::discover_prototypes`).
+    pub(crate) fn population_epoch(&self) -> u64 {
+        self.population_epoch
+    }
+
+    /// The current type-opinion epoch, which advances once per change batch that
+    /// authored `typeName`, `apiSchemas`, or the root's `fallbackPrimTypes`.
+    ///
+    /// A memo of composed schema identities stamps this *and*
+    /// [`population_epoch`](Self::population_epoch): those fields are what the
+    /// identity is composed from, and every structural change that can move
+    /// which opinion wins already advances the population epoch. Neither epoch
+    /// alone covers the other.
+    pub(crate) fn type_opinion_epoch(&self) -> u64 {
+        self.type_opinion_epoch
+    }
+
+    /// Records that a change batch moved a schema-identity opinion.
+    pub(super) fn bump_type_opinion_epoch(&mut self) {
+        self.type_opinion_epoch = self
+            .type_opinion_epoch
+            .checked_add(1)
+            .expect("type opinion epoch exhausted");
+    }
+
+    /// Records that the composed population may now differ — a prim may have
+    /// appeared or vanished, changed activeness, or moved in namespace — by
+    /// advancing [`population_epoch`](Self::population_epoch) and retiring the
+    /// memos derived from it.
+    ///
+    /// Its own seam, separate from [`Self::retire_query_errors`], because the two
+    /// cover different equivalence classes: an edit that changes only a value
+    /// leaves every prim, its ancestry, and its activeness exactly where they
+    /// were, so the redirection and eligibility memos — and a completed
+    /// population walk — all stay good.
+    ///
+    /// Called by each operation that can change population, before it drops
+    /// anything: `Changes::apply` for a pass that touches any tier but the
+    /// property one, [`Self::invalidate_layers`], [`Self::invalidate_muting`],
+    /// `set_load_rules`, and [`Self::drop_load_failed_indices`], where a
+    /// repaired target can reveal scene the failed one hid. Deliberately not
+    /// hung off the invalidation's victim set, which can be empty for an edit
+    /// that still changes what would compose — nothing cached reads the edited
+    /// layer yet, while a memo recording a prim's absence very much does.
+    pub(super) fn invalidate_population(&mut self) {
+        self.population_epoch += 1;
+        self.clear_population_memos();
+    }
+
+    /// Retires the memos that record where a prim composes and whether the
+    /// population admits it. Separate from the epoch because dropping a
+    /// prototype invalidates exactly these — every redirection into the
+    /// namespace it owned — without saying anything about the stage's
+    /// population having moved.
+    pub(super) fn clear_population_memos(&mut self) {
+        self.populated_prims.clear();
+        self.redirected_prims.clear();
+    }
+
+    /// Returns the recoverable composition errors encountered so far: the
+    /// one-shot collection errors, the current per-prim build errors, and the
+    /// transient query errors.
+    pub(crate) fn composition_errors(&self) -> Diagnostics {
+        self.collection_diagnostics
+            .iter()
+            .chain(self.store.errors())
+            .chain(&self.query_diagnostics)
+            .cloned()
+            .collect()
+    }
+
+    /// Drops the one-shot collection errors that also appear in `superseded` —
+    /// open-time loader copies of diagnostics the layer graph has taken
+    /// ownership of as per-stack regenerable errors, which would otherwise
+    /// double-report and outlive a later fix. Collection keeps what the loader
+    /// alone knows, e.g. a failure under a branch muted at open, which the
+    /// graph derives no diagnostic for.
+    pub(crate) fn discard_collection_errors(&mut self, superseded: &[CompositionDiagnostic]) {
+        self.collection_diagnostics.retain(|error| !superseded.contains(error));
+    }
+
+    #[cfg(test)]
+    fn take_composition_errors(&mut self) -> Vec<CompositionDiagnostic> {
+        let held = self.composition_errors().into_vec();
+        self.collection_diagnostics.clear();
+        self.query_diagnostics.clear();
+        self.store.clear_errors();
+        held
+    }
+
+    /// Runs the shared value-resolution walk for the property at `prim +
+    /// suffix` under `mode`, handing `resolver` every opinion it reaches in
+    /// strength order until the resolver stops.
+    ///
+    /// The single transcription of value-resolution strength order: the
+    /// per-time read, the cached source, the sample times, the sample summary
+    /// and the property stack are all resolvers over this one walk, so they
+    /// cannot disagree about which source answers.
+    fn resolve_property<R: OpinionResolver>(
+        &mut self,
+        graph: &LayerGraph,
+        prim: &Path,
+        suffix: &str,
+        mode: ResolveMode,
+        resolver: &mut R,
+    ) -> Result<(), QueryError> {
+        // Clips are consulted only where they can exist: without the presence
+        // flag the walk visits the spec stack alone, and never composes an
+        // ancestor's `clips` metadata.
+        let consults_clips = mode.consults_clips() && self.may_have_clips(prim);
+        if consults_clips {
+            // The clip tier composes each anchor prim's clip sets out of that
+            // prim's index while the site walk holds the store, so the indices
+            // are made ready first. Composing the sets stays inside the walk,
+            // which also decides how far up the chain it needs to look.
+            for anchor in prim.ancestors_below_root() {
+                self.ensure_index(graph, &anchor)?;
+                if !self.may_have_clips(&anchor) {
+                    break;
+                }
+            }
+        }
+        let Self {
+            store,
+            clip_cache,
+            query_diagnostics,
+            ..
+        } = self;
+        let mut clips = ClipTier::new(store, clip_cache, query_diagnostics);
+        let scope = match consults_clips {
+            true => SiteScope::EveryLayer,
+            false => SiteScope::SpecStack,
+        };
+        let index = store.cached(prim);
+        // Whether a `timeSamples` field block has withheld samples from every
+        // weaker site (a `ValueBlock` blocks weaker opinions for any field).
+        let mut samples_blocked = false;
+
+        // TODO(perf): the query path is rebuilt per site though it depends only
+        // on the node, and under `EveryLayer` it is built even for the layers the
+        // spec gate below rejects. `live_sites` is node-major in both scopes, so
+        // yielding a node with its layers would build it once per node.
+        for (node, layer, offset) in index.live_sites(graph, scope) {
+            let site = OpinionSite {
+                node,
+                layer,
+                offset,
+                query_path: PrimIndex::query_path(node, Some(suffix)).into_owned(),
+            };
+
+            if resolver.on_site(&site).stop() {
+                return Ok(());
+            }
+            // Whether this site authored a value opinion. A site supplies one
+            // value, so a resolver that claims what it finds does not also read
+            // a clip set introduced here (C++'s `foundOpinion`).
+            let mut found_opinion = false;
+            let data = graph.layer(layer).data();
+            // The wider walk reaches layers that author no spec for this prim,
+            // so that a clip introduced there is still consulted; one lookup
+            // rules the field probes out at those.
+            if node.has_specs() && data.has_spec(&node.path) {
+                if !samples_blocked
+                    && let Some(value) = data.try_field(&site.query_path, FieldKey::TimeSamples.as_str())?
+                {
+                    // What the field holds decides whether there is an opinion
+                    // here at all; the mode then decides what to do with it.
+                    let field = SampleField::classify(&value);
+                    found_opinion = matches!(field, SampleField::Map(_));
+                    // A block withholds samples from every weaker site whatever
+                    // the query asked for, so the flag only ever latches on.
+                    samples_blocked |= matches!(field, SampleField::Blocked);
+                    let step = match (field, mode.visits_time_samples()) {
+                        (SampleField::Unusable, _) => Step::Continue,
+                        // A default-time walk resolves from `default` alone, so
+                        // the opinion is only reported as the authored one it is;
+                        // this site's `default` is still probed below.
+                        (_, false) => {
+                            resolver.on_unresolved_samples(&site);
+                            Step::Continue
+                        }
+                        (SampleField::Map(samples), true) => resolver.on_time_samples(samples, &site),
+                        (SampleField::Blocked, true) => resolver.on_withheld(Withheld::TimeSamplesFieldBlock, &site),
+                    };
+                    if step.stop() {
+                        return Ok(());
+                    }
+                }
+                if let Some(value) = data.try_field(&site.query_path, FieldKey::Default.as_str())? {
+                    found_opinion = true;
+                    let step = match &*value {
+                        Value::ValueBlock | Value::None => resolver.on_withheld(Withheld::DefaultBlock, &site),
+                        other => resolver.on_default(other, &site),
+                    };
+                    if step.stop() {
+                        return Ok(());
+                    }
+                }
+            }
+            if consults_clips
+                && !(found_opinion && resolver.claims_sites())
+                && clips.visit(graph, prim, suffix, &site, resolver)?.stop()
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolves where an attribute's value comes from, without producing the
+    /// value (C++ `UsdStage::_GetResolveInfo`). `mode` selects the walk:
+    /// [`Proximal`](ResolveMode::Proximal) reports the source that would answer
+    /// without naming a time, while a timed mode reports the one that answers
+    /// there.
+    pub(crate) fn resolve_info(
+        &mut self,
+        graph: &LayerGraph,
+        stage: &LayerStackIdentifier,
+        attr_path: &Path,
+        mode: ResolveMode,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Resolution, QueryError> {
+        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
+            // Nothing authored, nothing blocked: what a prim the population mask
+            // excludes resolves to, so the masked path needs no special case.
+            return Ok(Resolution::default());
+        };
+        let mut resolver = InfoResolver {
+            graph,
+            stage,
+            time: match mode {
+                ResolveMode::Numeric(time) => Some(time),
+                ResolveMode::Proximal | ResolveMode::Default => None,
+            },
+            interp,
+            resolution: Resolution::default(),
+        };
+        self.resolve_property(graph, &prim, &suffix, mode, &mut resolver)?;
+        Ok(resolver.resolution)
+    }
+
+    /// Resolves an attribute's value at `time`, honoring value clips
+    /// (spec 12.3.4). Runs [`Self::resolve_property`], so the source it answers
+    /// from is the one every other value query reports.
+    ///
+    /// `interp` applies the stage's interpolation policy to a sample map at a
+    /// given time; it is supplied by the caller so this layer stays free of any
+    /// interpolation policy.
+    pub(crate) fn value_at(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+        time: f64,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Value>, QueryError> {
+        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
+            return Ok(None);
+        };
+        let mut resolver = ValueAtResolver {
+            graph,
+            time,
+            interp,
+            winner: Winner::None,
+        };
+        self.resolve_property(graph, &prim, &suffix, ResolveMode::Numeric(time), &mut resolver)?;
+        match resolver.winner {
+            Winner::None => Ok(None),
+            Winner::Samples { value, site } => Ok(self.resolve_asset_values(graph, value, site.as_ref())),
+            Winner::Clips { value } => Ok(value),
+            Winner::Default { site } => self.composed_default(graph, &prim, &suffix, &site),
+        }
+    }
+
+    /// Resolves the cacheable value source for an attribute (the source half of
+    /// [`Self::value_at`]), so a [`Stage::attribute_query`] can replay it across
+    /// time codes. When value clips claim the attribute the source is
+    /// [`AttributeValueSource::Clips`]: the query then falls back to `value_at`
+    /// per call, since clip resolution is time-dependent.
+    ///
+    /// [`Stage::attribute_query`]: crate::usd::Stage::attribute_query
+    pub(crate) fn resolve_value_source(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<StampedValueSource, QueryError> {
+        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
+            return Ok(self.stamp_source(AttributeValueSource::Static(None), attr_path, None));
+        };
+        let mut resolver = SourceResolver {
+            graph,
+            source: None,
+            default_site: None,
+        };
+        self.resolve_property(graph, &prim, &suffix, ResolveMode::Proximal, &mut resolver)?;
+        let source = match resolver.source {
+            Some(source) => source,
+            // A winning `default` composes from the site the walk selected; with
+            // no site nothing was authored, which is the same static `None`.
+            None => match resolver.default_site {
+                Some(site) => AttributeValueSource::Static(self.composed_default(graph, &prim, &suffix, &site)?),
+                None => AttributeValueSource::Static(None),
+            },
+        };
+        Ok(self.stamp_source(source, attr_path, Some(prim)))
+    }
+
+    /// Pairs a freshly resolved `source` with the stamp a cached view replays it
+    /// under, read in the same borrow that produced it so no edit can slip
+    /// between the answer and its validity token.
+    ///
+    /// `prim` is the composed prim the walk resolved from, or `None` when it
+    /// never reached one (the attribute has no spec anywhere) — that answer
+    /// still depends on the queried prim's composition, so it is stamped against
+    /// the queried path's own entry, and stays unmemoizable while none is
+    /// cached.
+    fn stamp_source(&self, source: AttributeValueSource, attr_path: &Path, prim: Option<Path>) -> StampedValueSource {
+        let queried = attr_path.prim_path();
+        let prim = prim.unwrap_or_else(|| queried.clone());
+        // The redirect that took an instance proxy to its prototype is memoized
+        // per population epoch (`redirected_prims`), so a stamp anchored at a
+        // path the query did not name must re-check that epoch too.
+        let redirect_epoch = (prim != queried).then(|| self.population_epoch());
+        StampedValueSource {
+            revision: self.prim_revision(&prim),
+            prim,
+            redirect_epoch,
+            source,
+        }
+    }
+
+    /// The composed `default` for a property whose winning site the shared walk
+    /// selected.
+    ///
+    /// A `default` composes across weaker opinions (dictionaries merge, path
+    /// expressions substitute), so the value comes from composed field
+    /// resolution rather than from the winning site alone — begun at that site,
+    /// which also anchors any `asset` in the result.
+    fn composed_default(
+        &mut self,
+        graph: &LayerGraph,
+        prim: &Path,
+        suffix: &str,
+        site: &SelectedSite,
+    ) -> Result<Option<Value>, QueryError> {
+        let value = self
+            .cached(prim)
+            .resolve_strongest(FieldKey::Default.as_str(), graph, Some(suffix), Some(site))?;
+        Ok(self.resolve_asset_at(graph, value, site).and_then(block_to_none))
+    }
+
+    /// Resolves an attribute's composed sample times, retimed to stage time and
+    /// including value-clip contributions (spec 12.3.4). `None` when no source
+    /// has samples or the prim is masked out.
+    ///
+    /// Reports the times of whichever source [`Self::value_at`] resolves the
+    /// value from, because both run [`Self::resolve_property`]. A winning
+    /// `default` is a constant, so it contributes none.
+    pub(crate) fn time_sample_times(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<Option<Vec<f64>>, QueryError> {
+        Ok(self.sample_times(graph, attr_path, Want::Times)?.times)
+    }
+
+    /// Resolves an attribute's composed `timeSamples` map, retimed to stage
+    /// time. `None` when the source that answers is not a `timeSamples`
+    /// opinion.
+    ///
+    /// Reports the map of whichever source [`Self::value_at`] resolves the value
+    /// from, because both run [`Self::resolve_property`]: a stronger `default`
+    /// hides a weaker layer's samples here exactly as it does in the read.
+    ///
+    /// A winning value-clip set answers with a schedule rather than a map, so
+    /// this reports `None` for one; its times reach
+    /// [`Self::time_sample_times`], and its values are read per time code
+    /// through [`Self::value_at`].
+    pub(crate) fn time_samples(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<Option<sdf::TimeSampleMap>, QueryError> {
+        Ok(self.sample_times(graph, attr_path, Want::Map)?.map)
+    }
+
+    /// Resolves the number of composed sample times for an attribute, including
+    /// value-clip contributions, without retiming the times themselves. Zero
+    /// when no source has samples or the prim is masked out.
+    pub(crate) fn num_time_samples(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<usize, QueryError> {
+        Ok(self.time_sample_summary(graph, attr_path)?.0)
+    }
+
+    /// Whether an attribute's value may vary over time, the introspection behind
+    /// [`Attribute::value_might_be_time_varying`]. True when the winning value
+    /// source has more than one composed sample, or when that source is a value-
+    /// clip set whose schedule alone can vary the value
+    /// ([`ClipSet::may_be_time_varying`]).
+    ///
+    /// [`Attribute::value_might_be_time_varying`]: crate::usd::Attribute::value_might_be_time_varying
+    pub(crate) fn value_might_be_time_varying(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<bool, QueryError> {
+        let (count, clip_may_vary) = self.time_sample_summary(graph, attr_path)?;
+        Ok(count > 1 || clip_may_vary)
+    }
+
+    /// The composed sample-time count for an attribute plus, when the winning
+    /// source is a value-clip set, whether that set's schedule can vary the
+    /// value ([`ClipSet::may_be_time_varying`]). Shared by
+    /// [`Self::num_time_samples`] and [`Self::value_might_be_time_varying`].
+    /// `(0, false)` when no source has samples or the prim is masked out.
+    fn time_sample_summary(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<(usize, bool), QueryError> {
+        let resolved = self.sample_times(graph, attr_path, Want::Count)?;
+        Ok((resolved.count, resolved.clip_may_vary))
+    }
+
+    /// The composed sample times of whichever source [`Self::value_at`] would
+    /// resolve from, plus whether that source is a clip set whose schedule alone
+    /// can vary the value.
+    fn sample_times(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+        want: Want,
+    ) -> Result<SampleTimesResolver, QueryError> {
+        let mut resolver = SampleTimesResolver {
+            times: None,
+            map: None,
+            clip_may_vary: false,
+            count: 0,
+            want,
+        };
+        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
+            return Ok(resolver);
+        };
+        self.resolve_property(graph, &prim, &suffix, ResolveMode::Proximal, &mut resolver)?;
+        Ok(resolver)
+    }
+
+    /// Ensures `anchor`'s index is composed and resolves its value-clip sets —
+    /// the shared preamble for the clip orchestration walks. Returns an owned
+    /// list so the cached-index borrow is released before the per-anchor
+    /// [`ClipCache`] query takes `&mut self.clip_cache`.
+    ///
+    /// TODO(perf): the sets are recomposed per query rather than memoized, so a
+    /// `${VAR}` in a set's asset paths is re-parsed and re-evaluated on every
+    /// clip read. A per-(prim, revision) cache of the returned `Vec` at this seam
+    /// would bound both.
+    fn clip_sets_for(&mut self, graph: &LayerGraph, anchor: &Path) -> Result<Vec<ResolvedClipSet>, QueryError> {
+        self.ensure_index(graph, anchor)?;
+        let mut errors = Diagnostics::default();
+        let sets = self.cached(anchor).resolve_clip_sets(graph, &mut errors)?;
+        self.query_diagnostics.extend(errors);
+        Ok(sets)
+    }
+
+    /// Generates a manifest layer for the clip set named `clip_set` composed on
+    /// `prim` (C++ `UsdClipsAPI::GenerateClipManifest`), declaring every
+    /// attribute the set's clips carry time samples for. `write_blocks` authors
+    /// a value block at each clip's activation time for the attributes that clip
+    /// has no samples for.
+    ///
+    /// `None` for the pseudo-root or when no set of that name resolves on
+    /// `prim`. The manifest is a fresh anonymous layer: it is not installed on
+    /// the set, so authoring `manifestAssetPath` after exporting it is the
+    /// caller's to do.
+    ///
+    /// Errors when a clip the schedule names cannot be read. An authored
+    /// manifest that silently omits a clip's attributes would stop value
+    /// resolution sourcing them at all, so the incomplete result is refused
+    /// rather than returned — unlike synthesis during value resolution, which
+    /// degrades to the clips it can read.
+    pub(crate) fn generate_clip_manifest(
+        &mut self,
+        graph: &LayerGraph,
+        prim: &Path,
+        clip_set: &str,
+        write_blocks: bool,
+    ) -> Result<Option<sdf::Layer>, QueryError> {
+        if prim.is_abs_root() {
+            return Ok(None);
+        }
+        // An instance proxy's clips are composed on the shared prototype, so
+        // read them from there — the same redirect every other query entry
+        // point applies.
+        let prim = &self.effective_path(graph, prim)?;
+        let sets = self.clip_sets_for(graph, prim)?;
+        let Some(resolved) = sets.into_iter().find(|resolved| resolved.set.name == clip_set) else {
+            return Ok(None);
+        };
+        let (manifest, unread) = self.clip_cache.generate_manifest(
+            graph,
+            &resolved,
+            prim,
+            clip_manifest::CLIP_MANIFEST_TAG,
+            write_blocks,
+        )?;
+        if let Some(error) = unread.iter().next() {
+            return Err(IncompleteClipManifest::new(clip_set, prim.clone(), error.clone()).into());
+        }
+        Ok(Some(manifest))
+    }
+
+    /// Redirects `attr_path` through [`Self::effective_path`] and ensures the
+    /// owning prim's index is composed, returning the owned prim path and
+    /// property suffix for a subsequent [`Self::cached`] lookup. `None` when no
+    /// spec exists at the path (absent or masked out).
+    fn ensure_attr_index(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<Option<(Path, String)>, QueryError> {
+        let attr_path = &self.effective_path(graph, attr_path)?;
+        if !self.has_spec_at(graph, attr_path)? {
+            return Ok(None);
+        }
+        let prim = attr_path.prim_path();
+        let suffix = attr_path.property_suffix().to_owned();
+        self.ensure_index(graph, &prim)?;
+        Ok(Some((prim, suffix)))
+    }
+
+    /// Read-only access to the cached indices and the dependency map they are
+    /// registered in — the pair change-driven invalidation reads.
+    pub(super) fn store(&self) -> &IndexStore {
+        &self.store
+    }
+
+    /// Whether value resolution has to consult value clips for `path`: clip
+    /// metadata is authored there or on an ancestor.
+    ///
+    /// Read off the composed context, which accumulates the answer down the
+    /// namespace, so this asks one prim rather than walking the chain.
+    fn may_have_clips(&self, path: &Path) -> bool {
+        self.store.context_at(path).is_some_and(|ctx| ctx.may_have_clips)
+    }
+
+    /// Returns `true` if a composed prim index is currently cached at `path`.
+    pub fn is_indexed(&self, path: &Path) -> bool {
+        self.store.is_indexed(path)
+    }
+
+    /// Borrows the cached index at `path`.
+    ///
+    /// Callers use this where composition has already guaranteed the index is
+    /// present (a prim's index is built before any query that reads it, and
+    /// children build after their parents). When the build was left uncached
+    /// because it demanded a not-yet-loaded layer, an empty index is returned:
+    /// the query reads empty results and the stage's query loop discards them,
+    /// recomposing once the demanded layer is loaded. Absence is therefore always
+    /// the transient demanded-layer case — never a logic error — under the
+    /// loop's guarantee that a demanded build is retried.
+    pub(super) fn cached(&self, path: &Path) -> &PrimIndex {
+        self.store.cached(path)
+    }
+
+    /// Number of cached prim indices.
+    pub fn indexed_count(&self) -> usize {
+        self.store.len()
+    }
+
+    /// Caches a fully composed `index` at `path` with the `context` its children
+    /// inherit, its recoverable build `errors`, and the per-stack
+    /// expression-variable names its build read (`expr_var_deps`), registering
+    /// its dependencies (see [`IndexStore::insert`]). Shared by the ordinary
+    /// [`build_index`](Self::build_index) path and the materialized-prototype path
+    /// (which has no spec to build from, so it passes no errors and no variable
+    /// dependencies — a variable edit evicts a prototype through its instances'
+    /// registrations).
+    pub(super) fn cache_index(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        index: PrimIndex,
+        context: CompositionContext,
+        errors: Diagnostics,
+        expr_var_deps: ExprVarDeps,
+    ) {
+        self.store.insert(graph, path, index, context, errors, expr_var_deps);
+    }
+
+    /// The composition context for a namespace-root prim: empty except for the
+    /// stage's variant fallbacks. Used to seed the root of an ordinary build and
+    /// of a materialized prototype. `load_payloads` is left at its `Default`
+    /// value — [`build_index`](Self::build_index) always overwrites it with a
+    /// per-path decision before the context is ever consumed, so the value
+    /// seeded here is never read.
+    pub(super) fn root_parent_context(&self) -> CompositionContext {
+        CompositionContext {
+            variant_fallbacks: self.variant_fallbacks.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// Drop a single prim's cached entry (its index, child context, and build
+    /// errors) along with its dependency registrations.
+    ///
+    /// The transient query errors are left alone: dropping an index is not by
+    /// itself an invalidation — a lazy prototype materialization drops one
+    /// mid-query — and [`Self::retire_query_errors`] is what retires them, at every
+    /// edit seam.
+    pub(super) fn drop_index(&mut self, path: &Path) {
+        self.store.remove(path);
+    }
+
+    /// Drops every cached index that recorded a
+    /// [`MalformedLayer`](CompositionDiagnostic::MalformedLayer) error so it recomposes and
+    /// re-demands the target. The arc to an unreadable target was dropped, so
+    /// these indices carry no dependency on it and an ordinary layer-stack
+    /// invalidation misses them; the stage calls this when an edit clears the
+    /// graph's recorded load failures, since the target may now be readable.
+    pub(crate) fn drop_load_failed_indices(&mut self) {
+        let failed = self.store.paths_with_malformed_layer();
+        if failed.is_empty() {
+            return;
+        }
+        for path in failed {
+            self.store.remove(&path);
+        }
+        self.retire_query_errors();
+        // A target that failed to read hid whatever it would have composed, so
+        // repairing it can reveal prims — and instances — the population never
+        // saw.
+        self.invalidate_population();
+    }
+
+    /// Spec-tier change consumer (C++ `Pcp_RescanForSpecs`) for one change round's
+    /// inert spec adds and removes, each a `(layer, path)` site. The store
+    /// refreshes every affected index's `has_specs` flags in place per site,
+    /// partitioning the indices into those refreshed in place and those it cannot
+    /// refresh; the latter are dropped for rebuild. The refresh keeps the spec
+    /// run it scanned for each touched node, and each in-place-refreshed index
+    /// splices those runs into its memoized spec stack once, however many of this
+    /// round's sites reached it — so a layer no site named is never re-probed.
+    /// The transient query errors are retired by [`Self::retire_query_errors`] at
+    /// the edit seam; they may reference a dropped prim.
+    ///
+    /// An added or removed spec can change whether a prim exists, so the caller
+    /// must already have advanced the population epoch for these sites.
+    /// `Changes::apply` has: the same `did_change_specs` paths reach
+    /// [`Self::invalidate_prototypes`] in its change set, which owns the seam.
+    /// Returns every composed prim the rescan reached, refreshed or dropped. A
+    /// spec appearing or disappearing at a site one of them reads is a change in
+    /// whether that prim contributes an opinion at all — a referenced site the
+    /// arc had culled as empty now composes — so the caller reports them as
+    /// resynced. Which of the two partitions a prim landed in says how the cache
+    /// caught up, not whether a consumer must.
+    pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, sites: &[(LayerId, Path)]) -> Vec<Path> {
+        let mut refreshed: HashMap<Path, NodeRuns> = HashMap::new();
+        let mut rebuild: HashSet<Path> = HashSet::new();
+        for (layer, path) in sites {
+            self.store
+                .refresh_specs(graph, *layer, path, &mut refreshed, &mut rebuild);
+        }
+        for prim in &rebuild {
+            self.store.remove(prim);
+        }
+        // An index condemned after an earlier site had already refreshed it kept
+        // its runs out of the map, so the two sets are disjoint by construction.
+        let touched = self.store.splice_spec_stacks(graph, refreshed);
+        rebuild.into_iter().chain(touched).collect()
+    }
+
+    /// Drop a prim's cached index and every namespace descendant. Used by
+    /// [`change::Changes`](super::change::Changes) when a significant change
+    /// touches `prefix` — the topology may have changed for the entire subtree,
+    /// so every dependent index is invalidated. The transient query errors are
+    /// left to [`Self::retire_query_errors`], as in [`Self::drop_index`].
+    pub(super) fn drop_index_subtree(&mut self, prefix: &Path) {
+        self.store.remove_subtree(prefix);
+    }
+
+    /// Invalidates the cache after a layer-set change restructures only some
+    /// prims: retires the query diagnostics and drops just the cached indices
+    /// that read one of the `affected` layers,
+    /// via [`drop_indices_touching_layers`](Self::drop_indices_touching_layers).
+    /// Used for a layer-muting toggle, a
+    /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables` edit
+    /// (see [`Changes::apply`](super::change::Changes::apply)), and a demanded
+    /// layer that introduces relocates; in each case the graph's precomputed
+    /// layer-stack state is rebuilt by the mutation first, so the cache is all that
+    /// remains. Drops exactly the cached indices whose composition reads an
+    /// `affected` layer, leaving the rest warm.
+    ///
+    /// Reports nothing, unlike its siblings: no caller of this path publishes a
+    /// notice today. Widening it is the first half of the deferred demand-notice
+    /// work — see the `TODO` beside `Payload::finish` in `usd::composition`.
+    pub(crate) fn invalidate_layers(&mut self, affected: &HashSet<LayerId>) {
+        self.retire_query_errors();
+        self.invalidate_population();
+        self.drop_indices_touching_layers(affected);
+    }
+
+    /// Invalidates the cache after a layer-muting toggle of the layer with
+    /// canonical identifier `canonical`: retires the query diagnostics, then
+    /// drops the cached indices the toggle can restructure (see
+    /// [`Dependencies::indices_for_mute_toggle`](super::dependencies::Dependencies::indices_for_mute_toggle))
+    /// — those reading one of the `affected` layers, plus those that only skipped
+    /// the target and recorded `canonical` because it interned no reachable layer.
+    /// Unmuting such a target drops the referrer's stale index so it recomposes and
+    /// the load barrier finally opens the now-unmuted target.
+    ///
+    /// Returns everything the toggle dropped — the indices above and the
+    /// prototype roots retired with them — for a caller to report as-is.
+    pub(crate) fn invalidate_muting(&mut self, affected: &HashSet<LayerId>, canonical: &str) -> Vec<Path> {
+        self.retire_query_errors();
+        self.invalidate_population();
+        let victims = self.store.dependencies().indices_for_mute_toggle(affected, canonical);
+        self.drop_index_victims(victims)
+    }
+
+    /// Drop every cached prim index whose composition reads one of the `affected`
+    /// layers (per [`Dependencies::indices_for_layers`](super::dependencies::Dependencies::indices_for_layers))
+    /// — together with its namespace descendants and any prototype the drops touch —
+    /// leaving indices that read none of them cached. Editing a layer can only
+    /// restructure prims that compose against a layer stack containing it (C++
+    /// `PcpChanges` layer-stack fanout), so the rest of the cache stays warm.
+    fn drop_indices_touching_layers(&mut self, affected: &HashSet<LayerId>) {
+        if affected.is_empty() {
+            return;
+        }
+        let victims = self.store.dependencies().indices_for_layers(affected);
+        self.drop_index_victims(victims);
+    }
+
+    /// Drops each victim prim index and the prototypes its drop touches — the tail
+    /// shared by [`drop_indices_touching_layers`](Self::drop_indices_touching_layers),
+    /// [`invalidate_muting`](Self::invalidate_muting),
+    /// [`set_load_rules`](Self::set_load_rules), and the `expressionVariables`
+    /// delta path (`change::apply_vars_deltas`).
+    ///
+    /// Returns everything the drop invalidated: `victims` and the prototype roots
+    /// retired with them, which no walk over `victims` could reach (see
+    /// [`invalidate_prototypes`](Self::invalidate_prototypes)).
+    pub(super) fn drop_index_victims(&mut self, mut victims: Vec<Path>) -> Vec<Path> {
+        if victims.is_empty() {
+            return victims;
+        }
+        // Evict prototypes whose instances or roots are among the victims, as the
+        // prim-tier path in [`Changes::apply`](super::change::Changes::apply) does.
+        let retired = self.invalidate_prototypes(&victims);
+        for path in &victims {
+            self.drop_index_subtree(path);
+        }
+        victims.extend(retired);
+        victims
+    }
+
+    /// Returns `true` if any layer has a spec at the given composed path.
+    ///
+    /// For property paths (e.g. `/Prim.attr`), checks whether the property
+    /// exists in any layer contributing to the owning prim's composition index.
+    pub fn has_spec(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        let path = &self.effective_path(graph, path)?;
+        self.has_spec_at(graph, path)
+    }
+
+    /// Whether `path` and every ancestor below the pseudo-root resolve active
+    /// (C++ `UsdPrim::IsActive`). An unauthored `active` defaults to `true`, so
+    /// an ancestor blocks only by authoring `false`; a prim with no composed
+    /// spec is inactive, since nothing exists to be active.
+    ///
+    /// Mask-independent — the population mask is the stage's policy, applied by
+    /// the query gate before this is ever reached — and existence-aware, which
+    /// is what separates it from [`Self::is_populated`].
+    pub(crate) fn is_active(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        if path.is_abs_root() {
+            return Ok(true);
+        }
+        if !self.has_spec(graph, path)? {
+            return Ok(false);
+        }
+        for ancestor in path.ancestors_below_root() {
+            if !self.active_locally(graph, &ancestor)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether `path` and every ancestor below the pseudo-root carry a defining
+    /// specifier — `def` or `class` (C++ `UsdPrim::IsDefined`). An `over`, a
+    /// missing specifier opinion, and a prim with no composed spec are all
+    /// undefined.
+    ///
+    /// The specifier twin of [`Self::is_active`], and resolved the same way:
+    /// one cache borrow for the whole ancestor chain, rather than a stage
+    /// round-trip per level.
+    pub(crate) fn is_defined(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        if path.is_abs_root() {
+            return Ok(true);
+        }
+        if !self.has_spec(graph, path)? {
+            return Ok(false);
+        }
+        for ancestor in path.ancestors_below_root() {
+            let specifier = self
+                .resolve_field(graph, &ancestor, FieldKey::Specifier.as_str())?
+                .map(sdf::Specifier::try_from)
+                .transpose()?;
+            if !matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// This prim's own composed `active` opinion, defaulting to `true`. The
+    /// per-prim read [`Self::is_active`] walks and [`Self::is_populated`] takes
+    /// for the prim it is deciding, its ancestors having been decided already.
+    fn active_locally(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        let path = &self.effective_path(graph, path)?;
+        self.active_at(graph, path)
+    }
+
+    /// [`active_locally`](Self::active_locally) for a path already redirected
+    /// onto the index that composes it, for a caller holding that redirection.
+    pub(super) fn active_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        match self.resolve_field_at(graph, path, FieldKey::Active.as_str())? {
+            Some(value) => Ok(bool::try_from(value)?),
+            None => Ok(true),
+        }
+    }
+
+    /// Resolves a value over the composition nodes of a property's owning prim,
+    /// strongest first, reading each contributing layer live. `path` must be a
+    /// property path: it is re-anchored onto each node's prim (crossing the
+    /// `.` separator) and `probe` is called with that node's layer and the
+    /// re-anchored property path; the first `Some` wins.
+    ///
+    /// Reading live — rather than from a property-keyed index — keeps results
+    /// correct after a property spec is authored, since authoring a property
+    /// never reshapes the owning prim's composition graph (the prim index
+    /// stays valid).
+    fn find_property_node<T>(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        mut probe: impl FnMut(&sdf::Layer, &Path) -> Option<T>,
+    ) -> Result<Option<T>, QueryError> {
+        let prim_path = path.prim_path();
+        self.ensure_index(graph, &prim_path)?;
+        let Some(index) = self.store.index_at(&prim_path) else {
+            return Ok(None);
+        };
+        for node in index.nodes() {
+            let Some(prop_path) = path.replace_prefix(&prim_path, &node.path) else {
+                continue;
+            };
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
+                if let Some(found) = probe(graph.layer(layer), &prop_path) {
+                    return Ok(Some(found));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Like [`Self::has_spec`], but assumes `path` has already been redirected
+    /// through [`Self::effective_path`]. Callers that redirected the path
+    /// themselves (e.g. [`Self::value_at`]) use this to avoid redirecting twice.
+    pub(super) fn has_spec_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        if path.is_property_path() {
+            return Ok(self
+                .find_property_node(graph, path, |layer, p| layer.data().has_spec(p).then_some(()))?
+                .is_some());
+        }
+        self.ensure_index(graph, path)?;
+        Ok(self.store.index_at(path).is_some_and(|idx| !idx.is_empty()))
+    }
+
+    /// Returns the spec type at a composed path from the strongest contributing layer.
+    ///
+    /// For a property path the type is read live from the owning prim's
+    /// composition nodes (see [`Self::find_property_node`]) rather than from a
+    /// property-keyed index, so a property spec added after this path was first
+    /// queried is picked up instead of a stale cached `None`.
+    pub fn spec_type(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<SpecType>, QueryError> {
+        let path = &self.effective_path(graph, path)?;
+        if path.is_property_path() {
+            return self.find_property_node(graph, path, |layer, p| layer.data().spec_type(p));
+        }
+        self.ensure_index(graph, path)?;
+        let Some(index) = self.store.index_at(path) else {
+            return Ok(None);
+        };
+        for node in index.nodes() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
+                if let Some(ty) = graph.layer(layer).data().spec_type(&node.path) {
+                    return Ok(Some(ty));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Returns `true` if the composed prim index contains any non-local arc.
+    pub(crate) fn has_composition_arc(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        self.ensure_index(graph, path)?;
+        Ok(self
+            .store
+            .index_at(path)
+            .is_some_and(|index| index.has_composition_arc()))
+    }
+
+    /// Captures the target layer identifier and namespace mapping of the
+    /// strongest node on `prim_path` whose arc satisfies `matches`, for building
+    /// an arc-based edit target (C++ `UsdEditTarget(UsdPrim, ...)`).
+    ///
+    /// Considers only nodes that author a spec and are not permission-denied, in
+    /// strength order. Returns `None` when none match. The mapping is the node's
+    /// `map_to_root`, and for a node whose site sits inside a variant it is
+    /// composed over the node-path qualifier pair `{site → stripped site}` (C++
+    /// `_ComposeMappingForNode`) — map functions never carry variant selections,
+    /// so the qualifier must be re-attached for the edit target to author at the
+    /// variant-qualified spec path. Oriented spec → scene, queried in reverse for
+    /// authoring.
+    ///
+    /// An instance-proxy path redirects to its shared prototype (the same
+    /// [`effective_path`](Self::effective_path) redirection value resolution
+    /// uses), so the arc captured is the prototype's, not an instance-local
+    /// opinion that composition discards. The returned mapping is therefore
+    /// oriented in the prototype's namespace, not the proxy's.
+    pub(crate) fn edit_target_node_info(
+        &mut self,
+        graph: &LayerGraph,
+        prim_path: &Path,
+        matches: impl Fn(ArcType) -> bool,
+    ) -> Result<Option<EditTargetNodeInfo>, QueryError> {
+        let prim_path = self.effective_path(graph, prim_path)?.prim_path();
+        self.ensure_index(graph, &prim_path)?;
+        let Some(index) = self.store.index_at(&prim_path) else {
+            return Ok(None);
+        };
+        Ok(index.nodes().find_map(|node| {
+            (matches(node.arc) && node.has_specs()).then(|| {
+                // A node inside a variant stores its specs at the qualified site
+                // path; compose the qualifier onto the map so the edit target
+                // reaches it (C++ `_ComposeMappingForNode`). The qualifier pair
+                // adapts the storage location only, so the arc map's root
+                // identity survives the composition — composing would otherwise
+                // drop it, since the pair itself carries none — keeping paths
+                // outside the arc's explicit domain visible to the target, as
+                // they are for every other arc whose map has the root identity.
+                let mapping = if node.path.contains_prim_variant_selection() {
+                    let composed = node.map_to_root.compose(&MapFunction::from_pair(
+                        node.path.clone(),
+                        node.path.strip_all_variant_selections(),
+                    ));
+                    if node.map_to_root.has_root_identity() {
+                        composed.with_root_identity()
+                    } else {
+                        composed
+                    }
+                } else {
+                    node.map_to_root.clone()
+                };
+                // The layer stack the node composes in, captured by value identity
+                // so the edit target authors into it exactly rather than
+                // re-inferring it from layer membership — a contextual instance's
+                // `${VAR}`-resolved members reach a relocate plan unchanged. The
+                // value form resolves on any equal-input stage, where a graph-local
+                // handle would name an unrelated instance.
+                (
+                    graph.identifier(node.layer_id()).to_string(),
+                    mapping,
+                    graph.stack_identity(node.layer_stack_id()),
+                )
+            })
+        }))
+    }
+
+    /// Resolves a field value from the strongest opinion across all composition nodes.
+    ///
+    /// Layer metadata authored on the pseudo-root is resolved directly from
+    /// the root layer and does not compose with sublayers or arcs. The
+    /// pseudo-root's `primChildren` field remains a child-list query and is
+    /// handled by normal composition.
+    pub fn resolve_field(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>, QueryError> {
+        let path = &self.effective_path(graph, path)?;
+        self.resolve_field_at(graph, path, field)
+    }
+
+    /// [`resolve_field`](Self::resolve_field) for a path already redirected onto
+    /// the index that composes it — the half a caller holding that redirection
+    /// reuses rather than resolving it again.
+    fn resolve_field_at(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>, QueryError> {
+        if path.is_abs_root() && field != ChildrenKey::PrimChildren.as_str() {
+            return Ok(graph.root_layer_field(field)?);
+        }
+
+        if path.is_property_path() {
+            let prim_path = path.prim_path();
+            let prop_suffix = path.property_suffix();
+            self.ensure_index(graph, &prim_path)?;
+            let value = self.cached(&prim_path).resolve_field(field, graph, Some(prop_suffix))?;
+            Ok(self.anchor_asset_paths(graph, &prim_path, field, Some(prop_suffix), value))
+        } else {
+            self.ensure_index(graph, path)?;
+            let value = self.cached(path).resolve_field(field, graph, None)?;
+            Ok(self.anchor_asset_paths(graph, path, field, None, value))
+        }
+    }
+
+    /// [`Self::anchor_asset_paths`] for a value whose authoring site the shared
+    /// value-resolution walk already selected, so no search for it is needed.
+    fn resolve_asset_at(&mut self, graph: &LayerGraph, value: Option<Value>, site: &SelectedSite) -> Option<Value> {
+        // Building the site copies two strings, so only a value that turns out
+        // to hold asset paths asks for one.
+        let asset_site = value
+            .as_ref()
+            .filter(|value| value.is_asset_valued())
+            .map(|_| AssetSite::in_graph(graph, site.layer_stack, site.layer, &site.query_path));
+        self.resolve_asset_values(graph, value, asset_site.as_ref())
+    }
+
+    /// Fills the resolved path on any `asset` / `asset[]` value just resolved,
+    /// taking its provenance from the strongest opinion for `field` — the
+    /// default-sourced case of C++ `UsdStage::_GetAssetPathContext`. Non-asset
+    /// values pass through; asset paths nested inside a dictionary value are not
+    /// recursed into, only top-level `asset` / `asset[]` fields are resolved.
+    ///
+    /// A read that resolved through the shared value-resolution walk knows the
+    /// site already and uses [`Self::resolve_asset_at`] instead; this is for a
+    /// plain metadata read, which has no walk to take it from.
+    fn anchor_asset_paths(
+        &mut self,
+        graph: &LayerGraph,
+        prim_path: &Path,
+        field: &str,
+        prop_suffix: Option<&str>,
+        value: Option<Value>,
+    ) -> Option<Value> {
+        // Only an asset-valued field needs provenance, and finding it walks the
+        // prim's opinions — so the type is checked before the walk.
+        let site = value
+            .as_ref()
+            .filter(|value| value.is_asset_valued())
+            .and_then(|_| self.store.index_at(prim_path))
+            .and_then(|index| index.strongest_opinion(field, graph, prop_suffix));
+        self.resolve_asset_values(graph, value, site.as_ref())
+    }
+
+    /// Fills the evaluated and resolved paths on an `asset` value authored at
+    /// `site`, recording any expression failure in the cache's query
+    /// diagnostics — the error channel a value query has, since it answers
+    /// through a value rather than a diagnostic.
+    ///
+    /// The seam every composed value source shares: a `default` opinion reaches
+    /// it through [`Self::anchor_asset_paths`], a time-sampled one through the
+    /// provenance its resolver carries out, and a value replayed from a cached
+    /// [`AttributeValueSource::TimeSamples`] through the stage. A clip resolves
+    /// against its own layer inside the clip cache instead, and merges its
+    /// diagnostics here through [`Self::record_clip_diagnostics`].
+    pub(crate) fn resolve_asset_values(
+        &mut self,
+        graph: &LayerGraph,
+        value: Option<Value>,
+        site: Option<&AssetSite>,
+    ) -> Option<Value> {
+        let mut errors = Diagnostics::default();
+        let resolved = asset_resolve::resolve_values(graph, value?, site, &mut errors);
+        self.query_diagnostics.extend(errors);
+        Some(resolved)
+    }
+
+    /// Returns the composed `apiSchemas` list for a prim: the items of the
+    /// generic list-op fold over the field.
+    pub fn api_schemas(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
+        let path = self.effective_path(graph, &path.prim_path())?;
+        self.ensure_index(graph, &path)?;
+        match self
+            .cached(&path)
+            .resolve_field(FieldKey::ApiSchemas.as_str(), graph, None)?
+        {
+            Some(Value::TokenListOp(op)) => Ok(op.explicit_items),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Resolves the `clipSets` strength-ordering list-op on the prim at `path`,
+    /// folding the list-op edits across every contributing layer (spec 12.2.6).
+    /// `None` when `clipSets` is unauthored (clip sets fall back to name order).
+    pub fn clip_sets_list_op(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+    ) -> Result<Option<sdf::StringListOp>, QueryError> {
+        let path = self.effective_path(graph, &path.prim_path())?;
+        self.ensure_index(graph, &path)?;
+        self.cached(&path).clip_sets_list_op(graph)
+    }
+
+    /// Returns the composed `connectionPaths` list for an attribute path,
+    /// folding list-op edits (prepend / append / add / delete) across every
+    /// contributing layer. Non-property paths trivially return an empty list.
+    pub fn connection_paths(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>, QueryError> {
+        self.property_targets(graph, path, FieldKey::ConnectionPaths)
+    }
+
+    /// Returns the composed raw `targetPaths` list for a relationship path,
+    /// folding list-op edits (prepend / append / add / delete) across every
+    /// contributing layer. Non-property paths trivially return an empty list.
+    ///
+    /// These are the raw targets (the resolved `targetPaths` list op, spec
+    /// 12.4); target forwarding — recursively chasing relationship-to-
+    /// relationship chains — is not applied here.
+    pub fn relationship_targets(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>, QueryError> {
+        self.property_targets(graph, path, FieldKey::TargetPaths)
+    }
+
+    /// Returns the forwarded `targetPaths` for a relationship (spec 12.4):
+    /// a target that resolves to a relationship is replaced, recursively, by
+    /// that relationship's own forwarded targets. Every other target is kept
+    /// as-is — prim paths, attribute paths, and any target that does not
+    /// resolve to a relationship (a dangling or unloaded path). This matches
+    /// C++ `UsdRelationship::GetForwardedTargets`, which forwards only through
+    /// live relationships. Cycles are broken (each relationship is followed
+    /// once) and duplicates collapse, keeping first occurrence.
+    ///
+    /// The walk uses an explicit stack rather than recursion (mirroring
+    /// [`crate::usd::ConnectionGraph::resolve_chain`]) so a deep relationship
+    /// chain cannot overflow the call stack.
+    ///
+    /// A target relationship on a prim the population mask excludes is not
+    /// followed — its raw targets would be empty under the mask anyway — so the
+    /// forwarded result never leaks scene the mask excludes (it stays
+    /// consistent with [`Self::relationship_targets`] on that path).
+    pub fn forwarded_relationship_targets(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>, QueryError> {
+        let mut out = Vec::new();
+        let mut emitted = HashSet::new();
+        let mut followed = HashSet::new();
+        followed.insert(path.clone());
+
+        // Seed with the queried relationship's raw targets. Targets are pushed
+        // reversed so the strongest (first) target is popped and resolved
+        // first, preserving authored order in `out`.
+        let mut stack: Vec<Path> = self.relationship_targets(graph, path)?.into_iter().rev().collect();
+        while let Some(target) = stack.pop() {
+            // Only property targets can be relationships; a prim-path target is
+            // always terminal. Classify property targets by composed spec type.
+            let is_relationship =
+                target.is_property_path() && matches!(self.spec_type(graph, &target)?, Some(SpecType::Relationship));
+            if is_relationship {
+                // Don't follow a relationship the mask excludes; a masked-out
+                // prim contributes no composed targets.
+                if !self.mask_includes(&target.prim_path()) {
+                    continue;
+                }
+                if !followed.insert(target.clone()) {
+                    continue; // already followed — break the cycle
+                }
+                stack.extend(self.relationship_targets(graph, &target)?.into_iter().rev());
+            } else if emitted.insert(target.clone()) {
+                out.push(target);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Composes a path-list-op property field (`connectionPaths` or
+    /// `targetPaths`) by folding list-op edits across every contributing layer
+    /// and mapping targets through composition arcs into the stage namespace.
+    /// Both fields follow generic list-op value resolution (spec 12.2.6).
+    fn property_targets(&mut self, graph: &LayerGraph, path: &Path, field: FieldKey) -> Result<Vec<Path>, QueryError> {
+        self.compose_property_paths(graph, path, field, false)
+    }
+
+    /// Composes a path-list-op property field into stage namespace. With
+    /// `deleted` it returns the field's deleted entries (the `delete`-op paths);
+    /// otherwise the resolved targets/connections. On an instance proxy both
+    /// resolve against the shared prototype's subtree and map the
+    /// prototype-namespace results back to the queried instance (spec 11.3.4
+    /// under 11.3.3).
+    fn compose_property_paths(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        field: FieldKey,
+        deleted: bool,
+    ) -> Result<Vec<Path>, QueryError> {
+        if !path.is_property_path() {
+            return Ok(Vec::new());
+        }
+        let prim = path.prim_path();
+        let prop_suffix = path.property_suffix().to_owned();
+        let anchor = self.redirect_anchor(graph, &prim)?;
+
+        let resolved_prim = match &anchor {
+            Some((origin, canonical)) => prim.replace_prefix(origin, canonical).unwrap_or_else(|| prim.clone()),
+            None => prim.clone(),
+        };
+        self.ensure_index(graph, &resolved_prim)?;
+
+        // A property whose prim composes in place (no instance redirect), read by
+        // the non-deleted walk, resolves into its own namespace, so its targets
+        // can memoize on the prim's own entry. Instance proxies map results back
+        // per instance and the deleted-paths walk is rare, so both resolve live.
+        // Whether the result is actually cacheable also turns on it not reading
+        // cross-prim instance state, decided once `compute_instance_targets` runs.
+        let is_connection = matches!(field, FieldKey::ConnectionPaths);
+        let memo_candidate = !deleted && anchor.is_none();
+        let memo_key = memo_candidate.then(|| TargetMemoKey {
+            kind: if is_connection {
+                PropertyTargetKind::Connection
+            } else {
+                PropertyTargetKind::Relationship
+            },
+            property_suffix: prop_suffix.clone(),
+        });
+        if let Some(key) = &memo_key
+            && let Some(hit) = self.store.target_memo(&resolved_prim, key)
+        {
+            let TargetMemo { targets, errors } = hit.clone();
+            // Re-surface the cached errors: an unrelated index invalidation may
+            // have cleared `query_diagnostics` since, so push any it now lacks.
+            self.query_diagnostics.extend(errors);
+            return Ok(targets);
+        }
+
+        // A connection/relationship target authored in a class that translates but
+        // names a different instance of that class is dropped from that class
+        // node's contribution (C++ `_TargetInClassAndTargetsInstance`). The cache
+        // precomputes the cross-prim instance set; the per-node target walk
+        // consults it so a valid stronger opinion for the same path survives.
+        let (instance_targets, read_cross_prim) = if deleted {
+            (HashSet::new(), false)
+        } else {
+            self.compute_instance_targets(graph, &resolved_prim, field, &prop_suffix)?
+        };
+
+        // The resolved-targets walk translates each target through its
+        // contributing node's map (relocates folded in), so it needs no separate
+        // relocate-chaining. The deleted-paths walk has no per-node origin, so it
+        // still chains every entry through the prim's effective relocates.
+        let index = self.cached(&resolved_prim);
+        let (mut targets, invalid) = if deleted {
+            (
+                index.resolve_path_list_op_deleted(field, graph, Some(&prop_suffix))?,
+                Vec::new(),
+            )
+        } else {
+            index.resolve_path_list_op_validated(field, graph, Some(&prop_suffix), &instance_targets)?
+        };
+        if deleted && graph.has_relocates() {
+            let relocates = effective_relocates(graph, &resolved_prim, self.store.entries());
+            for target in &mut targets {
+                *target = chain_through_relocates(target, &relocates, None);
+            }
+        }
+
+        // Targets dropped during composition are reported in authored order, the
+        // `invalid` list already honoring list-op composition (a target shadowed
+        // by a stronger explicit, or retracted by a delete, is not reported).
+        let mut errs = Diagnostics::default();
+        for inv in invalid {
+            errs.report(match inv.kind {
+                InvalidTargetKind::External => CompositionDiagnostic::InvalidExternalTargetPath {
+                    is_connection,
+                    target: inv.target,
+                    property: inv.property,
+                    layer: graph.identifier(inv.layer).to_string(),
+                    arc: inv.arc,
+                    arc_root: inv.arc_root,
+                    composing: prim.clone(),
+                },
+                InvalidTargetKind::Instance => CompositionDiagnostic::InvalidInstanceTargetPath {
+                    is_connection,
+                    target: inv.target,
+                    property: inv.property,
+                    layer: graph.identifier(inv.layer).to_string(),
+                    composing: prim.clone(),
+                },
+            });
+        }
+
+        // Targets resolved in the shared prototype's namespace map back to the
+        // queried instance (spec 11.3.4 under 11.3.3).
+        if let Some((origin, target_prefix)) = &anchor {
+            for target in &mut targets {
+                if let Some(remapped) = target.replace_prefix(target_prefix, origin) {
+                    *target = remapped;
+                }
+            }
+        }
+        // Cache the in-place result for repeat queries, the errors travelling with
+        // it so a later cache hit can re-surface them. A resolution that read
+        // cross-prim instance state is excluded: a target prim's later
+        // instance-status change is not tracked by this property's invalidation,
+        // so it must resolve live. The deleted walk and instance proxies (no
+        // `memo_key`) just append to the transient channel.
+        if let Some(key) = memo_key.filter(|_| !read_cross_prim) {
+            let memo = TargetMemo {
+                targets: targets.clone(),
+                errors: errs.clone(),
+            };
+            self.store.set_target_memo(&resolved_prim, key, memo);
+        }
+        self.query_diagnostics.extend(errs);
+        Ok(targets)
+    }
+
+    /// Computes the cross-prim set of connection/relationship targets authored in
+    /// a class (an inherit node) that name a *different* instance of that class
+    /// (C++ `_TargetInClassAndTargetsInstance`), keyed by the `(target, property)`
+    /// node-namespace pair the target walk matches on.
+    ///
+    /// This is the purely structural fact "is this class target an instance
+    /// target"; list-op composition (delete / explicit shadowing) and the actual
+    /// dropping/reporting are left to `resolve_path_list_op_validated`, which
+    /// consults this set per node contribution. A target inside the class itself
+    /// (`connectionPathInsideInheritedClass`) is never an instance target.
+    ///
+    /// Each candidate target prim is composed at the path that actually composes
+    /// it ([`Self::effective_path`]), so a target inside an instance is checked
+    /// against its shared prototype's subtree.
+    ///
+    /// Returns the set paired with whether any candidate was gathered — i.e.
+    /// whether the resolution read cross-prim instance state by composing target
+    /// prims. The target memo is unsafe in that case (a target prim's later
+    /// instance-status change is not tracked by the property's own value-tier
+    /// restale), so the caller skips memoization when it is `true`.
+    fn compute_instance_targets(
+        &mut self,
+        graph: &LayerGraph,
+        resolved_prim: &Path,
+        field: FieldKey,
+        prop_suffix: &str,
+    ) -> Result<(HashSet<(Path, Path)>, bool), QueryError> {
+        // Phase 1: gather candidates that translate, releasing the index borrow
+        // before the cross-prim composition in phase 2.
+        let mut candidates: Vec<InstanceCandidate> = Vec::new();
+        let mut seen: HashSet<(Path, Path)> = HashSet::new();
+        {
+            let index = self.cached(resolved_prim);
+            for (id, node) in index.nodes_with_ids() {
+                if node.arc != ArcType::Inherit || !node.has_specs() {
+                    continue;
+                }
+                let class_path = index.graph().path_at_introduction(id);
+                // The selection-free form for the within-class test below: a
+                // class defined inside a variant has a qualified introduction
+                // path, while target paths compare selection-free.
+                let class_prefix = class_path.strip_all_variant_selections();
+                let members = graph.layer_stack(node.layer_stack_id());
+                let class_layers: Vec<LayerId> = members.iter().map(|(l, _)| *l).collect();
+                // The node's map to the root namespace (C++ `PcpNodeRef::GetMapToRoot`).
+                let map = &node.map_to_root;
+                let property = Path::new(&format!("{}{prop_suffix}", node.path))?;
+                for &(layer, _) in members.iter() {
+                    let Some(value) = graph.layer(layer).data().try_field(&property, field.as_str())? else {
+                        continue;
+                    };
+                    let list_op = match value.into_owned() {
+                        Value::PathListOp(op) => op,
+                        Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
+                        _ => continue,
+                    };
+                    for path in list_op.iter() {
+                        let target = property.make_absolute(path);
+                        // A target inside the class itself is a normal within-class
+                        // target (C++ `connectionPathInsideInheritedClass`); only a
+                        // target that translates can name an instance. A relative
+                        // target anchors at the class node's qualified site, so
+                        // both sides compare selection-free.
+                        if target
+                            .prim_path()
+                            .strip_all_variant_selections()
+                            .has_prefix(&class_prefix)
+                        {
+                            continue;
+                        }
+                        if !seen.insert((target.clone(), property.clone())) {
+                            continue;
+                        }
+                        let Some(translated) = map.translate_to_target(&target) else {
+                            continue;
+                        };
+                        candidates.push(InstanceCandidate {
+                            target,
+                            property: property.clone(),
+                            translated,
+                            class_layers: class_layers.clone(),
+                            class_path: class_path.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Phase 2: compose each target prim for the cross-prim inherit check.
+        // A non-empty candidate set means the result read another prim's instance
+        // status, so the caller must not memoize it.
+        let read_cross_prim = !candidates.is_empty();
+        let mut instance_targets: HashSet<(Path, Path)> = HashSet::new();
+        for c in candidates {
+            // A target naming a prim inside an instance stands for a prim in that
+            // instance's shared prototype, so the class check reads the index
+            // that composes it (spec 11.3.3).
+            let target_prim = self.effective_path(graph, &c.translated.prim_path())?;
+            self.ensure_index(graph, &target_prim)?;
+            if target_prim_inherits_class(self.cached(&target_prim), graph, &c.class_layers, &c.class_path) {
+                instance_targets.insert((c.target, c.property));
+            }
+        }
+        Ok((instance_targets, read_cross_prim))
+    }
+
+    /// Composes a relationship's target paths together with the paths its
+    /// list-op deletes, returned as `(targets, deleted)` (C++
+    /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). Both are
+    /// mapped into stage namespace; a non-property path yields two empty lists.
+    pub fn compute_relationship_target_paths(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+    ) -> Result<(Vec<Path>, Vec<Path>), QueryError> {
+        self.compute_target_paths(graph, path, FieldKey::TargetPaths)
+    }
+
+    /// Composes an attribute's connection paths together with the paths its
+    /// list-op deletes (the connection analog of
+    /// [`Self::compute_relationship_target_paths`]).
+    pub fn compute_attribute_connection_paths(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+    ) -> Result<(Vec<Path>, Vec<Path>), QueryError> {
+        self.compute_target_paths(graph, path, FieldKey::ConnectionPaths)
+    }
+
+    /// Composes both the resolved and the deleted entries of a path-list-op
+    /// property field. TODO(perf): C++ surfaces both from a single target-index
+    /// build; this composes the field twice.
+    fn compute_target_paths(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        field: FieldKey,
+    ) -> Result<(Vec<Path>, Vec<Path>), QueryError> {
+        let targets = self.compose_property_paths(graph, path, field, false)?;
+        let deleted = self.compose_property_paths(graph, path, field, true)?;
+        Ok((targets, deleted))
+    }
+
+    /// Returns the composed list of child names for a prim path (C++
+    /// `PcpPrimIndex::ComputePrimChildNames`'s `nameOrder` out-param).
+    pub fn prim_children(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
+        let names = self.compute_prim_child_names(graph, path)?.0;
+        // Filtered here, where the list is produced, so no caller can compose a
+        // child list the population mask has not been applied to — C++ masks
+        // inside `_ComposeChildren` for the same reason.
+        Ok(self.filter_child_names(path, names))
+    }
+
+    /// Composes a prim's child names alongside the names prohibited at it (C++
+    /// `PcpPrimIndex::ComputePrimChildNames` / `_ComposePrimChildNames`, whose
+    /// `nameOrder` and `prohibitedNames` out-params this returns as a pair).
+    ///
+    /// The composition graph is walked weakest-to-strongest. At each contributing
+    /// node, the relocates authored in that node's layer stack are applied to the
+    /// names contributed so far (`relocates::apply_child_relocates`) — a child renamed
+    /// within the same parent keeps the source's position, a child relocated to a
+    /// different parent is removed, and a child relocated in from elsewhere is
+    /// appended in the normative element order (spec §8.2) — and then the node's own `primChildren` /
+    /// `primOrder` compose over the running order (mirroring C++
+    /// `_ComposePrimChildNamesAtNode`). Every relocation source becomes a
+    /// prohibited name, removed from the final order.
+    ///
+    /// Within a node, the contributing layers fold weakest-first: each appends
+    /// its not-yet-seen names in authored order, then its `primOrder` opinion
+    /// reshuffles the running list, so several sublayers can contribute partial
+    /// orderings. The recursive build already grafts inherit/specialize/reference
+    /// targets with their subtrees, so a single structural walk covers class
+    /// children. On an instance prim, locally-authored children are dropped (spec
+    /// 11.3.3) so the children come only from the composition arcs.
+    pub fn compute_prim_child_names(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+    ) -> Result<(Vec<Token>, Vec<Token>), QueryError> {
+        let path = self.effective_path(graph, path)?;
+        self.ensure_index(graph, &path)?;
+
+        // An instance prim's children come only from its composition arcs;
+        // opinions authored at the instance's own namespace — the local root and
+        // the ancestral references above the instanceable arc — are discarded
+        // (spec 11.3.3). The instance prim's own index is otherwise left intact.
+        let drop_local = self.is_instance(graph, &path)?;
+
+        let index = self.cached(&path);
+        // The instance-local partition is keyed by the prim's own namespace depth
+        // ([`PrimIndex::instance_local_nodes`]); empty when not dropping locals.
+        let local = if drop_local {
+            let depth = path.prim_element_count() as u16;
+            index.instance_local_nodes(depth, depth)
+        } else {
+            Vec::new()
+        };
+
+        let has_relocates = graph.has_relocates();
+        let mut name_order: Vec<Token> = Vec::new();
+        let mut name_set: HashSet<Token> = HashSet::new();
+        let mut prohibited: HashSet<Token> = HashSet::new();
+
+        // Contributing nodes are walked in reverse strength order (weak-to-
+        // strong) — the order in which C++ `_ComposePrimChildNames` finishes each
+        // node, visiting every descendant before its ancestor. A non-contributing
+        // node (inert or culled) is skipped (C++ `_ComposePrimChildNamesAtNode`'s
+        // `CanContributeSpecs` guard): an inert relocate placeholder or salted-
+        // earth source must not inject names or relocates at its site.
+        let nodes = index
+            .nodes_with_ids()
+            .filter(|(id, node)| !(node.is_inert() || node.is_culled() || drop_local && local[id.idx()]))
+            .map(|(_, node)| node)
+            .rev();
+
+        for node in nodes {
+            // Apply this node's layer-stack relocates to the names contributed so
+            // far, then compose the node's own children on top. A relocation
+            // source is always a namespace child introduced by a composition arc
+            // (a strictly weaker node), so by the time this node's relocates run
+            // the source name is already in `name_order`; the relocates therefore
+            // correctly run before this node's own `primChildren` fold.
+            //
+            // The pairs are chained within the node's layer stack
+            // (`combined_relocates`, C++ `GetRelocatesSourceToTarget`): a same-
+            // parent chain `A -> B`, `B -> C` resolves `A` straight to `C`, so the
+            // intermediate `B` (a prohibited source) does not survive as the final
+            // name. TODO(perf): `combined_relocates` rescans and re-allocates the
+            // node's layer-stack relocates on every contributing node (here and in
+            // the indexer's arc-map fold), gated on `has_relocates`. Precompute it
+            // once per distinct ambient, keyed by `LayerStackId` on the composed
+            // stack instance, so this becomes a lookup (C++ caches these on
+            // `PcpLayerStack`).
+            if has_relocates {
+                let pairs = graph.combined_relocates(node.layer_stack_id());
+                apply_child_relocates(&node.path, &pairs, &mut name_order, &mut name_set, &mut prohibited);
+            }
+            // The node's contributing layers fold weakest-first; `layer_stack()`
+            // is strongest-first, so it is reversed here. Only the layer index is
+            // needed (the offset `layers()` folds in is irrelevant to name
+            // composition), so the borrowed slice is reversed in place.
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter().rev() {
+                let layer_data = graph.layer(layer);
+                append_unseen_names(
+                    layer_data,
+                    &node.path,
+                    ChildrenKey::PrimChildren,
+                    &mut name_order,
+                    &mut name_set,
+                );
+                if let Ok(Value::TokenVec(order)) = layer_data
+                    .data()
+                    .get_field(&node.path, FieldKey::PrimOrder.as_str())
+                    .map(|v| v.into_owned())
+                {
+                    sdf::apply_ordering(&mut name_order, &order);
+                }
+            }
+        }
+
+        // Names relocated away cannot reappear here (C++ removes the prohibited
+        // set from the composed order after the walk).
+        if !prohibited.is_empty() {
+            name_order.retain(|name| !prohibited.contains(name));
+        }
+        let mut prohibited: Vec<Token> = prohibited.into_iter().collect();
+        // Order the prohibited set the same way as the child names (spec §8.2),
+        // so the two outputs of this function stay consistent.
+        prohibited.sort_by(|a, b| sdf::element_cmp(a.as_str(), b.as_str()));
+        Ok((name_order, prohibited))
+    }
+
+    /// Returns the composed list of property names for a prim path.
+    ///
+    /// Merges `propertyChildren` weakest-to-strongest. `propertyOrder` is not
+    /// applied: USD value resolution ignores `reorder properties` (C++
+    /// `_ComposePrimPropertyNames` passes a null order field in USD mode), so
+    /// composed property order follows authoring order alone.
+    pub fn prim_properties(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
+        let path = &self.effective_path(graph, path)?;
+        self.composed_property_names(graph, path)
+    }
+
+    /// Reports a [`CompositionDiagnostic::InconsistentPropertyType`] for each
+    /// composed property of `prim_path` whose specs mix attribute and
+    /// relationship kinds (C++ `PcpErrorInconsistentPropertyType`).
+    ///
+    /// Run from the index build, so a conflict is visible after composition even
+    /// when nobody asks for a property stack, and recorded on the entry the
+    /// build produced: the conflict is a fact about that composed prim and
+    /// lasts exactly as long as it does. A
+    /// [`property_stack`](Self::property_stack) query detects the same conflict
+    /// again from its own walk and reports it into the transient channel; the
+    /// two owners are folded through one collection, so the diagnostic reads
+    /// once however many passes found it.
+    fn report_property_type_conflicts(&mut self, graph: &LayerGraph, prim_path: &Path, names: &[Token]) {
+        let Some(index) = self.store.index_at(prim_path) else {
+            return;
+        };
+        let mut conflicts = Diagnostics::default();
+        for name in names {
+            let Ok(prop_path) = prim_path.append_property(name) else {
+                continue;
+            };
+            conflicts.extend(Self::property_type_conflicts(graph, index, prim_path, &prop_path));
+        }
+        let cached = self.store.replace_property_errors(prim_path, conflicts);
+        debug_assert!(
+            cached,
+            "property conflicts recorded against an uncached prim: {prim_path}"
+        );
+    }
+
+    /// Walks a property's specs strongest-first across the prim's composition
+    /// graph, returning its `(layer identifier, spec path)` stack and the
+    /// inconsistent-spec-type errors. The first spec's kind (attribute vs
+    /// relationship) is the defining type; weaker specs of the other kind are
+    /// inconsistent (C++ `PcpErrorInconsistentPropertyType`) — dropped from the
+    /// stack and reported. `prop_path` is the property in `prim_path`'s namespace.
+    ///
+    /// Reads the memoized prim spec stack as the candidate set: a property spec
+    /// requires its owning prim spec, so every layer that authors the property
+    /// also authors the prim spec the stack records. Inert and culled nodes are
+    /// skipped (matching the structural node walk); permission-denied sites stay.
+    fn property_type_conflicts(
+        graph: &LayerGraph,
+        index: &PrimIndex,
+        prim_path: &Path,
+        prop_path: &Path,
+    ) -> Diagnostics {
+        let mut conflicts = Diagnostics::default();
+        let mut defining = DefiningKind::default();
+        for (site, node) in index.live_spec_sites() {
+            let Some(p) = prop_path.replace_prefix(prim_path, node.path()) else {
+                continue;
+            };
+            let Some(spec_type) = graph.layer(site.layer).data().spec_type(&p) else {
+                continue;
+            };
+            let layer_id = graph.identifier(site.layer);
+            if let Some(conflict) = defining.admit(spec_type, layer_id, &p, prop_path, prim_path) {
+                conflicts.report(conflict);
+            }
+        }
+        conflicts
+    }
+
+    /// Returns the composed [`PrimIndex`] for a prim, building it if needed (C++
+    /// `UsdPrim::GetPrimIndex` / `PcpCache::ComputePrimIndex`). The borrow is
+    /// tied to the cache, so callers reach it through the borrowing
+    /// [`PrimIndexRef`](crate::usd::PrimIndexRef) view.
+    pub fn index(&mut self, graph: &LayerGraph, path: &Path) -> Result<&PrimIndex, QueryError> {
+        let path = self.effective_path(graph, &path.prim_path())?;
+        self.ensure_index(graph, &path)?;
+        Ok(self.cached(&path))
+    }
+
+    /// Returns the prim stack: each `(layer identifier, spec path)` site that
+    /// contributes a prim spec, strongest first (C++ `UsdPrim::GetPrimStack`).
+    ///
+    /// Projects the live spec sites; permission-denied sites are kept — they still
+    /// author a spec, so the structural introspection lists them, unlike value
+    /// resolution.
+    pub fn prim_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<SpecSiteRecord>, QueryError> {
+        let path = self.effective_path(graph, &path.prim_path())?;
+        self.ensure_index(graph, &path)?;
+        let index = self.cached(&path);
+        let stack = index
+            .live_spec_sites()
+            .map(|(site, node)| SpecSiteRecord {
+                layer: graph.identifier(site.layer).to_string(),
+                path: node.path().clone(),
+                offset: site.offset,
+            })
+            .collect();
+        Ok(stack)
+    }
+
+    /// Returns the property stack for a property path: each `(layer identifier,
+    /// spec path)` site that authors a property spec, strongest first. Backs
+    /// C++ `UsdProperty::GetPropertyStack`. A non-property path yields an empty
+    /// stack.
+    ///
+    /// `time` selects the walk: `None` collects the graph specs alone, while a
+    /// numeric time also lists the clip layer each participating value-clip set
+    /// sources the property from there.
+    pub fn property_stack(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        time: Option<f64>,
+    ) -> Result<Vec<SpecSiteRecord>, QueryError> {
+        let path = self.effective_path(graph, path)?;
+        if !path.is_property_path() {
+            return Ok(Vec::new());
+        }
+        let prim_path = path.prim_path();
+        let suffix = path.property_suffix().to_owned();
+        self.ensure_index(graph, &prim_path)?;
+        let mode = match time {
+            None => ResolveMode::Default,
+            Some(time) => ResolveMode::Numeric(time),
+        };
+        let mut resolver = StackResolver {
+            graph,
+            prop_path: &path,
+            prim_path: &prim_path,
+            time,
+            sites: Vec::new(),
+            conflicts: Diagnostics::default(),
+            defining: DefiningKind::default(),
+        };
+        self.resolve_property(graph, &prim_path, &suffix, mode, &mut resolver)?;
+        let StackResolver { sites, conflicts, .. } = resolver;
+        // The walk re-derives these on every call, and the prim build detects
+        // the same conflicts from its own pass; the channel keeps one copy of
+        // each, so the diagnostic reads once however often it is found.
+        self.query_diagnostics.extend(conflicts);
+        Ok(sites)
+    }
+
+    /// Returns the variant selections composed onto a prim, as `(set,
+    /// selection)` pairs sorted by set name. Backs C++
+    /// `UsdVariantSets::GetAllVariantSelections`. These are the effective
+    /// selections — authored, fallback, or default — read from the variant
+    /// selection sites composed into the index, so they match the variant
+    /// branches that actually contribute opinions.
+    pub fn variant_selections(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, String)>, QueryError> {
+        let path = self.effective_path(graph, &path.prim_path())?;
+        self.ensure_index(graph, &path)?;
+        Ok(self.cached(&path).variant_selections())
+    }
+
+    /// Collects ancestor arcs from all cached ancestors of `path`.
+    ///
+    /// Returns references into the cached contexts, avoiding allocation
+    /// of `AncestorArc` (which contains `MapFunction` with a `Vec`).
+    fn collect_ancestor_arcs(&self, path: &Path) -> Vec<&AncestorArc> {
+        let mut arcs = Vec::new();
+        let mut p = Some(path.clone());
+        while let Some(pp) = p {
+            if let Some(ctx) = self.store.context_at(&pp) {
+                arcs.extend(&ctx.ancestor_arcs);
+            }
+            p = pp.parent();
+        }
+        arcs
+    }
+
+    /// Pre-caches inherit/specialize targets declared in the prim's layer
+    /// data. Reads inherit paths from each layer, resolves them to composed
+    /// namespace using ancestor arcs, and ensures those targets are cached.
+    fn precache_inherit_targets(&mut self, graph: &LayerGraph, path: &Path) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Some(parent_index) = self.store.index_at(&parent) else {
+            return;
+        };
+
+        let ancestor_arcs = self.collect_ancestor_arcs(&parent);
+
+        // Scan each parent composition node for inherit/specialize targets: the
+        // parent's own path in that node's namespace, and the prim's path there
+        // (the node's path extended by the prim name). A layer that authors the
+        // prim directly contributes to the parent at the parent path, so it is
+        // already covered here — no separate all-layers scan of the prim path is
+        // needed.
+        let mut nodes_to_scan: Vec<(Path, LayerId)> = Vec::new();
+        for node in parent_index.nodes() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
+                nodes_to_scan.push((node.path.clone(), layer));
+                if let Some(name) = path.name()
+                    && let Ok(child_in_node) = node.path.append_path(name)
+                {
+                    nodes_to_scan.push((child_in_node, layer));
+                }
+            }
+        }
+
+        let mut targets_to_cache = Vec::new();
+        for (scan_path, scan_layer) in &nodes_to_scan {
+            for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
+                let Ok(val) = graph.layer(*scan_layer).data().get_field(scan_path, field.as_str()) else {
+                    continue;
+                };
+                let Value::PathListOp(list_op) = val.into_owned() else {
+                    continue;
+                };
+                for target in &list_op.flatten() {
+                    // Anchor a relative inherit/specialize target at the path it
+                    // is authored on (the scanned node's namespace), matching the
+                    // indexer's `path.make_absolute`. Anchoring at the
+                    // composed parent would mis-resolve `../` targets by a level.
+                    let raw = scan_path.make_absolute(target);
+                    // Try composed-namespace versions via ancestor arcs.
+                    for a in &ancestor_arcs {
+                        if let Some(composed) = a.map.map_source_to_target(&raw)
+                            && composed != raw
+                            && !targets_to_cache.contains(&composed)
+                        {
+                            targets_to_cache.push(composed);
+                        }
+                    }
+                    if !targets_to_cache.contains(&raw) {
+                        targets_to_cache.push(raw);
+                    }
+                }
+            }
+        }
+
+        for target in targets_to_cache {
+            self.precache_path(graph, &target);
+            // Recursively precache the target's own inherit targets.
+            if self.is_indexed(&target) {
+                self.precache_inherit_targets(graph, &target);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Core composition
+    // ------------------------------------------------------------------
+
+    /// Ensures the prim index for `path` is built and cached.
+    ///
+    /// When LIVRPS composition produces an empty index (no layer has a direct
+    /// spec at the composed path), parent composition nodes are checked for
+    /// child specs at their respective paths. This handles prims that only
+    /// exist through ancestor inherit, specialize, or reference arcs.
+    ///
+    /// Two paths are deliberately left uncached, so an absent entry means
+    /// either: a build that demanded a not-yet-loaded layer (the stage's load
+    /// loop recomposes it), and a path in the reserved `/__Prototype_N`
+    /// namespace with no prototype registered there. The latter names no scene
+    /// — C++ hands back an invalid prim for it — and composing the synthetic
+    /// path in place would cache an empty index that a later mint would have to
+    /// evict.
+    pub(super) fn ensure_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<(), QueryError> {
+        if self.is_indexed(path) || self.in_unregistered_prototype(path) {
+            return Ok(());
+        }
+        // Composing a prim whose ancestor is still mid-build cannot seed from that
+        // ancestor's opinions. This happens only when pre-caching an
+        // inherit/specialize target that is a namespace descendant of an
+        // in-progress ancestor (a prim inheriting its own descendant). The
+        // descendant may be more than one level down (`/A` inheriting `/A/B/C`),
+        // so every strict ancestor is checked, not just the parent. Defer without
+        // caching an under-seeded result; a later query composes it correctly once
+        // the ancestor is cached, and the cycle-closing arc finds no cached target.
+        if path.strict_ancestors().any(|a| self.in_progress.contains(&a)) {
+            return Ok(());
+        }
+        // A re-entrant call for a path already mid-build is a class-hierarchy
+        // cycle reached through inherit/specialize pre-caching. Bail out: the
+        // outer build finishes, and the cycle-closing arc finds no cached target.
+        if !self.in_progress.insert(path.clone()) {
+            return Ok(());
+        }
+        let result = self.build_index(graph, path);
+        self.in_progress.remove(path);
+        result
+    }
+
+    /// Builds and caches the index for `path`, assuming `path` is already
+    /// recorded in [`in_progress`](Self::in_progress) (see [`ensure_index`](Self::ensure_index)).
+    fn build_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<(), QueryError> {
+        // An already-cached path must not rebuild through here: the builder's
+        // cache-hit path reports empty expression-variable dependencies (the
+        // cached entry's registration is authoritative), so re-registering
+        // would wipe the prim's recorded `${VAR}` reads. `ensure_index`'s
+        // `is_indexed` check upholds this.
+        debug_assert!(
+            !self.is_indexed(path),
+            "build_index on a cached path would re-register empty expression-variable deps",
+        );
+        // Snapshot the demand queue so a reference/payload arc to a not-yet-loaded
+        // layer — demanded by this build or by a pre-cached ancestor below — is
+        // detected after the build and keeps the incomplete index out of the cache.
+        let pending_before = self.pending_loads.len();
+        // Compose ancestors first so the parent's `CompositionContext` (and
+        // its `within_instance` flag, spec 11.3.3) is available. Composition
+        // is a pure function of the layer stack, path, and parent context, so
+        // building ancestors eagerly only fixes the parent context — it does
+        // not change any prim's resolved opinions.
+        if let Some(parent) = path.parent()
+            && !parent.is_abs_root()
+            && !self.is_indexed(&parent)
+        {
+            self.precache_path(graph, &parent);
+        }
+
+        // Pre-cache inherit/specialize targets so the indexer can
+        // find them. This handles the timing issue where a target prim is
+        // in a sibling subtree that hasn't been traversed yet.
+        self.precache_inherit_targets(graph, path);
+
+        let parent_ctx = path
+            .parent()
+            .and_then(|p| self.store.context_at(&p))
+            .cloned()
+            .unwrap_or_else(|| self.root_parent_context());
+        // Computed per path, not inherited from the parent context: two
+        // siblings can have different load rules, and a rule authored on an
+        // ancestor doesn't by itself determine this path's own decision (see
+        // `LoadRules::effective_rule`'s lookahead).
+        let load_payloads = self.is_loaded(path);
+
+        // TODO(rayon): `build_with_cache` is a pure function of `graph`,
+        // `&parent_ctx`, and the store's entries, so sibling prims compose
+        // independently and this is the natural per-prim `par_iter` boundary.
+        // The blocker is the shared store the inherit/specialize targets read
+        // mid-build — parallelizing the driver needs a concurrent map or a
+        // topological (targets-first) build order.
+        let (mut index, mut build_errors, pending_loads, mut expr_var_deps) =
+            PrimIndex::build_with_cache(path, graph, &parent_ctx, self.store.entries(), load_payloads)?;
+        self.pending_loads.extend(pending_loads);
+        // A reference/payload arc demanded a layer that is not yet loaded — here,
+        // or in a pre-cached ancestor that then seeded this build incompletely —
+        // so this index is incomplete: leave `path` uncached for the stage's query
+        // loop to load and recompose. Returning before `cache_index` keeps a
+        // partial index — and the transient errors composed without the missing
+        // layer — out of the cache entirely.
+        if self.pending_loads.len() > pending_before {
+            return Ok(());
+        }
+        // Retain recoverable composition errors recorded during the build (e.g.
+        // an unresolvable arc). An invalid opinion at a
+        // relocation source is reported "while composing" this prim, so stamp its
+        // path — the indexer may have recorded it deep in a sub-index build whose
+        // own site path differs.
+        //
+        // Rebuilt through the collection, since stamping can make two
+        // diagnostics from different sub-builds equal and only a re-insertion
+        // applies uniqueness to the stamped values.
+        build_errors = build_errors
+            .into_iter()
+            .map(|mut error| {
+                match &mut error {
+                    CompositionDiagnostic::OpinionAtRelocationSource { composing, .. }
+                    | CompositionDiagnostic::ProhibitedRelocationSource { composing, .. } => *composing = path.clone(),
+                    CompositionDiagnostic::ArcCycle(info) => info.composing = path.clone(),
+                    _ => {}
+                }
+                error
+            })
+            .collect();
+        // `build_errors` accumulates every error for this prim and is carried
+        // into the prim's cache entry at the end, replacing any prior entry, so
+        // a rebuild never duplicates and a fixed prim drops its stale errors.
+
+        // Inside an instance, local opinions on descendants are discarded
+        // (spec 11.3.3): the subtree is composed purely from the arcs the
+        // instance brings in. This is enforced at composition time — the indexer
+        // marks the local root site inert for any prim whose parent context is
+        // `within_instance`, so the local arcs are never followed — rather than
+        // pruned afterwards, which would leave the nodes those local arcs spawned.
+
+        // Inside an instance, the ancestral references the instance prim is
+        // nested under contribute opinions at the instance's own namespace that
+        // must not leak into the shared subtree (spec 11.3.3). The indexer
+        // already inerted the local root for an instance descendant; this inerts
+        // those outer references too (the C++ `!HasTransitiveDirectDependency`
+        // nodes), leaving only the instanceable arc, its descendants, and the
+        // implied classes. Runs before deriving instance state below so the
+        // suppressed opinions are already inert.
+        if let Some(depth) = parent_ctx.instance_depth {
+            index.mark_instance_local_inert(path.prim_element_count() as u16, depth);
+        }
+
+        // This prim is an instance when its composition declares
+        // `instanceable = true` and carries an arc; its descendants then
+        // inherit `within_instance`. A nested instance therefore re-arms the
+        // flag for its own subtree. Computed from the freshly built index so it
+        // agrees with a later `Prim::is_instance`, avoiding re-entering
+        // `ensure_index` for `path`.
+        let is_instance = index.has_composition_arc()
+            && matches!(
+                index.resolve_field(FieldKey::Instanceable.as_str(), graph, None)?,
+                Some(Value::Bool(true))
+            );
+
+        // The child-context selection resolution can evaluate a `${VAR}`
+        // selection no indexing-time task did — one authored here for a set
+        // declared only on a descendant — so its reads merge into this prim's
+        // dependency map before it registers.
+        let (mut child_context, context_deps) = index.context_for_children(graph, &parent_ctx);
+        expr_var_deps.merge(context_deps);
+        // A nested instance re-arms the depth to its own (deeper) level, so an
+        // inner instance's descendants drop opinions above its instanceable arc
+        // rather than the outer instance's.
+        child_context.instance_depth = if is_instance {
+            Some(path.prim_element_count() as u16)
+        } else {
+            parent_ctx.instance_depth
+        };
+        self.cache_index(graph, path, index, child_context, build_errors, expr_var_deps);
+        // Report inconsistent property types at prim composition (C++
+        // `PcpErrorInconsistentPropertyType`) so the conflict is visible without
+        // anyone asking for a property stack. Composed property names read back
+        // through the store, so this runs after the entry is cached and reports
+        // onto it.
+        // TODO(perf): this composes property names on every prim build to find a
+        // rare conflict; gate it on a cheaper signal (e.g. a node carrying both
+        // attribute and relationship specs) before scanning.
+        let names = self.composed_property_names(graph, path)?;
+        self.report_property_type_conflicts(graph, path, &names);
+        Ok(())
+    }
+
+    /// Ensures a path and all its ancestors are cached (built on the fly if needed).
+    fn precache_path(&mut self, graph: &LayerGraph, path: &Path) {
+        let mut to_build = Vec::new();
+        let mut p = Some(path.clone());
+        while let Some(pp) = p {
+            if pp == Path::abs_root() || self.is_indexed(&pp) {
+                break;
+            }
+            to_build.push(pp.clone());
+            p = pp.parent();
+        }
+        for pp in to_build.into_iter().rev() {
+            let _ = self.ensure_index(graph, &pp);
+        }
+    }
+
+    /// Composes a prim's property names across its composition index, folding
+    /// `propertyChildren` weakest-to-strongest (C++ `_ComposePrimPropertyNames`).
+    ///
+    /// Nodes are visited weakest first (the reverse of strength order), and
+    /// within each node its contributing layers weakest first; each layer appends
+    /// its not-yet-seen names in authored order, so a name keeps its weakest
+    /// position. `propertyOrder` is not applied — USD value resolution ignores
+    /// `reorder properties` — so composed property order follows authoring order
+    /// alone. The recursive build already grafts inherit/specialize/reference
+    /// targets with their subtrees, so this single structural walk covers class
+    /// properties with no separate target rediscovery.
+    fn composed_property_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
+        self.ensure_index(graph, path)?;
+
+        let index = self.cached(path);
+        let mut result: Vec<Token> = Vec::new();
+        let mut seen: HashSet<Token> = HashSet::new();
+
+        // Fold weakest-to-strongest across both nodes and, within each node, its
+        // layers: contributing nodes in reverse strength order, and `layer_stack()`
+        // (strongest first) reversed in place. `seen` dedups names in O(1) while
+        // `result` preserves the weakest-position order.
+        for node in index.nodes().rev() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter().rev() {
+                let layer_data = graph.layer(layer);
+                append_unseen_names(
+                    layer_data,
+                    &node.path,
+                    ChildrenKey::PropertyChildren,
+                    &mut result,
+                    &mut seen,
+                );
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+/// Appends a layer's not-yet-seen `field` children (`primChildren` /
+/// `propertyChildren`) to `order` in authored order, recording each in `seen`.
+/// A name already present keeps its weaker position. Shared by the prim- and
+/// property-name folds (C++ `PcpComposeSiteChildNames`'s append step).
+fn append_unseen_names(
+    layer: &sdf::Layer,
+    path: &Path,
+    field: ChildrenKey,
+    order: &mut Vec<Token>,
+    seen: &mut HashSet<Token>,
+) {
+    if let Ok(Value::TokenVec(names)) = layer.data().get_field(path, field.as_str()).map(|v| v.into_owned()) {
+        for name in names {
+            if seen.insert(name.clone()) {
+                order.push(name);
+            }
+        }
+    }
+}
+
+/// A class-node target that translates, gathered by
+/// [`IndexCache::compute_instance_targets`] for the cross-prim instance check.
+struct InstanceCandidate {
+    /// The authored target, in the authoring (class) node's namespace.
+    target: Path,
+    /// The owning property, in the authoring node's namespace.
+    property: Path,
+    /// The target translated to the root namespace (C++
+    /// `PcpTranslatePathFromNodeToRoot`).
+    translated: Path,
+    /// The class node's layer-stack layers, for the cross-prim instance check.
+    class_layers: Vec<LayerId>,
+    /// The class path, in the node's namespace (the inherit's introduction path).
+    class_path: Path,
+}
+
+/// Whether `index` (a composed target prim) inherits the class at `class_path`
+/// from the same `class_layers` layer stack (C++
+/// `_TargetInClassAndTargetsInstance`'s node scan): the target names an instance
+/// of the class.
+fn target_prim_inherits_class(
+    index: &PrimIndex,
+    graph: &LayerGraph,
+    class_layers: &[LayerId],
+    class_path: &Path,
+) -> bool {
+    index.all_nodes().any(|n| {
+        n.arc == ArcType::Inherit
+            && graph
+                .layer_stack(n.layer_stack_id())
+                .iter()
+                .map(|(l, _)| *l)
+                .eq(class_layers.iter().copied())
+            && n.path.has_prefix(class_path)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::Result;
+
+    use super::super::{Changes, ExpressionContext, LayerChanges};
+    use super::*;
+    use crate::pcp::prim_graph::{NodeId, RelocateKind};
+
+    fn manifest_dir() -> String {
+        std::env::var("CARGO_MANIFEST_DIR").unwrap()
+    }
+
+    /// Projects a spec stack onto the `(layer, path)` pairs these tests compare.
+    fn sites(stack: Vec<SpecSiteRecord>) -> Vec<(String, Path)> {
+        stack.into_iter().map(|site| (site.layer, site.path)).collect()
+    }
+
+    /// Builds a stack with the root and the full transitive closure of its
+    /// sublayers, references, and payloads collected in, so composition can
+    /// resolve them directly without the stage's on-demand load loop (clip
+    /// layers are still opened lazily by the cache).
+    fn collected_stack(path: &str) -> (LayerGraph, IndexCache) {
+        let registry = sdf::LayerRegistry::default();
+        let layers = registry.collect_with_arcs(path).expect("collect layers");
+        let graph = LayerGraph::from_layers(layers, 0, registry);
+        (graph, fresh_cache())
+    }
+
+    /// Parses in-memory USDA text into a single `root.usda` layer.
+    fn parse_layer(text: &str) -> sdf::Layer {
+        parse_named_layer("root.usda", text)
+    }
+
+    /// Parses in-memory USDA text into a layer with the given identifier, so a
+    /// test can build a multi-layer stack whose `subLayers` resolve by name.
+    fn parse_named_layer(identifier: &str, text: &str) -> sdf::Layer {
+        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+        sdf::Layer::new(identifier, Box::new(sdf::Data::from_specs(data)))
+    }
+
+    /// Builds a one-layer graph + cache from in-memory USDA text, for
+    /// composition cases that need no on-disk asset.
+    fn in_memory_stack(text: &str) -> (LayerGraph, IndexCache) {
+        let graph = LayerGraph::from_layers(vec![parse_layer(text)], 0, sdf::LayerRegistry::default());
+        (graph, fresh_cache())
+    }
+
+    /// The blast radius of a value edit, pinned against a synthetic
+    /// reference-heavy graph.
+    ///
+    /// Editing `/Source/Inner.x` restales the prims that actually read it — the
+    /// authored prim and each referrer's copy — and leaves the rest of the cache
+    /// standing, the referrer roots included: each reads `/Source` as an
+    /// ancestor site, and the translated reach names the descendant that
+    /// composes the edit rather than sweeping the root's whole subtree.
+    #[test]
+    fn value_edit_restale_radius() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(
+            r#"#usda 1.0
+
+def "Source"
+{
+    def "Inner"
+    {
+        double x = 1
+    }
+}
+
+def "RefA" (
+    references = </Source>
+)
+{
+}
+
+def "RefB" (
+    references = </Source>
+)
+{
+}
+
+def "Unrelated"
+{
+    def "Deep"
+    {
+        double y = 2
+    }
+}
+"#,
+        );
+        for path in [
+            "/Source",
+            "/Source/Inner",
+            "/RefA",
+            "/RefA/Inner",
+            "/RefB",
+            "/RefB/Inner",
+            "/Unrelated",
+            "/Unrelated/Deep",
+        ] {
+            cache.ensure_index(&graph, &sdf::path(path)?)?;
+        }
+        let before: HashMap<Path, _> = cache.prim_revisions().into_iter().collect();
+
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/Source/Inner.x")?)
+            .note(FieldKey::Default.as_str(), sdf::FieldChange::Value);
+        let mut changes = Changes::new();
+        let layer = graph.all_ids()[0];
+        changes.did_change(&cache, &graph, &[crate::pcp::LayerChanges::plain(layer, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        let mut restaled: Vec<String> = cache
+            .prim_revisions()
+            .into_iter()
+            .filter(|(path, revision)| before.get(path) != Some(revision))
+            .map(|(path, _)| path.to_string())
+            .collect();
+        restaled.sort();
+        assert_eq!(
+            restaled,
+            ["/RefA/Inner", "/RefB/Inner", "/Source/Inner"],
+            "only the prims that compose the edited site may be restaled"
+        );
+        // Named on their own: each referrer *root* reads `/Source` as an
+        // ancestor site, and translating that reach is what keeps its own
+        // composition — which the edit leaves alone — out of the radius.
+        let after: HashMap<Path, _> = cache.prim_revisions().into_iter().collect();
+        for root in ["/RefA", "/RefB"] {
+            let path = sdf::path(root)?;
+            assert_eq!(
+                after.get(&path),
+                before.get(&path),
+                "{root} composes nothing the edit moved, so it keeps its revision"
+            );
+        }
+        Ok(())
+    }
+
+    /// `value_at` with the demand drain the stage's load barrier provides: a
+    /// first-touch `(target, context)` pair leaves a [`Demand`] for its
+    /// not-yet-interned stack, so mint and retry until a pass demands nothing
+    /// new (the fixtures load every layer up front, so a demand only ever needs
+    /// interning).
+    fn settled_value_at(
+        graph: &mut LayerGraph,
+        cache: &mut IndexCache,
+        path: &Path,
+        time: f64,
+    ) -> Result<Option<Value>> {
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        loop {
+            let value = cache.value_at(graph, path, time, &interp)?;
+            let mut pending = Vec::new();
+            cache.swap_pending_loads(&mut pending);
+            if !graph.intern_demanded(&pending) {
+                return Ok(value);
+            }
+        }
+    }
+
+    /// Run `f` as one atomic transaction on `layer` and return the recorded change
+    /// list, the test-side spelling of an [`sdf::Layer`] edit. Captures the record
+    /// the way any observer would — through an `after_commit` sink — since `edit`
+    /// itself returns only whether anything changed.
+    fn edit_layer(
+        layer: &mut sdf::Layer,
+        f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
+    ) -> Result<sdf::ChangeList, sdf::AuthoringError> {
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(sdf::ChangeList::new()));
+        let slot = captured.clone();
+        let id = layer.add_sink(move |_: &str, changes: &sdf::ChangeList| {
+            slot.replace(changes.clone());
+        });
+        let result = layer.edit(f);
+        layer.remove_sink(id);
+        match result {
+            Ok(_) => Ok(std::rc::Rc::try_unwrap(captured).expect("sink dropped").into_inner()),
+            Err(sdf::EditError::Author(e)) => Err(e),
+            Err(sdf::EditError::Rejected(_)) => panic!("no layer sink to veto in tests"),
+        }
+    }
+
+    /// Builds a one-layer graph + cache whose root is loaded from a real path,
+    /// so the resolver can anchor clip asset paths relative to it.
+    fn single_layer_stack(path: &str) -> (LayerGraph, IndexCache) {
+        let registry = sdf::LayerRegistry::default();
+        let id = registry.create_identifier(path, None);
+        let (_, data) = registry.open(path).expect("open root").expect("root resolves");
+        let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
+        (graph, fresh_cache())
+    }
+
+    /// A prim inheriting its own grand-descendant (`/A` inherits `/A/B/C`) is a
+    /// cycle whose arc is dropped, but composing `/A` must not cache an
+    /// under-seeded `/A/B/C`. The inherit-target precache builds `/A/B/C` while
+    /// `/A` is in progress, and its parent `/A/B` is not the in-progress prim, so
+    /// the deferral guard must check every ancestor, not just the parent. `/A/B`
+    /// references `</Lib/Ref>`, so a correctly-seeded `/A/B/C` exposes the
+    /// reference's `mark` property.
+    #[test]
+    fn grandchild_inherit_target_seeds_ancestors() -> Result<()> {
+        let text = r#"#usda 1.0
+def "Lib" {
+    def "Ref" {
+        def "C" { custom string mark = "from-ref" }
+    }
+}
+def "A" (
+    inherits = </A/B/C>
+)
+{
+    def "B" (
+        references = </Lib/Ref>
+    )
+    {
+    }
+}
+"#;
+        let (graph, mut cache) = in_memory_stack(text);
+        // Compose /A first so its inherit-target precache runs before /A/B/C is
+        // queried; the precache must not leave a stale, parentless /A/B/C cached.
+        cache.ensure_index(&graph, &sdf::path("/A")?)?;
+        assert!(
+            cache
+                .prim_properties(&graph, &sdf::path("/A/B/C")?)?
+                .iter()
+                .any(|t| t.as_str() == "mark"),
+            "/A/B/C must inherit the reference's `mark` via /A/B even when reached through /A's precache"
+        );
+        Ok(())
+    }
+
+    /// A child reachable only through a chain of local-class inherits composes
+    /// its own inherited grandchildren: `SymArmRig` inherits `_Class_ArmRig`
+    /// (whose `ArmRegion` over inherits `Body/_class_Region`), so
+    /// `SymArmRig/ArmRegion` must expose `Region`.
+    #[test]
+    fn inherited_child_chain_composes() -> Result<()> {
+        let root = format!(
+            "{}vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
+             TrickyLocalClassHierarchyWithRelocates_root/usda/root.usd",
+            env!("CARGO_WORKSPACE_DIR")
+        );
+        let (graph, mut cache) = collected_stack(&root);
+        let arm_region = sdf::path("/C_1/ArmsRig/SymArmRig/ArmRegion")?;
+        assert!(
+            cache
+                .prim_children(&graph, &arm_region)?
+                .iter()
+                .any(|t| t.as_str() == "Region"),
+            "deep local-class inherit chain must surface the inherited grandchild"
+        );
+        Ok(())
+    }
+
+    /// Child names fold weakest-to-strongest, reapplying each layer's
+    /// `primOrder` as it merges. `sub.usda` (weaker) authors `a b c` reordered
+    /// to `c b a`; `root.usda` (stronger) adds `d` and reorders `a d`. The fold
+    /// yields `[c, b, a, d]` — a strongest-`primOrder`-wins union would instead
+    /// give `[a, d, b, c]`.
+    #[test]
+    fn child_names_fold_weak_to_strong() -> Result<()> {
+        let root = format!("{}/fixtures/child_order_fold/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let children = cache.prim_children(&graph, &sdf::path("/P")?)?;
+        assert_eq!(
+            children.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            ["c", "b", "a", "d"]
+        );
+        Ok(())
+    }
+
+    /// A relocated prim's index carries relocate nodes (tagged
+    /// `RELOCATE_SOURCE`) whose grafted source subtree forms a consistent
+    /// tree: every stored parent link is mirrored by the parent's child list.
+    #[test]
+    fn relocate_nodes_form_subtree() -> Result<()> {
+        use super::super::prim_graph::NodeFlags;
+
+        let root = format!(
+            "{}vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
+             BasicRelocateToAnimInterface_root/usda/root.usd",
+            env!("CARGO_WORKSPACE_DIR")
+        );
+        let (graph, mut cache) = collected_stack(&root);
+        let path = sdf::path("/Model/Anim/Path")?;
+        cache.ensure_index(&graph, &path)?;
+        let index = cache.cached(&path);
+
+        // The relocate source node is composed inert (salted earth, C++
+        // `rootNodeShouldContributeSpecs == false`): its own site contributes
+        // nothing — its ancestral children carry the relocated opinions — so it
+        // is retained in the arena but skipped by `nodes`/`all_nodes`.
+        assert!(
+            index
+                .arena()
+                .iter()
+                .any(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE)),
+            "relocated prim has a relocate source node"
+        );
+        for (id, node) in index.nodes_with_ids() {
+            if let Some(parent) = node.parent() {
+                assert!(
+                    index.children(parent).contains(&id),
+                    "relocate node {id:?} parent {parent:?} missing it as a child"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A relocate source spanning several sublayers keeps every member in the
+    /// per-site relocate node — the weaker sublayer opinion must not be lost.
+    /// `/World/Src` (authored in both `root.usda` and `sub.usda`) relocates to
+    /// `/World/Dst`, whose relocate node must carry both layers.
+    #[test]
+    fn relocate_source_spans_sublayers() -> Result<()> {
+        use super::super::prim_graph::NodeFlags;
+
+        let root = format!("{}/fixtures/relocate_multilayer/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let path = sdf::path("/World/Dst")?;
+        cache.ensure_index(&graph, &path)?;
+        let index = cache.cached(&path);
+
+        // The relocate source node is composed inert (salted earth), so it is
+        // retained in the arena but skipped by `nodes`/`all_nodes`.
+        let relocate = index
+            .arena()
+            .iter()
+            .find(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE))
+            .expect("relocated prim has a relocate source node");
+        let layers: Vec<LayerId> = graph
+            .layer_stack(relocate.layer_stack_id())
+            .iter()
+            .map(|&(li, _)| li)
+            .collect();
+        let expected: Vec<LayerId> = graph.root_layer_stack().iter().map(|&(id, _)| id).collect();
+        assert_eq!(
+            layers, expected,
+            "relocate node folds both authoring sublayers, strongest first"
+        );
+        Ok(())
+    }
+
+    /// The dependency nodes an index registers at a site, collected — the tests'
+    /// view of [`PrimIndex::dependency_nodes_at`], which appends into a caller's
+    /// buffer so a change round can reuse one.
+    fn nodes_at_site(index: &PrimIndex, prim: &Path, layer: LayerId, site: &Path, graph: &LayerGraph) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        index.dependency_nodes_at(prim, layer, site, graph, &mut out);
+        out
+    }
+
+    /// A root prim whose reference declares the same property with the other
+    /// spec kind, so composing it reports one `InconsistentPropertyType`.
+    const CONFLICT_ROOT: &str =
+        "#usda 1.0\ndef \"P\" (\n    references = @model.usd@</R>\n)\n{\n    double x = 1.0\n}\n";
+
+    /// The property-type conflict is detected once at index build and again by
+    /// every `property_stack` query — the walk that produces the stack produces
+    /// it — so the diagnostic must be reported once however many times it is
+    /// detected.
+    #[test]
+    fn repeat_stack_reports_once() -> Result<()> {
+        let (graph, mut cache) = two_layer_stack(CONFLICT_ROOT, "#usda 1.0\ndef \"R\" {\n    add rel x\n}\n");
+        let prop = sdf::path("/P.x")?;
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        let after_build = conflict_count(&cache);
+        assert_eq!(after_build, 1, "the build pass detects it once");
+
+        for _ in 0..3 {
+            cache.property_stack(&graph, &prop, None)?;
+            assert_eq!(
+                conflict_count(&cache),
+                1,
+                "a repeated stack query re-detects the same conflict, which says nothing new"
+            );
+        }
+        Ok(())
+    }
+
+    /// Identity is the whole diagnostic, not the property it names: one property
+    /// with a defining attribute and two conflicting relationship specs in
+    /// different layers yields two diagnostics that share a variant and a
+    /// property path.
+    #[test]
+    fn distinct_conflicts_survive() -> Result<()> {
+        let root = "#usda 1.0\n(\n    subLayers = [@mid.usd@]\n)\ndef \"P\" (\n    references = @ref.usd@</R>\n) {\n    custom double x = 1\n}\n";
+        let graph = LayerGraph::from_layers(
+            vec![
+                parse_named_layer("root.usd", root),
+                parse_named_layer("mid.usd", "#usda 1.0\nover \"P\" {\n    add rel x\n}\n"),
+                parse_named_layer("ref.usd", "#usda 1.0\ndef \"R\" {\n    add rel x\n}\n"),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let mut cache = fresh_cache();
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        cache.property_stack(&graph, &sdf::path("/P.x")?, None)?;
+
+        assert_eq!(
+            conflict_count(&cache),
+            2,
+            "two conflicting specs are two failures, however alike, got {:?}",
+            cache.composition_errors().iter().collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    /// A build-detected conflict lives as long as the index that produced it.
+    /// The change round retires the transient query channel and leaves `/P`'s
+    /// index warm, so the conflict must still read — once — without anyone
+    /// asking for a property stack again.
+    #[test]
+    fn conflict_survives_edit() -> Result<()> {
+        let (mut graph, mut cache) = two_layer_stack(CONFLICT_ROOT, "#usda 1.0\ndef \"R\" {\n    add rel x\n}\n");
+        let prop = sdf::path("/P.x")?;
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        cache.property_stack(&graph, &prop, None)?;
+        assert_eq!(conflict_count(&cache), 1);
+
+        // A value edit on an unrelated prim: the round retires the query
+        // channel and leaves `/P`'s index standing.
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/P.other")?)
+            .note(FieldKey::Default.as_str(), sdf::FieldChange::Value);
+        let mut changes = Changes::new();
+        let layer = graph.all_ids()[0];
+        changes.did_change(&cache, &graph, &[crate::pcp::LayerChanges::plain(layer, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+        assert!(cache.is_indexed(&sdf::path("/P")?), "the index must stay warm");
+        assert_eq!(conflict_count(&cache), 1, "the entry still holds it");
+
+        cache.property_stack(&graph, &prop, None)?;
+        assert_eq!(conflict_count(&cache), 1, "and the query's own copy folds in");
+        Ok(())
+    }
+
+    /// A conflict the edit fixed must stop reporting. Removing the conflicting
+    /// relationship spec leaves `/P`'s graph — and so its index — standing, so
+    /// nothing drops the entry; the property-derived diagnostics are refreshed
+    /// because the composed property set is what moved.
+    #[test]
+    fn conflict_clears_on_removal() -> Result<()> {
+        let (mut graph, mut cache) = two_layer_stack(
+            CONFLICT_ROOT,
+            "#usda 1.0
+def \"R\" {
+    add rel x
+}
+",
+        );
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        assert_eq!(conflict_count(&cache), 1);
+
+        let model = graph.all_ids()[1];
+        let cl = edit_layer(&mut graph.get_mut(model).unwrap().layer, |e| {
+            e.data_mut().erase_spec(&sdf::path("/R.x").unwrap());
+            Ok(())
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(model, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(cache.is_indexed(&sdf::path("/P")?), "the index must stay warm");
+        assert_eq!(conflict_count(&cache), 0, "the conflicting spec is gone");
+        Ok(())
+    }
+
+    /// The same seam in the other direction: authoring a conflicting spec onto a
+    /// warm index reports the conflict without waiting for a rebuild or a query.
+    #[test]
+    fn conflict_appears_on_add() -> Result<()> {
+        let (mut graph, mut cache) = two_layer_stack(
+            CONFLICT_ROOT,
+            "#usda 1.0
+def \"R\" {
+}
+",
+        );
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        assert_eq!(conflict_count(&cache), 0, "nothing conflicts yet");
+
+        let model = graph.all_ids()[1];
+        let cl = edit_layer(&mut graph.get_mut(model).unwrap().layer, |e| {
+            e.data_mut()
+                .create_spec(sdf::path("/R.x").unwrap(), sdf::SpecType::Relationship);
+            Ok(())
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(model, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert_eq!(
+            conflict_count(&cache),
+            1,
+            "the new spec conflicts with the root's attribute"
+        );
+        Ok(())
+    }
+
+    /// How many inconsistent-property-type diagnostics the cache currently
+    /// reports.
+    fn conflict_count(cache: &IndexCache) -> usize {
+        cache
+            .composition_errors()
+            .iter()
+            .filter(|e| matches!(e, CompositionDiagnostic::InconsistentPropertyType { .. }))
+            .count()
+    }
+
+    /// The other repeatable producer: a target read through an *instance proxy*
+    /// is never memoized — the proxy maps results back per instance — so every
+    /// call re-resolves and re-derives the same diagnostic.
+    ///
+    /// `/Model/Child.r` targets a prim outside the referenced scope, which
+    /// cannot translate through the arc, and `/Inst` is instanceable, so the
+    /// read goes through the proxy path on each call.
+    #[test]
+    fn proxy_targets_report_once() -> Result<()> {
+        let (graph, mut cache) = two_layer_stack(
+            "#usda 1.0
+def \"Inst\" (
+    instanceable = true
+    references = @model.usd@</Model>
+) {}
+",
+            "#usda 1.0
+def \"Outside\" {}
+def \"Model\"
+{
+    def \"Child\"
+    {
+        add rel r = </Outside>
+    }
+}
+",
+        );
+        let proxy = sdf::path("/Inst/Child.r")?;
+        for _ in 0..3 {
+            assert!(
+                cache.relationship_targets(&graph, &proxy)?.is_empty(),
+                "the target cannot translate through the reference"
+            );
+            let reported = cache
+                .composition_errors()
+                .iter()
+                .filter(|e| matches!(e, CompositionDiagnostic::InvalidExternalTargetPath { .. }))
+                .count();
+            assert_eq!(
+                reported, 1,
+                "one untranslatable target is one failure, however often read"
+            );
+        }
+        Ok(())
+    }
+
+    /// A relocate grafted at the relocation itself carries the source-to-target
+    /// rename in its own map, so a change at the source translates straight
+    /// through it (C++ `_ProcessDependentNode`'s ordinary path).
+    #[test]
+    fn direct_relocate_translates() -> Result<()> {
+        let root = format!("{}/fixtures/relocate_cross_hierarchy/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let dst = sdf::path("/Dest/Moved")?;
+        cache.ensure_index(&graph, &dst)?;
+        let index = cache.cached(&dst);
+
+        let src = sdf::path("/Source/Inner")?;
+        let node = *nodes_at_site(index, &dst, graph.root_id().unwrap(), &src, &graph)
+            .first()
+            .expect("the relocate node registers its source site");
+        assert_eq!(index.node(node).relocate_kind(), Some(RelocateKind::Direct));
+        assert_eq!(index.translate_dependency_path(node, &src), Some(dst.clone()));
+        assert_eq!(
+            index.translate_dependency_path(node, &sdf::path("/Source/Inner.op")?),
+            Some(sdf::path("/Dest/Moved.op")?),
+            "the property suffix rides along",
+        );
+        Ok(())
+    }
+
+    /// A relocate propagated up an ancestor arc holds the identity map, so a
+    /// path steps out into the parent's namespace instead of mapping through it
+    /// — the case C++ handles by walking out of relocate nodes before
+    /// translating.
+    #[test]
+    fn implied_relocate_translates() -> Result<()> {
+        let (graph, mut cache) = referenced_relocate_stack();
+        let scope = sdf::path("/Ref/Scope")?;
+        cache.ensure_index(&graph, &sdf::path("/Ref")?)?;
+        cache.ensure_index(&graph, &scope)?;
+        let index = cache.cached(&scope);
+
+        // The placeholder sits at the relocation source mapped into the
+        // referrer's namespace, which is the site a change names.
+        let rig = sdf::path("/Ref/Rig")?;
+        let node = *nodes_at_site(index, &scope, graph.root_id().unwrap(), &rig, &graph)
+            .first()
+            .expect("the propagated placeholder registers its source site");
+        assert_eq!(index.node(node).relocate_kind(), Some(RelocateKind::Propagated));
+        assert_eq!(index.translate_dependency_path(node, &rig), Some(scope.clone()));
+        Ok(())
+    }
+
+    /// The same placeholder reached inside a materialized prototype still
+    /// translates as a placeholder. Its kind is recorded on the node, so it
+    /// survives the map rewriting `rebase_root` performs — which is why the
+    /// kind is stored rather than read back off the map.
+    #[test]
+    fn prototype_relocate_translates() -> Result<()> {
+        let (graph, mut cache) = instanced_relocate_stack();
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        cache.ensure_index(&graph, &sdf::path("/Inst")?)?;
+        // Reading through the proxy mints and materializes the prototype.
+        cache.value_at(&graph, &sdf::path("/Inst/Scope.x")?, 0.0, &interp)?;
+
+        let scope = sdf::path("/__Prototype_0/Scope")?;
+        let index = cache.cached(&scope);
+        let rig = sdf::path("/__Prototype_0/Rig")?;
+        let node = *nodes_at_site(index, &scope, graph.root_id().unwrap(), &rig, &graph)
+            .first()
+            .expect("the placeholder is rebased into the prototype namespace");
+        assert_eq!(index.node(node).relocate_kind(), Some(RelocateKind::Propagated));
+        assert_eq!(index.translate_dependency_path(node, &rig), Some(scope.clone()));
+        Ok(())
+    }
+
+    /// The site map skips a prim's own root edge, so the lookup must not
+    /// re-find it: translating through it would name a path no registration
+    /// ever produced.
+    #[test]
+    fn self_root_site_skipped() -> Result<()> {
+        let (graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"A\" { custom int x = 1 }\n");
+        let a = sdf::path("/A")?;
+        cache.ensure_index(&graph, &a)?;
+        assert!(
+            nodes_at_site(cache.cached(&a), &a, graph.root_id().unwrap(), &a, &graph).is_empty(),
+            "the self-Root node registers no site, so it is never re-found",
+        );
+        Ok(())
+    }
+
+    /// A layer stack the node does not read is not its dependency, matching the
+    /// layer filter the registration walk applies.
+    #[test]
+    fn other_layer_no_match() -> Result<()> {
+        let (graph, mut cache) = referenced_relocate_stack();
+        let scope = sdf::path("/Ref/Scope")?;
+        cache.ensure_index(&graph, &sdf::path("/Ref")?)?;
+        cache.ensure_index(&graph, &scope)?;
+        let model = graph.id_of("model.usd").unwrap();
+        assert!(
+            nodes_at_site(cache.cached(&scope), &scope, model, &sdf::path("/Ref/Rig")?, &graph).is_empty(),
+            "the placeholder reads the root stack, not the referenced one",
+        );
+        Ok(())
+    }
+
+    /// A relocate under a reference: the referenced stack relocates `/Model/Rig`
+    /// to `/Model/Scope`, so composing `/Ref/Scope` grafts an implied relocate
+    /// placeholder onto the grandparent.
+    fn referenced_relocate_stack() -> (LayerGraph, IndexCache) {
+        relocate_stack("#usda 1.0\ndef \"Ref\" (\n    references = @model.usd@</Model>\n) {}\n")
+    }
+
+    /// [`referenced_relocate_stack`] with the referrer marked instanceable, so a
+    /// read through the proxy materializes a prototype.
+    fn instanced_relocate_stack() -> (LayerGraph, IndexCache) {
+        relocate_stack(
+            "#usda 1.0\ndef \"Inst\" (\n    references = @model.usd@</Model>\n    instanceable = true\n) {}\n",
+        )
+    }
+
+    fn relocate_stack(root: &str) -> (LayerGraph, IndexCache) {
+        const MODEL: &str = "#usda 1.0\n(\n    relocates = { </Model/Rig>: </Model/Scope> }\n)\ndef \"Model\" {\n    def \"Rig\" { custom double x = 1 }\n}\n";
+        two_layer_stack(root, MODEL)
+    }
+
+    /// A graph of `root.usd` over `model.usd`, so the root can reference
+    /// `@model.usd@` by name, plus an empty cache over it.
+    fn two_layer_stack(root: &str, model: &str) -> (LayerGraph, IndexCache) {
+        let graph = LayerGraph::from_layers(
+            vec![
+                parse_named_layer("root.usd", root),
+                parse_named_layer("model.usd", model),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        (graph, fresh_cache())
+    }
+
+    /// An index cache with no variant fallbacks, everything loaded, nothing
+    /// masked — the default every composition fixture in this module wants.
+    fn fresh_cache() -> IndexCache {
+        IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::all(),
+            Diagnostics::default(),
+        )
+    }
+
+    /// The TODO's other named renaming case: an implied-class graft. `/Ref`
+    /// references a prim that inherits a class, so the class node is grafted
+    /// into the referrer's namespace and a change under the class site composes
+    /// beneath the referrer, not beneath the class.
+    #[test]
+    fn translates_implied_class() -> Result<()> {
+        const ROOT: &str = "#usda 1.0\ndef \"Ref\" (\n    references = @model.usd@</Model>\n) {}\n";
+        const MODEL: &str =
+            "#usda 1.0\nclass \"Cls\" { custom double x = 1 }\ndef \"Model\" (\n    inherits = </Cls>\n) {}\n";
+        let (graph, mut cache) = two_layer_stack(ROOT, MODEL);
+        let refp = sdf::path("/Ref")?;
+        cache.ensure_index(&graph, &refp)?;
+
+        let model = graph.id_of("model.usd").unwrap();
+        assert_eq!(
+            cache
+                .store()
+                .graph_ancestor_lookup(&graph, model, &sdf::path("/Cls/Child")?),
+            vec![sdf::path("/Ref/Child")?],
+            "the inherited class composes under the referrer"
+        );
+        Ok(())
+    }
+
+    /// A cross-hierarchy relocation source is registered as a dependency of the
+    /// relocated prim even though its node is inert. `/Source/Inner` relocates to
+    /// `/Dest/Moved`; the source's ancestors (`/Source`) are not ancestors of the
+    /// target, so only the source-site registration lets an edit at `/Source/Inner`
+    /// invalidate `/Dest/Moved`.
+    #[test]
+    fn relocate_source_registers_dependency() -> Result<()> {
+        let root = format!("{}/fixtures/relocate_cross_hierarchy/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let dst = sdf::path("/Dest/Moved")?;
+        cache.ensure_index(&graph, &dst)?;
+
+        let src = sdf::path("/Source/Inner")?;
+        assert!(
+            cache
+                .store()
+                .lookup_with_ancestors(&graph, graph.root_id().unwrap(), &src)
+                .contains(&dst),
+            "an edit at relocation source /Source/Inner must invalidate /Dest/Moved"
+        );
+        Ok(())
+    }
+
+    /// A recoverable composition error on an ancestor must not erase a
+    /// descendant's own opinions. `/A` references a missing layer — an error the
+    /// cache records and continues past — yet `/A/B`'s local opinion still
+    /// composes, rather than the child caching an empty index.
+    #[test]
+    fn ancestor_error_keeps_child_opinions() -> Result<()> {
+        let text = r#"#usda 1.0
+def "A" (
+    references = @nonexistent.usd@
+)
+{
+    def "B"
+    {
+        custom string marker = "ok"
+    }
+}
+"#;
+        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+        let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
+        let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+
+        let child = sdf::path("/A/B")?;
+        cache.ensure_index(&graph, &child)?;
+        assert!(
+            !cache.cached(&child).is_empty(),
+            "child local opinion must survive the ancestor's unresolved reference"
+        );
+        assert!(
+            cache
+                .take_composition_errors()
+                .iter()
+                .any(|e| matches!(e, CompositionDiagnostic::UnresolvedLayer { .. })),
+            "the ancestor's unresolved reference is recorded"
+        );
+        Ok(())
+    }
+
+    /// A prim's recoverable build error is keyed by its path and replaced on
+    /// rebuild, so dropping and recomposing the index (as a layer-stack edit
+    /// does via a scoped drop + re-query) does not duplicate it, and a prim that
+    /// composes cleanly leaves no stale error behind.
+    #[test]
+    fn prim_errors_replace_on_rebuild() -> Result<()> {
+        let (graph, mut cache) =
+            in_memory_stack("#usda 1.0\ndef \"A\" (\n    references = @nonexistent.usd@\n)\n{\n}\n");
+        let a = sdf::path("/A")?;
+        let unresolved = |c: &IndexCache| {
+            c.composition_errors()
+                .iter()
+                .filter(|e| matches!(e, CompositionDiagnostic::UnresolvedLayer { .. }))
+                .count()
+        };
+
+        cache.ensure_index(&graph, &a)?;
+        assert_eq!(unresolved(&cache), 1, "the unresolved reference is recorded once");
+
+        // Drop and rebuild — the bookkeeping a SIGNIFICANT layer-stack edit
+        // performs (a scoped drop then a re-query). The error must not double.
+        cache.drop_index(&a);
+        cache.ensure_index(&graph, &a)?;
+        assert_eq!(
+            unresolved(&cache),
+            1,
+            "rebuilding replaces the prim's error, not appends"
+        );
+
+        // A prim with no error leaves no entry, so its (absent) errors can't go stale.
+        let (clean_graph, mut clean_cache) = in_memory_stack("#usda 1.0\ndef \"A\" {}\n");
+        clean_cache.ensure_index(&clean_graph, &a)?;
+        assert!(
+            clean_cache.composition_errors().is_empty(),
+            "a cleanly composing prim records no error"
+        );
+        Ok(())
+    }
+
+    /// A reference whose asset path is a variable expression that fails to
+    /// evaluate (here a non-string result) is recoverable: the broken arc is
+    /// skipped and recorded as `InvalidExpression`, while the prim's own local
+    /// opinion still composes — it does not abort the whole prim index.
+    #[test]
+    fn invalid_expression_arc_recoverable() -> Result<()> {
+        let text = r#"#usda 1.0
+def "A" (
+    references = @`42`@
+)
+{
+    custom string marker = "ok"
+}
+"#;
+        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+        let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
+        let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+
+        let a = sdf::path("/A")?;
+        cache.ensure_index(&graph, &a)?;
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/A.marker")?, 0.0, &interp)?,
+            Some(Value::String("ok".to_string())),
+            "the prim's local opinion survives the broken expression arc"
+        );
+        assert!(
+            cache
+                .take_composition_errors()
+                .iter()
+                .any(|e| matches!(e, CompositionDiagnostic::InvalidExpression { .. })),
+            "the invalid asset-path expression is recorded as a recoverable error"
+        );
+        Ok(())
+    }
+
+    /// A variant selection whose expression does not evaluate to a string
+    /// records `InvalidExpression` with the variant context and falls through,
+    /// so the prim itself still composes.
+    #[test]
+    fn variant_expr_error_reported() -> Result<()> {
+        let text = r#"#usda 1.0
+def "A" (
+    variantSets = "v"
+    variants = { string v = "`42`" }
+)
+{
+    custom string marker = "ok"
+    variantSet "v" = {
+        "hi" { custom double y = 1 }
+    }
+}
+"#;
+        let (mut graph, mut cache) = in_memory_stack(text);
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/A.marker")?, 0.0)?,
+            Some(Value::String("ok".to_string())),
+            "the prim's local opinion survives the failed selection expression"
+        );
+        assert!(
+            cache.take_composition_errors().iter().any(|e| matches!(
+                e,
+                CompositionDiagnostic::InvalidExpression {
+                    context: ExpressionContext::Variant,
+                    ..
+                }
+            )),
+            "the failed selection is recorded with the variant context"
+        );
+        Ok(())
+    }
+
+    /// A selection expression authored on the referencing prim evaluates
+    /// against the referencing stack's variables and selects inside the
+    /// referenced target (spec 12.2 — the stronger site's opinion wins).
+    #[test]
+    fn variant_seed_across_reference() -> Result<()> {
+        let root_text = r#"#usda 1.0
+(
+    expressionVariables = {
+        string SEL = "hi"
+    }
+)
+def "Model" (
+    references = @t.usd@</T>
+    variants = { string v = "`${SEL}`" }
+)
+{
+}
+"#;
+        let target_text = r#"#usda 1.0
+def "T" (
+    variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "hi" { custom double x = 1 }
+        "lo" { custom double x = 2 }
+    }
+}
+"#;
+        let mut graph = LayerGraph::from_layers(
+            vec![
+                parse_named_layer("root.usd", root_text),
+                parse_named_layer("t.usd", target_text),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let mut cache = fresh_cache();
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.x")?, 0.0)?,
+            Some(Value::Double(1.0)),
+            "the referencing site's evaluated selection picks {{v=hi}} in the target"
+        );
+        Ok(())
+    }
+
+    /// A connection authored in a class that targets another instance of the
+    /// class but is removed by a stronger `delete` must not emit a spurious
+    /// instance-target diagnostic: `classify_inherit_targets` only reports targets
+    /// that survive list-op composition, so a deleted target is neither dropped
+    /// again nor reported.
+    #[test]
+    fn class_instance_target_deleted_no_error() -> Result<()> {
+        let text = r#"#usda 1.0
+def "Scope"
+{
+    class "LocalClass"
+    {
+        double y
+        double x
+        add double x.connect = </Scope/Instance_2.y>
+        delete double x.connect = </Scope/Instance_2.y>
+    }
+
+    def "Instance_1" (inherits = </Scope/LocalClass>) {}
+    def "Instance_2" (inherits = </Scope/LocalClass>) {}
+}
+"#;
+        let (graph, mut cache) = in_memory_stack(text);
+        let (targets, _) = cache.compute_attribute_connection_paths(&graph, &sdf::path("/Scope/Instance_1.x")?)?;
+        assert!(targets.is_empty(), "the deleted connection target composes to nothing");
+        let errors = cache.take_composition_errors();
+        assert!(
+            !errors.iter().any(|e| matches!(
+                e,
+                CompositionDiagnostic::InvalidInstanceTargetPath { .. }
+                    | CompositionDiagnostic::InvalidExternalTargetPath { .. }
+            )),
+            "a class target removed by a stronger delete must not be reported: {errors:?}"
+        );
+        Ok(())
+    }
+
+    /// An instance-target invalid contribution from a class node drops only that
+    /// node's contribution: a stronger local opinion authoring the same target
+    /// validly keeps it, while the class's invalid opinion is still reported.
+    #[test]
+    fn class_instance_target_kept_by_stronger_local() -> Result<()> {
+        let text = r#"#usda 1.0
+def "Scope"
+{
+    class "LocalClass"
+    {
+        double y
+        double x
+        add double x.connect = </Scope/Instance_2.y>
+    }
+
+    def "Instance_1" (inherits = </Scope/LocalClass>)
+    {
+        add double x.connect = </Scope/Instance_2.y>
+    }
+
+    def "Instance_2" (inherits = </Scope/LocalClass>) {}
+}
+"#;
+        let (graph, mut cache) = in_memory_stack(text);
+        let (targets, _) = cache.compute_attribute_connection_paths(&graph, &sdf::path("/Scope/Instance_1.x")?)?;
+        assert_eq!(
+            targets,
+            vec![sdf::path("/Scope/Instance_2.y")?],
+            "the stronger local connection keeps the target even though the class's is invalid"
+        );
+        let errors = cache.take_composition_errors();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, CompositionDiagnostic::InvalidInstanceTargetPath { .. })),
+            "the class node's instance-target contribution is still reported: {errors:?}"
+        );
+        Ok(())
+    }
+
+    /// A class target naming a prim inside an instance is checked against the
+    /// prim in the shared prototype it stands for (spec 11.3.3): a prim composed
+    /// under an instance drops its instance-local opinions, so the prototype's
+    /// subtree is where the target's composition lives. The instance references a
+    /// sub-root prim, the shape whose instance-suppressed build loses the arcs
+    /// below it.
+    #[test]
+    fn class_target_proxy_redirects() -> Result<()> {
+        let text = r#"#usda 1.0
+class "Rig"
+{
+    rel proxy = </Inst/Child>
+}
+
+def "Library"
+{
+    def "Proto"
+    {
+        def "Child" {}
+    }
+}
+
+def "Inst" (
+    instanceable = true
+    references = </Library/Proto>
+) {}
+
+def "Anchor" (inherits = </Rig>) {}
+"#;
+        let (graph, mut cache) = in_memory_stack(text);
+        let (targets, _) = cache.compute_relationship_target_paths(&graph, &sdf::path("/Anchor.proxy")?)?;
+        assert_eq!(
+            targets,
+            vec![sdf::path("/Inst/Child")?],
+            "the target keeps its stage-namespace path"
+        );
+
+        // The check composed the prototype's prim, leaving the proxy path unindexed.
+        assert!(!cache.is_indexed(&sdf::path("/Inst/Child")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Child")?));
+        Ok(())
+    }
+
+    /// A reference's asset-path expression authored inside a referenced layer
+    /// is evaluated against the composed expression variables, with the
+    /// referencing layer stack overriding the referenced one (C++
+    /// `PcpExpressionVariables`). The root sets `TARGET = "right.usda"`,
+    /// overriding mid.usda's local `TARGET = "wrong.usda"`, so `/Model` resolves
+    /// through mid to right.usda — collection must load right.usda for the arc
+    /// to compose rather than the locally-named wrong.usda.
+    #[test]
+    fn expr_vars_compose_across_reference() -> Result<()> {
+        let root = format!("{}/fixtures/expr_vars_compose/root.usda", manifest_dir());
+        let (mut graph, mut cache) = collected_stack(&root);
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.source")?, 0.0)?,
+            Some(Value::String("right".to_string())),
+            "the referencing layer's TARGET override resolves the nested reference to right.usda"
+        );
+        Ok(())
+    }
+
+    /// The sub-root twin of `expr_vars_compose_across_reference`: `/Model`
+    /// references a sub-root target `/Sub/Prim`, so composing it spawns a
+    /// nested ancestral sub-index (`Indexer::compose_and_graft`) for `/Sub`
+    /// and `/Sub/Prim`. `/Sub`'s own reference expression must still resolve
+    /// against the outer (root) layer's `TARGET`, not mid.usda's own local
+    /// value, even though it composes inside that disjoint nested build.
+    #[test]
+    fn expr_vars_subroot_reference() -> Result<()> {
+        let root = format!("{}/fixtures/expr_vars_compose_subroot/root.usda", manifest_dir());
+        let (mut graph, mut cache) = collected_stack(&root);
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.source")?, 0.0)?,
+            Some(Value::String("right".to_string())),
+            "the outer layer's TARGET override resolves Sub's ancestral reference to right.usda \
+             even though it composes inside the sub-root target's nested sub-build"
+        );
+        Ok(())
+    }
+
+    /// Editing a layer stack's `expressionVariables` re-resolves a `${VAR}`
+    /// reference asset path and recomposes the cached index: with `PICK = "a"`
+    /// the reference draws a.usda's opinion, and editing it to "b" yields
+    /// b.usda's — the under-invalidation (stale-read) guard.
+    #[test]
+    fn expr_var_edit_recomposes_reference() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\n(\n    expressionVariables = {\n        string PICK = \"a\"\n    }\n)\n\
+             def \"R\" (\n    references = @`\"${PICK}.usda\"`@</X>\n) {}\n",
+        );
+        let a = parse_named_layer("a.usda", "#usda 1.0\ndef \"X\" { custom double y = 1 }\n");
+        let b = parse_named_layer("b.usda", "#usda 1.0\ndef \"X\" { custom double y = 2 }\n");
+        let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        let root_id = graph.root_id().unwrap();
+        let y = sdf::path("/R.y")?;
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0)),
+            "the PICK-valued reference resolves to a.usda"
+        );
+
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |e| {
+            e.set_expression_variables(HashMap::from([("PICK".to_string(), Value::String("b".into()))]))
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(2.0)),
+            "editing PICK re-resolves the reference to b.usda and recomposes the cached index"
+        );
+        Ok(())
+    }
+
+    /// Builds a root layer whose `/User` references `@t.usda@` with no prim path,
+    /// so the arc resolves through the target's `defaultPrim`; `/Explicit` names
+    /// the same target prim outright, and `/Other` references nothing. Returns
+    /// the target layer, the one an edit under test authors.
+    fn default_prim_stack(target: &str) -> (LayerGraph, IndexCache, LayerId) {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"User\" (\n    references = @t.usda@\n) {}\n\
+             def \"Explicit\" (\n    references = @t.usda@</Source>\n) {}\n\
+             def \"Other\" { custom double y = 7 }\n",
+        );
+        let t = parse_named_layer("t.usda", target);
+        let graph = LayerGraph::from_layers(vec![root, t], 0, sdf::LayerRegistry::default());
+        let cache = fresh_cache();
+        let target_id = graph.id_of("t.usda").expect("the target layer is interned");
+        (graph, cache, target_id)
+    }
+
+    /// Authors `token` (or clears the field when `None`) as `layer`'s
+    /// `defaultPrim` through the unvalidated spec-tier setter, and runs one
+    /// change cycle, returning what it resynced. The prior value travels the way
+    /// the stage's layer sink captures it, read before the edit lands.
+    fn edit_default_prim(
+        graph: &mut LayerGraph,
+        cache: &mut IndexCache,
+        layer: LayerId,
+        token: Option<&str>,
+    ) -> Result<Vec<Path>> {
+        let prior = graph.default_prim_token(layer);
+        let cl = edit_layer(&mut graph.get_mut(layer).unwrap().layer, |e| match token {
+            Some(name) => {
+                e.pseudo_root_mut()?.set_default_prim(name);
+                Ok(())
+            }
+            None => e.clear_default_prim(),
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(
+            cache,
+            graph,
+            &[LayerChanges {
+                layer,
+                changes: &cl,
+                prior_default_prim: prior,
+            }],
+        );
+        Ok(changes.apply(cache, graph).resynced)
+    }
+
+    /// A target with a `defaultPrim`, plus a second prim to repoint it at.
+    const TWO_SOURCE_TARGET: &str = "#usda 1.0\n(\n    defaultPrim = \"Source\"\n)\n\
+         def \"Source\" { custom double y = 1 }\ndef \"Second\" { custom double y = 2 }\n";
+
+    /// Repointing a target's `defaultPrim` evicts the prim that resolved its
+    /// reference through the field, and the arc recomposes against the new
+    /// source — the stale-read guard.
+    #[test]
+    fn default_prim_resyncs_referrer() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert!(!cache.is_indexed(&sdf::path("/User")?), "the consumer is evicted");
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(2.0)),
+            "the reference recomposes against the new default"
+        );
+        Ok(())
+    }
+
+    /// A prim naming the target prim explicitly does not resolve through the
+    /// field, so it keeps its cached index — where C++, fanning out from the old
+    /// default prim's site, resyncs it.
+    #[test]
+    fn explicit_target_kept() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User.y")?, 0.0)?;
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/Explicit.y")?, 0.0)?;
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert!(!cache.is_indexed(&sdf::path("/User")?), "the consumer is evicted");
+        assert!(
+            cache.is_indexed(&sdf::path("/Explicit")?),
+            "an explicit target does not read the default, so it stays cached"
+        );
+        Ok(())
+    }
+
+    /// Clearing the field evicts the consumer, whose arc then resolves to
+    /// nothing rather than silently keeping its old composition.
+    #[test]
+    fn default_prim_cleared_resyncs() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, None)?;
+
+        assert_eq!(settled_value_at(&mut graph, &mut cache, &y, 0.0)?, None);
+        assert!(
+            cache
+                .composition_errors()
+                .iter()
+                .any(|e| matches!(e, CompositionDiagnostic::UnresolvedDefaultPrim { .. })),
+            "the unresolved arc is reported"
+        );
+        Ok(())
+    }
+
+    /// The reverse, and the case C++ reaches only through the placeholder arc it
+    /// grafts: with no default the arc grafts no node at all, so the recorded
+    /// consultation is the only trace that authoring the field must recompose.
+    #[test]
+    fn absent_default_authored() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack("#usda 1.0\ndef \"Source\" { custom double y = 1 }\n");
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            None,
+            "no default to resolve"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Source"))?;
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0)),
+            "authoring the default recomposes the arc that had none"
+        );
+        Ok(())
+    }
+
+    /// Re-spelling the same prim leaves the composed default where it was, so
+    /// the edit evicts nothing and reports nothing — C++'s equality skip.
+    #[test]
+    fn default_prim_respelling_inert() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User.y")?, 0.0)?;
+        let pre = cache.indexed_count();
+
+        let resynced = edit_default_prim(&mut graph, &mut cache, target, Some("/Source"))?;
+
+        assert!(resynced.is_empty(), "nothing resynced: {resynced:?}");
+        assert_eq!(cache.indexed_count(), pre, "and nothing evicted");
+        Ok(())
+    }
+
+    /// A malformed value reports the same unresolved error an absent field does,
+    /// so the absent-to-malformed edit the equality skip drops leaves behind no
+    /// diagnostic that contradicts the cached index.
+    #[test]
+    fn malformed_default_unresolved() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack("#usda 1.0\ndef \"Source\" { custom double y = 1 }\n");
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User.y")?, 0.0)?;
+        let absent: Vec<String> = cache.composition_errors().iter().map(|e| e.to_string()).collect();
+
+        let resynced = edit_default_prim(&mut graph, &mut cache, target, Some("Source.attr"))?;
+
+        assert!(resynced.is_empty(), "absent and malformed name the same prim: none");
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User.y")?, 0.0)?;
+        let malformed: Vec<String> = cache.composition_errors().iter().map(|e| e.to_string()).collect();
+        assert_eq!(
+            absent, malformed,
+            "one error covers both states, so neither can go stale"
+        );
+        Ok(())
+    }
+
+    /// A namespace child of the consumer inherits the record through the clone
+    /// its ancestral seed makes of the parent's graph, so it carries the
+    /// dependency in its own right.
+    #[test]
+    fn child_inherits_default_dep() -> Result<()> {
+        let target = "#usda 1.0\n(\n    defaultPrim = \"Source\"\n)\n\
+             def \"Source\" { def \"Child\" { custom double y = 1 } }\n\
+             def \"Second\" { def \"Child\" { custom double y = 2 } }\n";
+        let (mut graph, mut cache, target_id) = default_prim_stack(target);
+        let child_y = sdf::path("/User/Child.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &child_y, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+        assert!(
+            cache
+                .cached(&sdf::path("/User/Child")?)
+                .default_prim_layers()
+                .contains(&target_id),
+            "the seed clone carries the parent's record down"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target_id, Some("Second"))?;
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &child_y, 0.0)?,
+            Some(Value::Double(2.0))
+        );
+        Ok(())
+    }
+
+    /// Every descendant beneath a consumer inherits one `NonSiteDeps` allocation
+    /// rather than copying it. Finalization deduplicates only what a build owns,
+    /// so a descendant that records nothing of its own keeps sharing its
+    /// ancestor's value — without that, the copy-on-write buys nothing and the
+    /// allocation count grows with subtree depth.
+    #[test]
+    fn deep_subtree_shares_deps() -> Result<()> {
+        let target = "#usda 1.0
+(
+    defaultPrim = \"Source\"
+)
+             def \"Source\" { def \"A\" { def \"B\" { def \"C\" { custom double y = 1 } } } }
+";
+        let (mut graph, mut cache, target_id) = default_prim_stack(target);
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/User/A/B/C.y")?, 0.0)?;
+
+        let root = cache
+            .cached(&sdf::path("/User")?)
+            .graph()
+            .non_site_deps_shared()
+            .cloned();
+        let root = root.expect("the consumer records the consultation");
+        assert_eq!(root.default_prim, [target_id]);
+        for path in ["/User/A", "/User/A/B", "/User/A/B/C"] {
+            let deps = cache.cached(&sdf::path(path)?).graph().non_site_deps_shared();
+            let deps = deps.expect("the seed clone carries the record down");
+            assert!(Arc::ptr_eq(&root, deps), "{path} shares its ancestor's allocation");
+        }
+        Ok(())
+    }
+
+    /// A sub-root reference target composes as its own sub-index and is grafted,
+    /// so a consultation inside it must merge up into the grafting graph.
+    #[test]
+    fn grafted_subindex_default_dep() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"User\" (\n    references = @mid.usda@</Group/Inner>\n) {}\n",
+        );
+        let mid = parse_named_layer(
+            "mid.usda",
+            "#usda 1.0\ndef \"Group\" {\n    def \"Inner\" (\n        references = @t.usda@\n    ) {}\n}\n",
+        );
+        let t = parse_named_layer("t.usda", TWO_SOURCE_TARGET);
+        let mut graph = LayerGraph::from_layers(vec![root, mid, t], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        let target = graph.id_of("t.usda").expect("the target layer is interned");
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+        assert!(
+            cache
+                .cached(&sdf::path("/User")?)
+                .default_prim_layers()
+                .contains(&target),
+            "the sub-build's record merges into the grafting graph"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(2.0)),
+            "a consultation two arcs deep still recomposes"
+        );
+        Ok(())
+    }
+
+    /// A materialized prototype is a clone of its canonical instance's index, so
+    /// the record has to ride on the graph to survive: the build-output channel
+    /// a prototype is cached with is empty by construction.
+    #[test]
+    fn prototype_carries_default_dep() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    instanceable = true\n    references = @t.usda@\n) {}\n\
+             def \"B\" (\n    instanceable = true\n    references = @t.usda@\n) {}\n",
+        );
+        let t = parse_named_layer("t.usda", TWO_SOURCE_TARGET);
+        let mut graph = LayerGraph::from_layers(vec![root, t], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        let target = graph.id_of("t.usda").expect("the target layer is interned");
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/A.y")?, 0.0)?,
+            Some(Value::Double(1.0))
+        );
+        // Materializing the shared prototype is what clones the canonical
+        // instance's index; a value read alone leaves the registry cold.
+        cache
+            .prototype_of(&graph, &sdf::path("/A")?)?
+            .expect("an instance shares a prototype");
+        let prototype = cache.prototypes().first().cloned().expect("one shared prototype");
+        assert!(
+            cache.cached(&prototype).default_prim_layers().contains(&target),
+            "the clone carries the canonical instance's record"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/A.y")?, 0.0)?,
+            Some(Value::Double(2.0)),
+            "the shared prototype recomposes"
+        );
+        Ok(())
+    }
+
+    /// A `defaultPrim` edit on a layer no cached index depends on reports nothing
+    /// and evicts nothing: the record answers per layer, so a layer that is
+    /// interned but reached by no composition has no registrations to find.
+    #[test]
+    fn unused_layer_no_resync() -> Result<()> {
+        let (mut graph, mut cache, target) = default_prim_stack(TWO_SOURCE_TARGET);
+        // Compose only the prim that references nothing, so the target layer is
+        // interned but no index reads it.
+        settled_value_at(&mut graph, &mut cache, &sdf::path("/Other.y")?, 0.0)?;
+        let pre = cache.indexed_count();
+        assert!(pre > 0);
+
+        let resynced = edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
+
+        assert!(resynced.is_empty(), "no index depends on the layer: {resynced:?}");
+        assert_eq!(cache.indexed_count(), pre);
+        Ok(())
+    }
+
+    /// An internal reference naming no prim resolves through the *root* layer's
+    /// `defaultPrim`, not the session layer's, even though the session layer is
+    /// the root layer stack's strongest member. Editing the session layer's copy
+    /// of the field therefore changes nothing, and editing the root layer's
+    /// recomposes — the pair that pins which layer the record names.
+    #[test]
+    fn session_default_prim_inert() -> Result<()> {
+        let session = parse_named_layer("session.usda", "#usda 1.0\n(\n    defaultPrim = \"Ignored\"\n)\n");
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\n(\n    defaultPrim = \"Source\"\n)\n\
+             def \"Source\" { custom double y = 1 }\ndef \"Second\" { custom double y = 2 }\n\
+             def \"Ignored\" { custom double y = 99 }\n\
+             def \"User\" (\n    references = <>\n) {}\n",
+        );
+        let mut graph = LayerGraph::from_layers(vec![session, root], 1, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        let root_id = graph.root_id().unwrap();
+        let session_id = graph.id_of("session.usda").expect("the session layer is interned");
+        let y = sdf::path("/User.y")?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0)),
+            "the internal reference resolves through the root layer's default"
+        );
+
+        let resynced = edit_default_prim(&mut graph, &mut cache, session_id, Some("Second"))?;
+        assert!(
+            resynced.is_empty(),
+            "no index reads the session layer's default: {resynced:?}"
+        );
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(1.0)),
+            "and the composition is unchanged"
+        );
+
+        edit_default_prim(&mut graph, &mut cache, root_id, Some("Second"))?;
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
+            Some(Value::Double(2.0)),
+            "editing the layer actually consulted recomposes"
+        );
+        Ok(())
+    }
+
+    /// An asset attribute's `${VAR}` inside a referenced target resolves against
+    /// the variable authored on the referencing root. The target has no
+    /// expression sublayers, so only the contextual instance the arc minted
+    /// carries the variable to value-resolution time.
+    #[test]
+    fn expr_asset_inherited_context() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\n(\n    expressionVariables = {\n        string A = \"tex.png\"\n    }\n)\ndef \"M\" (\n    references = @base.usda@</B>\n) {}\n",
+        );
+        let base = parse_named_layer(
+            "base.usda",
+            "#usda 1.0\ndef \"B\" {\n    custom asset tex = @`${A}`@\n}\n",
+        );
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        let value = settled_value_at(&mut graph, &mut cache, &sdf::path("/M.tex")?, 0.0)?.expect("tex resolves");
+        let asset = value.try_as_asset_path().expect("attribute is asset-typed");
+        assert_eq!(
+            asset.evaluated_path(),
+            Some("tex.png"),
+            "the referencing root's A evaluates the target's asset expression"
+        );
+        Ok(())
+    }
+
+    /// An `expressionVariables` edit on a referenced layer drops only the indices
+    /// that read it: the referencing prim's index is evicted, while a sibling
+    /// composed solely from the root keeps its cached index — the
+    /// over-invalidation (dropped-sibling) guard.
+    #[test]
+    fn expr_var_edit_scoped_drop() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"Local\" {}\ndef \"Ref\" (\n    references = @base.usda@</Base>\n) {}\n",
+        );
+        let base = parse_named_layer("base.usda", "#usda 1.0\ndef \"Base\" {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        let base_id = graph.id_of("base.usda").unwrap();
+        let local = sdf::path("/Local")?;
+        let refp = sdf::path("/Ref")?;
+
+        cache.ensure_index(&graph, &local)?;
+        cache.ensure_index(&graph, &refp)?;
+        assert!(cache.store.index_at(&local).is_some());
+        assert!(cache.store.index_at(&refp).is_some());
+
+        let cl = edit_layer(&mut graph.get_mut(base_id).unwrap().layer, |e| {
+            e.set_expression_variables(HashMap::from([("V".to_string(), Value::String("x".into()))]))
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(base_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(
+            cache.store.index_at(&local).is_some(),
+            "the root-only sibling does not read base.usda, so its index stays warm"
+        );
+        assert!(
+            cache.store.index_at(&refp).is_none(),
+            "the referencing prim reads base.usda, so the expr-var edit drops its index"
+        );
+        Ok(())
+    }
+
+    /// A `targetPaths` edit clears only the edited relationship's memo; a sibling
+    /// relationship on the same prim keeps its cached resolved-target list — the
+    /// suffix-precise target-memo clear.
+    #[test]
+    fn target_edit_clears_one_memo() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(
+            "#usda 1.0\ndef \"P\" {\n    rel relA = [</X>]\n    rel relB = [</Y>]\n}\ndef \"X\" {}\ndef \"Y\" {}\n",
+        );
+        let root_id = graph.root_id().unwrap();
+        let p_prim = sdf::path("/P")?;
+        let key = |suffix: &str| TargetMemoKey {
+            kind: PropertyTargetKind::Relationship,
+            property_suffix: suffix.to_owned(),
+        };
+
+        // The first query of each relationship populates its memo on /P's entry.
+        cache.relationship_targets(&graph, &sdf::path("/P.relA")?)?;
+        cache.relationship_targets(&graph, &sdf::path("/P.relB")?)?;
+        assert!(cache.store.target_memo(&p_prim, &key(".relA")).is_some());
+        assert!(cache.store.target_memo(&p_prim, &key(".relB")).is_some());
+
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |e| {
+            e.relationship_mut("/P.relA")
+                .unwrap()
+                .expect("relationship spec")
+                .set_target_paths([sdf::path("/Z").unwrap()])
+                .unwrap();
+            Ok(())
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(
+            cache.store.target_memo(&p_prim, &key(".relA")).is_none(),
+            "the edited relationship's memo is cleared"
+        );
+        assert!(
+            cache.store.target_memo(&p_prim, &key(".relB")).is_some(),
+            "the sibling relationship's memo survives the suffix-precise clear"
+        );
+        Ok(())
+    }
+
+    /// A template clip set (`templateAssetPath` + start/end/stride) is
+    /// expanded to explicit clips and resolves end to end through
+    /// `value_at` (spec 12.3.4.1.3): `clip.1.usda` drives t=1, `clip.2.usda`
+    /// drives t=2.
+    #[test]
+    fn resolves_template_clip_values() -> Result<()> {
+        let root = format!("{}/fixtures/clip_template/root.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        // Exact-match sampler: each clip authors a single sample at its frame.
+        let interp =
+            |samples: &sdf::TimeSampleMap, t: f64| samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone());
+
+        let size =
+            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &interp);
+        assert_eq!(size(&mut cache, 1.0)?, Some(sdf::Value::Float(10.0)));
+        assert_eq!(size(&mut cache, 2.0)?, Some(sdf::Value::Float(20.0)));
+        Ok(())
+    }
+
+    /// A template clip set authored in a sublayer with a layer offset has its
+    /// derived schedule retimed into stage time (spec 12.3.4): the offset of 10
+    /// shifts `clip.1`'s frame to stage t=11 and `clip.2`'s to t=12.
+    #[test]
+    fn template_clip_schedule_retimed_by_offset() -> Result<()> {
+        let root = format!("{}/fixtures/clip_template_offset/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let size =
+            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
+        assert_eq!(size(&mut cache, 11.0)?, Some(Value::Float(10.0)));
+        assert_eq!(size(&mut cache, 12.0)?, Some(Value::Float(20.0)));
+        Ok(())
+    }
+
+    /// When a stronger layer authors explicit `assetPaths` and a weaker
+    /// sublayer authors `templateAssetPath` for the same set, the explicit
+    /// paths win (spec 12.3.4.1.3) and must anchor on the layer that authored
+    /// them: `@./clip.usda@` resolves next to the root, not the sublayer.
+    #[test]
+    fn explicit_asset_paths_anchor_over_template() -> Result<()> {
+        let root = format!("{}/fixtures/clip_asset_anchor/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let size =
+            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(42.0)));
+        Ok(())
+    }
+
+    /// Exact-match sampler: a clip resolves only at a frame it authors.
+    fn exact(samples: &sdf::TimeSampleMap, t: f64) -> Option<Value> {
+        samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone())
+    }
+
+    /// Linear sampler over `float` samples, held outside the sample range.
+    fn lerp(samples: &sdf::TimeSampleMap, t: f64) -> Option<Value> {
+        let as_f = |v: &Value| match v {
+            Value::Float(f) => *f as f64,
+            Value::Double(d) => *d,
+            _ => 0.0,
+        };
+        let first = samples.first()?;
+        if t <= first.0 {
+            return Some(first.1.clone());
+        }
+        let last = samples.last()?;
+        if t >= last.0 {
+            return Some(last.1.clone());
+        }
+        let w = samples.windows(2).find(|w| t >= w[0].0 && t <= w[1].0)?;
+        let f = (t - w[0].0) / (w[1].0 - w[0].0);
+        Some(Value::Float(
+            (as_f(&w[0].1) + (as_f(&w[1].1) - as_f(&w[0].1)) * f) as f32,
+        ))
+    }
+
+    /// A gap in the active clip falls to the manifest's authored default
+    /// (spec 12.3.4.6): `t=0` is sampled from the clip, `t=10` (no sample)
+    /// resolves to the manifest default `99.0`.
+    #[test]
+    fn missing_clip_value_uses_manifest_default() -> Result<()> {
+        let root = format!("{}/fixtures/clip_missing_default/root.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let size =
+            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(5.0)));
+        assert_eq!(size(&mut cache, 10.0)?, Some(Value::Float(99.0)));
+        Ok(())
+    }
+
+    /// A manifest-declared attribute with no default and a gap is
+    /// authoritatively absent (spec 12.3.4.6): the clip owns the attribute, so
+    /// the gap blocks fall-through to the referenced time samples (`777.0`) and
+    /// resolves to `None` rather than the weaker value.
+    #[test]
+    fn missing_clip_value_without_default_blocks() -> Result<()> {
+        let root = format!("{}/fixtures/clip_missing_block/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let size =
+            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(5.0)));
+        assert_eq!(size(&mut cache, 10.0)?, None);
+        Ok(())
+    }
+
+    /// `resolve_value_source` gates clips precisely: on a clip-bearing prim, an
+    /// attribute the manifest declares (`size`) resolves as
+    /// [`AttributeValueSource::Clips`], while a sibling the manifest does not
+    /// declare (`extra`) falls through to its referenced `timeSamples` rather
+    /// than being routed conservatively through the per-call clip path.
+    #[test]
+    fn value_source_skips_undeclared_clip_attr() -> Result<()> {
+        let root = format!("{}/fixtures/clip_undeclared_arc/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+
+        assert!(matches!(
+            cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?.source,
+            AttributeValueSource::Clips
+        ));
+        // `extra` is not in the manifest, so the clip set does not own it; the
+        // source is the reference's time samples, queryable on the fast path.
+        let AttributeValueSource::TimeSamples { samples, .. } =
+            cache.resolve_value_source(&graph, &sdf::path("/Model.extra")?)?.source
+        else {
+            panic!("undeclared clip attribute must resolve as arc time samples");
+        };
+        assert_eq!(samples.as_slice(), &[(3.0, Value::Float(42.0))]);
+        Ok(())
+    }
+
+    /// A clip holds its value across its active interval, so it owns the
+    /// attribute even at times where it authors no sample inside that interval.
+    /// `resolve_value_source` must agree with `value_at` here: clip0 (active
+    /// over stage `[0, 10)`) authors only at clip-time 50, yet holds `50.0` at
+    /// stage 5, so the source is `Clips` (deferring to `value_at`) and must not
+    /// collapse to the reference's weaker `999.0` time sample — the divergence a
+    /// discrete sample-time gate would cache.
+    #[test]
+    fn value_source_clips_held_manifestless() -> Result<()> {
+        let root = format!("{}/fixtures/clip_manifestless_held/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/Model.size")?, 5.0, &lerp)?,
+            Some(Value::Float(50.0))
+        );
+        assert!(matches!(
+            cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?.source,
+            AttributeValueSource::Clips
+        ));
+        Ok(())
+    }
+
+    /// A participating clip set reports each clip's activation time. The held
+    /// set contributes both activations and neither clip's samples — clip0's
+    /// sole sample maps to stage 50, outside its `[0, 10)` window, and clip1
+    /// authors none. A manifest that omits an attribute does not source it, so
+    /// `extra` falls through to the arc's own samples.
+    #[test]
+    fn clip_sample_times_boundaries() -> Result<()> {
+        let held = format!("{}/fixtures/clip_manifestless_held/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&held);
+        assert_eq!(
+            cache.time_sample_times(&graph, &sdf::path("/Model.size")?)?,
+            Some(vec![0.0, 10.0])
+        );
+
+        let arc = format!("{}/fixtures/clip_undeclared_arc/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&arc);
+        let extra = cache.time_sample_times(&graph, &sdf::path("/Model.extra")?)?;
+        assert_eq!(extra, Some(vec![3.0]));
+        Ok(())
+    }
+
+    /// With `interpolateMissingClipValues`, a gap is filled by interpolating
+    /// across the surrounding contributing clips (spec 12.3.4.7): the empty
+    /// middle clip at `t=15` interpolates `0.0` (t=0 clip) and `100.0`
+    /// (t=20 clip) to `75.0`.
+    #[test]
+    fn interpolate_missing_clip_values_across_clips() -> Result<()> {
+        let root = format!("{}/fixtures/clip_missing_interp/root.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let size =
+            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &lerp);
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(0.0)));
+        assert_eq!(size(&mut cache, 15.0)?, Some(Value::Float(75.0)));
+        assert_eq!(size(&mut cache, 20.0)?, Some(Value::Float(100.0)));
+        Ok(())
+    }
+
+    /// Instances sharing a prototype compose their subtree once: every
+    /// instance's descendants redirect into the shared prototype namespace, so
+    /// the descendant is indexed under `/__Prototype_N` and never under an
+    /// instance's own path (spec 11.3.3).
+    #[test]
+    fn instances_share_prototype() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_shared.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        // Query /A first so it mints /__Prototype_0 for its key.
+        let size = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), 0.0, &interp);
+        assert_eq!(size(&mut cache, "/A/Child.size")?, Some(sdf::Value::Double(5.0)));
+        assert_eq!(size(&mut cache, "/B/Child.size")?, Some(sdf::Value::Double(5.0)));
+        assert_eq!(size(&mut cache, "/C/Child.size")?, Some(sdf::Value::Double(9.0)));
+
+        // /A and /B share /__Prototype_0; /C uses /__Prototype_1. The shared
+        // subtree composes once in each prototype namespace, and no instance's
+        // own descendant path is ever indexed.
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Child")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_1/Child")?));
+        assert!(!cache.is_indexed(&sdf::path("/A/Child")?));
+        assert!(!cache.is_indexed(&sdf::path("/B/Child")?));
+        assert!(!cache.is_indexed(&sdf::path("/C/Child")?));
+        Ok(())
+    }
+
+    /// Reading a deep instance-proxy value composes the shared prototype subtree
+    /// once: the instance-ness check on an intermediate proxy prim redirects to
+    /// the shared `/__Prototype_N` index instead of composing a throwaway literal
+    /// index per instance, so no intermediate proxy path is ever indexed (spec
+    /// 11.3.3).
+    #[test]
+    fn proxy_descendants_share_prototype() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_deep.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), 0.0, &interp);
+
+        // Reading the deep value walks the proxy ancestors (/A/Mid, /B/Mid),
+        // testing each for instance-ness.
+        assert_eq!(v(&mut cache, "/A/Mid/Leaf.v")?, Some(sdf::Value::Double(1.0)));
+        assert_eq!(v(&mut cache, "/B/Mid/Leaf.v")?, Some(sdf::Value::Double(1.0)));
+
+        // The shared subtree composes once, under the prototype namespace.
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Mid")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Mid/Leaf")?));
+        // No intermediate proxy prim is composed literally at an instance path.
+        for p in ["/A/Mid", "/B/Mid", "/A/Mid/Leaf", "/B/Mid/Leaf"] {
+            assert!(!cache.is_indexed(&sdf::path(p)?), "{p} must not be indexed literally");
+        }
+        Ok(())
+    }
+
+    /// A nested instance inside a prototype namespace mints its own prototype and
+    /// its descendants redirect onto it: both an outer proxy (`/A/Nested/Leaf`)
+    /// and the prototype-namespace path (`/__Prototype_0/Nested/Leaf`) resolve
+    /// through the nested prototype, so the nested descendant never composes in
+    /// place under the outer prototype (spec 11.3.3).
+    #[test]
+    fn nested_prototype_proxy_redirects() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_in_prototype.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), 0.0, &interp);
+
+        // /A mints /__Prototype_0 (for /Outer); the nested instance mints
+        // /__Prototype_1 (for /Inner). Both the outer proxy and the
+        // prototype-namespace path resolve the nested leaf.
+        assert_eq!(v(&mut cache, "/A/Nested/Leaf.v")?, Some(sdf::Value::Double(3.0)));
+        assert_eq!(
+            v(&mut cache, "/__Prototype_0/Nested/Leaf.v")?,
+            Some(sdf::Value::Double(3.0))
+        );
+
+        // Both redirect to the nested prototype; neither the prototype-namespace
+        // nested descendant nor the outer proxy is composed in place.
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_1/Leaf")?));
+        assert!(!cache.is_indexed(&sdf::path("/__Prototype_0/Nested/Leaf")?));
+        assert!(!cache.is_indexed(&sdf::path("/A/Nested/Leaf")?));
+
+        // The nested instance reached via the instance namespace (/A/Nested) and
+        // via the prototype namespace (/__Prototype_0/Nested) is the same shared
+        // composition, so both resolve to one nested prototype — exactly two
+        // prototypes total, not three.
+        assert_eq!(
+            cache.prototype_of(&graph, &sdf::path("/A/Nested")?)?,
+            cache.prototype_of(&graph, &sdf::path("/__Prototype_0/Nested")?)?,
+        );
+        assert_eq!(cache.prototypes().len(), 2);
+        Ok(())
+    }
+
+    /// A nested instance has one registry identity — its prim inside the
+    /// enclosing prototype — whatever route reached it (spec 11.3.3). Querying
+    /// through each outer instance's proxy and through the prototype namespace,
+    /// in any order and on a fresh cache each time, registers that one instance,
+    /// while the outer prototype keeps reporting both of its own.
+    #[test]
+    fn nested_identity_query_order() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_in_prototype.usda", manifest_dir());
+        let orders = [
+            ["/A/Nested", "/B/Nested", "/__Prototype_0/Nested"],
+            ["/B/Nested", "/__Prototype_0/Nested", "/A/Nested"],
+            ["/A/Nested", "/__Prototype_0/Nested", "/B/Nested"],
+        ];
+        for order in orders {
+            let (graph, mut cache) = single_layer_stack(&root);
+            for queried in order {
+                cache.prototype_of(&graph, &sdf::path(queried)?)?;
+            }
+            let outer = cache
+                .prototype_of(&graph, &sdf::path("/A")?)?
+                .expect("/A is an instance");
+            let nested = cache
+                .prototype_of(&graph, &sdf::path("/A/Nested")?)?
+                .expect("the nested proxy is an instance");
+            assert_eq!(
+                cache.instances_of(&nested),
+                vec![outer.append_path("Nested")?],
+                "nested identity for {order:?}"
+            );
+            assert_eq!(
+                cache.instances_of(&outer),
+                vec![sdf::path("/A")?, sdf::path("/B")?],
+                "outer instances for {order:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Prototypes nested three deep are each seeded from the prototype above,
+    /// so a change at the outermost instance drops the whole chain (spec
+    /// 11.3.3), not just the prototype the change path is registered under.
+    #[test]
+    fn nested_chain_invalidates() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_chain.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, 0.0, &interp)?,
+            Some(Value::Double(1.0))
+        );
+        assert_eq!(cache.prototypes().len(), 3, "one prototype per nesting level");
+
+        cache.invalidate_prototypes(&[sdf::path("/A")?]);
+        assert!(
+            cache.prototypes().is_empty(),
+            "every prototype in the chain drops: {:?}",
+            cache.prototypes()
+        );
+
+        // The chain re-registers from scratch and resolves again, so the drop
+        // left behind no stale index, redirection, or key.
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, 0.0, &interp)?,
+            Some(Value::Double(1.0))
+        );
+        assert_eq!(cache.prototypes().len(), 3);
+        Ok(())
+    }
+
+    /// The victim list a drop is given cannot name the prototypes it retires: the
+    /// cascade reaches them through the registry, and a `/__Prototype_N` root is
+    /// in a namespace no instance path prefixes. `drop_index_victims` hands them
+    /// back so a caller reporting the invalidation can name them.
+    #[test]
+    fn drop_victims_returns_retired() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_chain.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, 0.0, &interp)?;
+        let registered = cache.prototypes();
+        assert_eq!(registered.len(), 3, "one prototype per nesting level");
+
+        let mut expected = registered;
+        expected.push(sdf::path("/A")?);
+        expected.sort();
+        let mut reported = cache.drop_index_victims(vec![sdf::path("/A")?]);
+        reported.sort();
+        assert_eq!(reported, expected, "the victim and every root the cascade retired");
+        Ok(())
+    }
+
+    /// A nested instance whose reference targets a sub-root prim composes from
+    /// its prim inside the enclosing prototype (spec 11.3.3): seeding the nested
+    /// prototype from the outer proxy's own namespace instead leaves its
+    /// descendants with no contributing specs.
+    #[test]
+    fn nested_subroot_proxy() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_subroot.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        // /A mints /__Prototype_0 for /Outer; the nested instance mints
+        // /__Prototype_1 for /Library/Inner, and the outer proxy's descendant
+        // stands in for a prim there.
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/A/Nested/Leaf.v")?, 0.0, &interp)?,
+            Some(Value::Double(3.0))
+        );
+        assert_eq!(
+            cache.prim_in_prototype(&graph, &sdf::path("/A/Nested/Leaf")?)?,
+            Some(sdf::path("/__Prototype_1/Leaf")?)
+        );
+
+        // The nested instance is never composed at the proxy path, and reaching
+        // it through the instance namespace or the prototype namespace yields
+        // one prototype — two in total, not three.
+        assert!(!cache.is_indexed(&sdf::path("/A/Nested")?));
+        assert_eq!(
+            cache.prototype_of(&graph, &sdf::path("/A/Nested")?)?,
+            cache.prototype_of(&graph, &sdf::path("/__Prototype_0/Nested")?)?,
+        );
+        assert_eq!(cache.prototypes().len(), 2);
+        Ok(())
+    }
+
+    /// A reference nested inside the prototype (below the instanceable arc) is
+    /// shared (spec 11.3.3): its opinions reach the instance through the direct
+    /// instanceable arc, so they survive in the instance's child names and
+    /// descendants. The structural trunk partition keeps it shared on two counts:
+    /// the arc is authored on the prim it targets rather than above the instance,
+    /// and its parent (the prototype root) is not on the instance trunk.
+    #[test]
+    fn nested_reference_in_prototype_shared() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_reference.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let inst = sdf::path("/World/Inst")?;
+
+        // The instance is at namespace depth 2 and is a real instance.
+        assert!(cache.is_instance(&graph, &inst)?, "/World/Inst resolves as an instance");
+
+        // Child names come from the shared prototype: ProtoChild from /Proto and
+        // OtherChild from the nested /Other reference (the leaked case the flat
+        // depth proxy dropped).
+        let children = cache.prim_children(&graph, &inst)?;
+        assert!(
+            children.iter().any(|t| t.as_str() == "ProtoChild"),
+            "prototype child must appear: {children:?}"
+        );
+        assert!(
+            children.iter().any(|t| t.as_str() == "OtherChild"),
+            "nested-reference child must appear: {children:?}"
+        );
+
+        // The nested reference's opinions resolve on the shared descendant.
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/World/Inst/OtherChild.size")?, 0.0, &interp)?,
+            Some(Value::Double(7.0)),
+            "nested-reference descendant value survives in the shared subtree"
+        );
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/World/Inst.otherAttr")?, 0.0, &interp)?,
+            Some(Value::Double(5.0)),
+            "nested-reference attribute survives on the instance root"
+        );
+        Ok(())
+    }
+
+    /// An instanceable prim reached through a reference on a non-root prim
+    /// materializes the same prototype as one reached through a reference on a
+    /// root prim (spec 11.3.3): the depth of the prim carrying the outer
+    /// reference does not change what composes. The instanceable arc is authored
+    /// in the referenced namespace, so its namespace depth is shallower than the
+    /// nested instance's stage depth and must be told apart from the outer
+    /// reference by where its arc was introduced relative to the instance.
+    #[test]
+    fn ancestral_reference_prototype() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_ancestral_reference.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        // The instance one level below the root and the instance at the root are
+        // the same shared composition, so they share a single prototype.
+        let shallow = cache.prototype_of(&graph, &sdf::path("/Shallow/A")?)?;
+        let deep = cache.prototype_of(&graph, &sdf::path("/Deep/G/A")?)?;
+        assert_eq!(shallow, deep, "nesting the referencing prim must not change the key");
+        let proto = deep.expect("nested instance resolves a prototype");
+        assert_eq!(cache.prototypes(), vec![proto.clone()]);
+
+        // The prototype materializes: the instanceable arc stayed shared, so the
+        // referenced subtree is there rather than an empty root.
+        assert_eq!(cache.prim_children(&graph, &proto)?, vec![Token::from("ProtoChild")]);
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/__Prototype_0.protoAttr")?, 0.0, &interp)?,
+            Some(Value::Double(3.0)),
+        );
+
+        // And the nested instance's own namespace serves that shared content.
+        assert_eq!(
+            cache.prim_children(&graph, &sdf::path("/Deep/G/A")?)?,
+            vec![Token::from("ProtoChild")]
+        );
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/Deep/G/A/ProtoChild.size")?, 0.0, &interp)?,
+            Some(Value::Double(7.0)),
+        );
+        Ok(())
+    }
+
+    /// A prototype root whose shared content carries `instanceable = true` — the
+    /// opinion an asset authors on the prim its referencing layer targets — is
+    /// still not an instance (spec 11.3.3). The opinion describes the prims that
+    /// share the prototype, so the prototype keeps it as content but mints no
+    /// prototype of its own and composes its plain content in place.
+    #[test]
+    fn prototype_root_instanceable() -> Result<()> {
+        let root = format!(
+            "{}/fixtures/instancing_prototype_root_instanceable.usda",
+            manifest_dir()
+        );
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        let proto = cache
+            .prototype_of(&graph, &sdf::path("/World/Place")?)?
+            .expect("the referencing prim is an instance");
+
+        // The opinion resolves true on the prototype root, yet the root is not an
+        // instance and so mints nothing further.
+        assert_eq!(
+            cache
+                .cached(&proto)
+                .resolve_field(FieldKey::Instanceable.as_str(), &graph, None)?,
+            Some(Value::Bool(true)),
+            "the instanceable opinion is shared content of the prototype"
+        );
+        assert!(
+            !cache.is_instance(&graph, &proto)?,
+            "a prototype root is never an instance"
+        );
+        assert_eq!(cache.prototype_of(&graph, &proto)?, None);
+        assert_eq!(cache.prototypes(), vec![proto.clone()]);
+
+        // Its content composes in place rather than redirecting back through it.
+        assert_eq!(cache.prim_children(&graph, &proto)?, vec![Token::from("BodyChild")]);
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/__Prototype_0.bodyAttr")?, 0.0, &interp)?,
+            Some(Value::Double(4.0)),
+        );
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/World/Place.bodyAttr")?, 0.0, &interp)?,
+            Some(Value::Double(4.0)),
+        );
+        Ok(())
+    }
+
+    /// `instances_of` is sorted by path, so the result is independent of the
+    /// order instances were registered (spec 11.3.3).
+    #[test]
+    fn instances_of_sorted() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_shared.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+
+        // Register /B before /A so registration order is [/B, /A].
+        let proto = cache.prototype_of(&graph, &sdf::path("/B")?)?.unwrap();
+        assert_eq!(cache.prototype_of(&graph, &sdf::path("/A")?)?, Some(proto.clone()));
+
+        // The returned instances are still sorted by path.
+        assert_eq!(cache.instances_of(&proto), vec![sdf::path("/A")?, sdf::path("/B")?]);
+        Ok(())
+    }
+
+    /// A significant change (here, flipping `instanceable`) clears the
+    /// prototype registry so stale instance-to-prototype mappings do not
+    /// persist (spec 11.3.3).
+    #[test]
+    fn instance_change_invalidates_prototypes() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_shared.usda", manifest_dir());
+        let (mut graph, mut cache) = single_layer_stack(&root);
+        let root_id = graph.root_id().unwrap();
+
+        assert!(cache.prototype_of(&graph, &sdf::path("/A")?)?.is_some());
+        assert!(!cache.prototypes().is_empty());
+
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/A")?)
+            .note(sdf::FieldKey::Instanceable.as_str(), sdf::FieldChange::Value);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(cache.prototypes().is_empty());
+        Ok(())
+    }
+
+    /// A plain inert `over` authored after a prim was queried as empty must
+    /// become visible: the spec-tier rescan refreshes the cached site's
+    /// `has_specs` in place (or drops a nodeless stale index), so the next
+    /// query sees the spec without a significant subtree rebuild.
+    #[test]
+    fn inert_add_recomposes() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"A\" {}\n");
+        let root_id = graph.root_id().unwrap();
+
+        // Query a prim no layer authors: cached as an empty index.
+        assert!(!cache.has_spec(&graph, &sdf::path("/Foo")?)?);
+
+        // Author an inert `over "Foo"` into the root layer.
+        let node = graph.get_mut(root_id).unwrap();
+        edit_layer(&mut node.layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Foo", sdf::Specifier::Over, "")?;
+            Ok(())
+        })?;
+
+        // Drive the inert add through the change pipeline.
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/Foo")?).flags = sdf::ChangeFlags::ADD_INERT_PRIM;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // The spec-tier rescan made the new opinion visible.
+        assert!(cache.has_spec(&graph, &sdf::path("/Foo")?)?);
+        Ok(())
+    }
+
+    /// An `over` authored together with a composition arc recomposes despite
+    /// the inert specifier: the change record surfaces `references` in
+    /// `info_changed` (only the auto-stamped `specifier` folds into the add), so
+    /// the classifier treats the inert add as significant.
+    #[test]
+    fn inert_add_with_arc_recomposes() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"Class\" { int x = 5 }\n");
+        let root_id = graph.root_id().unwrap();
+        let inst = sdf::path("/Inst")?;
+
+        // Query /Inst before it exists: cached as empty, composing no arc.
+        assert!(!cache.has_composition_arc(&graph, &inst)?);
+
+        // Author `over "Inst" ( references = </Class> )` through the recording proxy.
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            let data = l.data_mut();
+            data.create_spec(inst.clone(), sdf::SpecType::Prim);
+            data.set_field(
+                &inst,
+                sdf::FieldKey::Specifier.as_str(),
+                Value::Specifier(sdf::Specifier::Over),
+            );
+            let refs = sdf::ReferenceListOp::explicit([sdf::Reference {
+                prim_path: sdf::path("/Class").unwrap(),
+                ..Default::default()
+            }]);
+            data.set_field(&inst, sdf::FieldKey::References.as_str(), Value::ReferenceListOp(refs));
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // The reference is composed, not skipped by an in-place spec refresh.
+        assert!(cache.has_composition_arc(&graph, &inst)?);
+        Ok(())
+    }
+
+    /// Erasing an `over` that carried a composition arc recomposes: the change
+    /// record carries the removed `references` field, so the classifier
+    /// treats the inert removal as significant and the arc is torn down.
+    #[test]
+    fn inert_remove_of_arc_recomposes() -> Result<()> {
+        let (mut graph, mut cache) =
+            in_memory_stack("#usda 1.0\ndef \"Class\" { int x = 5 }\nover \"Inst\" ( references = </Class> ) {}\n");
+        let root_id = graph.root_id().unwrap();
+        let inst = sdf::path("/Inst")?;
+
+        // The reference composes initially.
+        assert!(cache.has_composition_arc(&graph, &inst)?);
+
+        // Erase the /Inst spec through the recording proxy and drive the removal.
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            l.data_mut().erase_spec(&inst);
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // The arc is gone, not left dangling by an in-place spec refresh.
+        assert!(!cache.has_composition_arc(&graph, &inst)?);
+        Ok(())
+    }
+
+    /// An inert `over` add into a stronger sublayer is a spec-tier change that
+    /// refreshes the memoized spec stack in place: the new site joins the prim
+    /// stack ahead of the weaker one, and the refreshed stack matches a
+    /// from-scratch composition of the edited layers.
+    #[test]
+    fn spec_tier_refresh_updates_prim_stack() -> Result<()> {
+        let root = parse_named_layer("root.usd", "#usda 1.0\n(\n    subLayers = [@weak.usd@]\n)\n");
+        let weak = parse_named_layer("weak.usd", "#usda 1.0\ndef \"A\" { custom int x = 1 }\n");
+        let mut graph = LayerGraph::from_layers(vec![root, weak], 0, sdf::LayerRegistry::default());
+        let root_id = graph.id_of("root.usd").unwrap();
+        let mut cache = fresh_cache();
+        let a = sdf::path("/A")?;
+
+        // Before the edit only the weak sublayer authors /A.
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![("weak.usd".to_string(), a.clone())]
+        );
+
+        // Author an inert `over "A"` into the strong root layer.
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/A")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        assert!(
+            changes.cache.did_change_specs.contains(&(root_id, a.clone())),
+            "an inert over add routes through the spec tier"
+        );
+        changes.apply(&mut cache, &mut graph);
+
+        // The refreshed spec stack lists the strong site first and equals a fresh
+        // composition of the same layers.
+        let refreshed = cache.prim_stack(&graph, &a)?;
+        assert_eq!(
+            sites(refreshed.clone()),
+            vec![("root.usd".to_string(), a.clone()), ("weak.usd".to_string(), a.clone())],
+            "the spec-tier refresh adds the new strong site to the prim stack"
+        );
+        let mut fresh = fresh_cache();
+        assert_eq!(
+            refreshed,
+            fresh.prim_stack(&graph, &a)?,
+            "in-place refresh matches a fresh build"
+        );
+        Ok(())
+    }
+
+    /// The splice places each refreshed run by node, not by arrival order.
+    ///
+    /// `/A` references `/Src`, which inherits `/SrcClass`, so the reference
+    /// grafts an implied class node into the *root* layer stack. That node is
+    /// created after the reference node it came from, yet inherits outrank
+    /// references — so one round refreshing both hands the splice runs whose
+    /// arena order contradicts the strength order it walks.
+    #[test]
+    fn splice_ignores_arena_order() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usd",
+            "#usda 1.0\n(\n    subLayers = [@mid.usd@]\n)\nover \"SrcClass\" { custom int rc = 1 }\ndef \"A\" (\n    references = @src.usd@</Src>\n)\n{\n}\n",
+        );
+        let mid = parse_named_layer("mid.usd", "#usda 1.0\n");
+        let src = parse_named_layer(
+            "src.usd",
+            "#usda 1.0\n(\n    subLayers = [@srcmid.usd@]\n)\nclass \"SrcClass\" { custom int c = 1 }\ndef \"Src\" (\n    inherits = </SrcClass>\n)\n{\n    custom int x = 1\n}\n",
+        );
+        let srcmid = parse_named_layer("srcmid.usd", "#usda 1.0\n");
+        let mut graph = LayerGraph::from_layers(vec![root, mid, src, srcmid], 0, sdf::LayerRegistry::default());
+        let mid_id = graph.id_of("mid.usd").unwrap();
+        let srcmid_id = graph.id_of("srcmid.usd").unwrap();
+        let mut cache = fresh_cache();
+        let a = sdf::path("/A")?;
+        let class = sdf::path("/SrcClass")?;
+        let src_path = sdf::path("/Src")?;
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![
+                ("root.usd".to_string(), a.clone()),
+                ("root.usd".to_string(), class.clone()),
+                ("src.usd".to_string(), src_path.clone()),
+                ("src.usd".to_string(), class.clone()),
+            ],
+        );
+
+        // One round, two sites: an inert `over` on the implied class node's
+        // stack and one on the reference node's, each extending a run whose
+        // node keeps the specs it already had.
+        let cl_mid = edit_layer(&mut graph.get_mut(mid_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/SrcClass")?;
+            Ok(())
+        })
+        .unwrap();
+        let cl_srcmid = edit_layer(&mut graph.get_mut(srcmid_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/Src")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(
+            &cache,
+            &graph,
+            &[
+                LayerChanges::plain(mid_id, &cl_mid),
+                LayerChanges::plain(srcmid_id, &cl_srcmid),
+            ],
+        );
+        changes.apply(&mut cache, &mut graph);
+
+        // Read before the query below would recompose it: the index is still
+        // cached, so this round took the in-place refresh the splice serves and
+        // not the significant tier's drop.
+        assert!(
+            cache.store.index_at(&a).is_some(),
+            "the spec tier must refresh the index in place",
+        );
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![
+                ("root.usd".to_string(), a.clone()),
+                ("root.usd".to_string(), class.clone()),
+                ("mid.usd".to_string(), class.clone()),
+                ("src.usd".to_string(), src_path.clone()),
+                ("srcmid.usd".to_string(), src_path),
+                ("src.usd".to_string(), class),
+            ],
+            "each new site joined its own node's run, in strength order",
+        );
+        Ok(())
+    }
+
+    /// The splice keeps the runs of nodes no site named. `/A` composes its own
+    /// local node plus a referenced one; an inert `over` added in a sublayer
+    /// lands in the local node's run, in strength order, while the referenced
+    /// node's entry stays exactly where it was.
+    #[test]
+    fn splice_keeps_reference_run() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usd",
+            "#usda 1.0\n(\n    subLayers = [@mid.usd@]\n)\ndef \"A\" (\n    references = @src.usd@</Src>\n)\n{\n}\n",
+        );
+        let mid = parse_named_layer("mid.usd", "#usda 1.0\n");
+        let src = parse_named_layer("src.usd", "#usda 1.0\ndef \"Src\" { custom int x = 1 }\n");
+        let mut graph = LayerGraph::from_layers(vec![root, mid, src], 0, sdf::LayerRegistry::default());
+        let mid_id = graph.id_of("mid.usd").unwrap();
+        let mut cache = fresh_cache();
+        let a = sdf::path("/A")?;
+        let src_path = sdf::path("/Src")?;
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![
+                ("root.usd".to_string(), a.clone()),
+                ("src.usd".to_string(), src_path.clone())
+            ],
+        );
+
+        let cl = edit_layer(&mut graph.get_mut(mid_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/A")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(mid_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![
+                ("root.usd".to_string(), a.clone()),
+                ("mid.usd".to_string(), a.clone()),
+                ("src.usd".to_string(), src_path),
+            ],
+            "the new site joins the local run; the referenced node keeps its own",
+        );
+        Ok(())
+    }
+
+    /// A node that loses its last spec keeps its place in the graph but
+    /// contributes nothing, so the splice must empty its run rather than leave
+    /// the removed site standing. The local root never culls, so this refreshes
+    /// in place instead of rebuilding.
+    #[test]
+    fn splice_empties_run() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\nover \"A\"\n{\n}\n");
+        let root_id = graph.root_id().unwrap();
+        let a = sdf::path("/A")?;
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![("root.usda".to_string(), a.clone())]
+        );
+
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            l.data_mut().erase_spec(&sdf::path("/A").unwrap());
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(
+            cache.prim_stack(&graph, &a)?.is_empty(),
+            "the removed site must leave the stack, not linger in it",
+        );
+        Ok(())
+    }
+
+    /// A single change round whose inert spec adds reach the same index through
+    /// several sites stays correct. `/A` composes across three sublayers; adding an
+    /// `over "A"` into two of them in one round produces two `(layer, /A)` sites
+    /// that both reach index `/A`, and the batched rescan must compose the prim
+    /// stack a fresh build would. Both sites reach the same node, which the
+    /// refresh scans once and the splice rewrites once; the debug assert in
+    /// `IndexStore::splice_spec_stacks` checks that result against a full
+    /// rebuild, so this test guards the composed answer the batching must
+    /// preserve.
+    #[test]
+    fn spec_refresh_multi_site() -> Result<()> {
+        let root = parse_named_layer("root.usd", "#usda 1.0\n(\n    subLayers = [@mid.usd@, @weak.usd@]\n)\n");
+        let mid = parse_named_layer("mid.usd", "#usda 1.0\n");
+        let weak = parse_named_layer("weak.usd", "#usda 1.0\ndef \"A\" { custom int x = 1 }\n");
+        let mut graph = LayerGraph::from_layers(vec![root, mid, weak], 0, sdf::LayerRegistry::default());
+        let root_id = graph.id_of("root.usd").unwrap();
+        let mid_id = graph.id_of("mid.usd").unwrap();
+        let mut cache = fresh_cache();
+        let a = sdf::path("/A")?;
+
+        // Only the weakest sublayer authors /A before the edit.
+        assert_eq!(
+            sites(cache.prim_stack(&graph, &a)?),
+            vec![("weak.usd".to_string(), a.clone())]
+        );
+
+        // In one change round author an inert `over "A"` into both the root and
+        // the middle sublayer — two spec-tier sites that both reach index /A.
+        let cl_root = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/A")?;
+            Ok(())
+        })
+        .unwrap();
+        let cl_mid = edit_layer(&mut graph.get_mut(mid_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/A")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(
+            &cache,
+            &graph,
+            &[
+                LayerChanges::plain(root_id, &cl_root),
+                LayerChanges::plain(mid_id, &cl_mid),
+            ],
+        );
+        assert!(changes.cache.did_change_specs.contains(&(root_id, a.clone())));
+        assert!(changes.cache.did_change_specs.contains(&(mid_id, a.clone())));
+        changes.apply(&mut cache, &mut graph);
+
+        // Both new sites joined the stack in strength order, matching a fresh
+        // composition of the edited layers.
+        let refreshed = cache.prim_stack(&graph, &a)?;
+        assert_eq!(
+            sites(refreshed.clone()),
+            vec![
+                ("root.usd".to_string(), a.clone()),
+                ("mid.usd".to_string(), a.clone()),
+                ("weak.usd".to_string(), a.clone()),
+            ],
+            "the batched spec-tier refresh adds both new strong sites"
+        );
+        let mut fresh = fresh_cache();
+        assert_eq!(
+            refreshed,
+            fresh.prim_stack(&graph, &a)?,
+            "in-place refresh matches a fresh build"
+        );
+        Ok(())
+    }
+
+    /// Authoring a spec at a previously-empty arc target recomposes a dependent
+    /// that had culled the arc: the spec-tier rescan drops the dependent so its
+    /// rebuild un-culls the reference, which an in-place `has_specs` flip cannot.
+    #[test]
+    fn inert_add_unculls_dependent() -> Result<()> {
+        // /A references a prim the base layer does not define, so the reference
+        // is culled until the target is authored.
+        let root = parse_named_layer(
+            "root.usd",
+            "#usda 1.0\ndef \"A\" ( references = @base.usd@</Empty> ) {}\n",
+        );
+        let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
+        let base_id = graph.id_of("base.usd").unwrap();
+        let mut cache = fresh_cache();
+        let a = sdf::path("/A")?;
+
+        // The empty target makes /A's reference culled — no composition arc.
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+
+        // Author `over "Empty"` into the base layer so the target now exists.
+        let cl = edit_layer(&mut graph.get_mut(base_id).unwrap().layer, |l| {
+            let data = l.data_mut();
+            data.create_spec(sdf::path("/Empty").unwrap(), sdf::SpecType::Prim);
+            data.set_field(
+                &sdf::path("/Empty").unwrap(),
+                sdf::FieldKey::Specifier.as_str(),
+                Value::Specifier(sdf::Specifier::Over),
+            );
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(base_id, &cl)]);
+        // The inert add routes through the spec tier (not a significant fanout),
+        // so the rescan's un-cull path is what recomposes /A.
+        assert!(
+            changes
+                .cache
+                .did_change_specs
+                .contains(&(base_id, sdf::path("/Empty")?))
+        );
+        changes.apply(&mut cache, &mut graph);
+
+        // The reference un-culled: /A now composes the arc.
+        assert!(cache.has_composition_arc(&graph, &a)?);
+        Ok(())
+    }
+
+    /// The same un-cull path works for an empty *inherit* target: authoring the
+    /// class via an inert `over` recomposes the dependent, since the spec-tier
+    /// rescan now sees the inherit as culled and rebuilds rather than flipping
+    /// `has_specs` in place.
+    #[test]
+    fn inert_add_unculls_inherit() -> Result<()> {
+        // /A inherits a class the layer does not define, so the inherit is culled
+        // until the class is authored.
+        let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( inherits = </_class_Foo> ) {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
+        let root_id = graph.id_of("root.usd").unwrap();
+        let mut cache = fresh_cache();
+        let a = sdf::path("/A")?;
+
+        // The empty class makes /A's inherit culled — no composition arc.
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+
+        // Author `over "_class_Foo"` so the class now exists.
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/_class_Foo")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        assert!(
+            changes
+                .cache
+                .did_change_specs
+                .contains(&(root_id, sdf::path("/_class_Foo")?))
+        );
+        changes.apply(&mut cache, &mut graph);
+
+        // The inherit un-culled: /A now composes the arc.
+        assert!(cache.has_composition_arc(&graph, &a)?);
+        Ok(())
+    }
+
+    /// An empty *specialize* target un-culls the same way: the culled
+    /// copy-to-root node carries the dependency, so authoring the class
+    /// recomposes the dependent.
+    #[test]
+    fn inert_add_unculls_specialize() -> Result<()> {
+        let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( specializes = </_class_Foo> ) {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
+        let root_id = graph.id_of("root.usd").unwrap();
+        let mut cache = fresh_cache();
+        let a = sdf::path("/A")?;
+
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/_class_Foo")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        assert!(
+            changes
+                .cache
+                .did_change_specs
+                .contains(&(root_id, sdf::path("/_class_Foo")?))
+        );
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(cache.has_composition_arc(&graph, &a)?);
+        Ok(())
+    }
+
+    /// A descendant under an empty ancestral variant selection carries the
+    /// variant as a culled node and reports no live composition arc. The parent's
+    /// local variant arc is culled when its `{set=sel}` site authors nothing, and
+    /// the ancestral seed clones that culled node down to the descendant — so the
+    /// cull reaches descendants without a separate path. `has_composition_arc`
+    /// stays gated on `has_specs`, so the spec-less variant never counts as a
+    /// composition arc.
+    #[test]
+    fn empty_ancestral_variant_culled() -> Result<()> {
+        // /A selects a variant its set never authors; /A/Child is authored
+        // directly, so it composes under the empty ancestral selection.
+        let (graph, mut cache) = in_memory_stack(
+            "#usda 1.0\ndef \"A\" (\n    variantSets = \"v\"\n    variants = { string v = \"missing\" }\n) {\n  def \"Child\" { custom double x = 1 }\n  variantSet \"v\" = {\n    \"present\" {}\n  }\n}\n",
+        );
+        let child = sdf::path("/A/Child")?;
+
+        // The child composes from its own opinion, not the empty variant.
+        assert!(!cache.has_composition_arc(&graph, &child)?);
+        let index = cache.store.index_at(&child).expect("child index");
+        assert!(
+            index.all_nodes().any(|n| n.arc == ArcType::Variant && n.is_culled()),
+            "the empty ancestral variant target is culled"
+        );
+        assert!(
+            index.nodes().all(|n| n.arc != ArcType::Variant),
+            "the culled variant contributes nothing to resolution"
+        );
+        Ok(())
+    }
+
+    /// Removing the final spec at an inherit target re-culls it. The contributing
+    /// node loses its last spec, so the spec-tier rescan rebuilds and the now-empty
+    /// target composes as a culled node — the same representation as an
+    /// always-empty target, which keeps a later re-add on the un-cull rebuild path
+    /// rather than an in-place flip that would skip grafting.
+    #[test]
+    fn inert_remove_reculls_inherit() -> Result<()> {
+        // /A inherits a class that exists only as an inert `over`, so the inherit
+        // node contributes a spec.
+        let (mut graph, mut cache) =
+            in_memory_stack("#usda 1.0\ndef \"A\" ( inherits = </_class_Foo> ) {}\nover \"_class_Foo\" {}\n");
+        let root_id = graph.root_id().unwrap();
+        let a = sdf::path("/A")?;
+
+        // The class exists, so /A composes the inherit.
+        assert!(cache.has_composition_arc(&graph, &a)?);
+
+        // Erase the class's only spec — a purely inert removal.
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            l.data_mut().erase_spec(&sdf::path("/_class_Foo").unwrap());
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(root_id, &cl)]);
+        assert!(
+            changes
+                .cache
+                .did_change_specs
+                .contains(&(root_id, sdf::path("/_class_Foo")?))
+        );
+        changes.apply(&mut cache, &mut graph);
+
+        // The emptied inherit composes as a culled node, just like an always-empty
+        // target — the rescan rebuilt rather than flipping `has_specs` in place.
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+        let index = cache.store.index_at(&a).expect("index rebuilt on query");
+        assert!(
+            index.all_nodes().any(|n| n.arc == ArcType::Inherit && n.is_culled()),
+            "the emptied inherit target re-culled"
+        );
+        Ok(())
+    }
+
+    /// A reference to a *nested* missing target also recomposes when the target
+    /// is authored. A sub-root target is grafted as a non-culled spec-less node
+    /// (not the root case's culled node), so the spec-tier rescan refreshes its
+    /// `has_specs` in place — no separate empty-target cull is needed.
+    #[test]
+    fn inert_add_recomposes_subroot_target() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usd",
+            "#usda 1.0\ndef \"A\" ( references = @base.usd@</Parent/Empty> ) {}\n",
+        );
+        let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
+        let base_id = graph.id_of("base.usd").unwrap();
+        let mut cache = fresh_cache();
+        let a = sdf::path("/A")?;
+
+        // The missing nested target makes /A's reference contribute nothing.
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+
+        // Author the nested target through the recording proxy.
+        let cl = edit_layer(&mut graph.get_mut(base_id).unwrap().layer, |l| {
+            l.data_mut()
+                .create_spec(sdf::path("/Parent/Empty").unwrap(), sdf::SpecType::Prim);
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(base_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // /A now composes the reference.
+        assert!(cache.has_composition_arc(&graph, &a)?);
+        Ok(())
+    }
+
+    /// Removing an inert `over` carrying `active = false` reactivates the prim:
+    /// the change record carries the removed `active` field, so the classifier
+    /// treats the removal as significant, the subtree recomposes from the weaker
+    /// `def`, and `active` resolves to its default — the subtree is not left
+    /// inactive after the opinion is gone.
+    #[test]
+    fn inert_remove_of_active_reactivates() -> Result<()> {
+        // A strong layer deactivates /World with an inert over; the weak layer
+        // it sublayers defines /World and its child.
+        let strong = parse_named_layer(
+            "strong.usda",
+            "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\nover \"World\" ( active = false ) {}\n",
+        );
+        let weak = parse_named_layer("weak.usda", "#usda 1.0\ndef \"World\" {\n  def \"Child\" {}\n}\n");
+        let mut graph = LayerGraph::from_layers(vec![strong, weak], 0, sdf::LayerRegistry::default());
+        let strong_id = graph.root_id().unwrap();
+        let mut cache = fresh_cache();
+
+        let world = sdf::path("/World")?;
+        let has_child = |cache: &mut IndexCache, graph: &LayerGraph| -> Result<bool> {
+            Ok(cache
+                .prim_children(graph, &world)?
+                .iter()
+                .any(|c| c.as_str() == "Child"))
+        };
+
+        // The over is in effect: `active` resolves false, the child still composes.
+        assert_eq!(
+            cache.resolve_field(&graph, &world, sdf::FieldKey::Active.as_str())?,
+            Some(Value::Bool(false))
+        );
+        assert!(has_child(&mut cache, &graph)?);
+
+        // Erase the over spec on the strong layer and drive the change the
+        // layer derives from it.
+        let cl = edit_layer(&mut graph.get_mut(strong_id).unwrap().layer, |l| {
+            l.data_mut().erase_spec(&world);
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(strong_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // The active=false opinion is gone — the prim reactivates by default —
+        // and the def-composed subtree survives.
+        assert_eq!(
+            cache.resolve_field(&graph, &world, sdf::FieldKey::Active.as_str())?,
+            None
+        );
+        assert!(cache.has_spec(&graph, &world)?);
+        assert!(has_child(&mut cache, &graph)?);
+        Ok(())
+    }
+
+    /// Builds a sublayer chain authoring `opinions[i]` (strongest first) as
+    /// `field` on `/World` of layer `i`, and resolves the field across the
+    /// stack.
+    fn resolve_stacked(field: &str, opinions: &[Value]) -> Result<Option<Value>> {
+        let world = sdf::path("/World")?;
+        let mut layers = Vec::new();
+        for (i, opinion) in opinions.iter().enumerate() {
+            let text = if i + 1 < opinions.len() {
+                format!(
+                    "#usda 1.0\n(\n    subLayers = [@layer{}.usda@]\n)\nover \"World\" {{}}\n",
+                    i + 1
+                )
+            } else {
+                "#usda 1.0\ndef \"World\" {}\n".to_string()
+            };
+            let mut layer = parse_named_layer(&format!("layer{i}.usda"), &text);
+            layer
+                .edit(|l| {
+                    l.data_mut().set_field(&world, field, opinion.clone());
+                    Ok(())
+                })
+                .expect("authored");
+            layers.push(layer);
+        }
+
+        let graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        Ok(cache.resolve_field(&graph, &world, field)?)
+    }
+
+    /// A custom metadata field authored as a list op composes by folding its
+    /// edits across layers (spec 12.2.6), resolving to a baked explicit list
+    /// op.
+    #[test]
+    fn custom_list_op_folds() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "order",
+                &[
+                    Value::IntListOp(sdf::ListOp::prepended(vec![1])),
+                    Value::IntListOp(sdf::ListOp::explicit(vec![2, 3])),
+                ]
+            )?,
+            Some(Value::IntListOp(sdf::ListOp::explicit(vec![1, 2, 3])))
+        );
+        Ok(())
+    }
+
+    /// A path expression's `%_` composes the next-weaker opinion in, and the
+    /// walk stops once no weaker reference remains.
+    #[test]
+    fn path_expr_composes_weaker() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "expr",
+                &[
+                    Value::PathExpression(sdf::PathExpression::parse("/add// %_")),
+                    Value::PathExpression(sdf::PathExpression::parse("/base//")),
+                ]
+            )?,
+            Some(Value::PathExpression(sdf::PathExpression::parse("/add// /base//")))
+        );
+
+        // Without a weaker reference the strongest opinion stands alone.
+        assert_eq!(
+            resolve_stacked(
+                "expr",
+                &[
+                    Value::PathExpression(sdf::PathExpression::parse("/strong//")),
+                    Value::PathExpression(sdf::PathExpression::parse("/base//")),
+                ]
+            )?,
+            Some(Value::PathExpression(sdf::PathExpression::parse("/strong//")))
+        );
+        Ok(())
+    }
+
+    /// A value block stops the `%_` chain; the surviving weaker reference
+    /// resolves to the empty expression.
+    #[test]
+    fn path_expr_block_finalizes() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "expr",
+                &[
+                    Value::PathExpression(sdf::PathExpression::parse("/add// %_")),
+                    Value::ValueBlock,
+                    Value::PathExpression(sdf::PathExpression::parse("/base//")),
+                ]
+            )?,
+            Some(Value::PathExpression(sdf::PathExpression::parse("/add//")))
+        );
+        Ok(())
+    }
+
+    /// An expression authored across an external reference arc translates
+    /// into the root namespace: relative patterns anchor to the referenced
+    /// prim first, and an atom outside the arc's domain drops to nothing.
+    #[test]
+    fn path_expr_maps_across_reference() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"Inst\" ( references = @ref.usda@</Class> ) {}\n",
+        );
+        let mut reference = parse_named_layer("ref.usda", "#usda 1.0\ndef \"Class\" {}\n");
+        let class = sdf::path("/Class")?;
+        edit_layer(&mut reference, |l| {
+            l.data_mut().set_field(
+                &class,
+                "expr",
+                Value::PathExpression(sdf::PathExpression::parse("child// /Class/Sets// /Elsewhere//")),
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        assert_eq!(
+            cache.resolve_field(&graph, &sdf::path("/Inst")?, "expr")?,
+            Some(Value::PathExpression(sdf::PathExpression::parse(
+                "/Inst/child// /Inst/Sets//"
+            )))
+        );
+        Ok(())
+    }
+
+    /// A weaker opinion authored as a plain string parses into the `%_`
+    /// chain, matching the lenient reads collection queries accept.
+    #[test]
+    fn path_expr_weaker_string() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "expr",
+                &[
+                    Value::PathExpression(sdf::PathExpression::parse("/add// %_")),
+                    Value::String("/base//".to_string()),
+                ]
+            )?,
+            Some(Value::PathExpression(sdf::PathExpression::parse("/add// /base//")))
+        );
+        Ok(())
+    }
+
+    /// Array elements translate across a reference arc like the scalar form,
+    /// and a surviving `%_` in an element resolves to the empty expression.
+    #[test]
+    fn path_expr_vec_maps() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"Inst\" ( references = @ref.usda@</Class> ) {}\n",
+        );
+        let mut reference = parse_named_layer("ref.usda", "#usda 1.0\ndef \"Class\" {}\n");
+        let class = sdf::path("/Class")?;
+        edit_layer(&mut reference, |l| {
+            l.data_mut().set_field(
+                &class,
+                "exprs",
+                Value::PathExpressionVec(vec![
+                    sdf::PathExpression::parse("child//"),
+                    sdf::PathExpression::parse("/Class/Sets// %_"),
+                ]),
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        assert_eq!(
+            cache.resolve_field(&graph, &sdf::path("/Inst")?, "exprs")?,
+            Some(Value::PathExpressionVec(vec![
+                sdf::PathExpression::parse("/Inst/child//"),
+                sdf::PathExpression::parse("/Inst/Sets//"),
+            ]))
+        );
+        Ok(())
+    }
+
+    /// A local default of a composing kind (here a path expression carrying
+    /// `%_`) resolves through full composition instead of winning raw, so
+    /// opinions across the reference arc still contribute.
+    #[test]
+    fn local_default_composes() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"Inst\" ( references = @ref.usda@</Class> )\n{\n    custom pathExpression e = \"/local// %_\"\n}\n",
+        );
+        let reference = parse_named_layer(
+            "ref.usda",
+            "#usda 1.0\ndef \"Class\"\n{\n    custom pathExpression e = \"/Class/child//\"\n}\n",
+        );
+        let graph = LayerGraph::from_layers(vec![root, reference], 0, sdf::LayerRegistry::default());
+        let mut cache = fresh_cache();
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/Inst.e")?, 0.0, &interp)?,
+            Some(Value::PathExpression(sdf::PathExpression::parse(
+                "/local// /Inst/child//"
+            )))
+        );
+        Ok(())
+    }
+
+    /// A value block between list-op opinions stops the weaker edits while the
+    /// stronger ones still compose.
+    #[test]
+    fn list_op_block_stops_weaker() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                "order",
+                &[
+                    Value::IntListOp(sdf::ListOp::prepended(vec![1])),
+                    Value::ValueBlock,
+                    Value::IntListOp(sdf::ListOp::explicit(vec![2])),
+                ]
+            )?,
+            Some(Value::IntListOp(sdf::ListOp::explicit(vec![1])))
+        );
+        Ok(())
+    }
+
+    /// A field composed by dedicated machinery keeps its raw strongest opinion
+    /// under generic resolution: the fold never reshapes `default`, whose
+    /// value resolution is strongest-wins.
+    #[test]
+    fn default_field_never_folds() -> Result<()> {
+        let strongest = Value::TokenListOp(sdf::ListOp::prepended(vec![Token::new("a")]));
+        assert_eq!(
+            resolve_stacked(
+                FieldKey::Default.as_str(),
+                &[
+                    strongest.clone(),
+                    Value::TokenListOp(sdf::ListOp::explicit(vec![Token::new("b")])),
+                ]
+            )?,
+            Some(strongest)
+        );
+        Ok(())
+    }
+
+    /// `apiSchemas` is declared token-list-op by the core schema, so an
+    /// ill-typed strongest opinion (a backend storing the field as a plain
+    /// vec) is skipped and the conformant weaker edits still compose.
+    #[test]
+    fn api_schemas_skips_ill_typed() -> Result<()> {
+        assert_eq!(
+            resolve_stacked(
+                FieldKey::ApiSchemas.as_str(),
+                &[
+                    Value::TokenVec(vec![Token::new("IllTypedAPI")]),
+                    Value::TokenListOp(sdf::ListOp::prepended(vec![Token::new("GoodAPI")])),
+                ]
+            )?,
+            Some(Value::TokenListOp(sdf::ListOp::explicit(vec![Token::new("GoodAPI")])))
+        );
+        Ok(())
+    }
+
+    /// Authors a `layerRelocates` edit on the root layer and drives it through
+    /// the change pipeline, returning the graph's diagnostics afterward.
+    fn relocate_edit(graph: &mut LayerGraph, cache: &mut IndexCache, text: &str) -> Diagnostics {
+        let root_id = graph.root_id().unwrap();
+        graph.get_mut(root_id).expect("root layer exists").layer = parse_layer(text);
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&Path::abs_root())
+            .note(sdf::FieldKey::LayerRelocates.as_str(), sdf::FieldChange::Value);
+        let mut changes = Changes::new();
+        changes.did_change(cache, graph, &[LayerChanges::plain(root_id, &cl)]);
+        changes.apply(cache, graph);
+        graph.errors()
+    }
+
+    /// A `layerRelocates` edit that authors an invalid relocate after stage
+    /// creation must surface an `InvalidRelocate` diagnostic from the graph,
+    /// which the recompute path refreshes in place.
+    #[test]
+    fn invalid_relocate_edit_surfaces_error() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"A\" {}\n");
+        // No relocates authored yet, so the graph holds no diagnostics.
+        assert!(graph.errors().is_empty());
+
+        // Author an invalid relocate (the target is an ancestor of the source).
+        let errors = relocate_edit(
+            &mut graph,
+            &mut cache,
+            "#usda 1.0\n(\n    relocates = { </A/B/C>: </A> }\n)\ndef \"A\" {}\n",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, CompositionDiagnostic::InvalidRelocate { .. })),
+            "an invalid relocate authored after construction must be retained"
+        );
+        Ok(())
+    }
+
+    /// Re-authoring a valid relocate over an invalid one clears the diagnostic,
+    /// and recomputing the same state twice does not duplicate it — the graph's
+    /// relocate-error bucket is replaced wholesale on every rebuild.
+    #[test]
+    fn relocate_error_clears_and_dedups() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"A\" {}\n");
+
+        // Author an invalid relocate, then the same edit twice: still exactly one.
+        let invalid = "#usda 1.0\n(\n    relocates = { </A/B/C>: </A> }\n)\ndef \"A\" {}\n";
+        let _ = relocate_edit(&mut graph, &mut cache, invalid);
+        let errors = relocate_edit(&mut graph, &mut cache, invalid);
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|e| matches!(e, CompositionDiagnostic::InvalidRelocate { .. }))
+                .count(),
+            1,
+            "recomputing the same invalid relocate must not duplicate the diagnostic"
+        );
+
+        // Re-author a valid relocate; the stale invalid diagnostic disappears.
+        let valid = "#usda 1.0\n(\n    relocates = { </A/B>: </A/C> }\n)\ndef \"A\" {}\n";
+        let errors = relocate_edit(&mut graph, &mut cache, valid);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, CompositionDiagnostic::InvalidRelocate { .. })),
+            "fixing the relocate must clear the diagnostic"
+        );
+        Ok(())
+    }
+}

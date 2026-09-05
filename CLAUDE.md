@@ -8,7 +8,13 @@ This is a pure Rust implementation of OpenUSD (Universal Scene Description), Pix
 
 ## Architecture
 
-The codebase mirrors the C++ OpenUSD SDK's module layout. The bullets below are only a navigational map — what each module is and where to start reading. They deliberately do not enumerate types or methods: the project is large, and any inventory kept here would drift out of date. Each module's own `//!` doc comment, and each item's own doc comment, are the source of truth — read those for specifics rather than expecting them here.
+The repository is a Cargo workspace. `crates/openusd` is the core library and
+`crates/openusd-schemas` the domain schemas layered on it; shared package
+properties, dependency versions, and the lint table live in the root
+`Cargo.toml`. Module paths in the bullets below are relative to a crate's
+`src/`.
+
+The core crate mirrors the C++ OpenUSD SDK's module layout. The bullets below are only a navigational map — what each module is and where to start reading. They deliberately do not enumerate types or methods: the project is large, and any inventory kept here would drift out of date. Each module's own `//!` doc comment, and each item's own doc comment, are the source of truth — read those for specifics rather than expecting them here.
 
 - **`tf/`** - Tools Foundation (C++ `Tf`): low-level utilities, chiefly `tf::Token`, the interned-identifier string behind every `TfToken`-equivalent API. Start at `tf/mod.rs`.
 
@@ -26,21 +32,21 @@ The codebase mirrors the C++ OpenUSD SDK's module layout. The bullets below are 
 
 - **`usd/`** - Composed stage API (C++ `Usd`): `usd::Stage` is the handle that delegates composition to `pcp::IndexCache`; `Prim`, `Attribute`, `Relationship`, and the schema views are `Clone` value types over it, and stage-tier authoring routes through the current `EditTarget`, with `Stage::batch_edit` for atomic multi-layer edits. Notable sub-surfaces: `usd/schema_registry.rs` + `usd/prim_definition.rs` + `usd/prim_type_info.rs` (C++ `UsdSchemaRegistry` / `UsdPrimDefinition` / `UsdPrimTypeInfo` — the schema type table and the property fallbacks it supplies, built from per-family manifest + schematics text), `usd/resolve_info.rs` (`ResolveInfo` / `ResolveInfoSource` — where a value read found its answer, over `pcp::value_resolve`'s shared walk), `usd/sink.rs` (`StageSink` composed-change observers, `Provenance`), `usd/diff.rs` (the transferable `Diff` and `Stage::apply_diff`), `usd/capture.rs` (`UndoStage` / `ReplayStage`, recording wrappers over the change seam), `usd/editor.rs` (namespace editing), `usd/composition.rs` (private `StageComposition`: owns the layer graph, index cache, and pending-edit queue, and the operations over them — reconciliation, the composed-query/load fixpoint, demand loading, interning, muting, load rules, construction — calling back to `Stage` through `CompositionHooks`). Start at `usd/stage.rs`. Public users import modules (`use openusd::{sdf, usd};`); the only root-level re-exports are `openusd::Error` and `openusd::Result` (`src/error.rs`), the crate-wide error enum every module error nests into.
 
-- **`schemas/`** - Domain schemas layered on `sdf` / `usd`, not part of the AOUSD core spec. Feature-gated per family (`geom`, `lux`, `media`, `physics`, `proc`, `render`, `shade`, `skel`, `ui`, `vol`; some enable `geom` transitively). See the table in `schemas/mod.rs`.
+- **`openusd-schemas`** - A separate crate (`crates/openusd-schemas`), not a module of the core: domain schemas layered on `sdf` / `usd`, not part of the AOUSD core spec. It depends on `openusd`, so the core must never reference it. Feature-gated per family (`geom`, `lux`, `media`, `physics`, `proc`, `render`, `shade`, `skel`, `ui`, `vol`; some enable `geom` transitively). See the table in its `lib.rs`.
 
 - **`gf/`** - Graphics Foundations (C++ `Gf`): `bytemuck::Pod` vector / quaternion / matrix types for bulk binary serialization, row-major / row-vector convention, each bridging to `sdf::Value` via `From` / `TryFrom`. See `gf/mod.rs` for the conventions.
 
 ## Development Commands
 
 ```bash
-# Build the project (use --all-features to include the gated schema modules)
-cargo build --all-features
+# Build the workspace (use --all-features to include the gated schema families)
+cargo build --workspace --all-features
 
 # Run tests (including comprehensive format validation tests)
-cargo test --all-targets --all-features
+cargo test --workspace --all-targets --all-features
 
 # Lint with Clippy (strict warnings as errors)
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Format code
 cargo fmt
@@ -49,13 +55,13 @@ cargo fmt
 cargo fmt --all -- --check --files-with-diff
 
 # Generate documentation
-cargo doc --no-deps
+cargo doc --workspace --no-deps
 
 # Run security/dependency audits
 cargo deny check
 
 # Run examples
-cargo run --example dump_usdc -- path/to/file.usd
+cargo run -p openusd --example dump_usdc -- path/to/file.usd
 ```
 
 ## ROADMAP.md Style
@@ -131,14 +137,14 @@ When implementing a new feature from the spec:
 
 ## Testing
 
-The test suite includes extensive binary format tests using fixture files in `fixtures/` directory. Tests validate:
+The test suite includes extensive binary format tests using fixture files in each crate's `fixtures/` directory. Tests validate:
 - Data type parsing (integers, floats, strings, arrays, etc.)
 - USD-specific types (paths, references, payloads, layer offsets)
 - Compression handling
 - Time-sampled data
 - Scene hierarchy traversal
 
-Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a suitable file exists. Only add new files to `fixtures/` when vendor assets don't cover the specific case needed.
+Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a suitable file exists. Only add new files to a crate's `fixtures/` when vendor assets don't cover the specific case needed.
 
 Never put a test-only function in a module's main body — not even gated with `#[cfg(test)]`. Every test helper lives inside a `#[cfg(test)] mod tests { … }` block. A helper that is intrinsically about a production type and is shared across modules' tests goes as a `#[cfg(test)]` method in a `#[cfg(test)] impl` block on that type (e.g. `LayerRegistry::collect_with_arcs`), reached as `Type::helper(...)`. Don't add a separate `test_support` module for it.
 
@@ -163,6 +169,6 @@ Key external dependencies:
 - `zip` - USDZ archive reading
 - `serde` (optional, `serde` feature) - Serialization support
 
-Domain schemas are gated behind per-module features (`geom`, `lux`, `media`, `physics`, `proc`, `render`, `shade`, `skel`, `ui`, `vol`); use `--all-features` when building, testing, or linting.
+Domain schemas live in the separate `openusd-schemas` crate, one feature per family (`geom`, `lux`, `media`, `physics`, `proc`, `render`, `shade`, `skel`, `ui`, `vol`); use `--workspace --all-features` when building, testing, or linting.
 
 The project maintains a minimal dependency footprint and uses cargo-deny to prevent license conflicts and vulnerability introduction. Allowed licenses: MIT, Apache-2.0, Zlib, Unicode-3.0.

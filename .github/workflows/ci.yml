@@ -21,11 +21,37 @@ jobs:
         with:
           submodules: true
 
-      - run: cargo check --examples --tests
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo check --workspace --examples --tests
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo fmt --all -- --check --files-with-diff
-      - run: cargo doc --no-deps
-      - run: cargo test --all-targets --all-features
+      - run: cargo doc --workspace --no-deps
+      - run: cargo test --workspace --all-targets --all-features
+
+  manifest:
+    name: Manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # `openusd-schemas` requires `openusd` by version, and a stale value there
+      # publishes a crate pinned to the previous release. Nothing else catches
+      # it: the path dependency wins locally, so builds and tests stay green.
+      - name: Workspace version matches the openusd dependency
+        run: |
+          pkg=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          dep=$(grep -m1 '^openusd = { version = ' Cargo.toml | cut -d'"' -f2)
+          echo "workspace.package.version = ${pkg:-<unset>}"
+          echo "workspace.dependencies.openusd.version = ${dep:-<unset>}"
+          if [ -z "$pkg" ] || [ -z "$dep" ]; then
+            echo "::error::could not read both versions from the root Cargo.toml"
+            exit 1
+          fi
+          if [ "$pkg" != "$dep" ]; then
+            echo "::error::version mismatch - bump both in the root Cargo.toml"
+            exit 1
+          fi
 
   deny:
     name: Deny
@@ -52,7 +78,7 @@ jobs:
       - run: cargo install grcov
       - run: grcov --version
 
-      - run: cargo test --all-features
+      - run: cargo test --workspace --all-features
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
           LLVM_PROFILE_FILE: "target/coverage/%p-%m.profraw"
@@ -65,7 +91,7 @@ jobs:
             --branch \
             --ignore-not-existing \
             --output-types markdown,lcov \
-            --keep-only 'src/*' \
+            --keep-only 'crates/*/src/*' \
             --output-path ./target/coverage/
 
       - name: Upload coverage data
