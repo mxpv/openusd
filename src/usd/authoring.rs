@@ -54,6 +54,20 @@ pub(super) enum EnsurePlan {
     Stamp(PropertyDeclaration),
 }
 
+impl EnsurePlan {
+    /// The value type this plan would declare an attribute with, or `None`
+    /// when it stamps nothing — a target that already holds the spec says
+    /// nothing about the type — or stamps a relationship.
+    pub fn attribute_type(&self) -> Option<&sdf::ValueTypeName> {
+        match self {
+            Self::Stamp(PropertyDeclaration::Attribute { type_name, .. }) => Some(type_name),
+            // A target that already holds the spec says nothing about its
+            // type, and a relationship plan never reaches a value write.
+            Self::Existing | Self::Stamp(PropertyDeclaration::Relationship { .. }) => None,
+        }
+    }
+}
+
 /// The read phase of authoring the property at `path` as a `kind` spec.
 ///
 /// In C++ precedence order: a spec of that kind already on the edit target is

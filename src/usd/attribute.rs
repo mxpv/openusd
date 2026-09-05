@@ -532,24 +532,28 @@ impl Attribute {
     /// value validated against the composed declaration, the spec plan, and
     /// the value and time mapped for the edit target. Runs outside any
     /// transaction, so every composition query happens here.
-    // TODO(perf): for an attribute no schema declares, the declaration read
-    // and the spec plan each walk the property stack; a `Stamp` plan already
-    // carries the composed declaration, so validating against it would spare
-    // the second walk.
+    ///
+    /// The spec plan resolves first because a plan that stamps a spec has
+    /// already found the declaration to stamp it from, which is the composed
+    /// declaration the value is checked against; only a target that holds the
+    /// spec already leaves the plan with nothing to say about the type, and
+    /// that one case reads it.
     fn plan_authoring(
         &self,
         value: sdf::Value,
         time: Option<super::TimeCode>,
     ) -> Result<AttributeAuthoringPlan, StageAuthoringError> {
+        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, None)?;
         let effective = if value.is_value_block() {
             None
         } else {
-            let token = self.declared_type_token()?.ok_or(sdf::ValueTypeError::Empty)?;
-            let effective = sdf::ValueTypeName::from(token);
-            effective.validate(&value)?;
-            Some(effective)
+            let declared = match ensure.attribute_type() {
+                Some(declared) => declared.clone(),
+                None => sdf::ValueTypeName::from(self.declared_type_token()?.ok_or(sdf::ValueTypeError::Empty)?),
+            };
+            declared.validate(&value)?;
+            Some(declared)
         };
-        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, None)?;
         let value = self.stage.map_to_spec_value(&self.path, value);
         let spec_time = time.map(|time| self.stage.map_to_spec_time(time.value()));
         Ok(AttributeAuthoringPlan {
