@@ -8,14 +8,16 @@
 
 `openusd` is a Rust implementation of Pixar's [Universal Scene Description](https://openusd.org/release/index.html) (USD) format with no C++ dependencies.
 
-The core library: it reads and writes the `.usda`, `.usdc`, and `.usdz` file
-formats, composes layers into a scene graph, and exposes the composed result
-through a `Stage` API for traversal, value resolution, and authoring.
+`openusd` covers the core USD workflow: read and write `.usda`, `.usdc`, and
+`.usdz` files; compose layers with references, payloads, variants, instancing,
+relocates, and variable expressions; then explore or edit the result through
+the `Stage` API. It supports predicate-based traversal, typed value resolution,
+layer- and stage-level authoring, and transferable diffs for live sync.
 
-Typed schema views over that stage — `Mesh`, `Camera`, `Material`, `Skeleton`,
-and the rest — live in a separate crate, [`openusd-schemas`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas).
-
-For a detailed comparison with the C++ reference implementation and current progress, see the [Roadmap](https://github.com/mxpv/openusd/blob/main/ROADMAP.md).
+For higher-level domain APIs, the companion
+[`openusd-schemas`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas)
+crate provides typed `Stage` views for geometry, shading, lighting, animation,
+physics, rendering, and more.
 
 ## Features
 
@@ -28,11 +30,6 @@ For a detailed comparison with the C++ reference implementation and current prog
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
 
 ## Getting started
-
-> [!WARNING]
-> This crate is under active development. No API stability is guaranteed until version 1.0.
-
-Make sure you have [`Rust`](https://www.rust-lang.org/tools/install) installed on your system, `rustup` will do the rest.
 
 Add the crate to your `Cargo.toml` (or run `cargo add openusd`):
 

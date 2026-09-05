@@ -18,14 +18,6 @@ let mesh = geom::Mesh::get(&stage, "/World/Mesh")?.unwrap();
 let points = mesh.points_attr().get::<Vec<gf::Vec3f>>()?;
 ```
 
-Ten schema families ship here, each behind its own feature flag, so a build
-compiles only the domains it touches:
-
-`UsdGeom` · `UsdLux` · `UsdMedia` · `UsdPhysics` · `UsdProc` · `UsdRender` ·
-`UsdShade` · `UsdSkel` · `UsdUI` · `UsdVol`
-
-The two crates share a version and release together.
-
 ## Usage
 
 Add both crates — a schema view is a handle on a stage the core opens — and
@@ -53,9 +45,6 @@ Nothing is enabled by default.
 | `skel` | [`UsdSkel`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/skel) — skeleton reader and skinning toolkit |
 | `ui` | [`UsdUI`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/ui) — Backdrop, SceneGraphPrimAPI, NodeGraphNodeAPI |
 | `vol` | [`UsdVol`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/vol) — Volume, OpenVDBAsset, Field3DAsset |
-
-`lux`, `media`, `proc`, `skel`, and `vol` build on the `geom` trait chain and
-enable it transitively.
 
 ## Example
 
