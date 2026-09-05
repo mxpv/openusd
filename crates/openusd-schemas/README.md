@@ -33,8 +33,8 @@ enable the families you need:
 
 ```toml
 [dependencies]
-openusd = "0.6"
-openusd-schemas = { version = "0.6", features = ["geom", "lux"] }
+openusd = "0.7"
+openusd-schemas = { version = "0.7", features = ["geom", "lux"] }
 ```
 
 Nothing is enabled by default.

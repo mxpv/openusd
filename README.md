@@ -56,8 +56,8 @@ schema family:
 
 ```toml
 [dependencies]
-openusd = "0.6"
-openusd-schemas = { version = "0.6", features = ["geom", "shade"] }
+openusd = "0.7"
+openusd-schemas = { version = "0.7", features = ["geom", "shade"] }
 ```
 
 Open a stage, walk its composed prims, and read a resolved attribute value:

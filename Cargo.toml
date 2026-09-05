@@ -6,7 +6,7 @@ members = ["crates/*"]
 # `field.workspace = true`, so a release moves a single line rather than one
 # per crate, and the members can never drift apart on the edition or the MSRV.
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.96"
 repository = "https://github.com/mxpv/openusd"
@@ -17,7 +17,7 @@ categories = ["graphics", "rendering", "rendering::data-formats"]
 # today, so a member picks a dependency up with `workspace = true` and no
 # version of its own to keep in sync.
 [workspace.dependencies]
-openusd = { version = "0.6.0", path = "crates/openusd" }
+openusd = { version = "0.7.0", path = "crates/openusd" }
 
 bitflags = "2.11.1"
 bytemuck = { version = "1.14.0", features = ["derive"] }
