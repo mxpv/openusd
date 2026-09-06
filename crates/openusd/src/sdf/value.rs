@@ -164,9 +164,7 @@ pub enum Value {
 
     TimeCode(TimeCode),
     TimeCodeVec(Vec<TimeCode>),
-    #[from(skip)]
     PathExpression(super::PathExpression),
-    #[from(skip)]
     PathExpressionVec(Vec<super::PathExpression>),
 }
 
@@ -538,6 +536,10 @@ impl_try_from_value!(i64, try_as_int_64, "Int64");
 impl_try_from_value!(u64, try_as_uint_64, "Uint64");
 impl_try_from_value!(f32, try_as_float, "Float");
 impl_try_from_value!(f64, try_as_double, "Double");
+impl_try_from_value!(u8, try_as_uchar, "Uchar");
+impl_try_from_value!(f16, try_as_half, "Half");
+impl_try_from_value!(TimeCode, try_as_time_code, "TimeCode");
+impl_try_from_value!(super::PathExpression, try_as_path_expression, "PathExpression");
 impl_try_from_value!(Specifier, try_as_specifier, "Specifier");
 impl_try_from_value!(Variability, try_as_variability, "Variability");
 impl_try_from_value!(ReferenceListOp, try_as_reference_list_op, "ReferenceListOp");
@@ -600,10 +602,23 @@ impl_try_from_value!(RelocateList, try_as_relocates, "Relocates");
 impl_try_from_value!(TimeSampleMap, try_as_time_samples, "TimeSamples");
 impl_try_from_value!(Vec<LayerOffset>, try_as_layer_offset_vec, "LayerOffsetVec");
 
-// Exact numeric arrays — `float[]` / `double[]`. Flattening a single vector
+// Exact scalar arrays (`float[]`, `int[]`, …). Flattening a single vector
 // into a scalar array is a coercion, so it lives in [`Value::cast`].
+impl_try_from_value!(Vec<bool>, try_as_bool_vec, "BoolVec");
+impl_try_from_value!(Vec<u8>, try_as_uchar_vec, "UcharVec");
+impl_try_from_value!(Vec<i32>, try_as_int_vec, "IntVec");
+impl_try_from_value!(Vec<u32>, try_as_uint_vec, "UintVec");
+impl_try_from_value!(Vec<i64>, try_as_int_64_vec, "Int64Vec");
+impl_try_from_value!(Vec<u64>, try_as_uint_64_vec, "Uint64Vec");
+impl_try_from_value!(Vec<f16>, try_as_half_vec, "HalfVec");
 impl_try_from_value!(Vec<f32>, try_as_float_vec, "FloatVec");
 impl_try_from_value!(Vec<f64>, try_as_double_vec, "DoubleVec");
+impl_try_from_value!(Vec<TimeCode>, try_as_time_code_vec, "TimeCodeVec");
+impl_try_from_value!(
+    Vec<super::PathExpression>,
+    try_as_path_expression_vec,
+    "PathExpressionVec"
+);
 
 // `gf` vector/quaternion variants as fixed-size arrays, via the type's `Into`.
 // Coercing across element precisions is [`Value::cast`]'s job.
@@ -1135,8 +1150,17 @@ mod tests {
         assert_eq!(f32::try_from(Value::Float(1.5)).unwrap(), 1.5);
         assert_eq!(f64::try_from(Value::Double(2.5)).unwrap(), 2.5);
         assert_eq!(String::try_from(Value::String("hello".into())).unwrap(), "hello");
+        assert_eq!(u8::try_from(Value::Uchar(7)).unwrap(), 7);
+        let half = f16::from_f32(0.5);
+        assert_eq!(f16::try_from(Value::Half(half)).unwrap(), half);
+        assert_eq!(
+            TimeCode::try_from(Value::TimeCode(TimeCode(2.0))).unwrap(),
+            TimeCode(2.0)
+        );
         // Exact extraction does not coerce a token to a string — that is `cast`.
         assert!(String::try_from(Value::Token("tok".into())).is_err());
+        // A time code is retimed by layer offsets, so it is not a plain double.
+        assert!(f64::try_from(Value::TimeCode(TimeCode(2.0))).is_err());
     }
 
     #[test]
@@ -1175,6 +1199,19 @@ mod tests {
 
         assert_eq!(Vec::<f64>::try_from(Value::DoubleVec(vec![1.0])).unwrap(), vec![1.0]);
         assert!(Vec::<f64>::try_from(Value::Vec2d(gf::vec2d(1.0, 2.0))).is_err());
+
+        assert_eq!(Vec::<i32>::try_from(Value::IntVec(vec![1, 2])).unwrap(), vec![1, 2]);
+        assert_eq!(Vec::<u32>::try_from(Value::UintVec(vec![3])).unwrap(), vec![3]);
+        assert_eq!(Vec::<i64>::try_from(Value::Int64Vec(vec![-4])).unwrap(), vec![-4]);
+        assert_eq!(Vec::<u64>::try_from(Value::Uint64Vec(vec![5])).unwrap(), vec![5]);
+        assert_eq!(Vec::<u8>::try_from(Value::UcharVec(vec![6])).unwrap(), vec![6]);
+        assert_eq!(Vec::<bool>::try_from(Value::BoolVec(vec![true])).unwrap(), vec![true]);
+        let half = f16::from_f32(0.5);
+        assert_eq!(Vec::<f16>::try_from(Value::HalfVec(vec![half])).unwrap(), vec![half]);
+        assert_eq!(
+            Vec::<TimeCode>::try_from(Value::TimeCodeVec(vec![TimeCode(3.0)])).unwrap(),
+            vec![TimeCode(3.0)]
+        );
 
         // The coercing tier still flattens.
         assert_eq!(
@@ -1286,5 +1323,19 @@ mod tests {
 
         let m = gf::Matrix4d::IDENTITY;
         assert_eq!(Value::from(m), Value::Matrix4d(m));
+    }
+
+    #[test]
+    fn path_expression_round_trip() {
+        use crate::sdf;
+
+        let expr = sdf::PathExpression::parse("/World//");
+        let value = Value::from(expr.clone());
+        assert_eq!(value, Value::PathExpression(expr.clone()));
+        assert_eq!(sdf::PathExpression::try_from(value).unwrap(), expr);
+
+        let exprs = vec![expr];
+        let value = Value::from(exprs.clone());
+        assert_eq!(Vec::<sdf::PathExpression>::try_from(value).unwrap(), exprs);
     }
 }

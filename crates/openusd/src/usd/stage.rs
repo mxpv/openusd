@@ -39,6 +39,7 @@
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::mem;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -511,6 +512,34 @@ pub enum StageAuthoringError {
     #[error(transparent)]
     Parse(#[from] sdf::PathParseError),
 
+    /// No prim composes at the path, so there is nothing to author against:
+    /// a prim-handle setter never conjures a prim (C++ `UsdPrim` setters on
+    /// an invalid prim).
+    #[error("no prim composes at {path}")]
+    PrimNotValid {
+        /// The path nothing composes at.
+        path: sdf::Path,
+    },
+
+    /// The path lies inside an instancing prototype (`/__Prototype_N`), a
+    /// composed namespace nothing authors into (C++ `_ValidateEditPrim`:
+    /// "authoring to an instancing prototype is not allowed").
+    #[error("authoring to an instancing prototype is not allowed: {path}")]
+    PrototypeEdit {
+        /// The prototype path the edit named.
+        path: sdf::Path,
+    },
+
+    /// The path is an instance proxy — a view into a prototype through an
+    /// instance — so an opinion authored there would compose nowhere
+    /// (C++ `_ValidateEditPrim`: "authoring to an instance proxy is not
+    /// allowed").
+    #[error("authoring to an instance proxy is not allowed: {path}")]
+    InstanceProxyEdit {
+        /// The instance-proxy path the edit named.
+        path: sdf::Path,
+    },
+
     /// The layer at the current edit target rejected the authoring call.
     #[error(transparent)]
     Layer(sdf::AuthoringError),
@@ -873,6 +902,16 @@ impl std::ops::Deref for Stage {
     }
 }
 
+impl fmt::Debug for Stage {
+    /// The root layer stack identity names the stage; the composition state
+    /// behind it is elided.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stage")
+            .field("layer_stack_id", &self.layer_stack_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A non-owning handle to a [`Stage`] (C++ `UsdStageWeakPtr`).
 ///
 /// Holds no strong reference, so it does not keep the stage alive. Obtain one
@@ -1040,20 +1079,85 @@ impl Stage {
         Ok((target.layer_identifier.clone(), spec_path))
     }
 
-    /// The kind of spec the current edit target's layer holds at the mapped
-    /// `scene_path`, or `None` when it holds none. Read outside any
-    /// transaction, under a short borrow of the layer graph: the first step of
-    /// [`plan_property_spec`](super::authoring::plan_property_spec).
+    /// Refuses an edit that instancing makes meaningless
+    /// (C++ `_ValidateEditPrimAtPath`): an opinion authored at a prototype
+    /// path or beneath an instance composes nowhere it can be seen. Only a
+    /// target on a local layer that maps the prim to itself is checked; one
+    /// that maps it elsewhere — a reference arc's layer, say — is trusted
+    /// to have been set up to author the site it names, as C++ trusts it.
+    /// `identifier` names the target's layer.
+    fn validate_edit_prim(&self, scene_path: &sdf::Path, identifier: &str) -> Result<(), StageAuthoringError> {
+        let prim = scene_path.prim_path();
+        let maps_to_self = self.edit_target.borrow().map_to_spec_path(&prim).as_ref() == Some(&prim);
+        if !maps_to_self || !self.is_local_layer(identifier) {
+            return Ok(());
+        }
+        // The prototype namespace is reserved, so its spelling alone convicts
+        // (C++ `Usd_InstanceCache::IsPathInPrototype`).
+        if pcp::is_prototype_namespace(&prim) {
+            return Err(StageAuthoringError::PrototypeEdit { path: prim });
+        }
+        // Anything beneath an instance is a proxy, whether or not a prim
+        // composes there yet (C++ `_IsObjectDescendantOfInstance`).
+        if self
+            .masked(&prim, |g, cache| cache.enclosing_instance(g, &prim))?
+            .is_some()
+        {
+            return Err(StageAuthoringError::InstanceProxyEdit { path: prim });
+        }
+        Ok(())
+    }
+
+    /// Whether the layer `identifier` names is in the stage's root layer stack
+    /// (C++ `UsdStage::HasLocalLayer`).
+    fn is_local_layer(&self, identifier: &str) -> bool {
+        let layers = self.layers();
+        layers
+            .id_of(identifier)
+            .is_some_and(|id| layers.root_layer_stack().iter().any(|&(member, _)| member == id))
+    }
+
+    /// Read the current edit target's layer at the spec path `scene_path`
+    /// maps to, outside any transaction and under a short borrow of the layer
+    /// graph: what a write consults before it opens its transaction.
     // TODO(perf): a planned write maps `scene_path` here and again in
     // `with_target_layer_at`; carrying the resolved site in the plan would
     // spare the second mapping.
-    pub(super) fn local_spec_type(&self, scene_path: &sdf::Path) -> Result<Option<sdf::SpecType>, StageAuthoringError> {
+    fn read_target_layer<T>(
+        &self,
+        scene_path: &sdf::Path,
+        read: impl FnOnce(&sdf::Layer, &sdf::Path) -> T,
+    ) -> Result<T, StageAuthoringError> {
         let (identifier, spec_path) = self.target_spec_path(scene_path)?;
         let layers = self.layers();
         let id = layers
             .id_of(&identifier)
             .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
-        Ok(layers.layer(id).data().spec_type(&spec_path))
+        Ok(read(layers.layer(id), &spec_path))
+    }
+
+    /// The kind of spec the current edit target's layer holds at the mapped
+    /// `scene_path`, or `None` when it holds none: the first step of
+    /// [`plan_property_spec`](super::authoring::plan_property_spec).
+    pub(super) fn local_spec_type(&self, scene_path: &sdf::Path) -> Result<Option<sdf::SpecType>, StageAuthoringError> {
+        self.read_target_layer(scene_path, |layer, path| layer.data().spec_type(path))
+    }
+
+    /// The opinion the current edit target's layer holds for `key` at the
+    /// mapped `scene_path`, or `None` when it holds none. Fallible so an
+    /// undecodable local field surfaces instead of reading back as absent.
+    pub(super) fn local_field(
+        &self,
+        scene_path: &sdf::Path,
+        key: &str,
+    ) -> Result<Option<sdf::Value>, StageAuthoringError> {
+        let value = self.read_target_layer(scene_path, |layer, path| {
+            layer
+                .data()
+                .try_field(path, key)
+                .map(|value| value.map(|value| value.into_owned()))
+        })?;
+        Ok(value?)
     }
 
     /// This stage's cached root layer stack identity, stamped onto stage-bound
@@ -1192,17 +1296,35 @@ impl Stage {
     }
 
     /// Author a `def` prim spec at `path` on the edit target's layer and
-    /// return a [`Prim`] handle. Mirrors C++ `UsdStage::DefinePrim`. The
-    /// returned handle lets callers chain field setters (`set_type_name`,
+    /// return a [`Prim`] handle (C++ `UsdStage::DefinePrim` with no type).
+    /// The returned handle lets callers chain field setters (`set_type_name`,
     /// `set_active`, `set_kind`, …) and child-property authoring
-    /// (`create_attribute`, `create_relationship`).
+    /// (`create_attribute`, `create_relationship`) on a prim the stage
+    /// composes. One it will not compose — outside its population mask, or
+    /// inside a variant it has not selected — takes no setter, and gets its
+    /// type through [`define_typed_prim`](Self::define_typed_prim).
     pub fn define_prim(&self, path: impl sdf::IntoPath) -> Result<super::Prim, StageAuthoringError> {
+        self.define_typed_prim(path, "")
+    }
+
+    /// Author a `def` prim spec typed `type_name` at `path` on the edit
+    /// target's layer, in one write, and return a [`Prim`] handle (C++
+    /// `UsdStage::DefinePrim(path, typeName)`). An existing spec is upgraded
+    /// to a `def` and retyped; an empty `type_name` leaves its type alone,
+    /// which is [`define_prim`](Self::define_prim).
+    pub fn define_typed_prim(
+        &self,
+        path: impl sdf::IntoPath,
+        type_name: impl Into<String>,
+    ) -> Result<super::Prim, StageAuthoringError> {
         let path = sdf::try_into_path(path)?;
+        let type_name = type_name.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
             // The layer records the spec add and any auto-created ancestor
-            // `over`s; an idempotent call (existing def) records nothing because
-            // deriving the change skips the no-op write.
-            sdf::PrimSpec::new(layer.data_mut(), layer_path, sdf::Specifier::Def, "")?;
+            // `over`s; an idempotent call (an existing def of that type)
+            // records nothing because deriving the change skips the no-op
+            // write.
+            sdf::PrimSpec::new(layer.data_mut(), layer_path, sdf::Specifier::Def, type_name)?;
             Ok(())
         })?;
         Ok(super::Prim::new(self, path))
@@ -1321,8 +1443,14 @@ impl Stage {
     /// returned `bool` reflects whether the erase recorded any change, which is
     /// exactly whether a spec was present. Shared by [`remove_prim`](Self::remove_prim)
     /// and [`remove_property`](Self::remove_property).
+    ///
+    /// Runs without the instancing validation of `with_target_layer_at`, as
+    /// C++ `_RemovePrim` / `_RemoveProperty` do: stripping a layer's stale
+    /// opinion beneath an instance or at a prototype path is what removal is
+    /// for.
     fn remove_spec(&self, path: &sdf::Path) -> Result<bool, StageAuthoringError> {
-        self.with_target_layer_at(path, |layer, layer_path| {
+        let (identifier, spec_path) = self.target_spec_path(path)?;
+        self.edit_target_layer(identifier, spec_path, |layer, layer_path| {
             layer.remove_spec(&layer_path)?;
             Ok(())
         })
@@ -1472,13 +1600,25 @@ impl Stage {
     where
         F: FnOnce(&mut sdf::LayerEdit<'_>, sdf::Path) -> Result<(), StageAuthoringError>,
     {
-        // The target is read under short borrows released before the layer
+        let (identifier, spec_path) = self.target_spec_path(scene_path)?;
+        self.validate_edit_prim(scene_path, &identifier)?;
+        self.edit_target_layer(identifier, spec_path, f)
+    }
+
+    /// Borrow the layer `identifier` names, hand it and `spec_path` to `f`,
+    /// then drive cache invalidation from the closure's change list: the
+    /// transaction behind [`with_target_layer_at`](Self::with_target_layer_at),
+    /// once the target mapping and the instancing validation are done.
+    fn edit_target_layer<F>(&self, identifier: String, spec_path: sdf::Path, f: F) -> Result<bool, StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::LayerEdit<'_>, sdf::Path) -> Result<(), StageAuthoringError>,
+    {
+        // The target is read under a short borrow released before the layer
         // borrow below. The mapping is cloned out (rather than borrowed across
         // the authoring call) because the sinks it ultimately feeds can
         // re-author and re-target the stage; clone it only when a sink is
         // installed to consume it, keeping the common no-sink authoring path
         // allocation-free.
-        let (identifier, spec_path) = self.target_spec_path(scene_path)?;
         let notify = !self.sinks.borrow().is_empty();
         let mapping = notify.then(|| self.edit_target.borrow().mapping.clone());
         let edited = {

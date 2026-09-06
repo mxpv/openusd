@@ -43,7 +43,7 @@ pub use prim_definition::{DefProperty, PrimDefinition};
 pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
 pub use relationship::Relationship;
 pub use resolve_info::{ResolveInfo, ResolveInfoSource};
-pub use schema::{SchemaBase, SchemaKind};
+pub use schema::{APISchemaBase, SchemaBase, SchemaKind, Typed};
 pub use schema_registry::{
     ApplyApiError, FamilySource, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError, Schematics,
     VersionFilter,

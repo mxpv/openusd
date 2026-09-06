@@ -25,7 +25,7 @@ use crate::tf;
 /// Returned by [`Stage::create_attribute`] / [`Prim::create_attribute`] with
 /// defaults `variability = Varying`, `custom = true`, matching C++ generic
 /// property authoring. Override via the fluent setters below.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Attribute {
     stage: Stage,
     path: sdf::Path,
@@ -1644,7 +1644,9 @@ mod tests {
             .mask(crate::usd::StagePopulationMask::new(["/Keep"])?)
             .in_memory("anon.usda")?;
         stage.define_prim("/Keep")?.set_type_name("DistantLight")?;
-        stage.define_prim("/Drop")?.set_type_name("DistantLight")?;
+        // Outside the mask nothing composes to take a setter, so the type is
+        // authored with the definition.
+        stage.define_typed_prim("/Drop", "DistantLight")?;
 
         assert_eq!(stage.attribute("/Keep.inputs:intensity")?.get::<f32>()?, Some(50000.0));
         // An excluded prim resolves no type, so it resolves no fallback either.
@@ -2257,17 +2259,13 @@ mod tests {
         let stage = stage()?;
         stage.define_prim("/A")?;
         let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
-        let error = attr
-            .clone()
-            .set(tf::Token::from("x"))
-            .err()
-            .expect("a token is no float");
+        let error = attr.clone().set(tf::Token::from("x")).expect_err("a token is no float");
         assert!(matches!(
             error,
             StageAuthoringError::ValueType(sdf::ValueTypeError::Mismatch { .. })
         ));
         // Exact: the stage tier never coerces.
-        let error = attr.clone().set(4_i32).err().expect("an int is no float");
+        let error = attr.clone().set(4_i32).expect_err("an int is no float");
         assert!(matches!(
             error,
             StageAuthoringError::ValueType(sdf::ValueTypeError::Mismatch { .. })
@@ -2283,7 +2281,7 @@ mod tests {
         let attr = stage.create_attribute("/A.x", "double3d[]")?;
         attr.clone().set(sdf::Value::ValueBlock)?;
         assert!(attr.resolve_info()?.value_is_blocked());
-        let error = attr.set(1.0_f64).err().expect("no value fits an unknown type");
+        let error = attr.set(1.0_f64).expect_err("no value fits an unknown type");
         assert!(matches!(
             error,
             StageAuthoringError::ValueType(sdf::ValueTypeError::Unregistered { .. })
@@ -2297,7 +2295,7 @@ mod tests {
         stage.define_prim("/A")?;
         let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::OPAQUE)?;
         for value in [sdf::Value::Opaque, sdf::Value::Float(1.0)] {
-            let error = attr.clone().set(value).err().expect("opaque holds no value");
+            let error = attr.clone().set(value).expect_err("opaque holds no value");
             assert!(matches!(
                 error,
                 StageAuthoringError::ValueType(sdf::ValueTypeError::Opaque)
@@ -2352,8 +2350,7 @@ mod tests {
         let error = stage
             .attribute("/A.x")?
             .set(2.0_f32)
-            .err()
-            .expect("double does not agree with float");
+            .expect_err("double does not agree with float");
         let conflict = type_conflict(error);
         assert_eq!(conflict.effective, tf::Token::from("float"));
         assert_eq!(conflict.local, tf::Token::from("double"));
@@ -2383,8 +2380,7 @@ mod tests {
         let error = stage
             .attribute("/A.x")?
             .set(gf::Vec3f::from([1.0, 0.5, 0.0]))
-            .err()
-            .expect("two roles never agree");
+            .expect_err("two roles never agree");
         let conflict = type_conflict(error);
         assert_eq!(conflict.local, tf::Token::from("point3f"));
         assert_eq!(root_field(&stage, "/A.x", "default"), None);
@@ -2401,8 +2397,7 @@ mod tests {
         let error = stage
             .attribute("/A.x")?
             .set(1.0_f32)
-            .err()
-            .expect("a spec without a type is not repaired");
+            .expect_err("a spec without a type is not repaired");
         assert!(matches!(
             error,
             StageAuthoringError::ValueType(sdf::ValueTypeError::Empty)
@@ -2423,8 +2418,7 @@ mod tests {
         let error = stage
             .attribute("/A.x")?
             .set(1.0_f32)
-            .err()
-            .expect("a malformed declaration is reported");
+            .expect_err("a malformed declaration is reported");
         assert!(matches!(
             error,
             StageAuthoringError::Layer(sdf::AuthoringError::Spec(sdf::SpecError::FieldType {
@@ -2442,8 +2436,7 @@ mod tests {
         let error = stage
             .attribute("/A.x")?
             .set(1.0_f32)
-            .err()
-            .expect("an unknown local type agrees with nothing");
+            .expect_err("an unknown local type agrees with nothing");
         assert_eq!(type_conflict(error).local, tf::Token::from("double3d[]"));
         stage.attribute("/A.x")?.set(sdf::Value::ValueBlock)?;
         assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
@@ -2481,8 +2474,7 @@ mod tests {
         let error = stage
             .attribute("/A.x")?
             .block()
-            .err()
-            .expect("a block still needs a declaration");
+            .expect_err("a block still needs a declaration");
         assert!(matches!(
             error,
             StageAuthoringError::ValueType(sdf::ValueTypeError::Empty)
@@ -2503,8 +2495,7 @@ mod tests {
         let error = stage
             .attribute("/A.x")?
             .block()
-            .err()
-            .expect("a malformed declaration is reported");
+            .expect_err("a malformed declaration is reported");
         assert!(matches!(
             error,
             StageAuthoringError::Layer(sdf::AuthoringError::Spec(sdf::SpecError::FieldType { .. }))
@@ -2594,8 +2585,7 @@ mod tests {
         })?;
         let error = attr
             .clear_at(TimeCode::new(10.0))
-            .err()
-            .expect("a malformed map is reported");
+            .expect_err("a malformed map is reported");
         assert!(matches!(
             error,
             StageAuthoringError::Layer(sdf::AuthoringError::Spec(sdf::SpecError::FieldType { .. }))
@@ -2629,8 +2619,7 @@ mod tests {
         let error = attr
             .clone()
             .set_type_name(sdf::ValueTypeName::FLOAT)
-            .err()
-            .expect("the stored double does not fit float");
+            .expect_err("the stored double does not fit float");
         assert!(matches!(
             error,
             StageAuthoringError::ValueType(sdf::ValueTypeError::Mismatch { .. })
@@ -2645,8 +2634,7 @@ mod tests {
         let attr = attr.set_type_name(sdf::ValueTypeName::FLOAT)?.set(1.0_f32)?;
         let error = attr
             .set_type_name("double3d[]")
-            .err()
-            .expect("a value never fits an unknown type");
+            .expect_err("a value never fits an unknown type");
         assert!(matches!(error, StageAuthoringError::ValueType(_)));
         Ok(())
     }
@@ -2661,8 +2649,7 @@ mod tests {
         let error = attr
             .clone()
             .set_type_name(sdf::ValueTypeName::OPAQUE)
-            .err()
-            .expect("a value never fits opaque");
+            .expect_err("a value never fits opaque");
         assert!(matches!(
             error,
             StageAuthoringError::ValueType(sdf::ValueTypeError::Opaque)
@@ -2736,8 +2723,7 @@ mod tests {
         stage.create_relationship("/A.r")?;
         let error = stage
             .create_attribute("/A.r", sdf::ValueTypeName::FLOAT)
-            .err()
-            .expect("a relationship is at the path");
+            .expect_err("a relationship is at the path");
         assert!(matches!(
             error,
             StageAuthoringError::SpecKindMismatch {
@@ -2796,8 +2782,7 @@ mod tests {
         stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
         let error = stage
             .create_relationship("/A.x")
-            .err()
-            .expect("an attribute is at the path");
+            .expect_err("an attribute is at the path");
         assert!(matches!(
             error,
             StageAuthoringError::SpecKindMismatch {
@@ -2815,8 +2800,7 @@ mod tests {
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         let error = stage
             .create_attribute("/Sun.collection:lightLink:includes", sdf::ValueTypeName::FLOAT)
-            .err()
-            .expect("the schema declares a relationship");
+            .expect_err("the schema declares a relationship");
         assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
         assert!(!root_has_spec(&stage, "/Sun.collection:lightLink:includes"));
         Ok(())
@@ -2828,8 +2812,7 @@ mod tests {
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         let error = stage
             .create_relationship("/Sun.inputs:intensity")
-            .err()
-            .expect("the schema declares an attribute");
+            .expect_err("the schema declares an attribute");
         assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
         Ok(())
     }
@@ -2839,8 +2822,7 @@ mod tests {
         let (_dir, stage) = stack("rel x", "", "float x")?;
         let error = stage
             .create_attribute("/A.x", sdf::ValueTypeName::FLOAT)
-            .err()
-            .expect("the strongest spec is a relationship");
+            .expect_err("the strongest spec is a relationship");
         assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
         assert!(!root_has_spec(&stage, "/A.x"));
         Ok(())
@@ -2851,8 +2833,7 @@ mod tests {
         let (_dir, stage) = stack("float x", "", "rel x")?;
         let error = stage
             .create_relationship("/A.x")
-            .err()
-            .expect("the strongest spec is an attribute");
+            .expect_err("the strongest spec is an attribute");
         assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
         assert!(!root_has_spec(&stage, "/A.x"));
         Ok(())
@@ -2886,8 +2867,7 @@ mod tests {
         let error = stage
             .attribute("/A.nope")?
             .set_type_name(sdf::ValueTypeName::FLOAT)
-            .err()
-            .expect("nothing defines the attribute");
+            .expect_err("nothing defines the attribute");
         assert!(matches!(
             error,
             StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. })
@@ -2958,8 +2938,7 @@ mod tests {
             stage.set_edit_target(EditTarget::for_layer(session_id.clone()))?;
             let error = stage
                 .create_attribute("/A.x", sdf::ValueTypeName::FLOAT)
-                .err()
-                .expect("the strongest declaration is malformed");
+                .expect_err("the strongest declaration is malformed");
             match bad {
                 None => assert!(
                     matches!(error, StageAuthoringError::ValueType(sdf::ValueTypeError::Empty)),
@@ -3000,8 +2979,7 @@ mod tests {
         stage.define_prim("/A")?;
         let error = stage
             .create_attribute("/A.x", "")
-            .err()
-            .expect("a new attribute needs a type");
+            .expect_err("a new attribute needs a type");
         assert!(matches!(
             error,
             StageAuthoringError::ValueType(sdf::ValueTypeError::Empty)
@@ -3091,14 +3069,14 @@ mod tests {
         let stage = stage()?;
         stage.define_prim("/A")?;
         let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
-        let error = attr.clone().set(tf::Token::from("x")).err().expect("mismatch");
+        let error = attr.clone().set(tf::Token::from("x")).expect_err("mismatch");
         assert!(matches!(error, StageAuthoringError::ValueType(_)), "{error:?}");
 
         root_edit(&stage, |e| {
             e.attribute_mut("/A.x")?.expect("root spec").erase("typeName");
             Ok(())
         })?;
-        let error = attr.set(sdf::Value::ValueBlock).err().expect("missing local type");
+        let error = attr.set(sdf::Value::ValueBlock).expect_err("missing local type");
         assert!(matches!(error, StageAuthoringError::ValueType(_)), "{error:?}");
         Ok(())
     }
@@ -3152,8 +3130,7 @@ mod tests {
         let error = stage
             .attribute("/A.r")?
             .clear()
-            .err()
-            .expect("a relationship is at the path");
+            .expect_err("a relationship is at the path");
         assert!(matches!(error, StageAuthoringError::SpecKindMismatch { .. }));
         Ok(())
     }
@@ -3177,13 +3154,13 @@ mod tests {
                     "{key}: {error:?}"
                 );
             };
-            reserved(attr.clone().set_metadata(key, 1.0_f32).err().expect(key));
-            reserved(attr.clone().update_metadata(key, |_| None).err().expect(key));
-            reserved(attr.clone().clear_metadata(key).err().expect(key));
+            reserved(attr.clone().set_metadata(key, 1.0_f32).expect_err(key));
+            reserved(attr.clone().update_metadata(key, |_| None).expect_err(key));
+            reserved(attr.clone().clear_metadata(key).expect_err(key));
         }
         let rel = stage.create_relationship("/A.r")?;
         for key in ["targetPaths", "variability", "custom"] {
-            let error = rel.clone().set_metadata(key, true).err().expect(key);
+            let error = rel.clone().set_metadata(key, true).expect_err(key);
             assert!(
                 matches!(error, StageAuthoringError::ReservedField { field } if field == key),
                 "{key}: {error:?}"
@@ -3314,6 +3291,21 @@ mod tests {
             )?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.x", "customExpr"),
+            "/Source/Child"
+        );
+        Ok(())
+    }
+
+    /// A path expression authors straight through `set`, and is anchored to
+    /// the edit target like any other path-expression opinion.
+    #[test]
+    fn set_path_expression() -> Result<()> {
+        let (stage, layer_id) = referenced_target()?;
+        stage
+            .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
+            .set(sdf::PathExpression::parse("Child"))?;
+        assert_eq!(
+            expr_field(&stage, &layer_id, "/Source.expr", "default"),
             "/Source/Child"
         );
         Ok(())

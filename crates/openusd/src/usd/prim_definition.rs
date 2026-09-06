@@ -179,7 +179,7 @@ impl PrimDefinition {
         // and its class prim describes the template, not the prims using it.
         let contributes_metadata = applied_name
             .as_ref()
-            .is_none_or(|name| schema_registry::split_instance_name(name).1.is_none());
+            .is_none_or(|name| SchemaRegistry::type_name_and_instance(name).1.is_none());
 
         let mut definition = PrimDefinition {
             applied_api_schemas: applied_name.into_iter().collect(),
@@ -233,7 +233,7 @@ impl PrimDefinition {
             Some(instance) => weaker
                 .applied_api_schemas
                 .iter()
-                .map(|name| schema_registry::make_instance_name(name, instance))
+                .map(|name| SchemaRegistry::make_multiple_apply_name_instance(name, instance))
                 .collect(),
             None => weaker.applied_api_schemas.clone(),
         };
@@ -255,7 +255,7 @@ impl PrimDefinition {
         let mut added = Vec::with_capacity(names.len());
 
         for name in names {
-            let (identifier, instance) = schema_registry::split_instance_name(&name);
+            let (identifier, instance) = SchemaRegistry::type_name_and_instance(&name);
             let Some(info) = infos.get(&identifier) else {
                 continue;
             };
@@ -289,7 +289,7 @@ impl PrimDefinition {
 
         for name in names {
             let instanced = match instance {
-                Some(instance) => schema_registry::make_instance_name(name, instance),
+                Some(instance) => SchemaRegistry::make_multiple_apply_name_instance(name, instance),
                 None => name.clone(),
             };
             self.add_or_compose_property(instanced, weaker, &weaker.prop_map[name]);

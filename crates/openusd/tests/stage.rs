@@ -8301,6 +8301,31 @@ fn define_prim() -> Result<()> {
     Ok(())
 }
 
+/// A typed define authors the specifier and the type in one write, so a prim
+/// the stage will not compose — here one outside the population mask —
+/// still gets its type; an existing `over` is upgraded and retyped.
+#[test]
+fn define_typed_prim() -> Result<()> {
+    let stage = Stage::builder()
+        .mask(usd::StagePopulationMask::new(["/Keep"])?)
+        .in_memory("anon.usda")?;
+    stage.override_prim("/Keep")?;
+    assert_eq!(
+        stage.define_typed_prim("/Keep", "Xform")?.type_name()?.as_deref(),
+        Some("Xform")
+    );
+    assert!(!stage.define_typed_prim("/Drop", "Scope")?.is_valid()?);
+    let layer = stage.root_layer();
+    assert_eq!(
+        layer.prim("/Keep")?.expect("upgraded").specifier(),
+        Some(sdf::Specifier::Def)
+    );
+    let drop = layer.prim("/Drop")?.expect("authored outside the mask");
+    assert_eq!(drop.specifier(), Some(sdf::Specifier::Def));
+    assert_eq!(drop.type_name().as_deref(), Some("Scope"));
+    Ok(())
+}
+
 /// A query that misses (the prim is not yet authored) caches the miss; authoring
 /// the prim must invalidate that cache so the next query sees it.
 #[test]
@@ -10243,5 +10268,74 @@ fn unsorted_samples_normalized() -> Result<()> {
     let attr = attr.set_at(3.0_f64, usd::TimeCode::new(10.0))?;
     assert_eq!(attr.num_time_samples()?, 2, "the write replaces the sample at its time");
     assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(10.0))?, Some(3.0));
+    Ok(())
+}
+
+/// Authoring through an instance proxy or into a prototype composes nowhere
+/// it can be seen, so the prim-handle and define seams refuse it (C++
+/// `_ValidateEditPrim`); the instance itself and the source stay editable,
+/// removal strips a stale opinion wherever it sits, and a target that maps the
+/// prim elsewhere is trusted.
+#[test]
+fn instancing_edits_refused() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"Source\"\n{\n    def \"Child\" {}\n}\ndef \"Inst\" (\n    instanceable = true\n    references = </Source>\n) {\n    def \"Stale\" {}\n}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let proxy = stage.prim("/Inst/Child")?;
+    assert!(proxy.is_instance_proxy()?);
+    assert!(matches!(
+        proxy.clone().apply_api("SomeAPI"),
+        Err(StageAuthoringError::InstanceProxyEdit { .. })
+    ));
+    assert!(matches!(
+        proxy.clone().set_kind("component"),
+        Err(StageAuthoringError::InstanceProxyEdit { .. })
+    ));
+    assert!(matches!(
+        stage.define_prim("/Inst/Child/New"),
+        Err(StageAuthoringError::InstanceProxyEdit { .. })
+    ));
+    let prototype = proxy
+        .prim_in_prototype()?
+        .expect("the proxy stands in for a prototype prim");
+    assert!(matches!(
+        prototype.apply_api("SomeAPI"),
+        Err(StageAuthoringError::PrototypeEdit { .. })
+    ));
+    // The prototype namespace is refused on its spelling alone.
+    assert!(matches!(
+        stage.define_prim("/__Prototype_7/Stray"),
+        Err(StageAuthoringError::PrototypeEdit { .. })
+    ));
+
+    stage.prim("/Inst")?.set_kind("component")?;
+    stage.prim("/Source/Child")?.apply_api("SomeAPI")?;
+    assert!(stage.remove_prim("/Inst/Stale")?, "the stale local spec is removable");
+    assert!(
+        stage.root_layer().prim("/Inst/Child")?.is_none() && stage.root_layer().prim("/Inst/Stale")?.is_none(),
+        "nothing was authored under the instance"
+    );
+
+    // A target that maps the prim elsewhere — here onto the reference's
+    // source — authors the site it names.
+    stage.set_edit_target(
+        stage
+            .prim("/Inst")?
+            .edit_target_for_arc(usd::EditTargetArc::Reference)?,
+    )?;
+    proxy.set_kind("component")?;
+    assert_eq!(
+        stage
+            .root_layer()
+            .prim("/Source/Child")?
+            .expect("the source prim")
+            .kind()
+            .as_deref(),
+        Some("component")
+    );
     Ok(())
 }

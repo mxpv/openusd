@@ -1695,6 +1695,9 @@ fn projected_origin(path: &sdf::Path, earlier: &[NamespaceEdit]) -> Option<sdf::
 /// edit's `kind`. A non-absolute path maps through `invalid` to the caller's
 /// source or destination error variant; a path of the wrong kind (a prim path
 /// for a property edit, or vice versa) is a [`KindMismatch`](NamespaceEditError::KindMismatch).
+// TODO: C++ `UsdNamespaceEditor` also refuses a source inside a prototype or
+// beneath an instance, and a new parent that is an instance; those checks are
+// not ported.
 fn check_editable(
     path: &sdf::Path,
     kind: ObjectKind,

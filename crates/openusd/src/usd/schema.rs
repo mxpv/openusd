@@ -4,8 +4,9 @@
 //! `UsdSchemaBase`). Every schema — typed (`IsA`) or applied (API) — is a
 //! lightweight value-type view over a single [`Prim`] and implements this
 //! trait, directly or through an intermediate schema trait (`Imageable`,
-//! `Xformable`, …). The domain schema crate builds its typed
-//! property accessors on top of [`SchemaBase::prim`].
+//! `Xformable`, …). [`Typed`] and [`APISchemaBase`] are the roots a generated
+//! chain hangs off, one per side of the typed / API split. The domain schema
+//! crate builds its typed property accessors on top of [`SchemaBase::prim`].
 
 use crate::sdf;
 
@@ -104,6 +105,15 @@ pub trait SchemaBase {
     }
 }
 
+/// The base of every typed (`IsA`) schema (C++ `UsdTyped`): a schema whose
+/// identifier a prim's `typeName` may carry. Generated schema traits derive
+/// from it and generated concrete views implement it; it declares nothing of
+/// its own, so a bound on it says only "this view stands for a prim type".
+pub trait Typed: SchemaBase {}
+
+/// The base of every API schema (C++ `UsdAPISchemaBase`), applied or not.
+pub trait APISchemaBase: SchemaBase {}
+
 impl SchemaKind {
     /// The token a manifest's `schemaKind` attribute uses, matching the
     /// spellings C++ writes into `plugInfo.json`.
@@ -155,6 +165,15 @@ mod tests {
         fn prim(&self) -> &Prim {
             &self.0
         }
+    }
+
+    impl Typed for Marker {}
+
+    /// A bound on the typed root accepts a view that implements it.
+    #[test]
+    fn typed_bound() {
+        fn accepts<T: Typed>() {}
+        accepts::<Marker>();
     }
 
     #[test]

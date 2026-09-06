@@ -31,13 +31,12 @@
 //! routes invalidation through [`crate::pcp::Changes`], so only the prim
 //! indices observably affected by the write are dropped.
 
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
     ApplyApiError, Attribute, EditTarget, EditTargetArc, LoadPolicy, PrimDefinition, PrimTypeInfo, Relationship,
-    SchemaRegistry, SpecSite, Stage, StageAuthoringError, VersionFilter, schema_registry,
+    SchemaRegistry, SpecSite, Stage, StageAuthoringError, VersionFilter,
 };
 use crate::tf::Token;
 use crate::{Result, pcp, sdf};
@@ -54,7 +53,7 @@ enum PropertySource {
 }
 
 /// Stage-composed prim handle. Mirrors C++ `UsdPrim`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Prim {
     stage: Stage,
     path: sdf::Path,
@@ -88,28 +87,43 @@ impl Prim {
     /// Set the prim's `typeName` field on the edit target's layer.
     pub fn set_type_name(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let name = name.into();
-        self.edit(|spec| spec.set_type_name(name))
+        self.edit(|spec| {
+            spec.set_type_name(name);
+            Ok(())
+        })
     }
 
     /// Set the prim's `active` flag.
     pub fn set_active(self, active: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set_active(active))
+        self.edit(|spec| {
+            spec.set_active(active);
+            Ok(())
+        })
     }
 
     /// Set the prim's `kind` metadata.
     pub fn set_kind(self, kind: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let kind = kind.into();
-        self.edit(|spec| spec.set_kind(kind))
+        self.edit(|spec| {
+            spec.set_kind(kind);
+            Ok(())
+        })
     }
 
     /// Set the prim's `hidden` flag.
     pub fn set_hidden(self, hidden: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set_hidden(hidden))
+        self.edit(|spec| {
+            spec.set_hidden(hidden);
+            Ok(())
+        })
     }
 
     /// Set the prim's `instanceable` flag.
     pub fn set_instanceable(self, instanceable: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set_instanceable(instanceable))
+        self.edit(|spec| {
+            spec.set_instanceable(instanceable);
+            Ok(())
+        })
     }
 
     /// Add an applied API schema name to this prim's `apiSchemas` metadata.
@@ -120,31 +134,23 @@ impl Prim {
     /// opinions, and authors `name` whatever it is. Reach for
     /// [`apply_api`](Self::apply_api) to have the registry check it first.
     ///
-    /// The prim spec must already exist on the active edit target — chain
-    /// after [`Stage::define_prim`] or [`Stage::override_prim`]; otherwise
-    /// the call returns [`sdf::AuthoringError::InvalidPath`].
-    ///
-    /// [`Stage::define_prim`]: crate::usd::Stage::define_prim
-    /// [`Stage::override_prim`]: crate::usd::Stage::override_prim
+    /// The prim must exist on the stage: a handle for a path nothing defines
+    /// is rejected as [`StageAuthoringError::PrimNotValid`], so applying never
+    /// conjures a prim. The `over` carrying the opinion is authored on the
+    /// edit target when the target holds no spec for the prim, as C++
+    /// `_CreatePrimSpecForEditing` does, so a prim defined only on a weaker
+    /// layer takes the opinion on the current target.
     pub fn add_applied_schema(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let name = name.into();
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            super::authoring::edit_spec(
-                layer.data_mut(),
-                path,
-                sdf::SpecType::Prim,
-                sdf::PrimSpecMut::get,
-                |spec| {
-                    spec.add_applied_schema(name)?;
-                    Ok(())
-                },
-            )
-        })?;
-        Ok(self)
+        self.edit(|spec| {
+            spec.add_applied_schema(name)?;
+            Ok(())
+        })
     }
 
     /// Apply an API schema to this prim, checking it against the registry
-    /// first. Mirrors C++ `UsdPrim::ApplyAPI`.
+    /// first. Mirrors C++ `UsdPrim::ApplyAPI` (`_ApplySingleApplyAPI` /
+    /// `_ApplyMultipleApplyAPI`).
     ///
     /// `name` carries the instance for a multiple-apply schema, as it does
     /// everywhere else applied names appear (`CollectionAPI:render`). The check
@@ -156,17 +162,9 @@ impl Prim {
     ///
     /// A name the registry does not know carries no rules to break, so it is
     /// authored as-is; that is what keeps applying schemas working while no
-    /// schema data is registered.
-    ///
-    /// Authoring carries [`add_applied_schema`](Self::add_applied_schema)'s
-    /// precondition: the prim spec must already exist on the active edit
-    /// target, so chain after [`Stage::define_prim`] or
-    /// [`Stage::override_prim`].
-    ///
-    /// [`Stage::define_prim`]: crate::usd::Stage::define_prim
-    /// [`Stage::override_prim`]: crate::usd::Stage::override_prim
-    // TODO: author the spec instead of requiring one, as C++ `ApplyAPI` does
-    // through `_CreatePrimSpecForEditing`.
+    /// schema data is registered. The authoring itself, including the prim
+    /// validity it demands, is
+    /// [`add_applied_schema`](Self::add_applied_schema).
     pub fn apply_api(self, name: impl Into<Token>) -> Result<Self, StageAuthoringError> {
         let name = name.into();
         self.stage.schema_registry().check_applied_name(&name)?;
@@ -184,33 +182,37 @@ impl Prim {
     /// through [`is_a`](Self::is_a).
     pub fn can_apply_api(&self, name: impl Into<Token>) -> Result<(), ApplyApiError> {
         let name = name.into();
+        let registry = self.stage.schema_registry();
+        let checked = registry.check_applied_name(&name)?;
+        // The `IsValid()` gate of C++ `_CanApplySingleApplyAPI` /
+        // `_CanApplyMultipleApplyAPI`, reported as the `whyNot` it is.
         if !self.stage.has_spec(&self.path)? {
             return Err(ApplyApiError::PrimNotValid {
                 path: self.path.clone(),
             });
         }
-
-        let registry = self.stage.schema_registry();
-        let Some((info, instance)) = registry.check_applied_name(&name)? else {
+        let Some((info, instance)) = checked else {
             return Ok(());
         };
         let schema = info.identifier();
+        let allowed = info.can_only_apply_to(instance.as_ref());
 
         if let Some(instance) = instance
             && !registry.is_allowed_instance_name(schema, &instance)
         {
-            let schema = schema.clone();
-            return Err(ApplyApiError::InstanceNameNotAllowed { schema, instance });
+            return Err(ApplyApiError::InstanceNameNotAllowed {
+                schema: schema.clone(),
+                instance,
+            });
         }
 
-        let allowed = info.can_only_apply_to();
         if !allowed.is_empty() {
             // The prim's type answers for every candidate, so it is resolved
             // before the scan.
             let type_info = self.stage.prim_type_info_composed(&self.path)?;
             if !allowed.iter().any(|t| registry.is_a(type_info.schema_type_name(), t)) {
                 return Err(ApplyApiError::PrimTypeNotAllowed {
-                    schema: schema.clone(),
+                    schema: name,
                     allowed: allowed.to_vec(),
                 });
             }
@@ -297,35 +299,37 @@ impl Prim {
         F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
     {
         super::authoring::check_reserved(sdf::SpecType::Prim, key)?;
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let local = layer.data_mut().try_field(&path, key)?.map(Cow::into_owned);
-            match f(local) {
-                // Author an `over` for the prim (and any missing ancestors) when
-                // the edit target has no local spec, matching C++
-                // `UsdObject::SetMetadata` creating the spec for editing. The
-                // layer records the ancestor adds and the metadata write.
-                Some(value) => sdf::PrimSpec::over(layer.data_mut(), path)?.set(key, value),
-                // Erasing reaches only a prim spec this layer already holds, so
-                // a prim it says nothing about stays absent from it — and the
-                // pseudo-root, whose fields are the layer's own metadata rather
-                // than any prim's, is no more clearable here than it is
-                // authorable.
-                None => {
-                    if let Some(mut spec) = sdf::PrimSpecMut::get(layer.data_mut(), path) {
-                        spec.erase(key);
-                    }
+        // The local opinion is read, and `f` decided, ahead of any transaction:
+        // only a write needs a prim to author against, and only a write
+        // composes to find one.
+        let local = self.stage.local_field(&self.path, key)?;
+        let Some(value) = f(local) else {
+            // Erasing reaches only a prim spec this layer already holds, so a
+            // prim it says nothing about stays absent from it — and the
+            // pseudo-root, whose fields are the layer's own metadata rather
+            // than any prim's, is no more clearable here than it is
+            // authorable.
+            self.stage.with_target_layer_at(&self.path, |layer, path| {
+                if let Some(mut spec) = sdf::PrimSpecMut::get(layer.data_mut(), path) {
+                    spec.erase(key);
                 }
-            }
+                Ok(())
+            })?;
+            return Ok(self);
+        };
+        self.edit(|spec| {
+            spec.set(key, value);
             Ok(())
-        })?;
-        Ok(self)
+        })
     }
 
     /// Author an attribute spec named `name` under this prim (C++
     /// `UsdPrim::CreateAttribute`); see [`Stage::create_attribute`] for the
     /// contract, under which `type_name` applies only to an attribute nothing
     /// declares yet. Defaults `variability = Varying`, `custom = true` —
-    /// override via the returned [`Attribute`] handle's fluent setters.
+    /// override via the returned [`Attribute`] handle's fluent setters. A prim
+    /// nothing composes is [`StageAuthoringError::PrimNotValid`], so the
+    /// property never conjures its prim.
     pub fn create_attribute(
         &self,
         name: impl Into<Token>,
@@ -333,14 +337,17 @@ impl Prim {
     ) -> Result<Attribute, StageAuthoringError> {
         let name = name.into();
         let attr_path = self.path.append_property(&name)?;
+        self.require_valid()?;
         self.stage.create_attribute(attr_path, type_name)
     }
 
-    /// Author a relationship spec named `name` under this prim. Mirrors C++
-    /// `UsdPrim::CreateRelationship`.
+    /// Author a relationship spec named `name` under this prim (C++
+    /// `UsdPrim::CreateRelationship`), under the same prim-validity rule as
+    /// [`create_attribute`](Self::create_attribute).
     pub fn create_relationship(&self, name: impl Into<Token>) -> Result<Relationship, StageAuthoringError> {
         let name = name.into();
         let rel_path = self.path.append_property(&name)?;
+        self.require_valid()?;
         self.stage.create_relationship(rel_path)
     }
 
@@ -368,6 +375,7 @@ impl Prim {
     pub fn append_to_uniform_token_array(&self, name: &str, value: impl Into<String>) -> Result<bool> {
         let value = value.into();
         let attr_path = self.path.append_property(name)?;
+        self.require_valid()?;
         let existing: Vec<String> = match self.stage.field::<sdf::Value>(&attr_path, sdf::FieldKey::Default)? {
             Some(sdf::Value::TokenVec(v)) => v.into_iter().map(Into::into).collect(),
             Some(sdf::Value::StringVec(v)) => v,
@@ -625,7 +633,7 @@ impl Prim {
 
         let authored = self.authored_api_schemas()?;
         let unregistered = authored.iter().filter_map(|name| {
-            let (schema, applied_instance) = schema_registry::split_instance_name(name);
+            let (schema, applied_instance) = SchemaRegistry::type_name_and_instance(name);
             if registry.schema_info(&schema).is_some() {
                 return None;
             }
@@ -1017,8 +1025,24 @@ impl Prim {
     /// `UsdPrim::IsValid` for a handle obtained from
     /// [`Stage::prim`](crate::usd::Stage::prim): a path with no
     /// contributing spec yields a handle that is not valid.
+    // TODO: C++ never populates a prim beneath an inactive ancestor, so its
+    // `IsValid()` is false there; this answers whether anything composes.
     pub fn is_valid(&self) -> Result<bool> {
         Ok(self.stage.has_spec(&self.path)?)
+    }
+
+    /// The gate every prim-handle write shares (C++ `UsdPrim` setters on an
+    /// invalid prim): a prim nothing composes cannot take an opinion, so
+    /// authoring through a handle never conjures a prim. A prim the stage will
+    /// not compose but a caller still means to type is defined through
+    /// [`Stage::define_typed_prim`] instead.
+    fn require_valid(&self) -> Result<(), StageAuthoringError> {
+        if self.stage.has_spec(&self.path)? {
+            return Ok(());
+        }
+        Err(StageAuthoringError::PrimNotValid {
+            path: self.path.clone(),
+        })
     }
 
     /// The property paths of `source` whose spec type matches `ty`, in composed
@@ -1063,24 +1087,24 @@ impl Prim {
         VariantSets::new(&self.stage, self.path.clone())
     }
 
-    /// Borrow the prim spec at `self.path` on the edit target's layer, apply
-    /// `f`, and return `self` for chaining. The layer records whatever fields
-    /// `f` writes. Returns `InvalidPath` if no prim spec exists at the path.
+    /// Run `f` on this prim's spec on the edit target's layer — an `over`
+    /// authored there, with `over` ancestors, when the layer holds none (C++
+    /// `_CreatePrimSpecForEditing`, behind every prim-handle write) — and
+    /// return `self` for chaining. The layer records whatever fields `f`
+    /// writes. A prim nothing composes is
+    /// [`StageAuthoringError::PrimNotValid`]; a spec of another kind at the
+    /// path is reported by [`sdf::PrimSpec::over`].
+    // TODO: a variant-selection leaf (`/Prim{set=sel}`, the spec path under a
+    // variant edit target) is rejected by `PrimSpec::over`, where C++
+    // `SdfCreatePrimInLayer` authors inside the variant.
     fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::PrimSpecMut<'_>),
+        F: FnOnce(&mut sdf::PrimSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
+        self.require_valid()?;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            super::authoring::edit_spec(
-                layer.data_mut(),
-                path,
-                sdf::SpecType::Prim,
-                sdf::PrimSpecMut::get,
-                |spec| {
-                    f(spec);
-                    Ok(())
-                },
-            )
+            let mut spec = sdf::PrimSpec::over(layer.data_mut(), path)?;
+            f(&mut spec)
         })?;
         Ok(self)
     }
@@ -1441,17 +1465,17 @@ mod tests {
         // A multiple-apply schema applies per instance; a single-apply one
         // applies whole. Getting that wrong is refused before anything is
         // authored.
-        let missing = stage.prim("/Sun")?.apply_api("CollectionAPI").err().expect("rejected");
+        let missing = stage.prim("/Sun")?.apply_api("CollectionAPI").expect_err("rejected");
         assert!(matches!(
             missing,
             StageAuthoringError::Schema(ApplyApiError::MissingInstanceName { .. })
         ));
-        let unexpected = stage.prim("/Sun")?.apply_api("LightAPI:extra").err().expect("rejected");
+        let unexpected = stage.prim("/Sun")?.apply_api("LightAPI:extra").expect_err("rejected");
         assert!(matches!(
             unexpected,
             StageAuthoringError::Schema(ApplyApiError::UnexpectedInstanceName { .. })
         ));
-        let typed = stage.prim("/Sun")?.apply_api("DistantLight").err().expect("rejected");
+        let typed = stage.prim("/Sun")?.apply_api("DistantLight").expect_err("rejected");
         assert!(matches!(
             typed,
             StageAuthoringError::Schema(ApplyApiError::NotAppliedApi { .. })
@@ -1500,9 +1524,59 @@ mod tests {
         assert!(matches!(wrong_instance, ApplyApiError::InstanceNameNotAllowed { .. }));
 
         // The restrictions are advisory: `apply_api` authors regardless, as
-        // C++ `ApplyAPI` does.
+        // C++ `ApplyAPI` does — the schema-wide one and an instance's alike.
         stage.prim("/Plain")?.apply_api("LightAPI")?;
         assert!(stage.prim("/Plain")?.has_api_schema("LightAPI")?);
+        stage.prim("/Sun")?.apply_api("SlotAPI:right")?;
+        assert!(stage.prim("/Sun")?.has_api_schema("SlotAPI:right")?);
+        Ok(())
+    }
+
+    #[test]
+    fn instance_restriction_wins() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        stage.define_prim("/Dome")?.set_type_name("DomeLight")?;
+
+        // `SlotAPI:right` narrows the schema-wide `NonboundableLightBase` to
+        // `DomeLight`, so the instance's list is the one that answers;
+        // `SlotAPI:left` lists nothing of its own and keeps the schema-wide one.
+        stage.prim("/Dome")?.can_apply_api("SlotAPI:right")?;
+        let err = stage.prim("/Sun")?.can_apply_api("SlotAPI:right").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ApplyApiError::PrimTypeNotAllowed { ref schema, ref allowed }
+                    if schema.as_str() == "SlotAPI:right" && allowed == &[Token::new("DomeLight")]
+            ),
+            "{err:?}"
+        );
+        stage.prim("/Sun")?.can_apply_api("SlotAPI:left")?;
+        Ok(())
+    }
+
+    #[test]
+    fn edits_author_over() -> Result<()> {
+        let stage = schema_stage()?;
+        let mut weaker = sdf::Layer::new_in_memory("weaker.usda");
+        weaker.edit(|edit| {
+            sdf::PrimSpec::new(edit.data_mut(), "/Sun", sdf::Specifier::Def, "DistantLight").expect("prim spec");
+            Ok(())
+        })?;
+        let root = stage.root_layer().identifier().to_string();
+        stage.insert_layer(&root, 0, weaker, sdf::LayerOffset::IDENTITY)?;
+
+        // The prim exists only on the weaker layer; applying a schema and
+        // setting a field both author an `over` on the edit target (the root
+        // layer) carrying the opinion.
+        stage.prim("/Sun")?.apply_api("LightAPI")?.set_kind("component")?;
+        assert!(stage.prim("/Sun")?.has_api_schema("LightAPI")?);
+        assert_eq!(stage.prim("/Sun")?.kind()?.as_deref(), Some("component"));
+        let root_layer = stage.root_layer();
+        let over = root_layer.prim("/Sun")?.expect("an over on the edit target");
+        assert_eq!(over.specifier(), Some(sdf::Specifier::Over));
+        assert_eq!(over.type_name(), None, "the over adds no type of its own");
+        assert_eq!(over.kind().as_deref(), Some("component"));
         Ok(())
     }
 
@@ -1676,10 +1750,21 @@ mod tests {
     fn can_apply_api_invalid_prim() -> Result<()> {
         let stage = schema_stage()?;
 
-        // Nothing composes at the path, so there is nothing to apply to —
-        // answered before any schema question, as C++ `CanApplyAPI` does.
+        // Nothing composes at the path, so there is nothing to apply to; the
+        // authoring entry points refuse alike and conjure no prim.
         let missing = stage.prim("/Typo")?.can_apply_api("CollectionAPI:render").unwrap_err();
         assert!(matches!(missing, ApplyApiError::PrimNotValid { .. }));
+        let missing = stage.prim("/Typo")?.apply_api("CollectionAPI:render").unwrap_err();
+        assert!(matches!(missing, StageAuthoringError::PrimNotValid { .. }));
+        let missing = stage.prim("/Typo")?.add_applied_schema("SomeAPI").unwrap_err();
+        assert!(matches!(missing, StageAuthoringError::PrimNotValid { .. }));
+        let missing = stage.prim("/Typo")?.set_kind("component").unwrap_err();
+        assert!(matches!(missing, StageAuthoringError::PrimNotValid { .. }));
+        let missing = stage.prim("/Typo")?.create_attribute("x", "float").unwrap_err();
+        assert!(matches!(missing, StageAuthoringError::PrimNotValid { .. }));
+        let missing = stage.prim("/Typo")?.create_relationship("r").unwrap_err();
+        assert!(matches!(missing, StageAuthoringError::PrimNotValid { .. }));
+        assert!(stage.root_layer().prim("/Typo")?.is_none(), "nothing was authored");
         Ok(())
     }
 

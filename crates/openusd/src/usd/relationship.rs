@@ -15,7 +15,7 @@ use crate::{pcp, sdf};
 /// Returned by [`Stage::create_relationship`] / [`Prim::create_relationship`]
 /// with defaults `variability = Varying`, `custom = true`, matching C++
 /// generic property authoring. Override via the fluent setters below.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Relationship {
     stage: Stage,
     path: sdf::Path,

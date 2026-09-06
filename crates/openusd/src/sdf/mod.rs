@@ -123,20 +123,6 @@ impl TimeCode {
     }
 }
 
-impl TryFrom<Value> for TimeCode {
-    type Error = CastError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::TimeCode(v) => Ok(v),
-            other => Err(CastError::TypeMismatch {
-                target: "TimeCode",
-                actual: (&other).into(),
-            }),
-        }
-    }
-}
-
 /// Represents a time offset and scale between layers.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]

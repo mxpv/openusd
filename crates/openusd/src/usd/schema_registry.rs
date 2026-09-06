@@ -91,6 +91,10 @@ pub struct SchemaInfo {
     property_namespace_prefix: Option<tf::Token>,
     auto_apply_to: Vec<tf::Token>,
     can_only_apply_to: Vec<tf::Token>,
+    /// A multiple-apply schema's `apiSchemaInstances` restrictions: the
+    /// non-empty `apiSchemaCanOnlyApplyTo` list an instance name answers
+    /// [`can_only_apply_to`](Self::can_only_apply_to) with.
+    instance_can_only_apply_to: HashMap<tf::Token, Vec<tf::Token>>,
     allowed_instance_names: Vec<tf::Token>,
 }
 
@@ -341,7 +345,8 @@ pub enum ApplyApiError {
     /// The schema's `apiSchemaCanOnlyApplyTo` does not cover this prim's type.
     #[error("{schema} can only be applied to {allowed:?}")]
     PrimTypeNotAllowed {
-        /// The offending schema identifier.
+        /// The applied name as given — the schema identifier, instanced for a
+        /// multiple-apply schema (`SlotAPI:right`), whose restriction failed.
         schema: tf::Token,
         /// The prim types the schema restricts itself to.
         allowed: Vec<tf::Token>,
@@ -380,9 +385,11 @@ impl SchemaRegistry {
     /// A family may not itself carry a version suffix, so `("Foo_1", 0)` names
     /// no schema even though `Foo_1` may well be registered.
     pub fn schema_info_in_family(&self, family: &tf::Token, version: u32) -> Option<&SchemaInfo> {
-        Self::is_allowed_family(family)
-            .then(|| self.infos.get(&Self::make_identifier(family, version)))
-            .flatten()
+        if !Self::is_allowed_schema_family(family) {
+            return None;
+        }
+        self.infos
+            .get(&Self::make_schema_identifier_for_family_and_version(family, version))
     }
 
     /// Every registered schema in `family` that `filter` accepts, newest
@@ -421,13 +428,14 @@ impl SchemaRegistry {
     /// Registration is not consulted: an identifier carries its own family and
     /// version, which is what lets an authored `typeName` be placed in a family
     /// while no schema data is registered. Only a spelling
-    /// [`is_allowed_identifier`](Self::is_allowed_identifier) accepts is placed,
-    /// so `Foo_01` — which could never name a registered schema — belongs to no
-    /// family rather than to `Foo`. C++ `ParseSchemaFamilyAndVersionFromIdentifier`
-    /// parses the same suffix but places every spelling, because it reaches
-    /// this question only for names that already resolved through `TfType`.
+    /// [`is_allowed_schema_identifier`](Self::is_allowed_schema_identifier)
+    /// accepts is placed, so `Foo_01` — which could never name a registered
+    /// schema — belongs to no family rather than to `Foo`. C++
+    /// `ParseSchemaFamilyAndVersionFromIdentifier` parses the same suffix but
+    /// places every spelling, because it reaches this question only for names
+    /// that already resolved through `TfType`.
     pub fn parse_allowed_identifier(identifier: &tf::Token) -> Option<(tf::Token, u32)> {
-        Self::is_allowed_identifier(identifier).then(|| Self::parse_identifier(identifier))
+        Self::is_allowed_schema_identifier(identifier).then(|| Self::parse_schema_family_and_version(identifier))
     }
 
     /// Every registered schema, in unspecified order.
@@ -566,7 +574,7 @@ impl SchemaRegistry {
         !definition
             .property_names()
             .iter()
-            .any(|property| name_template_base(property) == base)
+            .any(|property| SchemaRegistry::multiple_apply_name_template_base_name(property) == base)
     }
 
     /// Whether a field is meaningless as a schema fallback
@@ -630,7 +638,7 @@ impl SchemaRegistry {
         // type already builds in, so those versions are claimed up front.
         let mut seen = FamilyVersions::new();
         for name in typed.applied_api_schemas() {
-            let (identifier, instance) = split_instance_name(name);
+            let (identifier, instance) = SchemaRegistry::type_name_and_instance(name);
             if let Some(info) = self.infos.get(&identifier) {
                 seen.insert((info.family().clone(), instance), info.version());
             }
@@ -709,28 +717,29 @@ impl SchemaRegistry {
     /// ```
     /// use openusd::{tf, usd::SchemaRegistry};
     ///
-    /// let (family, version) = SchemaRegistry::parse_identifier(&tf::Token::new("DomeLight_1"));
+    /// let parse = SchemaRegistry::parse_schema_family_and_version;
+    /// let (family, version) = parse(&tf::Token::new("DomeLight_1"));
     /// assert_eq!((family.as_str(), version), ("DomeLight", 1));
     ///
-    /// let (family, version) = SchemaRegistry::parse_identifier(&tf::Token::new("DomeLight"));
+    /// let (family, version) = parse(&tf::Token::new("DomeLight"));
     /// assert_eq!((family.as_str(), version), ("DomeLight", 0));
     /// ```
-    pub fn parse_identifier(identifier: &tf::Token) -> (tf::Token, u32) {
-        match version_delimiter(identifier.as_str()) {
+    pub fn parse_schema_family_and_version(identifier: &tf::Token) -> (tf::Token, u32) {
+        match split_version_suffix(identifier) {
             // A version that does not fit a `u32` is treated as absent, which
             // keeps the identifier addressable under its own full name.
-            Some(delim) => match identifier[delim + 1..].parse() {
-                Ok(version) => (tf::Token::from(&identifier[..delim]), version),
+            (family, Some(suffix)) => match suffix.parse() {
+                Ok(version) => (tf::Token::from(family), version),
                 Err(_) => (identifier.clone(), 0),
             },
-            None => (identifier.clone(), 0),
+            (_, None) => (identifier.clone(), 0),
         }
     }
 
     /// Builds the identifier for a family and version
     /// (C++ `MakeSchemaIdentifierForFamilyAndVersion`). Version 0 is the bare
     /// family name.
-    pub fn make_identifier(family: &tf::Token, version: u32) -> tf::Token {
+    pub fn make_schema_identifier_for_family_and_version(family: &tf::Token, version: u32) -> tf::Token {
         match version {
             0 => family.clone(),
             _ => tf::Token::from(format!("{family}_{version}")),
@@ -739,16 +748,106 @@ impl SchemaRegistry {
 
     /// Whether `family` may name a schema family (C++ `IsAllowedSchemaFamily`):
     /// a valid identifier that does not itself end in a version suffix.
-    pub fn is_allowed_family(family: &tf::Token) -> bool {
-        sdf::Path::is_valid_identifier(family.as_str()) && version_delimiter(family.as_str()).is_none()
+    pub fn is_allowed_schema_family(family: &str) -> bool {
+        sdf::Path::is_valid_identifier(family) && version_delimiter(family).is_none()
     }
 
     /// Whether `identifier` may name a schema (C++ `IsAllowedSchemaIdentifier`):
     /// an allowed family plus a canonical version suffix, so `Foo_01` and
     /// `Foo_1_2` are rejected.
-    pub fn is_allowed_identifier(identifier: &tf::Token) -> bool {
-        let (family, version) = Self::parse_identifier(identifier);
-        Self::is_allowed_family(&family) && &Self::make_identifier(&family, version) == identifier
+    pub fn is_allowed_schema_identifier(identifier: &str) -> bool {
+        let (family, suffix) = split_version_suffix(identifier);
+        // Version 0 is spelled as the bare family, so `Foo_0` is no more
+        // canonical than `Foo_01`.
+        Self::is_allowed_schema_family(family)
+            && suffix.is_none_or(|suffix| {
+                suffix
+                    .parse::<u32>()
+                    .is_ok_and(|version| version != 0 && version.to_string() == suffix)
+            })
+    }
+
+    /// Splits an applied-schema name into its schema identifier and, when the
+    /// name is an instance of a multiple-apply schema, its instance name
+    /// (C++ `GetTypeNameAndInstance`).
+    ///
+    /// The split is at the first namespace delimiter: an identifier can never
+    /// contain one, while an instance name can.
+    ///
+    /// A name carries an instance only when there is one to carry, so a
+    /// trailing delimiter (`CollectionAPI:`) reads as the bare identifier —
+    /// C++ decides the same question as `!instanceName.IsEmpty()`.
+    pub fn type_name_and_instance(name: &tf::Token) -> (tf::Token, Option<tf::Token>) {
+        match name.split_once(':') {
+            Some((identifier, instance)) if !instance.is_empty() => {
+                (tf::Token::from(identifier), Some(tf::Token::from(instance)))
+            }
+            Some((identifier, _)) => (tf::Token::from(identifier), None),
+            None => (name.clone(), None),
+        }
+    }
+
+    /// The template name of a multiple-apply schema's property or built-in
+    /// before any instance name is chosen
+    /// (C++ `MakeMultipleApplyNameTemplate`): `prefix`, the instance-name
+    /// placeholder and `base` joined as namespace components, an empty
+    /// `prefix` or `base` contributing nothing. A schema's own applied name
+    /// templates as `Identifier:__INSTANCE_NAME__`, a property under the
+    /// prefix `collection` as `collection:__INSTANCE_NAME__:expansionRule`.
+    pub fn make_multiple_apply_name_template(prefix: &str, base: &str) -> tf::Token {
+        let mut name = String::with_capacity(prefix.len() + INSTANCE_NAME_PLACEHOLDER.len() + base.len() + 2);
+        for part in [prefix, INSTANCE_NAME_PLACEHOLDER, base]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+        {
+            if !name.is_empty() {
+                name.push(':');
+            }
+            name.push_str(part);
+        }
+        tf::Token::from(name)
+    }
+
+    /// Substitutes `instance` for the placeholder in a multiple-apply template
+    /// name (C++ `MakeMultipleApplyNameInstance`).
+    ///
+    /// Only the first placeholder component is replaced, so a nested template
+    /// like `Other:__INSTANCE_NAME__:foo` instantiates to
+    /// `Other:<instance>:foo`. A name with no placeholder is returned
+    /// unchanged.
+    pub fn make_multiple_apply_name_instance(template: &str, instance: &str) -> tf::Token {
+        match placeholder_position(template) {
+            Some(start) => {
+                let mut name = String::with_capacity(template.len() + instance.len());
+                name.push_str(&template[..start]);
+                name.push_str(instance);
+                name.push_str(&template[start + INSTANCE_NAME_PLACEHOLDER.len()..]);
+                tf::Token::from(name)
+            }
+            None => tf::Token::from(template),
+        }
+    }
+
+    /// The part of a multiple-apply property name that follows the
+    /// instance-name placeholder (C++ `GetMultipleApplyNameTemplateBaseName`).
+    ///
+    /// `collection:__INSTANCE_NAME__:includeRoot` bases to `includeRoot`; a
+    /// name ending at the placeholder bases to nothing, and one without a
+    /// placeholder is its own base.
+    pub fn multiple_apply_name_template_base_name(name: &str) -> &str {
+        match placeholder_position(name) {
+            Some(start) => name
+                .get(start + INSTANCE_NAME_PLACEHOLDER.len() + 1..)
+                .unwrap_or_default(),
+            None => name,
+        }
+    }
+
+    /// Whether `name` still carries the instance-name placeholder, which is
+    /// what distinguishes a multiple-apply template from an applied instance
+    /// (C++ `IsMultipleApplyNameTemplate`).
+    pub fn is_multiple_apply_name_template(name: &str) -> bool {
+        placeholder_position(name).is_some()
     }
 }
 
@@ -806,10 +905,16 @@ impl SchemaInfo {
         &self.auto_apply_to
     }
 
-    /// Schema identifiers this API schema may be applied to
-    /// (C++ `apiSchemaCanOnlyApplyTo`); empty means unrestricted.
-    pub fn can_only_apply_to(&self) -> &[tf::Token] {
-        &self.can_only_apply_to
+    /// Schema identifiers this API schema may be applied to, as a whole or —
+    /// for a multiple-apply schema — under `instance`
+    /// (C++ `GetAPISchemaCanOnlyApplyToTypeNames(name, instance)`). An instance
+    /// whose `apiSchemaInstances` entry lists any type is restricted to those;
+    /// every other query answers the schema-wide `apiSchemaCanOnlyApplyTo`.
+    /// Empty means unrestricted.
+    pub fn can_only_apply_to(&self, instance: Option<&tf::Token>) -> &[tf::Token] {
+        instance
+            .and_then(|instance| self.instance_can_only_apply_to.get(instance))
+            .map_or(&self.can_only_apply_to, Vec::as_slice)
     }
 
     /// Instance names a multiple-apply schema accepts; empty means any.
@@ -882,7 +987,13 @@ impl SchemaRegistryBuilder {
     ///
     /// The optional `propertyNamespacePrefix`, `apiSchemaAutoApplyTo`,
     /// `apiSchemaCanOnlyApplyTo` and `allowedInstanceNames` attributes map onto
-    /// the matching [`SchemaInfo`] accessors.
+    /// the matching [`SchemaInfo`] accessors. A multiple-apply schema restricts
+    /// single instances through the prim's
+    /// `customData.apiSchemaInstances.<instance>.apiSchemaCanOnlyApplyTo`
+    /// dictionary, read by [`SchemaInfo::can_only_apply_to`] — a dictionary,
+    /// where the other fields are attributes, because an instance name may
+    /// carry namespaces of its own (`a:b`), which a flat attribute name could
+    /// not split back out of unambiguously.
     ///
     /// `apiSchemaAutoApplyTo` auto-applies the declaring API schema to the
     /// named target schemas, under the same rules as a declaration registered
@@ -923,7 +1034,7 @@ impl SchemaRegistryBuilder {
                 cause: Box::new(cause),
             })?;
 
-            if !SchemaRegistry::is_allowed_identifier(&identifier) {
+            if !SchemaRegistry::is_allowed_schema_identifier(&identifier) {
                 return Err(SchemaRegistryError::InvalidIdentifier { identifier, family });
             }
             // An allowed identifier is exactly its family plus its version, so
@@ -1132,7 +1243,7 @@ impl SchemaRegistryBuilder {
 
         let mut pending = self.begin_definition(identifier, auto_applied)?;
         for name in mem::take(&mut pending.built_ins) {
-            let (built_in, instance) = split_instance_name(&name);
+            let (built_in, instance) = SchemaRegistry::type_name_and_instance(&name);
             // A built-in no family registered contributes nothing; the schema
             // that names it is still worth defining.
             if !self.infos.contains_key(&built_in) {
@@ -1160,7 +1271,7 @@ impl SchemaRegistryBuilder {
     ) -> Result<PrimDefinition, SchemaRegistryError> {
         let mut pending = self.begin_definition(identifier, auto_applied)?;
         for name in mem::take(&mut pending.built_ins) {
-            let (built_in, instance) = split_instance_name(&name);
+            let (built_in, instance) = SchemaRegistry::type_name_and_instance(&name);
             pending.compose_built_in(&built_in, instance.as_ref(), api_defs, &self.infos);
         }
         Ok(pending.finish())
@@ -1193,7 +1304,7 @@ impl SchemaRegistryBuilder {
         // A multiple-apply schema is a template: it contributes under a name
         // carrying the instance-name placeholder until an instance is chosen.
         let applied_name = match info.kind {
-            SchemaKind::MultipleApplyApi => Some(make_name_template(identifier)),
+            SchemaKind::MultipleApplyApi => Some(SchemaRegistry::make_multiple_apply_name_template(identifier, "")),
             SchemaKind::SingleApplyApi => Some(identifier.clone()),
             _ => None,
         };
@@ -1210,7 +1321,9 @@ impl SchemaRegistryBuilder {
         // multiple-apply case needs revisiting.
         let mut seen = FamilyVersions::new();
         if info.is_applied_api() {
-            let instance = applied_name.as_ref().and_then(|name| split_instance_name(name).1);
+            let instance = applied_name
+                .as_ref()
+                .and_then(|name| SchemaRegistry::type_name_and_instance(name).1);
             seen.insert((info.family.clone(), instance), info.version);
         }
 
@@ -1243,7 +1356,7 @@ impl SchemaRegistryBuilder {
         info: &SchemaInfo,
         auto_applied: &AutoApplied,
     ) -> Vec<tf::Token> {
-        let declared = class_prim_field(schematics, class_prim, sdf::FieldKey::ApiSchemas)
+        let declared = prim_field(schematics.data(), class_prim, sdf::FieldKey::ApiSchemas)
             .and_then(|value| value.clone().try_as_token_list_op())
             .map(|list_op| list_op.compose_over(&[]))
             .unwrap_or_default();
@@ -1253,7 +1366,7 @@ impl SchemaRegistryBuilder {
         declared
             .into_iter()
             .chain(auto_applied)
-            .filter(|name| is_name_template(name) == wants_templates)
+            .filter(|name| SchemaRegistry::is_multiple_apply_name_template(name) == wants_templates)
             .filter(|name| {
                 // The reference also has to agree with what it names: only a
                 // multiple-apply schema is applied under an instance name, so a
@@ -1333,20 +1446,17 @@ impl PendingDefinition {
 fn override_property_names(schematics: &Schematics, class_prim: &sdf::Path) -> Vec<tf::Token> {
     const OVERRIDE_NAMES: &str = "apiSchemaOverridePropertyNames";
 
-    class_prim_field(schematics, class_prim, sdf::FieldKey::CustomData)
+    prim_field(schematics.data(), class_prim, sdf::FieldKey::CustomData)
         .and_then(|value| value.clone().try_as_dictionary())
         .and_then(|mut custom_data| custom_data.remove(OVERRIDE_NAMES))
         .and_then(sdf::Value::try_as_token_vec)
         .unwrap_or_default()
 }
 
-/// Reads one field off a schema's class prim.
-fn class_prim_field<'a>(
-    schematics: &'a Schematics,
-    class_prim: &sdf::Path,
-    field: sdf::FieldKey,
-) -> Option<&'a sdf::Value> {
-    schematics.data().spec(class_prim)?.get(field.as_str())
+/// Reads one field off a prim in a family's parsed text — a schema's class
+/// prim in the schematics, or its entry in the manifest.
+fn prim_field<'a>(data: &'a sdf::Data, prim: &sdf::Path, field: sdf::FieldKey) -> Option<&'a sdf::Value> {
+    data.spec(prim)?.get(field.as_str())
 }
 
 /// The rule behind [`SchemaRegistry::check_applied_name`], over the schema
@@ -1357,7 +1467,7 @@ fn check_applied_shape<'a>(
     infos: &'a HashMap<tf::Token, SchemaInfo>,
     name: &tf::Token,
 ) -> Result<Option<(&'a SchemaInfo, Option<tf::Token>)>, ApplyApiError> {
-    let (schema, instance) = split_instance_name(name);
+    let (schema, instance) = SchemaRegistry::type_name_and_instance(name);
     let Some(info) = infos.get(&schema) else {
         return Ok(None);
     };
@@ -1376,76 +1486,9 @@ fn check_applied_shape<'a>(
 /// schema's property and built-in names (C++ `__INSTANCE_NAME__`).
 const INSTANCE_NAME_PLACEHOLDER: &str = "__INSTANCE_NAME__";
 
-/// Splits an applied-schema name into its schema identifier and, when the name
-/// is an instance of a multiple-apply schema, its instance name
-/// (C++ `GetTypeNameAndInstance`).
-///
-/// The split is at the first namespace delimiter: an identifier can never
-/// contain one, while an instance name can.
-///
-/// A name carries an instance only when there is one to carry, so a trailing
-/// delimiter (`CollectionAPI:`) reads as the bare identifier — C++ decides the
-/// same question as `!instanceName.IsEmpty()`.
-pub(super) fn split_instance_name(name: &tf::Token) -> (tf::Token, Option<tf::Token>) {
-    match name.split_once(':') {
-        Some((identifier, instance)) if !instance.is_empty() => {
-            (tf::Token::from(identifier), Some(tf::Token::from(instance)))
-        }
-        Some((identifier, _)) => (tf::Token::from(identifier), None),
-        None => (name.clone(), None),
-    }
-}
-
-/// The name a multiple-apply schema's definition is applied under before any
-/// instance name is chosen (C++ `MakeMultipleApplyNameTemplate`).
-pub(super) fn make_name_template(identifier: &tf::Token) -> tf::Token {
-    tf::Token::from(format!("{identifier}:{INSTANCE_NAME_PLACEHOLDER}"))
-}
-
-/// Substitutes `instance` for the placeholder in a multiple-apply template
-/// name (C++ `MakeMultipleApplyNameInstance`).
-///
-/// Only the first placeholder component is replaced, so a nested template like
-/// `Other:__INSTANCE_NAME__:foo` instantiates to `Other:<instance>:foo`. A name
-/// with no placeholder is returned unchanged.
-pub(super) fn make_instance_name(template: &tf::Token, instance: &tf::Token) -> tf::Token {
-    match placeholder_position(template) {
-        Some(start) => {
-            let mut name = String::with_capacity(template.len() + instance.len());
-            name.push_str(&template[..start]);
-            name.push_str(instance);
-            name.push_str(&template[start + INSTANCE_NAME_PLACEHOLDER.len()..]);
-            tf::Token::from(name)
-        }
-        None => template.clone(),
-    }
-}
-
-/// The part of a multiple-apply property name that follows the instance-name
-/// placeholder (C++ `GetMultipleApplyNameTemplateBaseName`).
-///
-/// `collection:__INSTANCE_NAME__:includeRoot` bases to `includeRoot`; a name
-/// ending at the placeholder bases to nothing, and one without a placeholder is
-/// its own base.
-pub(super) fn name_template_base(name: &tf::Token) -> &str {
-    match placeholder_position(name) {
-        Some(start) => name
-            .get(start + INSTANCE_NAME_PLACEHOLDER.len() + 1..)
-            .unwrap_or_default(),
-        None => name,
-    }
-}
-
-/// Whether `name` still carries the instance-name placeholder, which is what
-/// distinguishes a multiple-apply template from an applied instance
-/// (C++ `IsMultipleApplyNameTemplate`).
-pub(super) fn is_name_template(name: &tf::Token) -> bool {
-    placeholder_position(name).is_some()
-}
-
 /// Where the placeholder starts, matched as a whole namespace component so a
 /// property merely containing the text does not count.
-fn placeholder_position(name: &tf::Token) -> Option<usize> {
+fn placeholder_position(name: &str) -> Option<usize> {
     let mut start = 0;
     for component in name.split(':') {
         if component == INSTANCE_NAME_PLACEHOLDER {
@@ -1468,7 +1511,7 @@ fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<Sche
     let kind = manifest_token(manifest, &prim, "schemaKind").ok_or(SchemaRegistryError::MissingSchemaKind)?;
     let kind = SchemaKind::from_token(kind.as_str()).ok_or_else(|| SchemaRegistryError::UnknownSchemaKind { kind })?;
 
-    let (family, version) = SchemaRegistry::parse_identifier(identifier);
+    let (family, version) = SchemaRegistry::parse_schema_family_and_version(identifier);
 
     Ok(SchemaInfo {
         identifier: identifier.clone(),
@@ -1479,8 +1522,34 @@ fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<Sche
         property_namespace_prefix: manifest_token(manifest, &prim, "propertyNamespacePrefix"),
         auto_apply_to: manifest_token_vec(manifest, &prim, "apiSchemaAutoApplyTo"),
         can_only_apply_to: manifest_token_vec(manifest, &prim, "apiSchemaCanOnlyApplyTo"),
+        instance_can_only_apply_to: if kind == SchemaKind::MultipleApplyApi {
+            manifest_instance_restrictions(manifest, &prim)
+        } else {
+            HashMap::new()
+        },
         allowed_instance_names: manifest_token_vec(manifest, &prim, "allowedInstanceNames"),
     })
+}
+
+/// Reads a multiple-apply schema's per-instance `apiSchemaCanOnlyApplyTo`
+/// lists from the manifest prim's `customData.apiSchemaInstances` dictionary.
+/// An empty list is not recorded, as C++ `UsdSchemaRegistry`'s plugin loader
+/// stores none, so the instance keeps the schema-wide restriction.
+fn manifest_instance_restrictions(manifest: &sdf::Data, prim: &sdf::Path) -> HashMap<tf::Token, Vec<tf::Token>> {
+    prim_field(manifest, prim, sdf::FieldKey::CustomData)
+        .and_then(sdf::Value::try_as_dictionary_ref)
+        .and_then(|custom| custom.get("apiSchemaInstances"))
+        .and_then(sdf::Value::try_as_dictionary_ref)
+        .into_iter()
+        .flatten()
+        .filter_map(|(instance, entry)| {
+            let allowed = entry
+                .try_as_dictionary_ref()?
+                .get("apiSchemaCanOnlyApplyTo")?
+                .try_as_token_vec_ref()?;
+            (!allowed.is_empty()).then(|| (tf::Token::from(instance.as_str()), allowed.clone()))
+        })
+        .collect()
 }
 
 /// Reads a manifest attribute's default value as a token.
@@ -1500,6 +1569,15 @@ fn manifest_token_vec(manifest: &sdf::Data, prim: &sdf::Path, attribute: &str) -
 fn manifest_default<'a>(manifest: &'a sdf::Data, prim: &sdf::Path, attribute: &str) -> Option<&'a sdf::Value> {
     let path = prim.append_property(attribute).ok()?;
     manifest.spec(&path)?.get(sdf::FieldKey::Default.as_str())
+}
+
+/// Splits `identifier` at its version suffix, borrowing both halves:
+/// `("DomeLight", Some("1"))`, or `("DomeLight", None)` without one.
+fn split_version_suffix(identifier: &str) -> (&str, Option<&str>) {
+    match version_delimiter(identifier) {
+        Some(delim) => (&identifier[..delim], Some(&identifier[delim + 1..])),
+        None => (identifier, None),
+    }
 }
 
 /// Locates a schema identifier's version suffix: the index of the underscore
@@ -1541,7 +1619,18 @@ def "CollectionAPI"
     uniform token[] bases = ["APISchemaBase"]
 }
 
-def "SlotAPI"
+def "SlotAPI" (
+    customData = {
+        dictionary apiSchemaInstances = {
+            dictionary left = {
+                token[] apiSchemaCanOnlyApplyTo = []
+            }
+            dictionary right = {
+                token[] apiSchemaCanOnlyApplyTo = ["DomeLight"]
+            }
+        }
+    }
+)
 {
     uniform token schemaKind = "multipleApplyAPI"
     uniform token[] bases = ["APISchemaBase"]
@@ -1687,7 +1776,7 @@ mod tests {
         let light = registry.schema_info(&tf::Token::new("LightAPI")).expect("LightAPI");
         assert_eq!(light.kind(), SchemaKind::SingleApplyApi);
         assert_eq!(light.bases(), [tf::Token::new("APISchemaBase")]);
-        assert_eq!(light.can_only_apply_to(), [tf::Token::new("DistantLight")]);
+        assert_eq!(light.can_only_apply_to(None), [tf::Token::new("DistantLight")]);
         assert!(light.is_applied_api());
 
         let collection = registry
@@ -1717,6 +1806,23 @@ mod tests {
         assert!(!registry.is_a(&tf::Token::new("Bogus"), &tf::Token::new("Typed")));
         assert!(!registry.is_a(&tf::Token::new("Bogus"), &tf::Token::new("Bogus")));
         assert!(!registry.is_a(&distant, &tf::Token::default()));
+    }
+
+    #[test]
+    fn instance_restrictions() {
+        let registry = SchemaRegistry::test_registry();
+        let slot = registry.schema_info(&tf::Token::new("SlotAPI")).expect("SlotAPI");
+        let base = [tf::Token::new("NonboundableLightBase")];
+        assert_eq!(slot.can_only_apply_to(None), base);
+        assert_eq!(
+            slot.can_only_apply_to(Some(&tf::Token::new("right"))),
+            [tf::Token::new("DomeLight")],
+            "a non-empty instance list replaces the schema-wide one"
+        );
+        // An empty instance list is not stored, and an instance with no entry
+        // has none, so both keep the schema-wide restriction.
+        assert_eq!(slot.can_only_apply_to(Some(&tf::Token::new("left"))), base);
+        assert_eq!(slot.can_only_apply_to(Some(&tf::Token::new("other"))), base);
     }
 
     #[test]
@@ -1836,7 +1942,11 @@ mod tests {
             ("inputs:intensity", "inputs:intensity"),
         ];
         for (name, base) in cases {
-            assert_eq!(name_template_base(&tf::Token::new(name)), base, "basing {name}");
+            assert_eq!(
+                SchemaRegistry::multiple_apply_name_template_base_name(name),
+                base,
+                "basing {name}"
+            );
         }
     }
 
@@ -1875,29 +1985,33 @@ mod tests {
             ("_1", "", 1),
         ];
         for (identifier, family, version) in cases {
-            let parsed = SchemaRegistry::parse_identifier(&tf::Token::new(identifier));
+            let parsed = SchemaRegistry::parse_schema_family_and_version(&tf::Token::new(identifier));
             assert_eq!((parsed.0.as_str(), parsed.1), (family, version), "parsing {identifier}");
         }
     }
 
     #[test]
     fn allowed_identifiers() {
-        assert!(SchemaRegistry::is_allowed_identifier(&tf::Token::new("DomeLight")));
-        assert!(SchemaRegistry::is_allowed_identifier(&tf::Token::new("DomeLight_1")));
+        assert!(SchemaRegistry::is_allowed_schema_identifier("DomeLight"));
+        assert!(SchemaRegistry::is_allowed_schema_identifier("DomeLight_1"));
         // A non-canonical version suffix does not round-trip.
-        assert!(!SchemaRegistry::is_allowed_identifier(&tf::Token::new("DomeLight_01")));
+        assert!(!SchemaRegistry::is_allowed_schema_identifier("DomeLight_01"));
+        assert!(
+            !SchemaRegistry::is_allowed_schema_identifier("DomeLight_0"),
+            "version 0 is the bare family"
+        );
         // The family may not itself carry a version suffix.
-        assert!(!SchemaRegistry::is_allowed_identifier(&tf::Token::new("Foo_1_2")));
-        assert!(!SchemaRegistry::is_allowed_family(&tf::Token::new("2Foo")));
-        assert!(SchemaRegistry::is_allowed_family(&tf::Token::new("_Foo")));
+        assert!(!SchemaRegistry::is_allowed_schema_identifier("Foo_1_2"));
+        assert!(!SchemaRegistry::is_allowed_schema_family("2Foo"));
+        assert!(SchemaRegistry::is_allowed_schema_family("_Foo"));
     }
 
     #[test]
     fn instance_name_math() {
         let template = tf::Token::new("collection:__INSTANCE_NAME__:includeRoot");
-        assert!(is_name_template(&template));
+        assert!(SchemaRegistry::is_multiple_apply_name_template(&template));
         assert_eq!(
-            make_instance_name(&template, &tf::Token::new("lightLink")),
+            SchemaRegistry::make_multiple_apply_name_instance(&template, "lightLink"),
             tf::Token::new("collection:lightLink:includeRoot")
         );
 
@@ -1905,41 +2019,43 @@ mod tests {
         // template keeps the rest of its shape.
         let nested = tf::Token::new("Other:__INSTANCE_NAME__:foo");
         assert_eq!(
-            make_instance_name(&nested, &tf::Token::new("bar")),
+            SchemaRegistry::make_multiple_apply_name_instance(&nested, "bar"),
             tf::Token::new("Other:bar:foo")
         );
 
         // A name without the placeholder is left alone, and the placeholder is
         // matched as a whole component rather than as text.
         let plain = tf::Token::new("inputs:intensity");
-        assert!(!is_name_template(&plain));
-        assert_eq!(make_instance_name(&plain, &tf::Token::new("x")), plain);
-        assert!(!is_name_template(&tf::Token::new("my__INSTANCE_NAME__thing")));
+        assert!(!SchemaRegistry::is_multiple_apply_name_template(&plain));
+        assert_eq!(SchemaRegistry::make_multiple_apply_name_instance(&plain, "x"), plain);
+        assert!(!SchemaRegistry::is_multiple_apply_name_template(
+            "my__INSTANCE_NAME__thing"
+        ));
 
         assert_eq!(
-            make_name_template(&tf::Token::new("CollectionAPI")),
+            SchemaRegistry::make_multiple_apply_name_template("CollectionAPI", ""),
             tf::Token::new("CollectionAPI:__INSTANCE_NAME__")
         );
     }
 
     #[test]
     fn instance_name_split() {
-        let (identifier, instance) = split_instance_name(&tf::Token::new("CollectionAPI:lightLink"));
+        let (identifier, instance) = SchemaRegistry::type_name_and_instance(&tf::Token::new("CollectionAPI:lightLink"));
         assert_eq!(identifier, tf::Token::new("CollectionAPI"));
         assert_eq!(instance, Some(tf::Token::new("lightLink")));
 
         // An instance name may itself be namespaced; the identifier never is,
         // so the split is at the first delimiter.
-        let (identifier, instance) = split_instance_name(&tf::Token::new("CollectionAPI:a:b"));
+        let (identifier, instance) = SchemaRegistry::type_name_and_instance(&tf::Token::new("CollectionAPI:a:b"));
         assert_eq!(identifier, tf::Token::new("CollectionAPI"));
         assert_eq!(instance, Some(tf::Token::new("a:b")));
 
-        let (identifier, instance) = split_instance_name(&tf::Token::new("LightAPI"));
+        let (identifier, instance) = SchemaRegistry::type_name_and_instance(&tf::Token::new("LightAPI"));
         assert_eq!(identifier, tf::Token::new("LightAPI"));
         assert_eq!(instance, None);
 
         // A trailing delimiter carries no instance to name.
-        let (identifier, instance) = split_instance_name(&tf::Token::new("CollectionAPI:"));
+        let (identifier, instance) = SchemaRegistry::type_name_and_instance(&tf::Token::new("CollectionAPI:"));
         assert_eq!(identifier, tf::Token::new("CollectionAPI"));
         assert_eq!(instance, None);
     }

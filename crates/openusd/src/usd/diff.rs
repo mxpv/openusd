@@ -1019,7 +1019,7 @@ mod tests {
             sdf::path("/Prim{set=sel}")?,
         )?)?;
         let diffs = capture_diffs(&a);
-        a.define_prim("/Prim/child")?.set_type_name("Scope")?;
+        a.define_typed_prim("/Prim/child", "Scope")?;
 
         let b = in_memory_stage()?;
         let root_b = b.edit_target().layer_identifier().to_string();
@@ -1062,7 +1062,7 @@ mod tests {
             sdf::path("/Prim{set=sel}")?,
         )?)?;
         let diffs = capture_diffs(&a);
-        a.define_prim("/Prim/child")?.set_type_name("Scope")?;
+        a.define_typed_prim("/Prim/child", "Scope")?;
 
         // Encode: nothing in the diff is process-local. Paths and field names
         // are strings, the mapping decomposes into path pairs, the

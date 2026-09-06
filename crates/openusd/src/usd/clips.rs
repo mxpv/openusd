@@ -715,11 +715,22 @@ def "Model" (
     /// Authoring clips on a prim that has no local spec on the edit-target
     /// layer creates an `over` (C++ `SetMetadata` behavior) rather than erroring.
     #[test]
-    fn set_creates_over_without_local_spec() -> Result<()> {
+    fn set_authors_over() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        let clips = ClipsAPI::new(&stage.prim("/NoSpec")?);
+        let mut weaker = sdf::Layer::new_in_memory("weaker.usda");
+        weaker.edit(|edit| {
+            sdf::PrimSpec::new(edit.data_mut(), "/Model", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        let root = stage.root_layer().identifier().to_string();
+        stage.insert_layer(&root, 0, weaker, sdf::LayerOffset::IDENTITY)?;
+
+        let clips = ClipsAPI::new(&stage.prim("/Model")?);
         clips.set_clip_prim_path("default", "/Geo")?;
         assert_eq!(clips.clip_prim_path("default")?.as_deref(), Some("/Geo"));
+        let root_layer = stage.root_layer();
+        let over = root_layer.prim("/Model")?.expect("an over on the edit target");
+        assert_eq!(over.specifier(), Some(sdf::Specifier::Over));
         Ok(())
     }
 }
