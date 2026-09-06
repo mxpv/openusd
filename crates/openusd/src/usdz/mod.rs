@@ -11,6 +11,7 @@ mod writer;
 pub use reader::Archive;
 pub use writer::ArchiveWriter;
 
+use std::borrow::Cow;
 use std::io::{self, Cursor};
 use std::str;
 
@@ -113,6 +114,24 @@ pub struct UsdzFileFormat;
 /// the first entry).
 const USDZ_LAYER_NAME: &str = "layer.usdc";
 
+impl UsdzFileFormat {
+    /// Refuses a package named inside another package.
+    ///
+    /// A package-relative path reaches this format only when its named entry is
+    /// itself a package — an ordinary inner layer dispatches to its own format
+    /// — and a nested package is unsupported. Only a resolved path can say
+    /// this, so it is asked of the asset being opened, never of the label
+    /// [`read_bytes`](sdf::FileFormat::read_bytes) carries.
+    fn refuse_nested_package(resolved: &str) -> Result<(), sdf::FormatError> {
+        match ar::split_package_relative_path_outer(resolved) {
+            Some((_, inner)) => Err(sdf::FormatError::Decode(Box::new(ArchiveError::NestedPackage {
+                path: inner,
+            }))),
+            None => Ok(()),
+        }
+    }
+}
+
 impl sdf::FileFormat for UsdzFileFormat {
     fn format_id(&self) -> tf::Token {
         tf::Token::new("usdz")
@@ -161,28 +180,24 @@ impl sdf::FileFormat for UsdzFileFormat {
         resolver: &dyn ar::Resolver,
         resolved: &ar::ResolvedPath,
     ) -> Result<sdf::LayerData, sdf::FormatError> {
-        // A package-relative path reaches this format only when its named entry is
-        // itself a package (an ordinary inner layer dispatches to its own format),
-        // so it is a nested package — unsupported. Reported before opening the
-        // outer archive, since the whole-package read would only be discarded.
-        let s = resolved.to_string();
-        if let Some((_, inner)) = ar::split_package_relative_path_outer(&s) {
-            return Err(sdf::FormatError::Decode(Box::new(ArchiveError::NestedPackage {
-                path: inner,
-            })));
-        }
+        // Refused before the asset is opened: reading a whole package only to
+        // discard it is the expensive way to reach the same error.
+        let source_name = resolved.to_string();
+        Self::refuse_nested_package(&source_name)?;
+
+        let bytes = resolver.open_asset(resolved)?.read_all()?;
+        self.read_bytes(bytes.into(), &source_name)
+    }
+
+    fn read_bytes(&self, bytes: Cow<'static, [u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
         // A bare package has no named entry, so read its first (default) layer.
         //
-        // Only the direct `Io` variant is a storage failure here: the package
-        // is slurped into memory before any ZIP or entry decoding, so an I/O
-        // error nested deeper comes from the in-memory cursor and means
-        // truncated or corrupt content — a `Decode`.
-        Archive::from_asset(resolver, resolved)
+        // Every failure here is a decode: the bytes are already in hand, so
+        // even an I/O error comes from the cursor reading them and means the
+        // package is truncated or corrupt.
+        Archive::from_reader(Cursor::new(bytes))
             .and_then(|mut archive| archive.read_first_layer())
-            .map_err(|error| match error {
-                ArchiveError::Io(error) => sdf::FormatError::Io(error),
-                error => sdf::FormatError::Decode(Box::new(error)),
-            })
+            .map_err(|error| sdf::FormatError::Decode(Box::new(error)))
     }
 
     fn write(&self, data: &dyn sdf::AbstractData, sink: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {

@@ -40,13 +40,15 @@
 //! [`LayerRegistry`](super::LayerRegistry); cross-layer composition (references,
 //! payloads) lives in [`crate::pcp`].
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io::{self, Cursor};
 use std::path::Path as FsPath;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{ar, tf};
+use crate::{ar, sdf, tf};
 
 use super::schema::FieldKey;
 use super::{
@@ -111,10 +113,51 @@ pub struct Layer {
 impl Layer {
     /// Construct a layer from a resolved identifier and a backing data store.
     /// Crate-private — external callers should use [`Layer::new_anonymous`]
-    /// for blank in-memory layers, or open a stage (which loads layers from
-    /// disk on demand) for loaded layers.
+    /// for blank in-memory layers, [`open`](Self::open) for one on disk, or
+    /// [`from_bytes`](Self::from_bytes) for one already in hand.
     pub(crate) fn new(identifier: impl Into<String>, data: LayerData) -> Self {
         Self::build(identifier.into(), None, data)
+    }
+
+    /// Open the layer at `identifier` off the filesystem, read in whichever
+    /// format claims it.
+    ///
+    /// The layer is read alone: the sublayers, references and payloads it
+    /// declares stay the asset paths it authored. Composing them is
+    /// [`Stage::open`](crate::usd::Stage::open)'s job.
+    pub fn open(identifier: impl AsRef<str>) -> crate::Result<Self> {
+        Self::open_with(ar::DefaultResolver::new(), identifier)
+    }
+
+    /// Open the layer at `identifier`, resolving and reading it through
+    /// `resolver` — the door for layers a host serves from somewhere other than
+    /// the filesystem. See [`open`](Self::open).
+    pub fn open_with(resolver: impl ar::Resolver + 'static, identifier: impl AsRef<str>) -> crate::Result<Self> {
+        let registry = sdf::LayerRegistry::new(Box::new(resolver));
+        // Canonicalized first, as every other load path does: the layer is
+        // addressed by the identifier it keeps, so a caller's spelling of one
+        // file must not become a second identity for it.
+        let identifier = registry.create_identifier(identifier.as_ref(), None);
+        let (resolved, data) = registry
+            .open(&identifier)?
+            .ok_or(crate::Error::UnresolvedAsset(identifier.clone()))?;
+        Ok(Self::new_resolved(identifier, &resolved, data))
+    }
+
+    /// Decode `bytes` as an anonymous layer tagged `tag`, in whichever format
+    /// their content names (see
+    /// [`LayerRegistry::read_bytes`](sdf::LayerRegistry::read_bytes)).
+    ///
+    /// For layer bytes that were never an asset — compiled into a program, or
+    /// handed over by a host. The layer is anonymous because it resolved from
+    /// nowhere, so the relative asset paths it authors anchor against nothing;
+    /// C++ opens the schema data it compiles against the same way
+    /// (`SdfLayer::OpenAsAnonymous`). `tag` names their origin for diagnostics,
+    /// as in [`new_anonymous`](Self::new_anonymous).
+    pub fn from_bytes(tag: impl fmt::Display, bytes: impl Into<Cow<'static, [u8]>>) -> Result<Self, FormatError> {
+        let identifier = Self::anonymous_identifier(tag);
+        let data = sdf::LayerRegistry::read_bytes(bytes.into(), &identifier)?;
+        Ok(Self::new(identifier, data))
     }
 
     /// Construct a loaded layer recording its resolved physical location.
@@ -596,9 +639,15 @@ impl Layer {
     /// The layer's pseudo-root spec is pre-populated so layer-level metadata
     /// (`defaultPrim`, `subLayers`, time codes, …) can be authored via
     /// [`LayerEdit::pseudo_root_mut`] immediately.
-    pub fn new_anonymous(tag: impl std::fmt::Display) -> Self {
+    pub fn new_anonymous(tag: impl fmt::Display) -> Self {
+        Self::new_in_memory(Self::anonymous_identifier(tag))
+    }
+
+    /// A fresh anonymous identifier of the form `anon:<n>:<tag>`. Distinct on
+    /// every call, so independent anonymous layers never alias.
+    fn anonymous_identifier(tag: impl fmt::Display) -> String {
         let n = ANONYMOUS_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self::new_in_memory(format!("{ANONYMOUS_PREFIX}{n}:{tag}"))
+        format!("{ANONYMOUS_PREFIX}{n}:{tag}")
     }
 
     /// Create a blank in-memory writable layer with the given verbatim
@@ -1063,6 +1112,30 @@ mod tests {
 
     use crate::sdf;
     use crate::usda;
+
+    /// A layer opened by any spelling of its path keeps the canonical
+    /// identifier, so it stays one identity and `save` finds the file it loaded
+    /// from. Every other load path canonicalizes first; this one must too.
+    #[test]
+    fn open_canonicalizes_identifier() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scene.usda");
+        std::fs::write(&path, "#usda 1.0\n")?;
+
+        // The same file, spelled with a redundant directory step.
+        let indirect = dir.path().join(".").join("scene.usda");
+        let layer = Layer::open(indirect.to_string_lossy())?;
+
+        assert_eq!(
+            layer.identifier(),
+            path.canonicalize()?.to_string_lossy(),
+            "the identifier is the canonical one, not the spelling passed in"
+        );
+        layer
+            .save()
+            .expect("a layer that loaded from a file can save back to it");
+        Ok(())
+    }
 
     /// Author through the layer's `edit` API and commit, for tests that build a
     /// layer's content or metadata directly.

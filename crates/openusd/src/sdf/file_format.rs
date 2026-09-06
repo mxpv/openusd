@@ -8,6 +8,7 @@
 //! [`LayerRegistry`](super::LayerRegistry) (`find_by_extension` / `find_by_id`),
 //! mirroring C++ `SdfFileFormat::FindByExtension` / `FindById`.
 
+use std::borrow::Cow;
 use std::io::{self, Seek, Write};
 use std::{error, fmt, mem};
 
@@ -51,6 +52,12 @@ pub enum FormatError {
     /// hierarchy for serialization.
     #[error(transparent)]
     Path(Box<PathParseError>),
+
+    /// No registered format recognizes what the bytes begin with, so there is
+    /// nothing to decode them with. Boxed, like the errors above, to keep the
+    /// enum within the size the assertion below pins.
+    #[error("no file format recognizes the content of {0}")]
+    Unrecognized(Box<str>),
 }
 
 const _: () = assert!(mem::size_of::<FormatError>() <= 24);
@@ -144,9 +151,28 @@ pub trait FileFormat: Sync {
         FileFormatCaps::all()
     }
 
+    /// Decode a layer's data from `bytes`, already read out of `source_name`.
+    ///
+    /// `source_name` is where the bytes came from, for diagnostics that quote a
+    /// location: the resolved path for a layer read off disk, and whatever
+    /// label a caller chooses for bytes that were never there.
+    ///
+    /// The bytes are owned or borrowed for the program's life because a
+    /// decoder may keep reading them — the crate format indexes into the
+    /// buffer rather than copying it out — so bytes compiled into the program
+    /// decode without a copy while bytes just read off disk move in.
+    fn read_bytes(&self, bytes: Cow<'static, [u8]>, source_name: &str) -> Result<LayerData, FormatError>;
+
     /// Read a layer's data from `resolved`, opening the asset (and any
     /// sibling assets) through `resolver`.
-    fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData, FormatError>;
+    ///
+    /// A format that reads nothing but its own bytes needs only
+    /// [`read_bytes`](Self::read_bytes); one that reaches for sibling assets
+    /// overrides this.
+    fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData, FormatError> {
+        let bytes = resolver.open_asset(resolved)?.read_all()?;
+        self.read_bytes(bytes.into(), &resolved.to_string())
+    }
 
     /// Resolves the real path of the layer to open at `resolved` — the location
     /// it physically loads from and anchors its relative asset paths against

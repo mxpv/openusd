@@ -614,9 +614,8 @@ impl Attribute {
     /// prim's composed `typeName` and `apiSchemas`. `None` when no schema
     /// declares this attribute, or declares it without a fallback.
     ///
-    /// An `asset` fallback is anchored against the schematics that declared it,
-    /// on the terms
-    /// [`resolved_location`](super::FamilySource::resolved_location) states.
+    /// An `asset` fallback is anchored against the schematics that declared
+    /// it, at wherever that layer resolved from.
     pub fn fallback_value(&self) -> Result<Option<sdf::Value>> {
         let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
             return Ok(None);
@@ -1399,6 +1398,19 @@ mod tests {
         Ok(())
     }
 
+    /// The core `usd` family is compiled into the crate, so a stage that
+    /// registers nothing of its own still resolves what `CollectionAPI`
+    /// declares.
+    #[test]
+    fn core_family_supplies_fallback() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Group")?.apply_api("CollectionAPI:render")?;
+
+        let rule = stage.attribute("/Group.collection:render:expansionRule")?;
+        assert_eq!(rule.get::<tf::Token>()?, Some(tf::Token::new("expandPrims")));
+        Ok(())
+    }
+
     #[test]
     fn schema_property_reports_its_type() -> Result<()> {
         let stage = schema_stage()?;
@@ -1655,11 +1667,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_without_data_has_no_fallback() -> Result<()> {
+    fn unregistered_type_has_no_fallback() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
-        // The default process registry ships without schema data.
+        // The default process registry carries the core `usd` family alone,
+        // which declares no `DistantLight`.
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<sdf::Value>()?, None);
         assert_eq!(intensity.resolve_info()?.source(), ResolveInfoSource::None);

@@ -1297,10 +1297,12 @@ def "FileAPI"
 "#;
 
 /// A resolver that echoes the anchor it was handed back into the identifier,
-/// so a test can prove the registry passed a location through untouched. Its
-/// identifiers are not filesystem paths, which is the point: canonicalizing one
-/// would destroy it.
-struct EchoAnchorResolver;
+/// so a test can prove a location reached it untouched. Its identifiers are not
+/// filesystem paths, which is the point: canonicalizing one would destroy it.
+/// Every asset it opens serves the same bytes, so a layer can be opened from an
+/// identifier that names no file.
+#[derive(Default)]
+struct EchoAnchorResolver(Vec<u8>);
 
 impl ar::Resolver for EchoAnchorResolver {
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
@@ -1319,7 +1321,7 @@ impl ar::Resolver for EchoAnchorResolver {
     }
 
     fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-        Err(io::Error::other("this resolver opens nothing"))
+        Ok(Box::new(io::Cursor::new(self.0.clone())))
     }
 }
 
@@ -1329,42 +1331,48 @@ fn widget_schematics(default: &str) -> String {
     format!("#usda 1.0\n\nclass Widget \"Widget\"\n{{\n    asset inputs:file = {default}\n}}\n")
 }
 
-/// A registry declaring the concrete type `Widget` from `schematics`, said to
-/// have resolved from `location`.
-fn widget_registry(schematics: &str, location: Option<&ar::ResolvedPath>) -> Arc<usd::SchemaRegistry> {
+/// A registry declaring the concrete type `Widget` from the `schematics`
+/// layer, whose own location is what its fallbacks anchor against.
+fn widget_registry(schematics: &sdf::Layer) -> Arc<usd::SchemaRegistry> {
     usd::SchemaRegistry::builder()
         .family(usd::FamilySource {
             name: "widget",
-            manifest: WIDGET_MANIFEST,
+            manifest: &anon_layer("manifest.usda", WIDGET_MANIFEST),
             schematics,
-            resolved_location: location,
         })
         .expect("family registers")
         .build()
         .expect("registry builds")
 }
 
+/// A layer over `text` that resolved from nowhere, the way one compiled into a
+/// program does. `tag` names it for diagnostics only.
+fn anon_layer(tag: &str, text: &str) -> sdf::Layer {
+    sdf::Layer::from_bytes(tag, text.as_bytes().to_vec()).expect("the layer parses")
+}
+
+/// Writes `schematics` into `dir` and opens it, so the family resolves from
+/// there and anchors its fallbacks beside it.
+fn schema_layer(dir: &Path, schematics: &str) -> sdf::Layer {
+    let path = dir.join("generatedSchema.usda");
+    fs::write(&path, schematics).expect("write schematics");
+    sdf::Layer::open(path.to_string_lossy()).expect("the schematics layer opens")
+}
+
 /// A registry whose two families sit at different locations, so which one
 /// anchored a composed fallback is visible in the resolved path.
-fn two_family_registry(
-    core_schematics: &str,
-    core_location: &ar::ResolvedPath,
-    ext_schematics: &str,
-    ext_location: &ar::ResolvedPath,
-) -> Arc<usd::SchemaRegistry> {
+fn two_family_registry(core_schematics: &sdf::Layer, ext_schematics: &sdf::Layer) -> Arc<usd::SchemaRegistry> {
     usd::SchemaRegistry::builder()
         .family(usd::FamilySource {
             name: "core",
-            manifest: WIDGET_MANIFEST,
+            manifest: &anon_layer("manifest.usda", WIDGET_MANIFEST),
             schematics: core_schematics,
-            resolved_location: Some(core_location),
         })
         .expect("core registers")
         .family(usd::FamilySource {
             name: "ext",
-            manifest: FILE_API_MANIFEST,
+            manifest: &anon_layer("manifest.usda", FILE_API_MANIFEST),
             schematics: ext_schematics,
-            resolved_location: Some(ext_location),
         })
         .expect("ext registers")
         .build()
@@ -1392,13 +1400,11 @@ fn widget_stage_from(builder: usd::StageBuilder, registry: Arc<usd::SchemaRegist
     stage
 }
 
-/// Creates `dir/<name>` and returns it with the location a family whose
-/// schematics sits there registers under.
-fn schema_dir(dir: &tempfile::TempDir, name: &str) -> (PathBuf, ar::ResolvedPath) {
+/// Creates and returns `dir/<name>`.
+fn schema_dir(dir: &tempfile::TempDir, name: &str) -> PathBuf {
     let schemas = dir.path().join(name);
     fs::create_dir(&schemas).expect("create schema directory");
-    let location = ar::ResolvedPath::new(schemas.join("generatedSchema.usda"));
-    (schemas, location)
+    schemas
 }
 
 /// A stage whose `Widget` class prim declares `core_property` and overrides the
@@ -1407,8 +1413,8 @@ fn schema_dir(dir: &tempfile::TempDir, name: &str) -> (PathBuf, ar::ResolvedPath
 /// value came from.
 fn composed_widget(core_property: &str) -> (tempfile::TempDir, Stage) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (core, core_location) = schema_dir(&dir, "core");
-    let (ext, ext_location) = schema_dir(&dir, "ext");
+    let core = schema_dir(&dir, "core");
+    let ext = schema_dir(&dir, "ext");
     fs::write(core.join("core.png"), b"png").expect("write core texture");
     fs::write(core.join("ext.png"), b"png").expect("write core decoy");
     fs::write(ext.join("ext.png"), b"png").expect("write ext texture");
@@ -1429,7 +1435,10 @@ class Widget "Widget" (
     );
     let ext_schematics = "#usda 1.0\n\nclass \"FileAPI\"\n{\n    asset inputs:file = @./ext.png@\n}\n";
 
-    let registry = two_family_registry(&core_schematics, &core_location, ext_schematics, &ext_location);
+    let registry = two_family_registry(
+        &schema_layer(&core, &core_schematics),
+        &schema_layer(&ext, ext_schematics),
+    );
     (dir, widget_stage(registry))
 }
 
@@ -1438,10 +1447,10 @@ class Widget "Widget" (
 /// `tex.png`. The directory is returned so it outlives the stage.
 fn located_widget(default: &str) -> (tempfile::TempDir, Stage) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (schemas, location) = schema_dir(&dir, "schemas");
+    let schemas = schema_dir(&dir, "schemas");
     fs::write(schemas.join("tex.png"), b"png").expect("write texture");
 
-    let stage = widget_stage(widget_registry(&widget_schematics(default), Some(&location)));
+    let stage = widget_stage(widget_registry(&schema_layer(&schemas, &widget_schematics(default))));
     (dir, stage)
 }
 
@@ -1460,7 +1469,11 @@ fn unlocated_schema_keeps_relative() {
         .expect("the working directory holds a file to name");
     let authored = format!("./{}", present.file_name().to_string_lossy());
 
-    let stage = widget_stage(widget_registry(&widget_schematics(&format!("@{authored}@")), None));
+    let schematics = anon_layer(
+        "widget/generatedSchema.usda",
+        &widget_schematics(&format!("@{authored}@")),
+    );
+    let stage = widget_stage(widget_registry(&schematics));
     let asset = asset_at(&stage, "/W.inputs:file");
 
     assert_eq!(asset.as_str(), authored);
@@ -1477,7 +1490,7 @@ fn unlocated_schema_keeps_absolute() {
     let authored = texture.to_string_lossy().replace('\\', "/");
 
     let schematics = widget_schematics(&format!("@{authored}@"));
-    let stage = widget_stage(widget_registry(&schematics, None));
+    let stage = widget_stage(widget_registry(&anon_layer("widget/generatedSchema.usda", &schematics)));
     let asset = asset_at(&stage, "/W.inputs:file");
 
     assert_eq!(
@@ -1487,34 +1500,16 @@ fn unlocated_schema_keeps_absolute() {
     );
 }
 
-/// An empty resolved path is how a resolver reports that it found nothing, so
-/// registering one is an error rather than a location that anchors nowhere.
-#[test]
-fn empty_schema_location_rejected() {
-    let nowhere = ar::ResolvedPath::new("");
-    let registered = usd::SchemaRegistry::builder().family(usd::FamilySource {
-        name: "widget",
-        manifest: WIDGET_MANIFEST,
-        schematics: &widget_schematics("@./tex.png@"),
-        resolved_location: Some(&nowhere),
-    });
-
-    assert!(
-        registered.is_err(),
-        "an empty location is a failed resolution, not a location"
-    );
-}
-
 /// A fallback anchors on the schematics that declared it, not on the stage's
 /// root layer: both directories hold a `tex.png` and the schema's one wins.
 #[test]
 fn fallback_anchors_on_schema() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (schemas, location) = schema_dir(&dir, "schemas");
+    let schemas = schema_dir(&dir, "schemas");
     fs::write(schemas.join("tex.png"), b"png").expect("write schema texture");
     fs::write(dir.path().join("tex.png"), b"png").expect("write scene texture");
 
-    let registry = widget_registry(&widget_schematics("@./tex.png@"), Some(&location));
+    let registry = widget_registry(&schema_layer(&schemas, &widget_schematics("@./tex.png@")));
     let stage = open_scene_with(&dir, "#usda 1.0\n\ndef Widget \"W\"\n{\n}\n", registry);
 
     let asset = asset_at(&stage, "/W.inputs:file");
@@ -1526,11 +1521,11 @@ fn fallback_anchors_on_schema() {
 #[test]
 fn authored_beats_schema_anchor() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (schemas, location) = schema_dir(&dir, "schemas");
+    let schemas = schema_dir(&dir, "schemas");
     fs::write(schemas.join("tex.png"), b"png").expect("write schema texture");
     fs::write(dir.path().join("scene.png"), b"png").expect("write scene texture");
 
-    let registry = widget_registry(&widget_schematics("@./tex.png@"), Some(&location));
+    let registry = widget_registry(&schema_layer(&schemas, &widget_schematics("@./tex.png@")));
     let source = "#usda 1.0\n\ndef Widget \"W\"\n{\n    asset inputs:file = @./scene.png@\n}\n";
     let stage = open_scene_with(&dir, source, registry);
 
@@ -1544,9 +1539,13 @@ fn authored_beats_schema_anchor() {
 /// locations are not filesystem paths keeps working.
 #[test]
 fn schema_location_used_verbatim() {
-    let location = ar::ResolvedPath::new("vault://schemas/generatedSchema.usda");
-    let registry = widget_registry(&widget_schematics("@./tex.png@"), Some(&location));
-    let stage = widget_stage_from(Stage::builder().resolver(EchoAnchorResolver), registry);
+    let schematics = widget_schematics("@./tex.png@");
+    let resolver = EchoAnchorResolver(schematics.into_bytes());
+    let schematics = sdf::Layer::open_with(resolver, "vault://schemas/generatedSchema.usda")
+        .expect("the schematics layer opens through the resolver");
+
+    let registry = widget_registry(&schematics);
+    let stage = widget_stage_from(Stage::builder().resolver(EchoAnchorResolver::default()), registry);
 
     let asset = asset_at(&stage, "/W.inputs:file");
     assert_eq!(
@@ -1565,15 +1564,16 @@ fn packaged_schema_anchors_inside() {
     {
         let mut writer = ArchiveWriter::create(&package).expect("create archive");
         writer
-            .add_layer("gen/generatedSchema.usda", b"#usda 1.0\n")
+            .add_layer("gen/generatedSchema.usda", widget_schematics("@./tex.png@").as_bytes())
             .expect("add schematics");
         writer.add_layer("gen/tex.png", b"png").expect("add texture");
         writer.finish().expect("finish archive");
     }
 
     let package = package.to_string_lossy().replace('\\', "/");
-    let location = ar::ResolvedPath::new(format!("{package}[gen/generatedSchema.usda]"));
-    let stage = widget_stage(widget_registry(&widget_schematics("@./tex.png@"), Some(&location)));
+    let schematics =
+        sdf::Layer::open(format!("{package}[gen/generatedSchema.usda]")).expect("the packaged schematics layer opens");
+    let stage = widget_stage(widget_registry(&schematics));
 
     let asset = asset_at(&stage, "/W.inputs:file");
     assert_resolved_under(&asset, "[gen/tex.png]", "the package holding the schematics");
@@ -1585,7 +1585,7 @@ fn packaged_schema_anchors_inside() {
 #[test]
 fn mixed_asset_array_fallback() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (schemas, location) = schema_dir(&dir, "schemas");
+    let schemas = schema_dir(&dir, "schemas");
     fs::write(schemas.join("near.png"), b"png").expect("write near texture");
     let far = dir.path().join("far.png");
     fs::write(&far, b"png").expect("write far texture");
@@ -1594,7 +1594,7 @@ fn mixed_asset_array_fallback() {
     let schematics = format!(
         "#usda 1.0\n\nclass Widget \"Widget\"\n{{\n    asset[] inputs:files = [@./near.png@, @@, @{far}@]\n}}\n"
     );
-    let stage = widget_stage(widget_registry(&schematics, Some(&location)));
+    let stage = widget_stage(widget_registry(&schema_layer(&schemas, &schematics)));
 
     let values = stage
         .attribute("/W.inputs:files")

@@ -250,9 +250,8 @@
 //! # `asset` values a schema declares
 //!
 //! A schema fallback is authored outside every layer stack, so it never reaches
-//! this module's resolution tail; the schema tier anchors its `default` against
-//! the schematics instead, on the terms
-//! [`resolved_location`](crate::usd::FamilySource::resolved_location) states.
+//! this module's resolution tail; the schema tier anchors its `default`
+//! against wherever the schematics layer itself resolved from.
 //! A schema-declared *metadatum* is anchored by neither tier, matching C++,
 //! where `ConsumeUsdFallback` applies none of the layer-to-stage
 //! transformation `ConsumeAuthored` applies.

@@ -1411,18 +1411,18 @@ mod tests {
     }
 
     #[test]
-    fn type_identity_survives_an_empty_registry() -> Result<()> {
+    fn type_identity_without_definitions() -> Result<()> {
         let stage = stage()?;
         stage
             .define_prim("/Sun")?
             .set_type_name("DistantLight")?
-            .add_applied_schema("CollectionAPI:render")?;
+            .add_applied_schema("UnknownAPI:render")?;
 
-        // The registry knowing nothing means an empty *definition*, not an
+        // A registry knowing neither name means an empty *definition*, not an
         // empty identity — two unrelated types must not share one.
         let sun = stage.prim("/Sun")?.prim_type_info()?;
         assert_eq!(sun.id().type_name(), &Token::new("DistantLight"));
-        assert_eq!(sun.id().applied_api_schemas(), [Token::new("CollectionAPI:render")]);
+        assert_eq!(sun.id().applied_api_schemas(), [Token::new("UnknownAPI:render")]);
         assert!(sun.prim_definition().is_empty());
 
         stage.define_prim("/Ball")?.set_type_name("Sphere")?;
@@ -1680,8 +1680,8 @@ mod tests {
 
     #[test]
     fn family_queries_without_registry() -> Result<()> {
-        // A plain stage registers no schema data, which is the state every
-        // stage is in until it is vendored.
+        // The core family declares neither name, so both are placed by their
+        // spelling alone.
         let stage = stage()?;
         stage
             .define_prim("/New")?
@@ -1859,12 +1859,12 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_knows_nothing() -> Result<()> {
+    fn default_registry_core_only() -> Result<()> {
         let stage = stage()?;
         stage.define_prim("/Light")?.set_type_name("DistantLight")?;
 
-        // The process registry ships without schema data, so a real USD type
-        // resolves to an empty definition.
+        // The process registry carries the core `usd` family alone, so a type
+        // a domain family owns resolves to an empty definition.
         assert!(stage.prim("/Light")?.prim_definition()?.is_empty());
         Ok(())
     }

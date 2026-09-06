@@ -100,7 +100,7 @@ pub enum Error {
 
     /// Registering schema families or building their definitions failed.
     #[error(transparent)]
-    SchemaRegistry(Box<usd::SchemaRegistryError>),
+    SchemaRegistry(#[from] usd::SchemaRegistryError),
 
     /// The stage root or session layer's asset path resolved to nothing.
     #[error("failed to resolve asset path: {0}")]
@@ -148,15 +148,6 @@ const _: () = assert!(mem::size_of::<usdz::ArchiveError>() > INLINE_ERROR_BUDGET
 impl From<usdz::ArchiveError> for Error {
     fn from(error: usdz::ArchiveError) -> Self {
         Self::Archive(Box::new(error))
-    }
-}
-
-#[cfg(target_pointer_width = "64")]
-const _: () = assert!(mem::size_of::<usd::SchemaRegistryError>() > INLINE_ERROR_BUDGET);
-
-impl From<usd::SchemaRegistryError> for Error {
-    fn from(error: usd::SchemaRegistryError) -> Self {
-        Self::SchemaRegistry(Box::new(error))
     }
 }
 

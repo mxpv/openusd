@@ -113,4 +113,7 @@ cargo run -p openusd --example author_variant_and_reference
 
 ## License
 
-Licensed under the [MIT License](https://github.com/mxpv/openusd/blob/main/LICENSE).
+Licensed under the [MIT License](https://github.com/mxpv/openusd/blob/main/LICENSE),
+except for `schemas/`, which vendors OpenUSD's core schema data under the
+Tomorrow Open Source Technology License 1.0. That directory carries its own
+`LICENSE`, `NOTICE.txt` and `README.md`.

@@ -3155,9 +3155,9 @@ impl Stage {
     /// a fallback-sourced value, and `UsdSchemaRegistry` opens each
     /// `generatedSchema.usda` with `SdfLayer::OpenAsAnonymous`, so C++ has no
     /// location to anchor against in the first place. It stays opt-in — a
-    /// family registered without a
-    /// [`resolved_location`](super::FamilySource::resolved_location) reads back
-    /// exactly as C++ leaves it, since resolving an unanchored relative path
+    /// family whose schematics layer resolved from nowhere — an anonymous one,
+    /// as C++ always has — reads back exactly as C++ leaves it, since resolving
+    /// an unanchored relative path
     /// would canonicalize it against the process working directory and invent a
     /// location the author never named.
     ///

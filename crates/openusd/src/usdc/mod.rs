@@ -13,7 +13,7 @@ pub use layout::{Version, version};
 pub use reader::{CrateFile, ReadExt};
 pub use writer::CrateWriter;
 
-use crate::{ar, sdf, tf};
+use crate::{sdf, tf};
 
 /// USDC binary format magic bytes (`PXR-USDC`).
 pub const MAGIC: &[u8] = b"PXR-USDC";
@@ -373,12 +373,9 @@ impl sdf::FileFormat for UsdcFileFormat {
         &["usdc", "usd"]
     }
 
-    fn read(
-        &self,
-        resolver: &dyn ar::Resolver,
-        resolved: &ar::ResolvedPath,
-    ) -> Result<sdf::LayerData, sdf::FormatError> {
-        let bytes = resolver.open_asset(resolved)?.read_all()?;
+    fn read_bytes(&self, bytes: Cow<'static, [u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+        // Validated: these bytes are a file the caller did not write, and the
+        // decoder indexes into them on trust.
         let data =
             CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
         Ok(Box::new(data))

@@ -16,8 +16,8 @@
 //! opinions to its own namespace and so must be present whenever the layer is
 //! (spec 10.3.1.1).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::path::PathBuf;
 
 use crate::ar;
@@ -235,6 +235,27 @@ impl LayerRegistry {
         self.resolver.identity()
     }
 
+    /// Decodes `bytes` as a layer, choosing the registered format whose
+    /// [`matches_content`](sdf::FileFormat::matches_content) claims what they
+    /// begin with (C++ `SdfFileFormat::CanRead`).
+    ///
+    /// This is the door for layer bytes that never came from an asset — a layer
+    /// compiled into a program, or one a host hands over — where there is no
+    /// extension to dispatch on. Content is therefore the only evidence, and
+    /// bytes no format recognizes are
+    /// [`Unrecognized`](sdf::FormatError::Unrecognized) rather than guessed at.
+    /// A package has no content signature, so a `.usdz` is read from its asset
+    /// rather than from bytes. `source_name` names their origin, for
+    /// diagnostics that quote a location.
+    pub fn read_bytes(bytes: Cow<'static, [u8]>, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+        DEFAULT_FORMATS
+            .iter()
+            .copied()
+            .find(|format| format.matches_content(&bytes))
+            .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))?
+            .read_bytes(bytes, source_name)
+    }
+
     /// Find the format claiming `ext` (without the leading dot, case-insensitive),
     /// e.g. `"usda"` or `"usd"`. C++ `SdfFileFormat::FindByExtension`.
     pub fn find_by_extension(ext: &str) -> Option<&'static dyn sdf::FileFormat> {
@@ -427,38 +448,24 @@ impl LayerRegistry {
 
     /// Opens the layer at `resolved`, dispatching to the registered format for
     /// its extension. The `.usd` extension is the one ambiguous case — binary
-    /// crate or text — so it peeks the leading bytes and chooses by
-    /// [`matches_content`](sdf::FileFormat::matches_content) (the crate magic),
-    /// falling back to text. C++ `SdfFileFormat::FindByExtension` + `CanRead`.
+    /// crate or text — so it reads the bytes once and lets
+    /// [`read_bytes`](Self::read_bytes) choose by content.
+    /// C++ `SdfFileFormat::FindByExtension` + `CanRead`.
     fn read(&self, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData, LoadError> {
         let ext = resolved.extension();
-        let format = if ext.eq_ignore_ascii_case("usd") {
-            // TODO(perf): the chosen format re-opens the asset in `read`; only
-            // `.usd` peeks, so fold the peek into one read once `FileFormat::read`
-            // can take already-read bytes.
-            let prefix = self.read_prefix(resolved).map_err(sdf::FormatError::from)?;
-            DEFAULT_FORMATS
-                .iter()
-                .copied()
-                .find(|f| f.matches_content(&prefix))
-                .or_else(|| Self::find_by_id("usda"))
-        } else {
-            Self::find_by_extension(&ext)
-        };
-        Ok(format
+        if ext.eq_ignore_ascii_case("usd") {
+            let bytes = self
+                .resolver
+                .open_asset(resolved)
+                .and_then(|mut asset| asset.read_all())
+                .map_err(sdf::FormatError::from)?;
+            return Ok(Self::read_bytes(bytes.into(), &resolved.to_string())?);
+        }
+        Ok(Self::find_by_extension(&ext)
             .ok_or_else(|| LoadError::UnsupportedFormat {
                 resolved: resolved.to_string(),
             })?
             .read(self.resolver.as_ref(), resolved)?)
-    }
-
-    /// Reads the leading bytes of `resolved` for content-based format detection.
-    fn read_prefix(&self, resolved: &ar::ResolvedPath) -> Result<Vec<u8>, io::Error> {
-        use std::io::Read;
-        let mut asset = self.resolver.open_asset(resolved)?;
-        let mut prefix = Vec::new();
-        asset.by_ref().take(8).read_to_end(&mut prefix)?;
-        Ok(prefix)
     }
 
     /// Emits an already-read layer and recursively opens its sublayers.
@@ -747,6 +754,32 @@ mod tests {
     /// A registry over the default filesystem resolver.
     fn registry() -> LayerRegistry {
         LayerRegistry::default()
+    }
+
+    /// Bytes are dispatched by what they begin with: the crate magic, the
+    /// `usda` header, and nothing else. A guess would decode one format's
+    /// bytes as another's and report that format's parse error.
+    #[test]
+    fn content_picks_format() {
+        let text = LayerRegistry::read_bytes(
+            b"#usda 1.0
+"
+            .as_slice()
+            .into(),
+            "text",
+        )
+        .expect("text is recognized");
+        assert!(text.has_spec(&sdf::Path::abs_root()));
+
+        let unknown = LayerRegistry::read_bytes(b"nothing claims this".as_slice().into(), "mystery");
+        assert!(
+            matches!(unknown, Err(sdf::FormatError::Unrecognized(_))),
+            "unrecognized bytes are refused rather than guessed at"
+        );
+
+        // The lexer skips whitespace before the cookie, so detection must too.
+        let indented = LayerRegistry::read_bytes(b"\n#usda 1.0\n".as_slice().into(), "indented");
+        assert!(indented.is_ok(), "a layer opening with a blank line is still text");
     }
 
     /// Opens a root layer and its sublayer stack, erroring on a missing sublayer

@@ -1,5 +1,6 @@
 //! Text file format (`usda`) reader and writer.
 
+use std::borrow::Cow;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -16,13 +17,19 @@ use parser::Parser;
 pub use error::ParseError;
 pub use writer::TextWriter;
 
-use crate::{ar, sdf, tf};
+use crate::{sdf, tf};
 
 /// Parse `usda` text into an in-memory [`sdf::Data`] store.
 pub fn parse(text: &str) -> Result<sdf::Data, ParseError> {
     let specs = Parser::new(text).parse()?;
     Ok(sdf::Data::from_specs(specs))
 }
+
+/// The header every `usda` layer opens with (C++ `SdfUsdaFileFormat`'s file
+/// cookie), the literal the lexer's magic token requires before the version.
+/// Content-based format detection matches it; the trailing space is part of
+/// the cookie, so `#usdaFOO` is not text this format claims.
+pub const MAGIC: &[u8] = b"#usda ";
 
 /// Read a `usda` file from disk into an in-memory [`sdf::Data`] store.
 pub fn read_file(path: impl AsRef<Path>) -> crate::Result<sdf::Data> {
@@ -46,15 +53,23 @@ impl sdf::FileFormat for UsdaFileFormat {
         &["usda"]
     }
 
-    fn read(
-        &self,
-        resolver: &dyn ar::Resolver,
-        resolved: &ar::ResolvedPath,
-    ) -> Result<sdf::LayerData, sdf::FormatError> {
-        let bytes = resolver.open_asset(resolved)?.read_all()?;
-        let text = String::from_utf8(bytes).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
-        let data = parse(&text)
-            .map_err(|error| sdf::FormatError::Decode(Box::new(error.with_source_name(resolved.to_string()))))?;
+    fn matches_content(&self, prefix: &[u8]) -> bool {
+        // The lexer skips whitespace before the cookie, so a layer that opens
+        // with a blank line is still text (C++ `CanRead` reads the cookie the
+        // same way).
+        let start = prefix
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(prefix.len());
+        prefix[start..].starts_with(MAGIC)
+    }
+
+    fn read_bytes(&self, bytes: Cow<'static, [u8]>, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+        // Borrowed, not owned: the parse copies out everything it keeps, so
+        // bytes compiled into the program are never copied wholesale.
+        let text = str::from_utf8(&bytes).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
+        let data = parse(text)
+            .map_err(|error| sdf::FormatError::Decode(Box::new(error.with_source_name(source_name.to_owned()))))?;
         Ok(Box::new(data))
     }
 

@@ -33,7 +33,7 @@ pub(crate) fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Optio
 /// view matches a derived prim. A prim the registry has no schema for is gated
 /// on its authored `typeName` alone, which is what resolves the views while
 /// [`SchemaRegistryBuilder::compiled_in`](openusd::usd::SchemaRegistryBuilder::compiled_in)
-/// registers no schema data.
+/// registers only the core `usd` family.
 pub(crate) fn get_typed(
     stage: &Stage,
     path: impl sdf::IntoPath,
@@ -189,14 +189,18 @@ class DomeLight_1 "DomeLight_1"
 }
 "#;
 
+    /// One of the family's layers, over text.
+    fn layer(text: &str) -> openusd::sdf::Layer {
+        openusd::sdf::Layer::from_bytes("test", text.as_bytes().to_vec()).expect("the layer parses")
+    }
+
     /// A stage resolving against the miniature family above.
     fn schema_stage() -> Result<Stage> {
         let registry = SchemaRegistry::builder()
             .family(FamilySource {
                 name: "test",
-                manifest: MANIFEST,
-                schematics: SCHEMATICS,
-                resolved_location: None,
+                manifest: &layer(MANIFEST),
+                schematics: &layer(SCHEMATICS),
             })
             .expect("test family registers")
             .build()

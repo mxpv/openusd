@@ -6,8 +6,8 @@
 //! [`SchemaRegistry`] is the index of that information: it answers "what does a
 //! `Cube` look like?" without any stage or composition involved.
 //!
-//! Two ingredients define a schema family, both plain `.usda` text. The
-//! schematics are a fully flattened layer holding one class prim per schema,
+//! Two ingredients define a schema family. The schematics are a fully
+//! flattened layer holding one class prim per schema,
 //! named after the schema identifier — the shape OpenUSD's
 //! `generatedSchema.usda` already has; every property a schema defines, with
 //! its fallback value, lives on that class prim. The manifest supplies what a
@@ -15,25 +15,24 @@
 //! its base schemas. C++ keeps that in `plugInfo.json`; see
 //! [`SchemaRegistryBuilder::family`] for the format.
 //!
-//! A family may also say where its schematics was resolved from
-//! ([`FamilySource::resolved_location`]), which is what lets
+//! Both arrive as opened [`sdf::Layer`]s, so whichever encoding they were
+//! stored in, and wherever they were resolved from, is settled before the
+//! registry sees them. Where the schematics resolved from is what lets
 //! [`Attribute::get`](super::Attribute::get) hand back a resolved path for an
 //! `asset` fallback.
 //!
 //! [`SchemaRegistry::global`] is the lazily built process registry every
-//! [`Stage`](super::Stage) uses by default. It currently registers no families
-//! — the machinery is here, the OpenUSD schema data is not vendored yet — so
-//! fallback lookups uniformly find nothing. Registering families through
-//! [`SchemaRegistry::builder`] and handing the result to
-//! [`StageBuilder::schema_registry`](super::StageBuilder::schema_registry)
-//! works today.
+//! [`Stage`](super::Stage) uses by default. It registers that core `usd` family
+//! and no other, so the domain schemas (`UsdGeom`, `UsdShade`, …) resolve no
+//! fallbacks until a caller registers their families and hands the registry to
+//! [`StageBuilder::schema_registry`](super::StageBuilder::schema_registry).
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
-use crate::{ar, pcp, sdf, tf, usda};
+use crate::{ar, pcp, sdf, tf};
 
 use super::prim_definition::{self, FamilyVersions};
 use super::{PrimDefinition, PrimTypeId, PrimTypeInfo, SchemaKind};
@@ -109,40 +108,31 @@ pub struct SchemaInfo {
 #[derive(Debug)]
 pub struct Schematics {
     family: tf::Token,
-    /// Taken verbatim from [`FamilySource::resolved_location`].
+    /// The schematics layer's own location; `None` for an anonymous one.
     resolved_location: Option<ar::ResolvedPath>,
     data: sdf::Data,
 }
 
-/// One schema family's source text, as handed to
+/// One schema family's two layers, as handed to
 /// [`SchemaRegistryBuilder::family`].
 ///
-/// Both halves are `.usda`: `schematics` is a flattened layer of class prims,
-/// `manifest` is the per-schema metadata that flattening cannot preserve.
+/// `schematics` is a flattened layer of class prims and `manifest` the
+/// per-schema metadata that flattening cannot preserve. Open them however they
+/// are stored — [`Layer::open`](sdf::Layer::open) for a family on disk,
+/// [`Layer::from_bytes`](sdf::Layer::from_bytes) for one compiled into the
+/// program — and the registry reads what they hold.
 #[derive(Debug, Clone, Copy)]
 pub struct FamilySource<'a> {
-    /// Family name, used to attribute parse failures and to identify the
-    /// parsed [`Schematics`].
+    /// Family name, used to attribute read failures and to identify the
+    /// registered [`Schematics`].
     pub name: &'a str,
-    /// Manifest text — see [`SchemaRegistryBuilder::family`] for the format.
-    pub manifest: &'a str,
-    /// Schematics text, in `generatedSchema.usda` form.
-    pub schematics: &'a str,
-    /// Where that text was resolved from — the anchor for the relative asset
-    /// paths its fallback values author, and the one thing that lets
-    /// [`Attribute::get`](super::Attribute::get) resolve such a fallback.
-    ///
-    /// It must be non-empty, and it must be what the resolver applicable to
-    /// stages using this registry returns for the schematics; the registry
-    /// stores it verbatim and never canonicalizes or re-resolves it. A
-    /// [`ResolvedPath`](crate::ar::ResolvedPath) is an opaque resolver result,
-    /// so filesystem absoluteness is neither required nor checked.
-    ///
-    /// `None` for a family with no location, such as one compiled into a
-    /// binary; its fallbacks then read back exactly as authored, with no
-    /// resolved path, which is what C++ produces for every family (see the
-    /// module documentation).
-    pub resolved_location: Option<&'a ar::ResolvedPath>,
+    /// The manifest layer — see [`SchemaRegistryBuilder::family`] for the
+    /// format.
+    pub manifest: &'a sdf::Layer,
+    /// The schematics layer, in `generatedSchema.usda` form. Where it resolved
+    /// from anchors the relative asset paths its fallback values author; see
+    /// [`Attribute::fallback_value`](super::Attribute::fallback_value).
+    pub schematics: &'a sdf::Layer,
 }
 
 /// Accumulates schema families into a [`SchemaRegistry`].
@@ -188,32 +178,24 @@ pub enum VersionFilter {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SchemaRegistryError {
-    /// A family was registered with a present but empty resolved location —
-    /// a resolver's way of saying it found nothing.
-    #[error("Schema family {family} was registered with an empty resolved location")]
-    EmptyResolvedLocation {
-        /// The offending family.
-        family: tf::Token,
-    },
-
-    /// The family's schematics text failed to parse.
-    #[error("Unable to parse schematics for schema family {family}")]
+    /// The family's schematics layer could not be taken into the registry.
+    #[error("Unable to read schematics for schema family {family}")]
     Schematics {
         /// The offending family.
         family: tf::Token,
-        /// The parse failure.
+        /// What reading the layer hit.
         #[source]
-        source: usda::ParseError,
+        source: sdf::FormatError,
     },
 
-    /// The family's manifest text failed to parse.
-    #[error("Unable to parse manifest for schema family {family}")]
+    /// The family's manifest layer could not be taken into the registry.
+    #[error("Unable to read manifest for schema family {family}")]
     Manifest {
         /// The offending family.
         family: tf::Token,
-        /// The parse failure.
+        /// What reading the layer hit.
         #[source]
-        source: usda::ParseError,
+        source: sdf::FormatError,
     },
 
     /// One schema's manifest entry could not be read. The underlying failure
@@ -359,7 +341,7 @@ impl SchemaRegistry {
     /// Every stage opened without an explicit
     /// [`StageBuilder::schema_registry`](crate::usd::StageBuilder::schema_registry)
     /// shares this one. It registers the families compiled into the crate,
-    /// which today is none — see the module documentation.
+    /// which is the core `usd` family alone — see the module documentation.
     pub fn global() -> &'static Arc<SchemaRegistry> {
         static GLOBAL: OnceLock<Arc<SchemaRegistry>> = OnceLock::new();
         GLOBAL.get_or_init(|| {
@@ -369,7 +351,9 @@ impl SchemaRegistry {
         })
     }
 
-    /// Starts a registry with no families registered.
+    /// Starts a registry with no families registered — not even the core
+    /// `usd` family, whose roots every other family's bases reach. Start from
+    /// [`SchemaRegistryBuilder::compiled_in`] to keep those.
     pub fn builder() -> SchemaRegistryBuilder {
         SchemaRegistryBuilder::default()
     }
@@ -934,8 +918,8 @@ impl Schematics {
         &self.family
     }
 
-    /// Where these class prims were resolved from, as
-    /// [`FamilySource::resolved_location`] gave it.
+    /// Where these class prims were resolved from — the schematics layer's own
+    /// location, and `None` for a layer that resolved from nowhere.
     pub fn resolved_location(&self) -> Option<&ar::ResolvedPath> {
         self.resolved_location.as_ref()
     }
@@ -947,15 +931,39 @@ impl Schematics {
 }
 
 impl SchemaRegistryBuilder {
-    /// The families compiled into this crate.
+    /// The core family's manifest, as the `convert` example encodes it from
+    /// `schemas/usd/manifest.usda`.
+    const USD_MANIFEST: &'static [u8] = include_bytes!("../../schemas/usd/manifest.usdc");
+
+    /// The core family's schematics, as the `convert` example encodes it from the
+    /// vendored `schemas/usd/generatedSchema.usda`.
+    const USD_SCHEMATICS: &'static [u8] = include_bytes!("../../schemas/usd/generatedSchema.usdc");
+
+    /// The core `usd` family, vendored from OpenUSD under `schemas/usd/`.
     ///
-    /// Registers nothing today: the registry machinery ships ahead of the
-    /// OpenUSD schema data, so importing `generatedSchema.usda` for the core
-    /// and domain families is still outstanding.
-    // TODO: register the vendored core and per-feature family schematics here
-    // once the OpenUSD schema data is imported.
+    /// It defines the root every schema derives from, `SchemaBase`, the
+    /// `Typed` and `APISchemaBase` roots under it, and the API schemas the
+    /// core library itself implements. A registry carrying it can therefore answer
+    /// [`is_a`](SchemaRegistry::is_a) for any schema whose bases reach those
+    /// roots, which every domain family's does.
+    ///
+    /// The layers are compiled into the program, where C++ installs the same
+    /// data beside a plugin and opens it at first use (`_GetGeneratedSchema`)
+    /// — a linked crate has nowhere to install it. Both are anonymous, so the
+    /// fallbacks they declare anchor against nothing, as C++'s do.
     pub fn compiled_in() -> Self {
+        let manifest =
+            sdf::Layer::from_bytes("usd/manifest.usdc", Self::USD_MANIFEST).expect("the vendored manifest reads");
+        let schematics = sdf::Layer::from_bytes("usd/generatedSchema.usdc", Self::USD_SCHEMATICS)
+            .expect("the vendored schematics read");
+
         Self::default()
+            .family(FamilySource {
+                name: "usd",
+                manifest: &manifest,
+                schematics: &schematics,
+            })
+            .expect("the vendored usd family registers")
     }
 
     /// Registers one schema family.
@@ -999,33 +1007,29 @@ impl SchemaRegistryBuilder {
     /// named target schemas, under the same rules as a declaration registered
     /// through [`auto_apply`](Self::auto_apply).
     ///
-    /// Errors when [`resolved_location`](FamilySource::resolved_location) is
-    /// present but empty, which is a resolver's way of saying it found nothing.
-    // TODO: take the schematics through `sdf::FileFormat` so a family can ship
-    // a binary `generatedSchema.usdc`, as C++ does by opening it as a layer.
-    // Opening it as a layer also subsumes `FamilySource::resolved_location`:
-    // the layer carries its own `anchor_location`, so no caller has to supply
-    // one and none can supply a wrong one.
     pub fn family(mut self, source: FamilySource<'_>) -> Result<Self, SchemaRegistryError> {
         let family = tf::Token::from(source.name);
 
-        if source.resolved_location.is_some_and(|location| location.is_empty()) {
-            return Err(SchemaRegistryError::EmptyResolvedLocation { family });
-        }
-
+        // TODO: the registry copies each layer's specs because `AbstractData` is
+        // not `Send + Sync`, so a lazily decoded backend cannot be shared (see
+        // [`Schematics`]). Making the trait thread-safe would let a family hold
+        // its reader and decode a fallback on demand.
         let schematics = Arc::new(Schematics {
             family: family.clone(),
-            resolved_location: source.resolved_location.cloned(),
-            data: usda::parse(source.schematics).map_err(|source| SchemaRegistryError::Schematics {
-                family: family.clone(),
-                source,
+            resolved_location: source.schematics.anchor_location(),
+            data: sdf::Data::from_abstract(source.schematics.data()).map_err(|error| {
+                SchemaRegistryError::Schematics {
+                    family: family.clone(),
+                    source: error.into(),
+                }
             })?,
         });
 
-        let manifest = usda::parse(source.manifest).map_err(|source| SchemaRegistryError::Manifest {
-            family: family.clone(),
-            source,
-        })?;
+        let manifest =
+            sdf::Data::from_abstract(source.manifest.data()).map_err(|error| SchemaRegistryError::Manifest {
+                family: family.clone(),
+                source: error.into(),
+            })?;
 
         for identifier in root_prims(&manifest) {
             let info = read_schema_info(&manifest, &identifier).map_err(|cause| SchemaRegistryError::Schema {
@@ -1033,21 +1037,32 @@ impl SchemaRegistryBuilder {
                 family: family.clone(),
                 cause: Box::new(cause),
             })?;
-
-            if !SchemaRegistry::is_allowed_schema_identifier(&identifier) {
-                return Err(SchemaRegistryError::InvalidIdentifier { identifier, family });
-            }
-            // An allowed identifier is exactly its family plus its version, so
-            // rejecting a repeat identifier also rejects a repeated
-            // (family, version).
-            if self.infos.contains_key(&identifier) {
-                return Err(SchemaRegistryError::DuplicateIdentifier { identifier, family });
-            }
-            self.source_of.insert(identifier.clone(), schematics.clone());
-            self.infos.insert(identifier, info);
+            self.register(identifier, info, &schematics)?;
         }
 
         Ok(self)
+    }
+
+    /// Adds one schema to the registry being built, whatever declared it.
+    fn register(
+        &mut self,
+        identifier: tf::Token,
+        info: SchemaInfo,
+        schematics: &Arc<Schematics>,
+    ) -> Result<(), SchemaRegistryError> {
+        let family = schematics.family.clone();
+        if !SchemaRegistry::is_allowed_schema_identifier(&identifier) {
+            return Err(SchemaRegistryError::InvalidIdentifier { identifier, family });
+        }
+        // An allowed identifier is exactly its family plus its version, so
+        // rejecting a repeat identifier also rejects a repeated
+        // (family, version).
+        if self.infos.contains_key(&identifier) {
+            return Err(SchemaRegistryError::DuplicateIdentifier { identifier, family });
+        }
+        self.source_of.insert(identifier.clone(), schematics.clone());
+        self.infos.insert(identifier, info);
+        Ok(())
     }
 
     /// Auto-applies an API schema to schemas whose families do not declare it
@@ -1755,19 +1770,37 @@ class DomeLight_1 "DomeLight_1"
         Self::builder()
             .family(FamilySource {
                 name: "test",
-                manifest,
-                schematics,
-                resolved_location: None,
+                manifest: &Self::test_layer(manifest),
+                schematics: &Self::test_layer(schematics),
             })
             .expect("test family registers")
             .build()
             .expect("test registry builds")
+    }
+
+    /// One of a test family's layers, over text.
+    pub(crate) fn test_layer(text: &str) -> sdf::Layer {
+        sdf::Layer::from_bytes("test", text.as_bytes().to_vec()).expect("the test layer parses")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::BTreeMap;
+
+    /// Every spec `data` holds, keyed by path, each with its type and its
+    /// fields keyed by name — the whole of what a layer declares, in a form two
+    /// encodings of it must agree on. Authored field order is not part of that:
+    /// it says nothing about what a spec declares.
+    fn specs(data: &dyn sdf::AbstractData) -> BTreeMap<sdf::Path, (sdf::SpecType, BTreeMap<String, sdf::Value>)> {
+        sdf::Data::from_abstract(data)
+            .expect("the layer's data copies")
+            .iter()
+            .map(|(path, spec)| (path.clone(), (spec.ty, spec.fields.iter().cloned().collect())))
+            .collect()
+    }
 
     #[test]
     fn manifest_infos() {
@@ -2154,9 +2187,58 @@ mod tests {
         assert_eq!(SchemaKind::from_token("bogus"), None);
     }
 
+    /// The `.usdc` the crate embeds must hold what the `.usda` beside it says.
+    /// They are two encodings of one layer, and only the text is reviewable, so
+    /// a stale binary would be schema data nobody read. `schemas/README.md`
+    /// says how to regenerate them.
     #[test]
-    fn global_is_shared_and_empty() {
-        assert!(Arc::ptr_eq(SchemaRegistry::global(), SchemaRegistry::global()));
-        assert_eq!(SchemaRegistry::global().schema_infos().count(), 0);
+    fn vendored_usdc_matches_usda() {
+        let pairs = [
+            (
+                include_str!("../../schemas/usd/generatedSchema.usda"),
+                SchemaRegistryBuilder::USD_SCHEMATICS,
+            ),
+            (
+                include_str!("../../schemas/usd/manifest.usda"),
+                SchemaRegistryBuilder::USD_MANIFEST,
+            ),
+        ];
+
+        for (text, binary) in pairs {
+            let from_text = SchemaRegistry::test_layer(text);
+            let from_binary = sdf::Layer::from_bytes("vendored", binary).expect("the vendored crate file reads");
+            assert_eq!(
+                specs(from_text.data()),
+                specs(from_binary.data()),
+                "the two encodings agree",
+            );
+        }
+    }
+
+    #[test]
+    fn global_registers_usd_family() {
+        let registry = SchemaRegistry::global();
+        assert!(Arc::ptr_eq(registry, SchemaRegistry::global()));
+        assert_eq!(registry.schema_infos().count(), 8);
+        assert!(registry.is_a(&tf::Token::new("ColorSpaceAPI"), &tf::Token::new("APISchemaBase")));
+        // Every schema reaches `SchemaBase`, the root C++ puts above both
+        // `Typed` and `APISchemaBase`.
+        assert!(registry.is_a(&tf::Token::new("ColorSpaceAPI"), &tf::Token::new("SchemaBase")));
+
+        let collection = registry
+            .schema_info(&tf::Token::new("CollectionAPI"))
+            .expect("the core family declares CollectionAPI");
+        assert_eq!(collection.kind(), SchemaKind::MultipleApplyApi);
+        assert_eq!(
+            collection.property_namespace_prefix(),
+            Some(&tf::Token::new("collection"))
+        );
+
+        // A multiple-apply schema's properties stay templated in its own
+        // definition; a prim's definition instantiates them per instance.
+        let definition = registry
+            .api_prim_definition(&tf::Token::new("CollectionAPI"))
+            .expect("CollectionAPI has a definition");
+        assert!(definition.has_property(&tf::Token::new("collection:__INSTANCE_NAME__:expansionRule")));
     }
 }

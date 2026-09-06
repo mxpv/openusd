@@ -11,14 +11,19 @@ use std::sync::Arc;
 use openusd::usd::{FamilySource, SchemaRegistry};
 use openusd::{sdf, tf};
 
+/// One of a family's layers, over text: how a family stored as `.usda` and
+/// read into memory reaches the registry.
+fn layer(text: &str) -> sdf::Layer {
+    sdf::Layer::from_bytes("test", text.as_bytes().to_vec()).expect("the layer parses")
+}
+
 /// Builds a registry from one schema family's manifest and schematics.
 fn registry(manifest: &str, schematics: &str) -> Arc<SchemaRegistry> {
     SchemaRegistry::builder()
         .family(FamilySource {
             name: "test",
-            manifest,
-            schematics,
-            resolved_location: None,
+            manifest: &layer(manifest),
+            schematics: &layer(schematics),
         })
         .expect("family registers")
         .build()
@@ -848,16 +853,14 @@ def "MarkerAPI"
     let registry = SchemaRegistry::builder()
         .family(FamilySource {
             name: "core",
-            manifest: core_manifest,
-            schematics: "#usda 1.0\n\nclass Widget \"Widget\"\n{\n}\n",
-            resolved_location: None,
+            manifest: &layer(core_manifest),
+            schematics: &layer("#usda 1.0\n\nclass Widget \"Widget\"\n{\n}\n"),
         })
         .expect("core registers")
         .family(FamilySource {
             name: "ext",
-            manifest: ext_manifest,
-            schematics: "#usda 1.0\n\nclass \"MarkerAPI\"\n{\n    float marker:size = 2\n}\n",
-            resolved_location: None,
+            manifest: &layer(ext_manifest),
+            schematics: &layer("#usda 1.0\n\nclass \"MarkerAPI\"\n{\n    float marker:size = 2\n}\n"),
         })
         .expect("ext registers")
         .build()
@@ -911,9 +914,8 @@ class Gadget "Gadget"
         .auto_apply("MarkerAPI", ["Gadget"])
         .family(FamilySource {
             name: "test",
-            manifest,
-            schematics,
-            resolved_location: None,
+            manifest: &layer(manifest),
+            schematics: &layer(schematics),
         })
         .expect("family registers")
         .build()
@@ -960,9 +962,8 @@ def "Foo_01"
     let error = SchemaRegistry::builder()
         .family(FamilySource {
             name: "test",
-            manifest,
-            schematics: "#usda 1.0\n",
-            resolved_location: None,
+            manifest: &layer(manifest),
+            schematics: &layer("#usda 1.0\n"),
         })
         .expect_err("a non-canonical identifier is rejected");
     assert!(format!("{error:#}").contains("not a valid identifier"), "{error:#}");
@@ -1027,9 +1028,8 @@ fn unknown_kind_rejected() {
     let error = SchemaRegistry::builder()
         .family(FamilySource {
             name: "test",
-            manifest,
-            schematics: "#usda 1.0\n",
-            resolved_location: None,
+            manifest: &layer(manifest),
+            schematics: &layer("#usda 1.0\n"),
         })
         .expect_err("unknown kind is rejected");
     assert!(format!("{error:#}").contains("Unknown schemaKind"), "{error:#}");
@@ -1041,9 +1041,8 @@ fn missing_kind_rejected() {
     let error = SchemaRegistry::builder()
         .family(FamilySource {
             name: "test",
-            manifest,
-            schematics: "#usda 1.0\n",
-            resolved_location: None,
+            manifest: &layer(manifest),
+            schematics: &layer("#usda 1.0\n"),
         })
         .expect_err("missing kind is rejected");
     assert!(format!("{error:#}").contains("schemaKind is required"), "{error:#}");
@@ -1054,9 +1053,8 @@ fn duplicate_identifier_rejected() {
     let manifest = "#usda 1.0\n\ndef \"Thing\"\n{\n    uniform token schemaKind = \"abstractBase\"\n}\n";
     let source = FamilySource {
         name: "test",
-        manifest,
-        schematics: "#usda 1.0\n",
-        resolved_location: None,
+        manifest: &layer(manifest),
+        schematics: &layer("#usda 1.0\n"),
     };
     let error = SchemaRegistry::builder()
         .family(source)
