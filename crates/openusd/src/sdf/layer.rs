@@ -84,7 +84,9 @@ pub struct Layer {
     /// means it equals the identifier; a package (`.usdz`) opens under the bare
     /// package identifier while its real path is the package-relative default
     /// layer (`pkg.usdz[root.usd]`), so paths authored inside it anchor
-    /// in-package against the real path rather than the identifier. Read
+    /// in-package against the real path rather than the identifier, and a layer
+    /// found through a resolver search directory keeps the search path as its
+    /// identifier while its real path is the file that directory holds. Read
     /// through [`real_path`](Self::real_path), which falls back to the
     /// identifier.
     real_path: Option<String>,
@@ -284,7 +286,8 @@ impl Layer {
     /// The layer's resolved physical location, the anchor for the relative
     /// asset paths it authors (C++ `SdfLayer::GetRealPath`). Equals the
     /// identifier except for a package, whose real path is its package-relative
-    /// default layer.
+    /// default layer, and a layer found through a resolver search directory,
+    /// whose identifier is the search path.
     pub(crate) fn real_path(&self) -> &str {
         self.real_path.as_deref().unwrap_or(&self.identifier)
     }

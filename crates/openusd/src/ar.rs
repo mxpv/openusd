@@ -26,12 +26,13 @@
 //! }
 //! ```
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Seek};
 use std::ops::Deref;
-use std::path::{Component, Path, PathBuf};
+use std::path::{self, Component, Path, PathBuf};
 use std::time::SystemTime;
 
 /// A resolved asset path representing the physical location of an asset.
@@ -286,6 +287,12 @@ impl Default for DefaultResolver {
 }
 
 impl Resolver for DefaultResolver {
+    /// Anchors a relative `asset_path` against `anchor`'s directory, with the
+    /// look-here-first rule of C++ `ArDefaultResolver::_CreateIdentifier`: a
+    /// search path (relative, not spelled from `.` or `..`) whose anchored
+    /// candidate does not exist keeps its bare normalized spelling, so
+    /// resolving the identifier goes through the search directories and a
+    /// `@usd/schema.usda@` sublayer is found beside any layer that names it.
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
         if asset_path.is_empty() {
             return String::new();
@@ -330,7 +337,14 @@ impl Resolver for DefaultResolver {
                 return join_package_relative_path(&anchor_str, &joined);
             }
             if let Some(dir) = anchor.parent() {
-                return canonical_identifier(dir.join(path));
+                let anchored = dir.join(path);
+                if is_search_path(path) {
+                    return match anchored.canonicalize() {
+                        Ok(found) => found.to_string_lossy().into_owned(),
+                        Err(_) => without_dot_segments(asset_path).into_owned(),
+                    };
+                }
+                return canonical_identifier(anchored);
             }
         }
 
@@ -427,6 +441,38 @@ impl Resolver for DefaultResolver {
 /// symlinks. Matches the normalization C++ `TfNormPath` performs.
 fn lexically_normalize(path: &Path) -> PathBuf {
     path.components().filter(|c| !matches!(c, Component::CurDir)).collect()
+}
+
+/// Whether `path` is a search path (C++ `_IsSearchPath`): relative, and not
+/// file-relative — a path spelled from the anchoring layer's directory with a
+/// leading `.` or `..` component is looked up there and nowhere else. A path
+/// that opens with a root separator or a drive is absolute for this purpose on
+/// every platform, as C++ `TfIsRelativePath` treats it. A search path is also
+/// the one identifier form that depends on the filesystem beside its anchor:
+/// it stays bare until an asset appears there.
+pub(crate) fn is_search_path(path: &Path) -> bool {
+    matches!(path.components().next(), Some(Component::Normal(_)))
+}
+
+/// `asset_path` with its `.` (current-directory) segments dropped, rendered with
+/// `/` separators: `./a` and `a/./b` become `a` and `a/b`. Segments are split on
+/// any separator the platform accepts — `/` everywhere, and `\` on Windows — so
+/// this matches the `std::path::Components` normalization
+/// [`lexically_normalize`] applies. It is the bare identifier of a search path
+/// (an asset path the search directories are consulted for, not a location on
+/// this host, so it keeps the separator C++ `TfNormPath` gives it), and the
+/// spelling the composition graph's bare lookup uses for an in-memory layer
+/// interned under the literal name a `./`-relative entry names. A path with no
+/// `.` segment is returned unchanged.
+pub(crate) fn without_dot_segments(asset_path: &str) -> Cow<'_, str> {
+    if !asset_path.split(path::is_separator).any(|segment| segment == ".") {
+        return Cow::Borrowed(asset_path);
+    }
+    let kept: Vec<&str> = asset_path
+        .split(path::is_separator)
+        .filter(|segment| *segment != ".")
+        .collect();
+    Cow::Owned(kept.join("/"))
 }
 
 /// Renders `path` as a stable layer identifier: its filesystem-canonical
@@ -832,6 +878,80 @@ mod tests {
             resolver.create_identifier("sub.usda", Some(&anchor)),
             "a leading `./` normalizes away when the target cannot be canonicalized"
         );
+    }
+
+    /// A search path keeps its bare spelling when nothing sits beside the
+    /// anchor, so the identifier resolves through the search directories; the
+    /// same path anchors normally once a file appears beside the anchor
+    /// (look-here-first), and a `./` path anchors even when missing.
+    #[test]
+    fn search_path_identifier_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene = dir.path().join("scene");
+        let library = dir.path().join("library");
+        fs::create_dir_all(scene.join("lib")).unwrap();
+        fs::create_dir_all(library.join("lib")).unwrap();
+        fs::write(scene.join("root.usda"), "#usda 1.0\n").unwrap();
+        fs::write(library.join("lib").join("sub.usda"), "#usda 1.0\n").unwrap();
+
+        let resolver = DefaultResolver::with_search_paths([&library]);
+        let anchor = ResolvedPath::new(scene.join("root.usda"));
+
+        let id = resolver.create_identifier("lib/sub.usda", Some(&anchor));
+        assert_eq!(id, "lib/sub.usda", "a search path keeps its `/`-spelled bare form");
+        assert_eq!(
+            resolver.create_identifier("lib/./sub.usda", Some(&anchor)),
+            "lib/sub.usda",
+            "interior `.` segments normalize away"
+        );
+        let resolved = resolver.resolve(&id).expect("found through the search directory");
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            library.join("lib/sub.usda").canonicalize().unwrap()
+        );
+
+        // A `./` path is file-relative: it anchors even though nothing is there.
+        let dot = resolver.create_identifier("./lib/sub.usda", Some(&anchor));
+        assert!(Path::new(&dot).is_absolute(), "file-relative path anchored: {dot}");
+        assert!(resolver.resolve(&dot).is_none());
+
+        // Look-here-first: a file beside the anchor wins over the search path.
+        fs::write(scene.join("lib").join("sub.usda"), "#usda 1.0\n").unwrap();
+        let beside = resolver.create_identifier("lib/sub.usda", Some(&anchor));
+        assert_eq!(
+            Path::new(&beside).canonicalize().unwrap(),
+            scene.join("lib/sub.usda").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn search_path_predicate() {
+        assert!(is_search_path(Path::new("lib/sub.usda")));
+        assert!(is_search_path(Path::new("sub.usda")));
+        assert!(!is_search_path(Path::new("./sub.usda")));
+        assert!(!is_search_path(Path::new("../sub.usda")));
+        assert!(!is_search_path(Path::new("/abs/sub.usda")));
+    }
+
+    /// `.` path segments are dropped, anywhere in an asset path, rendered with
+    /// `/` separators. On Windows a `\`-spelled `.` segment is recognized too,
+    /// since `std::path` treats `\` as a separator there.
+    #[test]
+    fn dot_segments_normalized() {
+        assert_eq!(&*without_dot_segments("./sub.usda"), "sub.usda");
+        assert_eq!(&*without_dot_segments("././sub.usda"), "sub.usda");
+        assert_eq!(&*without_dot_segments("dir/./sub.usda"), "dir/sub.usda");
+        assert_eq!(&*without_dot_segments("/abs/./path"), "/abs/path");
+        assert_eq!(
+            &*without_dot_segments("sub.usda"),
+            "sub.usda",
+            "no `.` segment is unchanged"
+        );
+        #[cfg(windows)]
+        {
+            assert_eq!(&*without_dot_segments(".\\sub.usda"), "sub.usda");
+            assert_eq!(&*without_dot_segments("dir\\.\\sub.usda"), "dir/sub.usda");
+        }
     }
 
     #[test]

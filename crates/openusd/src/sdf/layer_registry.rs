@@ -297,8 +297,11 @@ impl LayerRegistry {
         Ok(expr::read_expression_variables(data.as_ref())?.into_owned())
     }
 
-    /// Opens `asset_path` (anchored against `anchor`) together with its sublayer
-    /// stack, root (strongest) layer first.
+    /// Opens the layer at `identifier` — a canonical identifier, as
+    /// [`create_identifier`](Self::create_identifier) produces — together with
+    /// its sublayer stack, root (strongest) layer first. Taking the identifier
+    /// rather than an asset path keeps a search-path identifier (`lib/x.usda`,
+    /// resolved through the search directories) from being re-anchored here.
     ///
     /// Following stops at references and payloads: composition opens those target
     /// layers on demand when it reaches the arc, so an un-visited subtree never
@@ -315,7 +318,7 @@ impl LayerRegistry {
     /// fails the whole stack (C++ `SdfLayer` opens the root and reports the bad
     /// sublayer).
     ///
-    /// `ancestor_expr_vars` are the overrides the stack that brought `asset_path`
+    /// `ancestor_expr_vars` are the overrides the stack that brought the layer
     /// in supplies (the session root's own variables for the stage root stack, a
     /// reference/payload arc's composed set for a target). They overlay the root
     /// layer's own `expressionVariables` — the overrides win — to form the one
@@ -333,8 +336,7 @@ impl LayerRegistry {
     /// to reach a shared layer first.
     pub(crate) fn open_stack(
         &self,
-        asset_path: &str,
-        anchor: Option<&ar::ResolvedPath>,
+        identifier: &str,
         ancestor_expr_vars: &HashMap<String, sdf::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
@@ -343,10 +345,10 @@ impl LayerRegistry {
         let mut layers = Vec::new();
         let mut visited = HashSet::new();
 
-        let identifier = self.create_identifier(asset_path, anchor);
         if identifier.is_empty() {
             return Ok(None);
         }
+        let identifier = identifier.to_string();
         // With `reload`, an already-interned root and its already-present sublayers
         // are re-read and re-walked (but not re-emitted) so a re-open under a new
         // expression-variable context loads the `${VAR}` sublayers the context now
@@ -750,8 +752,10 @@ mod tests {
     /// Opens a root layer and its sublayer stack, erroring on a missing sublayer
     /// or an unresolvable root.
     fn open_stack(path: &str) -> Result<Vec<sdf::Layer>> {
-        Ok(registry()
-            .open_stack(path, None, &HashMap::new(), false, &Err, &|_| false)?
+        let registry = registry();
+        let identifier = registry.create_identifier(path, None);
+        Ok(registry
+            .open_stack(&identifier, &HashMap::new(), false, &Err, &|_| false)?
             .expect("root did not resolve"))
     }
 
@@ -865,10 +869,10 @@ mod tests {
     #[test]
     fn handler_receives_sublayer_error() -> Result<()> {
         let errors = std::cell::RefCell::new(Vec::new());
-        let layers = registry()
+        let registry = registry();
+        let layers = registry
             .open_stack(
-                &composition_path("subLayer/sublayer_invalid.usda"),
-                None,
+                &registry.create_identifier(&composition_path("subLayer/sublayer_invalid.usda"), None),
                 &HashMap::new(),
                 false,
                 &|e| {

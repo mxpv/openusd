@@ -29,9 +29,9 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem;
-use std::path;
+use std::path::Path as FsPath;
 
-use crate::ar::ResolvedPath;
+use crate::ar::{self, ResolvedPath};
 use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
@@ -179,6 +179,13 @@ pub(crate) struct LayerGraph {
     /// identifier (the public authoring surface) in O(1), and a re-added
     /// identifier collapses onto its existing id.
     by_identifier: HashMap<String, LayerId>,
+    /// `real path → id` for every layer whose resolved location differs from
+    /// its identifier — one found through a resolver search directory keeps
+    /// the search path as its identifier — so the layer also answers to the
+    /// spelling its file has (C++ `Sdf_LayerRegistry`'s by-real-path index,
+    /// consulted by `SdfLayer::Find` after the identifier). The first layer
+    /// interned at a real path keeps it.
+    by_real_path: HashMap<String, LayerId>,
     /// Next id to mint. Monotonic for the life of the graph, so a removed id is
     /// never reused for a different layer within a session.
     next_id: u32,
@@ -194,24 +201,25 @@ pub(crate) struct LayerGraph {
     session_layer_count: usize,
     /// The root layer's id (the first non-session layer), if any.
     root: Option<LayerId>,
-    /// Canonical identifiers of the muted layers — the source of truth for muting
-    /// (C++ `Pcp_MutedLayers`'s sorted id set), so a layer can be muted before it
-    /// is loaded. A path is reduced to this canonical form by
-    /// [`canonical_muted_id`](Self::canonical_muted_id) (the resolver, anchored
-    /// against the root layer), so every spelling of one layer collapses to a
-    /// single entry and a not-yet-loaded reference/payload target matches the
-    /// identifier it will be interned under. Excludes the root layer's identifier,
-    /// which cannot be muted. The root layer can be muted neither here nor in
-    /// [`muted`](Self::muted).
-    muted_identifiers: HashSet<String>,
-    /// The interned ids of the [`muted_identifiers`](Self::muted_identifiers) that
-    /// name a loaded layer, re-materialized on every stack rebuild and excluded
+    /// The muted layers that are loaded, by id — the muted set proper, excluded
     /// when materializing the stacks (C++ `PcpLayerStack::_BuildLayerStack`). A
-    /// muted layer and its whole sublayer subtree are pruned from every stack while
-    /// staying interned, so unmute is a rebuild. Re-materializing on each rebuild
-    /// lets a layer muted before it was loaded take effect the moment it is
-    /// interned. Empty by default, leaving composition unchanged.
+    /// muted layer and its whole sublayer subtree are pruned from every stack
+    /// while staying interned, so unmute is a rebuild. Keyed by identity, so
+    /// every spelling of one layer — its identifier, or the real path of one
+    /// found through a search directory — mutes, unmutes and reads as the same
+    /// entry. Never holds the root layer, which cannot be muted ("would lead to
+    /// empty layer stacks"). Empty by default, leaving composition unchanged.
     muted: HashSet<LayerId>,
+    /// Canonical identifiers muted while no loaded layer answers to them (C++
+    /// `Pcp_MutedLayers` keeps every request as a string; here a request that
+    /// names a loaded layer goes straight into [`muted`](Self::muted)). A path
+    /// is reduced to this canonical form by
+    /// [`canonical_muted_id`](Self::canonical_muted_id) (the resolver, anchored
+    /// against the root layer), so a not-yet-loaded reference/payload target
+    /// matches the identifier it will be interned under, and the entry moves to
+    /// `muted` the moment such a layer is interned
+    /// ([`resolve_muted_ids`](Self::resolve_muted_ids)).
+    pending_mutes: HashSet<String>,
     /// Whether any node keeps structurally valid authored relocates. The indexer
     /// reads this to gate its relocate passes without rescanning.
     has_relocates: bool,
@@ -299,15 +307,18 @@ struct SublayerState {
     /// `LayerGraph::recompute_expr_sublayer_flags`.
     any_expr: bool,
     /// Memoized sublayer-path resolution, `parent layer → (authored sub-path →
-    /// resolved identifier)`. `LayerGraph::resolve_edges` anchors each relative
-    /// `subLayers` entry against its parent through the resolver — a filesystem
-    /// canonicalize — and re-runs the whole walk on every
-    /// `LayerGraph::build_sublayer_edges`, i.e. every `subLayers` edit. The
-    /// `(parent, sub-path) → identifier` mapping is a pure function of the
-    /// asset paths, so it is computed once and reused; the identifier is then
-    /// looked up live with [`LayerGraph::id_of`], so the cache survives a layer
-    /// being removed and re-added, and a target that interns on a later rebuild
-    /// is picked up without re-resolving the path.
+    /// resolved identifier)`, keyed by the entry's authored spelling (`./x` and
+    /// `x` are different entries: the resolver anchors the first and treats the
+    /// second as a search path). `LayerGraph::resolve_edges` anchors each
+    /// relative `subLayers` entry against its parent through the resolver — a
+    /// filesystem canonicalize — and re-runs the whole walk on every
+    /// `LayerGraph::build_sublayer_edges`, i.e. every `subLayers` edit. Only a
+    /// stable identifier is memoized — an absolute one naming an interned
+    /// layer, which nothing removes — so it is computed once and reused, and
+    /// looked up live with [`LayerGraph::id_of`]. A search-path or unresolved
+    /// entry is never memoized: its identifier follows the filesystem beside
+    /// its parent, so `LayerGraph::resolve_sublayer` derives it afresh on every
+    /// rebuild, as C++ `_BuildLayerStack` derives every entry.
     resolution: HashMap<LayerId, HashMap<String, String>>,
     /// Sublayer entries that resolved to no loaded layer under the empty
     /// context, keyed by the authoring parent — the table a stack on the
@@ -405,10 +416,11 @@ impl SublayerState {
 /// [`unmute_layer`](LayerGraph::unmute_layer) actually changed, returned only
 /// when the muted set changed.
 pub(crate) struct MuteChange {
-    /// The canonical identifier whose muted state toggled — the one a mute
-    /// inserted or an unmute removed. The stage notifies it, not the spelling the
-    /// caller passed, so a listener mirroring the muted set stays in sync (C++
-    /// reports the canonical id it toggled).
+    /// The identity whose muted state toggled: a loaded layer's interned
+    /// identifier, or the canonical identifier a not-yet-loaded layer is muted
+    /// under. The stage notifies it, not the spelling the caller passed, so a
+    /// listener mirroring the muted set stays in sync (C++ reports the canonical
+    /// id it toggled).
     pub(crate) changed: String,
     /// Layers whose cached prim indices the change can invalidate (see
     /// [`mute_fanout`](LayerGraph::mute_fanout)).
@@ -584,11 +596,12 @@ impl LayerGraph {
         Self {
             nodes: HashMap::new(),
             by_identifier: HashMap::new(),
+            by_real_path: HashMap::new(),
             next_id: 0,
             order: Vec::new(),
             session_layer_count: 0,
             root: None,
-            muted_identifiers: HashSet::new(),
+            pending_mutes: HashSet::new(),
             muted: HashSet::new(),
             has_relocates: false,
             diagnostics: GraphDiagnostics::default(),
@@ -634,9 +647,19 @@ impl LayerGraph {
         if let Some(&id) = self.by_identifier.get(layer.identifier()) {
             return (id, false);
         }
+        // A second identifier for a file already interned names that layer (C++
+        // `Sdf_LayerRegistry::_Layers::Insert` collides on real path): the new
+        // identifier becomes an alias of the existing id.
+        if let Some(id) = self.id_of(layer.real_path()) {
+            self.by_identifier.insert(layer.identifier().to_string(), id);
+            return (id, false);
+        }
         let id = LayerId::from_raw(self.next_id);
         self.next_id += 1;
         self.by_identifier.insert(layer.identifier().to_string(), id);
+        if layer.real_path() != layer.identifier() {
+            self.by_real_path.entry(layer.real_path().to_string()).or_insert(id);
+        }
         // A layer's content is composed fresh as it joins the graph, so any
         // change record left by prior write-through edits must not survive to
         // be drained by a later transaction the stage runs on it.
@@ -804,7 +827,7 @@ impl LayerGraph {
             } else {
                 sub_path
             };
-            let Some(sub_id) = self.resolve_sublayer(id, &sub_path, resolution) else {
+            let Ok(sub_id) = self.resolve_sublayer(id, &sub_path, resolution) else {
                 // No loaded layer at the entry's anchored (or bare) identifier:
                 // record a load-demand candidate for the stacks whose members
                 // include `id`, so the stage's load barrier can open it. An
@@ -831,35 +854,42 @@ impl LayerGraph {
     /// Resolves an authored `subLayers` entry `sub_path` against its parent layer
     /// `parent` to the interned sublayer (the memoizing form of
     /// [`find_relative`](Self::find_relative) for the per-rebuild
-    /// [`resolve_edges`](Self::resolve_edges) walk). The anchored identifier — the
-    /// asset USD resolves the relative entry to — is tried first; only when no
-    /// layer is interned there does it fall back to the bare authored string, so a
-    /// filesystem-backed parent never resolves to an unrelated layer interned
-    /// under the bare string, while an in-memory layer keyed under that literal
-    /// name (no filesystem anchor) still resolves.
+    /// [`resolve_edges`](Self::resolve_edges) walk), or `Err` with the anchored
+    /// canonical identifier the entry would intern under. The anchored
+    /// identifier — the asset USD resolves the relative entry to — is tried
+    /// first; only when no layer is interned there does it fall back to the bare
+    /// authored string, so a filesystem-backed parent never resolves to an
+    /// unrelated layer interned under the bare string, while an in-memory layer
+    /// keyed under that literal name (no filesystem anchor) still resolves. The
+    /// resolver receives the authored spelling, so a leading `./` keeps its
+    /// file-relative meaning; only the bare fallback strips it.
     ///
-    /// The anchored identifier is a pure function of the asset paths, so it is
-    /// memoized in `cache` whether or not it currently names an interned layer:
-    /// the resolver's filesystem canonicalize then runs once per `(parent,
-    /// sub_path)`, while the live [`id_of`](Self::id_of) below still tracks
-    /// interning, so a target that interns on a later rebuild is picked up without
-    /// re-resolving the path (see [`SublayerState::resolution`]).
+    /// An identifier is memoized in `cache` once it is stable — absolute, and
+    /// naming an interned layer, which nothing removes — so the resolver's
+    /// filesystem canonicalize runs once per such `(parent, sub_path)`. A
+    /// search-path or unresolved entry is anchored afresh on every rebuild, as
+    /// C++ `_BuildLayerStack` derives every entry: its identifier follows the
+    /// filesystem beside its parent (see [`SublayerState::resolution`]).
     fn resolve_sublayer(
         &self,
         parent: LayerId,
         sub_path: &str,
         cache: &mut HashMap<LayerId, HashMap<String, String>>,
-    ) -> Option<LayerId> {
-        let sub_path = without_dot_segments(sub_path);
-        if let Some(anchored) = cache.get(&parent).and_then(|paths| paths.get(sub_path.as_ref())) {
-            return self.anchored_or_bare(anchored, &sub_path);
+    ) -> Result<LayerId, String> {
+        let bare = ar::without_dot_segments(sub_path);
+        if let Some(anchored) = cache.get(&parent).and_then(|paths| paths.get(sub_path)) {
+            return self.anchored_or_bare(anchored, &bare).ok_or_else(|| anchored.clone());
         }
         let anchored = self
             .registry
-            .create_identifier_anchored(&sub_path, self.real_path(parent));
-        let sub_id = self.anchored_or_bare(&anchored, &sub_path);
-        cache.entry(parent).or_default().insert(sub_path.into_owned(), anchored);
-        sub_id
+            .create_identifier_anchored(sub_path, self.real_path(parent));
+        let Some(sub_id) = self.anchored_or_bare(&anchored, &bare) else {
+            return Err(anchored);
+        };
+        if !ar::is_search_path(FsPath::new(&anchored)) {
+            cache.entry(parent).or_default().insert(sub_path.to_string(), anchored);
+        }
+        Ok(sub_id)
     }
 
     /// Replaces [`cycles`](GraphDiagnostics::cycles) with the sublayer cycles
@@ -1074,27 +1104,28 @@ impl LayerGraph {
                 continue;
             }
             if !self.failed_loads.is_empty() {
-                // The entry's anchored identifier is in the resolution cache —
-                // `resolve_sublayer` filed it before reporting the entry
-                // unresolved. A miss falls through to a demand, whose barrier
-                // attempt records the same diagnostic.
-                let normalized = without_dot_segments(&demand.evaluated);
+                // An unresolved entry's identifier is derived afresh each
+                // rebuild (nothing memoizes it): under the resolver's
+                // look-here-first rule it is the bare search path until the
+                // asset appears beside its parent, and the anchored one from
+                // then on (C++ `_BuildLayerStack` derives every entry per
+                // rebuild). A recorded resolve failure is retried once the
+                // resolver finds the asset; any other failure is regenerated
+                // per referrer.
                 let anchored = self
-                    .sublayers
-                    .resolution
-                    .get(&demand.parent)
-                    .and_then(|paths| paths.get(normalized.as_ref()));
-                if let Some(anchored) = anchored {
-                    let retry = matches!(self.failed_loads.get(anchored), Some(LoadFailure::Unresolved))
-                        && self.registry.resolve(anchored).is_some();
-                    if retry {
-                        self.failed_loads.remove(anchored.as_str());
-                    } else if let Some(failure) = self.failed_loads.get(anchored) {
+                    .registry
+                    .create_identifier_anchored(&demand.evaluated, self.real_path(demand.parent));
+                match self.failed_loads.get(&anchored) {
+                    Some(LoadFailure::Unresolved) if self.registry.resolve(&anchored).is_some() => {
+                        self.failed_loads.remove(&anchored);
+                    }
+                    Some(failure) => {
                         if seen.insert((demand.parent, anchored.clone())) {
                             errors.report(failure.sublayer_error(&demand.evaluated, self.identifier(demand.parent)));
                         }
                         continue;
                     }
+                    None => {}
                 }
             }
             pending.push(demand);
@@ -1314,8 +1345,9 @@ impl LayerGraph {
     /// The resolved physical location of the layer with the given id — the
     /// anchor for the relative asset paths it authors (C++
     /// `SdfLayer::GetRealPath`). Equals the identifier except for a package,
-    /// whose real path is its package-relative default layer. Panics if
-    /// unknown.
+    /// whose real path is its package-relative default layer, and a layer found
+    /// through a resolver search directory, whose identifier is the search path.
+    /// Panics if unknown.
     pub(crate) fn real_path(&self, id: LayerId) -> &str {
         self.nodes[&id].layer.real_path()
     }
@@ -2244,13 +2276,19 @@ impl LayerGraph {
     }
 
     /// The id of the layer interned under exactly `identifier` (the canonical,
-    /// resolver-produced form), or `None`. An authored relative path must be
-    /// anchored to its canonical identifier first (see
-    /// [`find_relative`](Self::find_relative)); this is the exact registry lookup
-    /// the anchored path then resolves through, and the authoring surface keys a
-    /// layer this way.
+    /// resolver-produced form), or failing that the layer whose resolved real
+    /// path is `identifier`, or `None` (C++ `SdfLayer::Find`: by identifier,
+    /// then by real path). An authored relative path must be anchored to its
+    /// canonical identifier first (see [`find_relative`](Self::find_relative));
+    /// this is the registry lookup the anchored path then resolves through, and
+    /// the authoring surface keys a layer this way. The real-path alias is what
+    /// lets a layer found through a search directory — interned under the
+    /// search path — be named by the file it resolved to.
     pub(crate) fn id_of(&self, identifier: &str) -> Option<LayerId> {
-        self.by_identifier.get(identifier).copied()
+        self.by_identifier
+            .get(identifier)
+            .or_else(|| self.by_real_path.get(identifier))
+            .copied()
     }
 
     /// The layer interned under the resolver-anchored identifier `anchored`, or —
@@ -2289,31 +2327,22 @@ impl LayerGraph {
     /// on-demand loader opens a sublayer demand at, and the key load failures
     /// and open attempts are recorded by.
     pub(crate) fn resolve_relative(&self, asset_path: &str, anchor: LayerId) -> Result<LayerId, String> {
-        let asset_path = without_dot_segments(asset_path);
         let anchored = self
             .registry
-            .create_identifier_anchored(&asset_path, self.real_path(anchor));
-        self.anchored_or_bare(&anchored, &asset_path).ok_or(anchored)
+            .create_identifier_anchored(asset_path, self.real_path(anchor));
+        self.anchored_or_bare(&anchored, &ar::without_dot_segments(asset_path))
+            .ok_or(anchored)
     }
 
-    /// [`resolve_relative`](Self::resolve_relative) for a demanded sublayer
-    /// entry, replacing the entry's memoized anchoring
-    /// ([`SublayerState::resolution`]) with the fresh one: anchoring
-    /// canonicalizes through the filesystem, so an asset that appeared since
-    /// the memo was filed can shift the entry's canonical form, and the memo
-    /// must follow for the next rebuild to resolve the entry the same way the
-    /// barrier just did.
+    /// [`resolve_sublayer`](Self::resolve_sublayer) for a demanded sublayer
+    /// entry at the load barrier, over the graph's own memo
+    /// ([`SublayerState::resolution`]): the entry resolves to the layer the
+    /// barrier already interned, or yields the anchored identifier to open.
     pub(crate) fn refresh_demanded_sublayer(&mut self, parent: LayerId, sub_path: &str) -> Result<LayerId, String> {
-        let normalized = without_dot_segments(sub_path);
-        let anchored = self
-            .registry
-            .create_identifier_anchored(&normalized, self.real_path(parent));
-        self.sublayers
-            .resolution
-            .entry(parent)
-            .or_default()
-            .insert(normalized.clone().into_owned(), anchored.clone());
-        self.anchored_or_bare(&anchored, &normalized).ok_or(anchored)
+        let mut resolution = mem::take(&mut self.sublayers.resolution);
+        let resolved = self.resolve_sublayer(parent, sub_path, &mut resolution);
+        self.sublayers.resolution = resolution;
+        resolved
     }
 
     /// Mutes the layer with the given identifier so it contributes no opinions to
@@ -2328,30 +2357,35 @@ impl LayerGraph {
     /// re-materializes the interned muted ids).
     pub(crate) fn mute_layer(&mut self, identifier: String) -> Option<MuteChange> {
         let canonical = self.canonical_muted_id(&identifier, self.anchor_location(self.root).as_ref());
-        if self.is_root_identifier(&canonical) || !self.muted_identifiers.insert(canonical.clone()) {
+        if self.is_root_identifier(&canonical) {
             return None;
         }
-        let affected = self.recompose_for_mute_with_fanout(&canonical);
-        Some(MuteChange {
-            changed: canonical,
-            affected,
-        })
+        let changed = match self.id_of(&canonical) {
+            Some(id) => self.muted.insert(id).then(|| self.identity(id))?,
+            None => self.pending_mutes.insert(canonical.clone()).then_some(canonical)?,
+        };
+        let affected = self.recompose_for_mute_with_fanout(&changed);
+        Some(MuteChange { changed, affected })
     }
 
     /// Unmutes the layer with the given identifier, restoring its opinions and
     /// recomposing. Returns what changed (see [`MuteChange`]), or `None` when the
     /// identifier was not muted. The identifier is canonicalized the same way
-    /// muting canonicalized it, so any spelling of one layer unmutes it.
+    /// muting canonicalized it and resolved to the layer's identity, so any
+    /// spelling of one layer unmutes it, whichever spelling muted it.
     pub(crate) fn unmute_layer(&mut self, identifier: &str) -> Option<MuteChange> {
         let canonical = self.canonical_muted_id(identifier, self.anchor_location(self.root).as_ref());
-        if !self.muted_identifiers.remove(&canonical) {
-            return None;
-        }
-        let affected = self.recompose_for_mute_with_fanout(&canonical);
-        Some(MuteChange {
-            changed: canonical,
-            affected,
-        })
+        let changed = match self.id_of(&canonical) {
+            Some(id) if self.muted.remove(&id) => self.identity(id),
+            _ => self.pending_mutes.take(&canonical)?,
+        };
+        let affected = self.recompose_for_mute_with_fanout(&changed);
+        Some(MuteChange { changed, affected })
+    }
+
+    /// The identity a loaded layer is muted under: its interned identifier.
+    fn identity(&self, id: LayerId) -> String {
+        self.nodes[&id].layer.identifier().to_string()
     }
 
     /// Recomposes the muting-dependent graph state for a just-changed muted set
@@ -2485,14 +2519,23 @@ impl LayerGraph {
     /// Seeds the muted set from `identifiers` (open-time muting), then recomposes
     /// once — cheaper than a `mute_layer` per identifier, which would recompose on
     /// each. Canonicalizes each against the root layer and drops any that names the
-    /// root (which cannot be muted); identical canonical ids collapse in the set,
-    /// so [`muted_layers`](Self::muted_layers) lists each muted layer once.
+    /// root (which cannot be muted); the spellings of one layer collapse onto its
+    /// identity, so [`muted_layers`](Self::muted_layers) lists each muted layer
+    /// once.
     pub(crate) fn set_muted_identifiers(&mut self, identifiers: impl IntoIterator<Item = String>) {
         let root_anchor = self.anchor_location(self.root);
         for identifier in identifiers {
             let canonical = self.canonical_muted_id(&identifier, root_anchor.as_ref());
-            if !self.is_root_identifier(&canonical) {
-                self.muted_identifiers.insert(canonical);
+            if self.is_root_identifier(&canonical) {
+                continue;
+            }
+            match self.id_of(&canonical) {
+                Some(id) => {
+                    self.muted.insert(id);
+                }
+                None => {
+                    self.pending_mutes.insert(canonical);
+                }
             }
         }
         self.recompose_for_mute();
@@ -2500,19 +2543,31 @@ impl LayerGraph {
 
     /// Whether the layer named by this identifier is muted, matching by canonical
     /// identifier anchored against the root layer (C++ `PcpCache::IsLayerMuted`),
-    /// so any spelling of one layer reads alike.
+    /// so any spelling of one layer reads alike — including, for a loaded layer,
+    /// its identifier and its real path (see [`id_of`](Self::id_of)).
     pub(crate) fn is_layer_muted(&self, identifier: &str) -> bool {
-        if self.muted_identifiers.is_empty() {
-            return false;
-        }
-        let canonical = self.canonical_muted_id(identifier, self.anchor_location(self.root).as_ref());
-        self.muted_identifiers.contains(&canonical)
+        self.has_muted_layers()
+            && self
+                .muted_entry(&self.canonical_muted_id(identifier, self.anchor_location(self.root).as_ref()))
+                .is_some()
     }
 
-    /// Whether any layer identifier is muted at all. A cheap gate so the per-arc
-    /// mute check skips its anchoring work on the common unmuted stage.
+    /// The identity under which the layer with canonical identifier `canonical`
+    /// is muted — a loaded layer's interned identifier, or the pending canonical
+    /// identifier of one not yet loaded — or `None` when it is not muted. Every
+    /// mute query resolves through here, so the identifier and real-path
+    /// spellings of a loaded layer (see [`id_of`](Self::id_of)) read alike.
+    fn muted_entry(&self, canonical: &str) -> Option<String> {
+        let loaded = self.id_of(canonical).filter(|id| self.muted.contains(id));
+        loaded
+            .map(|id| self.identity(id))
+            .or_else(|| self.pending_mutes.contains(canonical).then(|| canonical.to_string()))
+    }
+
+    /// Whether any layer is muted at all. A cheap gate so the per-arc mute check
+    /// skips its anchoring work on the common unmuted stage.
     pub(crate) fn has_muted_layers(&self) -> bool {
-        !self.muted_identifiers.is_empty()
+        !self.muted.is_empty() || !self.pending_mutes.is_empty()
     }
 
     /// The muted-set identifier matched by the reference/payload target
@@ -2526,11 +2581,10 @@ impl LayerGraph {
     /// the returned identifier is the muted-set entry an unmute toggles, so a
     /// not-yet-loaded target can record it as its unmute-fanout trace.
     pub(crate) fn muted_asset_id(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> Option<String> {
-        if self.muted_identifiers.is_empty() {
+        if !self.has_muted_layers() {
             return None;
         }
-        let canonical = self.canonical_muted_id(asset_path, anchor);
-        self.muted_identifiers.contains(&canonical).then_some(canonical)
+        self.muted_entry(&self.canonical_muted_id(asset_path, anchor))
     }
 
     /// The layers of every composed stack — the effectively-present set the stage
@@ -2588,9 +2642,16 @@ impl LayerGraph {
                 .is_none()
     }
 
-    /// The muted layer identifiers, sorted for a deterministic result.
+    /// The muted layers — a loaded one by its identifier, a pending one by the
+    /// canonical identifier it was muted under — sorted for a deterministic
+    /// result.
     pub(crate) fn muted_layers(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.muted_identifiers.iter().cloned().collect();
+        let mut ids: Vec<String> = self
+            .muted
+            .iter()
+            .map(|&id| self.identity(id))
+            .chain(self.pending_mutes.iter().cloned())
+            .collect();
         ids.sort();
         ids
     }
@@ -2635,29 +2696,33 @@ impl LayerGraph {
         self.recompute_relocates()
     }
 
-    /// Re-materializes [`muted`](Self::muted) — the interned ids of the muted
-    /// canonical identifiers — at the start of every stack rebuild, so it reflects
-    /// the currently-loaded layers (a layer muted before it was loaded takes effect
-    /// the moment a later edit interns it). The root is never present: its
-    /// identifier is rejected before any entry is inserted (see
-    /// [`is_root_identifier`](Self::is_root_identifier)).
+    /// Moves every pending mute that now names a loaded layer into
+    /// [`muted`](Self::muted), at the start of every stack rebuild, so a layer
+    /// muted before it was loaded takes effect the moment a later edit interns
+    /// it. The root is never present: its identifier is rejected before any
+    /// entry is recorded (see [`is_root_identifier`](Self::is_root_identifier)).
     fn resolve_muted_ids(&mut self) {
         // TODO: reclaim a muted layer's memory. C++ drops its references; here
         // the node stays interned so unmute is a rebuild and nothing is freed.
-        // The common unmuted stage rebuilds stacks often, so leave `muted` (already
-        // empty) untouched rather than reallocating it each time.
-        if self.muted_identifiers.is_empty() {
-            self.muted.clear();
+        if self.pending_mutes.is_empty() {
             return;
         }
-        self.muted = self.muted_identifiers.iter().filter_map(|id| self.id_of(id)).collect();
+        let promoted: Vec<(String, LayerId)> = self
+            .pending_mutes
+            .iter()
+            .filter_map(|canonical| self.id_of(canonical).map(|id| (canonical.clone(), id)))
+            .collect();
+        for (canonical, id) in promoted {
+            self.pending_mutes.remove(&canonical);
+            self.muted.insert(id);
+        }
     }
 
-    /// Whether `canonical` is the root layer's identifier, which cannot be muted
-    /// ("would lead to empty layer stacks"). The single authority for rejecting a
-    /// request to mute the root, regardless of the spelling the caller supplied.
+    /// Whether `canonical` names the root layer, which cannot be muted ("would
+    /// lead to empty layer stacks"). The single authority for rejecting a request
+    /// to mute the root, regardless of the spelling the caller supplied.
     fn is_root_identifier(&self, canonical: &str) -> bool {
-        self.root.is_some_and(|root| self.identifier(root) == canonical)
+        self.root.is_some_and(|root| self.id_of(canonical) == Some(root))
     }
 
     /// The canonical identifier a muted-layer path resolves to (C++
@@ -2728,27 +2793,6 @@ fn collect_sublayers<'a>(
             }
         }
     }
-}
-
-/// `asset_path` with its `.` (current-directory) segments dropped, rendered with
-/// `/` separators: `./a` and `a/./b` become `a` and `a/b`. Segments are split on
-/// any separator the platform accepts — `/` everywhere, and `\` on Windows — so
-/// this matches the `std::path::Components` normalization the resolver applies
-/// when it anchors a relative path (`LayerRegistry::create_identifier` via
-/// `TfNormPath`). A dot-relative spelling therefore reduces to the same bare key
-/// the anchored identifier drops its `.` to — `./sub.usda` on any platform, or
-/// `.\sub.usda` on Windows — and the bare fallback in `anchored_or_bare` finds an
-/// in-memory layer interned under `sub.usda`. A path with no `.` segment is
-/// returned unchanged.
-fn without_dot_segments(asset_path: &str) -> Cow<'_, str> {
-    if !asset_path.split(path::is_separator).any(|segment| segment == ".") {
-        return Cow::Borrowed(asset_path);
-    }
-    let kept: Vec<&str> = asset_path
-        .split(path::is_separator)
-        .filter(|segment| *segment != ".")
-        .collect();
-    Cow::Owned(kept.join("/"))
 }
 
 #[cfg(test)]
@@ -4367,29 +4411,6 @@ mod tests {
             vec![root_id, sub_id],
             "the dot-relative entry resolves to the bare-interned child"
         );
-    }
-
-    /// `.` path segments are dropped, anywhere in an asset path, rendered with
-    /// `/` separators — matching the resolver's anchored normalization so the
-    /// exact and anchored lookups agree. On Windows a `\`-spelled `.` segment is
-    /// recognized too, since `std::path` (and thus the resolver) treats `\` as a
-    /// separator there.
-    #[test]
-    fn dot_segments_normalized() {
-        assert_eq!(&*without_dot_segments("./sub.usda"), "sub.usda");
-        assert_eq!(&*without_dot_segments("././sub.usda"), "sub.usda");
-        assert_eq!(&*without_dot_segments("dir/./sub.usda"), "dir/sub.usda");
-        assert_eq!(&*without_dot_segments("/abs/./path"), "/abs/path");
-        assert_eq!(
-            &*without_dot_segments("sub.usda"),
-            "sub.usda",
-            "no `.` segment is unchanged"
-        );
-        #[cfg(windows)]
-        {
-            assert_eq!(&*without_dot_segments(".\\sub.usda"), "sub.usda");
-            assert_eq!(&*without_dot_segments("dir\\.\\sub.usda"), "dir/sub.usda");
-        }
     }
 
     /// `find_relative` follows the resolver's canonicalization rather than raw

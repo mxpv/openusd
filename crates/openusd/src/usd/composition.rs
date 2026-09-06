@@ -582,15 +582,14 @@ impl StageComposition {
             if let Some(reload) = open {
                 *opened_flag = true;
                 // The shared graph borrow is dropped before `intern_layer` /
-                // `mark_load_failed` take a mutable one. The arc anchored `asset_path`
-                // to an absolute identifier, so no anchor is needed. Nested sublayer
-                // failures surface through the sublayer-demand pass below, which
-                // regenerates each one's diagnostic per stack.
+                // `mark_load_failed` take a mutable one. The arc anchored
+                // `asset_path` to its canonical identifier, which opens as is.
+                // Nested sublayer failures surface through the sublayer-demand
+                // pass below, which regenerates each one's diagnostic per stack.
                 let opened = {
                     let graph = self.layers.borrow();
                     graph.layer_registry().open_stack(
                         asset_path,
-                        None,
                         graph.stack_expression_variables(demand.context),
                         reload,
                         &|_| Ok(()),

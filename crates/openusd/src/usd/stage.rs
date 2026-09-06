@@ -1933,9 +1933,13 @@ impl Stage {
     ///
     /// The layer need not be loaded: muting an identifier the stage does not
     /// (yet) contain records it and takes effect if such a layer is later
-    /// encountered. The session layer can be muted; the root layer cannot (it
-    /// "would lead to empty layer stacks", matching C++), so a request to mute it
-    /// is ignored and `is_layer_muted` stays false for the root.
+    /// encountered. A loaded layer answers to its identifier and to the file it
+    /// resolved to (a layer found through a resolver search directory keeps the
+    /// search path as its identifier), and either spelling mutes, unmutes or
+    /// queries the same layer. The session layer can be muted; the root layer
+    /// cannot (it "would lead to empty layer stacks", matching C++), so a
+    /// request to mute it is ignored and `is_layer_muted` stays false for the
+    /// root.
     ///
     /// This implements Pcp/Stage-level muting. Sdf-level layer muting
     /// (`SdfLayer::SetMuted`, a process-global data swap) is a separate feature
@@ -3335,8 +3339,7 @@ impl StageBuilder {
         let layers = self
             .registry
             .open_stack(
-                path,
-                None,
+                &self.registry.create_identifier(path, None),
                 ancestor_expr_vars,
                 false,
                 &|error| {

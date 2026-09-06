@@ -1669,17 +1669,17 @@ fn mute_retries_resolvable() -> Result<()> {
     Ok(())
 }
 
-/// Two authored spellings of one missing sublayer — `missing.usda` and
-/// `./missing.usda` — resolve to the same canonical identifier and report one
-/// diagnostic, at open and across a runtime retry, matching open-time
-/// collection's per-canonical dedup.
+/// Two authored spellings of one missing sublayer — `./missing.usda` and
+/// `././missing.usda`, both file-relative — resolve to the same canonical
+/// identifier and report one diagnostic, at open and across a runtime retry,
+/// matching open-time collection's per-canonical dedup.
 #[test]
 fn dual_spelling_reports_once() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     fs::write(
         &root,
-        "#usda 1.0\n(\n    subLayers = [@missing.usda@, @./missing.usda@]\n)\ndef \"W\" {}\n",
+        "#usda 1.0\n(\n    subLayers = [@./missing.usda@, @././missing.usda@]\n)\ndef \"W\" {}\n",
     )?;
     let stage = Stage::open(root.to_str().unwrap())?;
     let count = |stage: &Stage| {
@@ -1697,6 +1697,59 @@ fn dual_spelling_reports_once() -> Result<()> {
     // still report once.
     stage.define_prim("/X")?;
     assert_eq!(count(&stage), 1, "one diagnostic after the runtime retry");
+    Ok(())
+}
+
+/// A search-path spelling (`missing.usda`) and a file-relative one
+/// (`./missing.usda`) are different identifiers while the asset is missing —
+/// the first may yet resolve through a search directory, the second only
+/// beside its author (C++ `ArDefaultResolver`'s look-here-first rule) — so each
+/// reports its own diagnostic. Once the file appears beside the root, both
+/// anchor to it and load one layer.
+#[test]
+fn search_and_file_relative_spellings_differ() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@missing.usda@, @./missing.usda@]\n)\ndef \"W\" {}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        unresolved_sublayer_count(&stage, "missing.usda"),
+        1,
+        "the search path reports"
+    );
+    assert_eq!(
+        unresolved_sublayer_count(&stage, "./missing.usda"),
+        1,
+        "the file-relative path reports"
+    );
+
+    fs::write(
+        dir.path().join("missing.usda"),
+        "#usda 1.0\ndef \"L\" {\n    custom double z = 5\n}\n",
+    )?;
+    stage.define_prim("/X")?;
+    assert_eq!(
+        stage.attribute("/L.z")?.get::<f64>()?,
+        Some(5.0),
+        "the appeared file loads"
+    );
+    assert!(
+        !reports_unresolved_sublayer(&stage, "missing.usda"),
+        "the search path heals"
+    );
+    assert!(
+        !reports_unresolved_sublayer(&stage, "./missing.usda"),
+        "the file-relative path heals"
+    );
+    let loaded = stage
+        .layer_identifiers()
+        .into_iter()
+        .filter(|id| FsPath::new(id).ends_with("missing.usda"))
+        .count();
+    assert_eq!(loaded, 1, "both spellings anchor to the one file beside the root");
     Ok(())
 }
 

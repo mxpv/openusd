@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -1775,4 +1775,231 @@ fn expr_edit_restales_asset() {
         Some("./b.png"),
         "the warmed query must re-resolve the expression the edit re-pointed",
     );
+}
+
+/// Creates `scene/` and `library/lib/` under `dir` and writes `root` as
+/// `scene/root.usda`, returning both directories. The library's layers are
+/// the test's to write; [`open_with_search_paths`] then opens the root.
+fn search_path_dirs(dir: &tempfile::TempDir, root: &str) -> (PathBuf, PathBuf) {
+    let scene = dir.path().join("scene");
+    let library = dir.path().join("library");
+    fs::create_dir_all(&scene).expect("scene dir");
+    fs::create_dir_all(library.join("lib")).expect("library dir");
+    fs::write(scene.join("root.usda"), root).expect("write root");
+    (scene, library)
+}
+
+/// Opens `scene/root.usda` with `search_paths` as the resolver's search
+/// directories, in order.
+fn open_with_search_paths(scene: &Path, search_paths: &[&Path]) -> Stage {
+    Stage::builder()
+        .resolver(ar::DefaultResolver::with_search_paths(search_paths.iter().copied()))
+        .open(scene.join("root.usda").to_str().unwrap())
+        .expect("open stage")
+}
+
+/// The composed `double` at `path`, `None` when nothing authors it.
+fn double_at(stage: &Stage, path: &str) -> Option<f64> {
+    stage.attribute(path).expect("attribute").get::<f64>().expect("read")
+}
+
+const SUBLAYER_ROOT: &str = "#usda 1.0\n(\n    subLayers = [@lib/sub.usda@]\n)\nover \"P\"\n{\n    double x = 2\n}\n";
+const SUBLAYER: &str = "#usda 1.0\ndef \"P\"\n{\n    double x = 1\n    double y = 3\n}\n";
+const LATE: &str = "#usda 1.0\ndef \"L\" {\n    custom double z = 5\n}\n";
+
+/// A sublayer authored as a search path (`@lib/sub.usda@`, no `./`) that is
+/// not beside the root layer resolves through the resolver's search
+/// directories, the way C++ `ArDefaultResolver` finds `@usd/schema.usda@` next
+/// to any schema library that sublayers it. The sublayer's opinion composes and
+/// the open reports no unresolved sublayer.
+#[test]
+fn sublayer_via_search_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (scene, library) = search_path_dirs(&dir, SUBLAYER_ROOT);
+    fs::write(library.join("lib/sub.usda"), SUBLAYER).expect("write sublayer");
+    let stage = open_with_search_paths(&scene, &[&library]);
+
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the search-path sublayer resolves: {:?}",
+        stage.composition_errors()
+    );
+    assert_eq!(double_at(&stage, "/P.y"), Some(3.0), "authored in the sublayer");
+    assert_eq!(
+        double_at(&stage, "/P.x"),
+        Some(2.0),
+        "the root layer's opinion is stronger than its sublayer's"
+    );
+}
+
+/// A reference and a payload authored as search paths open through the search
+/// directories too: the arc's canonical identifier is the search path, and
+/// the barrier opens it as is.
+#[test]
+fn arcs_via_search_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (scene, library) = search_path_dirs(
+        &dir,
+        concat!(
+            "#usda 1.0\n",
+            "def \"P\" (\n    references = @lib/model.usda@</M>\n) {}\n",
+            "def \"Q\" (\n    payload = @lib/model.usda@</M>\n) {}\n",
+        ),
+    );
+    fs::write(
+        library.join("lib/model.usda"),
+        "#usda 1.0\ndef \"M\" {\n    custom double z = 5\n}\n",
+    )
+    .expect("write model");
+    let stage = open_with_search_paths(&scene, &[&library]);
+
+    assert_eq!(double_at(&stage, "/P.z"), Some(5.0), "the reference target loads");
+    assert_eq!(double_at(&stage, "/Q.z"), Some(5.0), "the payload target loads");
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the search-path targets resolve: {:?}",
+        stage.composition_errors()
+    );
+}
+
+/// A layer found through a search directory is interned under the search path
+/// it was authored as, and its resolved file is a second name for the same
+/// layer: muting by either spelling drops its opinions, unmuting by either
+/// restores them, and the two spellings share one muted entry.
+#[test]
+fn mute_by_either_spelling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (scene, library) = search_path_dirs(&dir, SUBLAYER_ROOT);
+    let sub = library.join("lib/sub.usda");
+    fs::write(&sub, SUBLAYER).expect("write sublayer");
+    let stage = open_with_search_paths(&scene, &[&library]);
+    let real_path = sub.canonicalize().expect("real path").to_string_lossy().into_owned();
+
+    assert_eq!(double_at(&stage, "/P.y"), Some(3.0));
+    assert!(
+        stage.layer_identifiers().iter().any(|id| id == "lib/sub.usda"),
+        "the sublayer keeps its search-path identifier: {:?}",
+        stage.layer_identifiers()
+    );
+
+    stage.mute_layer(real_path.clone());
+    assert_eq!(double_at(&stage, "/P.y"), None, "muted by its real path");
+    assert!(stage.is_layer_muted(&real_path));
+    assert!(stage.is_layer_muted("lib/sub.usda"), "the identifier reads muted too");
+    stage.unmute_layer(&real_path);
+    assert_eq!(double_at(&stage, "/P.y"), Some(3.0), "unmuted by the same spelling");
+
+    stage.mute_layer("lib/sub.usda");
+    assert_eq!(double_at(&stage, "/P.y"), None, "muted by its identifier");
+    assert!(stage.is_layer_muted(&real_path), "the real path reads muted too");
+    stage.unmute_layer("lib/sub.usda");
+    assert_eq!(double_at(&stage, "/P.y"), Some(3.0));
+
+    stage.mute_layer(real_path.clone());
+    stage.unmute_layer("lib/sub.usda");
+    assert_eq!(
+        double_at(&stage, "/P.y"),
+        Some(3.0),
+        "muted by real path, unmuted by identifier"
+    );
+    assert!(!stage.is_layer_muted(&real_path));
+    assert!(stage.muted_layers().is_empty());
+
+    stage.mute_layer("lib/sub.usda");
+    stage.unmute_layer(&real_path);
+    assert_eq!(
+        double_at(&stage, "/P.y"),
+        Some(3.0),
+        "muted by identifier, unmuted by real path"
+    );
+    assert!(!stage.is_layer_muted("lib/sub.usda"));
+
+    stage.mute_layer("lib/sub.usda");
+    stage.mute_layer(real_path.clone());
+    assert_eq!(
+        stage.muted_layers(),
+        vec!["lib/sub.usda".to_string()],
+        "one layer, one muted entry"
+    );
+    stage.unmute_layer(&real_path);
+    assert_eq!(
+        double_at(&stage, "/P.y"),
+        Some(3.0),
+        "a single unmute clears both spellings"
+    );
+    assert!(stage.muted_layers().is_empty());
+}
+
+/// A search-path sublayer missing at open keeps its bare identifier, so a
+/// later rebuild — here the mute of an unrelated layer — re-resolves it through
+/// the search directories and loads the file that has since appeared there,
+/// away from the root.
+#[test]
+fn search_path_appears_later() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (scene, library) = search_path_dirs(
+        &dir,
+        "#usda 1.0\n(\n    subLayers = [@other.usda@, @lib/late.usda@]\n)\ndef \"W\" {}\n",
+    );
+    fs::write(scene.join("other.usda"), "#usda 1.0\ndef \"O\" {}\n").expect("write other");
+    let stage = open_with_search_paths(&scene, &[&library]);
+    let unresolved = |stage: &Stage| {
+        stage
+            .composition_errors()
+            .iter()
+            .any(|e| matches!(e, pcp::CompositionDiagnostic::UnresolvedSublayer { asset_path, .. } if asset_path == "lib/late.usda"))
+    };
+    assert!(unresolved(&stage), "the missing sublayer is reported at open");
+
+    fs::write(library.join("lib/late.usda"), LATE).expect("write late");
+    stage.mute_layer("other.usda");
+    assert_eq!(
+        double_at(&stage, "/L.z"),
+        Some(5.0),
+        "the rebuild re-resolves the search path and loads the appeared file"
+    );
+    assert!(
+        !unresolved(&stage),
+        "the healed diagnostic drops: {:?}",
+        stage.composition_errors()
+    );
+}
+
+/// Two identifiers that resolve to one file intern one layer (C++
+/// `Sdf_LayerRegistry` collides on real path): the root's file-relative
+/// `./lib/sub.usda` and a search path `lib/sub.usda` in a library layer, found
+/// through the scene directory, are the same layer and compose once.
+#[test]
+fn shared_file_one_layer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (scene, library) = search_path_dirs(
+        &dir,
+        "#usda 1.0\n(\n    subLayers = [@./lib/sub.usda@, @mid.usda@]\n)\ndef \"P\" {}\n",
+    );
+    fs::create_dir_all(scene.join("lib")).expect("scene lib dir");
+    fs::write(
+        scene.join("lib/sub.usda"),
+        "#usda 1.0\nover \"P\"\n{\n    double y = 3\n}\n",
+    )
+    .expect("write sub");
+    fs::write(
+        library.join("mid.usda"),
+        "#usda 1.0\n(\n    subLayers = [@lib/sub.usda@]\n)\nover \"P\"\n{\n    double x = 1\n}\n",
+    )
+    .expect("write mid");
+    let stage = open_with_search_paths(&scene, &[&library, &scene]);
+
+    assert!(
+        stage.composition_errors().is_empty(),
+        "every entry resolves: {:?}",
+        stage.composition_errors()
+    );
+    let subs = stage
+        .layer_identifiers()
+        .into_iter()
+        .filter(|id| id.ends_with("sub.usda"))
+        .collect::<Vec<_>>();
+    assert_eq!(subs.len(), 1, "one file, one layer: {subs:?}");
+    assert_eq!(double_at(&stage, "/P.y"), Some(3.0));
+    assert_eq!(double_at(&stage, "/P.x"), Some(1.0));
 }
