@@ -32,8 +32,7 @@ pub(crate) fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Optio
 /// A prim backed by a registered schema is gated on derivation, so a base
 /// view matches a derived prim. A prim the registry has no schema for is gated
 /// on its authored `typeName` alone, which is what resolves the views while
-/// [`SchemaRegistryBuilder::compiled_in`](openusd::usd::SchemaRegistryBuilder::compiled_in)
-/// registers only the core `usd` family.
+/// the process registry carries only the core `usd` family.
 pub(crate) fn get_typed(
     stage: &Stage,
     path: impl sdf::IntoPath,
@@ -139,7 +138,7 @@ mod tests {
     use super::*;
 
     use openusd::Result;
-    use openusd::usd::{FamilySource, SchemaRegistry};
+    use openusd::usd::{FamilySource, SchemaRegistryBuilder};
 
     /// One abstract base with three concrete types under it, two of them
     /// versions of the same family name — the derivation chain and version
@@ -196,7 +195,7 @@ class DomeLight_1 "DomeLight_1"
 
     /// A stage resolving against the miniature family above.
     fn schema_stage() -> Result<Stage> {
-        let registry = SchemaRegistry::builder()
+        let registry = SchemaRegistryBuilder::empty()
             .family(FamilySource {
                 name: "test",
                 manifest: &layer(MANIFEST),

@@ -19,7 +19,7 @@ schema needs no class prim, since nothing is ever defined as one.
 ## Regenerating
 
 The `.usdc` beside each `.usda` holds the same scene description in the binary
-crate format, and is what `SchemaRegistryBuilder::compiled_in` embeds. The text
+crate format, and is what `SchemaRegistry::builder` embeds. The text
 is what to review and edit; the binary is a build artifact that happens to be
 committed. After changing either `.usda`, or after vendoring a
 newer OpenUSD, regenerate both from the workspace root:

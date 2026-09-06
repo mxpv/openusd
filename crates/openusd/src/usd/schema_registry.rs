@@ -141,7 +141,7 @@ pub struct FamilySource<'a> {
 /// schematics; [`build`](Self::build) then composes the prim definitions that
 /// need every family present, such as a typed schema whose built-in API schema
 /// comes from another family, or one an API schema auto-applies to.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SchemaRegistryBuilder {
     infos: HashMap<tf::Token, SchemaInfo>,
     /// Which family's schematics holds each identifier's class prim.
@@ -340,20 +340,28 @@ impl SchemaRegistry {
     ///
     /// Every stage opened without an explicit
     /// [`StageBuilder::schema_registry`](crate::usd::StageBuilder::schema_registry)
-    /// shares this one. It registers the families compiled into the crate,
-    /// which is the core `usd` family alone — see the module documentation.
+    /// shares this one. It carries the core `usd` family alone — see the
+    /// module documentation.
     pub fn global() -> &'static Arc<SchemaRegistry> {
         static GLOBAL: OnceLock<Arc<SchemaRegistry>> = OnceLock::new();
         GLOBAL.get_or_init(|| {
-            SchemaRegistryBuilder::compiled_in()
+            SchemaRegistryBuilder::default()
                 .build()
                 .expect("compiled-in schema data must parse")
         })
     }
 
-    /// Starts a registry with no families registered — not even the core
-    /// `usd` family, whose roots every other family's bases reach. Start from
-    /// [`SchemaRegistryBuilder::compiled_in`] to keep those.
+    /// Starts a registry carrying the core `usd` family, ready for the
+    /// families a caller adds through
+    /// [`family`](SchemaRegistryBuilder::family).
+    ///
+    /// The core family comes along because every other family's bases reach
+    /// its roots: a registry without it answers
+    /// [`is_a`](Self::is_a) with `false` for schemas that do derive from them,
+    /// so replacing the process registry with a custom one would otherwise
+    /// lose definitions the same stage had by default. Registering a family
+    /// that redeclares one of its schemas is the usual duplicate-identifier
+    /// error; [`SchemaRegistryBuilder::empty`] starts from nothing instead.
     pub fn builder() -> SchemaRegistryBuilder {
         SchemaRegistryBuilder::default()
     }
@@ -930,6 +938,35 @@ impl Schematics {
     }
 }
 
+/// The core `usd` family alone, vendored from OpenUSD under `schemas/usd/`.
+///
+/// It defines the root every schema derives from, `SchemaBase`, the `Typed`
+/// and `APISchemaBase` roots under it, and the API schemas the core library
+/// itself implements. Seeding it means a family registered on top answers
+/// [`is_a`](SchemaRegistry::is_a) for the bases it declares, which every
+/// domain family's reach; [`empty`](SchemaRegistryBuilder::empty) opts out.
+///
+/// The layers are compiled into the program, where C++ installs the same data
+/// beside a plugin and opens it at first use (`_GetGeneratedSchema`) — a
+/// linked crate has nowhere to install it. Both are anonymous, so the
+/// fallbacks they declare anchor against nothing, as C++'s do.
+impl Default for SchemaRegistryBuilder {
+    fn default() -> Self {
+        let manifest = sdf::Layer::from_bytes("usd/manifest.usdc", SchemaRegistryBuilder::USD_MANIFEST)
+            .expect("the vendored manifest reads");
+        let schematics = sdf::Layer::from_bytes("usd/generatedSchema.usdc", SchemaRegistryBuilder::USD_SCHEMATICS)
+            .expect("the vendored schematics read");
+
+        SchemaRegistryBuilder::empty()
+            .family(FamilySource {
+                name: "usd",
+                manifest: &manifest,
+                schematics: &schematics,
+            })
+            .expect("the vendored usd family registers")
+    }
+}
+
 impl SchemaRegistryBuilder {
     /// The core family's manifest, as the `convert` example encodes it from
     /// `schemas/usd/manifest.usda`.
@@ -939,31 +976,20 @@ impl SchemaRegistryBuilder {
     /// vendored `schemas/usd/generatedSchema.usda`.
     const USD_SCHEMATICS: &'static [u8] = include_bytes!("../../schemas/usd/generatedSchema.usdc");
 
-    /// The core `usd` family, vendored from OpenUSD under `schemas/usd/`.
+    /// A builder with nothing registered at all, not even the core `usd`
+    /// family [`default`](Self::default) seeds.
     ///
-    /// It defines the root every schema derives from, `SchemaBase`, the
-    /// `Typed` and `APISchemaBase` roots under it, and the API schemas the
-    /// core library itself implements. A registry carrying it can therefore answer
-    /// [`is_a`](SchemaRegistry::is_a) for any schema whose bases reach those
-    /// roots, which every domain family's does.
-    ///
-    /// The layers are compiled into the program, where C++ installs the same
-    /// data beside a plugin and opens it at first use (`_GetGeneratedSchema`)
-    /// — a linked crate has nowhere to install it. Both are anonymous, so the
-    /// fallbacks they declare anchor against nothing, as C++'s do.
-    pub fn compiled_in() -> Self {
-        let manifest =
-            sdf::Layer::from_bytes("usd/manifest.usdc", Self::USD_MANIFEST).expect("the vendored manifest reads");
-        let schematics = sdf::Layer::from_bytes("usd/generatedSchema.usdc", Self::USD_SCHEMATICS)
-            .expect("the vendored schematics read");
-
-        Self::default()
-            .family(FamilySource {
-                name: "usd",
-                manifest: &manifest,
-                schematics: &schematics,
-            })
-            .expect("the vendored usd family registers")
+    /// For a registry that must hold exactly what it is given and no more: a
+    /// test over one family in isolation, or a generator reading schema data
+    /// that must not resolve against built-ins. Anything else wants
+    /// [`SchemaRegistry::builder`], since a family whose bases do not reach
+    /// the core roots answers [`is_a`](SchemaRegistry::is_a) with `false`.
+    pub fn empty() -> Self {
+        Self {
+            infos: HashMap::new(),
+            source_of: HashMap::new(),
+            extra_auto_apply: HashMap::new(),
+        }
     }
 
     /// Registers one schema family.
@@ -1767,7 +1793,9 @@ class DomeLight_1 "DomeLight_1"
 
     /// A registry of one family built from the given manifest and schematics.
     pub(crate) fn test_family(manifest: &str, schematics: &str) -> Arc<SchemaRegistry> {
-        Self::builder()
+        // Empty: the family below redeclares `Typed`, `APISchemaBase` and
+        // `CollectionAPI`, which the core family already owns.
+        SchemaRegistryBuilder::empty()
             .family(FamilySource {
                 name: "test",
                 manifest: &Self::test_layer(manifest),

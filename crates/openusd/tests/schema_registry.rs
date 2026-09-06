@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use openusd::usd::{FamilySource, SchemaRegistry};
+use openusd::usd::{FamilySource, SchemaRegistry, SchemaRegistryBuilder};
 use openusd::{sdf, tf};
 
 /// One of a family's layers, over text: how a family stored as `.usda` and
@@ -17,9 +17,61 @@ fn layer(text: &str) -> sdf::Layer {
     sdf::Layer::from_bytes("test", text.as_bytes().to_vec()).expect("the layer parses")
 }
 
+/// A registry assembled for a caller's own family carries the core one too, so
+/// handing a custom registry to a stage does not cost it the definitions the
+/// same stage had by default. Only [`SchemaRegistryBuilder::empty`] starts
+/// from nothing.
+#[test]
+fn builder_seeds_core_family() {
+    let manifest = r#"#usda 1.0
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Typed"]
+}
+"#;
+    let registry = SchemaRegistry::builder()
+        .family(FamilySource {
+            name: "widget",
+            manifest: &layer(manifest),
+            schematics: &layer("#usda 1.0\n\nclass Widget \"Widget\"\n{\n}\n"),
+        })
+        .expect("family registers")
+        .build()
+        .expect("registry builds");
+
+    // The core schemas are still there, and the custom family's base reaches
+    // them — the whole point of seeding.
+    assert!(registry.schema_info(&tf::Token::new("CollectionAPI")).is_some());
+    assert!(registry.is_a(&tf::Token::new("Widget"), &tf::Token::new("Typed")));
+    assert!(registry.is_a(&tf::Token::new("Widget"), &tf::Token::new("SchemaBase")));
+}
+
+/// Redeclaring one of the core schemas is the ordinary duplicate error, not a
+/// silent replacement.
+#[test]
+fn seeded_builder_rejects_core_duplicate() {
+    let manifest = r#"#usda 1.0
+
+def "CollectionAPI"
+{
+    uniform token schemaKind = "multipleApplyAPI"
+}
+"#;
+    let error = SchemaRegistry::builder()
+        .family(FamilySource {
+            name: "mine",
+            manifest: &layer(manifest),
+            schematics: &layer("#usda 1.0\n\nclass \"CollectionAPI\"\n{\n}\n"),
+        })
+        .expect_err("a core schema cannot be redeclared");
+    assert!(format!("{error:#}").contains("CollectionAPI"), "{error:#}");
+}
+
 /// Builds a registry from one schema family's manifest and schematics.
 fn registry(manifest: &str, schematics: &str) -> Arc<SchemaRegistry> {
-    SchemaRegistry::builder()
+    SchemaRegistryBuilder::empty()
         .family(FamilySource {
             name: "test",
             manifest: &layer(manifest),
@@ -850,7 +902,7 @@ def "MarkerAPI"
     uniform token[] apiSchemaAutoApplyTo = ["Widget"]
 }
 "#;
-    let registry = SchemaRegistry::builder()
+    let registry = SchemaRegistryBuilder::empty()
         .family(FamilySource {
             name: "core",
             manifest: &layer(core_manifest),
@@ -910,7 +962,7 @@ class Gadget "Gadget"
 {
 }
 "#;
-    let registry = SchemaRegistry::builder()
+    let registry = SchemaRegistryBuilder::empty()
         .auto_apply("MarkerAPI", ["Gadget"])
         .family(FamilySource {
             name: "test",
@@ -959,7 +1011,7 @@ def "Foo_01"
 "#;
     // `Foo_01` parses to the same family and version as `Foo_1`, so letting
     // it register would silently shadow one of the two.
-    let error = SchemaRegistry::builder()
+    let error = SchemaRegistryBuilder::empty()
         .family(FamilySource {
             name: "test",
             manifest: &layer(manifest),
@@ -1025,7 +1077,7 @@ class Widget "Widget" (
 #[test]
 fn unknown_kind_rejected() {
     let manifest = "#usda 1.0\n\ndef \"Thing\"\n{\n    uniform token schemaKind = \"bogus\"\n}\n";
-    let error = SchemaRegistry::builder()
+    let error = SchemaRegistryBuilder::empty()
         .family(FamilySource {
             name: "test",
             manifest: &layer(manifest),
@@ -1038,7 +1090,7 @@ fn unknown_kind_rejected() {
 #[test]
 fn missing_kind_rejected() {
     let manifest = "#usda 1.0\n\ndef \"Thing\"\n{\n}\n";
-    let error = SchemaRegistry::builder()
+    let error = SchemaRegistryBuilder::empty()
         .family(FamilySource {
             name: "test",
             manifest: &layer(manifest),
@@ -1056,7 +1108,7 @@ fn duplicate_identifier_rejected() {
         manifest: &layer(manifest),
         schematics: &layer("#usda 1.0\n"),
     };
-    let error = SchemaRegistry::builder()
+    let error = SchemaRegistryBuilder::empty()
         .family(source)
         .expect("first family registers")
         .family(FamilySource {

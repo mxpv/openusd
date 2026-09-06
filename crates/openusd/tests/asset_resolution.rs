@@ -1334,7 +1334,7 @@ fn widget_schematics(default: &str) -> String {
 /// A registry declaring the concrete type `Widget` from the `schematics`
 /// layer, whose own location is what its fallbacks anchor against.
 fn widget_registry(schematics: &sdf::Layer) -> Arc<usd::SchemaRegistry> {
-    usd::SchemaRegistry::builder()
+    usd::SchemaRegistryBuilder::empty()
         .family(usd::FamilySource {
             name: "widget",
             manifest: &anon_layer("manifest.usda", WIDGET_MANIFEST),
@@ -1362,7 +1362,7 @@ fn schema_layer(dir: &Path, schematics: &str) -> sdf::Layer {
 /// A registry whose two families sit at different locations, so which one
 /// anchored a composed fallback is visible in the resolved path.
 fn two_family_registry(core_schematics: &sdf::Layer, ext_schematics: &sdf::Layer) -> Arc<usd::SchemaRegistry> {
-    usd::SchemaRegistry::builder()
+    usd::SchemaRegistryBuilder::empty()
         .family(usd::FamilySource {
             name: "core",
             manifest: &anon_layer("manifest.usda", WIDGET_MANIFEST),
