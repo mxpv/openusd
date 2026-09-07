@@ -29,6 +29,15 @@
 
 mod error;
 
+// TODO: the emitter is what calls the three below, and until it lands nothing
+// in the crate does. Each allowance goes when its module has a caller.
+#[allow(dead_code)]
+mod doc;
+#[allow(dead_code)]
+mod names;
+#[allow(dead_code)]
+mod types;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;

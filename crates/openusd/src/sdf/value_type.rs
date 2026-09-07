@@ -281,6 +281,18 @@ impl ValueTypeName {
         }
     }
 
+    /// The identifier of the constant that names this identity, so
+    /// `point3f[]` answers `"POINT3F_ARRAY"` — what a code generator writes
+    /// to spell the type back as Rust source. `None` for an identity no
+    /// constant names: an unregistered spelling, and a legacy identity with no
+    /// standard row (`Transform`, `PointIndex`, `EdgeIndex`, `FaceIndex`).
+    pub fn constant_ident(&self) -> Option<&'static str> {
+        match &self.0 {
+            Repr::Registered(row) => constant_ident_of(row.kind, row.role),
+            Repr::Unregistered(_) => None,
+        }
+    }
+
     /// Agreement as §6.5.1 of the AOUSD core spec defines it: a semantic
     /// alias agrees with its underlying type (`color3f` with `float3`,
     /// `color3f[]` with `float3[]`), a type agrees with itself, and two
@@ -588,6 +600,16 @@ fn preferred_spelling(kind: ValueKind, role: Option<Role>) -> Option<&'static st
     }
 }
 
+/// The identifier of the constant naming an identity, scalar or array. Both
+/// halves come from the row that declares the constants, so a row whose
+/// spelling and constant disagree needs nothing added here.
+fn constant_ident_of(kind: ValueKind, role: Option<Role>) -> Option<&'static str> {
+    match kind.element_kind() {
+        Some(element) => array_constant_ident(element, role),
+        None => scalar_constant_ident(kind, role),
+    }
+}
+
 impl ValueTypeName {
     /// The `opaque` value type: an attribute carrying no value (C++
     /// `SdfOpaqueValue`). It has no array form.
@@ -673,6 +695,24 @@ macro_rules! value_types {
                 $( (ValueKind::$kind, value_types!(@role $($role)?)) => Some($name), )*
                 (ValueKind::Opaque, None) => Some("opaque"),
                 (ValueKind::Opaque, Some(Role::Group)) => Some("group"),
+                _ => None,
+            }
+        }
+
+        /// The identifier of the constant naming a scalar identity.
+        fn scalar_constant_ident(kind: ValueKind, role: Option<Role>) -> Option<&'static str> {
+            match (kind, role) {
+                $( (ValueKind::$kind, value_types!(@role $($role)?)) => Some(stringify!($scalar)), )*
+                (ValueKind::Opaque, None) => Some("OPAQUE"),
+                (ValueKind::Opaque, Some(Role::Group)) => Some("GROUP"),
+                _ => None,
+            }
+        }
+
+        /// The identifier of the constant naming the array of a scalar identity.
+        fn array_constant_ident(element: ValueKind, role: Option<Role>) -> Option<&'static str> {
+            match (element, role) {
+                $( (ValueKind::$kind, value_types!(@role $($role)?)) => Some(stringify!($array)), )*
                 _ => None,
             }
         }
@@ -813,6 +853,35 @@ mod tests {
         assert!(ValueTypeName::find("float3d").is_none());
         assert!(ValueTypeName::find("opaque[]").is_none());
         assert!(ValueTypeName::find("group[]").is_none());
+    }
+
+    /// Every standard row names the constant that holds it, and an identity
+    /// no row declares names none.
+    #[test]
+    fn constant_idents() {
+        for type_name in STANDARD {
+            assert!(
+                type_name.constant_ident().is_some(),
+                "{} names no constant",
+                type_name.as_str()
+            );
+        }
+
+        assert_eq!(ValueTypeName::POINT3F.constant_ident(), Some("POINT3F"));
+        assert_eq!(ValueTypeName::POINT3F_ARRAY.constant_ident(), Some("POINT3F_ARRAY"));
+        assert_eq!(ValueTypeName::TIME_CODE.constant_ident(), Some("TIME_CODE"));
+        assert_eq!(ValueTypeName::OPAQUE.constant_ident(), Some("OPAQUE"));
+
+        let legacy = ValueTypeName::find("Vec2i").expect("a legacy spelling");
+        assert_eq!(legacy.constant_ident(), Some("INT2"), "the standard twin it writes as");
+
+        let transform = ValueTypeName::find("Transform").expect("a legacy spelling");
+        assert_eq!(
+            transform.constant_ident(),
+            None,
+            "a legacy identity with no standard row"
+        );
+        assert_eq!(ValueTypeName::from("double3d[]").constant_ident(), None);
     }
 
     #[test]
