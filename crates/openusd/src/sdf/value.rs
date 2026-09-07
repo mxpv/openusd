@@ -420,6 +420,38 @@ impl Value {
         }
     }
 
+    /// Returns this value with every `asset` path it holds rewritten through
+    /// `f`: an `AssetPath` or `AssetPathVec` itself, and any nested inside a
+    /// dictionary, a heterogeneous array, or a time-sample map — the same
+    /// reach as [`map_path_expressions`](Self::map_path_expressions).
+    ///
+    /// That reach is wider than [`is_asset_valued`](Self::is_asset_valued)
+    /// admits, which counts only the two top-level forms because resolution
+    /// does not recurse. A caller rewriting paths rather than resolving them
+    /// wants the nested ones too, which is what flattening a stage needs.
+    pub fn map_asset_paths(self, f: &mut impl FnMut(super::AssetPath) -> super::AssetPath) -> Value {
+        match self {
+            Value::AssetPath(asset) => Value::AssetPath(f(asset)),
+            Value::AssetPathVec(assets) => Value::AssetPathVec(assets.into_iter().map(&mut *f).collect()),
+            Value::Dictionary(entries) => Value::Dictionary(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, value.map_asset_paths(f)))
+                    .collect(),
+            ),
+            Value::ValueVec(values) => {
+                Value::ValueVec(values.into_iter().map(|value| value.map_asset_paths(f)).collect())
+            }
+            Value::TimeSamples(samples) => Value::TimeSamples(
+                samples
+                    .into_iter()
+                    .map(|(time, value)| (time, value.map_asset_paths(f)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
     /// Returns a copy of this value with every embedded namespace path rewritten
     /// through `remap`. Paths live in `PathVec`, `PathListOp` (relationship
     /// targets, attribute connections, `inheritPaths`, `specializes`),

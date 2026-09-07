@@ -14,6 +14,7 @@ mod composition;
 mod connections;
 mod diff;
 mod editor;
+mod flatten;
 mod interp;
 mod prim;
 mod prim_definition;

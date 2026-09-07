@@ -645,7 +645,7 @@ impl Layer {
 
     /// A fresh anonymous identifier of the form `anon:<n>:<tag>`. Distinct on
     /// every call, so independent anonymous layers never alias.
-    fn anonymous_identifier(tag: impl fmt::Display) -> String {
+    pub(crate) fn anonymous_identifier(tag: impl fmt::Display) -> String {
         let n = ANONYMOUS_COUNTER.fetch_add(1, Ordering::Relaxed);
         format!("{ANONYMOUS_PREFIX}{n}:{tag}")
     }
