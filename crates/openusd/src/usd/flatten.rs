@@ -159,9 +159,12 @@ fn write_property(data: &mut dyn sdf::AbstractData, prim: &Prim, name: &tf::Toke
         }
         Some(sdf::SpecType::Relationship) => {
             let relationship = prim.relationship(name.clone());
+            // A relationship carries the field only where it is uniform, that
+            // being the spelling `rel` and the reverse of how an attribute
+            // reads, so an unauthored one is the `varying rel` a schema wrote.
             let variability = stage
                 .field::<sdf::Variability>(&path, sdf::FieldKey::Variability.as_str())?
-                .unwrap_or(sdf::Variability::Uniform);
+                .unwrap_or_default();
             sdf::RelationshipSpec::new(data, &path, variability, relationship.is_custom()?)?;
             write_fields(
                 data,
@@ -487,6 +490,35 @@ mod tests {
             .get::<sdf::PathListOp>(sdf::FieldKey::TargetPaths.as_str())
             .expect("targets");
         assert_eq!(targets.explicit_items, vec![sdf::Path::new("/Target").expect("path")]);
+    }
+
+    /// A relationship keeps the variability it was declared with, either way.
+    ///
+    /// The field is authored only where it is uniform — the `rel` spelling —
+    /// so an unauthored one is a `varying rel` and not an absent opinion.
+    #[test]
+    fn rel_variability_survives() {
+        let root = layer("root.usda", |data| {
+            sdf::PrimSpec::new(data, "/Prim", sdf::Specifier::Def, "").expect("prim");
+            sdf::RelationshipSpec::new(data, "/Prim.plain", sdf::Variability::Uniform, false).expect("uniform");
+            sdf::RelationshipSpec::new(data, "/Prim.loose", sdf::Variability::Varying, false).expect("varying");
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
+
+        let flattened = stage.flatten().expect("flattens");
+        let variability = |path: &str| {
+            flattened
+                .relationship(path)
+                .expect("a path")
+                .expect("the relationship")
+                .get::<sdf::Variability>(sdf::FieldKey::Variability.as_str())
+        };
+        assert_eq!(variability("/Prim.plain"), Some(sdf::Variability::Uniform));
+        assert_eq!(
+            variability("/Prim.loose"),
+            None,
+            "varying is what an absent field means"
+        );
     }
 
     /// A class prim is abstract, and a schema library is nothing else. The
