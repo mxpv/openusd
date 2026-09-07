@@ -1,0 +1,32 @@
+[package]
+name = "openusd-build"
+description = "Generates Rust schema views from OpenUSD schema.usda files, for use as a build dependency"
+keywords = ["usd", "openusd", "schema", "codegen", "build-dependencies"]
+readme = "README.md"
+# Unpublished until it generates: a release must not ship a crate whose
+# `generate` writes nothing.
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+categories.workspace = true
+
+[dependencies]
+# A build dependency, so a consumer compiles `openusd` for the host as well as
+# the target. In a dev build cargo unifies the two units and the host copy is
+# free; they split when the feature sets differ, and always when
+# cross-compiling.
+# TODO(perf): keep this dependency's features matching what consumers enable on
+# their own `openusd`, so the units keep unifying. Trimming features here to
+# shrink the host build does the opposite — it forces a second unit into every
+# dev build, which costs more than it saves.
+openusd.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

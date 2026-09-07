@@ -119,6 +119,9 @@ pub use error::{Error, Result};
 /// spells every path in full so it sits beside whatever the module imports,
 /// and the module is the consumer's, one library per module.
 ///
+/// `openusd-build` ships in this repository and is not published yet, so a
+/// crate outside it has nothing to generate with for now.
+///
 /// ```ignore
 /// // build.rs
 /// openusd_build::configure()
