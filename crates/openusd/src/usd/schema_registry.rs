@@ -938,35 +938,6 @@ impl Schematics {
     }
 }
 
-/// The core `usd` family alone, vendored from OpenUSD under `schemas/usd/`.
-///
-/// It defines the root every schema derives from, `SchemaBase`, the `Typed`
-/// and `APISchemaBase` roots under it, and the API schemas the core library
-/// itself implements. Seeding it means a family registered on top answers
-/// [`is_a`](SchemaRegistry::is_a) for the bases it declares, which every
-/// domain family's reach; [`empty`](SchemaRegistryBuilder::empty) opts out.
-///
-/// The layers are compiled into the program, where C++ installs the same data
-/// beside a plugin and opens it at first use (`_GetGeneratedSchema`) — a
-/// linked crate has nowhere to install it. Both are anonymous, so the
-/// fallbacks they declare anchor against nothing, as C++'s do.
-impl Default for SchemaRegistryBuilder {
-    fn default() -> Self {
-        let manifest = sdf::Layer::from_bytes("usd/manifest.usdc", SchemaRegistryBuilder::USD_MANIFEST)
-            .expect("the vendored manifest reads");
-        let schematics = sdf::Layer::from_bytes("usd/generatedSchema.usdc", SchemaRegistryBuilder::USD_SCHEMATICS)
-            .expect("the vendored schematics read");
-
-        SchemaRegistryBuilder::empty()
-            .family(FamilySource {
-                name: "usd",
-                manifest: &manifest,
-                schematics: &schematics,
-            })
-            .expect("the vendored usd family registers")
-    }
-}
-
 impl SchemaRegistryBuilder {
     /// The core family's manifest, as the `convert` example encodes it from
     /// `schemas/usd/manifest.usda`.
@@ -1543,6 +1514,36 @@ fn placeholder_position(name: &str) -> Option<usize> {
 /// The names of a parsed layer's root prims, in authored order.
 fn root_prims(data: &sdf::Data) -> Vec<tf::Token> {
     prim_definition::child_names(data, &sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren)
+}
+
+/// The core `usd` family alone, vendored from OpenUSD under `schemas/usd/`.
+///
+/// It defines the root every schema derives from, `SchemaBase`, the `Typed`
+/// and `APISchemaBase` roots under it, and the API schemas the core library
+/// itself implements. Seeding it means a family registered on top answers
+/// [`is_a`](SchemaRegistry::is_a) for the bases it declares, which every
+/// domain family's bases reach; [`empty`](SchemaRegistryBuilder::empty) opts
+/// out.
+///
+/// The layers are compiled into the program, where C++ installs the same data
+/// beside a plugin and opens it at first use (`_GetGeneratedSchema`) — a
+/// linked crate has nowhere to install it. Both are anonymous, so the
+/// fallbacks they declare anchor against nothing, as C++'s do.
+impl Default for SchemaRegistryBuilder {
+    fn default() -> Self {
+        let manifest =
+            sdf::Layer::from_bytes("usd/manifest.usdc", Self::USD_MANIFEST).expect("the vendored manifest reads");
+        let schematics = sdf::Layer::from_bytes("usd/generatedSchema.usdc", Self::USD_SCHEMATICS)
+            .expect("the vendored schematics read");
+
+        Self::empty()
+            .family(FamilySource {
+                name: "usd",
+                manifest: &manifest,
+                schematics: &schematics,
+            })
+            .expect("the vendored usd family registers")
+    }
 }
 
 /// Reads one schema's manifest entry from the prim at `/<identifier>`.

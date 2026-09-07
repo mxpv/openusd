@@ -3311,11 +3311,14 @@ impl StageBuilder {
 
     /// Sets the schemas the stage resolves fallback values against.
     ///
-    /// Defaults to [`SchemaRegistry::global`](SchemaRegistry::global),
-    /// the process-wide registry. Supply one built through
-    /// [`SchemaRegistry::builder`](SchemaRegistry::builder) to give a
-    /// stage schemas the process does not have, or to give it none. The
-    /// registry is pinned for the stage's life.
+    /// Defaults to [`SchemaRegistry::global`](SchemaRegistry::global), the
+    /// process-wide registry. Supply one built through
+    /// [`SchemaRegistry::builder`](SchemaRegistry::builder) to give a stage
+    /// schemas the process does not have; that carries the core `usd` family
+    /// too, and
+    /// [`SchemaRegistryBuilder::empty`](super::SchemaRegistryBuilder::empty)
+    /// is what gives a stage none. The registry is pinned for the stage's
+    /// life.
     pub fn schema_registry(mut self, registry: Arc<SchemaRegistry>) -> Self {
         self.schema_registry = Some(registry);
         self
