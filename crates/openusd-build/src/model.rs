@@ -1,0 +1,269 @@
+//! What the generator knows about a schema library, between reading it and
+//! emitting from it.
+//!
+//! Every output reads this and nothing else. Composition is consulted once,
+//! while [`Library`] is built, so the Rust emitter and the schematics writer
+//! cannot come to different conclusions about one field — and so a schema is
+//! read once however many files it produces.
+
+use std::collections::BTreeMap;
+
+use openusd::{sdf, tf, usd};
+
+/// The base every typed schema reaches. A schema that reaches it is one a
+/// prim's `typeName` can name.
+pub const TYPED: &str = "Typed";
+
+/// The base every applied API schema inherits directly.
+pub const API_SCHEMA_BASE: &str = "APISchemaBase";
+
+/// The `apiSchemaType` an API schema declares to say it is never applied.
+///
+/// Saying nothing is not the same: an API schema that declares no kind is
+/// single-apply, so only this spelling makes one non-applied.
+pub const NON_APPLIED: &str = "nonApplied";
+
+/// One schema library: what a single `schema.usda` and its sublayers declare.
+#[derive(Debug)]
+pub struct Library {
+    /// The `libraryName` its `/GLOBAL` prim declares, which names the library
+    /// wherever one library refers to another. Not the file's directory.
+    pub name: String,
+    /// Whether token identifiers keep the spelling the schema gave them
+    /// (`useLiteralIdentifier`, default true).
+    pub use_literal_identifiers: bool,
+    /// Whether the library asked for schema data only, with no Rust
+    /// (`skipCodeGeneration`).
+    pub skip_code_generation: bool,
+    /// The classes to generate, in the order the root layer declares them. A
+    /// class a sublayer declares is available to inherit from and is not here.
+    pub classes: Vec<Class>,
+    /// Every layer that was read, for a build script to watch.
+    pub source_layers: Vec<String>,
+}
+
+/// One schema: a class prim in the root layer, and everything generation needs
+/// to know about it.
+#[derive(Debug)]
+pub struct Class {
+    /// The registered identifier, which is the class prim's name.
+    pub identifier: tf::Token,
+    /// The identifier with any version suffix removed.
+    pub family: tf::Token,
+    /// The version its identifier's suffix names; 0 when it has none.
+    pub version: u32,
+    /// What kind of schema it is, which decides what the emitter writes and
+    /// what the manifest records.
+    pub kind: usd::SchemaKind,
+    /// The inheritance chain, nearest first. Empty for a class that inherits
+    /// nothing, whose implicit root is `SchemaBase`.
+    pub bases: Vec<Base>,
+    /// Every property the schema carries, its own and its ancestors', in the
+    /// order the schematics writes them. Each records the class that declared
+    /// it, so the emitter can take the local ones.
+    pub properties: Vec<Property>,
+    /// The API schemas applied to every instance of this schema.
+    pub applied_api_schemas: Vec<tf::Token>,
+    /// The schema's own documentation, as the schema wrote it.
+    pub documentation: Option<String>,
+    /// Whether `Typed` is among its ancestors, which is what makes a schema
+    /// instantiable.
+    pub is_typed: bool,
+    /// How many bases the class authored, which is at most one in a schema the
+    /// generator can represent.
+    pub authored_base_count: usize,
+    /// Every field authored on the class prim, as declared. Validation checks
+    /// these against what a schematics may carry.
+    pub authored_fields: Vec<String>,
+    /// The `typeName` as authored, before a parent declaring the same one
+    /// clears it.
+    pub authored_type_name: Option<tf::Token>,
+    /// The `apiSchemas` list op as authored, whose mode validation checks.
+    pub api_schemas_op: Option<sdf::TokenListOp>,
+    /// What its `customData` asked for.
+    pub metadata: Metadata,
+    /// Where it was declared.
+    pub origin: Origin,
+}
+
+/// A class this one inherits from.
+#[derive(Debug, Clone)]
+pub struct Base {
+    /// The identifier it is registered under.
+    pub identifier: tf::Token,
+    /// The library declaring it, when that is not the library being generated.
+    /// Its views live in another crate or module, reached through the
+    /// `extern_library` mapping.
+    pub library: Option<String>,
+    /// The `apiSchemaType` it declares, as authored. A rule about what may
+    /// inherit what reads this, since a base can be declared in a sublayer
+    /// this run does not generate and so has no [`Class`] of its own.
+    pub api_schema_type: Option<String>,
+}
+
+/// A class's `customData`, with what the registry reads kept apart from what
+/// only this crate reads.
+///
+/// The first group is runtime meaning: it reaches the manifest and decides how
+/// a stage composes and what `can_apply` answers. The second is generator
+/// convention, and steers the Rust alone.
+#[derive(Debug, Default)]
+pub struct Metadata {
+    /// The namespace every property of a multiple-apply schema sits under.
+    pub property_namespace_prefix: Option<tf::Token>,
+    /// Schemas this API schema is applied to automatically.
+    pub auto_apply_to: Vec<tf::Token>,
+    /// The only schemas this API schema may be applied to.
+    pub can_only_apply_to: Vec<tf::Token>,
+    /// The only instance names a multiple-apply schema admits.
+    pub allowed_instance_names: Vec<tf::Token>,
+    /// Per-instance overrides of [`can_only_apply_to`](Self::can_only_apply_to).
+    pub instance_restrictions: BTreeMap<tf::Token, Vec<tf::Token>>,
+    /// The concrete schemas a stage falls back to for this type.
+    pub fallback_types: Vec<tf::Token>,
+
+    /// The Rust type name, which defaults to the identifier in proper case.
+    pub class_name: String,
+    /// Single-apply API schemas whose accessors this class re-emits.
+    pub reflected_api_schemas: Vec<tf::Token>,
+}
+
+/// One property of a schema.
+///
+/// The authored fields travel whole, in [`fields`](Self::fields): validation
+/// has to see a field it means to reject, the emitter reads the documentation,
+/// and the schematics writer is the one place that drops what a schematics
+/// does not carry. The accessors below are typed reads over that map, so no
+/// two consumers can disagree about a value.
+#[derive(Debug)]
+pub struct Property {
+    /// The name the schema declared, without a namespace prefix.
+    pub name: tf::Token,
+    /// The name the schematics records. For a multiple-apply schema this is
+    /// the template `prefix:__INSTANCE_NAME__:name`.
+    pub schematics_name: tf::Token,
+    /// Whether it is an attribute or a relationship.
+    pub spec_type: sdf::SpecType,
+    /// The class that introduced it: this class for a property it alone
+    /// declares, and the furthest ancestor declaring it for one refined down a
+    /// chain.
+    pub declared_by: tf::Token,
+    /// Whether this class declares it in its own layer, which a redeclaration
+    /// does as much as a first declaration.
+    ///
+    /// Kept apart from [`declared_by`](Self::declared_by) because a
+    /// redeclaration is both: an ancestor introduced the property, and this
+    /// class still declares it — to change its fallback, or to ask for the
+    /// accessor the ancestor suppressed.
+    pub is_local: bool,
+    /// What its `customData` asked the generator for.
+    pub api: PropertyApi,
+    /// Every field authored on it, composed over the layers that declare it.
+    pub fields: BTreeMap<String, sdf::Value>,
+    /// Where it was declared.
+    pub origin: Origin,
+}
+
+/// A property's `customData`, which steers its accessor and nothing else.
+#[derive(Debug, Default)]
+pub struct PropertyApi {
+    /// The accessor's name before Rust casing, or `None` where the schema
+    /// asked for no accessor at all (`apiName = ""`, or an override).
+    pub name: Option<String>,
+    /// Whether the library supplies the read accessor by hand
+    /// (`apiGetImplementation = "custom"`), so the emitter writes everything
+    /// but that one method and leaves its name free.
+    pub custom_get: bool,
+    /// Whether the property exists only to override a built-in API schema's.
+    pub is_override: bool,
+}
+
+/// Where something was declared, so a diagnostic names the file a contributor
+/// has to open.
+#[derive(Debug, Clone)]
+pub struct Origin {
+    /// The layer that declared it.
+    pub layer: String,
+    /// Its path in that layer.
+    pub path: sdf::Path,
+}
+
+impl Class {
+    /// The properties this class declares itself, in schematics order,
+    /// including any it redeclares.
+    pub fn local_properties(&self) -> impl Iterator<Item = &Property> {
+        self.properties.iter().filter(|property| property.is_local)
+    }
+
+    /// The properties this schema declares only to override a built-in API
+    /// schema's, which reach the schematics and get no accessor.
+    pub fn override_properties(&self) -> impl Iterator<Item = &Property> {
+        self.properties.iter().filter(|property| property.api.is_override)
+    }
+}
+
+impl Property {
+    /// One authored field, decoded. `None` when it is unauthored or holds
+    /// another type.
+    ///
+    /// The defaults the accessors below apply are the ones `sdf` applies to
+    /// the same fields on a property spec; this reads them off the composed
+    /// map instead, which is where the schematics writer needs them.
+    fn field<T: TryFrom<sdf::Value>>(&self, key: sdf::FieldKey) -> Option<T> {
+        self.fields.get(key.as_str())?.clone().get()
+    }
+
+    /// An attribute's declared type. `None` for a relationship, and for an
+    /// attribute whose `typeName` names no registered type — which validation
+    /// rejects, since an accessor would have no type to read. Unlike every
+    /// other reader in the workspace this resolves through
+    /// `ValueTypeName::find`, so an unregistered spelling stays visible rather
+    /// than becoming an unregistered type name.
+    pub fn type_name(&self) -> Option<sdf::ValueTypeName> {
+        let name: tf::Token = self.field(sdf::FieldKey::TypeName)?;
+        sdf::ValueTypeName::find(name.as_str())
+    }
+
+    /// Whether the property may only be authored at the default time, which
+    /// USD leaves varying unless a schema says otherwise.
+    pub fn variability(&self) -> sdf::Variability {
+        self.field(sdf::FieldKey::Variability).unwrap_or_default()
+    }
+
+    /// Whether the schema declared it `custom`, which its creator authors.
+    pub fn is_custom(&self) -> bool {
+        self.field(sdf::FieldKey::Custom).unwrap_or(false)
+    }
+
+    /// The fallback a stage resolves when nothing is authored.
+    pub fn fallback(&self) -> Option<&sdf::Value> {
+        self.fields.get(sdf::FieldKey::Default.as_str())
+    }
+
+    /// The values a token attribute admits, which the tokens module emits and
+    /// the accessor's documentation lists.
+    pub fn allowed_tokens(&self) -> Vec<tf::Token> {
+        self.field(sdf::FieldKey::AllowedTokens).unwrap_or_default()
+    }
+
+    /// The property's own documentation, as the schema wrote it.
+    pub fn documentation(&self) -> Option<&str> {
+        self.fields
+            .get(sdf::FieldKey::Documentation.as_str())?
+            .try_as_string_ref()
+            .map(String::as_str)
+    }
+
+    /// Whether an accessor is emitted for it at all.
+    pub fn has_accessor(&self) -> bool {
+        self.api.name.is_some()
+    }
+}
+
+impl Origin {
+    /// Names the declaration the way a diagnostic should: the layer, then the
+    /// path inside it.
+    pub fn describe(&self) -> String {
+        format!("{}{}", self.layer, self.path)
+    }
+}

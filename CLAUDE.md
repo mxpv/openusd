@@ -146,7 +146,18 @@ The test suite includes extensive binary format tests using fixture files in eac
 
 Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a suitable file exists. Only add new files to a crate's `fixtures/` when vendor assets don't cover the specific case needed.
 
-Never put a test-only function in a module's main body — not even gated with `#[cfg(test)]`. Every test helper lives inside a `#[cfg(test)] mod tests { … }` block. A helper that is intrinsically about a production type and is shared across modules' tests goes as a `#[cfg(test)]` method in a `#[cfg(test)] impl` block on that type (e.g. `LayerRegistry::collect_with_arcs`), reached as `Type::helper(...)`. Don't add a separate `test_support` module for it.
+Test code never sits beside production code. Every test-only item — a helper
+function, a fixture builder, a constructor that only tests call — lives inside
+a `#[cfg(test)] mod tests { … }` block, and nothing test-only appears at a
+module's top level even gated with `#[cfg(test)]`. That includes
+`#[cfg(test)] impl Type { … }` blocks: a `#[cfg(test)]` attribute on an item in
+the main body still puts test code in the middle of the file a reader is trying
+to follow.
+
+A helper several modules' tests share lives in the `mod tests` of the module
+that owns the type it is about, declared `pub(crate)`, and is reached by path:
+`crate::layer_registry::tests::collect_with_arcs(…)`. Don't add a separate
+`test_support` module for it.
 
 Test function names MUST be terse — 2–4 underscore-separated words, no more. Match the existing naming convention of the file. Prefer `add_api_schema_dup_delete` over `add_api_schema_clears_duplicate_delete_opinions`, `light_api_skips_non_light` over `read_light_api_returns_none_on_non_light_prim`. Drop redundant prefixes like `read_`/`reads_` when the test file already targets a reader; favour the subject + outcome (`light_api_via_applied_schema`) over verbose sentences.
 

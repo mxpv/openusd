@@ -24,15 +24,22 @@
 //! A library's name comes from the `libraryName` its `schema.usda` declares,
 //! not from the path, so the two spellings above name one library.
 //!
-//! Reading a `schema.usda` and emitting from it is not implemented yet:
-//! [`Builder::generate`] accepts what to build and writes nothing.
+//! [`Builder::generate`] reads and checks the schemas it is given, and reports
+//! the layers they resolve to. Emitting from what it reads is not implemented
+//! yet, so it writes no files.
 
 mod error;
 
-// TODO: the emitter is what calls the three below, and until it lands nothing
-// in the crate does. Each allowance goes when its module has a caller.
+mod load;
+mod resolve;
+mod validate;
+
+// TODO: the emitter is what reads the rest of these, and until it lands
+// nothing in the crate does. Each allowance goes when its module has a caller.
 #[allow(dead_code)]
 mod doc;
+#[allow(dead_code)]
+mod model;
 #[allow(dead_code)]
 mod names;
 #[allow(dead_code)]
@@ -41,9 +48,12 @@ mod types;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use crate::model::Library;
 
 pub use error::Error;
+pub use validate::Violation;
 
 /// Starts describing what to generate. See [`Builder`].
 pub fn configure() -> Builder {
@@ -135,19 +145,66 @@ impl Builder {
             return Ok(());
         }
 
-        let out_dir = match self.out_dir {
-            Some(dir) => dir,
+        let out_dir = match &self.out_dir {
+            Some(dir) => dir.clone(),
             None => env::var_os("OUT_DIR").map(PathBuf::from).ok_or(Error::NoOutDir)?,
         };
-        fs::create_dir_all(&out_dir).map_err(|source| Error::Io { path: out_dir, source })?;
+        fs::create_dir_all(&out_dir).map_err(|source| Error::Io {
+            path: out_dir.clone(),
+            source,
+        })?;
 
+        for schema in &self.schemas {
+            self.read(schema)?;
+        }
+
+        // TODO: emit the views, the schematics and the manifest from the model
+        // each schema now resolves to. Nothing is written until they land.
+        //
+        // Telling cargo what to watch belongs with that. What generation
+        // depends on is the layers a schema resolves to, and `layer_stack`
+        // reports each one's *identifier* — which for a layer found through a
+        // `search_path` is a bare relative name, not a path on disk. Printing
+        // the ones that happen to look like files would name a subset while
+        // switching off cargo's own "rerun if the package changed" default,
+        // and so track less than printing nothing. Reaching the resolved
+        // location needs `sdf::Layer::real_path`, which is crate-private.
         Ok(())
+    }
+
+    /// Reads one schema into the model every output is generated from.
+    ///
+    /// The three stages behind it stay separate: [`load`] extracts what the
+    /// layers declare, [`resolve`] consults composition once and keeps the
+    /// answers, and [`validate`] checks the rules. Anything a schema author
+    /// should know but that does not make the output wrong is printed for the
+    /// build log rather than raised.
+    fn read(&self, schema: &Path) -> Result<Library, Error> {
+        let source = load::open(self, schema)?;
+        let library = resolve::library(&source)?;
+
+        // Prim indices are built on demand, so a diagnostic a class's own
+        // composition raises exists only once resolve has read that class.
+        // Asking again here is what catches those.
+        Error::composition(schema, &source.stage).map_or(Ok(()), Err)?;
+
+        for warning in validate::check(&library)? {
+            println!("cargo:warning={warning}");
+        }
+        Ok(library)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Resolves one file of the vendored upstream corpus, which every module's
+    /// tests read.
+    pub(crate) fn read_fixture(name: &str) -> Result<Library, Error> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/testUsdGenSchema");
+        configure().search_path(&dir).read(&dir.join(name))
+    }
 
     /// A run with nothing configured writes nothing and needs no destination,
     /// which is the state a consumer's build script is in when every schema
@@ -169,9 +226,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("nested/generated");
 
+        let schema = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/testUsdGenSchema/schema.usda");
         configure()
             .out_dir(&out)
-            .schema("schemas/usdGeom/schema.usda")
+            .search_path(schema.parent().expect("a parent"))
+            .schema(&schema)
             .generate()
             .expect("generates");
 

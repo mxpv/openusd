@@ -77,31 +77,28 @@ pub trait SchemaBase {
 
     /// Whether this is an instantiable prim type (C++ `IsConcrete`).
     fn is_concrete(&self) -> bool {
-        matches!(Self::KIND, SchemaKind::ConcreteTyped)
+        Self::KIND.is_concrete()
     }
 
     /// Whether this schema is an `IsA` (typed) schema (C++ `IsTyped`).
     fn is_typed(&self) -> bool {
-        matches!(Self::KIND, SchemaKind::AbstractTyped | SchemaKind::ConcreteTyped)
+        Self::KIND.is_typed()
     }
 
     /// Whether this schema is an API schema (C++ `IsAPISchema`).
     fn is_api_schema(&self) -> bool {
-        matches!(
-            Self::KIND,
-            SchemaKind::NonAppliedApi | SchemaKind::SingleApplyApi | SchemaKind::MultipleApplyApi
-        )
+        Self::KIND.is_api_schema()
     }
 
     /// Whether this is an applied API schema (C++ `IsAppliedAPISchema`).
     fn is_applied_api_schema(&self) -> bool {
-        matches!(Self::KIND, SchemaKind::SingleApplyApi | SchemaKind::MultipleApplyApi)
+        Self::KIND.is_applied_api_schema()
     }
 
     /// Whether this is a multiple-apply API schema
     /// (C++ `IsMultipleApplyAPISchema`).
     fn is_multiple_apply_api_schema(&self) -> bool {
-        matches!(Self::KIND, SchemaKind::MultipleApplyApi)
+        Self::KIND.is_multiple_apply_api_schema()
     }
 }
 
@@ -115,6 +112,36 @@ pub trait Typed: SchemaBase {}
 pub trait APISchemaBase: SchemaBase {}
 
 impl SchemaKind {
+    /// Whether a schema of this kind is an `IsA` (typed) schema, which a
+    /// prim's `typeName` may name.
+    pub fn is_typed(self) -> bool {
+        matches!(self, SchemaKind::AbstractTyped | SchemaKind::ConcreteTyped)
+    }
+
+    /// Whether a schema of this kind is a prim type a stage can instantiate.
+    pub fn is_concrete(self) -> bool {
+        matches!(self, SchemaKind::ConcreteTyped)
+    }
+
+    /// Whether a schema of this kind is an API schema, applied or not.
+    pub fn is_api_schema(self) -> bool {
+        matches!(
+            self,
+            SchemaKind::NonAppliedApi | SchemaKind::SingleApplyApi | SchemaKind::MultipleApplyApi
+        )
+    }
+
+    /// Whether a schema of this kind is applied to a prim, and so appears in
+    /// its `apiSchemas`.
+    pub fn is_applied_api_schema(self) -> bool {
+        matches!(self, SchemaKind::SingleApplyApi | SchemaKind::MultipleApplyApi)
+    }
+
+    /// Whether a schema of this kind is applied under an instance name.
+    pub fn is_multiple_apply_api_schema(self) -> bool {
+        matches!(self, SchemaKind::MultipleApplyApi)
+    }
+
     /// The token a manifest's `schemaKind` attribute uses, matching the
     /// spellings C++ writes into `plugInfo.json`.
     pub fn as_str(&self) -> &'static str {

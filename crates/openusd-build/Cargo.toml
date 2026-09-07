@@ -3,6 +3,9 @@ name = "openusd-build"
 description = "Generates Rust schema views from OpenUSD schema.usda files, for use as a build dependency"
 keywords = ["usd", "openusd", "schema", "codegen", "build-dependencies"]
 readme = "README.md"
+# Test input for this repository, not for a consumer: a published crate never
+# looks for it, and it carries its own upstream license.
+exclude = ["/fixtures"]
 # Unpublished until it generates: a release must not ship a crate whose
 # `generate` writes nothing.
 publish = false

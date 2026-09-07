@@ -17,11 +17,18 @@ use logos::Logos;
 pub enum Token<'source> {
     /// Magic header - extract version number.
     /// Example: "#usda 1.0" -> "1.0", "#usda 1.0.32" -> "1.0.32"
-    #[regex(r"#usda ([0-9]+\.[0-9]+(\.[0-9]+)?)", |lex| {
-        let s = lex.slice();
-        // Extract version after "#usda "
-        &s[6..]
-    })]
+    ///
+    /// The blanks around the version are part of the match. C++ pads the
+    /// header by design (`#usda 1.0        `), and matching the version alone
+    /// leaves the comment rule matching the longer run and swallowing the
+    /// whole line, so a padded header would carry no magic token at all.
+    // TODO: the header is a position, not a lexeme. C++ reads the first line
+    // as the header whatever it holds and ignores everything after the
+    // version, so `#usda 1.0 is the version` is a header there and a lex
+    // error here, while `#usda 1.0` mid-file is a comment there and a magic
+    // token here. Splitting the first line off before lexing would settle
+    // both, at the cost of offsetting every span.
+    #[regex(r"#usda[ ]+[0-9]+\.[0-9]+(\.[0-9]+)?[ \t]*", |lex| lex.slice()[6..].trim_ascii())]
     Magic(&'source str),
 
     /// Double-quoted strings
@@ -646,6 +653,39 @@ mod tests {
         let mut lexer3 = Token::lexer(input3);
         let token3 = lexer3.next().unwrap().unwrap();
         assert_eq!(token3, Token::Magic("1.0.32"));
+    }
+
+    /// A header padded with blanks is still the header. Without the blanks
+    /// in the pattern the comment rule matches the longer run, the line is
+    /// skipped, and the file carries no magic token at all — and upstream
+    /// pads its headers by design.
+    #[test]
+    fn test_magic_trailing_blanks() {
+        for input in [
+            "#usda 1.0 \n(\n)\n",
+            "#usda 1.0\t\n(\n)\n",
+            "#usda 1.0   \r\n(\r\n)\r\n",
+            "#usda  1.0\n(\n)\n",
+        ] {
+            let mut lexer = Token::lexer(input);
+            let token = lexer.next().expect("a token").expect("the magic token");
+            assert_eq!(token, Token::Magic("1.0"), "{input:?}");
+        }
+    }
+
+    /// A comment that opens like a header stays a comment.
+    #[test]
+    fn test_magic_only_once() {
+        let mut lexer = Token::lexer("#usda 1.0\n# usda 1.0 is what we target\n(\n)\n");
+        assert_eq!(
+            lexer.next().expect("a token").expect("the magic token"),
+            Token::Magic("1.0")
+        );
+        let next = lexer.next().expect("a token").expect("a valid token");
+        assert!(
+            !matches!(next, Token::Magic(_)),
+            "the comment line is skipped, not read as a second header: {next:?}"
+        );
     }
 
     #[test]

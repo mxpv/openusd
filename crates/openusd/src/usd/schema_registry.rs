@@ -916,7 +916,7 @@ impl SchemaInfo {
 
     /// Whether this schema is applied through a prim's `apiSchemas` list.
     pub fn is_applied_api(&self) -> bool {
-        matches!(self.kind, SchemaKind::SingleApplyApi | SchemaKind::MultipleApplyApi)
+        self.kind.is_applied_api_schema()
     }
 }
 
