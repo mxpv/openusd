@@ -22,7 +22,8 @@ use openusd::{sdf, tf, usd};
 use crate::error::Error;
 use crate::load::{Declaration, PropertyDeclaration, Source};
 use crate::model::{
-    API_SCHEMA_BASE, Base, Class, Library, Metadata, NON_APPLIED, Origin, Property, PropertyApi, TYPED,
+    API_SCHEMA_BASE, API_SCHEMA_OVERRIDE, Base, Class, Library, Metadata, NON_APPLIED, Property, PropertyApi,
+    SCHEMA_BASE, Site, TYPED,
 };
 use crate::names;
 use crate::validate::Violation;
@@ -65,6 +66,7 @@ fn class(
     declaration: &Declaration,
 ) -> Result<Class, Error> {
     let bases = chain(index, declaration)?;
+    let direct_base = direct_base(&bases, &declaration.name);
     let is_typed = bases.iter().any(|base| base.identifier.as_str() == TYPED);
 
     // A schema is concrete when it carries a type name of its own. Upstream
@@ -87,9 +89,11 @@ fn class(
         authored_base_count: declaration.bases.len(),
         bases,
         properties,
-        applied_api_schemas: applied_api_schemas(flattened, declaration),
+        applied_api_schemas: applied_api_schemas(flattened, declaration, kind),
         documentation: declaration.documentation.clone(),
+        direct_base,
         authored_fields: declaration.fields.clone(),
+        fields: composed_fields(flattened, &declaration.origin.path)?,
         authored_type_name: declaration.type_name.clone(),
         api_schemas_op: declaration.api_schemas.clone(),
         metadata,
@@ -139,16 +143,21 @@ fn chain(index: &HashMap<&tf::Token, &Declaration>, declaration: &Declaration) -
 
 /// What kind of schema a class is.
 ///
-/// A schema that is neither typed nor concrete, and is not one of the two
-/// roots, is an API schema; `apiSchemaType` then says which of the three, and
-/// defaults to single-apply.
+/// A schema that is neither typed nor concrete, and is not one of the three
+/// roots, is an API schema; `apiSchemaType` then says which of the three kinds,
+/// and defaults to single-apply.
 fn kind(
     declaration: &Declaration,
     is_typed: bool,
     is_concrete: bool,
     family: &tf::Token,
 ) -> Result<usd::SchemaKind, Error> {
-    let is_root = family.as_str() == TYPED || family.as_str() == API_SCHEMA_BASE;
+    // The roots are abstract bases. `SchemaBase` is among them: it inherits
+    // nothing and carries no type, which is what an API schema looks like from
+    // here, and a library declaring it would otherwise register the root every
+    // schema derives from as an API schema of its own.
+    let roots = [TYPED, API_SCHEMA_BASE, SCHEMA_BASE];
+    let is_root = roots.contains(&family.as_str());
     let is_api = !is_typed && !is_concrete && !is_root;
 
     let spelling = declaration.custom_data.string(API_SCHEMA_TYPE);
@@ -201,16 +210,47 @@ fn metadata(declaration: &Declaration) -> Metadata {
     }
 }
 
+/// The base a manifest names, which is what the registry walks `is_a` up to.
+///
+/// A class that inherits nothing still derives from the root every schema
+/// derives from — except that root, which derives from nothing and would
+/// otherwise be given itself to walk up to.
+fn direct_base(bases: &[Base], name: &tf::Token) -> Option<tf::Token> {
+    bases
+        .first()
+        .map(|base| base.identifier.clone())
+        .or_else(|| (name.as_str() != SCHEMA_BASE).then(|| tf::Token::new(SCHEMA_BASE)))
+}
+
 /// The API schemas applied to every instance of a schema, as composition
-/// resolved them.
-fn applied_api_schemas(flattened: &sdf::Layer, declaration: &Declaration) -> Vec<tf::Token> {
-    flattened
+/// resolved them and under the names the schematics records them by.
+///
+/// A multiple-apply schema's built-ins are applied under whatever instance name
+/// it is applied with, so they are templated here: `MultiApplyAPI` becomes
+/// `MultiApplyAPI:__INSTANCE_NAME__`, and an already-instanced
+/// `BuiltinAPI:builtin` becomes `BuiltinAPI:__INSTANCE_NAME__:builtin`. This is
+/// the same move [`schematics_name`] makes for a property, made once and in the
+/// same place.
+fn applied_api_schemas(flattened: &sdf::Layer, declaration: &Declaration, kind: usd::SchemaKind) -> Vec<tf::Token> {
+    let applied = flattened
         .prim(&declaration.origin.path)
         .ok()
         .flatten()
         .and_then(|prim| prim.api_schemas())
         .map(|list_op| list_op.flatten())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    if kind != usd::SchemaKind::MultipleApplyApi {
+        return applied;
+    }
+    applied
+        .iter()
+        .map(|name| {
+            let (identifier, instance) = usd::SchemaRegistry::type_name_and_instance(name);
+            let instance = instance.as_ref().map_or("", tf::Token::as_str);
+            usd::SchemaRegistry::make_multiple_apply_name_template(identifier.as_str(), instance)
+        })
+        .collect()
 }
 
 /// Every property the schema carries, its own and its ancestors'.
@@ -239,7 +279,14 @@ fn properties(
         };
 
         let local = declaration.properties.iter().find(|p| p.name == name);
-        let (declared_by, origin) = introduced_by(index, declaration, bases, &name);
+        let sites = declaring_sites(index, declaration, bases, &name);
+        // The furthest site introduced the property. A name no declaration
+        // carries belongs to the class it was found on, which is what a
+        // property reaching the model through composition alone looks like.
+        let (declared_by, origin) = match sites.last() {
+            Some(site) => (site.class.clone(), site.origin.clone()),
+            None => (declaration.name.clone(), declaration.origin.clone()),
+        };
         properties.push(Property {
             schematics_name: schematics_name(&name, metadata, kind),
             api: property_api(declaration, local, &name)?,
@@ -247,6 +294,7 @@ fn properties(
             name,
             spec_type: composed.spec_type,
             declared_by,
+            sites,
             fields: composed.fields,
             origin,
         });
@@ -263,48 +311,56 @@ struct Composed {
 
 /// One property of the flattened layer: what kind of property it is, and every
 /// field composition left on it.
+fn read_property(flattened: &sdf::Layer, path: &sdf::Path) -> Result<Option<Composed>, Error> {
+    let spec_type = match flattened.data().spec_type(path) {
+        Some(spec_type @ (sdf::SpecType::Attribute | sdf::SpecType::Relationship)) => spec_type,
+        _ => return Ok(None),
+    };
+    let fields = composed_fields(flattened, path)?;
+    Ok(Some(Composed { spec_type, fields }))
+}
+
+/// Every field composition left at a path, whether that is a class prim or one
+/// of its properties.
 ///
 /// Nothing is filtered. Validation has to see a field it means to reject, the
 /// emitter reads the documentation, and the schematics writer is the one place
 /// that drops what a schematics does not carry.
-fn read_property(flattened: &sdf::Layer, path: &sdf::Path) -> Result<Option<Composed>, Error> {
+fn composed_fields(flattened: &sdf::Layer, path: &sdf::Path) -> Result<BTreeMap<String, sdf::Value>, Error> {
     let data = flattened.data();
-    let spec_type = match data.spec_type(path) {
-        Some(spec_type @ (sdf::SpecType::Attribute | sdf::SpecType::Relationship)) => spec_type,
-        _ => return Ok(None),
-    };
-
     let mut fields = BTreeMap::new();
     for name in data.list_fields(path).unwrap_or_default() {
         if let Some(value) = data.try_field(path, &name)? {
             fields.insert(name, value.into_owned());
         }
     }
-    Ok(Some(Composed { spec_type, fields }))
+    Ok(fields)
 }
 
-/// The class that introduced a property, and where that declaration lives.
+/// Every class declaring a property, nearest first.
 ///
-/// The furthest ancestor declaring the name is the one that introduced it; a
-/// class redeclaring it refines what is already there. A name no declaration
-/// carries belongs to the class it was found on, which is what a property
-/// reaching the model through composition alone looks like.
-fn introduced_by(
+/// This class comes first where it redeclares the property, then each ancestor
+/// that declared it, which is the order their opinions run in. A class
+/// redeclaring a property refines what is already there, so the furthest site
+/// is the one that introduced it.
+fn declaring_sites(
     index: &HashMap<&tf::Token, &Declaration>,
     declaration: &Declaration,
     bases: &[Base],
     name: &tf::Token,
-) -> (tf::Token, Origin) {
-    let ancestors = bases
-        .iter()
-        .rev()
-        .filter_map(|base| index.get(&base.identifier).copied());
-    for class in ancestors.chain(iter::once(declaration)) {
-        if let Some(property) = class.properties.iter().find(|p| &p.name == name) {
-            return (class.name.clone(), property.origin.clone());
-        }
-    }
-    (declaration.name.clone(), declaration.origin.clone())
+) -> Vec<Site> {
+    let ancestors = bases.iter().filter_map(|base| index.get(&base.identifier).copied());
+    iter::once(declaration)
+        .chain(ancestors)
+        .filter_map(|class| {
+            let property = class.properties.iter().find(|p| &p.name == name)?;
+            Some(Site {
+                class: class.name.clone(),
+                is_override: property.custom_data.flag(API_SCHEMA_OVERRIDE).unwrap_or(false),
+                origin: property.origin.clone(),
+            })
+        })
+        .collect()
 }
 
 /// What a property's `customData` asks the generator for.
@@ -319,7 +375,7 @@ fn property_api(
         return Ok(PropertyApi::default());
     };
 
-    let is_override = property.custom_data.flag("apiSchemaOverride").unwrap_or(false);
+    let is_override = property.custom_data.flag(API_SCHEMA_OVERRIDE).unwrap_or(false);
     // An override exists to change a built-in's fallback, not to offer an
     // accessor, so it suppresses one exactly as an empty apiName does.
     let name = if is_override {
@@ -348,11 +404,7 @@ fn property_api(
         }
     };
 
-    Ok(PropertyApi {
-        name,
-        custom_get,
-        is_override,
-    })
+    Ok(PropertyApi { name, custom_get })
 }
 
 /// The name a property is recorded under in the schematics.
@@ -389,7 +441,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::tests::read_fixture;
+    use crate::tests::{read_fixture, read_source};
 
     /// The whole contrived library resolves, with each class classified from
     /// its metadata and its chain.
@@ -500,7 +552,12 @@ mod tests {
             .find(|property| property.name.as_str() == "overrideBaseTrueDerivedFalse")
             .expect("a redeclared property is still declared here");
 
-        assert!(!property.api.is_override, "Derived turns the override off");
+        assert!(!property.is_override(), "Derived turns the override off");
+        assert_eq!(
+            property.sites.iter().map(|site| site.is_override).collect::<Vec<_>>(),
+            vec![false, true],
+            "Derived's own declaration is the strongest, and Base's stands behind it"
+        );
         assert_eq!(
             property.api.name.as_deref(),
             Some("overrideBaseTrueDerivedFalse"),
@@ -519,9 +576,8 @@ mod tests {
     #[test]
     fn custom_data_list_spellings() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = dir.path().join("schema.usda");
-        fs::write(
-            &schema,
+        let library = read_source(
+            dir.path(),
             r#"#usda 1.0
 
 over "GLOBAL" (
@@ -551,9 +607,7 @@ class "TokensAPI" (
 ) {}
 "#,
         )
-        .expect("write");
-
-        let library = crate::configure().read(&schema).expect("resolves");
+        .expect("resolves");
         for identifier in ["StringsAPI", "TokensAPI"] {
             let class = library
                 .classes
@@ -625,7 +679,7 @@ class Child "Child" (
         )
         .expect("write");
 
-        let library = crate::configure()
+        let (library, _) = crate::configure()
             .search_path(dir.path())
             .read(&schema)
             .expect("the root's Base is the one that counts");

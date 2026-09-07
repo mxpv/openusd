@@ -85,6 +85,14 @@ impl From<openusd::sdf::PathParseError> for Error {
     }
 }
 
+/// Authoring the layers this crate writes goes through the same door every
+/// other edit does. Written out for the reason above.
+impl From<openusd::sdf::EditError> for Error {
+    fn from(source: openusd::sdf::EditError) -> Self {
+        Error::Core(source.into())
+    }
+}
+
 /// A field that will not decode is schema data this crate cannot use. Written
 /// out for the reason above.
 impl From<openusd::sdf::DataError> for Error {

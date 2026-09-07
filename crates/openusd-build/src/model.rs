@@ -17,6 +17,14 @@ pub const TYPED: &str = "Typed";
 /// The base every applied API schema inherits directly.
 pub const API_SCHEMA_BASE: &str = "APISchemaBase";
 
+/// The root every schema derives from, which a class inheriting nothing still
+/// reaches and the manifest names for it.
+pub const SCHEMA_BASE: &str = "SchemaBase";
+
+/// The `customData` key a property sets to say it exists only to change a
+/// built-in API schema's declaration, rather than to declare one of its own.
+pub const API_SCHEMA_OVERRIDE: &str = "apiSchemaOverride";
+
 /// The `apiSchemaType` an API schema declares to say it is never applied.
 ///
 /// Saying nothing is not the same: an API schema that declares no kind is
@@ -62,7 +70,10 @@ pub struct Class {
     /// order the schematics writes them. Each records the class that declared
     /// it, so the emitter can take the local ones.
     pub properties: Vec<Property>,
-    /// The API schemas applied to every instance of this schema.
+    /// The API schemas applied to every instance of this schema, under the
+    /// names the schematics records them by. A multiple-apply schema carries
+    /// its built-ins under whatever instance name it is applied with, so those
+    /// are templates rather than plain identifiers.
     pub applied_api_schemas: Vec<tf::Token>,
     /// The schema's own documentation, as the schema wrote it.
     pub documentation: Option<String>,
@@ -72,9 +83,25 @@ pub struct Class {
     /// How many bases the class authored, which is at most one in a schema the
     /// generator can represent.
     pub authored_base_count: usize,
-    /// Every field authored on the class prim, as declared. Validation checks
-    /// these against what a schematics may carry.
+    /// The base the registry walks `is_a` up to: the class's own, or the root
+    /// every schema derives from for a class that inherits nothing. `None` only
+    /// on that root itself, which derives from nothing.
+    pub direct_base: Option<tf::Token>,
+    /// Every field authored on the class prim, by name.
+    ///
+    /// Kept apart from [`fields`](Self::fields) because flattening resolves
+    /// composition away: a `references` or `variantSets` opinion is gone from
+    /// the composed map, and validation has to see what the schema wrote to
+    /// reject it.
     pub authored_fields: Vec<String>,
+    /// Every field composition left on the class prim, its own and its
+    /// ancestors'.
+    ///
+    /// These are the prim metadata a registry serves as fallbacks from the
+    /// schema's definition — `hidden`, `assetInfo`, `propertyOrder` — so they
+    /// travel whole exactly as a property's fields do, and the schematics
+    /// writer is the one place that narrows them.
+    pub fields: BTreeMap<String, sdf::Value>,
     /// The `typeName` as authored, before a parent declaring the same one
     /// clears it.
     pub authored_type_name: Option<tf::Token>,
@@ -148,6 +175,13 @@ pub struct Property {
     /// declares, and the furthest ancestor declaring it for one refined down a
     /// chain.
     pub declared_by: tf::Token,
+    /// Every class declaring it, nearest first: this class where it redeclares
+    /// the property, then each ancestor that declared it.
+    ///
+    /// The composed result cannot say which class asked for what, and two
+    /// questions need to know. The strongest site decides what the property is,
+    /// and a rule about a redeclaration compares that against the weaker ones.
+    pub sites: Vec<Site>,
     /// Whether this class declares it in its own layer, which a redeclaration
     /// does as much as a first declaration.
     ///
@@ -164,6 +198,17 @@ pub struct Property {
     pub origin: Origin,
 }
 
+/// One class's declaration of a property.
+#[derive(Debug)]
+pub struct Site {
+    /// The class that declared it.
+    pub class: tf::Token,
+    /// Whether that declaration asked for `apiSchemaOverride`.
+    pub is_override: bool,
+    /// Where it was written.
+    pub origin: Origin,
+}
+
 /// A property's `customData`, which steers its accessor and nothing else.
 #[derive(Debug, Default)]
 pub struct PropertyApi {
@@ -174,8 +219,6 @@ pub struct PropertyApi {
     /// (`apiGetImplementation = "custom"`), so the emitter writes everything
     /// but that one method and leaves its name free.
     pub custom_get: bool,
-    /// Whether the property exists only to override a built-in API schema's.
-    pub is_override: bool,
 }
 
 /// Where something was declared, so a diagnostic names the file a contributor
@@ -189,6 +232,12 @@ pub struct Origin {
 }
 
 impl Class {
+    /// Where the schema data records it, which is also where the registry looks
+    /// for it: a root prim named by the identifier.
+    pub fn prim_path(&self) -> Result<sdf::Path, sdf::PathParseError> {
+        sdf::Path::abs_root().append_path(self.identifier.as_str())
+    }
+
     /// The properties this class declares itself, in schematics order,
     /// including any it redeclares.
     pub fn local_properties(&self) -> impl Iterator<Item = &Property> {
@@ -198,7 +247,7 @@ impl Class {
     /// The properties this schema declares only to override a built-in API
     /// schema's, which reach the schematics and get no accessor.
     pub fn override_properties(&self) -> impl Iterator<Item = &Property> {
-        self.properties.iter().filter(|property| property.api.is_override)
+        self.properties.iter().filter(|property| property.is_override())
     }
 }
 
@@ -257,6 +306,16 @@ impl Property {
     /// Whether an accessor is emitted for it at all.
     pub fn has_accessor(&self) -> bool {
         self.api.name.is_some()
+    }
+
+    /// Whether the schematics records it among the class's API schema override
+    /// property names.
+    ///
+    /// The strongest declaration decides: this class's where it redeclares the
+    /// property, the nearest ancestor's otherwise. An override therefore
+    /// reaches a class that says nothing about the property at all.
+    pub fn is_override(&self) -> bool {
+        self.sites.first().is_some_and(|site| site.is_override)
     }
 }
 

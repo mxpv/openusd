@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use openusd::{sdf, tf, usd};
 
 use crate::error::Error;
-use crate::model::{API_SCHEMA_BASE, Class, Library, NON_APPLIED, Property};
+use crate::model::{API_SCHEMA_BASE, Class, Library, NON_APPLIED, Property, SCHEMA_BASE};
 
 /// A rule a schema broke.
 ///
@@ -93,7 +93,8 @@ pub enum Violation {
     /// Metadata that contradicts the kind of schema it sits on.
     #[error("{key} does not apply to a {kind} schema")]
     KindMismatch {
-        /// The `customData` key that does not belong.
+        /// The key that does not belong, whether the schema wrote it as prim
+        /// metadata or under `customData`.
         key: &'static str,
         /// The kind it was found on.
         kind: &'static str,
@@ -179,6 +180,21 @@ pub enum Violation {
         field: String,
     },
 
+    /// A property this class records as an API schema override that an ancestor
+    /// declares outright.
+    ///
+    /// An override reaches a prim definition only where a built-in API schema
+    /// supplies the property, so this would delete the ancestor's property from
+    /// the class wherever none does. The other direction is allowed: a class may
+    /// make an inherited override a declaration of its own.
+    #[error("`{property}` is an API schema override here, but `{class}` declares it outright")]
+    OverridesADeclaration {
+        /// The property.
+        property: tf::Token,
+        /// The ancestor declaring it outright.
+        class: tf::Token,
+    },
+
     /// An `apiGetImplementation` that is neither spelling.
     #[error("unknown apiGetImplementation `{spelling}`")]
     UnknownApiGetImplementation {
@@ -260,6 +276,18 @@ fn check_kind(class: &Class) -> Result<(), Error> {
             kind != usd::SchemaKind::ConcreteTyped && !metadata.fallback_types.is_empty(),
             "fallbackTypes",
         ),
+        // An order names properties as the schema declared them, and a
+        // multiple-apply schema's reach the schematics under an instance-name
+        // template instead — so the order it asked for would name properties
+        // the schema data does not have.
+        (
+            multiple_apply
+                && class
+                    .authored_fields
+                    .iter()
+                    .any(|field| field == sdf::FieldKey::PropertyOrder.as_str()),
+            sdf::FieldKey::PropertyOrder.as_str(),
+        ),
     ] {
         if mismatched {
             return Err(class.violation(Violation::KindMismatch {
@@ -318,11 +346,10 @@ fn check_inheritance(class: &Class) -> Result<(), Error> {
     }
 
     // A class inheriting nothing is rooted at SchemaBase, which every API
-    // schema needs APISchemaBase below.
-    let base = class
-        .bases
-        .first()
-        .map_or_else(|| tf::Token::from("SchemaBase"), |base| base.identifier.clone());
+    // schema needs APISchemaBase below. Only the root every schema derives from
+    // has no base at all, and naming it is what makes the diagnostic read for a
+    // class that claims to be an API schema anyway.
+    let base = class.direct_base.clone().unwrap_or_else(|| tf::Token::new(SCHEMA_BASE));
     let inherits_root = base.as_str() == API_SCHEMA_BASE;
 
     if class.kind.is_applied_api_schema() && !inherits_root {
@@ -405,6 +432,23 @@ fn check_properties(class: &Class) -> Result<(), Error> {
                 property: property.name.clone(),
             }));
         }
+
+        // An override reaches a prim definition only where a built-in API
+        // schema supplies the property, so a class that turns an inherited
+        // declaration into one deletes it from itself wherever none does. The
+        // other direction is fine, and a class may make an inherited override
+        // a declaration of its own.
+        if property.is_override()
+            && let Some(site) = property.sites.iter().find(|site| !site.is_override)
+        {
+            return Err(Error::Definition {
+                origin: site.origin.describe(),
+                violation: Violation::OverridesADeclaration {
+                    property: property.name.clone(),
+                    class: site.class.clone(),
+                },
+            });
+        }
     }
 
     Ok(())
@@ -435,8 +479,12 @@ fn conventions(class: &Class) -> Vec<String> {
 /// The first field a schematics would refuse to carry, if any.
 ///
 /// The generator's own input is expected and never written out: what a class
-/// inherits, its `customData`, its specifier, and the children keys that hold
-/// the namespace together.
+/// inherits, its `customData`, its specifier, and the two children keys naming
+/// the prims and properties it declares.
+///
+/// The other children keys are not on that list. A class prim carrying a
+/// variant set is a shape the schematics has no way to record, and letting the
+/// key through would drop the variant's content without a word.
 fn disallowed_field<'a>(fields: impl IntoIterator<Item = &'a String>) -> Option<&'a String> {
     let input = [
         sdf::FieldKey::InheritPaths.as_str(),
@@ -484,10 +532,8 @@ impl Property {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
-    use crate::tests::read_fixture;
+    use crate::tests::{read_fixture, read_source};
 
     /// The rule a fixture is rejected for.
     fn violation(name: &str) -> Violation {
@@ -515,6 +561,7 @@ mod tests {
             ("schemaFail16.usda", "fallbackTypes"),
             ("schemaFail17.usda", "apiSchemaAutoApplyTo"),
             ("schemaFail18.usda", "apiSchemaAutoApplyTo"),
+            ("schemaFail24.usda", "propertyOrder"),
         ] {
             match violation(fixture) {
                 Violation::KindMismatch { key: found, .. } => assert_eq!(found, key, "{fixture}"),
@@ -557,6 +604,234 @@ mod tests {
         match violation("schemaFail23.usda") {
             Violation::DisallowedField { field } => assert_eq!(field, "kind"),
             other => panic!("{other}"),
+        }
+    }
+
+    /// A variant set on a class prim is a shape the schematics cannot record,
+    /// and the children key naming it is not the generator input the two keys
+    /// beside it are — so it is refused rather than quietly dropped along with
+    /// everything the variant declares.
+    #[test]
+    fn variant_set_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = read_source(
+            dir.path(),
+            r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testVariants"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Varied" (
+    inherits = </Typed>
+) {
+    double plain = 1
+
+    variantSet "shading" = {
+        "red" {
+            double onlyInVariant = 2
+        }
+    }
+}
+"#,
+        )
+        .expect_err("a schema may not vary");
+
+        match error {
+            Error::Definition {
+                violation: Violation::DisallowedField { field },
+                ..
+            } => assert_eq!(field, sdf::ChildrenKey::VariantSetChildren.as_str()),
+            other => panic!("{other}"),
+        }
+    }
+
+    /// A composition arc is a field the registry refuses too, and it has to be
+    /// caught on the class prim rather than on the composed result: flattening
+    /// is what resolves an arc away, so by then there is nothing left to see.
+    #[test]
+    fn composition_arc_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = read_source(
+            dir.path(),
+            r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testArc"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Specializing" (
+    inherits = </Typed>
+    specializes = </Typed>
+) {}
+"#,
+        )
+        .expect_err("a schema may not compose");
+
+        match error {
+            Error::Definition {
+                violation: Violation::DisallowedField { field },
+                ..
+            } => assert_eq!(field, "specializes"),
+            other => panic!("{other}"),
+        }
+    }
+
+    /// The two override schemas the corpus keeps commented out, because
+    /// upstream rejects them for the reason this rule states.
+    const OVERRIDES: &str = r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testOverrides"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Base" (
+    inherits = </Typed>
+) {
+    int plain = 1
+}
+
+class "Derived" (
+    inherits = </Base>
+) {
+    int plain = 2 (
+        customData = {
+            bool apiSchemaOverride = true
+        }
+    )
+}
+"#;
+
+    /// A class may not turn a property an ancestor declares outright into an
+    /// API schema override, which would delete it from this class wherever no
+    /// built-in API schema supplies it.
+    #[test]
+    fn override_of_a_declaration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = read_source(dir.path(), OVERRIDES).expect_err("a class may not delete what it inherits");
+
+        match error {
+            Error::Definition {
+                violation: Violation::OverridesADeclaration { property, class },
+                ..
+            } => {
+                assert_eq!(property.as_str(), "plain");
+                assert_eq!(class.as_str(), "Base");
+            }
+            other => panic!("{other}"),
+        }
+    }
+
+    /// The reverse is allowed, and is what the corpus's own
+    /// `overrideBaseTrueDerivedFalse` does: a class may make an inherited
+    /// override a declaration of its own.
+    #[test]
+    fn declaration_over_an_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let library = read_source(
+            dir.path(),
+            r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testTakenOn"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Base" (
+    inherits = </Typed>
+) {
+    int plain = 1 (
+        customData = {
+            bool apiSchemaOverride = true
+        }
+    )
+}
+
+class "Derived" (
+    inherits = </Base>
+) {
+    int plain = 2
+}
+"#,
+        )
+        .expect("a class may take an inherited override on");
+
+        let derived = library
+            .classes
+            .iter()
+            .find(|class| class.identifier.as_str() == "Derived")
+            .expect("the derived class");
+        assert_eq!(derived.override_properties().count(), 0);
+    }
+
+    /// An override travels to a class that says nothing about the property:
+    /// the strongest declaration decides, and for a class that redeclares
+    /// nothing that is the ancestor's.
+    #[test]
+    fn override_reaches_a_silent_class() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let library = read_source(
+            dir.path(),
+            r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testInheritedOverride"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Base" (
+    inherits = </Typed>
+) {
+    int plain = 1 (
+        customData = {
+            bool apiSchemaOverride = true
+        }
+    )
+}
+
+class "Derived" (
+    inherits = </Base>
+) {}
+"#,
+        )
+        .expect("resolves");
+
+        for identifier in ["Base", "Derived"] {
+            let class = library
+                .classes
+                .iter()
+                .find(|class| class.identifier.as_str() == identifier)
+                .expect("the class");
+            let names: Vec<&str> = class.override_properties().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, vec!["plain"], "{identifier}");
         }
     }
 
@@ -616,9 +891,8 @@ mod tests {
     #[test]
     fn typed_cannot_be_api() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = dir.path().join("schema.usda");
-        fs::write(
-            &schema,
+        let error = read_source(
+            dir.path(),
             r#"#usda 1.0
 
 over "GLOBAL" (
@@ -637,9 +911,7 @@ class Shape "Shape" (
 ) {}
 "#,
         )
-        .expect("write");
-
-        let error = crate::configure().read(&schema).expect_err("a schema cannot be both");
+        .expect_err("a schema cannot be both");
         assert!(
             matches!(
                 error,
@@ -658,9 +930,8 @@ class Shape "Shape" (
     #[test]
     fn silent_base_is_not_non_applied() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = dir.path().join("schema.usda");
-        fs::write(
-            &schema,
+        let error = read_source(
+            dir.path(),
             r#"#usda 1.0
 
 over "GLOBAL" (
@@ -683,11 +954,7 @@ class "NonAppliedAPI" (
 ) {}
 "#,
         )
-        .expect("write");
-
-        let error = crate::configure()
-            .read(&schema)
-            .expect_err("the base is single-apply by default");
+        .expect_err("the base is single-apply by default");
         assert!(
             matches!(
                 error,
@@ -706,9 +973,8 @@ class "NonAppliedAPI" (
     #[test]
     fn schematics_names_collide() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = dir.path().join("schema.usda");
-        fs::write(
-            &schema,
+        let error = read_source(
+            dir.path(),
             r#"#usda 1.0
 
 over "GLOBAL" (
@@ -733,11 +999,7 @@ class "CollideAPI" (
 }
 "#,
         )
-        .expect("write");
-
-        let error = crate::configure()
-            .read(&schema)
-            .expect_err("both properties reach one schematics name");
+        .expect_err("both properties reach one schematics name");
         assert!(
             matches!(
                 error,
@@ -752,15 +1014,15 @@ class "CollideAPI" (
 
     /// The upstream failure files this crate accepts, and why.
     ///
-    /// Each of these turns on a name two tokens would reach once converted to
-    /// a Rust identifier — an `allowedTokens` value colliding with a library
-    /// token, or a property order that renames one. Those are generator rules,
-    /// which the name stage owes and which nothing here can check yet. The
-    /// list is the decision on the record: a file leaving it means a rule
-    /// arrived, and a file joining it needs a reason written here.
+    /// Both turn on a name two tokens would reach once converted to a Rust
+    /// identifier: an `allowedTokens` value colliding with a library token.
+    /// That is a generator rule, which the name stage owes and which nothing
+    /// here can check yet. The list is the decision on the record: a file
+    /// leaving it means a rule arrived, and a file joining it needs a reason
+    /// written here.
     #[test]
     fn accepted_upstream_failures() {
-        for fixture in ["schemaFail.usda", "schemaFail2.usda", "schemaFail24.usda"] {
+        for fixture in ["schemaFail.usda", "schemaFail2.usda"] {
             assert!(
                 read_fixture(fixture).is_ok(),
                 "{fixture} is now rejected; move it to a rule test and drop it from this list"
@@ -777,9 +1039,8 @@ class "CollideAPI" (
     #[test]
     fn suffix_is_a_warning() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = dir.path().join("schema.usda");
-        fs::write(
-            &schema,
+        let library = read_source(
+            dir.path(),
             r#"#usda 1.0
 
 over "GLOBAL" (
@@ -798,9 +1059,7 @@ class "Applied" (
 ) {}
 "#,
         )
-        .expect("write");
-
-        let library = crate::configure().read(&schema).expect("nothing here breaks a rule");
+        .expect("nothing here breaks a rule");
         let warnings = check(&library).expect("nothing here breaks a rule");
 
         assert!(

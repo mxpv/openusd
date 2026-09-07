@@ -60,8 +60,8 @@ pub struct Declaration {
     pub documentation: Option<String>,
     /// The properties it declares itself.
     pub properties: Vec<PropertyDeclaration>,
-    /// Every field authored on the prim, which validation checks against what
-    /// a schematics may carry.
+    /// Every field authored on the prim, by name. Validation reads these rather
+    /// than the composed map, flattening having resolved composition away.
     pub fields: Vec<String>,
     /// Where it was declared.
     pub origin: Origin,
