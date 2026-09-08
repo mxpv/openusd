@@ -28,7 +28,7 @@ thiserror.workspace = true
 # The generated Rust is built as syntax rather than as text: `quote` writes it,
 # `syn` parses it back to catch anything malformed here rather than in a
 # consumer's build, and `prettyplease` lays it out without an external rustfmt.
-prettyplease = "0.2"
+prettyplease = "0.3"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "parsing", "printing"] }
