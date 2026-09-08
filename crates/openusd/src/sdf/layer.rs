@@ -326,11 +326,21 @@ impl Layer {
         &self.identifier
     }
 
+    /// Where the layer was found, or `None` for an anonymous layer, which was
+    /// never read from anywhere (C++ `SdfLayer::GetRealPath`, empty for one).
+    ///
+    /// This is the identifier except for a package, whose location is its
+    /// package-relative default layer, and a layer found through a resolver
+    /// search directory, whose identifier is the bare search path it was asked
+    /// for.
+    pub fn resolved_path(&self) -> Option<&str> {
+        (!self.is_anonymous()).then(|| self.real_path())
+    }
+
     /// The layer's resolved physical location, the anchor for the relative
-    /// asset paths it authors (C++ `SdfLayer::GetRealPath`). Equals the
-    /// identifier except for a package, whose real path is its package-relative
-    /// default layer, and a layer found through a resolver search directory,
-    /// whose identifier is the search path.
+    /// asset paths it authors. Falls back to the identifier, which is what an
+    /// anonymous layer anchors against; [`resolved_path`](Self::resolved_path)
+    /// is the one that says so.
     pub(crate) fn real_path(&self) -> &str {
         self.real_path.as_deref().unwrap_or(&self.identifier)
     }

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use openusd::{sdf, tf, usd};
 
 use crate::error::Error;
-use crate::model::{API_SCHEMA_BASE, Class, Library, NON_APPLIED, Property, SCHEMA_BASE};
+use crate::model::{API_SCHEMA_BASE, Class, Library, Property, SCHEMA_BASE};
 
 /// A rule a schema broke.
 ///
@@ -195,6 +195,83 @@ pub enum Violation {
         class: tf::Token,
     },
 
+    /// Two token sources reaching one identifier with different values, where
+    /// one constant would have to hold both strings.
+    #[error("token `{id}` would hold both \"{first}\" and \"{second}\"")]
+    TokenValueCollision {
+        /// The identifier they collided on.
+        id: String,
+        /// The string the first source gave it.
+        first: String,
+        /// The string the second gave it.
+        second: String,
+    },
+
+    /// Two token identifiers reaching one Rust constant, which is the same
+    /// problem one step later.
+    #[error("`{first}` and `{second}` both reach the constant {constant}")]
+    TokenConstantCollision {
+        /// The constant they collided on.
+        constant: String,
+        /// The first identifier to reach it.
+        first: String,
+        /// The second.
+        second: String,
+    },
+
+    /// Two classes of one library reaching one Rust name, where one module
+    /// cannot hold both.
+    ///
+    /// The scope is the module: two libraries may each declare a `Sphere`, and
+    /// nothing stops them.
+    #[error("`{first}` and `{second}` both reach the name {name}")]
+    RustNameCollision {
+        /// The name they collided on.
+        name: String,
+        /// The first schema to reach it.
+        first: String,
+        /// The second.
+        second: String,
+    },
+
+    /// Two properties reaching one method name, where two methods of one name
+    /// — or two traits offering one — make every call ambiguous.
+    #[error("`{first}` and `{second}` both reach the method {method}")]
+    MethodCollision {
+        /// The method they collided on.
+        method: String,
+        /// The first property to reach it.
+        first: tf::Token,
+        /// The second.
+        second: tf::Token,
+    },
+
+    /// A name a schema chose — through `className` or `apiName` — that is not a
+    /// Rust identifier, so nothing could be called it.
+    #[error("`{name}` is not an identifier, so nothing generated can be called it")]
+    NotAnIdentifier {
+        /// The name as the schema wrote it.
+        name: String,
+    },
+
+    /// A base this run does not generate and that belongs to no other library,
+    /// so no view of it exists for a descendant to derive from.
+    #[error("`{base}` is inherited from but not generated; declare it in the root layer or in a library of its own")]
+    UngeneratedBase {
+        /// The base that has no views.
+        base: tf::Token,
+    },
+
+    /// A base in a library this run does not generate and was not told where to
+    /// find, so its views cannot be named.
+    #[error("`{base}` belongs to the {library} library; name where its views live with Builder::extern_library")]
+    UnknownLibrary {
+        /// The library declaring the base.
+        library: String,
+        /// The base that could not be reached.
+        base: tf::Token,
+    },
+
     /// An `apiGetImplementation` that is neither spelling.
     #[error("unknown apiGetImplementation `{spelling}`")]
     UnknownApiGetImplementation {
@@ -208,6 +285,16 @@ pub enum Violation {
     CustomGetWithoutAccessor {
         /// The property.
         property: tf::Token,
+    },
+
+    /// An attribute whose type the core reads but gives no constant to declare
+    /// it with, so nothing could author the property.
+    #[error("`{property}` is a `{type_name}`, which has no value-type constant to declare it with")]
+    UnnameableType {
+        /// The property.
+        property: tf::Token,
+        /// The type it was declared as.
+        type_name: tf::Token,
     },
 }
 
@@ -357,15 +444,14 @@ fn check_inheritance(class: &Class) -> Result<(), Error> {
     }
 
     // A non-applied API schema may sit on APISchemaBase or on another
-    // non-applied one, wherever that base is declared. Only a base that says
-    // `nonApplied` is one: an API schema that declares no kind at all is
-    // single-apply by default, so silence is not permission.
+    // non-applied one, wherever that base is declared. Only a base that is one
+    // counts: an API schema that declares no kind at all is single-apply by
+    // default, so silence is not permission.
     if class.kind == usd::SchemaKind::NonAppliedApi && !inherits_root {
         let base_is_non_applied = class
             .bases
             .first()
-            .and_then(|base| base.api_schema_type.as_deref())
-            .is_some_and(|spelling| spelling == NON_APPLIED);
+            .is_some_and(|base| base.kind == usd::SchemaKind::NonAppliedApi);
         if !base_is_non_applied {
             return Err(class.violation(Violation::NonAppliedApiNotRooted { base }));
         }
@@ -512,7 +598,7 @@ fn kind_name(kind: usd::SchemaKind) -> &'static str {
 
 impl Class {
     /// This class's declaration, with the rule it broke.
-    fn violation(&self, violation: Violation) -> Error {
+    pub(crate) fn violation(&self, violation: Violation) -> Error {
         Error::Definition {
             origin: self.origin.describe(),
             violation,
@@ -522,7 +608,7 @@ impl Class {
 
 impl Property {
     /// This property's declaration, with the rule it broke.
-    fn violation(&self, violation: Violation) -> Error {
+    pub(crate) fn violation(&self, violation: Violation) -> Error {
         Error::Definition {
             origin: self.origin.describe(),
             violation,

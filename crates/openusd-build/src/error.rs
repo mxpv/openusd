@@ -93,6 +93,14 @@ impl From<openusd::sdf::EditError> for Error {
     }
 }
 
+/// Writing a generated layer out as text, which is how both reach the files a
+/// consumer's build script leaves behind. Written out for the reason above.
+impl From<openusd::sdf::ExportError> for Error {
+    fn from(source: openusd::sdf::ExportError) -> Self {
+        Error::Core(source.into())
+    }
+}
+
 /// A field that will not decode is schema data this crate cannot use. Written
 /// out for the reason above.
 impl From<openusd::sdf::DataError> for Error {

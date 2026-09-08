@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::iter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use openusd::{ar, sdf, tf, usd};
 
@@ -34,8 +34,10 @@ pub struct Source {
     pub skip_code_generation: bool,
     /// Every class any layer declares, in root-layer declaration order first.
     pub declarations: Vec<Declaration>,
-    /// Every layer read, for a build script to watch.
-    pub source_layers: Vec<String>,
+    /// Where every layer read was found, for a build script to watch.
+    pub source_layers: Vec<PathBuf>,
+    /// The `libraryTokens` the root layer's `/GLOBAL` declares.
+    pub tokens: Vec<DeclaredToken>,
 }
 
 /// One class prim, as the layer that declares it wrote it.
@@ -103,20 +105,31 @@ pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
         return Err(error);
     }
 
-    let source_layers = stage.layer_stack();
+    let identifiers = stage.layer_stack();
     let root = stage.root_layer().identifier.clone();
 
     // The root layer first, so what this run generates leads the list.
     let mut globals = Vec::new();
-    for identifier in iter::once(&root).chain(source_layers.iter().filter(|id| **id != root)) {
+    let mut source_layers = Vec::new();
+    for identifier in iter::once(&root).chain(identifiers.iter().filter(|id| **id != root)) {
         let Some(layer) = stage.layer(identifier) else {
             continue;
         };
+        // What a build script watches is where the layer was found, which for
+        // one reached through a search path is not what it was asked for by.
+        // An anonymous layer was read from nowhere and so is watched nowhere.
+        source_layers.extend(layer.resolved_path().map(watched_path));
         globals.push((identifier, read_global(&layer)));
     }
 
     let skip_code_generation = globals.iter().any(|(_, global)| global.skip_code_generation);
     let use_literal_identifiers = globals.first().is_none_or(|(_, global)| global.use_literal_identifiers);
+    // Only the root layer's, the library being generated being the one whose
+    // tokens this run declares.
+    let tokens = globals
+        .first()
+        .map(|(_, global)| global.tokens.clone())
+        .unwrap_or_default();
 
     // A layer with no `/GLOBAL` of its own belongs to whichever library
     // sublayered it; only its class prims matter.
@@ -145,7 +158,20 @@ pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
         skip_code_generation,
         declarations,
         source_layers,
+        tokens,
     })
+}
+
+/// A token a schema asks for outright, beyond the ones its properties imply:
+/// `schemaTokens` on a class, `libraryTokens` on the library.
+#[derive(Debug, Clone)]
+pub struct DeclaredToken {
+    /// The identifier the schema keyed it by.
+    pub id: String,
+    /// The string the constant holds, which defaults to that identifier.
+    pub value: String,
+    /// What the schema said it is for, if it said.
+    pub documentation: Option<String>,
 }
 
 /// What one layer's `/GLOBAL` prim configures.
@@ -153,6 +179,20 @@ struct Global {
     library: Option<String>,
     use_literal_identifiers: bool,
     skip_code_generation: bool,
+    tokens: Vec<DeclaredToken>,
+}
+
+/// A resolved path as a build script reports it.
+///
+/// Resolving canonicalizes, which on Windows spells a path verbatim
+/// (`\?\D:\...`). Nothing a consumer configured matches that spelling, and
+/// cargo reads these back, so a verbatim disk path is unwrapped. A verbatim UNC
+/// path is left alone: there the prefix is part of the path, not a decoration.
+fn watched_path(resolved: &str) -> PathBuf {
+    match resolved.strip_prefix(r"\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => PathBuf::from(resolved),
+    }
 }
 
 /// Reads a layer's `/GLOBAL` prim.
@@ -172,6 +212,7 @@ fn read_global(layer: &sdf::Layer) -> Global {
         library: custom_data.string("libraryName"),
         use_literal_identifiers: custom_data.flag("useLiteralIdentifier").unwrap_or(true),
         skip_code_generation: custom_data.flag("skipCodeGeneration").unwrap_or(false),
+        tokens: custom_data.token_declarations("libraryTokens"),
     }
 }
 
@@ -305,6 +346,28 @@ impl CustomData {
             .try_as_string_vec_ref()
             .map(|strings| strings.iter().map(|text| tf::Token::from(text.as_str())).collect())
             .unwrap_or_default()
+    }
+
+    /// The tokens an entry declares outright, rather than through a property.
+    ///
+    /// Written as `dictionary <id> = { string value = "..."; string doc =
+    /// "..." }`, both entries optional: a token that names no value holds its
+    /// own identifier.
+    pub fn token_declarations(&self, key: &str) -> Vec<DeclaredToken> {
+        self.0
+            .get(key)
+            .and_then(sdf::Value::try_as_dictionary_ref)
+            .into_iter()
+            .flatten()
+            .map(|(id, entry)| {
+                let entry = CustomData(entry.try_as_dictionary_ref().cloned().unwrap_or_default());
+                DeclaredToken {
+                    value: entry.string("value").unwrap_or_else(|| id.clone()),
+                    documentation: entry.string("doc"),
+                    id: id.clone(),
+                }
+            })
+            .collect()
     }
 
     /// The per-instance `apiSchemaCanOnlyApplyTo` lists a multiple-apply

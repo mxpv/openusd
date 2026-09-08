@@ -12,8 +12,9 @@ use openusd::sdf;
 /// attribute can hold — `opaque`, which carries no value, and the metadata-only
 /// kinds.
 ///
-/// Paths are spelled the way generated code spells them, module-qualified
-/// against what a schema module imports.
+/// Paths are spelled the way generated code spells them: in full, since the
+/// generated file is included bare into a consumer's module and carries no
+/// `use` block of its own.
 pub fn rust_type(kind: sdf::ValueKind) -> Option<String> {
     if let Some(element) = kind.element_kind() {
         return Some(format!("Vec<{}>", scalar_type(element)?));
@@ -35,35 +36,35 @@ fn scalar_type(kind: sdf::ValueKind) -> Option<&'static str> {
         sdf::ValueKind::Uint => "u32",
         sdf::ValueKind::Int64 => "i64",
         sdf::ValueKind::Uint64 => "u64",
-        sdf::ValueKind::Half => "gf::f16",
+        sdf::ValueKind::Half => "::openusd::gf::f16",
         sdf::ValueKind::Float => "f32",
         sdf::ValueKind::Double => "f64",
         sdf::ValueKind::String => "String",
-        sdf::ValueKind::Token => "tf::Token",
-        sdf::ValueKind::AssetPath => "sdf::AssetPath",
-        sdf::ValueKind::TimeCode => "sdf::TimeCode",
-        sdf::ValueKind::PathExpression => "sdf::PathExpression",
+        sdf::ValueKind::Token => "::openusd::tf::Token",
+        sdf::ValueKind::AssetPath => "::openusd::sdf::AssetPath",
+        sdf::ValueKind::TimeCode => "::openusd::sdf::TimeCode",
+        sdf::ValueKind::PathExpression => "::openusd::sdf::PathExpression",
 
-        sdf::ValueKind::Vec2h => "gf::Vec2h",
-        sdf::ValueKind::Vec2f => "gf::Vec2f",
-        sdf::ValueKind::Vec2d => "gf::Vec2d",
-        sdf::ValueKind::Vec2i => "gf::Vec2i",
-        sdf::ValueKind::Vec3h => "gf::Vec3h",
-        sdf::ValueKind::Vec3f => "gf::Vec3f",
-        sdf::ValueKind::Vec3d => "gf::Vec3d",
-        sdf::ValueKind::Vec3i => "gf::Vec3i",
-        sdf::ValueKind::Vec4h => "gf::Vec4h",
-        sdf::ValueKind::Vec4f => "gf::Vec4f",
-        sdf::ValueKind::Vec4d => "gf::Vec4d",
-        sdf::ValueKind::Vec4i => "gf::Vec4i",
+        sdf::ValueKind::Vec2h => "::openusd::gf::Vec2h",
+        sdf::ValueKind::Vec2f => "::openusd::gf::Vec2f",
+        sdf::ValueKind::Vec2d => "::openusd::gf::Vec2d",
+        sdf::ValueKind::Vec2i => "::openusd::gf::Vec2i",
+        sdf::ValueKind::Vec3h => "::openusd::gf::Vec3h",
+        sdf::ValueKind::Vec3f => "::openusd::gf::Vec3f",
+        sdf::ValueKind::Vec3d => "::openusd::gf::Vec3d",
+        sdf::ValueKind::Vec3i => "::openusd::gf::Vec3i",
+        sdf::ValueKind::Vec4h => "::openusd::gf::Vec4h",
+        sdf::ValueKind::Vec4f => "::openusd::gf::Vec4f",
+        sdf::ValueKind::Vec4d => "::openusd::gf::Vec4d",
+        sdf::ValueKind::Vec4i => "::openusd::gf::Vec4i",
 
-        sdf::ValueKind::Quath => "gf::Quath",
-        sdf::ValueKind::Quatf => "gf::Quatf",
-        sdf::ValueKind::Quatd => "gf::Quatd",
+        sdf::ValueKind::Quath => "::openusd::gf::Quath",
+        sdf::ValueKind::Quatf => "::openusd::gf::Quatf",
+        sdf::ValueKind::Quatd => "::openusd::gf::Quatd",
 
-        sdf::ValueKind::Matrix2d => "gf::Mat2d",
-        sdf::ValueKind::Matrix3d => "gf::Mat3d",
-        sdf::ValueKind::Matrix4d => "gf::Matrix4d",
+        sdf::ValueKind::Matrix2d => "::openusd::gf::Mat2d",
+        sdf::ValueKind::Matrix3d => "::openusd::gf::Mat3d",
+        sdf::ValueKind::Matrix4d => "::openusd::gf::Matrix4d",
 
         // `opaque` carries no value, and the rest are metadata kinds no
         // attribute is declared with.
@@ -92,8 +93,14 @@ mod tests {
         }
 
         assert_eq!(rust_type(sdf::ValueKind::Float).as_deref(), Some("f32"));
-        assert_eq!(rust_type(sdf::ValueKind::Vec3fVec).as_deref(), Some("Vec<gf::Vec3f>"));
-        assert_eq!(rust_type(sdf::ValueKind::TokenVec).as_deref(), Some("Vec<tf::Token>"));
+        assert_eq!(
+            rust_type(sdf::ValueKind::Vec3fVec).as_deref(),
+            Some("Vec<::openusd::gf::Vec3f>")
+        );
+        assert_eq!(
+            rust_type(sdf::ValueKind::TokenVec).as_deref(),
+            Some("Vec<::openusd::tf::Token>")
+        );
     }
 
     /// A role does not change the Rust type: a point, a normal and a colour
@@ -102,7 +109,11 @@ mod tests {
     fn roles_share_a_type() {
         for spelling in ["float3", "point3f", "normal3f", "vector3f", "color3f"] {
             let kind = sdf::ValueTypeName::find(spelling).and_then(|type_name| type_name.kind());
-            assert_eq!(kind.and_then(rust_type).as_deref(), Some("gf::Vec3f"), "{spelling}");
+            assert_eq!(
+                kind.and_then(rust_type).as_deref(),
+                Some("::openusd::gf::Vec3f"),
+                "{spelling}"
+            );
         }
     }
 

@@ -1,0 +1,122 @@
+#usda 1.0
+(
+    """A small library covering every shape this generator emits, so that a
+    change to any of them shows up as a diff against the expected output
+    beside this file."""
+    subLayers = [
+        @base.usda@
+    ]
+)
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "tiny"
+        dictionary libraryTokens = {
+            dictionary sentinel = {
+                string value = "!sentinel!"
+                string doc = "a value this library gives no property"
+            }
+        }
+    }
+)
+{
+}
+
+class "Shape" (
+    inherits = </Typed>
+    doc = "Something with an extent, which everything drawable has."
+    customData = {
+        dictionary schemaTokens = {
+            dictionary shapeKind = {
+                string doc = "how a shape is classified"
+            }
+        }
+    }
+)
+{
+    double3 extent = (1, 1, 1) (
+        doc = "The bounds, in the shape's own space."
+    )
+
+    uniform token drawMode = "default" (
+        allowedTokens = ["default", "bounds"]
+        doc = "How the shape draws."
+    )
+
+    double density = 1 (
+        doc = "How heavy the shape is for its size."
+        customData = {
+            string apiGetImplementation = "custom"
+        }
+    )
+}
+
+class Ball "Ball" (
+    inherits = </Shape>
+    doc = "A sphere, by another name."
+)
+{
+    double radius = 1 (
+        doc = "The radius."
+    )
+
+    double3 extent = (2, 2, 2) (
+        doc = "A ball is bigger than a shape by default."
+    )
+
+    custom float temperature (
+        doc = "How warm it is, which no schema owns."
+    )
+
+    rel material (
+        doc = "What the ball is made of."
+    )
+}
+
+class "TagAPI" (
+    inherits = </APISchemaBase>
+    doc = "Names a prim for a pipeline to find later."
+    customData = {
+        token apiSchemaType = "singleApply"
+        token[] apiSchemaCanOnlyApplyTo = ["Ball"]
+    }
+)
+{
+    string tag = "" (
+        doc = "The name the pipeline looks for."
+    )
+}
+
+class "SlotAPI" (
+    inherits = </APISchemaBase>
+    doc = "One of several interchangeable attachment points."
+    customData = {
+        token apiSchemaType = "multipleApply"
+        token propertyNamespacePrefix = "slot"
+        token[] apiSchemaAllowedInstanceNames = ["front", "back"]
+        dictionary apiSchemaInstances = {
+            dictionary front = {
+                token[] apiSchemaCanOnlyApplyTo = ["Ball"]
+            }
+        }
+    }
+)
+{
+    opaque __INSTANCE_NAME__ (
+        doc = "The slot itself, which carries no value."
+        customData = {
+            string apiName = "slot"
+        }
+    )
+
+    int depth = 0 (
+        doc = "How far in the slot sits."
+    )
+
+    double3 offset = (0, 0, 0) (
+        doc = "Where the slot sits, relative to the prim."
+        customData = {
+            string apiName = "slotOffset"
+        }
+    )
+}

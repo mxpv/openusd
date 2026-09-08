@@ -820,6 +820,20 @@ impl SchemaRegistry {
         }
     }
 
+    /// The name a schema is applied to a prim under, which for a
+    /// multiple-apply schema carries the instance it is applied as.
+    ///
+    /// The inverse of [`type_name_and_instance`](Self::type_name_and_instance),
+    /// and what `apiSchemas` records: `SlotAPI` applied as `front` is
+    /// `SlotAPI:front`. An empty instance names the schema alone, which is what
+    /// a single-apply schema is applied under.
+    pub fn make_applied_name(schema: &str, instance: &str) -> tf::Token {
+        match instance.is_empty() {
+            true => tf::Token::from(schema),
+            false => tf::Token::from(format!("{schema}:{instance}")),
+        }
+    }
+
     /// The part of a multiple-apply property name that follows the
     /// instance-name placeholder (C++ `GetMultipleApplyNameTemplateBaseName`).
     ///

@@ -227,6 +227,17 @@ pub fn is_identifier(name: &str) -> bool {
     is_identifier_start(first) && chars.all(is_identifier_cont)
 }
 
+/// Whether `name` is an identifier Rust would accept: one this crate's own
+/// rules admit, that is not a keyword and not the placeholder `_`.
+///
+/// A schema names its own types and accessors through `className` and
+/// `apiName`, so a name Rust has taken has to be reported against the schema
+/// that wrote it. The list is Rust's own reserved words, the editions'
+/// together, since a generated file is compiled under the consumer's edition.
+pub fn is_rust_identifier(name: &str) -> bool {
+    is_identifier(name) && name != "_" && !RUST_KEYWORDS.contains(&name)
+}
+
 /// `name` with every character an identifier cannot hold replaced by an
 /// underscore (C++ `TfMakeValidIdentifier`).
 ///
@@ -245,10 +256,10 @@ pub fn valid_identifier(name: &str) -> String {
 
 /// A token identifier as the constant that holds it: `modelDrawMode` becomes
 /// `MODEL_DRAW_MODE`.
-// TODO: the mapping is lossy — `hwPrimvar` and `hw_primvar` reach one
-// `HW_PRIMVAR` — so a library declaring both would emit the constant twice.
-// The name stage owes this a collision check, reported against the two tokens
-// that collided rather than against the duplicate definition rustc sees.
+///
+/// The mapping is lossy — `hwPrimvar` and `hw_primvar` reach one `HW_PRIMVAR`
+/// — so the emitter checks the constants it mints and reports the pair that
+/// collided rather than leaving rustc to report a duplicate definition.
 pub fn screaming_snake(id: &str) -> String {
     snake_case(id).to_ascii_uppercase()
 }
@@ -284,6 +295,15 @@ pub fn snake_case(name: &str) -> String {
     out
 }
 
+/// The words Rust reserves, which no generated identifier may be: the strict
+/// keywords of every edition, then the ones reserved for later use.
+const RUST_KEYWORDS: &[&str] = &[
+    "Self", "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate", "do", "dyn",
+    "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "macro",
+    "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "return", "self", "static", "struct", "super",
+    "trait", "true", "try", "type", "typeof", "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
+];
+
 /// Whether `c` may open an identifier: an ASCII letter or an underscore.
 fn is_identifier_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
@@ -297,6 +317,15 @@ fn is_identifier_cont(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name Rust has taken is no identifier here, however well it reads as
+    /// one to USD.
+    #[test]
+    fn keywords_are_not_identifiers() {
+        assert!(is_identifier("type") && !is_rust_identifier("type"));
+        assert!(is_identifier("_") && !is_rust_identifier("_"));
+        assert!(is_rust_identifier("Sphere") && is_rust_identifier("type_"));
+    }
 
     /// Non-word runs are dropped and each fragment is capitalized, as
     /// `usdGenSchema` does; a lone character is just uppercased.

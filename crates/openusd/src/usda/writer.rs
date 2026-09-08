@@ -37,6 +37,16 @@ impl TextWriter {
         Ok(())
     }
 
+    /// One value as `usda` writes it, e.g. `(1.0, 1.0, 1.0)` for a `double3`.
+    ///
+    /// The same rendering a layer's own text uses, for a caller that has a value
+    /// rather than a layer — showing a schema's fallback in documentation, say.
+    pub fn value_to_string(value: &sdf::Value) -> Result<String, FormatError> {
+        let mut text = String::new();
+        format_value(&mut text, value)?;
+        Ok(text)
+    }
+
     /// Write the layer to any `io::Write` sink.
     pub fn write<W: Write>(data: &dyn AbstractData, out: &mut W) -> Result<(), FormatError> {
         let mut emitter = Emitter { out, indent: 0 };

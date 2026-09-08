@@ -7,8 +7,11 @@
 //! read once however many files it produces.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use openusd::{sdf, tf, usd};
+
+pub use crate::load::DeclaredToken;
 
 /// The base every typed schema reaches. A schema that reaches it is one a
 /// prim's `typeName` can name.
@@ -43,11 +46,17 @@ pub struct Library {
     /// Whether the library asked for schema data only, with no Rust
     /// (`skipCodeGeneration`).
     pub skip_code_generation: bool,
-    /// The classes to generate, in the order the root layer declares them. A
-    /// class a sublayer declares is available to inherit from and is not here.
+    /// The classes to generate, in the order the root layer declares them.
+    ///
+    /// A class a sublayer declares is not here. What a view can inherit from is
+    /// therefore a class of this layer, one of the schema roots, or a class of
+    /// a library that declares its own `libraryName` and generates its own
+    /// views; anything else is reported as an ungenerated base.
     pub classes: Vec<Class>,
-    /// Every layer that was read, for a build script to watch.
-    pub source_layers: Vec<String>,
+    /// Where every layer read was found, for a build script to watch.
+    pub source_layers: Vec<PathBuf>,
+    /// The tokens the library asks for outright, beyond what its schemas imply.
+    pub declared_tokens: Vec<DeclaredToken>,
 }
 
 /// One schema: a class prim in the root layer, and everything generation needs
@@ -122,10 +131,11 @@ pub struct Base {
     /// Its views live in another crate or module, reached through the
     /// `extern_library` mapping.
     pub library: Option<String>,
-    /// The `apiSchemaType` it declares, as authored. A rule about what may
-    /// inherit what reads this, since a base can be declared in a sublayer
-    /// this run does not generate and so has no [`Class`] of its own.
-    pub api_schema_type: Option<String>,
+    /// The class name it declares (`className`), defaulting to its identifier
+    /// in proper case. What a generator makes of it is the generator's own.
+    pub class_name: String,
+    /// What kind of schema it is, classified against what stands behind it.
+    pub kind: usd::SchemaKind,
 }
 
 /// A class's `customData`, with what the registry reads kept apart from what
@@ -152,7 +162,14 @@ pub struct Metadata {
     /// The Rust type name, which defaults to the identifier in proper case.
     pub class_name: String,
     /// Single-apply API schemas whose accessors this class re-emits.
+    ///
+    // TODO: nothing reads this yet. Re-emitting a reflected schema's accessors
+    // as delegates on the reflecting class is the missing feature.
+    #[allow(dead_code)]
     pub reflected_api_schemas: Vec<tf::Token>,
+    /// The tokens this schema asks for outright, beyond what its properties
+    /// imply.
+    pub schema_tokens: Vec<DeclaredToken>,
 }
 
 /// One property of a schema.
@@ -171,10 +188,6 @@ pub struct Property {
     pub schematics_name: tf::Token,
     /// Whether it is an attribute or a relationship.
     pub spec_type: sdf::SpecType,
-    /// The class that introduced it: this class for a property it alone
-    /// declares, and the furthest ancestor declaring it for one refined down a
-    /// chain.
-    pub declared_by: tf::Token,
     /// Every class declaring it, nearest first: this class where it redeclares
     /// the property, then each ancestor that declared it.
     ///
@@ -185,10 +198,9 @@ pub struct Property {
     /// Whether this class declares it in its own layer, which a redeclaration
     /// does as much as a first declaration.
     ///
-    /// Kept apart from [`declared_by`](Self::declared_by) because a
-    /// redeclaration is both: an ancestor introduced the property, and this
-    /// class still declares it — to change its fallback, or to ask for the
-    /// accessor the ancestor suppressed.
+    /// A redeclaration is both a declaration and an inheritance: an ancestor
+    /// introduced the property, and this class still declares it — to change
+    /// its fallback, or to ask for the accessor the ancestor suppressed.
     pub is_local: bool,
     /// What its `customData` asked the generator for.
     pub api: PropertyApi,
@@ -205,6 +217,14 @@ pub struct Site {
     pub class: tf::Token,
     /// Whether that declaration asked for `apiSchemaOverride`.
     pub is_override: bool,
+    /// The accessor name that declaration asked for, or `None` where it asked
+    /// for none.
+    ///
+    /// A class redeclaring an ancestor's property has to know what the ancestor
+    /// called it, and the ancestor may be declared in a library this run does
+    /// not generate — so the name travels with the site rather than being
+    /// looked up on a class that may not be here.
+    pub api_name: Option<String>,
     /// Where it was written.
     pub origin: Origin,
 }
@@ -212,9 +232,6 @@ pub struct Site {
 /// A property's `customData`, which steers its accessor and nothing else.
 #[derive(Debug, Default)]
 pub struct PropertyApi {
-    /// The accessor's name before Rust casing, or `None` where the schema
-    /// asked for no accessor at all (`apiName = ""`, or an override).
-    pub name: Option<String>,
     /// Whether the library supplies the read accessor by hand
     /// (`apiGetImplementation = "custom"`), so the emitter writes everything
     /// but that one method and leaves its name free.
@@ -291,8 +308,23 @@ impl Property {
 
     /// The values a token attribute admits, which the tokens module emits and
     /// the accessor's documentation lists.
+    ///
+    /// Read as tokens or as strings: `allowedTokens` is `token[]` in the schema
+    /// SDF declares, but the text parser types the metadata it does not know
+    /// from the values it sees, so a list of quoted names arrives as strings.
+    ///
+    /// TODO: type it in the parser instead, which would let this be one read.
     pub fn allowed_tokens(&self) -> Vec<tf::Token> {
-        self.field(sdf::FieldKey::AllowedTokens).unwrap_or_default()
+        let Some(value) = self.fields.get(sdf::FieldKey::AllowedTokens.as_str()) else {
+            return Vec::new();
+        };
+        if let Some(tokens) = value.try_as_token_vec_ref() {
+            return tokens.clone();
+        }
+        value
+            .try_as_string_vec_ref()
+            .map(|strings| strings.iter().map(|text| tf::Token::from(text.as_str())).collect())
+            .unwrap_or_default()
     }
 
     /// The property's own documentation, as the schema wrote it.
@@ -303,9 +335,20 @@ impl Property {
             .map(String::as_str)
     }
 
+    /// The accessor's name before Rust casing, or `None` where this class
+    /// asked for no accessor — an `apiName` of `""`, an override, or a
+    /// property it only inherits.
+    ///
+    /// The strongest site is this class's own declaration exactly where it has
+    /// one, which is what [`is_local`](Self::is_local) says.
+    pub fn api_name(&self) -> Option<&str> {
+        let site = self.sites.first()?;
+        self.is_local.then_some(site.api_name.as_deref()).flatten()
+    }
+
     /// Whether an accessor is emitted for it at all.
     pub fn has_accessor(&self) -> bool {
-        self.api.name.is_some()
+        self.api_name().is_some()
     }
 
     /// Whether the schematics records it among the class's API schema override

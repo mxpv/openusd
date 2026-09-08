@@ -20,7 +20,7 @@ use std::iter;
 use openusd::{sdf, tf, usd};
 
 use crate::error::Error;
-use crate::load::{Declaration, PropertyDeclaration, Source};
+use crate::load::{CustomData, Declaration, PropertyDeclaration, Source};
 use crate::model::{
     API_SCHEMA_BASE, API_SCHEMA_OVERRIDE, Base, Class, Library, Metadata, NON_APPLIED, Property, PropertyApi,
     SCHEMA_BASE, Site, TYPED,
@@ -56,6 +56,7 @@ pub fn library(source: &Source) -> Result<Library, Error> {
         skip_code_generation: source.skip_code_generation,
         classes,
         source_layers: source.source_layers.clone(),
+        declared_tokens: source.tokens.clone(),
     })
 }
 
@@ -69,14 +70,11 @@ fn class(
     let direct_base = direct_base(&bases, &declaration.name);
     let is_typed = bases.iter().any(|base| base.identifier.as_str() == TYPED);
 
-    // A schema is concrete when it carries a type name of its own. Upstream
-    // also clears one a parent already declares; here a type name has to be
+    // Upstream clears a type name a parent already declares; here one has to be
     // the class's own identifier (`Violation::TypeNameMismatch`), and two
     // classes cannot share that, so there is nothing to clear.
-    let is_concrete = declaration.type_name.is_some();
-
     let (family, version) = usd::SchemaRegistry::parse_schema_family_and_version(&declaration.name);
-    let kind = kind(declaration, is_typed, is_concrete, &family)?;
+    let kind = kind(declaration, is_typed, &family)?;
     let metadata = metadata(declaration);
     let properties = properties(flattened, index, declaration, &bases, &metadata, kind)?;
 
@@ -106,7 +104,7 @@ fn class(
 /// The chain is checked for a cycle as it is walked, so a schema inheriting
 /// from itself is a diagnostic rather than a hang.
 fn chain(index: &HashMap<&tf::Token, &Declaration>, declaration: &Declaration) -> Result<Vec<Base>, Error> {
-    let mut bases = Vec::new();
+    let mut walked: Vec<&Declaration> = Vec::new();
     let mut seen = HashSet::new();
     seen.insert(declaration.name.clone());
 
@@ -120,25 +118,55 @@ fn chain(index: &HashMap<&tf::Token, &Declaration>, declaration: &Declaration) -
         };
 
         if !seen.insert(parent.name.clone()) {
-            let mut walked: Vec<&str> = bases.iter().map(|base: &Base| base.identifier.as_str()).collect();
-            walked.push(parent.name.as_str());
+            let mut chain: Vec<&str> = walked.iter().map(|base| base.name.as_str()).collect();
+            chain.push(parent.name.as_str());
             return Err(Error::Definition {
                 origin: declaration.origin.describe(),
                 violation: Violation::CyclicInheritance {
-                    chain: walked.join(" -> "),
+                    chain: chain.join(" -> "),
                 },
             });
         }
 
-        bases.push(Base {
-            identifier: parent.name.clone(),
-            library: (parent.library != declaration.library).then(|| parent.library.clone()),
-            api_schema_type: parent.custom_data.string(API_SCHEMA_TYPE),
-        });
+        walked.push(parent);
         current = parent;
     }
 
+    // Each base is classified against what stands behind it, which is the rest
+    // of this chain. Building it furthest-first is what carries `Typed` forward:
+    // a base is typed exactly when something further back is.
+    let mut reaches_typed = false;
+    let mut bases: Vec<Base> = walked
+        .iter()
+        .rev()
+        .map(|parent| {
+            let (family, _) = usd::SchemaRegistry::parse_schema_family_and_version(&parent.name);
+            // An `apiSchemaType` nothing can read is a rule broken by the class
+            // that wrote it, which validation reports where that class is
+            // generated. A descendant merely inheriting from it reads the kind
+            // it can see rather than failing on someone else's declaration.
+            let kind = kind(parent, reaches_typed, &family).unwrap_or(usd::SchemaKind::AbstractBase);
+            reaches_typed |= parent.name.as_str() == TYPED;
+            Base {
+                identifier: parent.name.clone(),
+                library: (parent.library != declaration.library).then(|| parent.library.clone()),
+                class_name: class_name(parent),
+                kind,
+            }
+        })
+        .collect();
+
+    bases.reverse();
     Ok(bases)
+}
+
+/// The Rust type name a class is generated under: what its `customData` asked
+/// for, or its identifier in proper case.
+fn class_name(declaration: &Declaration) -> String {
+    declaration
+        .custom_data
+        .string("className")
+        .unwrap_or_else(|| names::proper_case(declaration.name.as_str()))
 }
 
 /// What kind of schema a class is.
@@ -146,12 +174,9 @@ fn chain(index: &HashMap<&tf::Token, &Declaration>, declaration: &Declaration) -
 /// A schema that is neither typed nor concrete, and is not one of the three
 /// roots, is an API schema; `apiSchemaType` then says which of the three kinds,
 /// and defaults to single-apply.
-fn kind(
-    declaration: &Declaration,
-    is_typed: bool,
-    is_concrete: bool,
-    family: &tf::Token,
-) -> Result<usd::SchemaKind, Error> {
+fn kind(declaration: &Declaration, is_typed: bool, family: &tf::Token) -> Result<usd::SchemaKind, Error> {
+    // A schema is concrete when it carries a type name of its own.
+    let is_concrete = declaration.type_name.is_some();
     // The roots are abstract bases. `SchemaBase` is among them: it inherits
     // nothing and carries no type, which is what an API schema looks like from
     // here, and a library declaring it would otherwise register the root every
@@ -202,11 +227,9 @@ fn metadata(declaration: &Declaration) -> Metadata {
         allowed_instance_names: declaration.custom_data.tokens("apiSchemaAllowedInstanceNames"),
         instance_restrictions: declaration.custom_data.instance_restrictions(),
         fallback_types: declaration.custom_data.tokens("fallbackTypes"),
-        class_name: declaration
-            .custom_data
-            .string("className")
-            .unwrap_or_else(|| names::proper_case(declaration.name.as_str())),
+        class_name: class_name(declaration),
         reflected_api_schemas: declaration.custom_data.tokens("reflectedAPISchemas"),
+        schema_tokens: declaration.custom_data.token_declarations("schemaTokens"),
     }
 }
 
@@ -280,20 +303,17 @@ fn properties(
 
         let local = declaration.properties.iter().find(|p| p.name == name);
         let sites = declaring_sites(index, declaration, bases, &name);
-        // The furthest site introduced the property. A name no declaration
-        // carries belongs to the class it was found on, which is what a
-        // property reaching the model through composition alone looks like.
-        let (declared_by, origin) = match sites.last() {
-            Some(site) => (site.class.clone(), site.origin.clone()),
-            None => (declaration.name.clone(), declaration.origin.clone()),
-        };
+        // A property no declaration carries was found on this class, which is
+        // what one reaching the model through composition alone looks like.
+        let origin = sites
+            .last()
+            .map_or_else(|| declaration.origin.clone(), |site| site.origin.clone());
         properties.push(Property {
             schematics_name: schematics_name(&name, metadata, kind),
-            api: property_api(declaration, local, &name)?,
+            api: property_api(declaration, local)?,
             is_local: local.is_some(),
             name,
             spec_type: composed.spec_type,
-            declared_by,
             sites,
             fields: composed.fields,
             origin,
@@ -357,35 +377,35 @@ fn declaring_sites(
             Some(Site {
                 class: class.name.clone(),
                 is_override: property.custom_data.flag(API_SCHEMA_OVERRIDE).unwrap_or(false),
+                api_name: api_name(&property.custom_data, name),
                 origin: property.origin.clone(),
             })
         })
         .collect()
 }
 
+/// The accessor name one declaration of a property asks for.
+///
+/// An override exists to change a built-in's fallback, not to offer an
+/// accessor, so it suppresses one exactly as an empty `apiName` does. Saying
+/// nothing asks for the property's own name.
+fn api_name(custom_data: &CustomData, name: &tf::Token) -> Option<String> {
+    if custom_data.flag(API_SCHEMA_OVERRIDE).unwrap_or(false) {
+        return None;
+    }
+    match custom_data.string("apiName").as_deref() {
+        Some("") => None,
+        Some(explicit) => Some(explicit.to_owned()),
+        None => Some(names::camel_case(name.as_str())),
+    }
+}
+
 /// What a property's `customData` asks the generator for.
-fn property_api(
-    declaration: &Declaration,
-    property: Option<&PropertyDeclaration>,
-    name: &tf::Token,
-) -> Result<PropertyApi, Error> {
+fn property_api(declaration: &Declaration, property: Option<&PropertyDeclaration>) -> Result<PropertyApi, Error> {
     let Some(property) = property else {
         // An inherited property keeps the accessor its own class generates, so
         // this class needs none of its own.
         return Ok(PropertyApi::default());
-    };
-
-    let is_override = property.custom_data.flag(API_SCHEMA_OVERRIDE).unwrap_or(false);
-    // An override exists to change a built-in's fallback, not to offer an
-    // accessor, so it suppresses one exactly as an empty apiName does.
-    let name = if is_override {
-        None
-    } else {
-        match property.custom_data.string("apiName").as_deref() {
-            Some("") => None,
-            Some(explicit) => Some(explicit.to_owned()),
-            None => Some(names::camel_case(name.as_str())),
-        }
     };
 
     // `generated` is the default and asks for nothing; `custom` says the
@@ -404,7 +424,7 @@ fn property_api(
         }
     };
 
-    Ok(PropertyApi { name, custom_get })
+    Ok(PropertyApi { custom_get })
 }
 
 /// The name a property is recorded under in the schematics.
@@ -511,12 +531,10 @@ mod tests {
                 .local_properties()
                 .find(|property| property.name.as_str() == name)
                 .unwrap_or_else(|| panic!("{name} is declared"))
-                .api
-                .name
-                .clone()
+                .api_name()
         };
         assert_eq!(
-            accessor("riStatements:attributes:user:Gofur_GeomOnHairdensity").as_deref(),
+            accessor("riStatements:attributes:user:Gofur_GeomOnHairdensity"),
             Some("Gofur_GeomOnHairdensity"),
             "the declared apiName is what the accessor is called"
         );
@@ -525,11 +543,7 @@ mod tests {
             None,
             "an empty apiName asks for no accessor"
         );
-        assert_eq!(
-            accessor("temp").as_deref(),
-            Some("temp"),
-            "the default is the name itself"
-        );
+        assert_eq!(accessor("temp"), Some("temp"), "the default is the name itself");
     }
 
     /// A class that redeclares an inherited property still declares it, so the
@@ -559,13 +573,13 @@ mod tests {
             "Derived's own declaration is the strongest, and Base's stands behind it"
         );
         assert_eq!(
-            property.api.name.as_deref(),
+            property.api_name(),
             Some("overrideBaseTrueDerivedFalse"),
             "so Derived asks for the accessor Base suppressed"
         );
         assert_eq!(
-            property.declared_by.as_str(),
-            "Base",
+            property.sites.last().map(|site| site.class.as_str()),
+            Some("Base"),
             "while Base is still what introduced it"
         );
     }
@@ -707,8 +721,9 @@ class Child "Child" (
         let inherited: Vec<&str> = derived
             .properties
             .iter()
-            .filter(|property| property.declared_by.as_str() != "Derived")
-            .map(|property| property.declared_by.as_str())
+            .filter_map(|property| property.sites.last())
+            .map(|site| site.class.as_str())
+            .filter(|declared| *declared != "Derived")
             .collect();
         assert!(
             inherited.contains(&"Base"),

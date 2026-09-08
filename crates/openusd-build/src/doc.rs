@@ -341,7 +341,7 @@ fn reads_as_code(word: &str) -> bool {
 /// Breaks `line` at spaces so no line runs past [`WIDTH`] columns, keeping its
 /// indentation. A word longer than the width stands alone rather than being
 /// split.
-fn wrap(line: &str) -> String {
+pub fn wrap(line: &str) -> String {
     if columns(line) <= WIDTH {
         return line.trim_end().to_owned();
     }

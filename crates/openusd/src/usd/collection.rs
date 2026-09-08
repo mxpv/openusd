@@ -28,7 +28,7 @@ use std::rc::Rc;
 
 use crate::Result;
 use crate::sdf::{self, FieldKey, Path, Value, Variability};
-use crate::usd::{Prim, PrimPredicate, Relationship, Stage};
+use crate::usd::{Prim, PrimPredicate, Relationship, SchemaRegistry, Stage};
 
 use super::collection_expr::{CollectionEvaluator, CollectionSearcher, resolve_complete_membership_expression};
 
@@ -444,7 +444,7 @@ pub fn apply_collection(stage: &Stage, prim: impl sdf::IntoPath, name: impl Into
     // needed). `override_prim` is idempotent when a spec already exists.
     stage
         .override_prim(prim.clone())?
-        .add_applied_schema(format!("{API_COLLECTION}:{name}"))?;
+        .add_applied_schema(SchemaRegistry::make_applied_name(API_COLLECTION, &name))?;
     Ok(Collection::from_parts(prim, name))
 }
 

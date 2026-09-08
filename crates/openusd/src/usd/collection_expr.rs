@@ -13,7 +13,7 @@ use crate::sdf::path_expr::{
     FnArg, GlobPattern, IncrementalSearcher, PathExpressionEval, PredResult, PredicateArg, PredicateLibrary,
 };
 use crate::sdf::{self, Path};
-use crate::usd::{Prim, Stage};
+use crate::usd::{Prim, SchemaRegistry, Stage};
 
 use super::collection::Collection;
 
@@ -383,10 +383,7 @@ fn predicate_library() -> PredicateLibrary<CollectionObject> {
                 }
                 let prim = obj.closest_prim();
                 let value = apis.iter().any(|api| {
-                    let name = match &instance {
-                        Some(instance) => format!("{api}:{instance}"),
-                        None => api.clone(),
-                    };
+                    let name = SchemaRegistry::make_applied_name(api, instance.as_deref().unwrap_or_default());
                     prim.has_api_schema(name).unwrap_or(false)
                 });
                 PredResult::varying(value)

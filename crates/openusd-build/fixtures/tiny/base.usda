@@ -1,0 +1,18 @@
+#usda 1.0
+(
+    """The roots every schema derives from, which a real library gets by
+    sublayering the core `usd/schema.usda`. Declared here so the fixture needs
+    nothing outside its own directory."""
+)
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "tinyBase"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "APISchemaBase" {}
