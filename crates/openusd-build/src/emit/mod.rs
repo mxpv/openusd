@@ -284,9 +284,9 @@ class "Held" (
         );
     }
 
-    /// Two token identifiers reaching one Rust constant is refused, a constant
-    /// holding one string. The library declares the pair happily; only naming
-    /// them in Rust puts them in each other's way.
+    /// Two token identifiers can reach one Rust constant, which upstream does
+    /// on purpose where a schema and a property share a name. The library
+    /// declares the pair happily, and the second constant takes an underscore.
     #[test]
     fn two_ids_one_constant() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -315,13 +315,11 @@ class "Typed" {}
         )
         .expect("the library itself is well formed");
 
-        match emit(&library, &Externs::new(), "schema.usda") {
-            Err(Error::Definition {
-                violation: Violation::TokenConstantCollision { constant, .. },
-                ..
-            }) => assert_eq!(constant, "DRAW_MODE"),
-            other => panic!("{:?}", other.map(|_| "emitted")),
-        }
+        let text = emit(&library, &Externs::new(), "schema.usda").expect("both are named");
+        // `draw_mode` sorts before `drawMode`, so it is the one that keeps the
+        // name; both say which string they hold.
+        assert!(text.contains("pub const DRAW_MODE: &str = \"b\";"), "{text}");
+        assert!(text.contains("pub const DRAW_MODE_: &str = \"a\";"), "{text}");
     }
 
     /// Two properties of one class can ask for one accessor name, and Rust has

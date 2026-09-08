@@ -10,8 +10,27 @@ use openusd::Result;
 use openusd::usd::SchemaBase;
 use openusd::{sdf, tf, usd};
 
-use super::tokens as tok;
+use super::tokens;
 use super::{ImplementationSource, Shader};
+
+/// The namespace a shader's source is named under. A render context interposes
+/// its own name after it, as in `info:<context>:sourceAsset`, and no schema
+/// declares those names.
+pub const INFO_NAMESPACE: &str = "info:";
+
+/// The tail of the name carrying a source asset's sub-identifier, which
+/// [`INFO_NAMESPACE`] and a render context precede.
+pub const SUBIDENTIFIER_SUFFIX: &str = "sourceAsset:subIdentifier";
+
+/// The source asset of the universal render context, which is the context a
+/// caller reaches without naming one.
+pub const INFO_SOURCE_ASSET: &str = "info:sourceAsset";
+
+/// The universal render context's source-asset sub-identifier.
+pub const INFO_SOURCE_ASSET_SUBIDENTIFIER: &str = "info:sourceAsset:subIdentifier";
+
+/// The source code of the universal render context.
+pub const INFO_SOURCE_CODE: &str = "info:sourceCode";
 
 /// String-valued metadata passed to an Sdr shader or property definition
 /// (C++ `SdrTokenMap`).
@@ -19,7 +38,7 @@ pub type SdrMetadata = HashMap<tf::Token, String>;
 
 /// One `NodeDef` source family: which implementation selects it, the universal
 /// attribute that carries it, and how a source-type-specific one is spelled and
-/// typed. `universal_name` is [`NS_INFO`](tok::NS_INFO) joined to `suffix`,
+/// typed. `universal_name` is [`INFO_NAMESPACE`] joined to `suffix`,
 /// which is what a source-type-specific name interposes its type into.
 struct SourceAttr {
     implementation: ImplementationSource,
@@ -30,22 +49,22 @@ struct SourceAttr {
 
 const SOURCE_ASSET: SourceAttr = SourceAttr {
     implementation: ImplementationSource::SourceAsset,
-    universal_name: tok::A_INFO_SOURCE_ASSET,
-    suffix: tok::IMPL_SOURCE_SOURCE_ASSET,
+    universal_name: INFO_SOURCE_ASSET,
+    suffix: tokens::SOURCE_ASSET,
     type_name: sdf::ValueTypeName::ASSET,
 };
 
 const SOURCE_ASSET_SUBIDENTIFIER: SourceAttr = SourceAttr {
     implementation: ImplementationSource::SourceAsset,
-    universal_name: tok::A_INFO_SOURCE_ASSET_SUBIDENTIFIER,
-    suffix: tok::SOURCE_ASSET_SUBIDENTIFIER,
+    universal_name: INFO_SOURCE_ASSET_SUBIDENTIFIER,
+    suffix: SUBIDENTIFIER_SUFFIX,
     type_name: sdf::ValueTypeName::TOKEN,
 };
 
 const SOURCE_CODE: SourceAttr = SourceAttr {
     implementation: ImplementationSource::SourceCode,
-    universal_name: tok::A_INFO_SOURCE_CODE,
-    suffix: tok::IMPL_SOURCE_SOURCE_CODE,
+    universal_name: INFO_SOURCE_CODE,
+    suffix: tokens::SOURCE_CODE,
     type_name: sdf::ValueTypeName::STRING,
 };
 
@@ -158,8 +177,8 @@ impl Shader {
     pub fn source_types(&self) -> Result<Vec<tf::Token>> {
         let suffix = match implementation_source(self)? {
             ImplementationSource::Id => return Ok(Vec::new()),
-            ImplementationSource::SourceAsset => tok::IMPL_SOURCE_SOURCE_ASSET,
-            ImplementationSource::SourceCode => tok::IMPL_SOURCE_SOURCE_CODE,
+            ImplementationSource::SourceAsset => tokens::SOURCE_ASSET,
+            ImplementationSource::SourceCode => tokens::SOURCE_CODE,
         };
 
         Ok(self
@@ -176,17 +195,17 @@ impl Shader {
     /// an [`SdrMetadata`] is what a consumer wants; a composed presence probe
     /// that does not clone the value would serve the `has_*` pair.
     pub fn sdr_metadata(&self) -> Result<SdrMetadata> {
-        Ok(metadata_map(self.get_metadata(tok::META_SDR_METADATA)?))
+        Ok(metadata_map(self.get_metadata(tokens::SDR_METADATA)?))
     }
 
     /// The composed shader-level `sdrMetadata` value for `key`.
     pub fn sdr_metadata_by_key(&self, key: impl AsRef<str>) -> Result<Option<String>> {
-        Ok(metadata_value(self.get_metadata(tok::META_SDR_METADATA)?, key.as_ref()))
+        Ok(metadata_value(self.get_metadata(tokens::SDR_METADATA)?, key.as_ref()))
     }
 
     /// Whether a composed shader-level `sdrMetadata` field exists.
     pub fn has_sdr_metadata(&self) -> Result<bool> {
-        Ok(self.get_metadata::<sdf::Value>(tok::META_SDR_METADATA)?.is_some())
+        Ok(self.get_metadata::<sdf::Value>(tokens::SDR_METADATA)?.is_some())
     }
 
     /// Whether the composed shader-level `sdrMetadata` dictionary contains
@@ -194,10 +213,7 @@ impl Shader {
     /// text rendering, so a key holding one reports here but reads back as
     /// absent from the value queries.
     pub fn has_sdr_metadata_by_key(&self, key: impl AsRef<str>) -> Result<bool> {
-        Ok(metadata_has_key(
-            self.get_metadata(tok::META_SDR_METADATA)?,
-            key.as_ref(),
-        ))
+        Ok(metadata_has_key(self.get_metadata(tokens::SDR_METADATA)?, key.as_ref()))
     }
 
     /// Author `sdrMetadata` entries on the shader (C++ `SetSdrMetadata`).
@@ -207,7 +223,7 @@ impl Shader {
     pub fn set_sdr_metadata(&self, metadata: &SdrMetadata) -> Result<(), usd::StageAuthoringError> {
         self.prim()
             .clone()
-            .update_metadata(tok::META_SDR_METADATA, |current| merge_metadata_map(current, metadata))?;
+            .update_metadata(tokens::SDR_METADATA, |current| merge_metadata_map(current, metadata))?;
         Ok(())
     }
 
@@ -221,21 +237,21 @@ impl Shader {
         let entry = [(key.into(), value.into())];
         self.prim()
             .clone()
-            .update_metadata(tok::META_SDR_METADATA, |current| merge_metadata(current, entry))?;
+            .update_metadata(tokens::SDR_METADATA, |current| merge_metadata(current, entry))?;
         Ok(())
     }
 
     /// Drop the shader's whole `sdrMetadata` opinion on the edit-target layer
     /// (C++ `ClearSdrMetadata`).
     pub fn clear_sdr_metadata(&self) -> Result<(), usd::StageAuthoringError> {
-        self.prim().clone().clear_metadata(tok::META_SDR_METADATA)?;
+        self.prim().clone().clear_metadata(tokens::SDR_METADATA)?;
         Ok(())
     }
 
     /// Drop one `sdrMetadata` entry from the shader's opinion on the
     /// edit-target layer (C++ `ClearSdrMetadataByKey`).
     pub fn clear_sdr_metadata_by_key(&self, key: impl AsRef<str>) -> Result<(), usd::StageAuthoringError> {
-        self.prim().clone().update_metadata(tok::META_SDR_METADATA, |current| {
+        self.prim().clone().update_metadata(tokens::SDR_METADATA, |current| {
             remove_metadata_key(current, key.as_ref())
         })?;
         Ok(())
@@ -288,7 +304,7 @@ fn set_source_value(
 
 /// Resolves the active implementation family on a `NodeDef` prim.
 fn implementation_source(prim: &usd::Prim) -> Result<ImplementationSource> {
-    let value = prim.attribute(tok::A_INFO_IMPLEMENTATION_SOURCE).get::<sdf::Value>()?;
+    let value = prim.attribute(tokens::INFO_IMPLEMENTATION_SOURCE).get::<sdf::Value>()?;
     Ok(value
         .and_then(sdf::Value::try_as_token)
         .and_then(ImplementationSource::from_token)
@@ -300,14 +316,14 @@ fn source_property_name(attr: &SourceAttr, source_type: &str) -> Cow<'static, st
     if source_type.is_empty() {
         Cow::Borrowed(attr.universal_name)
     } else {
-        Cow::Owned(format!("{}{source_type}:{}", tok::NS_INFO, attr.suffix))
+        Cow::Owned(format!("{INFO_NAMESPACE}{source_type}:{}", attr.suffix))
     }
 }
 
 /// Extracts the source type from an exact active-family property name —
 /// `info:<sourceType>:<suffix>`, and nothing longer or shorter.
 fn source_type<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
-    let (source_type, found) = name.strip_prefix(tok::NS_INFO)?.split_once(':')?;
+    let (source_type, found) = name.strip_prefix(INFO_NAMESPACE)?.split_once(':')?;
     (!source_type.is_empty() && found == suffix).then_some(source_type)
 }
 
@@ -373,22 +389,22 @@ pub(super) fn remove_metadata_key(current: Option<sdf::Value>, key: &str) -> Opt
 
 /// The composed `sdrMetadata` dictionary on a shading attribute.
 pub(super) fn attribute_sdr_metadata(attribute: &usd::Attribute) -> Result<SdrMetadata> {
-    Ok(metadata_map(attribute.get_metadata(tok::META_SDR_METADATA)?))
+    Ok(metadata_map(attribute.get_metadata(tokens::SDR_METADATA)?))
 }
 
 /// The composed `sdrMetadata` value for `key` on a shading attribute.
 pub(super) fn attribute_sdr_metadata_by_key(attribute: &usd::Attribute, key: &str) -> Result<Option<String>> {
-    Ok(metadata_value(attribute.get_metadata(tok::META_SDR_METADATA)?, key))
+    Ok(metadata_value(attribute.get_metadata(tokens::SDR_METADATA)?, key))
 }
 
 /// Whether a composed `sdrMetadata` field exists on a shading attribute.
 pub(super) fn attribute_has_sdr_metadata(attribute: &usd::Attribute) -> Result<bool> {
-    Ok(attribute.get_metadata::<sdf::Value>(tok::META_SDR_METADATA)?.is_some())
+    Ok(attribute.get_metadata::<sdf::Value>(tokens::SDR_METADATA)?.is_some())
 }
 
 /// Whether a shading attribute's composed `sdrMetadata` dictionary holds `key`.
 pub(super) fn attribute_has_sdr_metadata_by_key(attribute: &usd::Attribute, key: &str) -> Result<bool> {
-    Ok(metadata_has_key(attribute.get_metadata(tok::META_SDR_METADATA)?, key))
+    Ok(metadata_has_key(attribute.get_metadata(tokens::SDR_METADATA)?, key))
 }
 
 /// Merges `metadata` into a shading attribute's own `sdrMetadata` opinion.
@@ -396,7 +412,7 @@ pub(super) fn set_attribute_sdr_metadata(
     attribute: usd::Attribute,
     metadata: &SdrMetadata,
 ) -> Result<usd::Attribute, usd::StageAuthoringError> {
-    attribute.update_metadata(tok::META_SDR_METADATA, |current| merge_metadata_map(current, metadata))
+    attribute.update_metadata(tokens::SDR_METADATA, |current| merge_metadata_map(current, metadata))
 }
 
 /// Merges one entry into a shading attribute's own `sdrMetadata` opinion.
@@ -405,9 +421,7 @@ pub(super) fn set_attribute_sdr_metadata_by_key(
     key: String,
     value: String,
 ) -> Result<usd::Attribute, usd::StageAuthoringError> {
-    attribute.update_metadata(tok::META_SDR_METADATA, |current| {
-        merge_metadata(current, [(key, value)])
-    })
+    attribute.update_metadata(tokens::SDR_METADATA, |current| merge_metadata(current, [(key, value)]))
 }
 
 /// Drops one entry from a shading attribute's own `sdrMetadata` opinion.
@@ -415,7 +429,7 @@ pub(super) fn clear_attribute_sdr_metadata_by_key(
     attribute: usd::Attribute,
     key: &str,
 ) -> Result<usd::Attribute, usd::StageAuthoringError> {
-    attribute.update_metadata(tok::META_SDR_METADATA, |current| remove_metadata_key(current, key))
+    attribute.update_metadata(tokens::SDR_METADATA, |current| remove_metadata_key(current, key))
 }
 
 /// Renders a metadata value as the string an Sdr consumer reads, the way C++
@@ -467,7 +481,7 @@ mod tests {
 
     #[test]
     fn implementation_selects_id() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
         shader.create_id_attr()?.set(sdf::Value::token("Example"))?;
 
@@ -489,7 +503,7 @@ mod tests {
 
     #[test]
     fn source_asset_fallback() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
         shader
             .create_implementation_source_attr()?
@@ -540,7 +554,7 @@ mod tests {
 
     #[test]
     fn source_code_selection() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
         shader
             .create_implementation_source_attr()?
@@ -567,14 +581,17 @@ mod tests {
 
     #[test]
     fn authors_source_selection() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
 
-        // An id needs no `info:implementationSource`: identifier mode is the
-        // schema fallback.
+        // An id needs no authored `info:implementationSource`: identifier mode
+        // is the schema's own fallback, which the registry answers with.
         shader.set_shader_id("Example")?;
         assert_eq!(shader.id()?.as_deref(), Some("Example"));
-        assert_eq!(shader.implementation_source_attr().get::<sdf::Value>()?, None);
+        assert_eq!(
+            shader.implementation_source_attr().get()?,
+            Some(sdf::Value::token("id"))
+        );
 
         shader.set_source_asset("./shader.mdl", "mdl")?;
         assert_eq!(shader.implementation_source()?, ImplementationSource::SourceAsset);
@@ -605,7 +622,7 @@ mod tests {
     /// reads back as identifier mode.
     #[test]
     fn shader_id_corrects_family() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("root.usda")?;
+        let stage = crate::tests::stage("root.usda")?;
         let root = stage.root_layer().identifier().to_string();
         let weak = sdf::Layer::new_anonymous("weak");
         let weak_id = weak.identifier().to_string();
@@ -628,21 +645,18 @@ mod tests {
         shader.set_shader_id("Example")?;
 
         let weak = stage.layer(&weak_id).expect("weak layer").export_to_string()?;
-        assert!(!weak.contains(tok::IMPL_SOURCE_SOURCE_CODE));
+        assert!(!weak.contains(tokens::SOURCE_CODE));
         Ok(())
     }
 
     #[test]
     fn metadata_composes() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("root.usda")?;
+        let stage = crate::tests::stage("root.usda")?;
         let root = stage.root_layer().identifier().to_string();
         let mut weak = sdf::Layer::new_anonymous("weak");
         weak.edit(|edit| {
-            let mut shader = sdf::PrimSpec::new(edit.data_mut(), "/Shader", sdf::Specifier::Def, tok::T_SHADER)?;
-            shader.set(
-                tok::META_SDR_METADATA,
-                dictionary(&[("label", "weak"), ("page", "weak")]),
-            );
+            let mut shader = sdf::PrimSpec::new(edit.data_mut(), "/Shader", sdf::Specifier::Def, tokens::SHADER)?;
+            shader.set(tokens::SDR_METADATA, dictionary(&[("label", "weak"), ("page", "weak")]));
             let mut input = sdf::AttributeSpec::new(
                 edit.data_mut(),
                 "/Shader.inputs:value",
@@ -650,7 +664,7 @@ mod tests {
                 sdf::Variability::Varying,
                 false,
             )?;
-            input.set(tok::META_SDR_METADATA, dictionary(&[("widget", "slider")]));
+            input.set(tokens::SDR_METADATA, dictionary(&[("widget", "slider")]));
             Ok(())
         })?;
         stage.insert_layer(&root, 0, weak, sdf::LayerOffset::IDENTITY)?;
@@ -663,13 +677,13 @@ mod tests {
         shader
             .prim()
             .clone()
-            .set_metadata(tok::META_SDR_METADATA, sdf::Value::Dictionary(strong_metadata))?;
+            .set_metadata(tokens::SDR_METADATA, sdf::Value::Dictionary(strong_metadata))?;
         let input = shader.create_input("value", "float")?;
         let output = shader.create_output("result", "float")?;
         output
             .clone()
             .into_attribute()
-            .set_metadata(tok::META_SDR_METADATA, dictionary(&[("role", "result")]))?;
+            .set_metadata(tokens::SDR_METADATA, dictionary(&[("role", "result")]))?;
 
         let metadata = shader.sdr_metadata()?;
         assert_eq!(
@@ -699,7 +713,7 @@ mod tests {
 
     #[test]
     fn metadata_unauthored() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
         let input = shader.create_input("value", "float")?;
 
@@ -714,7 +728,7 @@ mod tests {
 
     #[test]
     fn authors_metadata_entries() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
 
         shader.set_sdr_metadata_by_key("label", "Diffuse")?;
@@ -750,12 +764,12 @@ mod tests {
     /// weaker layer authors instead of leaving an empty dictionary behind.
     #[test]
     fn clearing_key_uncovers_weaker() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("root.usda")?;
+        let stage = crate::tests::stage("root.usda")?;
         let root = stage.root_layer().identifier().to_string();
         let mut weak = sdf::Layer::new_anonymous("weak");
         weak.edit(|edit| {
-            let mut shader = sdf::PrimSpec::new(edit.data_mut(), "/Shader", sdf::Specifier::Def, tok::T_SHADER)?;
-            shader.set(tok::META_SDR_METADATA, dictionary(&[("label", "weak")]));
+            let mut shader = sdf::PrimSpec::new(edit.data_mut(), "/Shader", sdf::Specifier::Def, tokens::SHADER)?;
+            shader.set(tokens::SDR_METADATA, dictionary(&[("label", "weak")]));
             Ok(())
         })?;
         stage.insert_layer(&root, 0, weak, sdf::LayerOffset::IDENTITY)?;

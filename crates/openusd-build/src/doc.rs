@@ -18,33 +18,75 @@ const WIDTH: usize = 76;
 /// Punctuation that stays outside markup when it opens a word, so a quoted
 /// name is backticked without its quotes. A `[` is absent deliberately:
 /// escaping a bracket is [`mark_up`]'s job.
-const OPENING: &[char] = &['"', '\'', '('];
+const OPENING: &[char] = &['"', '\'', '(', '*'];
+
+/// What opens and closes a Markdown code block, which a schema may write for
+/// itself.
+const FENCE: &str = "```";
 
 /// Punctuation that stays outside markup when it closes a word, so a code span
 /// never swallows the full stop ending its sentence. A `)` is absent so that
 /// `Compute()` keeps its call parentheses.
-const CLOSING: &[char] = &['"', '\'', '.', ',', ';', ':', '!', '?'];
+const CLOSING: &[char] = &['"', '\'', '.', ',', ';', ':', '!', '?', '*'];
 
 /// One schema's documentation as Markdown, wrapped and ready to emit as a
 /// `///` block.
 pub fn to_markdown(documentation: &str) -> String {
+    // A schema's text carries the whitespace it was written with, which a doc
+    // comment cannot: upstream `usdShade` wraps a sentence on a bare carriage
+    // return, which Rust reads as an error rather than as a break, and
+    // `usdGeom` indents a list with tabs, which `clippy::tabs_in_doc_comments`
+    // refuses. Both become the spelling a comment holds.
+    let documentation = documentation
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', "    ");
+    let documentation = dedent(&documentation);
     let mut out = String::with_capacity(documentation.len() + documentation.len() / 4);
 
-    for segment in segments(documentation) {
+    for segment in segments(&documentation) {
         match segment {
             Segment::Code(body) => {
-                out.push_str("```text\n");
-                out.push_str(body.trim_start_matches(['\r', '\n']).trim_end());
-                out.push_str("\n```\n");
+                out.push_str(FENCE);
+                out.push_str("text\n");
+                out.push_str(body.trim_start_matches('\n').trim_end());
+                out.push('\n');
+                out.push_str(FENCE);
+                out.push('\n');
             }
             Segment::Prose(text) => {
-                for line in text.lines() {
+                let mut sample = false;
+                for line in items(text) {
+                    // Four columns of indentation is a Markdown code block,
+                    // which rustdoc reads as Rust and runs as a doctest. What
+                    // a schema indented is a sample, so it is fenced as one
+                    // and shown as it stands. A blank line inside one belongs
+                    // to it.
+                    let indented = line.starts_with("    ") || (sample && line.trim().is_empty());
+                    if indented != sample {
+                        out.push_str(FENCE);
+                        if indented {
+                            out.push_str("text");
+                        }
+                        out.push('\n');
+                        sample = indented;
+                    }
+                    if sample {
+                        out.push_str(&line);
+                        out.push('\n');
+                        continue;
+                    }
+
                     // A `\n` command renders as a break, so one source line can
                     // leave several to wrap.
-                    for rendered in render_line(line).split('\n') {
-                        out.push_str(&wrap(rendered));
+                    for rendered in render_line(&line).split('\n') {
+                        out.push_str(&wrap(&balance(rendered)));
                         out.push('\n');
                     }
+                }
+                if sample {
+                    out.push_str(FENCE);
+                    out.push('\n');
                 }
             }
         }
@@ -52,6 +94,82 @@ pub fn to_markdown(documentation: &str) -> String {
 
     out.truncate(out.trim_end().len());
     out
+}
+
+/// The line with any backtick it opens and does not close escaped.
+///
+/// A code span closes on the line that opened it, so an odd count is a
+/// backtick that spans nothing — upstream `usdRender` closes a quoted name
+/// with one by mistake. Left as it stands it swallows the rest of the comment,
+/// and `clippy::doc_markdown` reports the imbalance in the consumer's build.
+fn balance(line: &str) -> String {
+    if line.matches('`').count().is_multiple_of(2) {
+        return line.to_owned();
+    }
+
+    let mut out = String::with_capacity(line.len() + 1);
+    let stray = line.rfind('`').expect("an odd count has at least one");
+    out.push_str(&line[..stray]);
+    out.push_str("\\`");
+    out.push_str(&line[stray + 1..]);
+    out
+}
+
+/// Prose as the lines it renders as, in Markdown, a list item and what the
+/// author wrapped it onto counting as one.
+///
+/// A schema wraps its own text where the line ran out, and Markdown reads a
+/// list item's continuation at the margin as a new paragraph. Joining the item
+/// back together lets [`wrap`] break it where an item's continuation belongs.
+fn items(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut item = false;
+
+    for line in text.lines() {
+        // Every way a schema writes an item opens one: Markdown's own marker,
+        // the Doxygen command, and the HTML tag this converts first so that
+        // the three read alike.
+        let line = html(line);
+        let trimmed = line.trim_start();
+        let opens = marker(trimmed) > 0 || trimmed.starts_with(r"\li ");
+        if item && !opens && !trimmed.is_empty() {
+            let carried = out.last_mut().expect("an item opened before this continues it");
+            carried.push(' ');
+            carried.push_str(trimmed);
+        } else {
+            item = opens;
+            out.push(line.clone());
+        }
+    }
+    out
+}
+
+/// The text without the indentation the schema wrote it at.
+///
+/// A `doc = """…"""` block is indented to sit inside its own file, and that
+/// indentation is presentation rather than content: four columns of it in a doc
+/// comment is a Markdown code block, which rustdoc reads as Rust and reports it
+/// cannot parse. What is indented further than the block keeps the difference,
+/// which is what a sample or a nested item is.
+///
+/// The first line opens beside the quotes, so it is not what the block's own
+/// indentation can be measured from.
+fn dedent(text: &str) -> String {
+    let common = text
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    text.lines()
+        .enumerate()
+        .map(|(at, line)| match at {
+            0 => line,
+            _ => line.get(common..).unwrap_or(""),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A run of documentation, and whether it is prose to convert or a sample to
@@ -70,24 +188,58 @@ fn segments(documentation: &str) -> Vec<Segment<'_>> {
     let mut out = Vec::new();
     let mut rest = documentation;
 
-    while let Some((at, after)) = find_command(rest, "code") {
-        out.push(Segment::Prose(&rest[..at]));
+    loop {
+        // Whichever opens first opens the sample: a fence inside a `\code`
+        // block is part of what that block shows, and a command inside a fence
+        // likewise.
+        let command = find_command(rest, "code");
+        let fence = fenced(rest);
+        match (command, fence) {
+            (Some((at, after)), _) if fence.is_none_or(|(open, _, _)| at < open) => {
+                out.push(Segment::Prose(&rest[..at]));
 
-        // `\code{.py}` names a language a fenced block does not carry over.
-        let body = match after.strip_prefix('{') {
-            Some(braced) => braced.split_once('}').map_or(braced, |(_, tail)| tail),
-            None => after,
-        };
-        let Some((end, tail)) = find_command(body, "endcode") else {
-            out.push(Segment::Code(body));
-            return out;
-        };
-        out.push(Segment::Code(&body[..end]));
-        rest = tail;
+                // `\code{.py}` names a language a fenced block does not carry
+                // over.
+                let body = match after.strip_prefix('{') {
+                    Some(braced) => braced.split_once('}').map_or(braced, |(_, tail)| tail),
+                    None => after,
+                };
+                let Some((end, tail)) = find_command(body, "endcode") else {
+                    out.push(Segment::Code(body));
+                    return out;
+                };
+                out.push(Segment::Code(&body[..end]));
+                rest = tail;
+            }
+            (_, Some((open, body, tail))) => {
+                out.push(Segment::Prose(&rest[..open]));
+                out.push(Segment::Code(body));
+                rest = tail;
+            }
+            // Neither opens, or one does and the guard above already took it.
+            _ => break,
+        }
     }
 
     out.push(Segment::Prose(rest));
     out
+}
+
+/// Where the next Markdown fence opens, what it shows, and what follows it.
+///
+/// A schema may write a fenced block itself rather than reach for `\code`, as
+/// upstream `usdMedia` does. What a fence shows is as literal as what a command
+/// shows, and its own markers are dropped: the fence this crate emits is the
+/// one that reaches the doc comment, at the margin a rustdoc block needs.
+fn fenced(text: &str) -> Option<(usize, &str, &str)> {
+    let open = text.find(FENCE)?;
+    // The rest of the opening line names a language, which the emitted fence
+    // does not carry over.
+    let body = text[open + FENCE.len()..].split_once('\n').map_or("", |(_, body)| body);
+    match body.find(FENCE) {
+        Some(close) => Some((open, &body[..close], &body[close + FENCE.len()..])),
+        None => Some((open, body, "")),
+    }
 }
 
 /// Where `name` is next used as a command, and the text after it.
@@ -150,6 +302,51 @@ fn next_command(text: &str) -> Option<Command<'_>> {
     }
 
     None
+}
+
+/// The HTML a schema wrote, as the Markdown a doc comment reads.
+///
+/// Upstream emphasizes a word with `<b>` and points at a page with
+/// `<a href="…">`, and rustdoc reports every tag it cannot pair as an unopened
+/// or unclosed one. Emphasis becomes its Markdown spelling; any other tag is
+/// dropped and the text it wrapped is kept, a link's address with it — a doc
+/// comment can say `<https://…>` for itself, and [`mark_up`] does.
+fn html(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let name: String = after
+            .trim_start_matches('/')
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        // A `<` that opens no tag is the character it was written as, which in
+        // this documentation is a comparison.
+        let opens = after[name.len() + usize::from(after.starts_with('/'))..].trim_start();
+        let tag = !name.is_empty()
+            && (opens.starts_with('>') || opens.starts_with('/') || opens.starts_with(|c: char| c.is_alphabetic()));
+        let Some(close) = after.find('>').filter(|_| tag) else {
+            out.push_str(&rest[..open + 1]);
+            rest = after;
+            continue;
+        };
+
+        out.push_str(&rest[..open]);
+        out.push_str(match name.to_ascii_lowercase().as_str() {
+            "b" | "strong" => "**",
+            "i" | "em" => "*",
+            "tt" | "code" => "`",
+            "li" if !after.starts_with('/') => "- ",
+            "br" => " ",
+            _ => "",
+        });
+        rest = &after[close + 1..];
+    }
+
+    out.push_str(rest);
+    out
 }
 
 /// One prose line as Markdown: each command rendered where it stands, and the
@@ -235,7 +432,12 @@ fn reference<'a>(command: &Command<'a>, out: &mut String) -> &'a str {
     if let Some(text) = quoted.strip_prefix('"')
         && let Some(close) = text.find('"')
     {
-        out.push_str(&text[..close]);
+        // The replacement text is what the sentence reads as, so it is marked
+        // up like the rest of it: a reference whose replacement text names an
+        // item names it as plainly as the prose around it would, and a bare
+        // `NurbsPatch` in a doc comment is a
+        // `clippy::doc_markdown` finding in the consumer's build.
+        mark_up(&text[..close], out);
         return &text[close + 1..];
     }
 
@@ -264,7 +466,20 @@ fn next_word(after: &str) -> (&str, &str) {
 fn split_word(word: &str) -> (&str, &str, &str) {
     let after_opening = word.trim_start_matches(OPENING);
     let leading = &word[..word.len() - after_opening.len()];
-    let core = after_opening.trim_end_matches(CLOSING);
+    let mut core = after_opening;
+
+    // A `)` closes the word where the word did not open it: `Compute()` keeps
+    // its own parentheses, and the one that closes `(see Compute())` does not
+    // belong to the name inside. Trimming alternates until neither kind is
+    // left, since a word can end with both, as `BasisCurves.)` does.
+    while let Some(unopened) = core
+        .trim_end_matches(CLOSING)
+        .strip_suffix(')')
+        .filter(|open| open.matches(')').count() >= open.matches('(').count())
+    {
+        core = unopened;
+    }
+    core = core.trim_end_matches(CLOSING);
     (leading, core, &word[leading.len() + core.len()..])
 }
 
@@ -329,13 +544,25 @@ fn reads_as_code(word: &str) -> bool {
         return false;
     }
 
-    word.contains("::")
-        || word.contains('_')
-        || word.ends_with("()")
-        || word
-            .chars()
-            .zip(word.chars().skip(1))
-            .any(|(previous, c)| previous.is_lowercase() && c.is_uppercase())
+    // A possessive belongs to the sentence rather than to the name, though the
+    // markup takes it along: `RenderMan's` reads as one word either way.
+    let bare = word.strip_suffix("'s").unwrap_or(word);
+    word.contains("::") || word.contains('_') || word.ends_with("()") || is_camel_case(bare)
+}
+
+/// Whether `word` is a camel-case name, by what `clippy::doc_markdown` reads
+/// as one.
+///
+/// That lint is what judges the generated file in a consumer's build, so this
+/// answers as it does: a name is letters and digits throughout, carries a
+/// capital past its first character, and has a lowercase letter somewhere.
+/// `BBox`, `Field3D`, `NurbsPatch` and `camelCase` are names by it; `3D` and
+/// `USD` are not, having no lowercase, and neither is the `@Foo/bar.usd@` of
+/// an asset path, which is not letters and digits throughout.
+fn is_camel_case(word: &str) -> bool {
+    word.chars().all(char::is_alphanumeric)
+        && word.chars().skip(1).any(char::is_uppercase)
+        && word.chars().any(char::is_lowercase)
 }
 
 /// Breaks `line` at spaces so no line runs past [`WIDTH`] columns, keeping its
@@ -348,17 +575,25 @@ pub fn wrap(line: &str) -> String {
 
     let body = line.trim_start();
     let indent = &line[..line.len() - body.len()];
+    // What a list item wraps onto sits under the item's text, not under its
+    // marker: Markdown reads a continuation at the marker's own column as a
+    // new paragraph, which is what `clippy::doc_lazy_continuation` reports in
+    // the consumer's build.
+    let hanging = format!("{indent}{}", " ".repeat(marker(body)));
     let mut out = String::with_capacity(line.len() + 8);
     let mut column = 0;
+    let mut first = true;
 
     for word in body.split_whitespace() {
         if column > 0 && column + 1 + columns(word) > WIDTH {
             out.push('\n');
             column = 0;
+            first = false;
         }
         if column == 0 {
-            out.push_str(indent);
-            column = columns(indent);
+            let opening = if first { indent } else { &hanging };
+            out.push_str(opening);
+            column = columns(opening);
         } else {
             out.push(' ');
             column += 1;
@@ -369,6 +604,23 @@ pub fn wrap(line: &str) -> String {
     out
 }
 
+/// How wide the list marker `body` opens with is, or zero where it opens with
+/// none: `- ` and `1. ` are two and three columns of hanging indent.
+fn marker(body: &str) -> usize {
+    if let Some(rest) = body.strip_prefix(['-', '*', '+'])
+        && rest.starts_with(' ')
+    {
+        return 2;
+    }
+
+    let digits = body.trim_start_matches(|c: char| c.is_ascii_digit());
+    let counted = body.len() - digits.len();
+    match counted > 0 && digits.starts_with(['.', ')']) && digits[1..].starts_with(' ') {
+        true => counted + 2,
+        false => 0,
+    }
+}
+
 /// How wide `text` renders, which is its characters and not its bytes.
 fn columns(text: &str) -> usize {
     text.chars().count()
@@ -377,6 +629,80 @@ fn columns(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whitespace a schema wrote is whitespace a doc comment can hold.
+    #[test]
+    fn whitespace_normalizes() {
+        assert_eq!(to_markdown("one\r\ntwo"), "one\ntwo");
+        assert_eq!(to_markdown("one\rtwo"), "one\ntwo");
+        assert_eq!(
+            to_markdown("one\n\ttwo\n\t\tthree"),
+            "one\ntwo\n```text\n    three\n```"
+        );
+    }
+
+    /// A list item the schema wrapped itself is one item, re-wrapped where a
+    /// continuation belongs.
+    #[test]
+    fn joins_a_wrapped_item() {
+        let text = "- one two\nthree four\n\nafter";
+        assert_eq!(to_markdown(text), "- one two three four\n\nafter");
+    }
+
+    /// A word carrying both cases names something; one carrying a digit and a
+    /// capital does not, and neither does a word that is only capitals.
+    #[test]
+    fn code_words_backtick() {
+        assert_eq!(to_markdown("the Field3D format"), "the `Field3D` format");
+        assert_eq!(to_markdown("from BBox computation"), "from `BBox` computation");
+        assert_eq!(to_markdown("a 3D scene"), "a 3D scene");
+        assert_eq!(to_markdown("the USD stage"), "the USD stage");
+        assert_eq!(to_markdown("a Sphere prim"), "a Sphere prim");
+    }
+
+    /// A schema indents its documentation to sit in its own file, and what
+    /// stays is what it says.
+    #[test]
+    fn indentation_drops() {
+        let text = "The radius.\n\n    Twice the size of\n        the sample below.";
+        assert_eq!(
+            to_markdown(text),
+            "The radius.\n\nTwice the size of\n```text\n    the sample below.\n```"
+        );
+    }
+
+    /// A tag a schema wrote reads as the Markdown it meant, and one that
+    /// only points somewhere leaves its text behind.
+    #[test]
+    fn html_becomes_markdown() {
+        assert_eq!(to_markdown("a <b>bold</b> word"), "a **bold** word");
+        assert_eq!(to_markdown("an <i>italic</i> word"), "an *italic* word");
+        assert_eq!(
+            to_markdown(r#"see <A HREF="http://x.com">the page</A>"#),
+            "see the page"
+        );
+        assert_eq!(to_markdown("<ul><li>one</li></ul>"), "- one");
+        assert_eq!(to_markdown("where x < y and y > z"), "where x < y and y > z");
+    }
+
+    /// A backtick that closes nothing is escaped rather than left to swallow
+    /// the rest of the comment.
+    #[test]
+    fn stray_backtick_escapes() {
+        assert_eq!(to_markdown("a name 'beauty` here"), "a name 'beauty\\` here");
+        assert_eq!(to_markdown("a `span` here"), "a `span` here");
+    }
+
+    /// What a schema indented is shown as it stands, fenced so that rustdoc
+    /// reads it as text rather than as Rust it should run.
+    #[test]
+    fn indented_blocks_fence() {
+        let text = "Like this:\n\n    def Mesh \"m\" {\n    }\n\nand after.";
+        assert_eq!(
+            to_markdown(text),
+            "Like this:\n\n```text\n    def Mesh \"m\" {\n    }\n\n```\nand after."
+        );
+    }
 
     #[test]
     fn em_italic() {
@@ -510,6 +836,26 @@ mod tests {
 
     /// Prose wraps within the room a `///` line leaves, a long word is not
     /// split, and the measure is characters rather than bytes.
+    /// A list item that wraps stays one item: its continuation sits under
+    /// its text, where Markdown reads it as the same paragraph.
+    #[test]
+    fn wraps_a_list_item() {
+        let item = format!("- {}", "word ".repeat(30));
+        let wrapped = wrap(&item);
+        let mut lines = wrapped.lines();
+        assert!(lines.next().is_some_and(|line| line.starts_with("- word")));
+        assert!(
+            lines.all(|line| line.starts_with("  word")),
+            "each continuation is indented under the text: {wrapped}"
+        );
+
+        let numbered = wrap(&format!("10. {}", "word ".repeat(30)));
+        assert!(
+            numbered.lines().skip(1).all(|line| line.starts_with("    word")),
+            "{numbered}"
+        );
+    }
+
     #[test]
     fn wraps_at_width() {
         let long = "word ".repeat(30);

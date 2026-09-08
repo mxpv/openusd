@@ -9,7 +9,7 @@
 //!
 //! Time-dependent methods (`ComputeJointLocalTransforms(time)`,
 //! `ComputeSkinningTransforms(time)`, etc.) require evaluating a bound
-//! `SkelAnimation` at a specific stage time — see [`super::SkelAnimQuery`].
+//! `Animation` at a specific stage time — see [`super::SkelAnimQuery`].
 //! Feed its pre-evaluated local transforms into
 //! [`SkeletonResolver::compute_skinning_transforms_from_local`] below.
 
@@ -17,7 +17,7 @@ use openusd::Result;
 
 use openusd::gf;
 
-use super::schema::Skeleton;
+use super::Skeleton;
 use super::skinning::{
     compute_inverse_bind_transforms, compute_skinning_transforms as math_skin_xforms, joint_local_to_skel_space,
     joint_skel_to_world,
@@ -86,7 +86,7 @@ impl SkeletonResolver {
     }
 
     /// Lift skel-space joint transforms into world space using the supplied
-    /// SkelRoot local-to-world matrix.
+    /// Root local-to-world matrix.
     pub fn joint_skel_to_world(&self, skel: &[gf::Matrix4d], skel_local_to_world: gf::Matrix4d) -> Vec<gf::Matrix4d> {
         joint_skel_to_world(skel, skel_local_to_world)
     }
@@ -100,7 +100,7 @@ impl SkeletonResolver {
     /// Compute skinning transforms from joint-local transforms in one step:
     /// compose to skel-space, lift to world, then multiply by the inverse-bind.
     /// Use when you have only local poses (typical after evaluating a
-    /// SkelAnimation).
+    /// Animation).
     pub fn compute_skinning_transforms_from_local(
         &self,
         joint_local: &[gf::Matrix4d],
@@ -113,7 +113,7 @@ impl SkeletonResolver {
 
     /// The rest-pose joint-local transforms a caller can hand to
     /// [`compute_skinning_transforms_from_local`](Self::compute_skinning_transforms_from_local)
-    /// when no SkelAnimation is bound (or for a preview / fallback pose).
+    /// when no Animation is bound (or for a preview / fallback pose).
     pub fn rest_pose_local(&self) -> &[gf::Matrix4d] {
         &self.rest_transforms
     }

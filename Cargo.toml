@@ -17,6 +17,10 @@ categories = ["graphics", "rendering", "rendering::data-formats"]
 # dependency only one crate uses stays in that crate's own manifest.
 [workspace.dependencies]
 openusd = { version = "0.7.0", path = "crates/openusd" }
+# A build dependency of `openusd-schemas`. It is here rather than in that
+# crate's own manifest because the version a published crate pins it by has to
+# stay with the workspace version, which the Manifest CI job checks.
+openusd-build = { version = "0.7.0", path = "crates/openusd-build" }
 
 bitflags = "2.11.1"
 bytemuck = { version = "1.14.0", features = ["derive"] }

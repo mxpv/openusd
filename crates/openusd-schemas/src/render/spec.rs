@@ -1,6 +1,6 @@
 //! The computed render spec (`UsdRenderSpec`).
 //!
-//! A flattened, fallback-resolved view of a `RenderSettings` prim, its
+//! A flattened, fallback-resolved view of a `Settings` prim, its
 //! products, vars, and camera: product attributes have overridden the
 //! settings they inherit, the aspect-ratio conform policy has been
 //! applied to `aperture_size`, and vars are de-duplicated into one global
@@ -17,7 +17,7 @@ use super::{AspectRatioConformPolicy, ProductType, SourceType};
 /// and the camera aperture conform-adjusted.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Product {
-    /// Scene path of the source `RenderProduct` prim.
+    /// Scene path of the source `Product` prim.
     pub render_product_path: String,
     /// `productType` (e.g. `raster`).
     pub product_type: ProductType,
@@ -48,8 +48,8 @@ pub struct Product {
 
 /// One render var (AOV), flattened.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct RenderVar {
-    /// Scene path of the source `RenderVar` prim.
+pub struct Var {
+    /// Scene path of the source `Var` prim.
     pub render_var_path: String,
     /// `dataType`.
     pub data_type: String,
@@ -61,14 +61,14 @@ pub struct RenderVar {
     pub namespaced_settings: Vec<(String, Value)>,
 }
 
-/// The computed render spec for one `RenderSettings` prim.
+/// The computed render spec for one `Settings` prim.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RenderSpec {
     /// The products to produce, in `products`-relationship order.
     pub products: Vec<Product>,
     /// The global, de-duplicated var list referenced by
     /// [`Product::render_var_indices`].
-    pub render_vars: Vec<RenderVar>,
+    pub render_vars: Vec<Var>,
     /// `includedPurposes` from the settings.
     pub included_purposes: Vec<String>,
     /// `materialBindingPurposes` from the settings.

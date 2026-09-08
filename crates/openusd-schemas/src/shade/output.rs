@@ -3,7 +3,7 @@
 use openusd::{sdf, usd};
 
 use super::impl_shading_attribute;
-use super::tokens::NS_OUTPUTS;
+use super::tokens::OUTPUTS;
 use super::{ConnectionTarget, ShadingAttribute};
 
 /// A UsdShade output backed by an `outputs:<base>` USD attribute
@@ -18,7 +18,7 @@ pub struct Output {
     attribute: usd::Attribute,
 }
 
-impl_shading_attribute!(Output, NS_OUTPUTS);
+impl_shading_attribute!(Output, OUTPUTS);
 
 impl From<Output> for ShadingAttribute {
     fn from(output: Output) -> Self {

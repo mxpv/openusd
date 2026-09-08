@@ -21,7 +21,9 @@ lux = ["geom"]
 # UsdMediaSpatialAudio is a UsdGeomXformable-derived prim, so the media views
 # build on the geom schema traits.
 media = ["geom"]
-physics = []
+# UsdPhysicsJoint and the collider prims are UsdGeom Imageable / Xformable
+# prims, so the physics views build on the geom schema traits.
+physics = ["geom"]
 # UsdProcGenerativeProcedural is a UsdGeomBoundable-derived prim, so the proc
 # views build on the geom schema traits.
 proc = ["geom"]
@@ -39,6 +41,11 @@ vol = ["geom"]
 [package.metadata.docs.rs]
 all-features = true
 
+[build-dependencies]
+# The views, the schematics and the manifest are generated from the vendored
+# `schemas/` definitions at build time; see `build.rs`.
+openusd-build.workspace = true
+
 [dependencies]
 openusd.workspace = true
 derive_more.workspace = true
@@ -51,41 +58,41 @@ tempfile.workspace = true
 workspace = true
 
 [[test]]
-name = "geom_reader"
+name = "geom"
 required-features = ["geom"]
 
 [[test]]
-name = "lux_reader"
+name = "lux"
 required-features = ["lux"]
 
 [[test]]
-name = "media_reader"
+name = "media"
 required-features = ["media"]
 
 [[test]]
-name = "physics_reader"
+name = "physics"
 required-features = ["physics"]
 
 [[test]]
-name = "proc_reader"
+name = "proc"
 required-features = ["proc"]
 
 [[test]]
-name = "render_reader"
+name = "render"
 required-features = ["render"]
 
 [[test]]
-name = "shade_reader"
+name = "shade"
 required-features = ["shade"]
 
 [[test]]
-name = "skel_reader"
+name = "skel"
 required-features = ["skel"]
 
 [[test]]
-name = "ui_reader"
+name = "ui"
 required-features = ["ui"]
 
 [[test]]
-name = "vol_reader"
+name = "vol"
 required-features = ["vol"]

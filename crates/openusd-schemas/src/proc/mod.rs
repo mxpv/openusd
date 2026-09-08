@@ -12,11 +12,16 @@
 //! # Example
 //!
 //! ```
-//! use openusd_schemas::proc::GenerativeProcedural;
+//! // A view's own accessors live on its `<Class>Schema` trait.
+//! use openusd_schemas::proc::{GenerativeProcedural, GenerativeProceduralSchema};
 //! use openusd::sdf;
 //! use openusd::usd::Stage;
 //!
-//! let stage = Stage::builder().in_memory("scene.usda").unwrap();
+//! // The registry is what makes the prim a `GenerativeProcedural`.
+//! let stage = Stage::builder()
+//!     .schema_registry(openusd_schemas::schema_registry())
+//!     .in_memory("scene.usda")
+//!     .unwrap();
 //!
 //! let proc = GenerativeProcedural::define(&stage, "/World/Scatter").unwrap();
 //! proc.create_procedural_system_attr().unwrap().set(sdf::Value::Token("Houdini".into())).unwrap();
@@ -29,31 +34,4 @@
 //! );
 //! ```
 
-pub mod tokens;
-
-mod schema;
-
-pub use schema::GenerativeProcedural;
-
-/// Implement the schema-trait chain for a concrete `struct $ty(Prim)` proc
-/// newtype. All trait paths are fully qualified, so the call site only needs
-/// the macro in scope.
-///
-/// - `boundable` is a [`geom::Boundable`](crate::geom::Boundable) prim
-///   (`GenerativeProcedural`).
-macro_rules! impl_proc_schema {
-    (boundable $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::ConcreteTyped;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-        impl $crate::geom::Imageable for $ty {}
-        impl $crate::geom::Xformable for $ty {}
-        impl $crate::geom::Boundable for $ty {}
-    };
-}
-
-pub(crate) use impl_proc_schema;
+openusd::include_schema!("usdProc");

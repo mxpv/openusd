@@ -59,3 +59,9 @@ pub trait Connectable: SchemaBase {
             .collect())
     }
 }
+
+// The three views a shading network connects through, which is what the trait
+// is about; a generated view carries no membership of a hand-written trait.
+impl Connectable for super::Shader {}
+impl Connectable for super::NodeGraph {}
+impl Connectable for super::Material {}

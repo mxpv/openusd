@@ -27,31 +27,31 @@ jobs:
       - run: cargo doc --workspace --no-deps
       - run: cargo test --workspace --all-targets --all-features
 
-  manifest:
-    name: Manifest
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - uses: actions/checkout@v7
-
-      # `openusd-schemas` requires `openusd` by version, and a stale value there
+      # The members require each other by version, and a stale value there
       # publishes a crate pinned to the previous release. Nothing else catches
       # it: the path dependency wins locally, so builds and tests stay green.
-      - name: Workspace version matches the openusd dependency
+      - name: Workspace version matches the in-workspace dependencies
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           pkg=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          dep=$(grep -m1 '^openusd = { version = ' Cargo.toml | cut -d'"' -f2)
           echo "workspace.package.version = ${pkg:-<unset>}"
-          echo "workspace.dependencies.openusd.version = ${dep:-<unset>}"
-          if [ -z "$pkg" ] || [ -z "$dep" ]; then
-            echo "::error::could not read both versions from the root Cargo.toml"
+          if [ -z "$pkg" ]; then
+            echo "::error::could not read the version from the root Cargo.toml"
             exit 1
           fi
-          if [ "$pkg" != "$dep" ]; then
-            echo "::error::version mismatch - bump both in the root Cargo.toml"
-            exit 1
-          fi
+          for crate in openusd openusd-build; do
+            dep=$(grep -m1 "^$crate = { version = " Cargo.toml | cut -d'"' -f2)
+            echo "workspace.dependencies.$crate.version = ${dep:-<unset>}"
+            if [ -z "$dep" ]; then
+              echo "::error::could not read the $crate version from the root Cargo.toml"
+              exit 1
+            fi
+            if [ "$pkg" != "$dep" ]; then
+              echo "::error::$crate version mismatch - bump both in the root Cargo.toml"
+              exit 1
+            fi
+          done
 
   deny:
     name: Deny

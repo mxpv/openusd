@@ -25,10 +25,15 @@
 //! use openusd_schemas::ui::{self, ExpansionState};
 //! use openusd::usd::Stage;
 //!
-//! let stage = Stage::builder().in_memory("scene.usda").unwrap();
-//! stage.define_prim("/Mat/Surface").unwrap().set_type_name("Shader").unwrap();
+//! let stage = Stage::builder()
+//!     .schema_registry(openusd_schemas::schema_registry())
+//!     .in_memory("scene.usda")
+//!     .unwrap();
+//! let prim = stage.define_prim("/Mat/Surface").unwrap();
+//! prim.clone().set_type_name("Shader").unwrap();
 //!
-//! let node = ui::NodeGraphNodeAPI::apply(&stage, "/Mat/Surface").unwrap();
+//! // An API schema is applied to the prim it is carried by.
+//! let node = ui::NodeGraphNodeAPI::apply(&prim).unwrap();
 //! node.create_pos_attr().unwrap().set(gf::vec2f(12.0, 34.0)).unwrap();
 //! node.create_expansion_state_attr().unwrap().set(ExpansionState::Minimized).unwrap();
 //!
@@ -39,43 +44,10 @@
 //! );
 //! ```
 
-pub mod tokens;
-
-mod schema;
-
-pub use schema::{Backdrop, NodeGraphNodeAPI, SceneGraphPrimAPI};
+openusd::include_schema!("usdUI");
 
 use openusd::tf;
 use tokens::*;
-
-/// Implement the `SchemaBase` membership for a concrete UsdUI view. All trait
-/// paths are fully qualified, so the call site only needs the macro in scope.
-///
-/// - `typed` is a concrete typed prim ([`Backdrop`]).
-/// - `single_api` is a single-apply API schema ([`SceneGraphPrimAPI`],
-///   [`NodeGraphNodeAPI`]).
-macro_rules! impl_ui_schema {
-    (typed $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::ConcreteTyped;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-    };
-    (single_api $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::SingleApplyApi;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-    };
-}
-
-pub(crate) use impl_ui_schema;
 
 /// `ui:nodegraph:node:expansionState` — how a node renders in a node-graph
 /// editor. There is no spec default, so an unauthored value reads as `None`.
@@ -92,17 +64,17 @@ pub enum ExpansionState {
 impl ExpansionState {
     pub fn as_token(self) -> &'static str {
         match self {
-            ExpansionState::Open => EXPANSION_OPEN,
-            ExpansionState::Closed => EXPANSION_CLOSED,
-            ExpansionState::Minimized => EXPANSION_MINIMIZED,
+            ExpansionState::Open => OPEN,
+            ExpansionState::Closed => CLOSED,
+            ExpansionState::Minimized => MINIMIZED,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            EXPANSION_OPEN => ExpansionState::Open,
-            EXPANSION_CLOSED => ExpansionState::Closed,
-            EXPANSION_MINIMIZED => ExpansionState::Minimized,
+            OPEN => ExpansionState::Open,
+            CLOSED => ExpansionState::Closed,
+            MINIMIZED => ExpansionState::Minimized,
             _ => return None,
         })
     }
@@ -110,4 +82,4 @@ impl ExpansionState {
 
 // `From`/`TryFrom<Value>` so the state passes straight to `Attribute::set` and
 // `get::<ExpansionState>()`.
-crate::common::impl_token_value!(ExpansionState);
+crate::token_value::impl_token_value!(ExpansionState);

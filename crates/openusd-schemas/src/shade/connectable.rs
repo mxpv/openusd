@@ -2,10 +2,9 @@
 
 use openusd::Result;
 
-use crate::common::is_any_typed;
 use openusd::{sdf, tf, usd};
 
-use super::tokens::{NS_INPUTS, NS_OUTPUTS, T_MATERIAL, T_NODE_GRAPH};
+use super::tokens::{INPUTS, NODE_GRAPH, OUTPUTS};
 use super::{Input, Output};
 
 /// Whether a shading attribute is an `inputs:` or `outputs:` property.
@@ -21,8 +20,8 @@ impl AttributeType {
     /// The namespace prefix for this attribute type.
     pub const fn prefix(self) -> &'static str {
         match self {
-            AttributeType::Input => NS_INPUTS,
-            AttributeType::Output => NS_OUTPUTS,
+            AttributeType::Input => INPUTS,
+            AttributeType::Output => OUTPUTS,
         }
     }
 }
@@ -219,12 +218,12 @@ pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedS
 
 /// The full property name for an input: `inputs:<base>`.
 pub(super) fn input_name(base: &str) -> String {
-    format!("{NS_INPUTS}{base}")
+    format!("{INPUTS}{base}")
 }
 
 /// The full property name for an output: `outputs:<base>`.
 pub(super) fn output_name(base: &str) -> String {
-    format!("{NS_OUTPUTS}{base}")
+    format!("{OUTPUTS}{base}")
 }
 
 /// The base name of a connectable property.
@@ -238,11 +237,11 @@ pub fn base_name(full_name: &str) -> &str {
 /// Split a full shading attribute name into its base name and attribute type.
 pub fn base_name_and_type(full_name: &str) -> Option<(&str, AttributeType)> {
     full_name
-        .strip_prefix(NS_INPUTS)
+        .strip_prefix(INPUTS)
         .map(|name| (name, AttributeType::Input))
         .or_else(|| {
             full_name
-                .strip_prefix(NS_OUTPUTS)
+                .strip_prefix(OUTPUTS)
                 .map(|name| (name, AttributeType::Output))
         })
 }
@@ -267,7 +266,9 @@ fn source_prim(stage: &usd::Stage, path: &sdf::Path) -> Result<Option<(usd::Prim
 /// so a site can teach it about its own container types. Naming the two
 /// built-in ones stands in for that registry.
 pub(super) fn is_container(prim: &usd::Prim) -> Result<bool> {
-    is_any_typed(prim, &[T_NODE_GRAPH, T_MATERIAL])
+    // A `Material` inherits `NodeGraph`, so one question answers for both —
+    // which is what C++ `UsdShadeConnectableAPI::IsContainer` amounts to.
+    prim.is_a(NODE_GRAPH)
 }
 
 /// The authored `inputs:` attributes of `prim` in composed property order —
@@ -290,7 +291,7 @@ mod tests {
 
     #[test]
     fn structured_sources() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let source = Shader::define(&stage, "/Mat/Source")?;
         let output = source.create_output("rgb", "float3")?;
         let sink = Shader::define(&stage, "/Mat/Sink")?;
@@ -310,7 +311,7 @@ mod tests {
 
     #[test]
     fn untyped_source_valid() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let source = stage.override_prim("/Mat/Source")?;
         let source_output = source.create_attribute("outputs:result", "float")?;
         let sink = Shader::define(&stage, "/Mat/Sink")?;
@@ -330,7 +331,7 @@ mod tests {
 
     #[test]
     fn invalid_sources_reported() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let valid = Shader::define(&stage, "/Mat/Valid")?;
         let valid_output = valid.create_output("result", "float")?;
         let missing_output = Shader::define(&stage, "/Mat/MissingOutput")?;
@@ -364,7 +365,7 @@ mod tests {
 
     #[test]
     fn material_is_container() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let material = crate::shade::Material::define(&stage, "/Mat")?;
         material.create_input("gain", "float")?;
         let shader = Shader::define(&stage, "/Mat/Shader")?;

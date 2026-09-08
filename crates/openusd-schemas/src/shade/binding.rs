@@ -19,46 +19,22 @@ use std::collections::hash_map::Entry;
 use openusd::Result;
 
 use openusd::sdf::{self, Path, Value};
-use openusd::usd::{Collection, MembershipQuery, Prim, Relationship, Stage, is_collection_api_path};
+use openusd::usd::{Collection, MembershipQuery, Relationship, Stage, is_collection_api_path};
 
 use super::BindingStrength;
-use super::impl_shade_schema;
-use super::tokens::{
-    API_MATERIAL_BINDING, META_BIND_MATERIAL_AS, PURPOSE_ALL, REL_MATERIAL_BINDING, REL_MATERIAL_BINDING_COLLECTION,
-};
-use crate::common::get_with_api;
-
-/// Material bindings on a prim (C++ `UsdShadeMaterialBindingAPI`, single-apply):
-/// direct and collection bindings, optionally purpose-restricted, with the
-/// `bindMaterialAs` strength. Apply it, author bindings, read them back, and
-/// resolve the material bound to a prim across the namespace hierarchy.
-#[derive(Clone, derive_more::Deref)]
-pub struct MaterialBindingAPI(Prim);
+use super::MaterialBindingAPI;
+use super::tokens::{ALL_PURPOSE, BIND_MATERIAL_AS, MATERIAL_BINDING, MATERIAL_BINDING_COLLECTION};
 
 impl MaterialBindingAPI {
-    /// Apply `MaterialBindingAPI` to the prim at `path`
-    /// (C++ `UsdShadeMaterialBindingAPI::Apply`). The prim is opened as `over`.
-    pub fn apply(stage: &Stage, path: impl sdf::IntoPath) -> Result<Self> {
-        Ok(Self(
-            stage.override_prim(path)?.add_applied_schema(API_MATERIAL_BINDING)?,
-        ))
-    }
-
-    /// Wrap `path` as a `MaterialBindingAPI` if it carries `MaterialBindingAPI`
-    /// in its `apiSchemas` (C++ `UsdShadeMaterialBindingAPI::Get`).
-    pub fn get(stage: &Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
-        get_with_api(stage, path, &[API_MATERIAL_BINDING]).map(|o| o.map(Self))
-    }
-
     /// Author an all-purpose **direct** binding (`material:binding`) targeting
     /// `material` (C++ `UsdShadeMaterialBindingAPI::Bind`).
     pub fn bind(&self, material: impl sdf::IntoPath) -> Result<&Self> {
-        self.bind_for_purpose(PURPOSE_ALL, material, BindingStrength::WeakerThanDescendants)
+        self.bind_for_purpose(ALL_PURPOSE, material, BindingStrength::WeakerThanDescendants)
     }
 
     /// Author a **direct** binding for an explicit `purpose`
     /// (`material:binding:<purpose>`, or `material:binding` when `purpose` is
-    /// [`PURPOSE_ALL`](super::tokens::PURPOSE_ALL)). `strength` is written as
+    /// [`ALL_PURPOSE`]). `strength` is written as
     /// `bindMaterialAs` only when it must override a composed opinion (the
     /// default `weakerThanDescendants` is otherwise left unauthored).
     pub fn bind_for_purpose(
@@ -95,7 +71,7 @@ impl MaterialBindingAPI {
     }
 
     /// The directly-bound Material for `purpose`
-    /// ([`PURPOSE_ALL`](super::tokens::PURPOSE_ALL) for the fallback binding).
+    /// ([`ALL_PURPOSE`] for the fallback binding).
     /// Returns `None` when no such binding is authored.
     /// C++ `UsdShadeMaterialBindingAPI::GetDirectBinding`.
     pub fn direct_binding(&self, purpose: &str) -> Result<Option<Path>> {
@@ -148,24 +124,22 @@ impl MaterialBindingAPI {
     }
 }
 
-impl_shade_schema!(single_api MaterialBindingAPI);
-
 /// The direct-binding relationship name for `purpose`. All-purpose (empty) →
 /// `material:binding`; otherwise `material:binding:<purpose>`.
 fn direct_binding_rel(purpose: &str) -> String {
-    if purpose == PURPOSE_ALL {
-        REL_MATERIAL_BINDING.to_string()
+    if purpose == ALL_PURPOSE {
+        MATERIAL_BINDING.to_string()
     } else {
-        format!("{REL_MATERIAL_BINDING}:{purpose}")
+        format!("{MATERIAL_BINDING}:{purpose}")
     }
 }
 
 /// The collection-binding relationship name for `purpose` + `name`.
 fn collection_binding_rel(purpose: &str, name: &str) -> String {
-    if purpose == PURPOSE_ALL {
-        format!("{REL_MATERIAL_BINDING_COLLECTION}:{name}")
+    if purpose == ALL_PURPOSE {
+        format!("{MATERIAL_BINDING_COLLECTION}:{name}")
     } else {
-        format!("{REL_MATERIAL_BINDING_COLLECTION}:{purpose}:{name}")
+        format!("{MATERIAL_BINDING_COLLECTION}:{purpose}:{name}")
     }
 }
 
@@ -178,7 +152,7 @@ fn apply_binding_strength(stage: &Stage, rel: Relationship, strength: BindingStr
     let needs_write = strength != BindingStrength::WeakerThanDescendants
         || composed_strength(stage, rel.path())? != BindingStrength::WeakerThanDescendants;
     if needs_write {
-        rel.set_metadata(META_BIND_MATERIAL_AS, strength)?;
+        rel.set_metadata(BIND_MATERIAL_AS, strength)?;
     }
     Ok(())
 }
@@ -186,7 +160,7 @@ fn apply_binding_strength(stage: &Stage, rel: Relationship, strength: BindingStr
 /// Composed `bindMaterialAs` strength on a binding relationship, falling back to
 /// the spec default when unauthored.
 fn composed_strength(stage: &Stage, rel: &Path) -> Result<BindingStrength> {
-    Ok(match stage.field::<Value>(rel.clone(), META_BIND_MATERIAL_AS)? {
+    Ok(match stage.field::<Value>(rel.clone(), BIND_MATERIAL_AS)? {
         Some(Value::Token(t)) => BindingStrength::from_token(t).unwrap_or_default(),
         _ => BindingStrength::default(),
     })
@@ -252,7 +226,7 @@ fn winning_binding_at(
 /// The collection bindings authored on `p` for `purpose`, as
 /// `(collection, material, strength)`, in native property order.
 fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<(Path, Path, BindingStrength)>> {
-    let prefix = format!("{REL_MATERIAL_BINDING_COLLECTION}:");
+    let prefix = format!("{MATERIAL_BINDING_COLLECTION}:");
     let mut out = Vec::new();
     for name in stage.prim(p.clone())?.authored_property_names()? {
         let Some(rest) = name.strip_prefix(&prefix) else {
@@ -264,7 +238,7 @@ fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<
         // deeper-namespaced name is all-purpose.
         let binding_purpose = match rest.split(':').collect::<Vec<_>>().as_slice() {
             [pur, _name] => *pur,
-            _ => PURPOSE_ALL,
+            _ => ALL_PURPOSE,
         };
         if binding_purpose != purpose {
             continue;
@@ -302,10 +276,10 @@ fn is_collection_member(
 /// Purposes to try in preference order: a restricted purpose first, then the
 /// all-purpose fallback (spec §15 — restricted preferred over all-purpose).
 fn purpose_fallbacks(purpose: &str) -> Vec<&str> {
-    if purpose == PURPOSE_ALL {
-        vec![PURPOSE_ALL]
+    if purpose == ALL_PURPOSE {
+        vec![ALL_PURPOSE]
     } else {
-        vec![purpose, PURPOSE_ALL]
+        vec![purpose, ALL_PURPOSE]
     }
 }
 
@@ -318,10 +292,10 @@ mod tests {
 
     #[test]
     fn direct_all_purpose_roundtrip() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
         stage.define_prim("/World/Mat")?.set_type_name("Material")?;
-        MaterialBindingAPI::apply(&stage, sdf::path("/World/Mesh")?)?.bind(sdf::path("/World/Mat")?)?;
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/World/Mesh")?)?)?.bind(sdf::path("/World/Mat")?)?;
 
         let binding = MaterialBindingAPI::get(&stage, "/World/Mesh")?.expect("MaterialBindingAPI");
         assert_eq!(
@@ -334,10 +308,10 @@ mod tests {
 
     #[test]
     fn purpose_binding_with_strength() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
         stage.define_prim("/Mat")?.set_type_name("Material")?;
-        MaterialBindingAPI::apply(&stage, sdf::path("/Mesh")?)?.bind_for_purpose(
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Mesh")?)?)?.bind_for_purpose(
             "preview",
             sdf::path("/Mat")?,
             BindingStrength::StrongerThanDescendants,
@@ -361,9 +335,9 @@ mod tests {
     fn rebind_overrides_strength() -> Result<()> {
         // Rebinding with the default strength must clear a previously authored
         // stronger opinion, not silently leave it composing.
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
-        let binding = MaterialBindingAPI::apply(&stage, sdf::path("/Mesh")?)?;
+        let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Mesh")?)?)?;
         binding.bind_for_purpose("", sdf::path("/MatA")?, BindingStrength::StrongerThanDescendants)?;
         binding.bind_for_purpose("", sdf::path("/MatB")?, BindingStrength::WeakerThanDescendants)?;
 
@@ -373,10 +347,10 @@ mod tests {
 
     #[test]
     fn collection_binding_roundtrip() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mat")?.set_type_name("Material")?;
-        MaterialBindingAPI::apply(&stage, sdf::path("/Set")?)?.bind_collection(
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?.bind_collection(
             "metalBits",
             sdf::path("/Set.collection:metal")?,
             sdf::path("/Set/Mat")?,
@@ -402,16 +376,16 @@ mod tests {
 
     #[test]
     fn closer_binding_wins() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
-        MaterialBindingAPI::apply(&stage, sdf::path("/Set")?)?.bind(sdf::path("/MatA")?)?;
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?.bind(sdf::path("/MatA")?)?;
 
         // Inherited from the ancestor.
         assert_eq!(bound(&stage, "/Set/Mesh", ""), Some("/MatA".to_string()));
 
         // A binding on the closer prim wins (both weakerThanDescendants).
-        MaterialBindingAPI::apply(&stage, sdf::path("/Set/Mesh")?)?.bind(sdf::path("/MatB")?)?;
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set/Mesh")?)?)?.bind(sdf::path("/MatB")?)?;
         assert_eq!(bound(&stage, "/Set/Mesh", ""), Some("/MatB".to_string()));
         // The ancestor itself still resolves to its own binding.
         assert_eq!(bound(&stage, "/Set", ""), Some("/MatA".to_string()));
@@ -422,16 +396,16 @@ mod tests {
 
     #[test]
     fn stronger_ancestor_wins() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
         // Ancestor binding is stronger; closer binding is the default weak.
-        MaterialBindingAPI::apply(&stage, sdf::path("/Set")?)?.bind_for_purpose(
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?.bind_for_purpose(
             "",
             sdf::path("/MatStrong")?,
             BindingStrength::StrongerThanDescendants,
         )?;
-        MaterialBindingAPI::apply(&stage, sdf::path("/Set/Mesh")?)?.bind(sdf::path("/MatWeak")?)?;
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set/Mesh")?)?)?.bind(sdf::path("/MatWeak")?)?;
 
         // The stronger ancestor wins despite the closer binding.
         assert_eq!(bound(&stage, "/Set/Mesh", ""), Some("/MatStrong".to_string()));
@@ -440,9 +414,9 @@ mod tests {
 
     #[test]
     fn restricted_purpose_preferred() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
-        let binding = MaterialBindingAPI::apply(&stage, sdf::path("/Mesh")?)?;
+        let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Mesh")?)?)?;
         binding.bind(sdf::path("/MatAll")?)?; // all-purpose
         binding.bind_for_purpose(
             "preview",
@@ -459,17 +433,17 @@ mod tests {
 
     #[test]
     fn restricted_ancestor_wins() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
         // Restricted "preview" binding on the ancestor; the queried prim carries
         // only an all-purpose binding.
-        MaterialBindingAPI::apply(&stage, sdf::path("/Set")?)?.bind_for_purpose(
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?.bind_for_purpose(
             "preview",
             sdf::path("/MatPreview")?,
             BindingStrength::WeakerThanDescendants,
         )?;
-        MaterialBindingAPI::apply(&stage, sdf::path("/Set/Mesh")?)?.bind(sdf::path("/MatAll")?)?;
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set/Mesh")?)?)?.bind(sdf::path("/MatAll")?)?;
 
         // The restricted purpose is resolved across the whole chain first, so
         // the ancestor's "preview" binding outranks the closer all-purpose one.
@@ -482,13 +456,13 @@ mod tests {
     /// Build `/Set` with a `metal` collection including `/Set/A`, and a
     /// collection binding to `/MatMetal`, plus a direct binding to `/MatDir`.
     fn collection_scene() -> Result<Stage> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/A")?.set_type_name("Mesh")?;
         stage.define_prim("/Set/B")?.set_type_name("Mesh")?;
         let coll = openusd::usd::apply_collection(&stage, sdf::path("/Set")?, "metal")?;
         coll.include_path(&stage, sdf::path("/Set/A")?)?;
-        let binding = MaterialBindingAPI::apply(&stage, sdf::path("/Set")?)?;
+        let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?;
         binding.bind(sdf::path("/MatDir")?)?;
         binding.bind_collection(
             "metalBits",
@@ -512,7 +486,7 @@ mod tests {
 
     #[test]
     fn collection_native_order() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/A")?.set_type_name("Mesh")?;
         // Two collections that both include /Set/A.
@@ -522,7 +496,7 @@ mod tests {
         }
         // Author binding "aaa" (collection `second`) before "zzz" (collection
         // `first`) — native *property* order, not target order, decides.
-        let binding = MaterialBindingAPI::apply(&stage, sdf::path("/Set")?)?;
+        let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?;
         binding.bind_collection(
             "aaa",
             sdf::path("/Set.collection:second")?,

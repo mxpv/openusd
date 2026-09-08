@@ -207,18 +207,6 @@ pub enum Violation {
         second: String,
     },
 
-    /// Two token identifiers reaching one Rust constant, which is the same
-    /// problem one step later.
-    #[error("`{first}` and `{second}` both reach the constant {constant}")]
-    TokenConstantCollision {
-        /// The constant they collided on.
-        constant: String,
-        /// The first identifier to reach it.
-        first: String,
-        /// The second.
-        second: String,
-    },
-
     /// Two classes of one library reaching one Rust name, where one module
     /// cannot hold both.
     ///

@@ -329,6 +329,20 @@ impl SlotAPI {
             name,
         })
     }
+    /// Views `prim` as this schema applied under `name`, or `None`
+    /// where it does not carry it.
+    pub fn get_instance(
+        prim: &::openusd::usd::Prim,
+        name: impl ::std::convert::Into<::openusd::tf::Token>,
+    ) -> ::openusd::Result<::std::option::Option<Self>> {
+        let name = name.into();
+        let applied = ::openusd::usd::SchemaRegistry::make_applied_name(
+            tokens::SLOT_API,
+            name.as_str(),
+        );
+        let carried = prim.has_api_schema(applied)?;
+        ::std::result::Result::Ok(carried.then(|| Self { prim: prim.clone(), name }))
+    }
     /// Whether the schema may be applied to `prim` under `name`.
     pub fn can_apply(
         prim: &::openusd::usd::Prim,

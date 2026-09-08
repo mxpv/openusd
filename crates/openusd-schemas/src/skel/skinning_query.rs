@@ -1,6 +1,6 @@
 //! Per-mesh skinning resolver — the static (time-independent) data
 //! every skinning pipeline needs for one prim carrying
-//! `SkelBindingAPI`.
+//! `BindingAPI`.
 //!
 //! Mirrors the static surface of Pixar's `UsdSkelSkinningQuery`. The
 //! caller still owns the per-frame joint pose (in the bound
@@ -19,8 +19,8 @@ use openusd::Result;
 use openusd::gf;
 use openusd::usd::SchemaBase;
 
+use super::BindingAPI;
 use super::anim_mapper::AnimMapper;
-use super::schema::SkelBindingAPI;
 use super::skinning::{rigid_skinning_transform, skin_normals_lbs, skin_points_lbs};
 use super::{InfluenceInterpolation, SkinningMethod};
 
@@ -52,7 +52,7 @@ impl SkinningResolver {
     /// Build a resolver from `binding`. `skeleton_joint_order` is the bound
     /// `Skeleton.joints` array, used to derive the skeleton→mesh joint remap
     /// when `skel:joints` is authored.
-    pub fn from_binding(binding: &SkelBindingAPI, skeleton_joint_order: &[String]) -> Result<Self> {
+    pub fn from_binding(binding: &BindingAPI, skeleton_joint_order: &[String]) -> Result<Self> {
         let joint_subset = binding.joint_subset()?;
         // No subset authored → skinning transforms feed straight through; an
         // identity mapper keeps callers on one code path.

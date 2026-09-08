@@ -11,7 +11,7 @@
 //! two tokens reaching one constant, two methods reaching one name, two schemas
 //! reaching one type — can only be checked where the names are made.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use openusd::{sdf, tf, usd, usda};
 use proc_macro2::{Ident, Span, TokenStream};
@@ -60,6 +60,10 @@ pub struct RustClass {
     pub memberships: Vec<syn::Path>,
     /// The `tokens::` constant naming the schema.
     pub constant: TokenStream,
+    /// Whether its names need `non_camel_case_types` allowed: a versioned
+    /// schema keeps the underscore its identifier carries, and `Cylinder_1` is
+    /// no camel-case name.
+    pub allows_non_camel_case: bool,
     /// The `usd::SchemaKind` constant the view reports itself as.
     pub kind_constant: syn::Path,
     /// What a prim is viewed through, or `None` for a class no prim can be.
@@ -68,6 +72,18 @@ pub struct RustClass {
     pub documentation: Option<String>,
     /// The accessors it emits, in property order.
     pub accessors: Vec<RustAccessor>,
+    /// The API schemas whose properties it offers as its own, each as the
+    /// method that views a prim through it.
+    pub reflected: Vec<Reflected>,
+}
+
+/// An API schema a class reflects: its properties read as the class's own, and
+/// the view itself is one method away.
+pub struct Reflected {
+    /// What the method that views the prim through the schema is called.
+    pub accessor: Ident,
+    /// The view it returns.
+    pub view: Ident,
 }
 
 /// What a prim is viewed through, which decides the shape of the view and the
@@ -154,27 +170,27 @@ pub fn library(model: &Library, externs: &Externs) -> Result<RustLibrary, Error>
     })
 }
 
-/// The constant each token is emitted as, checked for two reaching one name.
+/// The constant each token is emitted as.
 ///
-/// Two identifiers that differ only in punctuation or case reach the same
-/// screaming-snake constant, and a constant holds one string.
+/// Two identifiers can reach one screaming-snake name: `points` and the schema
+/// `Points` both reach `POINTS`, a pair upstream writes on purpose and keeps
+/// apart by case, which a Rust constant cannot. The first one there keeps the
+/// name and the next takes a trailing underscore, as a token landing on a
+/// reserved word does. The order is the one [`Library::tokens`] fixed —
+/// properties by name, schema identifiers last — so a library mints the same
+/// constants on every run, and each says in its own documentation what it
+/// holds.
 fn constants(model: &Library) -> Result<Vec<Constant>, Error> {
-    let mut minted: BTreeMap<String, String> = BTreeMap::new();
+    let mut minted: BTreeSet<String> = BTreeSet::new();
     let mut constants = Vec::new();
 
     for token in model.tokens()? {
-        let name = names::screaming_snake(&token.id);
-        let origin = format!("token `{}`", token.id);
-        if let Some(first) = minted.insert(name.clone(), token.id.clone()) {
-            return Err(Error::Definition {
-                origin,
-                violation: Violation::TokenConstantCollision {
-                    constant: name,
-                    first,
-                    second: token.id,
-                },
-            });
+        let mut name = names::screaming_snake(&token.id);
+        while !minted.insert(name.clone()) {
+            name.push('_');
         }
+
+        let origin = format!("token `{}`", token.id);
         constants.push(Constant {
             name: identifier(&name, &origin)?,
             documentation: doc::wrap(&format!("`\"{}\"`: {}.", token.value, token.documentation.join(", "))),
@@ -272,6 +288,42 @@ fn lower_class(
     let mut memberships: Vec<syn::Path> = view.iter().map(schema_root).collect();
     memberships.extend(inherited.into_iter().flatten());
 
+    // What a class reflects reads as its own: the properties of an API schema
+    // that every prim of this type carries anyway.
+    let mut accessors: Vec<RustAccessor> = accessors;
+    let mut reflected = Vec::new();
+    for schema in &class.metadata.reflected_api_schemas {
+        // TODO: reflect a schema another library declares. Its properties are
+        // not in this model, so only what this run generates is reflected; a
+        // caller reaches the rest by applying that schema to the prim.
+        let Some(other) = model.classes.iter().find(|other| &other.identifier == schema) else {
+            continue;
+        };
+
+        let origin = other.origin.describe();
+        accessors.extend(
+            other
+                .local_properties()
+                .filter_map(|property| named(property.api_name(), property.spec_type).map(|a| (property, a)))
+                .map(|(property, accessor)| lower_accessor(other, property, &accessor, by_value))
+                .collect::<Result<Vec<_>, _>>()?
+                // A reflected accessor is the reflecting class's own, so it is
+                // a trait method like the rest of them.
+                .into_iter()
+                .map(|accessor| RustAccessor {
+                    inherent: applied,
+                    ..accessor
+                }),
+        );
+        reflected.push(Reflected {
+            accessor: identifier(&names::snake_case(&other.metadata.class_name), &origin)?,
+            view: identifier(&other.metadata.class_name, &origin)?,
+        });
+    }
+    if !reflected.is_empty() {
+        check_reflected(class, &accessors, &reflected)?;
+    }
+
     let name = &class.metadata.class_name;
     let origin = class.origin.describe();
     Ok(RustClass {
@@ -283,10 +335,12 @@ fn lower_class(
         parent,
         memberships,
         constant: constant_of(by_value, &class.identifier),
+        allows_non_camel_case: name.contains('_'),
         kind_constant: kind_constant(class.kind),
         view,
         documentation: class.documentation.as_deref().map(doc::to_markdown),
         accessors,
+        reflected,
     })
 }
 
@@ -438,6 +492,38 @@ fn shadows_an_ancestor(class: &Class, property: &Property) -> bool {
         .any(|theirs| theirs.getter == mine.getter)
 }
 
+/// A reflected accessor landing on a name the class already offers.
+///
+/// The check [`check_methods`] runs is over what a class declares; what it
+/// reflects arrives from another class, so the merged set is checked here. The
+/// schemas name where each name came from: the class's own declaration, or the
+/// schema it reflects.
+fn check_reflected(class: &Class, accessors: &[RustAccessor], reflected: &[Reflected]) -> Result<(), Error> {
+    // Everything the chain already offers, which is what `check_methods`
+    // walked: a reflected name collides with an inherited one as surely as
+    // with one the class declares itself.
+    let mut seen: BTreeSet<String> = class
+        .properties
+        .iter()
+        .filter(|property| !property.is_local)
+        .flat_map(offered)
+        .collect();
+
+    for accessor in accessors {
+        for method in [&accessor.getter, &accessor.creator] {
+            if !seen.insert(method.to_string()) {
+                let schemas = reflected.iter().map(|r| r.view.to_string()).collect::<Vec<_>>();
+                return Err(class.violation(Violation::MethodCollision {
+                    method: method.to_string(),
+                    first: class.identifier.clone(),
+                    second: tf::Token::from(schemas.join(", ")),
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Two properties reaching one method name, counting every ancestor's.
 ///
 /// A view's methods arrive through a chain of traits, and two supertraits
@@ -574,7 +660,16 @@ fn declaration(property: &Property) -> String {
 
     let allowed = property.allowed_tokens();
     if !allowed.is_empty() {
-        let listed: Vec<String> = allowed.iter().map(|token| format!("`{token}`")).collect();
+        // An allowed value can be the empty string, which upstream
+        // `usdRender` writes; an empty code span is no spelling of it, so it
+        // reads as the two quotes a schema author would write.
+        let listed: Vec<String> = allowed
+            .iter()
+            .map(|token| match token.as_str().is_empty() {
+                true => "`\"\"`".to_owned(),
+                false => format!("`{token}`"),
+            })
+            .collect();
         text.push_str(&format!(" One of {}.", listed.join(", ")));
     }
 

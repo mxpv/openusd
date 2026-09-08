@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn direct_consumers() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
         let unused = graph.create_input("unused", "float")?;
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn consumer_deduplication() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
         let nested = NodeGraph::define(&stage, "/Graph/Nested")?;
@@ -332,14 +332,14 @@ mod tests {
 
     #[test]
     fn stage_bound_lookup() -> Result<()> {
-        let first_stage = usd::Stage::builder().in_memory("same.usda")?;
+        let first_stage = crate::tests::stage("same.usda")?;
         let first_graph = NodeGraph::define(&first_stage, "/Graph")?;
         let first_gain = first_graph.create_input("gain", "float")?;
         let shader = Shader::define(&first_stage, "/Graph/Shader")?;
         shader.create_input("gain", "float")?.connect_to(&first_gain)?;
         let map = first_graph.compute_interface_input_consumers_map(false)?;
 
-        let second_stage = usd::Stage::builder().in_memory("same.usda")?;
+        let second_stage = crate::tests::stage("same.usda")?;
         let second_graph = NodeGraph::define(&second_stage, "/Graph")?;
         let second_gain = second_graph.create_input("gain", "float")?;
 
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn transitive_consumers() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
         let spare = graph.create_input("spare", "float")?;
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn material_transitive() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
         let material = Material::define(&stage, "/Graph/Mat")?;
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn material_consumers() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let material = Material::define(&stage, "/Mat")?;
         let roughness = material.create_input("roughness", "float")?;
         let shader = Shader::define(&stage, "/Mat/Surface")?;
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn filtered_consumers() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
         let active = Shader::define(&stage, "/Graph/Active")?;
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn typed_consumer_included() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
         // A non-Shader typed prim (a light) consumes the interface input; an
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn instance_consumers() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let source = NodeGraph::define(&stage, "/Source")?;
         let gain = source.create_input("gain", "float")?;
         let shader = Shader::define(&stage, "/Source/Shader")?;
@@ -498,7 +498,7 @@ mod tests {
     fn deep_consumer_chain() -> Result<()> {
         const DEPTH: usize = 10_000;
 
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let mut chain = Vec::with_capacity(DEPTH);
         for index in 0..DEPTH {
             let name = sdf::path(format!("N{index}"))?;

@@ -161,11 +161,8 @@ pub struct Metadata {
 
     /// The Rust type name, which defaults to the identifier in proper case.
     pub class_name: String,
-    /// Single-apply API schemas whose accessors this class re-emits.
-    ///
-    // TODO: nothing reads this yet. Re-emitting a reflected schema's accessors
-    // as delegates on the reflecting class is the missing feature.
-    #[allow(dead_code)]
+    /// Single-apply API schemas whose accessors this class re-emits as its
+    /// own, so a caller reaches them without applying the schema first.
     pub reflected_api_schemas: Vec<tf::Token>,
     /// The tokens this schema asks for outright, beyond what its properties
     /// imply.

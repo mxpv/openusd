@@ -18,6 +18,50 @@ use openusd::{gf, sdf, usd};
 use super::tokens::*;
 use super::{Connectable, Input, Material, ProducerFilter, Shader};
 
+// The names below belong to shader nodes, not to schemas, so no `schema.usda`
+// declares them and the generated `tokens` module carries none of them. A
+// caller reading or authoring this shading model needs them all the same.
+
+// The canonical UsdPreviewSurface shader ids.
+pub const SHADER_ID_PREVIEW_SURFACE: &str = "UsdPreviewSurface";
+pub const SHADER_ID_UV_TEXTURE: &str = "UsdUVTexture";
+pub const SHADER_ID_PRIMVAR_READER_FLOAT2: &str = "UsdPrimvarReader_float2";
+
+// UsdPreviewSurface inputs (`inputs:<name>`).
+pub const PS_DIFFUSE_COLOR: &str = "diffuseColor";
+pub const PS_EMISSIVE_COLOR: &str = "emissiveColor";
+pub const PS_METALLIC: &str = "metallic";
+pub const PS_ROUGHNESS: &str = "roughness";
+pub const PS_CLEARCOAT: &str = "clearcoat";
+pub const PS_CLEARCOAT_ROUGHNESS: &str = "clearcoatRoughness";
+pub const PS_OPACITY: &str = "opacity";
+pub const PS_OPACITY_THRESHOLD: &str = "opacityThreshold";
+pub const PS_IOR: &str = "ior";
+pub const PS_NORMAL: &str = "normal";
+pub const PS_DISPLACEMENT: &str = "displacement";
+pub const PS_OCCLUSION: &str = "occlusion";
+pub const PS_SPECULAR_COLOR: &str = "specularColor";
+pub const PS_USE_SPECULAR_WORKFLOW: &str = "useSpecularWorkflow";
+
+// UsdUVTexture inputs / outputs.
+pub const TEX_FILE: &str = "file";
+pub const TEX_ST: &str = "st";
+pub const TEX_WRAP_S: &str = "wrapS";
+pub const TEX_WRAP_T: &str = "wrapT";
+pub const TEX_FALLBACK: &str = "fallback";
+pub const TEX_SCALE: &str = "scale";
+pub const TEX_BIAS: &str = "bias";
+pub const TEX_SOURCE_COLOR_SPACE: &str = "sourceColorSpace";
+pub const TEX_OUT_R: &str = "r";
+pub const TEX_OUT_G: &str = "g";
+pub const TEX_OUT_B: &str = "b";
+pub const TEX_OUT_A: &str = "a";
+pub const TEX_OUT_RGB: &str = "rgb";
+
+// UsdPrimvarReader inputs / outputs.
+pub const PVR_VARNAME: &str = "varname";
+pub const PVR_OUT_RESULT: &str = "result";
+
 /// One UsdPreviewSurface channel: either a constant value, a texture asset path
 /// (the input connects to a `UsdUVTexture`), or unauthored.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -121,7 +165,7 @@ fn resolve_surface_terminal(material: &Material) -> Result<Option<super::Resolve
     if let Some(terminal) = material.compute_surface_source(&[])? {
         return Ok(Some(terminal));
     }
-    let suffix = format!(":{}", TERMINAL_SURFACE);
+    let suffix = format!(":{}", SURFACE);
     let mut contexts: Vec<String> = material
         .surface_outputs()?
         .iter()
@@ -212,7 +256,7 @@ mod tests {
 
     #[test]
     fn context_only_surface() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
         surf.create_input("roughness", "float")?.set(sdf::Value::Float(0.4))?;
@@ -232,7 +276,7 @@ mod tests {
 
     #[test]
     fn scalar_and_textured_channels() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
 
         // A UsdUVTexture feeding diffuseColor; roughness/metallic are scalars.
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
@@ -266,7 +310,7 @@ mod tests {
 
     #[test]
     fn interface_driven_texture() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
 
         // The texture's file path is driven by a Material interface input rather
         // than authored directly on the texture.
@@ -295,7 +339,7 @@ mod tests {
 
     #[test]
     fn non_preview_surface_none() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.create_id_attr()?
             .set(sdf::Value::token("ND_standard_surface_surfaceshader"))?;

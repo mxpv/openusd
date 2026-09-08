@@ -85,7 +85,7 @@ pub fn compute_inverse_bind_transforms(bind: &[gf::Matrix4d]) -> Vec<gf::Matrix4
 ///
 /// `points` are in the mesh's local space at bind time.
 /// `joint_indices` / `joint_weights` are the flattened per-point
-/// influence lists from `SkelBindingAPI`; `num_influences` is the
+/// influence lists from `BindingAPI`; `num_influences` is the
 /// per-vertex stride (`elementSize` on the primvar).
 /// `skinning_xforms` must be in the *mesh-effective* joint order
 /// (apply [`super::AnimMapper`] first if the mesh uses `skel:joints`
@@ -166,7 +166,7 @@ pub fn skin_normals_lbs(
 }
 
 /// Rigid-deformation transform for a constant-interpolation
-/// SkelBindingAPI — when every vertex shares one set of joint
+/// `BindingAPI` — when every vertex shares one set of joint
 /// influences, skinning collapses to a single 4×4 to apply to the
 /// whole mesh's local-to-world.
 ///

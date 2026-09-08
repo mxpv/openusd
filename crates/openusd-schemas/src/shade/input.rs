@@ -5,7 +5,7 @@ use openusd::Result;
 use openusd::{sdf, usd};
 
 use super::impl_shading_attribute;
-use super::tokens::{META_CONNECTABILITY, NS_INPUTS};
+use super::tokens::INPUTS;
 use super::{Connectability, ConnectionTarget, ShadingAttribute};
 
 /// A UsdShade input backed by an `inputs:<base>` USD attribute
@@ -20,7 +20,7 @@ pub struct Input {
     attribute: usd::Attribute,
 }
 
-impl_shading_attribute!(Input, NS_INPUTS);
+impl_shading_attribute!(Input, INPUTS);
 
 impl Input {
     /// The input's `connectability`, defaulting to [`Connectability::Full`]
@@ -28,7 +28,7 @@ impl Input {
     pub fn connectability(&self) -> Result<Connectability> {
         Ok(self
             .attribute
-            .get_metadata::<Connectability>(META_CONNECTABILITY)?
+            .get_metadata::<Connectability>(super::CONNECTABILITY)?
             .unwrap_or_default())
     }
 
@@ -36,7 +36,7 @@ impl Input {
     /// (C++ `UsdShadeInput::SetConnectability`).
     pub fn set_connectability(self, connectability: Connectability) -> Result<Self, usd::StageAuthoringError> {
         Ok(Self {
-            attribute: self.attribute.set_metadata(META_CONNECTABILITY, connectability)?,
+            attribute: self.attribute.set_metadata(super::CONNECTABILITY, connectability)?,
         })
     }
 }
@@ -58,11 +58,10 @@ mod tests {
     use openusd::Result;
 
     use crate::shade::{Connectable, Shader};
-    use openusd::usd::Stage;
 
     #[test]
     fn invalid_base_name_reads_empty() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Mat/Surface")?;
 
         // A base name USD rejects addresses no property, so the view reads

@@ -132,11 +132,10 @@ mod tests {
 
     use crate::shade::{AttributeType, Connectable, Material, NodeGraph, Shader};
     use openusd::Result;
-    use openusd::usd;
 
     #[test]
     fn untyped_source_terminal() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let source = stage.override_prim("/Mat/Source")?;
         let source_output = source.create_attribute("outputs:result", "float")?;
         let sink = Shader::define(&stage, "/Mat/Sink")?;
@@ -154,7 +153,7 @@ mod tests {
 
     #[test]
     fn nested_graph_resolution() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let source = Shader::define(&stage, "/Mat/Source")?;
         let source_output = source.create_output("result", "float")?;
 
@@ -177,7 +176,7 @@ mod tests {
 
     #[test]
     fn interface_value_resolution() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let material = Material::define(&stage, "/Mat")?;
         material.create_input("gain", "float")?.set(2.0_f32)?;
         let graph = NodeGraph::define(&stage, "/Mat/Graph")?;
@@ -203,7 +202,7 @@ mod tests {
 
     #[test]
     fn multiple_source_order() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let first = Shader::define(&stage, "/Mat/First")?;
         let first_output = first.create_output("result", "float")?;
         let second = Shader::define(&stage, "/Mat/Second")?;
@@ -231,7 +230,7 @@ mod tests {
 
     #[test]
     fn diamond_resolves_both() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Mat/Source")?;
         let shader_output = shader.create_output("result", "float")?;
         let shared = NodeGraph::define(&stage, "/Mat/Shared")?;
@@ -261,7 +260,7 @@ mod tests {
 
     #[test]
     fn repeated_source_followed_once() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Mat/Source")?;
         let shader_output = shader.create_output("result", "float")?;
         let root = NodeGraph::define(&stage, "/Mat/Root")?;
@@ -279,7 +278,7 @@ mod tests {
 
     #[test]
     fn deep_chain_errors() -> Result<()> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let depth = MAX_CONNECTION_DEPTH + 2;
         for hop in 0..depth {
             NodeGraph::define(&stage, format!("/Mat/N{hop}"))?.create_output("result", "float")?;
@@ -303,7 +302,7 @@ mod tests {
 
     #[test]
     fn cycle_stops() -> Result<(), SchemaError> {
-        let stage = usd::Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let first = NodeGraph::define(&stage, "/Mat/First")?;
         let second = NodeGraph::define(&stage, "/Mat/Second")?;
         first.create_output("result", "float")?;

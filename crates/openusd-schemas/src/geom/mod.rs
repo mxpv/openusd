@@ -27,16 +27,20 @@
 //! # Example
 //!
 //! ```
-//! // `Imageable` is brought in so its inherited accessors resolve on the view.
-//! use openusd_schemas::geom::{self, Imageable};
+//! // A view's own accessors live on its `<Class>Schema` trait, and the ones it
+//! // inherits on the trait of the class that declared them.
+//! use openusd_schemas::geom::{self, Imageable, MeshSchema};
 //! use openusd::usd;
 //!
-//! let stage = usd::Stage::builder().in_memory("scene.usda").unwrap();
+//! // The registry is what makes a prim a `Mesh` and what resolves the
+//! // fallbacks its schema declares.
+//! let stage = usd::Stage::builder()
+//!     .schema_registry(openusd_schemas::schema_registry())
+//!     .in_memory("scene.usda")
+//!     .unwrap();
 //!
-//! // Author a Mesh through its typed view. `create_subdivision_scheme_attr` is
-//! // the Mesh's own accessor; `create_visibility_attr` is inherited from
-//! // `Imageable`, further up the trait chain. Token enums convert straight to
-//! // a value via `From`, so they pass to `set` directly.
+//! // Token enums convert straight to a value via `From`, so they pass to
+//! // `set` directly.
 //! let mesh = geom::Mesh::define(&stage, "/World/Mesh").unwrap();
 //! mesh.create_subdivision_scheme_attr().unwrap().set(geom::SubdivisionScheme::Loop).unwrap();
 //! mesh.create_visibility_attr().unwrap().set(geom::Visibility::Invisible).unwrap();
@@ -54,13 +58,13 @@
 //! yields the authored value, or the fallback the schema declares when
 //! nothing is authored (see [`openusd::usd::SchemaRegistry`]), and `create_foo_attr()` authors
 //! the attribute with its schema-declared type / variability and returns the
-//! handle. `GeomSubset` is the lone typed-but-not-imageable schema.
+//! handle. `Subset` is the lone typed-but-not-imageable schema.
 //!
 //! Token-valued attributes (`visibility`, `purpose`, `projection`, `axis`,
 //! `subdivisionScheme`, …) decode through the token enums defined at the end
 //! of this module, which carry `from_token` / `as_token`. `visibility` and
 //! `purpose` are inherited down namespace;
-//! [`Imageable::compute_visibility`] / [`Imageable::compute_purpose`] resolve
+//! [`ImageableExt::compute_visibility`] / [`ImageableExt::compute_purpose`] resolve
 //! the effective value walking ancestors.
 //!
 //! # Primvars
@@ -74,97 +78,31 @@
 //! get a typed view that bundles values with interpolation and resolves
 //! indexed primvars, rather than callers reading the metadata by hand.
 
-pub mod tokens;
+openusd::include_schema!("usdGeom");
 
-mod boundable;
-mod camera;
-mod curves;
-mod gprim;
-mod grouping;
 mod imageable;
-mod instancer;
-mod mesh;
-mod pointbased;
-mod points;
-mod shapes;
 mod xformable;
 
+// The token enums below name the generated constants directly.
+use openusd::tf;
 use tokens::*;
 
-use openusd::tf;
-
-pub use boundable::Boundable;
-pub use camera::Camera;
-pub use curves::{BasisCurves, Curves, HermiteCurves, NurbsCurves, NurbsPatch};
-pub use gprim::Gprim;
-pub use grouping::{Scope, Xform};
-pub use imageable::Imageable;
-pub use instancer::PointInstancer;
-pub use mesh::{GeomSubset, Mesh};
-pub use pointbased::PointBased;
-pub use points::{Points, TetMesh};
-pub use shapes::{Capsule, Cone, Cube, Cylinder, Plane, Sphere};
-pub use xformable::{XformOpPrecision, Xformable};
-
-/// Implement the schema-trait chain for a concrete `struct $ty(Prim)` newtype,
-/// up to the membership named by the first token. Every concrete UsdGeom view
-/// declares its chain through this macro; the single hand-written `SchemaBase`
-/// method is `prim`, and the intermediate traits are empty memberships. Each
-/// arm extends the next-weaker one, so the chain order lives in one place; the
-/// traits it pulls in — plus `SchemaBase` and `Prim` — must be in scope at the
-/// call site.
-///
-/// - `typed` stops at [`SchemaBase`] (a typed prim that is not `Imageable`,
-///   e.g. `GeomSubset`).
-/// - `imageable` adds [`Imageable`] (e.g. `Scope`).
-/// - `xformable` adds [`Xformable`] (e.g. `Xform`, `Camera`).
-/// - `boundable` adds [`Boundable`] (a `Boundable` that is not a `Gprim`,
-///   e.g. `PointInstancer`).
-/// - `gprim` adds [`Gprim`] (the intrinsic shapes).
-/// - `pointbased` adds [`PointBased`] (`Mesh`, `Points`, `NurbsPatch`, …).
-/// - `curves` adds [`Curves`] (`BasisCurves`, `NurbsCurves`, `HermiteCurves`).
-macro_rules! impl_geom_schema {
-    (typed $ty:ident) => {
-        impl SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::ConcreteTyped;
-
-            fn prim(&self) -> &Prim {
-                &self.0
-            }
-        }
-    };
-    (imageable $ty:ident) => {
-        impl_geom_schema!(typed $ty);
-        impl Imageable for $ty {}
-    };
-    (xformable $ty:ident) => {
-        impl_geom_schema!(imageable $ty);
-        impl Xformable for $ty {}
-    };
-    (boundable $ty:ident) => {
-        impl_geom_schema!(xformable $ty);
-        impl Boundable for $ty {}
-    };
-    (gprim $ty:ident) => {
-        impl_geom_schema!(boundable $ty);
-        impl Gprim for $ty {}
-    };
-    (pointbased $ty:ident) => {
-        impl_geom_schema!(gprim $ty);
-        impl PointBased for $ty {}
-    };
-    (curves $ty:ident) => {
-        impl_geom_schema!(pointbased $ty);
-        impl Curves for $ty {}
-    };
-}
-
-pub(crate) use impl_geom_schema;
+pub use imageable::ImageableExt;
+pub use xformable::{XformOpPrecision, XformableExt};
 
 // Each enum decodes one `allowedTokens` attribute via `from_token` /
 // `as_token`, with the Pixar default as its `Default`. The view types expose
 // the raw `Attribute` handles; pass the handle's token through these to
 // classify it.
+
+/// The namespace a primvar is authored under: a primvar named `st` is the
+/// attribute `primvars:st`.
+pub const PRIMVARS_NAMESPACE: &str = "primvars:";
+
+/// The prim metadata naming a model's role in the hierarchy (`component`,
+/// `assembly`, `group`). It is metadata rather than a property, so no schema
+/// declares it.
+pub const META_KIND: &str = "kind";
 
 /// `UsdGeomImageable.visibility` token values. The spec default
 /// (unauthored) is [`Visibility::Inherited`] — children inherit
@@ -179,15 +117,15 @@ pub enum Visibility {
 impl Visibility {
     pub fn as_token(self) -> &'static str {
         match self {
-            Visibility::Inherited => VISIBILITY_INHERITED,
-            Visibility::Invisible => VISIBILITY_INVISIBLE,
+            Visibility::Inherited => INHERITED,
+            Visibility::Invisible => INVISIBLE,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            VISIBILITY_INHERITED => Visibility::Inherited,
-            VISIBILITY_INVISIBLE => Visibility::Invisible,
+            INHERITED => Visibility::Inherited,
+            INVISIBLE => Visibility::Invisible,
             _ => return None,
         })
     }
@@ -207,19 +145,19 @@ pub enum Purpose {
 impl Purpose {
     pub fn as_token(self) -> &'static str {
         match self {
-            Purpose::Default => PURPOSE_DEFAULT,
-            Purpose::Render => PURPOSE_RENDER,
-            Purpose::Proxy => PURPOSE_PROXY,
-            Purpose::Guide => PURPOSE_GUIDE,
+            Purpose::Default => DEFAULT_,
+            Purpose::Render => RENDER,
+            Purpose::Proxy => PROXY,
+            Purpose::Guide => GUIDE,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            PURPOSE_DEFAULT => Purpose::Default,
-            PURPOSE_RENDER => Purpose::Render,
-            PURPOSE_PROXY => Purpose::Proxy,
-            PURPOSE_GUIDE => Purpose::Guide,
+            DEFAULT_ => Purpose::Default,
+            RENDER => Purpose::Render,
+            PROXY => Purpose::Proxy,
+            GUIDE => Purpose::Guide,
             _ => return None,
         })
     }
@@ -237,15 +175,15 @@ pub enum Orientation {
 impl Orientation {
     pub fn as_token(self) -> &'static str {
         match self {
-            Orientation::RightHanded => ORIENTATION_RIGHT_HANDED,
-            Orientation::LeftHanded => ORIENTATION_LEFT_HANDED,
+            Orientation::RightHanded => RIGHT_HANDED,
+            Orientation::LeftHanded => LEFT_HANDED,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            ORIENTATION_RIGHT_HANDED => Orientation::RightHanded,
-            ORIENTATION_LEFT_HANDED => Orientation::LeftHanded,
+            RIGHT_HANDED => Orientation::RightHanded,
+            LEFT_HANDED => Orientation::LeftHanded,
             _ => return None,
         })
     }
@@ -264,17 +202,17 @@ pub enum Axis {
 impl Axis {
     pub fn as_token(self) -> &'static str {
         match self {
-            Axis::X => AXIS_X,
-            Axis::Y => AXIS_Y,
-            Axis::Z => AXIS_Z,
+            Axis::X => X,
+            Axis::Y => Y,
+            Axis::Z => Z,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            AXIS_X => Axis::X,
-            AXIS_Y => Axis::Y,
-            AXIS_Z => Axis::Z,
+            X => Axis::X,
+            Y => Axis::Y,
+            Z => Axis::Z,
             _ => return None,
         })
     }
@@ -291,15 +229,15 @@ pub enum Projection {
 impl Projection {
     pub fn as_token(self) -> &'static str {
         match self {
-            Projection::Perspective => PROJECTION_PERSPECTIVE,
-            Projection::Orthographic => PROJECTION_ORTHOGRAPHIC,
+            Projection::Perspective => PERSPECTIVE,
+            Projection::Orthographic => ORTHOGRAPHIC,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            PROJECTION_PERSPECTIVE => Projection::Perspective,
-            PROJECTION_ORTHOGRAPHIC => Projection::Orthographic,
+            PERSPECTIVE => Projection::Perspective,
+            ORTHOGRAPHIC => Projection::Orthographic,
             _ => return None,
         })
     }
@@ -317,17 +255,17 @@ pub enum StereoRole {
 impl StereoRole {
     pub fn as_token(self) -> &'static str {
         match self {
-            StereoRole::Mono => STEREO_ROLE_MONO,
-            StereoRole::Left => STEREO_ROLE_LEFT,
-            StereoRole::Right => STEREO_ROLE_RIGHT,
+            StereoRole::Mono => MONO,
+            StereoRole::Left => LEFT,
+            StereoRole::Right => RIGHT,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            STEREO_ROLE_MONO => StereoRole::Mono,
-            STEREO_ROLE_LEFT => StereoRole::Left,
-            STEREO_ROLE_RIGHT => StereoRole::Right,
+            MONO => StereoRole::Mono,
+            LEFT => StereoRole::Left,
+            RIGHT => StereoRole::Right,
             _ => return None,
         })
     }
@@ -347,19 +285,19 @@ pub enum SubdivisionScheme {
 impl SubdivisionScheme {
     pub fn as_token(self) -> &'static str {
         match self {
-            SubdivisionScheme::None => SUBDIV_SCHEME_NONE,
-            SubdivisionScheme::CatmullClark => SUBDIV_SCHEME_CATMULL_CLARK,
-            SubdivisionScheme::Loop => SUBDIV_SCHEME_LOOP,
-            SubdivisionScheme::Bilinear => SUBDIV_SCHEME_BILINEAR,
+            SubdivisionScheme::None => NONE,
+            SubdivisionScheme::CatmullClark => CATMULL_CLARK,
+            SubdivisionScheme::Loop => LOOP,
+            SubdivisionScheme::Bilinear => BILINEAR,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            SUBDIV_SCHEME_NONE => SubdivisionScheme::None,
-            SUBDIV_SCHEME_CATMULL_CLARK => SubdivisionScheme::CatmullClark,
-            SUBDIV_SCHEME_LOOP => SubdivisionScheme::Loop,
-            SUBDIV_SCHEME_BILINEAR => SubdivisionScheme::Bilinear,
+            NONE => SubdivisionScheme::None,
+            CATMULL_CLARK => SubdivisionScheme::CatmullClark,
+            LOOP => SubdivisionScheme::Loop,
+            BILINEAR => SubdivisionScheme::Bilinear,
             _ => return None,
         })
     }
@@ -384,17 +322,17 @@ pub enum InterpolateBoundary {
 impl InterpolateBoundary {
     pub fn as_token(self) -> &'static str {
         match self {
-            InterpolateBoundary::None => INTERPOLATE_BOUNDARY_NONE,
-            InterpolateBoundary::EdgeOnly => INTERPOLATE_BOUNDARY_EDGE_ONLY,
-            InterpolateBoundary::EdgeAndCorner => INTERPOLATE_BOUNDARY_EDGE_AND_CORNER,
+            InterpolateBoundary::None => NONE,
+            InterpolateBoundary::EdgeOnly => EDGE_ONLY,
+            InterpolateBoundary::EdgeAndCorner => EDGE_AND_CORNER,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            INTERPOLATE_BOUNDARY_NONE => InterpolateBoundary::None,
-            INTERPOLATE_BOUNDARY_EDGE_ONLY => InterpolateBoundary::EdgeOnly,
-            INTERPOLATE_BOUNDARY_EDGE_AND_CORNER => InterpolateBoundary::EdgeAndCorner,
+            NONE => InterpolateBoundary::None,
+            EDGE_ONLY => InterpolateBoundary::EdgeOnly,
+            EDGE_AND_CORNER => InterpolateBoundary::EdgeAndCorner,
             _ => return None,
         })
     }
@@ -416,23 +354,23 @@ pub enum FaceVaryingLinearInterpolation {
 impl FaceVaryingLinearInterpolation {
     pub fn as_token(self) -> &'static str {
         match self {
-            FaceVaryingLinearInterpolation::None => FV_LINEAR_INTERP_NONE,
-            FaceVaryingLinearInterpolation::CornersOnly => FV_LINEAR_INTERP_CORNERS_ONLY,
-            FaceVaryingLinearInterpolation::CornersPlus1 => FV_LINEAR_INTERP_CORNERS_PLUS_1,
-            FaceVaryingLinearInterpolation::CornersPlus2 => FV_LINEAR_INTERP_CORNERS_PLUS_2,
-            FaceVaryingLinearInterpolation::Boundaries => FV_LINEAR_INTERP_BOUNDARIES,
-            FaceVaryingLinearInterpolation::All => FV_LINEAR_INTERP_ALL,
+            FaceVaryingLinearInterpolation::None => NONE,
+            FaceVaryingLinearInterpolation::CornersOnly => CORNERS_ONLY,
+            FaceVaryingLinearInterpolation::CornersPlus1 => CORNERS_PLUS1,
+            FaceVaryingLinearInterpolation::CornersPlus2 => CORNERS_PLUS2,
+            FaceVaryingLinearInterpolation::Boundaries => BOUNDARIES,
+            FaceVaryingLinearInterpolation::All => ALL,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            FV_LINEAR_INTERP_NONE => FaceVaryingLinearInterpolation::None,
-            FV_LINEAR_INTERP_CORNERS_ONLY => FaceVaryingLinearInterpolation::CornersOnly,
-            FV_LINEAR_INTERP_CORNERS_PLUS_1 => FaceVaryingLinearInterpolation::CornersPlus1,
-            FV_LINEAR_INTERP_CORNERS_PLUS_2 => FaceVaryingLinearInterpolation::CornersPlus2,
-            FV_LINEAR_INTERP_BOUNDARIES => FaceVaryingLinearInterpolation::Boundaries,
-            FV_LINEAR_INTERP_ALL => FaceVaryingLinearInterpolation::All,
+            NONE => FaceVaryingLinearInterpolation::None,
+            CORNERS_ONLY => FaceVaryingLinearInterpolation::CornersOnly,
+            CORNERS_PLUS1 => FaceVaryingLinearInterpolation::CornersPlus1,
+            CORNERS_PLUS2 => FaceVaryingLinearInterpolation::CornersPlus2,
+            BOUNDARIES => FaceVaryingLinearInterpolation::Boundaries,
+            ALL => FaceVaryingLinearInterpolation::All,
             _ => return None,
         })
     }
@@ -450,15 +388,15 @@ pub enum TriangleSubdivisionRule {
 impl TriangleSubdivisionRule {
     pub fn as_token(self) -> &'static str {
         match self {
-            TriangleSubdivisionRule::CatmullClark => TRIANGLE_SUBDIV_RULE_CATMULL_CLARK,
-            TriangleSubdivisionRule::Smooth => TRIANGLE_SUBDIV_RULE_SMOOTH,
+            TriangleSubdivisionRule::CatmullClark => CATMULL_CLARK,
+            TriangleSubdivisionRule::Smooth => SMOOTH,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            TRIANGLE_SUBDIV_RULE_CATMULL_CLARK => TriangleSubdivisionRule::CatmullClark,
-            TRIANGLE_SUBDIV_RULE_SMOOTH => TriangleSubdivisionRule::Smooth,
+            CATMULL_CLARK => TriangleSubdivisionRule::CatmullClark,
+            SMOOTH => TriangleSubdivisionRule::Smooth,
             _ => return None,
         })
     }
@@ -485,21 +423,21 @@ pub enum Interpolation {
 impl Interpolation {
     pub fn as_token(self) -> &'static str {
         match self {
-            Interpolation::Constant => INTERP_CONSTANT,
-            Interpolation::Uniform => INTERP_UNIFORM,
-            Interpolation::Varying => INTERP_VARYING,
-            Interpolation::Vertex => INTERP_VERTEX,
-            Interpolation::FaceVarying => INTERP_FACE_VARYING,
+            Interpolation::Constant => CONSTANT,
+            Interpolation::Uniform => UNIFORM,
+            Interpolation::Varying => VARYING,
+            Interpolation::Vertex => VERTEX,
+            Interpolation::FaceVarying => FACE_VARYING,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            INTERP_CONSTANT => Interpolation::Constant,
-            INTERP_UNIFORM => Interpolation::Uniform,
-            INTERP_VARYING => Interpolation::Varying,
-            INTERP_VERTEX => Interpolation::Vertex,
-            INTERP_FACE_VARYING => Interpolation::FaceVarying,
+            CONSTANT => Interpolation::Constant,
+            UNIFORM => Interpolation::Uniform,
+            VARYING => Interpolation::Varying,
+            VERTEX => Interpolation::Vertex,
+            FACE_VARYING => Interpolation::FaceVarying,
             _ => return None,
         })
     }
@@ -519,19 +457,19 @@ pub enum ElementType {
 impl ElementType {
     pub fn as_token(self) -> &'static str {
         match self {
-            ElementType::Face => ELEMENT_TYPE_FACE,
-            ElementType::Point => ELEMENT_TYPE_POINT,
-            ElementType::Edge => ELEMENT_TYPE_EDGE,
-            ElementType::Tetrahedron => ELEMENT_TYPE_TETRAHEDRON,
+            ElementType::Face => FACE,
+            ElementType::Point => POINT,
+            ElementType::Edge => EDGE,
+            ElementType::Tetrahedron => TETRAHEDRON,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            ELEMENT_TYPE_FACE => ElementType::Face,
-            ELEMENT_TYPE_POINT => ElementType::Point,
-            ELEMENT_TYPE_EDGE => ElementType::Edge,
-            ELEMENT_TYPE_TETRAHEDRON => ElementType::Tetrahedron,
+            FACE => ElementType::Face,
+            POINT => ElementType::Point,
+            EDGE => ElementType::Edge,
+            TETRAHEDRON => ElementType::Tetrahedron,
             _ => return None,
         })
     }
@@ -548,15 +486,15 @@ pub enum CurveType {
 impl CurveType {
     pub fn as_token(self) -> &'static str {
         match self {
-            CurveType::Cubic => CURVE_TYPE_CUBIC,
-            CurveType::Linear => CURVE_TYPE_LINEAR,
+            CurveType::Cubic => CUBIC,
+            CurveType::Linear => LINEAR,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            CURVE_TYPE_CUBIC => CurveType::Cubic,
-            CURVE_TYPE_LINEAR => CurveType::Linear,
+            CUBIC => CurveType::Cubic,
+            LINEAR => CurveType::Linear,
             _ => return None,
         })
     }
@@ -575,19 +513,19 @@ pub enum CurveBasis {
 impl CurveBasis {
     pub fn as_token(self) -> &'static str {
         match self {
-            CurveBasis::Bezier => CURVE_BASIS_BEZIER,
-            CurveBasis::Bspline => CURVE_BASIS_BSPLINE,
-            CurveBasis::CatmullRom => CURVE_BASIS_CATMULL_ROM,
-            CurveBasis::Hermite => CURVE_BASIS_HERMITE,
+            CurveBasis::Bezier => BEZIER,
+            CurveBasis::Bspline => BSPLINE,
+            CurveBasis::CatmullRom => CATMULL_ROM,
+            CurveBasis::Hermite => HERMITE,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            CURVE_BASIS_BEZIER => CurveBasis::Bezier,
-            CURVE_BASIS_BSPLINE => CurveBasis::Bspline,
-            CURVE_BASIS_CATMULL_ROM => CurveBasis::CatmullRom,
-            CURVE_BASIS_HERMITE => CurveBasis::Hermite,
+            BEZIER => CurveBasis::Bezier,
+            BSPLINE => CurveBasis::Bspline,
+            CATMULL_ROM => CurveBasis::CatmullRom,
+            HERMITE => CurveBasis::Hermite,
             _ => return None,
         })
     }
@@ -605,17 +543,17 @@ pub enum CurveWrap {
 impl CurveWrap {
     pub fn as_token(self) -> &'static str {
         match self {
-            CurveWrap::Nonperiodic => CURVE_WRAP_NONPERIODIC,
-            CurveWrap::Periodic => CURVE_WRAP_PERIODIC,
-            CurveWrap::Pinned => CURVE_WRAP_PINNED,
+            CurveWrap::Nonperiodic => NONPERIODIC,
+            CurveWrap::Periodic => PERIODIC,
+            CurveWrap::Pinned => PINNED,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            CURVE_WRAP_NONPERIODIC => CurveWrap::Nonperiodic,
-            CURVE_WRAP_PERIODIC => CurveWrap::Periodic,
-            CURVE_WRAP_PINNED => CurveWrap::Pinned,
+            NONPERIODIC => CurveWrap::Nonperiodic,
+            PERIODIC => CurveWrap::Periodic,
+            PINNED => CurveWrap::Pinned,
             _ => return None,
         })
     }
@@ -636,17 +574,17 @@ pub enum PatchForm {
 impl PatchForm {
     pub fn as_token(self) -> &'static str {
         match self {
-            PatchForm::Open => PATCH_FORM_OPEN,
-            PatchForm::Closed => PATCH_FORM_CLOSED,
-            PatchForm::Periodic => PATCH_FORM_PERIODIC,
+            PatchForm::Open => OPEN,
+            PatchForm::Closed => CLOSED,
+            PatchForm::Periodic => PERIODIC,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            PATCH_FORM_OPEN => PatchForm::Open,
-            PATCH_FORM_CLOSED => PatchForm::Closed,
-            PATCH_FORM_PERIODIC => PatchForm::Periodic,
+            OPEN => PatchForm::Open,
+            CLOSED => PatchForm::Closed,
+            PERIODIC => PatchForm::Periodic,
             _ => return None,
         })
     }
@@ -654,7 +592,7 @@ impl PatchForm {
 
 // Bidirectional `From`/`TryFrom<Value>` for each token enum, so they pass
 // straight to `Attribute::set` / `get::<Enum>()`. See the macro's own docs.
-use crate::common::impl_token_value;
+use crate::token_value::impl_token_value;
 
 impl_token_value!(
     Visibility,
@@ -684,7 +622,7 @@ mod tests {
     fn token_value_round_trip() {
         // `From` authors a token; `TryFrom` decodes it back.
         let value = Value::from(SubdivisionScheme::Loop);
-        assert_eq!(value, Value::Token(SUBDIV_SCHEME_LOOP.into()));
+        assert_eq!(value, Value::Token(LOOP.into()));
         assert_eq!(SubdivisionScheme::try_from(value).unwrap(), SubdivisionScheme::Loop);
     }
 

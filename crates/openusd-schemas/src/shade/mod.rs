@@ -43,7 +43,9 @@
 //! use openusd_schemas::shade::{self, Connectable};
 //! use openusd::{sdf, usd};
 //!
-//! let stage = usd::Stage::builder().in_memory("scene.usda").unwrap();
+//! let stage = usd::Stage::builder()
+//!     .schema_registry(openusd_schemas::schema_registry())
+//!     .in_memory("scene.usda").unwrap();
 //!
 //! let surface = shade::Shader::define(&stage, "/Mat/Surface").unwrap();
 //! surface.create_id_attr().unwrap().set(sdf::Value::token("UsdPreviewSurface")).unwrap();
@@ -61,66 +63,53 @@
 //! assert_eq!(shader.id().unwrap().as_deref(), Some("UsdPreviewSurface"));
 //! ```
 
-pub mod tokens;
+openusd::include_schema!("usdShade");
 
 mod binding;
 mod connectable;
 mod input;
 mod interface;
+mod material;
 mod node_def;
 mod output;
 mod preview;
-mod schema;
 mod traits;
 mod utils;
 
-pub use binding::MaterialBindingAPI;
 pub use connectable::{
     AttributeType, ConnectedSources, ConnectionSource, ConnectionTarget, ShadingAttribute, base_name,
     base_name_and_type,
 };
 pub use input::Input;
 pub use interface::{InterfaceInputConsumersMap, NodeGraphInterface};
-pub use node_def::SdrMetadata;
+pub use material::{ResolvedTerminal, TerminalKind, TerminalSource};
+pub use node_def::{
+    INFO_NAMESPACE, INFO_SOURCE_ASSET, INFO_SOURCE_ASSET_SUBIDENTIFIER, INFO_SOURCE_CODE, SUBIDENTIFIER_SUFFIX,
+    SdrMetadata,
+};
 pub use output::Output;
-pub use preview::{Channel, ReadPreviewSurface, read_preview_surface};
-pub use schema::{Material, NodeGraph, ResolvedTerminal, Shader, TerminalKind, TerminalSource};
+pub use preview::{
+    Channel, PS_CLEARCOAT, PS_CLEARCOAT_ROUGHNESS, PS_DIFFUSE_COLOR, PS_DISPLACEMENT, PS_EMISSIVE_COLOR, PS_IOR,
+    PS_METALLIC, PS_NORMAL, PS_OCCLUSION, PS_OPACITY, PS_OPACITY_THRESHOLD, PS_ROUGHNESS, PS_SPECULAR_COLOR,
+    PS_USE_SPECULAR_WORKFLOW, PVR_OUT_RESULT, PVR_VARNAME, ReadPreviewSurface, SHADER_ID_PREVIEW_SURFACE,
+    SHADER_ID_PRIMVAR_READER_FLOAT2, SHADER_ID_UV_TEXTURE, TEX_BIAS, TEX_FALLBACK, TEX_FILE, TEX_OUT_A, TEX_OUT_B,
+    TEX_OUT_G, TEX_OUT_R, TEX_OUT_RGB, TEX_SCALE, TEX_SOURCE_COLOR_SPACE, TEX_ST, TEX_WRAP_S, TEX_WRAP_T,
+    read_preview_surface,
+};
 pub use traits::Connectable;
 pub use utils::ProducerFilter;
 
+/// Whether a shading attribute accepts a connection, and from where. It is a
+/// key of the property's own metadata rather than a property, so no schema
+/// declares it.
+pub const CONNECTABILITY: &str = "connectability";
+
+/// The renderer-specific type a shading attribute stands for, likewise
+/// property metadata rather than a property.
+pub const RENDER_TYPE: &str = "renderType";
+
 use openusd::tf;
 use tokens::*;
-
-/// Implement the schema-trait memberships for a concrete UsdShade view. All
-/// trait paths are fully qualified, so the call site only needs the macro in
-/// scope.
-///
-/// - `connectable` is a concrete typed shading prim that carries `inputs:` /
-///   `outputs:` ([`Shader`], [`NodeGraph`], [`Material`]).
-/// - `single_api` is a single-apply API schema ([`MaterialBindingAPI`]).
-macro_rules! impl_shade_schema {
-    (connectable $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::ConcreteTyped;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-        impl $crate::shade::Connectable for $ty {}
-    };
-    (single_api $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::SingleApplyApi;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-    };
-}
-
-pub(crate) use impl_shade_schema;
 
 /// Implement the shading-attribute surface shared by [`Input`] and [`Output`]:
 /// the namespace-checked constructors, the fluent authoring setters, the
@@ -219,8 +208,7 @@ macro_rules! impl_shading_attribute {
 
             /// The renderer-specific `renderType` hint, when authored.
             pub fn render_type(&self) -> $crate::openusd::Result<Option<$crate::openusd::tf::Token>> {
-                self.attribute
-                    .get_metadata($crate::shade::tokens::META_RENDER_TYPE)
+                self.attribute.get_metadata($crate::shade::RENDER_TYPE)
             }
 
             /// Author this attribute's renderer-specific `renderType` hint.
@@ -230,7 +218,7 @@ macro_rules! impl_shading_attribute {
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
                 Ok(Self {
                     attribute: self.attribute.set_metadata(
-                        $crate::shade::tokens::META_RENDER_TYPE,
+                        $crate::shade::RENDER_TYPE,
                         $crate::openusd::sdf::Value::Token(render_type.into()),
                     )?,
                 })
@@ -301,7 +289,7 @@ macro_rules! impl_shading_attribute {
                 Ok(Self {
                     attribute: self
                         .attribute
-                        .clear_metadata($crate::shade::tokens::META_SDR_METADATA)?,
+                        .clear_metadata($crate::shade::tokens::SDR_METADATA)?,
                 })
             }
 
@@ -369,17 +357,17 @@ pub enum ImplementationSource {
 impl ImplementationSource {
     pub fn as_token(self) -> &'static str {
         match self {
-            ImplementationSource::Id => IMPL_SOURCE_ID,
-            ImplementationSource::SourceAsset => IMPL_SOURCE_SOURCE_ASSET,
-            ImplementationSource::SourceCode => IMPL_SOURCE_SOURCE_CODE,
+            ImplementationSource::Id => ID,
+            ImplementationSource::SourceAsset => SOURCE_ASSET,
+            ImplementationSource::SourceCode => SOURCE_CODE,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            IMPL_SOURCE_ID => ImplementationSource::Id,
-            IMPL_SOURCE_SOURCE_ASSET => ImplementationSource::SourceAsset,
-            IMPL_SOURCE_SOURCE_CODE => ImplementationSource::SourceCode,
+            ID => ImplementationSource::Id,
+            SOURCE_ASSET => ImplementationSource::SourceAsset,
+            SOURCE_CODE => ImplementationSource::SourceCode,
             _ => return None,
         })
     }
@@ -400,15 +388,15 @@ pub enum Connectability {
 impl Connectability {
     pub fn as_token(self) -> &'static str {
         match self {
-            Connectability::Full => CONNECTABILITY_FULL,
-            Connectability::InterfaceOnly => CONNECTABILITY_INTERFACE_ONLY,
+            Connectability::Full => FULL,
+            Connectability::InterfaceOnly => INTERFACE_ONLY,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            CONNECTABILITY_FULL => Connectability::Full,
-            CONNECTABILITY_INTERFACE_ONLY => Connectability::InterfaceOnly,
+            FULL => Connectability::Full,
+            INTERFACE_ONLY => Connectability::InterfaceOnly,
             _ => return None,
         })
     }
@@ -429,15 +417,15 @@ pub enum BindingStrength {
 impl BindingStrength {
     pub fn as_token(self) -> &'static str {
         match self {
-            BindingStrength::WeakerThanDescendants => STRENGTH_WEAKER_THAN_DESCENDANTS,
-            BindingStrength::StrongerThanDescendants => STRENGTH_STRONGER_THAN_DESCENDANTS,
+            BindingStrength::WeakerThanDescendants => WEAKER_THAN_DESCENDANTS,
+            BindingStrength::StrongerThanDescendants => STRONGER_THAN_DESCENDANTS,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            STRENGTH_WEAKER_THAN_DESCENDANTS => BindingStrength::WeakerThanDescendants,
-            STRENGTH_STRONGER_THAN_DESCENDANTS => BindingStrength::StrongerThanDescendants,
+            WEAKER_THAN_DESCENDANTS => BindingStrength::WeakerThanDescendants,
+            STRONGER_THAN_DESCENDANTS => BindingStrength::StrongerThanDescendants,
             _ => return None,
         })
     }
@@ -445,4 +433,4 @@ impl BindingStrength {
 
 // `From`/`TryFrom<Value>` for the token-valued enums, so they pass straight to
 // `Attribute::set` / `get::<Enum>()`.
-crate::common::impl_token_value!(ImplementationSource, Connectability, BindingStrength);
+crate::token_value::impl_token_value!(ImplementationSource, Connectability, BindingStrength);

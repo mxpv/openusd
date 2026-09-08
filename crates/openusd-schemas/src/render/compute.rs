@@ -1,6 +1,6 @@
 //! The computed render spec (`UsdRenderComputeSpec`).
 //!
-//! Flattens a `RenderSettings` prim, its products, vars, and cameras into
+//! Flattens a `Settings` prim, its products, vars, and cameras into
 //! a self-contained [`spec::RenderSpec`]: each product's base attributes
 //! are resolved (settings, then authored product overrides), the
 //! aspect-ratio conform policy is applied against the bound camera's
@@ -17,14 +17,15 @@ use openusd::sdf::{self, FieldKey, Path, Value};
 use openusd::usd::{Attribute, Relationship, Stage};
 
 use super::conform::apply_aspect_ratio_policy;
-use super::spec::{Product, RenderSpec, RenderVar as SpecVar};
+use super::spec::{Product as SpecProduct, RenderSpec, Var as SpecVar};
 use super::{
-    AspectRatioConformPolicy, ProductType, RenderProduct, RenderSettings, RenderSettingsBase, RenderVar, SourceType,
+    AspectRatioConformPolicy, Product, ProductSchema, ProductType, Settings, SettingsBase, SettingsSchema, SourceType,
+    Var, VarSchema,
 };
 
-/// Compute the [`RenderSpec`](super::spec::RenderSpec) for the `RenderSettings`
+/// Compute the [`RenderSpec`](super::spec::RenderSpec) for the `Settings`
 /// prim at `settings_prim`. Returns `None` when the prim is not a
-/// `RenderSettings`.
+/// `Settings`.
 ///
 /// Mirrors C++ `UsdRenderComputeSpec`: resolve the settings base, then per
 /// product copy that base and override it with the product's authored
@@ -35,7 +36,7 @@ use super::{
 /// `namespace:`-prefixed opinions) by top-level namespace; an empty slice
 /// gathers every namespace.
 pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> Result<Option<RenderSpec>> {
-    let Some(settings) = RenderSettings::get(stage, settings_prim.clone())? else {
+    let Some(settings) = Settings::get(stage, settings_prim.clone())? else {
         return Ok(None);
     };
     // Resolve the settings base against the spec defaults.
@@ -45,11 +46,11 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&s
     // var path → index into `render_vars`, so de-duplication is O(1) rather
     // than scanning the vector for each product's vars.
     let mut var_index: HashMap<String, usize> = HashMap::new();
-    let mut products: Vec<Product> = Vec::new();
+    let mut products: Vec<SpecProduct> = Vec::new();
 
     for product_path in settings.products_rel().forwarded_targets()? {
-        let Some(product) = RenderProduct::get(stage, product_path.clone())? else {
-            continue; // a `products` target that isn't a RenderProduct is ignored
+        let Some(product) = Product::get(stage, product_path.clone())? else {
+            continue; // a `products` target that isn't a Product is ignored
         };
 
         // Product attributes override the resolved settings base where authored.
@@ -79,7 +80,7 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&s
             namespaces,
         )?;
 
-        products.push(Product {
+        products.push(SpecProduct {
             render_product_path: product_path.as_str().to_string(),
             product_type: product.product_type_attr().get::<ProductType>()?.unwrap_or_default(),
             name: product.product_name_attr().cast::<String>()?.unwrap_or_default(),
@@ -107,7 +108,7 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&s
     }))
 }
 
-/// The camera + framing attributes resolved from a [`RenderSettingsBase`] view,
+/// The camera + framing attributes resolved from a [`SettingsBase`] view,
 /// with per-attribute fallback to a weaker base (the spec defaults for the
 /// settings, the resolved settings for a product). The intermediate value the
 /// render-spec computation flattens.
@@ -142,22 +143,19 @@ impl ResolvedBase {
     /// product attribute overrides only where the product authors it, mirroring
     /// C++ `_Get(attr, val, getDefaultValue=false)`, which uses the value only
     /// when the attribute has an authored opinion.
-    fn resolve(view: &impl RenderSettingsBase, fallback: &ResolvedBase) -> Result<Self> {
+    fn resolve(view: &impl SettingsBase, fallback: &ResolvedBase) -> Result<Self> {
         Ok(Self {
             resolution: read_int2(&view.resolution_attr())?.unwrap_or(fallback.resolution),
             pixel_aspect_ratio: read_f32(&view.pixel_aspect_ratio_attr())?.unwrap_or(fallback.pixel_aspect_ratio),
-            aspect_ratio_conform_policy: view
-                .aspect_ratio_conform_policy_attr()
-                .get::<AspectRatioConformPolicy>()?
+            aspect_ratio_conform_policy: authored(&view.aspect_ratio_conform_policy_attr())?
+                .and_then(|value| AspectRatioConformPolicy::try_from(value).ok())
                 .unwrap_or(fallback.aspect_ratio_conform_policy),
             data_window_ndc: read_float4(&view.data_window_ndc_attr())?.unwrap_or(fallback.data_window_ndc),
-            disable_motion_blur: view
-                .disable_motion_blur_attr()
-                .get::<bool>()?
+            disable_motion_blur: authored(&view.disable_motion_blur_attr())?
+                .and_then(|value| value.try_as_bool())
                 .unwrap_or(fallback.disable_motion_blur),
-            disable_depth_of_field: view
-                .disable_depth_of_field_attr()
-                .get::<bool>()?
+            disable_depth_of_field: authored(&view.disable_depth_of_field_attr())?
+                .and_then(|value| value.try_as_bool())
                 .unwrap_or(fallback.disable_depth_of_field),
             camera: read_rel_first_target(&view.camera_rel())?.or_else(|| fallback.camera.clone()),
         })
@@ -198,7 +196,7 @@ pub fn compute_namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&st
 
 /// Resolve a product's `orderedVars` to indices into the shared
 /// `render_vars` list, appending any var not seen before (de-duplication
-/// by var path). Targets that aren't `RenderVar` prims are skipped.
+/// by var path). Targets that aren't `Var` prims are skipped.
 fn collect_var_indices(
     stage: &Stage,
     ordered_vars_rel: &Relationship,
@@ -213,7 +211,7 @@ fn collect_var_indices(
             indices.push(i);
             continue;
         }
-        let Some(var) = RenderVar::get(stage, var_path.clone())? else {
+        let Some(var) = Var::get(stage, var_path.clone())? else {
             continue;
         };
         render_vars.push(SpecVar {
@@ -251,8 +249,21 @@ fn f64_to_f32(d: f64) -> f32 {
     d.clamp(f32::MIN as f64, f32::MAX as f64) as f32
 }
 
+/// The attribute's value where the prim itself authors one, and `None` where
+/// what it would answer is the schema's fallback.
+///
+/// What a render product inherits from its settings prim is what it does not
+/// say for itself, and a schema fallback is not the product saying anything
+/// (C++ passes `getDefaultValue = false` for exactly this).
+fn authored(attr: &Attribute) -> Result<Option<Value>> {
+    match attr.resolve_info()?.has_authored_value() {
+        true => attr.get::<Value>(),
+        false => Ok(None),
+    }
+}
+
 fn read_f32(attr: &Attribute) -> Result<Option<f32>> {
-    Ok(match attr.get::<Value>()? {
+    Ok(match authored(attr)? {
         Some(Value::Float(f)) => Some(f),
         Some(Value::Double(d)) => Some(f64_to_f32(d)),
         Some(Value::Half(h)) => Some(h.to_f32()),
@@ -261,11 +272,11 @@ fn read_f32(attr: &Attribute) -> Result<Option<f32>> {
 }
 
 fn read_int2(attr: &Attribute) -> Result<Option<[i32; 2]>> {
-    Ok(attr.get::<Value>()?.and_then(|v| v.try_as_vec_2i()).map(|v| [v.x, v.y]))
+    Ok(authored(attr)?.and_then(|v| v.try_as_vec_2i()).map(|v| [v.x, v.y]))
 }
 
 fn read_float4(attr: &Attribute) -> Result<Option<[f32; 4]>> {
-    Ok(match attr.get::<Value>()? {
+    Ok(match authored(attr)? {
         Some(Value::Vec4f(v)) => Some([v.x, v.y, v.z, v.w]),
         Some(Value::Vec4d(v)) => Some([f64_to_f32(v.x), f64_to_f32(v.y), f64_to_f32(v.z), f64_to_f32(v.w)]),
         _ => None,
@@ -296,26 +307,26 @@ mod tests {
     /// referenced by index from both products.
     #[test]
     fn products_and_dedup_vars() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
 
-        let color = RenderVar::define(&stage, "/Render/Vars/color")?;
+        let color = Var::define(&stage, "/Render/Vars/color")?;
         color.create_data_type_attr()?.set(sdf::Value::token("color3f"))?;
         color.create_source_type_attr()?.set(SourceType::Raw)?;
-        let alpha = RenderVar::define(&stage, "/Render/Vars/alpha")?;
+        let alpha = Var::define(&stage, "/Render/Vars/alpha")?;
         alpha.create_data_type_attr()?.set(sdf::Value::token("float"))?;
         alpha.create_source_name_attr()?.set("a".to_string())?;
 
-        let beauty = RenderProduct::define(&stage, "/Render/Products/beauty")?;
+        let beauty = Product::define(&stage, "/Render/Products/beauty")?;
         beauty.create_product_type_attr()?.set(ProductType::Raster)?;
         beauty
             .create_ordered_vars_rel()?
             .set_targets([sdf::path("/Render/Vars/color")?, sdf::path("/Render/Vars/alpha")?])?;
         // matte re-uses `color`, so it must NOT add a second global entry.
-        RenderProduct::define(&stage, "/Render/Products/matte")?
+        Product::define(&stage, "/Render/Products/matte")?
             .create_ordered_vars_rel()?
             .set_targets(["/Render/Vars/color"])?;
 
-        let settings = RenderSettings::define(&stage, "/Render/Settings")?;
+        let settings = Settings::define(&stage, "/Render/Settings")?;
         settings.create_resolution_attr()?.set(gf::vec2i(1024, 512))?;
         settings.create_products_rel()?.set_targets([
             sdf::path("/Render/Products/beauty")?,
@@ -341,13 +352,13 @@ mod tests {
     /// authors it; everything else inherits the resolved settings.
     #[test]
     fn product_overrides_only_authored() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        let settings = RenderSettings::define(&stage, "/Render/Settings")?;
+        let stage = crate::tests::stage("anon.usda")?;
+        let settings = Settings::define(&stage, "/Render/Settings")?;
         settings.create_resolution_attr()?.set(gf::vec2i(1920, 1080))?;
         settings.create_pixel_aspect_ratio_attr()?.set(2.0_f32)?;
         settings.create_products_rel()?.set_targets(["/Render/Products/p"])?;
         // Product authors only `resolution`.
-        RenderProduct::define(&stage, "/Render/Products/p")?
+        Product::define(&stage, "/Render/Products/p")?
             .create_resolution_attr()?
             .set(gf::vec2i(512, 512))?;
 
@@ -362,15 +373,15 @@ mod tests {
     /// 2:1 image expands the aperture width (default `expandAperture`).
     #[test]
     fn conform_against_bound_camera() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let cam = stage.define_prim("/World/Cam")?.set_type_name("Camera")?;
         for (name, v) in [("horizontalAperture", 10.0f32), ("verticalAperture", 10.0)] {
             stage
                 .create_attribute(cam.path().append_property(name)?, "float")?
                 .set(sdf::Value::Float(v))?;
         }
-        RenderProduct::define(&stage, "/Render/Products/p")?;
-        let settings = RenderSettings::define(&stage, "/Render/Settings")?;
+        Product::define(&stage, "/Render/Products/p")?;
+        let settings = Settings::define(&stage, "/Render/Settings")?;
         settings.create_resolution_attr()?.set(gf::vec2i(200, 100))?;
         settings.create_camera_rel()?.add_target("/World/Cam")?;
         settings.create_products_rel()?.set_targets(["/Render/Products/p"])?;
@@ -386,7 +397,7 @@ mod tests {
 
     #[test]
     fn non_settings_prim_is_none() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Scope")?.set_type_name("Scope")?;
         assert!(compute_render_spec(&stage, &sdf::path("/Scope")?, &[])?.is_none());
         Ok(())
@@ -396,8 +407,8 @@ mod tests {
     /// requested namespace); the unnamespaced schema attrs are not.
     #[test]
     fn namespaced_settings_filtered() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        let settings = RenderSettings::define(&stage, "/Render/Settings")?;
+        let stage = crate::tests::stage("anon.usda")?;
+        let settings = Settings::define(&stage, "/Render/Settings")?;
         settings.create_resolution_attr()?.set(gf::vec2i(512, 512))?;
         // A render-delegate setting (gathered) and a foreign-namespace one (filtered out).
         stage

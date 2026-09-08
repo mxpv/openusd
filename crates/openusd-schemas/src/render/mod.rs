@@ -6,17 +6,16 @@
 //!
 //! ```text
 //! SchemaBase
-//!  ├ RenderSettingsBase  (interface; shared camera + framing attrs)
-//!  │  ├ RenderSettings    (typed; top-level config + products)
-//!  │  └ RenderProduct     (typed; one output artifact, overrides the base)
-//!  ├ RenderVar            (typed; one output channel / AOV)
-//!  ├ RenderPass           (typed; a node in a multi-pass graph)
-//!  └ RenderDenoisePass    (typed; dev-era denoise marker)
+//!  ├ SettingsBase  (interface; shared camera + framing attrs)
+//!  │  ├ Settings    (typed; top-level config + products)
+//!  │  └ Product     (typed; one output artifact, overrides the base)
+//!  ├ Var            (typed; one output channel / AOV)
+//!  ├ Pass           (typed; a node in a multi-pass graph)
 //! ```
 //!
-//! [`RenderSettingsBase`] carries the camera + image-framing attributes shared
-//! by [`RenderSettings`] and [`RenderProduct`]. The centrepiece is the computed
-//! *render spec* ([`compute_render_spec`]): a `RenderSettings` prim, its
+//! [`SettingsBase`] carries the camera + image-framing attributes shared
+//! by [`Settings`] and [`Product`]. The centrepiece is the computed
+//! *render spec* ([`compute_render_spec`]): a `Settings` prim, its
 //! products, vars, and camera are flattened into a self-contained,
 //! fallback-resolved [`RenderSpec`](spec::RenderSpec) (product attributes
 //! overriding settings, the aspect-ratio conform policy applied, vars
@@ -28,16 +27,18 @@
 //! ```
 //! use openusd::gf;
 //! use openusd::sdf;
-//! use openusd_schemas::render::{self, RenderSettingsBase};
+//! use openusd_schemas::render::{self, ProductSchema, SettingsBase, SettingsSchema};
 //! use openusd::usd::Stage;
 //!
-//! let stage = Stage::builder().in_memory("scene.usda").unwrap();
+//! let stage = Stage::builder()
+//!     .schema_registry(openusd_schemas::schema_registry())
+//!     .in_memory("scene.usda").unwrap();
 //!
-//! let settings = render::RenderSettings::define(&stage, "/Render/Settings").unwrap();
+//! let settings = render::Settings::define(&stage, "/Render/Settings").unwrap();
 //! settings.create_resolution_attr().unwrap().set(gf::vec2i(1920, 1080)).unwrap();
 //! settings.create_products_rel().unwrap().add_target("/Render/Products/beauty").unwrap();
 //!
-//! render::RenderProduct::define(&stage, "/Render/Products/beauty").unwrap()
+//! render::Product::define(&stage, "/Render/Products/beauty").unwrap()
 //!     .create_product_name_attr().unwrap()
 //!     .set(sdf::Value::token("beauty.exr")).unwrap();
 //!
@@ -46,47 +47,25 @@
 //! assert_eq!(spec.products.len(), 1);
 //! ```
 
+openusd::include_schema!("usdRender");
+
 pub mod spec;
-pub mod tokens;
 
 mod compute;
 mod conform;
-mod schema;
-mod traits;
+mod settings;
 
 pub use compute::{compute_namespaced_settings, compute_render_spec};
 pub use conform::{ConformedAperture, apply_aspect_ratio_policy};
-pub use schema::{RenderDenoisePass, RenderPass, RenderProduct, RenderSettings, RenderVar};
-pub use traits::RenderSettingsBase;
 
 use openusd::tf;
 use tokens::*;
 
-/// Implement the schema-trait memberships for a concrete UsdRender view. All
-/// trait paths are fully qualified, so the call site only needs the macro in
-/// scope.
-///
-/// - `typed` is a concrete typed prim ([`RenderVar`], [`RenderPass`],
-///   [`RenderDenoisePass`]).
-/// - `settings_base` is a typed prim that also implements
-///   [`RenderSettingsBase`] ([`RenderSettings`], [`RenderProduct`]).
-macro_rules! impl_render_schema {
-    (typed $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::ConcreteTyped;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-    };
-    (settings_base $ty:ident) => {
-        impl_render_schema!(typed $ty);
-        impl $crate::render::RenderSettingsBase for $ty {}
-    };
-}
-
-pub(crate) use impl_render_schema;
+// The collections a `RenderPass` carries, each an instance name of
+// `UsdCollectionAPI` rather than a property of the pass.
+pub const COLLECTION_CAMERA_VISIBILITY: &str = "cameraVisibility";
+pub const COLLECTION_PRUNE: &str = "prune";
+pub const COLLECTION_MATTE: &str = "matte";
 
 /// `aspectRatioConformPolicy` — how the camera aperture aspect ratio is
 /// reconciled with the image aspect ratio (`resolution` ×
@@ -110,27 +89,27 @@ pub enum AspectRatioConformPolicy {
 impl AspectRatioConformPolicy {
     pub fn as_token(self) -> &'static str {
         match self {
-            AspectRatioConformPolicy::ExpandAperture => CONFORM_EXPAND_APERTURE,
-            AspectRatioConformPolicy::CropAperture => CONFORM_CROP_APERTURE,
-            AspectRatioConformPolicy::AdjustApertureWidth => CONFORM_ADJUST_APERTURE_WIDTH,
-            AspectRatioConformPolicy::AdjustApertureHeight => CONFORM_ADJUST_APERTURE_HEIGHT,
-            AspectRatioConformPolicy::AdjustPixelAspectRatio => CONFORM_ADJUST_PIXEL_ASPECT_RATIO,
+            AspectRatioConformPolicy::ExpandAperture => EXPAND_APERTURE,
+            AspectRatioConformPolicy::CropAperture => CROP_APERTURE,
+            AspectRatioConformPolicy::AdjustApertureWidth => ADJUST_APERTURE_WIDTH,
+            AspectRatioConformPolicy::AdjustApertureHeight => ADJUST_APERTURE_HEIGHT,
+            AspectRatioConformPolicy::AdjustPixelAspectRatio => ADJUST_PIXEL_ASPECT_RATIO,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            CONFORM_EXPAND_APERTURE => AspectRatioConformPolicy::ExpandAperture,
-            CONFORM_CROP_APERTURE => AspectRatioConformPolicy::CropAperture,
-            CONFORM_ADJUST_APERTURE_WIDTH => AspectRatioConformPolicy::AdjustApertureWidth,
-            CONFORM_ADJUST_APERTURE_HEIGHT => AspectRatioConformPolicy::AdjustApertureHeight,
-            CONFORM_ADJUST_PIXEL_ASPECT_RATIO => AspectRatioConformPolicy::AdjustPixelAspectRatio,
+            EXPAND_APERTURE => AspectRatioConformPolicy::ExpandAperture,
+            CROP_APERTURE => AspectRatioConformPolicy::CropAperture,
+            ADJUST_APERTURE_WIDTH => AspectRatioConformPolicy::AdjustApertureWidth,
+            ADJUST_APERTURE_HEIGHT => AspectRatioConformPolicy::AdjustApertureHeight,
+            ADJUST_PIXEL_ASPECT_RATIO => AspectRatioConformPolicy::AdjustPixelAspectRatio,
             _ => return None,
         })
     }
 }
 
-/// `productType` — the kind of artifact a [`RenderProduct`] emits. Pixar's
+/// `productType` — the kind of artifact a [`Product`] emits. Pixar's
 /// fallback is [`ProductType::Raster`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProductType {
@@ -144,21 +123,21 @@ pub enum ProductType {
 impl ProductType {
     pub fn as_token(self) -> &'static str {
         match self {
-            ProductType::Raster => PRODUCT_TYPE_RASTER,
-            ProductType::DeepRaster => PRODUCT_TYPE_DEEP_RASTER,
+            ProductType::Raster => RASTER,
+            ProductType::DeepRaster => DEEP_RASTER,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            PRODUCT_TYPE_RASTER => ProductType::Raster,
-            PRODUCT_TYPE_DEEP_RASTER => ProductType::DeepRaster,
+            RASTER => ProductType::Raster,
+            DEEP_RASTER => ProductType::DeepRaster,
             _ => return None,
         })
     }
 }
 
-/// `sourceType` — how a [`RenderVar`]'s `sourceName` is interpreted. Pixar's
+/// `sourceType` — how a [`Var`]'s `sourceName` is interpreted. Pixar's
 /// fallback is [`SourceType::Raw`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceType {
@@ -176,19 +155,19 @@ pub enum SourceType {
 impl SourceType {
     pub fn as_token(self) -> &'static str {
         match self {
-            SourceType::Raw => SOURCE_TYPE_RAW,
-            SourceType::Primvar => SOURCE_TYPE_PRIMVAR,
-            SourceType::Lpe => SOURCE_TYPE_LPE,
-            SourceType::Intrinsic => SOURCE_TYPE_INTRINSIC,
+            SourceType::Raw => RAW,
+            SourceType::Primvar => PRIMVAR,
+            SourceType::Lpe => LPE,
+            SourceType::Intrinsic => INTRINSIC,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            SOURCE_TYPE_RAW => SourceType::Raw,
-            SOURCE_TYPE_PRIMVAR => SourceType::Primvar,
-            SOURCE_TYPE_LPE => SourceType::Lpe,
-            SOURCE_TYPE_INTRINSIC => SourceType::Intrinsic,
+            RAW => SourceType::Raw,
+            PRIMVAR => SourceType::Primvar,
+            LPE => SourceType::Lpe,
+            INTRINSIC => SourceType::Intrinsic,
             _ => return None,
         })
     }
@@ -196,4 +175,4 @@ impl SourceType {
 
 // `From`/`TryFrom<Value>` for the token-valued enums, so they pass straight to
 // `Attribute::set` / `get::<Enum>()`.
-crate::common::impl_token_value!(AspectRatioConformPolicy, ProductType, SourceType);
+crate::token_value::impl_token_value!(AspectRatioConformPolicy, ProductType, SourceType);

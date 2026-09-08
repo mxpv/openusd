@@ -1,4 +1,4 @@
-//! Time-dependent view of a `SkelAnimation` prim.
+//! Time-dependent view of a `Animation` prim.
 //!
 //! Mirrors Pixar's `UsdSkelAnimQuery`. Thin wrapper: each
 //! `compute_*` method pulls the underlying `timeSamples` through
@@ -18,15 +18,15 @@ use openusd::sdf::{self, Path, Value};
 use openusd::tf;
 use openusd::usd::{SchemaBase, Stage, TimeCode};
 
-use super::schema::SkelAnimation;
-use super::tokens::{A_BLEND_SHAPE_WEIGHTS, A_ROTATIONS, A_SCALES, A_TRANSLATIONS};
+use super::Animation;
+use super::tokens::{BLEND_SHAPE_WEIGHTS, ROTATIONS, SCALES, TRANSLATIONS};
 
 /// Decomposed joint-local transforms at a stage time: one entry per
 /// joint, holding translation, rotation, and scale. Returned by
 /// [`SkelAnimQuery::compute_joint_local_transform_components`].
 pub type JointTransformComponents = (Vec<gf::Vec3f>, Vec<gf::Quatf>, Vec<gf::Vec3f>);
 
-/// Pre-resolved description of one `SkelAnimation` prim. Holds the
+/// Pre-resolved description of one `Animation` prim. Holds the
 /// joint and blend-shape ordering tokens plus flags recording which
 /// time-sampled attributes were actually authored, so the
 /// `*_might_be_time_varying` predicates can answer without going back
@@ -43,11 +43,11 @@ pub struct SkelAnimQuery {
 }
 
 impl SkelAnimQuery {
-    /// Build a query for a `SkelAnimation` prim. Returns `None` when
-    /// the prim isn't typed `SkelAnimation`, or when neither joints
+    /// Build a query for a `Animation` prim. Returns `None` when
+    /// the prim isn't typed `Animation`, or when neither joints
     /// nor blend shapes are authored on it.
     pub fn new(stage: &Stage, prim: impl sdf::IntoPath) -> Result<Option<Self>> {
-        let Some(anim) = SkelAnimation::get(stage, prim)? else {
+        let Some(anim) = Animation::get(stage, prim)? else {
             return Ok(None);
         };
         let joints = anim.joints()?;
@@ -57,29 +57,29 @@ impl SkelAnimQuery {
         }
         let prim = anim.path().clone();
         Ok(Some(Self {
-            has_translations: attr_authored(stage, &prim, A_TRANSLATIONS)?,
-            has_rotations: attr_authored(stage, &prim, A_ROTATIONS)?,
-            has_scales: attr_authored(stage, &prim, A_SCALES)?,
-            has_blend_shape_weights: attr_authored(stage, &prim, A_BLEND_SHAPE_WEIGHTS)?,
+            has_translations: attr_authored(stage, &prim, TRANSLATIONS)?,
+            has_rotations: attr_authored(stage, &prim, ROTATIONS)?,
+            has_scales: attr_authored(stage, &prim, SCALES)?,
+            has_blend_shape_weights: attr_authored(stage, &prim, BLEND_SHAPE_WEIGHTS)?,
             joints,
             blend_shapes,
             prim,
         }))
     }
 
-    /// Path of the underlying `SkelAnimation` prim.
+    /// Path of the underlying `Animation` prim.
     pub fn prim_path(&self) -> &str {
         self.prim.as_str()
     }
 
-    /// Joint ordering as authored on the SkelAnimation. Does not
+    /// Joint ordering as authored on the Animation. Does not
     /// have to match the bound Skeleton's joint order — callers
     /// remap by name when needed.
     pub fn joint_order(&self) -> &[String] {
         &self.joints
     }
 
-    /// Blend-shape ordering as authored on the SkelAnimation.
+    /// Blend-shape ordering as authored on the Animation.
     pub fn blend_shape_order(&self) -> &[String] {
         &self.blend_shapes
     }
@@ -108,9 +108,9 @@ impl SkelAnimQuery {
     ) -> Result<JointTransformComponents> {
         let time = time.into();
         let n = self.joints.len();
-        let translations = self.read_vec3f_attr_at(stage, A_TRANSLATIONS, time, n, gf::Vec3f::default())?;
-        let rotations = self.read_quatf_attr_at(stage, A_ROTATIONS, time, n, gf::Quatf::IDENTITY)?;
-        let scales = self.read_vec3f_attr_at(stage, A_SCALES, time, n, gf::vec3f(1.0, 1.0, 1.0))?;
+        let translations = self.read_vec3f_attr_at(stage, TRANSLATIONS, time, n, gf::Vec3f::default())?;
+        let rotations = self.read_quatf_attr_at(stage, ROTATIONS, time, n, gf::Quatf::IDENTITY)?;
+        let scales = self.read_vec3f_attr_at(stage, SCALES, time, n, gf::vec3f(1.0, 1.0, 1.0))?;
         Ok((translations, rotations, scales))
     }
 
@@ -141,7 +141,7 @@ impl SkelAnimQuery {
         if n == 0 {
             return Ok(Vec::new());
         }
-        let attr = self.prim.append_property(A_BLEND_SHAPE_WEIGHTS)?;
+        let attr = self.prim.append_property(BLEND_SHAPE_WEIGHTS)?;
         let v = stage.attribute(attr)?.get_at::<Value>(time.into())?;
         Ok(match v {
             Some(Value::FloatVec(w)) if w.len() == n => w,

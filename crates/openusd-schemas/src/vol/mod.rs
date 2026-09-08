@@ -22,16 +22,18 @@
 //! [`OpenVDBAsset`] (an OpenVDB grid) and [`Field3DAsset`] (a Field3D file) add
 //! their own `fieldClass` / `fieldPurpose`.
 //!
-//! The newer `ParticleField*` schemas (Gaussian-splat volumes) are a separate,
-//! larger subsystem and are not covered here.
+//! The `ParticleField*` schemas (Gaussian-splat volumes) are generated beside
+//! them; the subsystem that consumes them is not modelled here.
 //!
 //! # Example
 //!
 //! ```
-//! use openusd_schemas::vol::{self, FieldAsset};
+//! use openusd_schemas::vol::{self, VolumeFieldAsset, VolumeSchema};
 //! use openusd::{sdf, usd};
 //!
-//! let stage = usd::Stage::builder().in_memory("scene.usda").unwrap();
+//! let stage = usd::Stage::builder()
+//!     .schema_registry(openusd_schemas::schema_registry())
+//!     .in_memory("scene.usda").unwrap();
 //!
 //! // A field is a file-backed grid prim; `create_file_path_attr` is inherited
 //! // from the `FieldAsset` interface.
@@ -49,52 +51,14 @@
 //! );
 //! ```
 
-pub mod tokens;
+openusd::include_schema!("usdVol");
 
-mod schema;
-mod traits;
+mod volume;
+
+pub use volume::FIELD_NAMESPACE;
 
 use openusd::tf;
-
-pub use schema::{Field3DAsset, OpenVDBAsset, Volume};
-pub use traits::{FieldAsset, FieldBase};
-
 use tokens::*;
-
-/// Implement the schema-trait chain for a concrete `struct $ty(Prim)` vol
-/// newtype. Every arm hand-writes the one `SchemaBase` method (`prim`) and adds
-/// the empty membership impls for the chain it names; all trait paths are fully
-/// qualified, so the call site only needs the macro in scope.
-///
-/// - `gprim` is a [`geom::Gprim`](crate::geom::Gprim) (`Volume`).
-/// - `field_asset` adds [`FieldBase`] + [`FieldAsset`] on top of
-///   [`geom::Xformable`](crate::geom::Xformable) (`OpenVDBAsset`,
-///   `Field3DAsset`).
-macro_rules! impl_vol_schema {
-    (@base $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::ConcreteTyped;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-        impl $crate::geom::Imageable for $ty {}
-        impl $crate::geom::Xformable for $ty {}
-    };
-    (gprim $ty:ident) => {
-        impl_vol_schema!(@base $ty);
-        impl $crate::geom::Boundable for $ty {}
-        impl $crate::geom::Gprim for $ty {}
-    };
-    (field_asset $ty:ident) => {
-        impl_vol_schema!(@base $ty);
-        impl $crate::vol::FieldBase for $ty {}
-        impl $crate::vol::FieldAsset for $ty {}
-    };
-}
-
-pub(crate) use impl_vol_schema;
 
 /// The geometric role of a vector-valued field (the `vectorDataRoleHint`
 /// token). Per Pixar's spec the default (unauthored) is
@@ -113,21 +77,21 @@ pub enum VectorDataRoleHint {
 impl VectorDataRoleHint {
     pub fn as_token(self) -> &'static str {
         match self {
-            VectorDataRoleHint::NoRole => ROLE_NONE,
-            VectorDataRoleHint::Point => ROLE_POINT,
-            VectorDataRoleHint::Normal => ROLE_NORMAL,
-            VectorDataRoleHint::Vector => ROLE_VECTOR,
-            VectorDataRoleHint::Color => ROLE_COLOR,
+            VectorDataRoleHint::NoRole => NONE_,
+            VectorDataRoleHint::Point => POINT,
+            VectorDataRoleHint::Normal => NORMAL,
+            VectorDataRoleHint::Vector => VECTOR,
+            VectorDataRoleHint::Color => COLOR,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            ROLE_NONE => VectorDataRoleHint::NoRole,
-            ROLE_POINT => VectorDataRoleHint::Point,
-            ROLE_NORMAL => VectorDataRoleHint::Normal,
-            ROLE_VECTOR => VectorDataRoleHint::Vector,
-            ROLE_COLOR => VectorDataRoleHint::Color,
+            NONE_ => VectorDataRoleHint::NoRole,
+            POINT => VectorDataRoleHint::Point,
+            NORMAL => VectorDataRoleHint::Normal,
+            VECTOR => VectorDataRoleHint::Vector,
+            COLOR => VectorDataRoleHint::Color,
             _ => return None,
         })
     }
@@ -135,4 +99,4 @@ impl VectorDataRoleHint {
 
 // `From`/`TryFrom<Value>` so the hint passes straight to `Attribute::set` and
 // `get::<VectorDataRoleHint>()`.
-crate::common::impl_token_value!(VectorDataRoleHint);
+crate::token_value::impl_token_value!(VectorDataRoleHint);

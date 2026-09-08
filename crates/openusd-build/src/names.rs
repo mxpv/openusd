@@ -280,6 +280,17 @@ pub fn snake_case(name: &str) -> String {
     let mut chars = name.chars().peekable();
 
     while let Some(c) = chars.next() {
+        // A name a schema wrote can hold what an identifier cannot: `apiName`
+        // is a property name, and upstream writes `shaping:focus` there. Every
+        // such run opens a word, as a case boundary does.
+        if !c.is_alphanumeric() && c != '_' {
+            if !out.is_empty() && !out.ends_with('_') {
+                out.push('_');
+            }
+            previous = None;
+            continue;
+        }
+
         let opens_word = c.is_uppercase()
             && previous.is_some_and(|p| {
                 p.is_lowercase()
@@ -325,6 +336,15 @@ mod tests {
         assert!(is_identifier("type") && !is_rust_identifier("type"));
         assert!(is_identifier("_") && !is_rust_identifier("_"));
         assert!(is_rust_identifier("Sphere") && is_rust_identifier("type_"));
+    }
+
+    /// A namespaced `apiName` is one word per segment, since a method name
+    /// holds no `:`.
+    #[test]
+    fn snake_namespaced() {
+        assert_eq!(snake_case("shaping:focus"), "shaping_focus");
+        assert_eq!(snake_case("inputs:shaping:ies:file"), "inputs_shaping_ies_file");
+        assert_eq!(snake_case("primvars:displayColor"), "primvars_display_color");
     }
 
     /// Non-word runs are dropped and each fragment is capitalized, as

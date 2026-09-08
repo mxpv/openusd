@@ -28,11 +28,13 @@
 //! # Example
 //!
 //! ```
-//! use openusd_schemas::media::{AuralMode, SpatialAudio};
+//! use openusd_schemas::media::{AuralMode, SpatialAudio, SpatialAudioSchema};
 //! use openusd::sdf;
 //! use openusd::usd::Stage;
 //!
-//! let stage = Stage::builder().in_memory("scene.usda").unwrap();
+//! let stage = Stage::builder()
+//!     .schema_registry(openusd_schemas::schema_registry())
+//!     .in_memory("scene.usda").unwrap();
 //!
 //! // Author a non-spatial ambient track that loops from frame 24 to 48.
 //! let audio = SpatialAudio::define(&stage, "/World/Ambient").unwrap();
@@ -53,46 +55,12 @@
 //! assert_eq!(mode, Some(AuralMode::NonSpatial));
 //! ```
 
-pub mod tokens;
+openusd::include_schema!("usdMedia");
 
-mod schema;
-
-pub use schema::{AssetPreviewsAPI, SpatialAudio};
+mod previews;
 
 use openusd::tf;
 use tokens::*;
-
-/// Implement the schema-trait chain for a concrete `struct $ty(Prim)` media
-/// newtype. All trait paths are fully qualified, so the call site only needs
-/// the macro in scope.
-///
-/// - `xformable` is a typed [`geom::Xformable`](crate::geom::Xformable)
-///   prim (`SpatialAudio`).
-/// - `applied_api` is a single-apply API-schema view (`AssetPreviewsAPI`).
-macro_rules! impl_media_schema {
-    (xformable $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::ConcreteTyped;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-        impl $crate::geom::Imageable for $ty {}
-        impl $crate::geom::Xformable for $ty {}
-    };
-    (applied_api $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::SingleApplyApi;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-    };
-}
-
-pub(crate) use impl_media_schema;
 
 // Token-valued attribute enums. Each decodes one `allowedTokens` attribute via
 // `from_token` / `as_token`, with the Pixar default as its `Default`.
@@ -109,15 +77,15 @@ pub enum AuralMode {
 impl AuralMode {
     pub fn as_token(self) -> &'static str {
         match self {
-            AuralMode::Spatial => AURAL_SPATIAL,
-            AuralMode::NonSpatial => AURAL_NON_SPATIAL,
+            AuralMode::Spatial => SPATIAL,
+            AuralMode::NonSpatial => NON_SPATIAL,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            AURAL_SPATIAL => AuralMode::Spatial,
-            AURAL_NON_SPATIAL => AuralMode::NonSpatial,
+            SPATIAL => AuralMode::Spatial,
+            NON_SPATIAL => AuralMode::NonSpatial,
             _ => return None,
         })
     }
@@ -138,21 +106,21 @@ pub enum PlaybackMode {
 impl PlaybackMode {
     pub fn as_token(self) -> &'static str {
         match self {
-            PlaybackMode::OnceFromStart => PLAYBACK_ONCE_FROM_START,
-            PlaybackMode::OnceFromStartToEnd => PLAYBACK_ONCE_FROM_START_TO_END,
-            PlaybackMode::LoopFromStart => PLAYBACK_LOOP_FROM_START,
-            PlaybackMode::LoopFromStartToEnd => PLAYBACK_LOOP_FROM_START_TO_END,
-            PlaybackMode::LoopFromStage => PLAYBACK_LOOP_FROM_STAGE,
+            PlaybackMode::OnceFromStart => ONCE_FROM_START,
+            PlaybackMode::OnceFromStartToEnd => ONCE_FROM_START_TO_END,
+            PlaybackMode::LoopFromStart => LOOP_FROM_START,
+            PlaybackMode::LoopFromStartToEnd => LOOP_FROM_START_TO_END,
+            PlaybackMode::LoopFromStage => LOOP_FROM_STAGE,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            PLAYBACK_ONCE_FROM_START => PlaybackMode::OnceFromStart,
-            PLAYBACK_ONCE_FROM_START_TO_END => PlaybackMode::OnceFromStartToEnd,
-            PLAYBACK_LOOP_FROM_START => PlaybackMode::LoopFromStart,
-            PLAYBACK_LOOP_FROM_START_TO_END => PlaybackMode::LoopFromStartToEnd,
-            PLAYBACK_LOOP_FROM_STAGE => PlaybackMode::LoopFromStage,
+            ONCE_FROM_START => PlaybackMode::OnceFromStart,
+            ONCE_FROM_START_TO_END => PlaybackMode::OnceFromStartToEnd,
+            LOOP_FROM_START => PlaybackMode::LoopFromStart,
+            LOOP_FROM_START_TO_END => PlaybackMode::LoopFromStartToEnd,
+            LOOP_FROM_STAGE => PlaybackMode::LoopFromStage,
             _ => return None,
         })
     }

@@ -1,15 +1,15 @@
 //! UsdPhysics schema views.
 //!
 //! Typed value-views over a composed [`openusd::usd::Stage`], mirroring Pixar's
-//! `UsdPhysics` family — rigid-body dynamics, collision, and joints. Unlike the
-//! UsdGeom-derived families these are not geom prims: the typed prims
-//! ([`Scene`], [`CollisionGroup`], [`Joint`] and its subtypes) derive `UsdTyped`
-//! directly, and the rest are API schemas applied onto existing prims.
+//! `UsdPhysics` family — rigid-body dynamics, collision, and joints. A joint is
+//! a `UsdGeom` [`Imageable`](crate::geom::Imageable), which is why this family
+//! enables `geom`; [`Scene`] and [`CollisionGroup`] derive `UsdTyped` directly,
+//! and the rest are API schemas applied onto existing prims.
 //!
 //! ```text
 //! SchemaBase
 //!  ├ Scene / CollisionGroup                 (typed simulation prims)
-//!  ├ Joint  (+ JointBase interface)         (typed; two-body constraint)
+//!  ├ Joint  (+ JointSchema accessors)       (typed; two-body constraint)
 //!  │  └ FixedJoint / RevoluteJoint / PrismaticJoint / SphericalJoint / DistanceJoint
 //!  ├ single-apply APIs                       RigidBodyAPI / MassAPI / CollisionAPI /
 //!  │                                         MeshCollisionAPI / MaterialAPI /
@@ -17,7 +17,7 @@
 //!  └ multi-apply APIs (one instance per DOF) DriveAPI / LimitAPI
 //! ```
 //!
-//! Joints share the [`JointBase`] attribute interface (the two attached bodies
+//! Joints share the [`JointSchema`] attribute interface (the two attached bodies
 //! and their local frames). The multi-apply [`DriveAPI`] and [`LimitAPI`] carry
 //! a degree-of-freedom instance name (e.g. `rotX`, `linear`): they apply as
 //! `PhysicsDriveAPI:<dof>` / `PhysicsLimitAPI:<dof>` and their attributes live at
@@ -29,86 +29,47 @@
 //! # Example
 //!
 //! ```
-//! use openusd_schemas::physics::{self, JointBase};
+//! use openusd_schemas::physics::{self, JointSchema, RevoluteJointSchema, SceneSchema};
 //! use openusd::{sdf, usd};
 //!
-//! let stage = usd::Stage::builder().in_memory("scene.usda").unwrap();
+//! let stage = usd::Stage::builder()
+//!     .schema_registry(openusd_schemas::schema_registry())
+//!     .in_memory("scene.usda").unwrap();
 //!
 //! let scene = physics::Scene::define(&stage, "/World/Scene").unwrap();
 //! scene.create_gravity_magnitude_attr().unwrap().set(981.0_f32).unwrap();
 //!
 //! // A hinge: a RevoluteJoint adds `axis`/limits; `breakForce` is inherited
-//! // from the shared JointBase interface.
+//! // from the shared JointSchema accessors.
 //! let hinge = physics::RevoluteJoint::define(&stage, "/World/Hinge").unwrap();
 //! hinge.create_axis_attr().unwrap().set(physics::JointAxis::Z).unwrap();
 //! hinge.create_break_force_attr().unwrap().set(500.0_f32).unwrap();
 //!
 //! // A rigid body is a single-apply API applied onto an existing prim.
-//! let body = physics::RigidBodyAPI::apply(&stage, "/World/Box").unwrap();
+//! let box_prim = stage.define_prim("/World/Box").unwrap();
+//! let body = physics::RigidBodyAPI::apply(&box_prim).unwrap();
 //! body.create_rigid_body_enabled_attr().unwrap().set(true).unwrap();
 //!
 //! assert_eq!(hinge.axis_attr().get::<physics::JointAxis>().unwrap(), Some(physics::JointAxis::Z));
 //! ```
 
-pub mod tokens;
-
-mod schema;
-mod traits;
-
-pub use schema::{
-    ArticulationRootAPI, CollisionAPI, CollisionGroup, DistanceJoint, DriveAPI, FilteredPairsAPI, FixedJoint, Joint,
-    LimitAPI, MassAPI, MaterialAPI, MeshCollisionAPI, PrismaticJoint, RevoluteJoint, RigidBodyAPI, Scene,
-    SphericalJoint,
-};
-pub use traits::JointBase;
+openusd::include_schema!("usdPhysics");
 
 use openusd::tf;
 use tokens::*;
 
-/// Implement the `SchemaBase` (and, for joints, [`JointBase`]) memberships for a
-/// concrete physics view. All trait paths are fully qualified, so the call site
-/// only needs the macro in scope.
-///
-/// - `typed` is a concrete typed prim (`Scene`, `CollisionGroup`).
-/// - `joint` is a typed prim that also implements [`JointBase`] (the joints).
-/// - `single_api` is a single-apply API schema (the `*API` views).
-/// - `multi_api` is a multiple-apply API schema carrying a `name` instance
-///   (`DriveAPI`, `LimitAPI`); its `prim` lives in a named field.
-macro_rules! impl_physics_schema {
-    (typed $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::ConcreteTyped;
+/// The physics-specific material binding, which is `material:binding` under
+/// the `physics` purpose.
+pub const REL_MATERIAL_BINDING_PHYSICS: &str = "material:binding:physics";
 
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-    };
-    (joint $ty:ident) => {
-        impl_physics_schema!(typed $ty);
-        impl $crate::physics::JointBase for $ty {}
-    };
-    (single_api $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::SingleApplyApi;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.0
-            }
-        }
-    };
-    (multi_api $ty:ident) => {
-        impl $crate::openusd::usd::SchemaBase for $ty {
-            const KIND: $crate::openusd::usd::SchemaKind = $crate::openusd::usd::SchemaKind::MultipleApplyApi;
-
-            fn prim(&self) -> &$crate::openusd::usd::Prim {
-                &self.prim
-            }
-        }
-    };
-}
-
-pub(crate) use impl_physics_schema;
+// What a `PhysicsDriveAPI` instance's properties are called after the instance
+// name: a drive is `drive:<name>:targetPosition`, and the schema declares the
+// template rather than any of these tails.
+pub const DRIVE_SUB_TARGET_POSITION: &str = "targetPosition";
+pub const DRIVE_SUB_TARGET_VELOCITY: &str = "targetVelocity";
+pub const DRIVE_SUB_DAMPING: &str = "damping";
+pub const DRIVE_SUB_STIFFNESS: &str = "stiffness";
+pub const DRIVE_SUB_MAX_FORCE: &str = "maxForce";
 
 /// The axis a single-axis joint acts about (`physics:axis` on revolute /
 /// prismatic / spherical joints). Pixar's spec default is [`JointAxis::X`].
@@ -123,17 +84,17 @@ pub enum JointAxis {
 impl JointAxis {
     pub fn as_token(self) -> &'static str {
         match self {
-            JointAxis::X => AXIS_X,
-            JointAxis::Y => AXIS_Y,
-            JointAxis::Z => AXIS_Z,
+            JointAxis::X => X,
+            JointAxis::Y => Y,
+            JointAxis::Z => Z,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            AXIS_X => JointAxis::X,
-            AXIS_Y => JointAxis::Y,
-            AXIS_Z => JointAxis::Z,
+            X => JointAxis::X,
+            Y => JointAxis::Y,
+            Z => JointAxis::Z,
             _ => return None,
         })
     }
@@ -151,15 +112,15 @@ pub enum DriveType {
 impl DriveType {
     pub fn as_token(self) -> &'static str {
         match self {
-            DriveType::Force => DRIVE_TYPE_FORCE,
-            DriveType::Acceleration => DRIVE_TYPE_ACCELERATION,
+            DriveType::Force => FORCE,
+            DriveType::Acceleration => ACCELERATION,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            DRIVE_TYPE_FORCE => DriveType::Force,
-            DRIVE_TYPE_ACCELERATION => DriveType::Acceleration,
+            FORCE => DriveType::Force,
+            ACCELERATION => DriveType::Acceleration,
             _ => return None,
         })
     }
@@ -183,23 +144,23 @@ pub enum CollisionApprox {
 impl CollisionApprox {
     pub fn as_token(self) -> &'static str {
         match self {
-            CollisionApprox::None => APPROX_NONE,
-            CollisionApprox::ConvexHull => APPROX_CONVEX_HULL,
-            CollisionApprox::ConvexDecomposition => APPROX_CONVEX_DECOMPOSITION,
-            CollisionApprox::BoundingSphere => APPROX_BOUNDING_SPHERE,
-            CollisionApprox::BoundingCube => APPROX_BOUNDING_CUBE,
-            CollisionApprox::MeshSimplification => APPROX_MESH_SIMPLIFICATION,
+            CollisionApprox::None => NONE,
+            CollisionApprox::ConvexHull => CONVEX_HULL,
+            CollisionApprox::ConvexDecomposition => CONVEX_DECOMPOSITION,
+            CollisionApprox::BoundingSphere => BOUNDING_SPHERE,
+            CollisionApprox::BoundingCube => BOUNDING_CUBE,
+            CollisionApprox::MeshSimplification => MESH_SIMPLIFICATION,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            APPROX_NONE => CollisionApprox::None,
-            APPROX_CONVEX_HULL => CollisionApprox::ConvexHull,
-            APPROX_CONVEX_DECOMPOSITION => CollisionApprox::ConvexDecomposition,
-            APPROX_BOUNDING_SPHERE => CollisionApprox::BoundingSphere,
-            APPROX_BOUNDING_CUBE => CollisionApprox::BoundingCube,
-            APPROX_MESH_SIMPLIFICATION => CollisionApprox::MeshSimplification,
+            NONE => CollisionApprox::None,
+            CONVEX_HULL => CollisionApprox::ConvexHull,
+            CONVEX_DECOMPOSITION => CollisionApprox::ConvexDecomposition,
+            BOUNDING_SPHERE => CollisionApprox::BoundingSphere,
+            BOUNDING_CUBE => CollisionApprox::BoundingCube,
+            MESH_SIMPLIFICATION => CollisionApprox::MeshSimplification,
             _ => return None,
         })
     }
@@ -227,29 +188,29 @@ pub enum Dof {
 impl Dof {
     pub fn as_token(self) -> &'static str {
         match self {
-            Dof::TransX => DOF_TRANS_X,
-            Dof::TransY => DOF_TRANS_Y,
-            Dof::TransZ => DOF_TRANS_Z,
-            Dof::RotX => DOF_ROT_X,
-            Dof::RotY => DOF_ROT_Y,
-            Dof::RotZ => DOF_ROT_Z,
-            Dof::Linear => DOF_LINEAR,
-            Dof::Angular => DOF_ANGULAR,
-            Dof::Distance => DOF_DISTANCE,
+            Dof::TransX => TRANS_X,
+            Dof::TransY => TRANS_Y,
+            Dof::TransZ => TRANS_Z,
+            Dof::RotX => ROT_X,
+            Dof::RotY => ROT_Y,
+            Dof::RotZ => ROT_Z,
+            Dof::Linear => LINEAR,
+            Dof::Angular => ANGULAR,
+            Dof::Distance => DISTANCE,
         }
     }
 
     pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
         Some(match token.into().as_str() {
-            DOF_TRANS_X => Dof::TransX,
-            DOF_TRANS_Y => Dof::TransY,
-            DOF_TRANS_Z => Dof::TransZ,
-            DOF_ROT_X => Dof::RotX,
-            DOF_ROT_Y => Dof::RotY,
-            DOF_ROT_Z => Dof::RotZ,
-            DOF_LINEAR => Dof::Linear,
-            DOF_ANGULAR => Dof::Angular,
-            DOF_DISTANCE => Dof::Distance,
+            TRANS_X => Dof::TransX,
+            TRANS_Y => Dof::TransY,
+            TRANS_Z => Dof::TransZ,
+            ROT_X => Dof::RotX,
+            ROT_Y => Dof::RotY,
+            ROT_Z => Dof::RotZ,
+            LINEAR => Dof::Linear,
+            ANGULAR => Dof::Angular,
+            DISTANCE => Dof::Distance,
             _ => return None,
         })
     }
@@ -257,4 +218,4 @@ impl Dof {
 
 // `From`/`TryFrom<Value>` for the token-valued enums, so they pass straight to
 // `Attribute::set` / `get::<Enum>()`.
-crate::common::impl_token_value!(JointAxis, DriveType, CollisionApprox);
+crate::token_value::impl_token_value!(JointAxis, DriveType, CollisionApprox);

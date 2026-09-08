@@ -6,45 +6,63 @@
 //! skinning weights — as Rust types, rather than by attribute name and hand
 //! decoding. Every view authors as well as reads.
 //!
-//! Each sub-module is feature-gated so callers only compile what
-//! they need:
+//! Every view is generated from the schema definitions this crate vendors, by
+//! [`openusd-build`](https://docs.rs/openusd-build) at build time: a family's
+//! views, the tokens it names things by, and the schema data a registry reads
+//! its fallbacks and inheritance from. What is hand-written beside them is
+//! what a property cannot say — a transform stack, a skinning topology, a
+//! render spec.
 //!
-//! | Feature | Module | Status |
-//! |---------|--------|--------|
-//! | `geom`    | `geom`    | `UsdGeom` reader (cross-cutting Imageable / Boundable today; full surface incoming). |
-//! | `physics` | `physics` | `UsdPhysics` reader (8 prim types, 7 single-apply APIs, multi-apply `LimitAPI` / `DriveAPI`). |
-//! | `skel`    | `skel`    | `UsdSkel` trait-views (SkelRoot / Skeleton as geom `Boundable`, SkelAnimation / BlendShape typed, SkelBindingAPI single-apply) + skinning toolkit (Topology, AnimMapper, SkeletonResolver, SkinningResolver, pure-math LBS); builds on the `geom` trait chain. |
-//! | `lux`     | `lux`     | `UsdLux` trait-views (8 concrete light prims + LightFilter + LightAPI / ShapingAPI / ShadowAPI / LightListAPI); builds on the `geom` trait chain. |
-//! | `shade`   | `shade`   | `UsdShade` trait-views (Shader / NodeGraph / Material via the `Connectable` interface, MaterialBindingAPI, UsdPreviewSurface reader). |
-//! | `render`  | `render`  | `UsdRender` trait-views (RenderSettings / Product via the `RenderSettingsBase` interface, Var / Pass / DenoisePass) + the computed render spec. |
-//! | `ui`      | `ui`      | `UsdUI` trait-views (typed `Backdrop` + single-apply `SceneGraphPrimAPI` / `NodeGraphNodeAPI`). |
-//! | `vol`     | `vol`     | `UsdVol` trait-views (`Volume` + `OpenVDBAsset` / `Field3DAsset`); builds on the `geom` trait chain. |
-//! | `media`   | `media`   | `UsdMedia` trait-views (`SpatialAudio` + `AssetPreviewsAPI`); builds on the `geom` trait chain. |
-//! | `proc`    | `proc`    | `UsdProc` trait-view (`GenerativeProcedural`, a `geom::Boundable`); builds on the `geom` trait chain. |
+//! Each family is feature-gated, so a caller compiles only the domains it
+//! reads. A family that builds on another's views enables it:
 //!
-//! These views read and author opinions; the property fallbacks a schema
-//! declares come from [`openusd::usd::SchemaRegistry`].
+//! | Feature | Module | Schemas | Beyond the views |
+//! |---------|--------|---------|------------------|
+//! | `geom`    | `geom`    | `UsdGeom`     | `ImageableExt` (visibility / purpose down namespace), `XformableExt` (the transform stack), the token enums |
+//! | `lux`     | `lux`     | `UsdLux`      | the token enums; needs `geom` |
+//! | `media`   | `media`   | `UsdMedia`    | asset-preview thumbnails, which live in `assetInfo`; needs `geom` |
+//! | `physics` | `physics` | `UsdPhysics`  | the token enums; needs `geom` |
+//! | `proc`    | `proc`    | `UsdProc`     | needs `geom` |
+//! | `render`  | `render`  | `UsdRender`   | the computed render spec, aperture conforming, the stage's settings prim |
+//! | `shade`   | `shade`   | `UsdShade`    | the `Connectable` interface, connection resolution, material terminals, the `UsdPreviewSurface` reader |
+//! | `skel`    | `skel`    | `UsdSkel`     | the skinning toolkit: topology, animation mapping, resolvers, pure-math LBS; needs `geom` |
+//! | `ui`      | `ui`      | `UsdUI`       | |
+//! | `vol`     | `vol`     | `UsdVol`      | a volume's field relationships, which no property declares; needs `geom` |
+//!
+//! # The registry
+//!
+//! A view answers through the stage's [`SchemaRegistry`]: it is what makes a
+//! prim a `Mesh`, what resolves the fallback a schema declares for an
+//! unauthored property, and what answers
+//! [`is_a`](openusd::usd::Prim::is_a) along a schema's inheritance. Hand
+//! [`schema_registry`] to the stage, or [`registry_builder`] where a caller
+//! adds families of its own. A stage opened without it knows only the core
+//! `usd` family, so the typed `get` constructors answer `None`.
+//!
+//! # Conventions
+//!
+//! A view's own accessors live on its `<Class>Schema` trait and the inherited
+//! ones on the trait of the class that declared them, so reading `mesh.points_attr()`
+//! needs `PointBased` in scope. A property is reached through a
+//! `foo_attr()` / `create_foo_attr()` pair, named by the schema's own
+//! `apiName`. An applied API schema is applied to a prim
+//! (`TagAPI::apply(&prim)`) and read back with `get` — or, where it takes an
+//! instance name, `get_instance(&prim, "front")`.
+
+use std::sync::{Arc, OnceLock};
 
 use openusd::sdf;
+use openusd::usd::{SchemaRegistry, SchemaRegistryBuilder};
 
 // The macros below generate paths into the core crate. Reaching it through
 // `$crate::openusd` keeps them bound to this crate's dependency rather than
 // to whatever `openusd` names at the expansion site.
 pub(crate) use ::openusd;
 
-#[cfg(any(
-    feature = "geom",
-    feature = "lux",
-    feature = "media",
-    feature = "physics",
-    feature = "proc",
-    feature = "render",
-    feature = "shade",
-    feature = "skel",
-    feature = "ui",
-    feature = "vol"
-))]
-mod common;
+// The families that name a token-valued enum. The three others that use the
+// macro — `physics`, `skel` and `vol` — enable `geom`, which is already here.
+#[cfg(any(feature = "geom", feature = "render", feature = "shade", feature = "ui"))]
+mod token_value;
 
 /// Any failure a schema view can report: a schema-domain failure of its own,
 /// or a core failure ([`Core`](Self::Core)) from the composed queries and
@@ -167,3 +185,83 @@ pub mod skel;
 pub mod ui;
 #[cfg(feature = "vol")]
 pub mod vol;
+
+/// A registry builder carrying the core `usd` family and every family this
+/// build enables, for a caller that adds families of its own before building.
+///
+/// Each family registers the schema data generated from its own vendored
+/// definitions: the fallbacks a stage resolves, and the inheritance it answers
+/// [`is_a`](openusd::usd::Prim::is_a) along.
+pub fn registry_builder() -> Result<SchemaRegistryBuilder, SchemaError> {
+    let builder = SchemaRegistry::builder();
+    #[cfg(feature = "geom")]
+    let builder = geom::register(builder)?;
+    #[cfg(feature = "lux")]
+    let builder = lux::register(builder)?;
+    #[cfg(feature = "media")]
+    let builder = media::register(builder)?;
+    #[cfg(feature = "physics")]
+    let builder = physics::register(builder)?;
+    #[cfg(feature = "proc")]
+    let builder = proc::register(builder)?;
+    #[cfg(feature = "render")]
+    let builder = render::register(builder)?;
+    #[cfg(feature = "shade")]
+    let builder = shade::register(builder)?;
+    #[cfg(feature = "skel")]
+    let builder = skel::register(builder)?;
+    #[cfg(feature = "ui")]
+    let builder = ui::register(builder)?;
+    #[cfg(feature = "vol")]
+    let builder = vol::register(builder)?;
+    Ok(builder)
+}
+
+/// The registry of every enabled family, built once and shared.
+///
+/// Hand it to [`usd::StageBuilder::schema_registry`](openusd::usd::StageBuilder::schema_registry):
+/// a stage opened without it knows only the core `usd` family, so the typed
+/// `get` constructors answer `None` and no schema fallback resolves.
+///
+/// ```no_run
+/// use openusd::usd::Stage;
+///
+/// let stage = Stage::builder()
+///     .schema_registry(openusd_schemas::schema_registry())
+///     .open("scene.usda")?;
+/// # Ok::<(), openusd::Error>(())
+/// ```
+///
+/// # Panics
+///
+/// If the generated schema data does not register, which is a bug in this
+/// crate rather than anything a caller can cause.
+pub fn schema_registry() -> Arc<SchemaRegistry> {
+    static REGISTRY: OnceLock<Arc<SchemaRegistry>> = OnceLock::new();
+    REGISTRY
+        .get_or_init(|| {
+            let builder = registry_builder().expect("the generated schema data registers");
+            builder.build().expect("the registered families compose")
+        })
+        .clone()
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    use openusd::Result;
+    use openusd::usd::Stage;
+
+    /// An in-memory stage carrying every enabled family's schema data, which
+    /// is what makes a prim its type and resolves the fallbacks a schema
+    /// declares. Reached from a family's own tests as
+    /// `crate::tests::stage("anon.usda")`.
+    #[allow(
+        dead_code,
+        reason = "which families' tests reach for it depends on the features enabled"
+    )]
+    pub(crate) fn stage(name: &str) -> Result<Stage> {
+        Stage::builder().schema_registry(schema_registry()).in_memory(name)
+    }
+}

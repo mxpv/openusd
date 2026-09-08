@@ -1,66 +1,18 @@
-//! `UsdGeomImageable` — the base of the UsdGeom prim hierarchy.
+//! What `UsdGeomImageable` answers beyond its own properties.
 
 use openusd::Result;
-
 use openusd::sdf;
 use openusd::tf;
-use openusd::usd::{Attribute, Relationship, SchemaBase};
 
-use super::tokens as tok;
-use super::{Purpose, Visibility};
+use super::tokens;
+use super::{Imageable, Purpose, Visibility};
 
-/// A prim that can be visualized — the base for every UsdGeom prim
-/// (C++ `UsdGeomImageable`). Carries `visibility` / `purpose` (both
-/// inherited down namespace) and the `proxyPrim` relationship.
+/// The questions `visibility` and `purpose` are actually asked, both of which
+/// are answered by walking namespace rather than by reading one prim.
 ///
-/// Implemented by every concrete UsdGeom schema through the
-/// `Imageable → Xformable → Boundable → Gprim` chain, so its accessors are
-/// available on each shape.
-pub trait Imageable: SchemaBase {
-    /// Whether the prim and its subtree are rendered: `inherited` defers to the
-    /// nearest ancestor, while `invisible` prunes this prim and everything below
-    /// it. The opinion is inherited down namespace. C++
-    /// `UsdGeomImageable::GetVisibilityAttr`.
-    ///
-    /// Type `token`. Fetch with `get::<Visibility>()?`.
-    fn visibility_attr(&self) -> Attribute {
-        self.prim().attribute(tok::A_VISIBILITY)
-    }
-
-    /// Author the `visibility` attribute (`token`, varying), returning its
-    /// handle (C++ `CreateVisibilityAttr`).
-    fn create_visibility_attr(&self) -> Result<Attribute> {
-        Ok(self
-            .prim()
-            .create_attribute(tok::A_VISIBILITY, sdf::ValueTypeName::TOKEN)?
-            .set_custom(false)?)
-    }
-
-    /// The prim's render purpose — `default`, `render`, `proxy`, or `guide` —
-    /// classifying it for purpose-based visibility (e.g. show `proxy` in the
-    /// viewport, `render` at final quality). The opinion is inherited down
-    /// namespace. C++ `UsdGeomImageable::GetPurposeAttr`.
-    ///
-    /// Type `token`. Fetch with `get::<Purpose>()?`.
-    fn purpose_attr(&self) -> Attribute {
-        self.prim().attribute(tok::A_PURPOSE)
-    }
-
-    /// Author the `purpose` attribute (`uniform token`), returning its
-    /// handle (C++ `CreatePurposeAttr`).
-    fn create_purpose_attr(&self) -> Result<Attribute> {
-        Ok(self
-            .prim()
-            .create_attribute(tok::A_PURPOSE, sdf::ValueTypeName::TOKEN)?
-            .set_custom(false)?
-            .set_variability(sdf::Variability::Uniform)?)
-    }
-
-    /// `proxyPrim` relationship handle (C++ `GetProxyPrimRel`).
-    fn proxy_prim_rel(&self) -> Relationship {
-        self.prim().relationship(tok::REL_PROXY_PRIM)
-    }
-
+/// Every [`Imageable`] answers them, so a view has them wherever the generated
+/// accessors are.
+pub trait ImageableExt: Imageable {
     /// Resolve the effective composed `visibility`, walking ancestors
     /// (C++ `ComputeVisibility`): an `invisible` opinion on this prim or any
     /// ancestor prunes the subtree, so the result is
@@ -70,7 +22,7 @@ pub trait Imageable: SchemaBase {
         let mut cur = self.path().clone();
         loop {
             if stage
-                .field::<tf::Token>(cur.append_property(tok::A_VISIBILITY)?, sdf::FieldKey::Default)?
+                .field::<tf::Token>(cur.append_property(tokens::VISIBILITY)?, sdf::FieldKey::Default)?
                 .and_then(Visibility::from_token)
                 .unwrap_or_default()
                 == Visibility::Invisible
@@ -93,7 +45,7 @@ pub trait Imageable: SchemaBase {
         let mut cur = self.path().clone();
         loop {
             if let Some(token) =
-                stage.field::<tf::Token>(cur.append_property(tok::A_PURPOSE)?, sdf::FieldKey::Default)?
+                stage.field::<tf::Token>(cur.append_property(tokens::PURPOSE)?, sdf::FieldKey::Default)?
             {
                 return Ok(Purpose::from_token(token).unwrap_or_default());
             }
@@ -104,3 +56,5 @@ pub trait Imageable: SchemaBase {
         }
     }
 }
+
+impl<T: Imageable> ImageableExt for T {}

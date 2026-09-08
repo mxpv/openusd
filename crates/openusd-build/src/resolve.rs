@@ -35,6 +35,13 @@ const API_SCHEMA_TYPE: &str = "apiSchemaType";
 pub fn library(source: &Source) -> Result<Library, Error> {
     // One flattening answers what every class effectively holds; the
     // declarations answer the rest.
+    //
+    // TODO(perf): flatten only the prims this library generates. Measured over
+    // the eleven upstream libraries, this is 80 ms of a 165 ms release run
+    // (49%), and most of it composes base-library prims that arrive through
+    // `subLayers` and are never read: `usdMedia` flattens 40 declarations to
+    // read 2. A paths-scoped flatten — `usd::flatten`'s `write_prim` over the
+    // generated declarations alone — would take it to roughly 21 ms.
     let flattened = source.stage.flatten()?;
 
     // Declarations arrive strongest first, so the first of a name is the one

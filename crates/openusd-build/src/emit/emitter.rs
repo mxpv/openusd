@@ -21,7 +21,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use super::lower::{Constant, PropertyKind, RustAccessor, RustClass, RustLibrary, View};
+use super::lower::{Constant, PropertyKind, Reflected, RustAccessor, RustClass, RustLibrary, View};
 
 /// The whole generated file: the tokens its schemas name things by, what
 /// registers them, and a trait and a view per schema.
@@ -136,13 +136,45 @@ fn accessor_trait(class: &RustClass) -> TokenStream {
     };
     let parent = &class.parent;
     let documentation = documented(class);
+    let allow = allow_non_camel_case(class);
     let methods = class.accessors.iter().filter(|accessor| !accessor.inherent).map(method);
+    // A reflected schema's own view is one method away, for what it offers
+    // beyond its properties.
+    let reflected = class.reflected.iter().map(|reflected| {
+        let Reflected { accessor, view } = reflected;
+        let documentation = format!(" Views the prim through `{view}`, whose properties this schema carries.");
+        quote! {
+            #[doc = #documentation]
+            fn #accessor(&self) -> #view {
+                #view::new(self.prim().clone())
+            }
+        }
+    });
 
     quote! {
         #documentation
+        #allow
         pub trait #name: #parent {
+            #(#reflected)*
             #(#methods)*
         }
+    }
+}
+
+/// What lets a versioned schema keep the name its identifier gives it.
+///
+/// `Cylinder_1` is what the registry knows the schema as and what a schema
+/// author reads, so the view is called that too rather than being respelled
+/// into a camel-case name that matches nothing.
+fn allow_non_camel_case(class: &RustClass) -> TokenStream {
+    match class.allows_non_camel_case {
+        true => quote! {
+            #[allow(
+                non_camel_case_types,
+                reason = "the schema's identifier carries its version, and the view is named after it"
+            )]
+        },
+        false => TokenStream::new(),
     }
 }
 
@@ -155,6 +187,7 @@ fn view(class: &RustClass) -> TokenStream {
 
     let name = &class.name;
     let documentation = documented(class);
+    let allow = allow_non_camel_case(class);
     let kind = &class.kind_constant;
     let constructors = constructors(class, shape);
 
@@ -181,6 +214,7 @@ fn view(class: &RustClass) -> TokenStream {
 
     quote! {
         #documentation
+        #allow
         #[derive(::std::clone::Clone, ::std::fmt::Debug)]
         #declaration
 
@@ -299,6 +333,19 @@ fn constructors(class: &RustClass, shape: &View) -> TokenStream {
                 let applied =
                     ::openusd::usd::SchemaRegistry::make_applied_name(#constant, name.as_str());
                 ::std::result::Result::Ok(Self { prim: prim.clone().apply_api(applied)?, name })
+            }
+
+            /// Views `prim` as this schema applied under `name`, or `None`
+            /// where it does not carry it.
+            pub fn get_instance(
+                prim: &::openusd::usd::Prim,
+                name: impl ::std::convert::Into<::openusd::tf::Token>,
+            ) -> ::openusd::Result<::std::option::Option<Self>> {
+                let name = name.into();
+                let applied =
+                    ::openusd::usd::SchemaRegistry::make_applied_name(#constant, name.as_str());
+                let carried = prim.has_api_schema(applied)?;
+                ::std::result::Result::Ok(carried.then(|| Self { prim: prim.clone(), name }))
             }
 
             /// Whether the schema may be applied to `prim` under `name`.

@@ -5,7 +5,7 @@
 //! most local (innermost in the matrix product), the last outermost. Two
 //! sentinels are honored — `!invert!<op>` inverts an op's value, and a
 //! leading `!resetXformStack!` opts the prim out of inheriting its parent
-//! transform (surfaced via [`Xformable::resets_xform_stack`]). Per-op values
+//! transform (surfaced via [`XformableExt::resets_xform_stack`]). Per-op values
 //! flow through [`openusd::usd::Attribute::get`], so time-sampled ops
 //! interpolate per AOUSD §12.5.
 
@@ -16,10 +16,10 @@ use crate::SchemaError;
 use openusd::gf;
 use openusd::sdf;
 use openusd::tf;
-use openusd::usd::{Attribute, Prim, TimeCode};
+use openusd::usd::{Prim, TimeCode};
 
-use super::Imageable;
-use super::tokens as tok;
+use super::Xformable;
+use super::tokens;
 
 const TOKEN_INVERT_PREFIX: &str = "!invert!";
 const TOKEN_RESET_XFORM_STACK: &str = "!resetXformStack!";
@@ -45,37 +45,17 @@ pub enum XformOpPrecision {
 }
 
 /// A prim that carries a transform stack (C++ `UsdGeomXformable`). Inherits
-/// [`Imageable`].
+/// [`Xformable`].
 ///
 /// Reader methods compose the authored `xformOp:*` stack; the `set_*` setters
 /// author one op and append it to `xformOpOrder`, so successive calls build
 /// the canonical T·R·S ordering. Setters consume `self` and return it, so
 /// they chain (`xform.set_translate(t)?.set_rotate_y(d)?`).
-pub trait Xformable: Imageable {
-    /// The ordered list of `xformOp:*` attribute names that compose this prim's
-    /// local transform, strongest (most local) last; the sentinels `!invert!`
-    /// and a leading `!resetXformStack!` are also honoured. C++
-    /// `UsdGeomXformable::GetXformOpOrderAttr`.
-    ///
-    /// Type `token[]`. Fetch with `get::<sdf::Value>()?` (a `Value::TokenVec`).
-    fn xform_op_order_attr(&self) -> Attribute {
-        self.prim().attribute(tok::A_XFORM_OP_ORDER)
-    }
-
-    /// Author the `xformOpOrder` attribute (`uniform token[]`), returning its
-    /// handle (C++ `CreateXformOpOrderAttr`).
-    fn create_xform_op_order_attr(&self) -> Result<Attribute> {
-        Ok(self
-            .prim()
-            .create_attribute(tok::A_XFORM_OP_ORDER, sdf::ValueTypeName::TOKEN_ARRAY)?
-            .set_custom(false)?
-            .set_variability(sdf::Variability::Uniform)?)
-    }
-
+pub trait XformableExt: Xformable {
     /// The authored `xformOpOrder` token list, flattening any list-op
     /// authoring. `None` when unauthored (C++ `GetXformOpOrderAttr().Get`).
     fn xform_op_order(&self) -> Result<Option<Vec<String>>> {
-        let attr = self.prim().path().append_property(tok::A_XFORM_OP_ORDER)?;
+        let attr = self.prim().path().append_property(tokens::XFORM_OP_ORDER)?;
         Ok(match self.prim().stage().field::<sdf::Value>(attr, "default")? {
             Some(sdf::Value::TokenVec(v)) => Some(v.into_iter().map(Into::into).collect()),
             Some(sdf::Value::StringVec(v)) => Some(v),
@@ -131,12 +111,8 @@ pub trait Xformable: Imageable {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let tokens: Vec<String> = order.into_iter().map(Into::into).collect();
-        self.prim()
-            .create_attribute(tok::A_XFORM_OP_ORDER, sdf::ValueTypeName::TOKEN_ARRAY)?
-            .set_variability(sdf::Variability::Uniform)?
-            .set_custom(false)?
-            .set(sdf::Value::token_vec(tokens))?;
+        let order: Vec<String> = order.into_iter().map(Into::into).collect();
+        self.create_xform_op_order_attr()?.set(sdf::Value::token_vec(order))?;
         Ok(self)
     }
 
@@ -392,7 +368,7 @@ fn op_value_type(op: &str, precision: XformOpPrecision) -> Result<sdf::ValueType
 
 /// Append `op` to `xformOpOrder`, de-duplicating re-authored ops.
 fn append_op(prim: &Prim, op: &str) -> Result<()> {
-    prim.append_to_uniform_token_array(tok::A_XFORM_OP_ORDER, op_attr_name(op))?;
+    prim.append_to_uniform_token_array(tokens::XFORM_OP_ORDER, op_attr_name(op))?;
     Ok(())
 }
 
@@ -430,21 +406,24 @@ fn value_to_quat_wxyz(v: &sdf::Value) -> Option<[f64; 4]> {
     }
 }
 
+/// Every [`Xformable`] carries the transform stack, so a view has these
+/// wherever the generated accessors are.
+impl<T: Xformable> XformableExt for T {}
+
 #[cfg(test)]
 mod tests {
-    use super::{XformOpPrecision, Xformable};
+    use super::{XformOpPrecision, XformableExt};
     use crate::SchemaError;
     use crate::geom::Xform;
     use openusd::Result;
     use openusd::gf;
     use openusd::sdf;
-    use openusd::usd::Stage;
 
     /// An asset that declares an op at another precision keeps it: the
     /// setter converts the value rather than failing on the mismatch.
     #[test]
     fn scale_into_double_op() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?;
         stage.create_attribute("/X.xformOp:scale", sdf::ValueTypeName::DOUBLE3)?;
 
@@ -466,7 +445,7 @@ mod tests {
     /// a `transform` has only the one matrix spelling whatever is asked for.
     #[test]
     fn op_precision_selects_type() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         Xform::define(&stage, "/X")?
             .set_xform_op("scale", XformOpPrecision::Double, gf::vec3f(2.0, 2.0, 2.0))?
             .set_xform_op("rotateX", XformOpPrecision::Half, 90.0_f32)?
@@ -501,7 +480,7 @@ mod tests {
     /// takes its kind's value type.
     #[test]
     fn suffix_keeps_kind() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?.set_xform_op(
             "translate:pivot",
             XformOpPrecision::Float,
@@ -521,7 +500,7 @@ mod tests {
     /// `!invert!` sentinel has no authoring spelling and lands here too.
     #[test]
     fn unknown_op_rejected() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?;
         for op in ["bogusOp", "!invert!translate"] {
             let error = x
@@ -554,7 +533,7 @@ mod tests {
     /// op nothing declares.
     #[test]
     fn unregistered_op_type_rejected() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?;
         stage.create_attribute("/X.xformOp:scale", "double3d[]")?;
 
@@ -578,7 +557,7 @@ mod tests {
     /// and keep.
     #[test]
     fn failed_conversion_authors_nothing() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?;
 
         // 70000 is past the half range, so the conversion to `half3` fails.
@@ -608,7 +587,7 @@ mod tests {
     /// in names the same op rather than a doubly-prefixed one.
     #[test]
     fn prefixed_op_not_doubled() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?.set_xform_op(
             "xformOp:translate",
             XformOpPrecision::Double,
@@ -624,7 +603,7 @@ mod tests {
 
     #[test]
     fn translate_appears_in_order() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?.set_translate(gf::vec3d(1.0, 2.0, 3.0))?;
         assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate".to_string()]));
         assert_eq!(
@@ -636,7 +615,7 @@ mod tests {
 
     #[test]
     fn trs_preserves_insertion_order() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
             .set_rotate_y(90.0)?
@@ -654,7 +633,7 @@ mod tests {
 
     #[test]
     fn local_to_parent_translate_unrotated() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(3.0, 5.0, 7.0))?
             .set_rotate_z(90.0)?;
@@ -665,7 +644,7 @@ mod tests {
 
     #[test]
     fn re_authoring_op_does_not_duplicate() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(1.0, 0.0, 0.0))?
             .set_translate(gf::vec3d(2.0, 0.0, 0.0))?;
@@ -675,7 +654,7 @@ mod tests {
 
     #[test]
     fn rotate_xyz_authors_float3() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         Xform::define(&stage, "/X")?.set_rotate_xyz(gf::vec3f(30.0, 45.0, 60.0))?;
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:rotateXYZ", sdf::FieldKey::Default)?,
@@ -686,7 +665,7 @@ mod tests {
 
     #[test]
     fn orient_writes_quatf() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         Xform::define(&stage, "/X")?.set_orient(gf::quatf(1.0, 0.0, 0.0, 0.0))?;
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:orient", sdf::FieldKey::Default)?,
@@ -697,7 +676,7 @@ mod tests {
 
     #[test]
     fn transform_writes_matrix4d() -> Result<(), SchemaError> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
+        let stage = crate::tests::stage("anon.usda")?;
         let m = gf::Matrix4d([
             1.0, 0.0, 0.0, 0.0, //
             0.0, 1.0, 0.0, 0.0, //

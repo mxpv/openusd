@@ -1,7 +1,7 @@
 //! Per-joint array remapping between two joint orderings.
 //!
 //! Mirrors Pixar's `UsdSkelAnimMapper`. Built from a *source* joint
-//! order (e.g. a SkelAnimation's `joints`) and a *target* joint order
+//! order (e.g. a Animation's `joints`) and a *target* joint order
 //! (e.g. a bound Skeleton's `joints`, or a per-mesh `skel:joints`
 //! subset). The resulting mapper can then transfer arrays whose
 //! per-joint stride is known — translations (`[f32; 3]`), rotations
