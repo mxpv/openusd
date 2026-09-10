@@ -46,6 +46,35 @@ pub enum Error {
         violation: Violation,
     },
 
+    /// A field holds a value the generated declaration has no Rust literal for.
+    ///
+    /// Only a fallback or a piece of metadata reaches the table, so this is a
+    /// value type nothing generated has needed yet rather than an unusual
+    /// schema. It stops the build: a fallback that went missing would leave the
+    /// generated schemas answering differently from the ones they came from.
+    #[error("{schema}.{field} holds a {kind} value, which the generated declaration cannot express")]
+    UnwritableValue {
+        /// The schema declaring it.
+        schema: String,
+        /// The field on it.
+        field: String,
+        /// The value type that has no literal.
+        kind: &'static str,
+    },
+
+    /// The generator wrote Rust that does not parse.
+    ///
+    /// A defect in this crate rather than anything a schema can ask for, but it
+    /// surfaces in a consumer's build, so it says which schema was being
+    /// generated and what the parser made of it.
+    #[error("generated Rust for {schema} does not parse: {cause}")]
+    Malformed {
+        /// The schema being generated.
+        schema: String,
+        /// What parsing the emitted tokens reported.
+        cause: String,
+    },
+
     /// A file or directory could not be read, written or created.
     #[error("cannot access {path}")]
     Io {

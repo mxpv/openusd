@@ -50,30 +50,175 @@ pub mod tokens {
 /// The library these schemas belong to, as their manifest records it.
 pub const LIBRARY_NAME: &str = "tiny";
 
-/// Registers this library's schemas on `builder`.
+/// The schemas this library declares, ready to register.
 ///
-/// A stage opened with the resulting registry resolves these schemas'
-/// fallbacks and answers `is_a` along their inheritance; one opened
-/// without it knows nothing about them, and the typed constructors
+/// Hand it to
+/// [`SchemaRegistryBuilder::register`](::openusd::usd::SchemaRegistryBuilder::register):
+/// a stage opened with the resulting registry resolves these schemas'
+/// fallbacks and answers `is_a` along their inheritance, and one opened
+/// without it knows nothing about them, so the typed constructors
 /// answer `None`.
-pub fn register(
-    builder: ::openusd::usd::SchemaRegistryBuilder,
-) -> ::openusd::Result<::openusd::usd::SchemaRegistryBuilder> {
-    let manifest = ::openusd::sdf::Layer::from_bytes(
-        "tiny manifest",
-        include_bytes!("tiny.manifest.usda").as_slice(),
-    )?;
-    let schematics = ::openusd::sdf::Layer::from_bytes(
-        "tiny schematics",
-        include_bytes!("tiny.schematics.usda").as_slice(),
-    )?;
-    let source = ::openusd::usd::FamilySource {
-        name: LIBRARY_NAME,
-        manifest: &manifest,
-        schematics: &schematics,
-    };
-    ::std::result::Result::Ok(builder.family(source)?)
-}
+pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::SchemaFamily::new(
+    LIBRARY_NAME,
+    &[
+        ::openusd::usd::SchemaDecl::new(
+                "Shape",
+                ::openusd::usd::SchemaKind::AbstractTyped,
+            )
+            .bases(&["Typed"])
+            .properties(
+                &[
+                    ::openusd::usd::PropertyDecl::attribute("extent", "double3")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::sdf::Value::Vec3d(
+                                        ::openusd::gf::vec3d(1f64, 1f64, 1f64),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute("drawMode", "token")
+                        .uniform()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::strings(
+                                    "allowedTokens",
+                                    &["default", "bounds"],
+                                ),
+                                ::openusd::usd::Field::token("default", "default"),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute("density", "double")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::sdf::Value::Double(1f64),
+                                ),
+                            ],
+                        ),
+                ],
+            ),
+        ::openusd::usd::SchemaDecl::new(
+                "Ball",
+                ::openusd::usd::SchemaKind::ConcreteTyped,
+            )
+            .bases(&["Shape"])
+            .properties(
+                &[
+                    ::openusd::usd::PropertyDecl::attribute("extent", "double3")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::sdf::Value::Vec3d(
+                                        ::openusd::gf::vec3d(2f64, 2f64, 2f64),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute("drawMode", "token")
+                        .uniform()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::strings(
+                                    "allowedTokens",
+                                    &["default", "bounds"],
+                                ),
+                                ::openusd::usd::Field::token("default", "default"),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute("density", "double")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::sdf::Value::Double(1f64),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute("radius", "double")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::sdf::Value::Double(1f64),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute("temperature", "float")
+                        .varying()
+                        .custom(),
+                    ::openusd::usd::PropertyDecl::relationship("material").uniform(),
+                ],
+            ),
+        ::openusd::usd::SchemaDecl::new(
+                "TagAPI",
+                ::openusd::usd::SchemaKind::SingleApplyApi,
+            )
+            .bases(&["APISchemaBase"])
+            .can_only_apply_to(&["Ball"])
+            .properties(
+                &[
+                    ::openusd::usd::PropertyDecl::attribute("tag", "string")
+                        .varying()
+                        .fields(&[::openusd::usd::Field::string("default", "")]),
+                ],
+            ),
+        ::openusd::usd::SchemaDecl::new(
+                "SlotAPI",
+                ::openusd::usd::SchemaKind::MultipleApplyApi,
+            )
+            .bases(&["APISchemaBase"])
+            .property_namespace_prefix("slot")
+            .instance_restrictions(&[("front", &["Ball"])])
+            .allowed_instance_names(&["front", "back"])
+            .properties(
+                &[
+                    ::openusd::usd::PropertyDecl::attribute(
+                            "slot:__INSTANCE_NAME__",
+                            "opaque",
+                        )
+                        .varying(),
+                    ::openusd::usd::PropertyDecl::attribute(
+                            "slot:__INSTANCE_NAME__:depth",
+                            "int",
+                        )
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::sdf::Value::Int(0i32),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute(
+                            "slot:__INSTANCE_NAME__:offset",
+                            "double3",
+                        )
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::sdf::Value::Vec3d(
+                                        ::openusd::gf::vec3d(0f64, 0f64, 0f64),
+                                    ),
+                                ),
+                            ],
+                        ),
+                ],
+            ),
+    ],
+);
 
 /// Something with an extent, which everything drawable has.
 pub trait Shape: ::openusd::usd::Typed {

@@ -35,9 +35,10 @@
 //! prim a `Mesh`, what resolves the fallback a schema declares for an
 //! unauthored property, and what answers
 //! [`is_a`](openusd::usd::Prim::is_a) along a schema's inheritance. Hand
-//! [`schema_registry`] to the stage, or [`registry_builder`] where a caller
-//! adds families of its own. A stage opened without it knows only the core
-//! `usd` family, so the typed `get` constructors answer `None`.
+//! [`schema_registry`] to the stage, or register [`ALL`] on a builder of your
+//! own where a caller adds families beside these. A stage opened without it
+//! knows only the core `usd` family, so the typed `get` constructors answer
+//! `None`.
 //!
 //! # Conventions
 //!
@@ -52,7 +53,7 @@
 use std::sync::{Arc, OnceLock};
 
 use openusd::sdf;
-use openusd::usd::{SchemaRegistry, SchemaRegistryBuilder};
+use openusd::usd::{self, SchemaRegistry};
 
 // The macros below generate paths into the core crate. Reaching it through
 // `$crate::openusd` keeps them bound to this crate's dependency rather than
@@ -186,36 +187,49 @@ pub mod ui;
 #[cfg(feature = "vol")]
 pub mod vol;
 
-/// A registry builder carrying the core `usd` family and every family this
-/// build enables, for a caller that adds families of its own before building.
+/// Every family this build enables, ready to register.
 ///
-/// Each family registers the schema data generated from its own vendored
-/// definitions: the fallbacks a stage resolves, and the inheritance it answers
-/// [`is_a`](openusd::usd::Prim::is_a) along.
-pub fn registry_builder() -> Result<SchemaRegistryBuilder, SchemaError> {
-    let builder = SchemaRegistry::builder();
+/// Register each on a builder to make a registry of your own;
+/// [`schema_registry`] is the shared one built from exactly this. Each family declares the schema data generated from its
+/// own vendored definitions: the fallbacks a stage resolves, and the
+/// inheritance it answers [`is_a`](openusd::usd::Prim::is_a) along.
+///
+/// A single family registers the same way, through the `SCHEMAS` its module
+/// exposes:
+///
+/// ```
+/// # #[cfg(feature = "geom")]
+/// # fn main() -> Result<(), openusd::usd::SchemaRegistryError> {
+/// use openusd::usd::SchemaRegistry;
+///
+/// let registry = SchemaRegistry::builder().register(openusd_schemas::geom::SCHEMAS).build()?;
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "geom"))]
+/// # fn main() {}
+/// ```
+pub static ALL: &[&usd::SchemaFamily<'static>] = &[
     #[cfg(feature = "geom")]
-    let builder = geom::register(builder)?;
+    geom::SCHEMAS,
     #[cfg(feature = "lux")]
-    let builder = lux::register(builder)?;
+    lux::SCHEMAS,
     #[cfg(feature = "media")]
-    let builder = media::register(builder)?;
+    media::SCHEMAS,
     #[cfg(feature = "physics")]
-    let builder = physics::register(builder)?;
+    physics::SCHEMAS,
     #[cfg(feature = "proc")]
-    let builder = proc::register(builder)?;
+    proc::SCHEMAS,
     #[cfg(feature = "render")]
-    let builder = render::register(builder)?;
+    render::SCHEMAS,
     #[cfg(feature = "shade")]
-    let builder = shade::register(builder)?;
+    shade::SCHEMAS,
     #[cfg(feature = "skel")]
-    let builder = skel::register(builder)?;
+    skel::SCHEMAS,
     #[cfg(feature = "ui")]
-    let builder = ui::register(builder)?;
+    ui::SCHEMAS,
     #[cfg(feature = "vol")]
-    let builder = vol::register(builder)?;
-    Ok(builder)
-}
+    vol::SCHEMAS,
+];
 
 /// The registry of every enabled family, built once and shared.
 ///
@@ -234,14 +248,16 @@ pub fn registry_builder() -> Result<SchemaRegistryBuilder, SchemaError> {
 ///
 /// # Panics
 ///
-/// If the generated schema data does not register, which is a bug in this
-/// crate rather than anything a caller can cause.
+/// If the generated schema data does not register or compose, which is a bug
+/// in this crate rather than anything a caller can cause.
 pub fn schema_registry() -> Arc<SchemaRegistry> {
     static REGISTRY: OnceLock<Arc<SchemaRegistry>> = OnceLock::new();
     REGISTRY
         .get_or_init(|| {
-            let builder = registry_builder().expect("the generated schema data registers");
-            builder.build().expect("the registered families compose")
+            ALL.iter()
+                .fold(SchemaRegistry::builder(), |builder, family| builder.register(family))
+                .build()
+                .expect("the generated schema data registers and composes")
         })
         .clone()
 }

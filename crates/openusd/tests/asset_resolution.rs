@@ -1340,7 +1340,6 @@ fn widget_registry(schematics: &sdf::Layer) -> Arc<usd::SchemaRegistry> {
             manifest: &anon_layer("manifest.usda", WIDGET_MANIFEST),
             schematics,
         })
-        .expect("family registers")
         .build()
         .expect("registry builds")
 }
@@ -1368,13 +1367,11 @@ fn two_family_registry(core_schematics: &sdf::Layer, ext_schematics: &sdf::Layer
             manifest: &anon_layer("manifest.usda", WIDGET_MANIFEST),
             schematics: core_schematics,
         })
-        .expect("core registers")
         .family(usd::FamilySource {
             name: "ext",
             manifest: &anon_layer("manifest.usda", FILE_API_MANIFEST),
             schematics: ext_schematics,
         })
-        .expect("ext registers")
         .build()
         .expect("registry builds")
 }

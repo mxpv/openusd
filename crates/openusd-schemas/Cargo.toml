@@ -52,6 +52,9 @@ derive_more.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# The generator, so a test can read the schemas the compiled tables were
+# generated from and check the tables against them.
+openusd-build.workspace = true
 tempfile.workspace = true
 
 [lints]

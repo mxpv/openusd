@@ -17,7 +17,6 @@ use openusd::{sdf, tf, usd, usda};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 
-use crate::generated_file;
 use crate::model::{API_SCHEMA_BASE, Base, Class, Library, Property, SCHEMA_BASE, TYPED};
 use crate::validate::Violation;
 use crate::{Externs, doc, error::Error, names, types};
@@ -30,10 +29,6 @@ pub struct RustLibrary {
     pub tokens: Vec<Constant>,
     /// The schemas, in the order the root layer declares them.
     pub classes: Vec<RustClass>,
-    /// The manifest the generated `register` embeds, named as it is written.
-    pub manifest_file: String,
-    /// The schematics it embeds beside it.
-    pub schematics_file: String,
 }
 
 /// One token constant.
@@ -50,9 +45,10 @@ pub struct Constant {
 pub struct RustClass {
     /// The view type's name.
     pub name: Ident,
-    /// The trait this class's own accessors live on, where it has one. An
-    /// applied API schema is never inherited from, so its accessors are
-    /// inherent and it has none.
+    /// The trait this class's own accessors live on, and so where every one of
+    /// them is written: as that trait's defaults, or on the view itself when
+    /// this is `None`. An applied API schema is never inherited from, so its
+    /// accessors are inherent and it has no trait.
     pub accessor_trait: Option<Ident>,
     /// The trait that trait derives from.
     pub parent: syn::Path,
@@ -70,7 +66,9 @@ pub struct RustClass {
     pub view: Option<View>,
     /// The schema's documentation, converted, where it wrote any.
     pub documentation: Option<String>,
-    /// The accessors it emits, in property order.
+    /// The accessors it emits, in property order. Where they go is one
+    /// decision for the class, which [`accessor_trait`](Self::accessor_trait)
+    /// carries: they are that trait's defaults, or inherent when it has none.
     pub accessors: Vec<RustAccessor>,
     /// The API schemas whose properties it offers as its own, each as the
     /// method that views a prim through it.
@@ -115,10 +113,6 @@ pub struct RustAccessor {
     /// Whether the library writes the reader by hand, so only the creator is
     /// emitted and the reader's name is left reserved.
     pub custom_get: bool,
-    /// Whether the pair is written on the view itself rather than on a trait,
-    /// which is what an applied API schema's accessors are: nothing derives
-    /// from one, so there is no trait for them to live on.
-    pub inherent: bool,
     /// The expression naming the property, which for a multiple-apply schema
     /// instantiates a template with the view's own instance name.
     pub token: TokenStream,
@@ -147,26 +141,35 @@ pub enum PropertyKind {
 
 /// Lowers a library to Rust, resolving every name it will mint.
 pub fn library(model: &Library, externs: &Externs) -> Result<RustLibrary, Error> {
-    let tokens = constants(model)?;
-    let by_value: BTreeMap<&str, &Ident> = tokens
+    let mut lowered = tokens(model)?;
+    let by_value: BTreeMap<&str, &Ident> = lowered
+        .tokens
         .iter()
         .map(|constant| (constant.value.as_str(), &constant.name))
         .collect();
 
     check_class_names(model)?;
-    let classes = model
+    lowered.classes = model
         .classes
         .iter()
         .filter(|class| !is_root(class.identifier.as_str()))
         .map(|class| lower_class(class, model, externs, &by_value))
         .collect::<Result<_, _>>()?;
 
+    Ok(lowered)
+}
+
+/// The tokens alone, for a library that gets no views.
+///
+/// A separate request rather than a flag on [`library`], because it is held to
+/// different rules: what a Rust name would collide with, or which type has no
+/// constant to declare it, says nothing about a library whose API is written by
+/// hand. Asking for one or the other says which set applies.
+pub fn tokens(model: &Library) -> Result<RustLibrary, Error> {
     Ok(RustLibrary {
-        manifest_file: generated_file(&model.name, "manifest.usda"),
-        schematics_file: generated_file(&model.name, "schematics.usda"),
         library: model.name.clone(),
-        tokens,
-        classes,
+        tokens: constants(model)?,
+        classes: Vec::new(),
     })
 }
 
@@ -205,8 +208,11 @@ fn constants(model: &Library) -> Result<Vec<Constant>, Error> {
 /// The scope is this module: two libraries may each have a `Sphere`, and
 /// nothing stops them, since a consumer includes each in a module of its own.
 fn check_class_names(model: &Library) -> Result<(), Error> {
-    // The file takes three names of its own, which a schema may not also take.
-    let mut seen: BTreeMap<String, &str> = ["tokens", "register", "LIBRARY_NAME"]
+    // The names the file takes for itself, which a schema may not also take:
+    // `SCHEMAS` is a value, and so is a concrete view's tuple-struct
+    // constructor, so a schema of that name would collide with it. Read from
+    // where the emitter writes them, so renaming one cannot leave this stale.
+    let mut seen: BTreeMap<String, &str> = super::items::ALL
         .map(|name| (name.to_owned(), "the generated file"))
         .into();
     for class in &model.classes {
@@ -300,20 +306,15 @@ fn lower_class(
             continue;
         };
 
+        // A reflected accessor is the reflecting class's own, so it goes
+        // wherever the rest of them go: nothing here marks it apart.
         let origin = other.origin.describe();
         accessors.extend(
             other
                 .local_properties()
                 .filter_map(|property| named(property.api_name(), property.spec_type).map(|a| (property, a)))
                 .map(|(property, accessor)| lower_accessor(other, property, &accessor, by_value))
-                .collect::<Result<Vec<_>, _>>()?
-                // A reflected accessor is the reflecting class's own, so it is
-                // a trait method like the rest of them.
-                .into_iter()
-                .map(|accessor| RustAccessor {
-                    inherent: applied,
-                    ..accessor
-                }),
+                .collect::<Result<Vec<_>, _>>()?,
         );
         reflected.push(Reflected {
             accessor: identifier(&names::snake_case(&other.metadata.class_name), &origin)?,
@@ -371,7 +372,6 @@ fn lower_accessor(
         getter: identifier(&accessor.getter, &origin)?,
         creator: identifier(&accessor.creator, &origin)?,
         custom_get: property.api.custom_get,
-        inherent: class.kind.is_applied_api_schema(),
         token,
         kind,
         custom: property.is_custom(),
@@ -414,7 +414,8 @@ fn value_type(property: &Property) -> Result<syn::Path, Error> {
 /// which is still what the schematics recorded.
 fn constant_of(by_value: &BTreeMap<&str, &Ident>, value: &tf::Token) -> TokenStream {
     if let Some(name) = by_value.get(value.as_str()) {
-        return quote! { tokens::#name };
+        let tokens = super::ident(super::items::TOKENS);
+        return quote! { #tokens::#name };
     }
     let literal = value.as_str();
     quote! { #literal }
@@ -617,8 +618,9 @@ fn schema_root(view: &View) -> syn::Path {
     }
 }
 
-/// The `usd::SchemaKind` constant a view reports itself as.
-fn kind_constant(kind: usd::SchemaKind) -> syn::Path {
+/// The `usd::SchemaKind` constant a view reports itself as, and a declaration
+/// records its kind as.
+pub(super) fn kind_constant(kind: usd::SchemaKind) -> syn::Path {
     let variant = Ident::new(
         match kind {
             usd::SchemaKind::AbstractBase => "AbstractBase",

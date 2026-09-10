@@ -1,0 +1,31 @@
+#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testValues"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Marked" (
+    inherits = </Typed>
+    assetInfo = {
+        string version = "1"
+        double[] weights = [0.5, 1]
+    }
+) {
+    double blocked = None
+    rel plain
+    varying rel loose
+    matrix4d big = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix2d small = ( (1, 0), (0, 1) )
+    matrix3d middling = ( (1, 0, 0), (0, 1, 0), (0, 0, 1) )
+    quath spin = (1, 0, 0, 0)
+    timecode when = 3
+    half tiny = 0.5
+    asset file = @./texture.png@
+    float limit = 1
+}

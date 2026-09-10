@@ -1,9 +1,17 @@
 //! The Rust a lowered schema library is written as.
 //!
 //! Everything here reads [`RustLibrary`](super::lower::RustLibrary) and writes
-//! syntax. It decides nothing: every name, path and membership was settled by
-//! [`lower`](super::lower), so a mistake here is a mistake about layout rather
-//! than about what a schema means.
+//! Rust. What it decides is what that Rust looks like: which construct carries
+//! an accessor, how a call chain is laid out, where a doc comment goes. Those
+//! are real decisions, and a wrong one compiles and behaves wrongly — writing
+//! syntax is not the same as writing correct code.
+//!
+//! What it does not do is resolve a name or read a schema. Every identifier,
+//! path and membership was settled by [`lower`](super::lower) and arrives
+//! already decided, so nothing here can disagree with the rest of the pipeline
+//! about what a schema declares or what anything is called. That is the
+//! boundary worth relying on; the code it writes is held to its own tests.
+//! [`family`](super::family) writes the schema data on the same terms.
 //!
 //! The output is built as tokens rather than as text. `quote!` writes it in the
 //! shape it will take, `syn` parses it back so anything malformed fails here
@@ -21,11 +29,13 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use super::{ident, items};
+
 use super::lower::{Constant, PropertyKind, Reflected, RustAccessor, RustClass, RustLibrary, View};
 
 /// The whole generated file: the tokens its schemas name things by, what
 /// registers them, and a trait and a view per schema.
-pub fn library(library: &RustLibrary) -> TokenStream {
+pub fn library(library: &RustLibrary, declarations: &TokenStream) -> TokenStream {
     let name = library.library.as_str();
     let constants = library.tokens.iter().map(|constant| {
         let Constant {
@@ -39,7 +49,6 @@ pub fn library(library: &RustLibrary) -> TokenStream {
             pub const #name: &str = #value;
         }
     });
-    let register = register(library);
     let classes = library.classes.iter().map(|class| {
         let accessors = accessor_trait(class);
         let view = view(class);
@@ -49,69 +58,24 @@ pub fn library(library: &RustLibrary) -> TokenStream {
         }
     });
 
+    let tokens = ident(items::TOKENS);
+    let library_name = ident(items::LIBRARY_NAME);
+
     quote! {
         /// The strings these schemas name things by.
         ///
         /// A token's value is what a stage actually reads; the constant is a
         /// name for it, so an application can say what it means instead of
         /// retyping a string.
-        pub mod tokens {
+        pub mod #tokens {
             #(#constants)*
         }
 
         /// The library these schemas belong to, as their manifest records it.
-        pub const LIBRARY_NAME: &str = #name;
+        pub const #library_name: &str = #name;
 
-        #register
+        #declarations
         #(#classes)*
-    }
-}
-
-/// The function that hands this library's schema data to a registry.
-///
-/// Both layers are embedded rather than read at runtime, so registering
-/// touches no filesystem and a built binary carries what it needs. They are
-/// opened, copied into the registry and dropped inside the call. A function
-/// is what can do that: an `sdf::Layer` is neither `Send` nor `Sync`, so no
-/// `static` could hold one.
-///
-/// Each is named relative to this file, which is what a relative
-/// `include_bytes!` resolves against: the builder writes all three files to one
-/// directory, so wherever it was asked to write, the layers are beside the
-/// Rust that embeds them.
-fn register(library: &RustLibrary) -> TokenStream {
-    let name = library.library.as_str();
-    let manifest = format!("{name} manifest");
-    let schematics = format!("{name} schematics");
-    let manifest_file = &library.manifest_file;
-    let schematics_file = &library.schematics_file;
-
-    quote! {
-        /// Registers this library's schemas on `builder`.
-        ///
-        /// A stage opened with the resulting registry resolves these schemas'
-        /// fallbacks and answers `is_a` along their inheritance; one opened
-        /// without it knows nothing about them, and the typed constructors
-        /// answer `None`.
-        pub fn register(
-            builder: ::openusd::usd::SchemaRegistryBuilder,
-        ) -> ::openusd::Result<::openusd::usd::SchemaRegistryBuilder> {
-            let manifest = ::openusd::sdf::Layer::from_bytes(
-                #manifest,
-                include_bytes!(#manifest_file).as_slice(),
-            )?;
-            let schematics = ::openusd::sdf::Layer::from_bytes(
-                #schematics,
-                include_bytes!(#schematics_file).as_slice(),
-            )?;
-
-            let source = ::openusd::usd::FamilySource {
-                name: LIBRARY_NAME,
-                manifest: &manifest,
-                schematics: &schematics,
-            };
-            ::std::result::Result::Ok(builder.family(source)?)
-        }
     }
 }
 
@@ -137,7 +101,7 @@ fn accessor_trait(class: &RustClass) -> TokenStream {
     let parent = &class.parent;
     let documentation = documented(class);
     let allow = allow_non_camel_case(class);
-    let methods = class.accessors.iter().filter(|accessor| !accessor.inherent).map(method);
+    let methods = class.accessors.iter().map(|accessor| method(accessor, false));
     // A reflected schema's own view is one method away, for what it offers
     // beyond its properties.
     let reflected = class.reflected.iter().map(|reflected| {
@@ -207,8 +171,14 @@ fn view(class: &RustClass) -> TokenStream {
     };
 
     // An applied API schema is never derived from, so its accessors are written
-    // on the view rather than on a trait nothing would implement.
-    let inherent = class.accessors.iter().filter(|accessor| accessor.inherent).map(method);
+    // on the view rather than on a trait nothing would implement. A class with
+    // a trait puts them all there instead, so this is empty for it.
+    let inherent = class
+        .accessor_trait
+        .is_none()
+        .then(|| class.accessors.iter().map(|accessor| method(accessor, true)))
+        .into_iter()
+        .flatten();
     let own = class.accessor_trait.iter().map(|own| quote! { impl #own for #name {} });
     let answers_to = class.memberships.iter().map(|path| quote! { impl #path for #name {} });
 
@@ -381,9 +351,9 @@ fn constructors(class: &RustClass, shape: &View) -> TokenStream {
     }
 }
 
-/// One property's accessor pair, as trait defaults or as inherent methods.
-fn method(accessor: &RustAccessor) -> TokenStream {
-    let inherent = accessor.inherent;
+/// One property's accessor pair, written where its class puts them:
+/// `inherent` on the view itself, otherwise as defaults of its trait.
+fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
     let RustAccessor {
         getter,
         creator,

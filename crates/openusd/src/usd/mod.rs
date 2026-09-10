@@ -22,6 +22,7 @@ mod prim_type_info;
 mod relationship;
 mod resolve_info;
 mod schema;
+mod schema_decl;
 mod schema_registry;
 mod sink;
 mod stage;
@@ -45,6 +46,7 @@ pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
 pub use relationship::Relationship;
 pub use resolve_info::{ResolveInfo, ResolveInfoSource};
 pub use schema::{APISchemaBase, SchemaBase, SchemaKind, Typed};
+pub use schema_decl::{Field, InstanceRestriction, PropertyDecl, SchemaDecl, SchemaFamily};
 pub use schema_registry::{
     ApplyApiError, FamilySource, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError, Schematics,
     VersionFilter,

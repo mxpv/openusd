@@ -246,12 +246,6 @@ pub struct Origin {
 }
 
 impl Class {
-    /// Where the schema data records it, which is also where the registry looks
-    /// for it: a root prim named by the identifier.
-    pub fn prim_path(&self) -> Result<sdf::Path, sdf::PathParseError> {
-        sdf::Path::abs_root().append_path(self.identifier.as_str())
-    }
-
     /// The properties this class declares itself, in schematics order,
     /// including any it redeclares.
     pub fn local_properties(&self) -> impl Iterator<Item = &Property> {
@@ -283,8 +277,16 @@ impl Property {
     /// `ValueTypeName::find`, so an unregistered spelling stays visible rather
     /// than becoming an unregistered type name.
     pub fn type_name(&self) -> Option<sdf::ValueTypeName> {
-        let name: tf::Token = self.field(sdf::FieldKey::TypeName)?;
-        sdf::ValueTypeName::find(name.as_str())
+        sdf::ValueTypeName::find(self.declared_type_name()?)
+    }
+
+    /// An attribute's `typeName` as the schema spells it, before anything looks
+    /// it up. `None` for a relationship, and for one holding no token.
+    pub fn declared_type_name(&self) -> Option<&str> {
+        self.fields
+            .get(sdf::FieldKey::TypeName.as_str())
+            .and_then(sdf::Value::try_as_token_ref)
+            .map(tf::Token::as_str)
     }
 
     /// Whether the property may only be authored at the default time, which

@@ -8,7 +8,10 @@
 
 use std::sync::Arc;
 
-use openusd::usd::{FamilySource, SchemaRegistry, SchemaRegistryBuilder};
+use openusd::usd::{
+    FamilySource, Field, PropertyDecl, SchemaDecl, SchemaFamily, SchemaKind, SchemaRegistry, SchemaRegistryBuilder,
+    SchemaRegistryError,
+};
 use openusd::{sdf, tf};
 
 /// One of a family's layers, over text: how a family stored as `.usda` and
@@ -37,7 +40,6 @@ def "Widget"
             manifest: &layer(manifest),
             schematics: &layer("#usda 1.0\n\nclass Widget \"Widget\"\n{\n}\n"),
         })
-        .expect("family registers")
         .build()
         .expect("registry builds");
 
@@ -65,6 +67,7 @@ def "CollectionAPI"
             manifest: &layer(manifest),
             schematics: &layer("#usda 1.0\n\nclass \"CollectionAPI\"\n{\n}\n"),
         })
+        .build()
         .expect_err("a core schema cannot be redeclared");
     assert!(format!("{error:#}").contains("CollectionAPI"), "{error:#}");
 }
@@ -77,7 +80,6 @@ fn registry(manifest: &str, schematics: &str) -> Arc<SchemaRegistry> {
             manifest: &layer(manifest),
             schematics: &layer(schematics),
         })
-        .expect("family registers")
         .build()
         .expect("registry builds")
 }
@@ -908,13 +910,11 @@ def "MarkerAPI"
             manifest: &layer(core_manifest),
             schematics: &layer("#usda 1.0\n\nclass Widget \"Widget\"\n{\n}\n"),
         })
-        .expect("core registers")
         .family(FamilySource {
             name: "ext",
             manifest: &layer(ext_manifest),
             schematics: &layer("#usda 1.0\n\nclass \"MarkerAPI\"\n{\n    float marker:size = 2\n}\n"),
         })
-        .expect("ext registers")
         .build()
         .expect("registry builds");
 
@@ -969,7 +969,6 @@ class Gadget "Gadget"
             manifest: &layer(manifest),
             schematics: &layer(schematics),
         })
-        .expect("family registers")
         .build()
         .expect("registry builds");
 
@@ -1017,6 +1016,7 @@ def "Foo_01"
             manifest: &layer(manifest),
             schematics: &layer("#usda 1.0\n"),
         })
+        .build()
         .expect_err("a non-canonical identifier is rejected");
     assert!(format!("{error:#}").contains("not a valid identifier"), "{error:#}");
 }
@@ -1083,6 +1083,7 @@ fn unknown_kind_rejected() {
             manifest: &layer(manifest),
             schematics: &layer("#usda 1.0\n"),
         })
+        .build()
         .expect_err("unknown kind is rejected");
     assert!(format!("{error:#}").contains("Unknown schemaKind"), "{error:#}");
 }
@@ -1096,6 +1097,7 @@ fn missing_kind_rejected() {
             manifest: &layer(manifest),
             schematics: &layer("#usda 1.0\n"),
         })
+        .build()
         .expect_err("missing kind is rejected");
     assert!(format!("{error:#}").contains("schemaKind is required"), "{error:#}");
 }
@@ -1110,14 +1112,259 @@ fn duplicate_identifier_rejected() {
     };
     let error = SchemaRegistryBuilder::empty()
         .family(source)
-        .expect("first family registers")
         .family(FamilySource {
             name: "other",
             ..source
         })
+        .build()
         .expect_err("duplicate identifier is rejected");
     assert!(
         format!("{error:#}").contains("Duplicate schema identifier"),
         "{error:#}"
     );
+}
+
+/// The declared twin of `LAYERS`, schema for schema and field for field.
+static DECLARED: &SchemaFamily<'_> = &SchemaFamily::new(
+    "gadget",
+    &[
+        SchemaDecl::new("Gadget", SchemaKind::ConcreteTyped)
+            .bases(&["Typed"])
+            .properties(&[
+                PropertyDecl::attribute("size", "double").fields(&[Field::new("default", || sdf::Value::Double(2.0))]),
+                PropertyDecl::attribute("purpose", "token").uniform().fields(&[
+                    Field::token("default", "render"),
+                    Field::strings("allowedTokens", &["render", "proxy"]),
+                    Field::string("displayGroup", "Shape"),
+                ]),
+                PropertyDecl::relationship("proxyPrim").uniform(),
+                PropertyDecl::relationship("targets"),
+            ]),
+        SchemaDecl::new("SlotAPI", SchemaKind::MultipleApplyApi)
+            .bases(&["APISchemaBase"])
+            .property_namespace_prefix("slot")
+            .can_only_apply_to(&["Gadget"])
+            .instance_restrictions(&[("left", &["Gadget"]), ("right", &[])])
+            .allowed_instance_names(&["left", "right"])
+            .properties(&[PropertyDecl::attribute("slot:__INSTANCE_NAME__:depth", "int")
+                .fields(&[Field::new("default", || sdf::Value::Int(3))])]),
+    ],
+);
+
+/// The same family as the pair of layers a `generatedSchema.usda` build hands
+/// over, which is what the declaration has to agree with.
+const LAYERS: (&str, &str) = (
+    r#"#usda 1.0
+
+def "Gadget"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Typed"]
+}
+
+def "SlotAPI" (
+    customData = {
+        dictionary apiSchemaInstances = {
+            dictionary left = {
+                token[] apiSchemaCanOnlyApplyTo = ["Gadget"]
+            }
+            dictionary right = {
+                token[] apiSchemaCanOnlyApplyTo = []
+            }
+        }
+    }
+)
+{
+    uniform token schemaKind = "multipleApplyAPI"
+    uniform token[] bases = ["APISchemaBase"]
+    uniform token propertyNamespacePrefix = "slot"
+    uniform token[] apiSchemaCanOnlyApplyTo = ["Gadget"]
+    uniform token[] allowedInstanceNames = ["left", "right"]
+}
+"#,
+    r#"#usda 1.0
+
+class Gadget "Gadget"
+{
+    double size = 2
+    uniform token purpose = "render" (
+        allowedTokens = ["render", "proxy"]
+        displayGroup = "Shape"
+    )
+    rel proxyPrim
+    varying rel targets
+}
+
+class "SlotAPI"
+{
+    int slot:__INSTANCE_NAME__:depth = 3
+}
+"#,
+);
+
+/// Everything a registry answers about one schema, for comparing two ways of
+/// declaring the same family.
+fn described(registry: &SchemaRegistry, identifier: &str) -> String {
+    let identifier = tf::Token::from(identifier);
+    let info = registry.schema_info(&identifier).expect("the schema is registered");
+    let definition = registry
+        .concrete_prim_definition(&identifier)
+        .or_else(|| registry.api_prim_definition(&identifier))
+        .expect("the schema has a definition");
+
+    let mut described = format!(
+        "{:?} {:?} bases={:?} prefix={:?} canOnlyApplyTo={:?} instances={:?} allowed={:?}\n",
+        info.identifier(),
+        info.kind(),
+        info.bases(),
+        info.property_namespace_prefix(),
+        info.can_only_apply_to(None),
+        ["left", "right"].map(|name| info.can_only_apply_to(Some(&tf::Token::new(name))).to_vec()),
+        info.allowed_instance_names(),
+    );
+    for name in definition.property_names() {
+        let property = definition.property(name).expect("the property is defined");
+        described += &format!(
+            "  {name} {:?} {:?} {:?} custom={:?} default={:?} allowed={:?} group={:?}\n",
+            property.spec_type(),
+            property.type_name(),
+            property.variability(),
+            property.field(sdf::FieldKey::Custom),
+            property.fallback(),
+            property.field(sdf::FieldKey::AllowedTokens),
+            property.field(sdf::FieldKey::DisplayGroup),
+        );
+    }
+    described
+}
+
+/// A declared family reaches the registry as the pair of layers would: same
+/// kinds, bases, restrictions and property fallbacks, down to a relationship's
+/// variability and a per-instance restriction.
+#[test]
+fn declared_family_matches_layers() {
+    let from_layers = SchemaRegistry::builder()
+        .family(FamilySource {
+            name: "gadget",
+            manifest: &layer(LAYERS.0),
+            schematics: &layer(LAYERS.1),
+        })
+        .build()
+        .expect("the layers register");
+    let from_decls = SchemaRegistry::builder()
+        .register(DECLARED)
+        .build()
+        .expect("the declaration registers");
+
+    for identifier in ["Gadget", "SlotAPI"] {
+        assert_eq!(
+            described(&from_decls, identifier),
+            described(&from_layers, identifier),
+            "{identifier} differs"
+        );
+    }
+}
+
+/// A declared family is registered like any other, so a stage resolves its
+/// fallbacks and `is_a` walks its bases into the core family.
+#[test]
+fn declared_family_answers_is_a() {
+    let registry = SchemaRegistry::builder()
+        .register(DECLARED)
+        .build()
+        .expect("the declaration registers");
+
+    assert!(registry.is_a(&tf::Token::new("Gadget"), &tf::Token::new("Typed")));
+    assert_eq!(
+        registry
+            .concrete_prim_definition(&tf::Token::new("Gadget"))
+            .expect("Gadget")
+            .property(&tf::Token::new("size"))
+            .expect("size")
+            .fallback(),
+        Some(sdf::Value::Double(2.0))
+    );
+}
+
+/// Registering a family twice is refused rather than replacing or merging what
+/// the first registration brought.
+#[test]
+fn duplicate_family_rejected() {
+    let error = SchemaRegistry::builder()
+        .register(DECLARED)
+        .register(DECLARED)
+        .build()
+        .expect_err("a family cannot be registered twice");
+
+    assert!(
+        matches!(&error, SchemaRegistryError::DuplicateFamily { family } if family.as_str() == "gadget"),
+        "{error:?}"
+    );
+}
+
+/// A field the registry derives from the declaration itself is refused, so
+/// which of the two won cannot come down to the order they are written in.
+#[test]
+fn reserved_field_rejected() {
+    static RESERVED: &SchemaFamily<'_> = &SchemaFamily::new(
+        "reserved",
+        &[SchemaDecl::new("Thing", SchemaKind::ConcreteTyped)
+            .bases(&["Typed"])
+            .properties(&[PropertyDecl::attribute("size", "double").fields(&[Field::token("typeName", "float")])])],
+    );
+
+    let error = SchemaRegistry::builder()
+        .register(RESERVED)
+        .build()
+        .expect_err("a derived field cannot be declared");
+
+    assert!(
+        matches!(&error, SchemaRegistryError::ReservedField { field, .. } if &**field == "typeName"),
+        "{error:?}"
+    );
+}
+
+/// Registration reports nothing itself, so a failure survives every later call
+/// and is the one `build` hands back.
+#[test]
+fn first_failure_kept() {
+    static OTHER: &SchemaFamily<'_> = &SchemaFamily::new(
+        "other",
+        &[SchemaDecl::new("Other", SchemaKind::ConcreteTyped).bases(&["Typed"])],
+    );
+
+    let error = SchemaRegistry::builder()
+        .register(DECLARED)
+        .register(DECLARED)
+        .register(OTHER)
+        .build()
+        .expect_err("the first failure is kept");
+
+    assert!(
+        matches!(error, SchemaRegistryError::DuplicateFamily { .. }),
+        "{error:?}"
+    );
+}
+
+/// A slice registers every family in it, which is what a crate's own list of
+/// what it declares amounts to.
+#[test]
+fn slice_registers_every_family() {
+    static FIRST: &SchemaFamily<'_> = &SchemaFamily::new(
+        "first",
+        &[SchemaDecl::new("First", SchemaKind::ConcreteTyped).bases(&["Typed"])],
+    );
+    static SECOND: &SchemaFamily<'_> = &SchemaFamily::new(
+        "second",
+        &[SchemaDecl::new("Second", SchemaKind::ConcreteTyped).bases(&["Typed"])],
+    );
+    static ALL: &[&SchemaFamily<'_>] = &[FIRST, SECOND];
+
+    let registry = ALL
+        .iter()
+        .fold(SchemaRegistry::builder(), |builder, family| builder.register(family))
+        .build()
+        .expect("both register");
+    assert!(registry.schema_info(&tf::Token::new("First")).is_some());
+    assert!(registry.schema_info(&tf::Token::new("Second")).is_some());
 }
