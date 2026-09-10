@@ -97,6 +97,12 @@
 //! # Ok::<(), openusd::Error>(())
 //! ```
 
+// The generated schema data spells its paths from the crate root, as it does
+// in any consumer; this is what makes those paths resolve inside the crate
+// that defines them. It is for that one included file: hand-written code here
+// still reaches its own modules through `crate::`.
+extern crate self as openusd;
+
 pub mod ar;
 mod error;
 pub mod gf;

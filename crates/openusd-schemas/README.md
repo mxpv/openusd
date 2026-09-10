@@ -76,4 +76,9 @@ through the core's `usd::SchemaRegistry`.
 
 ## License
 
-Licensed under the [MIT License](https://github.com/mxpv/openusd/blob/main/LICENSE).
+Licensed under the
+[MIT License](https://github.com/mxpv/openusd/blob/main/LICENSE), except for
+the schema definitions under `schemas/`, which are copied from OpenUSD and
+covered by the Tomorrow Open Source Technology License 1.0. `third-party/`
+carries that license and upstream's notice; `vendor/OpenUSD/README.md` in the
+repository records which files they are and the one modification made to them.

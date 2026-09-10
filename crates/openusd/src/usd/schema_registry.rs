@@ -1216,14 +1216,6 @@ impl SchemaFamily<'_> {
 }
 
 impl SchemaRegistryBuilder {
-    /// The core family's manifest, as the `convert` example encodes it from
-    /// `schemas/usd/manifest.usda`.
-    const USD_MANIFEST: &'static [u8] = include_bytes!("../../schemas/usd/manifest.usdc");
-
-    /// The core family's schematics, as the `convert` example encodes it from the
-    /// vendored `schemas/usd/generatedSchema.usda`.
-    const USD_SCHEMATICS: &'static [u8] = include_bytes!("../../schemas/usd/generatedSchema.usdc");
-
     /// A builder with nothing registered at all, not even the core `usd`
     /// family [`default`](Self::default) seeds.
     ///
@@ -1882,16 +1874,7 @@ fn root_prims(data: &sdf::Data) -> Vec<tf::Token> {
 /// fallbacks they declare anchor against nothing, as C++'s do.
 impl Default for SchemaRegistryBuilder {
     fn default() -> Self {
-        let manifest =
-            sdf::Layer::from_bytes("usd/manifest.usdc", Self::USD_MANIFEST).expect("the vendored manifest reads");
-        let schematics = sdf::Layer::from_bytes("usd/generatedSchema.usdc", Self::USD_SCHEMATICS)
-            .expect("the vendored schematics read");
-
-        Self::empty().family(FamilySource {
-            name: "usd",
-            manifest: &manifest,
-            schematics: &schematics,
-        })
+        Self::empty().register(super::core_schemas::SCHEMAS)
     }
 }
 
@@ -2213,48 +2196,6 @@ class DomeLight_1 "DomeLight_1"
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::collections::BTreeMap;
-
-    /// Every spec `data` holds, keyed by path, each with its type and its
-    /// fields keyed by name — the whole of what a layer declares, in a form two
-    /// encodings of it must agree on. Authored field order is not part of that:
-    /// it says nothing about what a spec declares.
-    fn specs(data: &dyn sdf::AbstractData) -> BTreeMap<sdf::Path, (sdf::SpecType, BTreeMap<String, sdf::Value>)> {
-        sdf::Data::from_abstract(data)
-            .expect("the layer's data copies")
-            .iter()
-            .map(|(path, spec)| (path.clone(), (spec.ty, spec.fields.iter().cloned().collect())))
-            .collect()
-    }
-
-    /// The `.usdc` the crate embeds must hold what the `.usda` beside it says.
-    /// They are two encodings of one layer, and only the text is reviewable, so
-    /// a stale binary would be schema data nobody read. `schemas/README.md`
-    /// says how to regenerate them.
-    #[test]
-    fn vendored_usdc_matches_usda() {
-        let pairs = [
-            (
-                include_str!("../../schemas/usd/generatedSchema.usda"),
-                SchemaRegistryBuilder::USD_SCHEMATICS,
-            ),
-            (
-                include_str!("../../schemas/usd/manifest.usda"),
-                SchemaRegistryBuilder::USD_MANIFEST,
-            ),
-        ];
-
-        for (text, binary) in pairs {
-            let from_text = SchemaRegistry::test_layer(text);
-            let from_binary = sdf::Layer::from_bytes("vendored", binary).expect("the vendored crate file reads");
-            assert_eq!(
-                specs(from_text.data()),
-                specs(from_binary.data()),
-                "the two encodings agree",
-            );
-        }
-    }
 
     #[test]
     fn manifest_infos() {

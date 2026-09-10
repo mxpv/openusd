@@ -31,6 +31,18 @@ def "GLOBAL" (
 {
 }
 
+class "SchemaBase"
+(
+    doc = """The root every schema derives from.
+
+    MODIFIED FROM UPSTREAM: upstream registers this root through
+    pxr/usd/usd/plugInfo.json rather than in this file, and openusd reads no
+    plugInfo. Declaring it here, and naming it as the base of Typed and
+    APISchemaBase below, keeps UsdSchemaRegistry::IsA answering as C++ does."""
+)
+{
+}
+
 class "Typed" 
 (
     doc = """The base class for all \\em typed schemas (those that can impart a
