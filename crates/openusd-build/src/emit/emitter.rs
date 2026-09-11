@@ -222,58 +222,47 @@ fn constructors(class: &RustClass, shape: &View) -> TokenStream {
     let constant = &class.constant;
 
     match shape {
-        View::Concrete => quote! {
-            /// Views `prim` as this schema, whatever it is.
-            ///
-            /// The prim is not checked; [`get`](Self::get) is the constructor
-            /// that asks.
-            pub fn new(prim: ::openusd::usd::Prim) -> Self {
-                Self(prim)
-            }
+        // Both are recognised by what a prim is, which is one question however
+        // far up the chain it is asked: a prim of a type under `Gprim` is a
+        // `Gprim`, as one of type `Sphere` is a `Sphere`. Only authoring parts
+        // them, a base of prim types naming nothing a prim can be defined as.
+        View::Concrete | View::Abstract => {
+            let define = matches!(shape, View::Concrete).then(|| {
+                quote! {
+                    /// Defines a prim of this schema at `path` and views it.
+                    pub fn define(
+                        stage: &::openusd::usd::Stage,
+                        path: impl ::openusd::sdf::IntoPath,
+                    ) -> ::openusd::Result<Self> {
+                        ::std::result::Result::Ok(Self(stage.define_typed_prim(path, #constant)?))
+                    }
+                }
+            });
+            quote! {
+                /// Views `prim` as this schema, whatever it is.
+                ///
+                /// The prim is not checked; [`get`](Self::get) is the constructor
+                /// that asks.
+                pub fn new(prim: ::openusd::usd::Prim) -> Self {
+                    Self(prim)
+                }
 
-            /// Defines a prim of this schema at `path` and views it.
-            pub fn define(
-                stage: &::openusd::usd::Stage,
-                path: impl ::openusd::sdf::IntoPath,
-            ) -> ::openusd::Result<Self> {
-                ::std::result::Result::Ok(Self(stage.define_typed_prim(path, #constant)?))
-            }
+                #define
 
-            /// Views the prim at `path` as this schema, or `None` where it is
-            /// not one.
-            ///
-            /// The stage's registry is what answers, so a stage opened without
-            /// this library's family registered answers `None` for every prim.
-            pub fn get(
-                stage: &::openusd::usd::Stage,
-                path: impl ::openusd::sdf::IntoPath,
-            ) -> ::openusd::Result<::std::option::Option<Self>> {
-                let prim = stage.prim(path)?;
-                ::std::result::Result::Ok(prim.is_a(#constant)?.then_some(Self(prim)))
+                /// Views the prim at `path` as this schema, or `None` where it is
+                /// not one.
+                ///
+                /// The stage's registry is what answers, so a stage opened without
+                /// this library's family registered answers `None` for every prim.
+                pub fn get(
+                    stage: &::openusd::usd::Stage,
+                    path: impl ::openusd::sdf::IntoPath,
+                ) -> ::openusd::Result<::std::option::Option<Self>> {
+                    let prim = stage.prim(path)?;
+                    ::std::result::Result::Ok(prim.is_a(#constant)?.then_some(Self(prim)))
+                }
             }
-        },
-        View::Abstract => quote! {
-            /// Views `prim` as this schema, whatever it is.
-            ///
-            /// The prim is not checked; [`get`](Self::get) is the constructor
-            /// that asks.
-            pub fn new(prim: ::openusd::usd::Prim) -> Self {
-                Self(prim)
-            }
-
-            /// Views the prim at `path` as this schema, or `None` where its
-            /// type does not derive from it.
-            ///
-            /// The stage's registry is what answers, so a stage opened without
-            /// this library's family registered answers `None` for every prim.
-            pub fn get(
-                stage: &::openusd::usd::Stage,
-                path: impl ::openusd::sdf::IntoPath,
-            ) -> ::openusd::Result<::std::option::Option<Self>> {
-                let prim = stage.prim(path)?;
-                ::std::result::Result::Ok(prim.is_a(#constant)?.then_some(Self(prim)))
-            }
-        },
+        }
         View::SingleApply => quote! {
             /// Views `prim` as this schema, whether or not it carries it.
             pub fn new(prim: ::openusd::usd::Prim) -> Self {

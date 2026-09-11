@@ -287,8 +287,8 @@ impl Shape {
     pub fn new(prim: ::openusd::usd::Prim) -> Self {
         Self(prim)
     }
-    /// Views the prim at `path` as this schema, or `None` where its
-    /// type does not derive from it.
+    /// Views the prim at `path` as this schema, or `None` where it is
+    /// not one.
     ///
     /// The stage's registry is what answers, so a stage opened without
     /// this library's family registered answers `None` for every prim.
