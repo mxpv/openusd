@@ -218,6 +218,48 @@ class "Typed_1" {}
         body
     }
 
+    /// A library whose documentation points at its own API, the way upstream's
+    /// does.
+    const REFERENCES: &str = r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testRefs"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class RefsCrate "RefsCrate" (
+    doc = """A TestRefsCrate holds a TestRefsBox.
+    See GetWeightAttr(), GetSizeAttr() and TestRefsBox::GetSizeAttr()."""
+    inherits = </Typed>
+    customData = {
+        string className = "Crate"
+    }
+) {
+}
+
+class Tin "Tin" (
+    doc = "Another thing with a size."
+    inherits = </Typed>
+) {
+    double size = 1
+}
+
+class Box "Box" (
+    doc = """A TestRefsBox, which knows its own size.
+    \\sa GetSizeAttr()
+    \\sa ComputeNothing()"""
+    inherits = </Typed>
+) {
+    double size = 1
+    double weight = 1
+}
+"#;
+
     /// What one schema library generates.
     fn emitted(source: &str) -> String {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -234,6 +276,12 @@ class "Typed_1" {}
     /// The accessors fixture, likewise.
     fn accessors() -> &'static str {
         static ONCE: LazyLock<String> = LazyLock::new(|| emitted(ACCESSORS));
+        &ONCE
+    }
+
+    /// The references fixture, likewise.
+    fn references() -> &'static str {
+        static ONCE: LazyLock<String> = LazyLock::new(|| emitted(REFERENCES));
         &ONCE
     }
 
@@ -566,6 +614,51 @@ class "Held" (
         assert!(
             text.contains("::openusd::usd::Typed"),
             "the core's is what a view answers to: {text}"
+        );
+    }
+
+    /// A reference upstream wrote about its own API reads as a link to
+    /// whatever answers for it here; one to something only C++ has keeps the
+    /// name it was written with.
+    #[test]
+    fn references_become_links() {
+        let text = references();
+        assert!(text.contains("[`size_attr`](BoxSchema::size_attr)"), "{text}");
+        assert!(text.contains("[`Box`]"), "{text}");
+        assert!(text.contains("`ComputeNothing()`"), "{text}");
+    }
+
+    /// Upstream names a class by the class name it declared, not by the
+    /// identifier it is registered under, so that is what the C++ spelling is
+    /// built from: `RefsCrate` is `TestRefsCrate` there and `Crate` here.
+    #[test]
+    fn class_name_builds_symbol() {
+        let text = references();
+        assert!(text.contains("A [`Crate`] holds a [`Box`]."), "{text}");
+    }
+
+    /// A name reached from outside the declaring class's chain is answered by
+    /// the library, which pairs a name only one class declares. `Crate` is
+    /// under neither `Box` nor `Tin`, and both declare a `size`.
+    #[test]
+    fn library_answers_unique_names() {
+        let text = references();
+        // The sentence wraps, so it is read whole rather than by line, and to
+        // wherever the paragraph it is in ends.
+        let at = text.find("See [").expect("the sentence that references them");
+        let rest = &text[at..];
+        let sentence = rest.split_once("\n    ///\n").map_or(rest, |(paragraph, _)| paragraph);
+        assert!(
+            sentence.contains("[`weight_attr`](BoxSchema::weight_attr)"),
+            "{sentence}"
+        );
+        assert!(
+            sentence.contains("`GetSizeAttr()`"),
+            "ambiguous, so left alone: {sentence}"
+        );
+        assert!(
+            sentence.contains("[`size_attr`](BoxSchema::size_attr)"),
+            "qualified, so answered: {sentence}"
         );
     }
 

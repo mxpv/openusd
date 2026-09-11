@@ -12,6 +12,7 @@
 //! reaching one type — can only be checked where the names are made.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::iter;
 
 use openusd::{sdf, tf, usd, usda};
 use proc_macro2::{Ident, Span, TokenStream};
@@ -52,8 +53,12 @@ pub struct RustClass {
     pub accessor_trait: Option<Ident>,
     /// The trait that trait derives from.
     pub parent: syn::Path,
-    /// Every trait the view implements, the schema root it answers to first.
-    pub memberships: Vec<syn::Path>,
+    /// The schema root the view answers to, one per side of the typed / API
+    /// split.
+    pub root: syn::Path,
+    /// The traits carrying the accessors it inherits, which are those of the
+    /// classes it is built on, nearest first.
+    pub inherited: Vec<syn::Path>,
     /// The `tokens::` constant naming the schema.
     pub constant: TokenStream,
     /// Whether its names need `non_camel_case_types` allowed: a versioned
@@ -152,11 +157,13 @@ pub fn library(model: &Library, externs: &Externs) -> Result<RustLibrary, Error>
         .collect();
 
     check_class_names(model)?;
+    // One table for the library, layered under each class's own.
+    let library = library_symbols(model);
     lowered.classes = model
         .classes
         .iter()
         .filter(|class| !is_root(&class.identifier))
-        .map(|class| lower_class(class, model, externs, &by_value))
+        .map(|class| lower_class(class, model, externs, &by_value, &library))
         .collect::<Result<_, _>>()?;
 
     Ok(lowered)
@@ -253,6 +260,7 @@ fn lower_class(
     model: &Library,
     externs: &Externs,
     by_value: &BTreeMap<&str, &Ident>,
+    library: &doc::Symbols<'_>,
 ) -> Result<RustClass, Error> {
     check_methods(class)?;
 
@@ -270,11 +278,12 @@ fn lower_class(
             }));
         }
     }
+    let links = class_symbols(class, model, library);
     let accessors = class
         .local_properties()
         .filter(offers)
         .filter_map(|property| named(property.api_name(), property.spec_type).map(|a| (property, a)))
-        .map(|(property, accessor)| lower_accessor(class, property, &accessor, by_value))
+        .map(|(property, accessor)| lower_accessor(class, property, &accessor, by_value, &links))
         .collect::<Result<_, _>>()?;
 
     // Each base contributes the trait a view derives its accessors from, the
@@ -294,8 +303,7 @@ fn lower_class(
     // The root the view answers to, then every ancestor whose accessors it
     // inherits.
     let view = view(class.kind);
-    let mut memberships: Vec<syn::Path> = vec![schema_root(&view)];
-    memberships.extend(inherited.into_iter().flatten());
+    let inherited: Vec<syn::Path> = inherited.into_iter().flatten().collect();
 
     // What a class reflects reads as its own: the properties of an API schema
     // that every prim of this type carries anyway.
@@ -312,11 +320,12 @@ fn lower_class(
         // A reflected accessor is the reflecting class's own, so it goes
         // wherever the rest of them go: nothing here marks it apart.
         let origin = other.origin.describe();
+        let reflected_links = class_symbols(other, model, library);
         accessors.extend(
             other
                 .local_properties()
                 .filter_map(|property| named(property.api_name(), property.spec_type).map(|a| (property, a)))
-                .map(|(property, accessor)| lower_accessor(other, property, &accessor, by_value))
+                .map(|(property, accessor)| lower_accessor(other, property, &accessor, by_value, &reflected_links))
                 .collect::<Result<Vec<_>, _>>()?,
         );
         reflected.push(Reflected {
@@ -337,12 +346,16 @@ fn lower_class(
             false => Some(identifier(&trait_name(name), &origin)?),
         },
         parent,
-        memberships,
+        root: schema_root(&view),
+        inherited,
         constant: constant_of(by_value, &class.identifier),
         allows_non_camel_case: name.contains('_'),
         kind_constant: kind_constant(class.kind),
         view,
-        documentation: class.documentation.as_deref().map(doc::to_markdown),
+        documentation: class
+            .documentation
+            .as_deref()
+            .map(|text| doc::to_markdown(text, &links)),
         accessors,
         reflected,
     })
@@ -354,6 +367,7 @@ fn lower_accessor(
     property: &Property,
     accessor: &Accessor,
     by_value: &BTreeMap<&str, &Ident>,
+    symbols: &doc::Symbols<'_>,
 ) -> Result<RustAccessor, Error> {
     let named = constant_of(by_value, &property.schematics_name);
     let token = match class.kind.is_multiple_apply_api_schema() {
@@ -380,7 +394,7 @@ fn lower_accessor(
         custom: property.is_custom(),
         uniform: property.variability() == sdf::Variability::Uniform
             && property.spec_type != sdf::SpecType::Relationship,
-        documentation: documentation(property),
+        documentation: documentation(property, symbols),
     })
 }
 
@@ -545,6 +559,152 @@ fn check_methods(class: &Class) -> Result<(), Error> {
     Ok(())
 }
 
+/// What the C++ names a library's documentation mentions point at here.
+///
+/// Upstream's prose names upstream's API — `GetExtentAttr()`, `UsdGeomMesh` —
+/// and the reader of the generated crate has neither. What this library emits
+/// for those is known here, so the two are paired and the documentation reads
+/// as links to the Rust that answers.
+///
+/// This is the half that holds for the whole library: the classes it declares,
+/// under both spellings upstream writes them, and the accessors that one class
+/// alone declares. A name several classes declare is left to
+/// [`class_symbols`], which answers it against the class being documented.
+///
+/// TODO: a class of another library is named here as plainly as one of this
+/// one, and goes unlinked. `Externs` holds where those libraries' views live,
+/// so their classes could be paired too.
+fn library_symbols(model: &Library) -> doc::Symbols<'static> {
+    let mut symbols = doc::Symbols::default();
+
+    let prefix = names::proper_case(&model.name);
+
+    // A name is paired only where one class declares it; `None` marks one that
+    // several do, which stays here so a later class cannot revive it.
+    let mut accessors: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for class in model.classes.iter().filter(|class| !is_root(&class.identifier)) {
+        for (cpp, markdown) in accessor_links(class, &prefix) {
+            accessors
+                .entry(cpp)
+                .and_modify(|found| *found = None)
+                .or_insert(Some(markdown));
+        }
+    }
+    for (cpp, markdown) in accessors {
+        if let Some(markdown) = markdown {
+            symbols.insert(cpp, markdown);
+        }
+    }
+
+    // Upstream names a class by its library and its class name; the same class
+    // is that class name alone here. Both spellings appear in its prose, the
+    // bare one far more often.
+    //
+    // TODO: the prefix is `libraryPrefix` where a library declares one, which
+    // `load` drops for want of a reader. This is the fallback upstream applies
+    // without it (`usdGenSchema._GetLibPrefix`), so a library declaring one
+    // would be paired under the wrong spelling.
+    for class in &model.classes {
+        if is_root(&class.identifier) {
+            continue;
+        }
+        // A view is named where the documentation is, so its own name reaches
+        // it and the link needs no path.
+        let view = &class.metadata.class_name;
+        let link = doc::link(view, None);
+        symbols.insert(format!("{prefix}{view}"), link.clone());
+
+        // The bare name is paired only where it is a coined one, which an
+        // interior capital is what makes it: upstream writes `PointInstancer`
+        // meaning the schema, but `Curves` for a RIB statement and for what
+        // Maya calls a NURBS curve, and a word that is ordinary English is
+        // ordinary English as often as it is a class.
+        if view.chars().skip(1).any(char::is_uppercase) {
+            symbols.insert(view.clone(), link);
+        }
+    }
+    symbols
+}
+
+/// What those names point at when the documentation is `class`'s own.
+///
+/// A method name alone is ambiguous across a library: four of `usdGeom`'s
+/// shapes declare a `radius`. Documentation on a class means that class's
+/// property, so its own chain answers first and nearest wins; what is left
+/// falls through to the library, which pairs only unambiguous names.
+// TODO(perf): every class re-walks its chain and re-pairs what `library_symbols`
+// already paired once, each base found by a scan of the library. The pairs are a
+// pure function of the class, so they could be built per class in one pass and
+// read here, or built in parallel.
+fn class_symbols<'a>(class: &Class, model: &Library, library: &'a doc::Symbols<'a>) -> doc::Symbols<'a> {
+    let mut symbols = doc::Symbols::layered(library);
+    let prefix = names::proper_case(&model.name);
+    let chain = iter::once(class).chain(
+        class
+            .bases
+            .iter()
+            .filter_map(|base| model.classes.iter().find(|other| other.identifier == base.identifier)),
+    );
+    for owner in chain {
+        for (cpp, markdown) in accessor_links(owner, &prefix) {
+            symbols.insert(cpp, markdown);
+        }
+    }
+    symbols
+}
+
+/// Every accessor a class emits, as the C++ names upstream calls it by and the
+/// Markdown that links it here.
+///
+/// A property redeclared to change a fallback contributes none: its accessor is
+/// the ancestor's, which that ancestor pairs. Each is paired under its bare
+/// name and under the class-qualified one upstream also writes, so a reference
+/// naming the class it means is answered by that class.
+fn accessor_links<'a>(owner: &'a Class, prefix: &str) -> impl Iterator<Item = (String, String)> + 'a {
+    let applied = owner.kind.is_applied_api_schema();
+    // An applied API schema writes its accessors on the view; everything else
+    // puts them on the trait a view derives them from.
+    let qualifier = match applied {
+        true => owner.metadata.class_name.clone(),
+        false => trait_name(&owner.metadata.class_name),
+    };
+    let class = owner.metadata.class_name.clone();
+    // Upstream qualifies with its own spelling of the class, this crate with its.
+    let qualified = format!("{prefix}{class}");
+
+    owner
+        .local_properties()
+        .filter(move |property| applied || !shadows_an_ancestor(owner, property))
+        .filter_map(move |property| {
+            let accessor = named(property.api_name(), property.spec_type)?;
+            let suffix = match property.spec_type {
+                sdf::SpecType::Relationship => "Rel",
+                _ => "Attr",
+            };
+            let name = names::proper_case(property.api_name()?);
+
+            // A reader the library writes by hand is no method of this crate's,
+            // so only the creator is paired for it.
+            let mut pairs = vec![(format!("Create{name}{suffix}"), accessor.creator)];
+            if !property.api.custom_get {
+                pairs.push((format!("Get{name}{suffix}"), accessor.getter));
+            }
+
+            // Each property's pairs name the class they came from, so the two
+            // names travel with them rather than being borrowed per pair.
+            let (qualifier, class, qualified) = (qualifier.clone(), class.clone(), qualified.clone());
+            Some(pairs.into_iter().flat_map(move |(cpp, method)| {
+                let markdown = doc::link(&method, Some(&format!("{qualifier}::{method}")));
+                [
+                    (format!("{qualified}::{cpp}"), markdown.clone()),
+                    (format!("{class}::{cpp}"), markdown.clone()),
+                    (cpp, markdown),
+                ]
+            }))
+        })
+        .flatten()
+}
+
 /// The trait a class's accessors live on.
 ///
 /// The schema's own name belongs to the view a prim is read through, so the
@@ -654,13 +814,13 @@ fn root_trait(name: &tf::Token) -> syn::Path {
 }
 
 /// A property's documentation: what the schema said, then what the property is.
-fn documentation(property: &Property) -> String {
+fn documentation(property: &Property, symbols: &doc::Symbols<'_>) -> String {
     // What the schema wrote arrives wrapped, from `to_markdown`; the sentence
     // about the declaration is this crate's own and is wrapped here, so every
     // line of a doc comment holds to one width.
     let declared = doc::wrap(&declaration(property));
     match property.documentation() {
-        Some(text) => format!("{}\n\n{declared}", doc::to_markdown(text)),
+        Some(text) => format!("{}\n\n{declared}", doc::to_markdown(text, symbols)),
         None => declared,
     }
 }

@@ -221,6 +221,9 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
 );
 
 /// Something with an extent, which everything drawable has.
+///
+/// The accessors [`Shape`] carries. They live on a trait so that a schema
+/// deriving from this one carries them too.
 pub trait ShapeSchema: ::openusd::usd::Typed {
     /// The bounds, in the shape's own space.
     ///
@@ -276,6 +279,11 @@ pub trait ShapeSchema: ::openusd::usd::Typed {
 }
 
 /// Something with an extent, which everything drawable has.
+///
+/// # Accessors
+///
+/// Its accessors live on [`ShapeSchema`], which a caller has to have in scope
+/// to reach one.
 #[derive(::std::clone::Clone, ::std::fmt::Debug)]
 pub struct Shape(::openusd::usd::Prim);
 
@@ -319,7 +327,14 @@ impl ShapeSchema for Shape {}
 
 impl ::openusd::usd::Typed for Shape {}
 
-/// A sphere, by another name.
+/// A sphere, by another name. A [`Ball`] is a [`Shape`], so it has an
+/// extent as well as a radius.
+/// See also [`radius_attr`](BallSchema::radius_attr)
+/// See also [`extent_attr`](ShapeSchema::extent_attr)
+/// See also `ComputeSomethingOnlyCppHas()`
+///
+/// The accessors [`Ball`] carries. They live on a trait so that a schema
+/// deriving from this one carries them too.
 pub trait BallSchema: ShapeSchema {
     /// The radius.
     ///
@@ -368,7 +383,17 @@ pub trait BallSchema: ShapeSchema {
     }
 }
 
-/// A sphere, by another name.
+/// A sphere, by another name. A [`Ball`] is a [`Shape`], so it has an
+/// extent as well as a radius.
+/// See also [`radius_attr`](BallSchema::radius_attr)
+/// See also [`extent_attr`](ShapeSchema::extent_attr)
+/// See also `ComputeSomethingOnlyCppHas()`
+///
+/// # Accessors
+///
+/// A property is reached through the trait that declares it, which a caller
+/// has to have in scope. This schema's own are on [`BallSchema`]; the rest come
+/// from the classes behind it, on [`ShapeSchema`].
 #[derive(::std::clone::Clone, ::std::fmt::Debug)]
 pub struct Ball(::openusd::usd::Prim);
 

@@ -62,8 +62,8 @@ pub mod tokens {
     /// `"custom"`: the fallback of `ColorSpaceDefinitionAPI.name`.
     pub const CUSTOM: &str = "custom";
     /// `"exclude"`: This is the token used to exclude a path from a collection.
-    /// Although it is not a possible value for the "`expansionRule`" attribute, it
-    /// is used as the `expansionRule` for excluded paths in
+    /// Although it is not a possible value for the "`expansionRule`"
+    /// attribute, it is used as the `expansionRule` for excluded paths in
     /// `UsdCollectionAPI::MembershipQuery::IsPathIncluded`..
     pub const EXCLUDE: &str = "exclude";
     /// `"expandPrims"`: the fallback of `CollectionAPI.expansionRule`.

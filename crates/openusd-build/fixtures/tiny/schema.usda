@@ -53,7 +53,11 @@ class "Shape" (
 
 class Ball "Ball" (
     inherits = </Shape>
-    doc = "A sphere, by another name."
+    doc = """A sphere, by another name. A TinyBall is a TinyShape, so it has an
+    extent as well as a radius.
+    \\sa GetRadiusAttr()
+    \\sa GetExtentAttr()
+    \\sa ComputeSomethingOnlyCppHas()"""
 )
 {
     double radius = 1 (

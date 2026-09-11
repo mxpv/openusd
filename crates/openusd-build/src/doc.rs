@@ -11,6 +11,8 @@
 //! again would put `*emphasis*` inside a code span — and a code sample reaches
 //! the output exactly as the schema wrote it, commands and all.
 
+use std::collections::BTreeMap;
+
 /// Where a doc comment wraps: the project's 80-column prose width, less the
 /// `/// ` every emitted line begins with.
 const WIDTH: usize = 76;
@@ -29,9 +31,77 @@ const FENCE: &str = "```";
 /// `Compute()` keeps its call parentheses.
 const CLOSING: &[char] = &['"', '\'', '.', ',', ';', ':', '!', '?', '*'];
 
+/// What the C++ names in a schema's documentation point at here.
+///
+/// Upstream writes its prose about its own API: `GetExtentAttr()` names a
+/// method this crate emits under another name, and `UsdGeomMesh` a class it
+/// emits as a view. A name in here is rendered as a link to whatever answers
+/// for it; a name that is not keeps the spelling upstream gave it, which is
+/// what a reference to something only C++ has should read as.
+/// A table is layered so that what one class declares is asked before what its
+/// library does: a name several classes declare means the nearest one, and a
+/// library-wide table is one table rather than one per class.
+#[derive(Default)]
+pub struct Symbols<'a> {
+    /// What this class and the classes behind it declare, nearest first.
+    own: BTreeMap<String, String>,
+    /// What the library declares beyond them, asked when `own` has no answer.
+    behind: Option<&'a Symbols<'a>>,
+}
+
+impl<'a> Symbols<'a> {
+    /// A table asked before `behind` is.
+    pub fn layered(behind: &'a Symbols<'a>) -> Self {
+        Symbols {
+            own: BTreeMap::new(),
+            behind: Some(behind),
+        }
+    }
+
+    /// Records that `cpp` is reached here through `markdown`, keeping the first
+    /// answer given: a caller offers the nearest declaration first, and a
+    /// property redeclared further up the chain is the same method either way.
+    pub fn insert(&mut self, cpp: String, markdown: String) {
+        self.own.entry(cpp).or_insert(markdown);
+    }
+
+    /// What `name` is reached through, this table's own answer first.
+    fn get(&self, name: &str) -> Option<&str> {
+        match self.own.get(name) {
+            Some(markdown) => Some(markdown),
+            None => self.behind?.get(name),
+        }
+    }
+
+    /// The Markdown a word is rendered as, where it names something known.
+    ///
+    /// Upstream writes a method with its call parentheses, which name nothing
+    /// and go. What it qualifies with a class is looked up under that class:
+    /// a reference saying which class it means is answered by that class or
+    /// not at all, since `AbcGeom::Xform` names Alembic's class and
+    /// `UsdGeomGprim::GetAxisAttr()` names a method Gprim does not declare.
+    /// Answering either from the bare name would answer with whichever class
+    /// this library happens to declare it.
+    fn link(&self, word: &str) -> Option<&str> {
+        self.get(word.strip_suffix("()").unwrap_or(word))
+    }
+}
+
+/// A Markdown link to a Rust item: the name a reader sees, and the path that
+/// reaches it where the name alone does not.
+///
+/// Every link this crate writes is written here, so a reader of the generated
+/// documentation meets one spelling of them.
+pub fn link(display: &str, path: Option<&str>) -> String {
+    match path {
+        Some(path) => format!("[`{display}`]({path})"),
+        None => format!("[`{display}`]"),
+    }
+}
+
 /// One schema's documentation as Markdown, wrapped and ready to emit as a
 /// `///` block.
-pub fn to_markdown(documentation: &str) -> String {
+pub fn to_markdown(documentation: &str, symbols: &Symbols<'_>) -> String {
     // A schema's text carries the whitespace it was written with, which a doc
     // comment cannot: upstream `usdShade` wraps a sentence on a bare carriage
     // return, which Rust reads as an error rather than as a break, and
@@ -79,7 +149,7 @@ pub fn to_markdown(documentation: &str) -> String {
 
                     // A `\n` command renders as a break, so one source line can
                     // leave several to wrap.
-                    for rendered in render_line(&line).split('\n') {
+                    for rendered in render_line(&line, symbols).split('\n') {
                         out.push_str(&wrap(&balance(rendered)));
                         out.push('\n');
                     }
@@ -351,15 +421,15 @@ fn html(line: &str) -> String {
 
 /// One prose line as Markdown: each command rendered where it stands, and the
 /// source text between them marked up.
-fn render_line(line: &str) -> String {
+fn render_line(line: &str, symbols: &Symbols<'_>) -> String {
     let mut out = String::with_capacity(line.len() + line.len() / 8);
     let mut rest = line;
 
     while let Some(command) = next_command(rest) {
-        mark_up(&rest[..command.at], &mut out);
-        rest = render_command(&command, &mut out);
+        mark_up(&rest[..command.at], symbols, &mut out);
+        rest = render_command(&command, symbols, &mut out);
     }
-    mark_up(rest, &mut out);
+    mark_up(rest, symbols, &mut out);
     out
 }
 
@@ -371,14 +441,14 @@ fn render_line(line: &str) -> String {
 // TODO: `\section` and `\subsection` take a label before their title, and
 // `\snippet` names a file this crate cannot see. Both are rare in schema
 // documentation and are left as written until one shows up.
-fn render_command<'a>(command: &Command<'a>, out: &mut String) -> &'a str {
+fn render_command<'a>(command: &Command<'a>, symbols: &Symbols<'_>, out: &mut String) -> &'a str {
     match command.name {
         // An emphasis command takes the one word that follows it.
         "em" | "e" => return wrap_next_word(command, '*', out),
         "p" | "a" | "c" => return wrap_next_word(command, '`', out),
         // `\ref target "text"` reads as its text, `\ref target` as the target
         // itself, which is a symbol name.
-        "ref" => return reference(command, out),
+        "ref" => return reference(command, symbols, out),
         "sa" => out.push_str("See also"),
         "li" => {
             out.push_str("- ");
@@ -420,7 +490,7 @@ fn wrap_next_word<'a>(command: &Command<'a>, delimiter: char, out: &mut String) 
 }
 
 /// Writes a `\ref` as its quoted text when it has one, else as the target.
-fn reference<'a>(command: &Command<'a>, out: &mut String) -> &'a str {
+fn reference<'a>(command: &Command<'a>, symbols: &Symbols<'_>, out: &mut String) -> &'a str {
     let (target, rest) = next_word(command.after);
     if target.is_empty() {
         out.push(command.marker);
@@ -437,13 +507,18 @@ fn reference<'a>(command: &Command<'a>, out: &mut String) -> &'a str {
         // item names it as plainly as the prose around it would, and a bare
         // `NurbsPatch` in a doc comment is a
         // `clippy::doc_markdown` finding in the consumer's build.
-        mark_up(&text[..close], out);
+        mark_up(&text[..close], symbols, out);
         return &text[close + 1..];
     }
 
     let (leading, core, trailing) = split_word(target);
     if core.is_empty() {
         out.push_str(target);
+    } else if let Some(link) = symbols.link(core) {
+        // The target is a symbol name by definition, so it is the reference
+        // most worth answering.
+        out.push_str(leading);
+        out.push_str(link);
     } else {
         out.push_str(leading);
         out.push('`');
@@ -488,7 +563,7 @@ fn split_word(word: &str) -> (&str, &str, &str) {
 ///
 /// A word inside a code span the schema wrote itself passes through untouched,
 /// its contents being code already.
-fn mark_up(text: &str, out: &mut String) {
+fn mark_up(text: &str, symbols: &Symbols<'_>, out: &mut String) {
     // A schema that writes its own Markdown link keeps it: escaping those
     // brackets would render the link as its own source text.
     let links = text.contains("](");
@@ -514,6 +589,8 @@ fn mark_up(text: &str, out: &mut String) {
             out.push('<');
             out.push_str(core);
             out.push('>');
+        } else if let Some(link) = symbols.link(core) {
+            out.push_str(link);
         } else if reads_as_code(core) {
             out.push('`');
             out.push_str(core);
@@ -535,10 +612,11 @@ fn is_url(word: &str) -> bool {
 
 /// Whether a word reads as code: a path, an underscored or parenthesized name,
 /// or one with an inner capital.
-// TODO: a word's shape is a guess at what it means. The generator will hold
-// every class, property and token name in the libraries it emits, and that
-// symbol table is the real answer — backtick a word it knows, link a class
-// rather than backtick it, and leave prose such as `OpenUSD` alone.
+// TODO: a word's shape is a guess at what it means, and the guess is what
+// answers for every name [`Symbols`] does not hold — a token, a class of a
+// library this run does not generate, and prose such as `OpenUSD` or
+// `RenderMan`, which is backticked as though it were code. Holding those too
+// would leave this for words that name nothing at all.
 fn reads_as_code(word: &str) -> bool {
     if word.len() < 2 {
         return false;
@@ -580,28 +658,21 @@ pub fn wrap(line: &str) -> String {
     // new paragraph, which is what `clippy::doc_lazy_continuation` reports in
     // the consumer's build.
     let hanging = format!("{indent}{}", " ".repeat(marker(body)));
-    let mut out = String::with_capacity(line.len() + 8);
-    let mut column = 0;
-    let mut first = true;
 
-    for word in body.split_whitespace() {
-        if column > 0 && column + 1 + columns(word) > WIDTH {
-            out.push('\n');
-            column = 0;
-            first = false;
-        }
-        if column == 0 {
-            let opening = if first { indent } else { &hanging };
-            out.push_str(opening);
-            column = columns(opening);
-        } else {
-            out.push(' ');
-            column += 1;
-        }
-        out.push_str(word);
-        column += columns(word);
-    }
-    out
+    // Upstream writes two spaces after a sentence and indents as it pleases; a
+    // doc comment reads as one space between words, so the words are laid out
+    // afresh rather than as they were written.
+    let words = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let options = textwrap::Options::new(WIDTH)
+        .initial_indent(indent)
+        .subsequent_indent(&hanging)
+        // A word longer than the width stands alone rather than being split:
+        // it is a path, an identifier or a URL, and half of one reaches
+        // nothing.
+        .break_words(false)
+        .word_splitter(textwrap::WordSplitter::NoHyphenation);
+
+    textwrap::wrap(&words, options).join("\n")
 }
 
 /// How wide the list marker `body` opens with is, or zero where it opens with
@@ -623,12 +694,58 @@ fn marker(body: &str) -> usize {
 
 /// How wide `text` renders, which is its characters and not its bytes.
 fn columns(text: &str) -> usize {
-    text.chars().count()
+    textwrap::core::display_width(text)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The conversion with no symbol table behind it, which is what a test
+    /// about prose alone wants: nothing is linked, so what it asserts is the
+    /// Markdown the text itself becomes.
+    fn to_markdown(documentation: &str) -> String {
+        super::to_markdown(documentation, &Symbols::default())
+    }
+
+    /// A name is looked up by what it names, and upstream writes a method with
+    /// the call parentheses, which name nothing. A class-qualified spelling is
+    /// its own name, and is paired as one.
+    #[test]
+    fn link_strips_call() {
+        let mut symbols = Symbols::default();
+        symbols.insert("GetSizeAttr".to_owned(), "[`size_attr`]".to_owned());
+        symbols.insert("UsdGeomBox::GetSizeAttr".to_owned(), "[`size_attr`]".to_owned());
+
+        assert_eq!(symbols.link("GetSizeAttr"), Some("[`size_attr`]"));
+        assert_eq!(symbols.link("GetSizeAttr()"), Some("[`size_attr`]"));
+        assert_eq!(symbols.link("UsdGeomBox::GetSizeAttr()"), Some("[`size_attr`]"));
+        assert_eq!(symbols.link("GetOtherAttr()"), None);
+    }
+
+    /// A reference naming a class this library does not know is answered by
+    /// nothing: `AbcGeom::Xform` is Alembic's class, not the view that happens
+    /// to share its last word.
+    #[test]
+    fn link_needs_the_named_class() {
+        let mut symbols = Symbols::default();
+        symbols.insert("Xform".to_owned(), "[`Xform`]".to_owned());
+        symbols.insert("GetSizeAttr".to_owned(), "[`size_attr`]".to_owned());
+
+        assert_eq!(symbols.link("Xform"), Some("[`Xform`]"));
+        assert_eq!(symbols.link("AbcGeom::Xform"), None);
+        assert_eq!(symbols.link("UsdGeomGprim::GetSizeAttr()"), None);
+    }
+
+    /// The first answer stands, a caller offering the nearest declaration
+    /// first.
+    #[test]
+    fn link_keeps_first() {
+        let mut symbols = Symbols::default();
+        symbols.insert("GetRadiusAttr".to_owned(), "[`near`]".to_owned());
+        symbols.insert("GetRadiusAttr".to_owned(), "[`far`]".to_owned());
+        assert_eq!(symbols.link("GetRadiusAttr"), Some("[`near`]"));
+    }
 
     /// Whitespace a schema wrote is whitespace a doc comment can hold.
     #[test]

@@ -26,12 +26,15 @@
 //! out as a `/** … */` block instead. What this crate says about the code it
 //! writes is a doc comment in the `quote!` itself.
 
+use std::iter;
+
 use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::{ident, items};
 
 use super::lower::{Constant, PropertyKind, Reflected, RustAccessor, RustClass, RustLibrary, View};
+use crate::doc;
 
 /// The whole generated file: the tokens its schemas name things by, what
 /// registers them, and a trait and a view per schema.
@@ -79,14 +82,99 @@ pub fn library(library: &RustLibrary, declarations: &TokenStream) -> TokenStream
     }
 }
 
-/// A schema's documentation as the doc comment above its trait and its view.
-fn documented(class: &RustClass) -> TokenStream {
-    let lines = class
-        .documentation
-        .iter()
-        .flat_map(|text| text.lines())
+/// A schema's documentation as the doc comment above its trait and its view,
+/// followed by whatever `note` the two say for themselves.
+fn documented(class: &RustClass, note: &str) -> TokenStream {
+    let own = class.documentation.as_deref().unwrap_or_default();
+    // A blank line parts the two, where both have something to say.
+    let separator = (!own.is_empty() && !note.is_empty()).then_some("");
+    let lines = own
+        .lines()
+        .chain(separator)
+        .chain(note.lines())
         .map(|line| format!(" {line}"));
     quote! { #(#[doc = #lines])* }
+}
+
+/// What a view says about where its accessors are, since reaching one means
+/// having the trait that declares it in scope.
+///
+/// The schema's own documentation is upstream's and describes the schema, which
+/// the trait and the view share; this is what parts them, and is why a reader
+/// landing on either knows which to import.
+fn accessor_note(class: &RustClass) -> String {
+    // An applied API schema writes its accessors on the view, there being no
+    // trait to derive from, so a caller needs nothing else in scope.
+    let Some(own) = &class.accessor_trait else {
+        return String::new();
+    };
+
+    let own = doc::link(&own.to_string(), None);
+    let inherited: Vec<String> = class.inherited.iter().map(linked).collect();
+    let text = match (class.accessors.is_empty(), inherited.is_empty()) {
+        // A schema that declares no property and derives from none of its own
+        // has nothing to reach, so it says nothing about reaching it.
+        (true, true) => return String::new(),
+        (true, false) => format!(
+            "Its accessors are those of the classes behind it, on {}, which a caller has to have in \
+             scope to reach one.",
+            listed(&inherited)
+        ),
+        (false, true) => format!("Its accessors live on {own}, which a caller has to have in scope to reach one."),
+        (false, false) => format!(
+            "A property is reached through the trait that declares it, which a caller has to have in \
+             scope. This schema's own are on {own}; the rest come from the classes behind it, on {}.",
+            listed(&inherited)
+        ),
+    };
+    format!("# Accessors\n\n{}", doc::wrap(&text))
+}
+
+/// What the trait says for itself, which is what it is for: the accessors a
+/// view carries, held apart so that a schema deriving from this one carries
+/// them too.
+fn trait_note(class: &RustClass) -> String {
+    // A trait with no accessor of its own carries nothing to say this about; it
+    // is there for a view to derive the ones behind it through.
+    if class.accessors.is_empty() {
+        return String::new();
+    }
+
+    let name = doc::link(&class.name.to_string(), None);
+    doc::wrap(&format!(
+        "The accessors {name} carries. They live on a trait so that a schema deriving from this one \
+         carries them too."
+    ))
+}
+
+/// A trait as a link, whatever module it came from: the name a reader sees,
+/// and the path that reaches it.
+fn linked(path: &syn::Path) -> String {
+    let name = match path.segments.last() {
+        Some(segment) => segment.ident.to_string(),
+        None => return String::new(),
+    };
+    // A trait of this library is named where the view is, so its own name
+    // reaches it; one from another module needs the path spelled out.
+    if path.segments.len() == 1 && path.leading_colon.is_none() {
+        return doc::link(&name, None);
+    }
+
+    let leading = match path.leading_colon.is_some() {
+        true => "::",
+        false => "",
+    };
+    let full: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
+    doc::link(&name, Some(&format!("{leading}{}", full.join("::"))))
+}
+
+/// Names in a sentence, the last joined with `and`.
+fn listed(names: &[String]) -> String {
+    match names.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
 }
 
 /// The trait a class's own accessors live on.
@@ -99,7 +187,7 @@ fn accessor_trait(class: &RustClass) -> TokenStream {
         return TokenStream::new();
     };
     let parent = &class.parent;
-    let documentation = documented(class);
+    let documentation = documented(class, &trait_note(class));
     let allow = allow_non_camel_case(class);
     let methods = class.accessors.iter().map(|accessor| method(accessor, false));
     // A reflected schema's own view is one method away, for what it offers
@@ -147,7 +235,7 @@ fn allow_non_camel_case(class: &RustClass) -> TokenStream {
 fn view(class: &RustClass) -> TokenStream {
     let shape = &class.view;
     let name = &class.name;
-    let documentation = documented(class);
+    let documentation = documented(class, &accessor_note(class));
     let allow = allow_non_camel_case(class);
     let kind = &class.kind_constant;
     let constructors = constructors(class, shape);
@@ -177,7 +265,9 @@ fn view(class: &RustClass) -> TokenStream {
         .into_iter()
         .flatten();
     let own = class.accessor_trait.iter().map(|own| quote! { impl #own for #name {} });
-    let answers_to = class.memberships.iter().map(|path| quote! { impl #path for #name {} });
+    let answers_to = iter::once(&class.root)
+        .chain(&class.inherited)
+        .map(|path| quote! { impl #path for #name {} });
 
     quote! {
         #documentation

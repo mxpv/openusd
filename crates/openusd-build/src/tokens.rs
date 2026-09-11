@@ -206,7 +206,7 @@ impl Gathered {
         // What a schema author wrote is prose, and what this crate writes is
         // already Markdown.
         let documentation = match &declared.documentation {
-            Some(text) => doc::to_markdown(text),
+            Some(text) => doc::to_markdown(text, &doc::Symbols::default()),
             None => fallback.to_owned(),
         };
         self.insert(
