@@ -260,6 +260,16 @@ pub enum Violation {
         base: tf::Token,
     },
 
+    /// A library was told where its views live, but not in a spelling Rust can
+    /// read, so nothing can be named through it.
+    #[error("the {library} library's views were placed at `{path}`, which is no Rust path")]
+    UnreadableLibraryPath {
+        /// The library the path was given for.
+        library: String,
+        /// What was given.
+        path: String,
+    },
+
     /// An `apiGetImplementation` that is neither spelling.
     #[error("unknown apiGetImplementation `{spelling}`")]
     UnknownApiGetImplementation {

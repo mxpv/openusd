@@ -98,6 +98,7 @@ fn render(file: TokenStream, schema: &str) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::Path;
     use std::sync::LazyLock;
 
@@ -671,6 +672,106 @@ class "Held" (
         assert!(text.contains("pub const LIBRARY_NAME"), "the library emits: {text}");
         assert!(!text.contains("pub trait"), "{text}");
         assert!(!text.contains("pub struct"), "{text}");
+    }
+
+    /// A library whose base belongs to another, which is what reaches for the
+    /// configured path to that library's views.
+    fn inheriting(dir: &Path) -> Library {
+        fs::write(
+            dir.join("base.usda"),
+            r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testElsewhere"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Thing" (
+    inherits = </Typed>
+) {
+}
+"#,
+        )
+        .expect("writes the base");
+
+        read_source(
+            dir,
+            r#"#usda 1.0
+(
+    subLayers = [
+        @base.usda@
+    ]
+)
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testHere"
+    }
+)
+{
+}
+
+class Crate "Crate" (
+    inherits = </Thing>
+) {
+}
+"#,
+        )
+        .expect("resolves")
+    }
+
+    /// Where a library's views live is read where a base reaches for it, so a
+    /// spelling Rust cannot read is reported against the class that reached,
+    /// and told apart from a library that was never placed at all.
+    #[test]
+    fn library_path_must_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = inheriting(dir.path());
+        let externs = Externs::from([("testElsewhere".to_owned(), "not a path!".to_owned())]);
+
+        match emit(&model, &externs, "schema.usda", Views::Generate) {
+            Err(Error::Definition {
+                violation: Violation::UnreadableLibraryPath { library, path },
+                ..
+            }) => {
+                assert_eq!(library, "testElsewhere");
+                assert_eq!(path, "not a path!");
+            }
+            other => panic!("{:?}", other.map(|_| "emitted")),
+        }
+    }
+
+    /// A library that was never placed is a different fault, and the one a
+    /// caller can fix by placing it.
+    #[test]
+    fn library_must_be_placed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = inheriting(dir.path());
+
+        match emit(&model, &Externs::new(), "schema.usda", Views::Generate) {
+            Err(Error::Definition {
+                violation: Violation::UnknownLibrary { library, .. },
+                ..
+            }) => assert_eq!(library, "testElsewhere"),
+            other => panic!("{:?}", other.map(|_| "emitted")),
+        }
+    }
+
+    /// The configuration names every library a consumer has, whether or not
+    /// this one inherits from it, so one this library never reaches for is
+    /// none of its business — however it is spelled.
+    #[test]
+    fn unreached_library_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = read_source(dir.path(), KINDS).expect("resolves");
+        let externs = Externs::from([("testElsewhere".to_owned(), "not a path!".to_owned())]);
+
+        emit(&model, &externs, "schema.usda", Views::Generate).expect("emits");
     }
 
     /// The generated file takes three names of its own, and a class that asks

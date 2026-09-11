@@ -28,12 +28,15 @@
 
 use std::iter;
 
+use openusd::usd;
 use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::{ident, items};
 
-use super::lower::{Constant, PropertyKind, Reflected, RustAccessor, RustClass, RustLibrary, View};
+use super::lower::{
+    AccessorTrait, Constant, PropertyKind, Reflected, RustAccessor, RustClass, RustLibrary, kind_constant, schema_root,
+};
 use crate::doc;
 
 /// The whole generated file: the tokens its schemas name things by, what
@@ -109,7 +112,7 @@ fn accessor_note(class: &RustClass) -> String {
         return String::new();
     };
 
-    let own = doc::link(&own.to_string(), None);
+    let own = doc::link(&own.name.to_string(), None);
     let inherited: Vec<String> = class.inherited.iter().map(linked).collect();
     let text = match (class.accessors.is_empty(), inherited.is_empty()) {
         // A schema that declares no property and derives from none of its own
@@ -183,10 +186,9 @@ fn listed(names: &[String]) -> String {
 /// finds it without this class restating it, and a class with no accessors of
 /// its own still earns a trait: what it offers is everything behind it.
 fn accessor_trait(class: &RustClass) -> TokenStream {
-    let Some(name) = &class.accessor_trait else {
+    let Some(AccessorTrait { name, parent }) = &class.accessor_trait else {
         return TokenStream::new();
     };
-    let parent = &class.parent;
     let documentation = documented(class, &trait_note(class));
     let allow = allow_non_camel_case(class);
     let methods = class.accessors.iter().map(|accessor| method(accessor, false));
@@ -219,7 +221,7 @@ fn accessor_trait(class: &RustClass) -> TokenStream {
 /// author reads, so the view is called that too rather than being respelled
 /// into a camel-case name that matches nothing.
 fn allow_non_camel_case(class: &RustClass) -> TokenStream {
-    match class.allows_non_camel_case {
+    match class.name.to_string().contains('_') {
         true => quote! {
             #[allow(
                 non_camel_case_types,
@@ -233,16 +235,15 @@ fn allow_non_camel_case(class: &RustClass) -> TokenStream {
 /// The struct a prim is viewed through: what it holds, what reaches the prim
 /// inside it, and every trait it implements.
 fn view(class: &RustClass) -> TokenStream {
-    let shape = &class.view;
     let name = &class.name;
     let documentation = documented(class, &accessor_note(class));
     let allow = allow_non_camel_case(class);
-    let kind = &class.kind_constant;
-    let constructors = constructors(class, shape);
+    let kind = kind_constant(class.kind);
+    let constructors = constructors(class);
 
     // A multiple-apply view carries the instance name it was applied under
     // beside the prim; every other kind is the prim alone.
-    let (declaration, prim) = match shape.is_multiple_apply() {
+    let (declaration, prim) = match class.kind.is_multiple_apply_api_schema() {
         true => (
             quote! {
                 pub struct #name {
@@ -264,8 +265,12 @@ fn view(class: &RustClass) -> TokenStream {
         .then(|| class.accessors.iter().map(|accessor| method(accessor, true)))
         .into_iter()
         .flatten();
-    let own = class.accessor_trait.iter().map(|own| quote! { impl #own for #name {} });
-    let answers_to = iter::once(&class.root)
+    let own = class.accessor_trait.iter().map(|own| {
+        let own = &own.name;
+        quote! { impl #own for #name {} }
+    });
+    let root = schema_root(class.kind);
+    let answers_to = iter::once(&root)
         .chain(&class.inherited)
         .map(|path| quote! { impl #path for #name {} });
 
@@ -308,16 +313,16 @@ fn view(class: &RustClass) -> TokenStream {
 /// prim carries. An applied API schema is applied to a prim already there and
 /// recognised by what it carries, under an instance name where the schema takes
 /// one. Anything else is a view over whatever prim a caller hands it.
-fn constructors(class: &RustClass, shape: &View) -> TokenStream {
+fn constructors(class: &RustClass) -> TokenStream {
     let constant = &class.constant;
 
-    match shape {
+    match class.kind {
         // Both are recognised by what a prim is, which is one question however
         // far up the chain it is asked: a prim of a type under `Gprim` is a
         // `Gprim`, as one of type `Sphere` is a `Sphere`. Only authoring parts
         // them, a base of prim types naming nothing a prim can be defined as.
-        View::Concrete | View::Abstract => {
-            let define = matches!(shape, View::Concrete).then(|| {
+        usd::SchemaKind::ConcreteTyped | usd::SchemaKind::AbstractTyped => {
+            let define = class.kind.is_concrete().then(|| {
                 quote! {
                     /// Defines a prim of this schema at `path` and views it.
                     pub fn define(
@@ -353,7 +358,7 @@ fn constructors(class: &RustClass, shape: &View) -> TokenStream {
                 }
             }
         }
-        View::SingleApply => quote! {
+        usd::SchemaKind::SingleApplyApi => quote! {
             /// Views `prim` as this schema, whether or not it carries it.
             pub fn new(prim: ::openusd::usd::Prim) -> Self {
                 Self(prim)
@@ -381,7 +386,7 @@ fn constructors(class: &RustClass, shape: &View) -> TokenStream {
                 ::std::result::Result::Ok(prim.has_api_schema(#constant)?.then_some(Self(prim)))
             }
         },
-        View::MultipleApply => quote! {
+        usd::SchemaKind::MultipleApplyApi => quote! {
             /// Views `prim` as this schema applied under `name`, whether or not
             /// it is.
             pub fn new(prim: ::openusd::usd::Prim, name: impl ::std::convert::Into<::openusd::tf::Token>) -> Self {
@@ -441,7 +446,9 @@ fn constructors(class: &RustClass, shape: &View) -> TokenStream {
                 ::std::result::Result::Ok(found)
             }
         },
-        View::Plain => quote! {
+        // An abstract base is no root here — a root is never lowered — so it
+        // is viewed as any schema that is applied to nothing is.
+        usd::SchemaKind::AbstractBase | usd::SchemaKind::NonAppliedApi => quote! {
             /// Views `prim` as this schema.
             pub fn new(prim: ::openusd::usd::Prim) -> Self {
                 Self(prim)
@@ -457,9 +464,19 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
         getter,
         creator,
         token,
+        instanced,
         documentation,
         ..
     } = accessor;
+
+    // A multiple-apply schema's property is named by a template, and the view
+    // fills it in with the instance name it carries.
+    let token = match instanced {
+        true => quote! {
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(#token, self.name.as_str())
+        },
+        false => token.clone(),
+    };
 
     let visibility = if inherent {
         quote! { pub }
