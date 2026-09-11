@@ -62,9 +62,8 @@ pub struct RustClass {
     pub allows_non_camel_case: bool,
     /// The `usd::SchemaKind` constant the view reports itself as.
     pub kind_constant: syn::Path,
-    /// What a prim is viewed through, or `None` for a class that is no schema
-    /// of this library's own, which only a schema root is.
-    pub view: Option<View>,
+    /// What a prim is viewed through.
+    pub view: View,
     /// The schema's documentation, converted, where it wrote any.
     pub documentation: Option<String>,
     /// The accessors it emits, in property order. Where they go is one
@@ -293,9 +292,9 @@ fn lower_class(
     };
 
     // The root the view answers to, then every ancestor whose accessors it
-    // inherits. A class no prim can be implements nothing, having no view.
+    // inherits.
     let view = view(class.kind);
-    let mut memberships: Vec<syn::Path> = view.iter().map(schema_root).collect();
+    let mut memberships: Vec<syn::Path> = vec![schema_root(&view)];
     memberships.extend(inherited.into_iter().flatten());
 
     // What a class reflects reads as its own: the properties of an API schema
@@ -591,18 +590,21 @@ fn base_trait(class: &Class, base: &Base, model: &Library, externs: &Externs) ->
     Ok(Some(syn::parse_quote! { #path::#inherited }))
 }
 
-/// What a prim of this kind is viewed through, or `None` for one that is no
-/// schema of this library's own: [`AbstractBase`](usd::SchemaKind::AbstractBase)
-/// is what a schema root is classified as, and [`is_root`] is what keeps one
-/// from reaching here, so nothing generated takes that arm.
-fn view(kind: usd::SchemaKind) -> Option<View> {
+/// What a prim of this kind is viewed through.
+///
+/// Every kind names one, so a class carries a view rather than perhaps
+/// carrying one: the schema roots are what would have none, and [`is_root`]
+/// keeps those from being lowered at all. An abstract base that is not a root
+/// is viewed as any unapplied schema is, which is what it is — C++ recognises
+/// the two alike, `UsdAPISchemaBase::_IsCompatible` asking nothing of a prim
+/// until the schema is one that gets applied to it.
+fn view(kind: usd::SchemaKind) -> View {
     match kind {
-        usd::SchemaKind::AbstractBase => None,
-        usd::SchemaKind::AbstractTyped => Some(View::Abstract),
-        usd::SchemaKind::ConcreteTyped => Some(View::Concrete),
-        usd::SchemaKind::NonAppliedApi => Some(View::Plain),
-        usd::SchemaKind::SingleApplyApi => Some(View::SingleApply),
-        usd::SchemaKind::MultipleApplyApi => Some(View::MultipleApply),
+        usd::SchemaKind::AbstractTyped => View::Abstract,
+        usd::SchemaKind::ConcreteTyped => View::Concrete,
+        usd::SchemaKind::AbstractBase | usd::SchemaKind::NonAppliedApi => View::Plain,
+        usd::SchemaKind::SingleApplyApi => View::SingleApply,
+        usd::SchemaKind::MultipleApplyApi => View::MultipleApply,
     }
 }
 

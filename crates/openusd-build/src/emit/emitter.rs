@@ -145,10 +145,7 @@ fn allow_non_camel_case(class: &RustClass) -> TokenStream {
 /// The struct a prim is viewed through: what it holds, what reaches the prim
 /// inside it, and every trait it implements.
 fn view(class: &RustClass) -> TokenStream {
-    let Some(shape) = &class.view else {
-        return TokenStream::new();
-    };
-
+    let shape = &class.view;
     let name = &class.name;
     let documentation = documented(class);
     let allow = allow_non_camel_case(class);
