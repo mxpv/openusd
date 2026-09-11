@@ -22,7 +22,7 @@ impl Shader {
     /// The `UsdShadeNodeDefAPI` view of this shader, which is where upstream
     /// declares what implementation a shader stands for.
     pub fn node_def(&self) -> NodeDefAPI {
-        NodeDefAPI::new((**self).clone())
+        NodeDefAPI::from_prim_unchecked((**self).clone())
     }
 
     /// The Sdr registry identifier, e.g. `UsdPreviewSurface` or `UsdUVTexture`.
@@ -379,8 +379,7 @@ impl Material {
             // not its prim is typed Shader — C++ hands back an invalid
             // UsdShadeShader rather than falling through to a weaker render
             // context.
-            let prim = attribute.attribute().prim();
-            let shader = prim.is_a(tokens::SHADER)?.then(|| Shader::new(prim));
+            let shader = Shader::from_prim(attribute.attribute().prim())?;
             sources.push(TerminalSource { shader, attribute });
         }
         if sources.is_empty() {

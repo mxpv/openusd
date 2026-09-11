@@ -188,6 +188,17 @@ fn abstract_get_gated() -> Result<()> {
 }
 
 #[test]
+fn from_prim_gated() -> Result<()> {
+    let stage = open()?;
+    // What a traversal has in hand is the prim, not its path.
+    let prim = stage.prim(sdf::path("/World/FancyMesh")?)?;
+
+    assert!(Mesh::from_prim(prim.clone())?.is_some());
+    assert!(Camera::from_prim(prim)?.is_none());
+    Ok(())
+}
+
+#[test]
 fn abstract_view_takes_ext() -> Result<()> {
     let stage = open()?;
     let child = Imageable::get(&stage, sdf::path("/World/Hidden/HiddenChild")?)?.expect("Imageable");

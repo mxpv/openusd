@@ -288,24 +288,32 @@ pub trait ShapeSchema: ::openusd::usd::Typed {
 pub struct Shape(::openusd::usd::Prim);
 
 impl Shape {
-    /// Views `prim` as this schema, whatever it is.
+    /// Views `prim` as this schema without asking whether it is one.
     ///
-    /// The prim is not checked; [`get`](Self::get) is the constructor
-    /// that asks.
-    pub fn new(prim: ::openusd::usd::Prim) -> Self {
+    /// Unchecked of the schema, not of memory: nothing here is
+    /// `unsafe`, and a prim of another type simply answers nothing
+    /// for the properties this schema declares.
+    /// [`from_prim`](Self::from_prim) is the constructor that asks.
+    pub fn from_prim_unchecked(prim: ::openusd::usd::Prim) -> Self {
         Self(prim)
     }
-    /// Views the prim at `path` as this schema, or `None` where it is
-    /// not one.
+    /// Views `prim` as this schema, or `None` where it is not one.
     ///
-    /// The stage's registry is what answers, so a stage opened without
-    /// this library's family registered answers `None` for every prim.
+    /// The stage's registry is what answers, so a prim from a stage
+    /// opened without this library's family registered is never one.
+    pub fn from_prim(
+        prim: ::openusd::usd::Prim,
+    ) -> ::openusd::Result<::std::option::Option<Self>> {
+        ::std::result::Result::Ok(prim.is_a(tokens::SHAPE)?.then_some(Self(prim)))
+    }
+    /// Views the prim at `path` as this schema, or `None` where it
+    /// is not one — [`from_prim`](Self::from_prim) over the prim
+    /// `path` names.
     pub fn get(
         stage: &::openusd::usd::Stage,
         path: impl ::openusd::sdf::IntoPath,
     ) -> ::openusd::Result<::std::option::Option<Self>> {
-        let prim = stage.prim(path)?;
-        ::std::result::Result::Ok(prim.is_a(tokens::SHAPE)?.then_some(Self(prim)))
+        Self::from_prim(stage.prim(path)?)
     }
 }
 
@@ -398,11 +406,13 @@ pub trait BallSchema: ShapeSchema {
 pub struct Ball(::openusd::usd::Prim);
 
 impl Ball {
-    /// Views `prim` as this schema, whatever it is.
+    /// Views `prim` as this schema without asking whether it is one.
     ///
-    /// The prim is not checked; [`get`](Self::get) is the constructor
-    /// that asks.
-    pub fn new(prim: ::openusd::usd::Prim) -> Self {
+    /// Unchecked of the schema, not of memory: nothing here is
+    /// `unsafe`, and a prim of another type simply answers nothing
+    /// for the properties this schema declares.
+    /// [`from_prim`](Self::from_prim) is the constructor that asks.
+    pub fn from_prim_unchecked(prim: ::openusd::usd::Prim) -> Self {
         Self(prim)
     }
     /// Defines a prim of this schema at `path` and views it.
@@ -412,17 +422,23 @@ impl Ball {
     ) -> ::openusd::Result<Self> {
         ::std::result::Result::Ok(Self(stage.define_typed_prim(path, tokens::BALL)?))
     }
-    /// Views the prim at `path` as this schema, or `None` where it is
-    /// not one.
+    /// Views `prim` as this schema, or `None` where it is not one.
     ///
-    /// The stage's registry is what answers, so a stage opened without
-    /// this library's family registered answers `None` for every prim.
+    /// The stage's registry is what answers, so a prim from a stage
+    /// opened without this library's family registered is never one.
+    pub fn from_prim(
+        prim: ::openusd::usd::Prim,
+    ) -> ::openusd::Result<::std::option::Option<Self>> {
+        ::std::result::Result::Ok(prim.is_a(tokens::BALL)?.then_some(Self(prim)))
+    }
+    /// Views the prim at `path` as this schema, or `None` where it
+    /// is not one — [`from_prim`](Self::from_prim) over the prim
+    /// `path` names.
     pub fn get(
         stage: &::openusd::usd::Stage,
         path: impl ::openusd::sdf::IntoPath,
     ) -> ::openusd::Result<::std::option::Option<Self>> {
-        let prim = stage.prim(path)?;
-        ::std::result::Result::Ok(prim.is_a(tokens::BALL)?.then_some(Self(prim)))
+        Self::from_prim(stage.prim(path)?)
     }
 }
 
@@ -451,8 +467,13 @@ impl ShapeSchema for Ball {}
 pub struct TagAPI(::openusd::usd::Prim);
 
 impl TagAPI {
-    /// Views `prim` as this schema, whether or not it carries it.
-    pub fn new(prim: ::openusd::usd::Prim) -> Self {
+    /// Views `prim` as this schema whether or not it carries it.
+    ///
+    /// Unchecked of the schema, not of memory: nothing here is
+    /// `unsafe`, and a prim that does not carry this schema simply
+    /// answers nothing for the properties it declares.
+    /// [`from_prim`](Self::from_prim) is the constructor that asks.
+    pub fn from_prim_unchecked(prim: ::openusd::usd::Prim) -> Self {
         Self(prim)
     }
     /// Applies the schema to `prim` and views it.
@@ -465,16 +486,23 @@ impl TagAPI {
     ) -> ::std::result::Result<(), ::openusd::usd::ApplyApiError> {
         prim.can_apply_api(tokens::TAG_API)
     }
+    /// Views `prim` as this schema, or `None` where it does not carry
+    /// it.
+    pub fn from_prim(
+        prim: ::openusd::usd::Prim,
+    ) -> ::openusd::Result<::std::option::Option<Self>> {
+        ::std::result::Result::Ok(
+            prim.has_api_schema(tokens::TAG_API)?.then_some(Self(prim)),
+        )
+    }
     /// Views the prim at `path` as this schema, or `None` where it does
-    /// not carry it.
+    /// not carry it — [`from_prim`](Self::from_prim) over the prim
+    /// `path` names.
     pub fn get(
         stage: &::openusd::usd::Stage,
         path: impl ::openusd::sdf::IntoPath,
     ) -> ::openusd::Result<::std::option::Option<Self>> {
-        let prim = stage.prim(path)?;
-        ::std::result::Result::Ok(
-            prim.has_api_schema(tokens::TAG_API)?.then_some(Self(prim)),
-        )
+        Self::from_prim(stage.prim(path)?)
     }
     /// The name the pipeline looks for.
     ///
@@ -518,7 +546,13 @@ pub struct SlotAPI {
 impl SlotAPI {
     /// Views `prim` as this schema applied under `name`, whether or not
     /// it is.
-    pub fn new(
+    ///
+    /// Unchecked of the schema, not of memory: nothing here is
+    /// `unsafe`, and a prim that does not carry this schema under this
+    /// name simply answers nothing for the properties it declares.
+    /// [`get_instance`](Self::get_instance) is the constructor that
+    /// asks.
+    pub fn from_prim_unchecked(
         prim: ::openusd::usd::Prim,
         name: impl ::std::convert::Into<::openusd::tf::Token>,
     ) -> Self {

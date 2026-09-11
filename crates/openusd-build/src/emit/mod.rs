@@ -370,6 +370,9 @@ class Box "Box" (
             text.contains("prim.is_a(tokens::BALL)?.then_some(Self(prim))"),
             "{text}"
         );
+        // A caller holding a prim asks it directly, and looking one up by path
+        // is that question over the prim at the path.
+        assert!(text.contains("Self::from_prim(stage.prim(path)?)"), "{text}");
     }
 
     /// An applied API schema is applied rather than defined, and a
@@ -378,6 +381,10 @@ class Box "Box" (
     fn applied_constructors() {
         let text = kinds();
         assert!(text.contains("prim.clone().apply_api(tokens::TAG_API)?"), "{text}");
+        assert!(
+            text.contains("prim.has_api_schema(tokens::TAG_API)?.then_some(Self(prim))"),
+            "{text}"
+        );
         assert!(text.contains("name: ::openusd::tf::Token,"), "{text}");
         assert!(text.contains("make_applied_name(tokens::SLOT_API"), "{text}");
     }

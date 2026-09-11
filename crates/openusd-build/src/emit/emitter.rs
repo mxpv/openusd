@@ -200,7 +200,7 @@ fn accessor_trait(class: &RustClass) -> TokenStream {
         quote! {
             #[doc = #documentation]
             fn #accessor(&self) -> #view {
-                #view::new(self.prim().clone())
+                #view::from_prim_unchecked(self.prim().clone())
             }
         }
     });
@@ -308,6 +308,11 @@ fn view(class: &RustClass) -> TokenStream {
 
 /// What views a prim as the schema, and what authors it.
 ///
+/// Every kind is constructed from a prim the same way, by
+/// `from_prim_unchecked`, which is what lets a schema that reflects another
+/// reach its view without knowing what kind it is. Where a prim can be asked
+/// whether it is one, a checked constructor sits beside it.
+///
 /// A prim type is defined at a path and recognised by what a prim is; a base of
 /// prim types is recognised the same way, but defines none, being no type a
 /// prim carries. An applied API schema is applied to a prim already there and
@@ -334,33 +339,47 @@ fn constructors(class: &RustClass) -> TokenStream {
                 }
             });
             quote! {
-                /// Views `prim` as this schema, whatever it is.
+                /// Views `prim` as this schema without asking whether it is one.
                 ///
-                /// The prim is not checked; [`get`](Self::get) is the constructor
-                /// that asks.
-                pub fn new(prim: ::openusd::usd::Prim) -> Self {
+                /// Unchecked of the schema, not of memory: nothing here is
+                /// `unsafe`, and a prim of another type simply answers nothing
+                /// for the properties this schema declares.
+                /// [`from_prim`](Self::from_prim) is the constructor that asks.
+                pub fn from_prim_unchecked(prim: ::openusd::usd::Prim) -> Self {
                     Self(prim)
                 }
 
                 #define
 
-                /// Views the prim at `path` as this schema, or `None` where it is
-                /// not one.
+                /// Views `prim` as this schema, or `None` where it is not one.
                 ///
-                /// The stage's registry is what answers, so a stage opened without
-                /// this library's family registered answers `None` for every prim.
+                /// The stage's registry is what answers, so a prim from a stage
+                /// opened without this library's family registered is never one.
+                pub fn from_prim(
+                    prim: ::openusd::usd::Prim,
+                ) -> ::openusd::Result<::std::option::Option<Self>> {
+                    ::std::result::Result::Ok(prim.is_a(#constant)?.then_some(Self(prim)))
+                }
+
+                /// Views the prim at `path` as this schema, or `None` where it
+                /// is not one — [`from_prim`](Self::from_prim) over the prim
+                /// `path` names.
                 pub fn get(
                     stage: &::openusd::usd::Stage,
                     path: impl ::openusd::sdf::IntoPath,
                 ) -> ::openusd::Result<::std::option::Option<Self>> {
-                    let prim = stage.prim(path)?;
-                    ::std::result::Result::Ok(prim.is_a(#constant)?.then_some(Self(prim)))
+                    Self::from_prim(stage.prim(path)?)
                 }
             }
         }
         usd::SchemaKind::SingleApplyApi => quote! {
-            /// Views `prim` as this schema, whether or not it carries it.
-            pub fn new(prim: ::openusd::usd::Prim) -> Self {
+            /// Views `prim` as this schema whether or not it carries it.
+            ///
+            /// Unchecked of the schema, not of memory: nothing here is
+            /// `unsafe`, and a prim that does not carry this schema simply
+            /// answers nothing for the properties it declares.
+            /// [`from_prim`](Self::from_prim) is the constructor that asks.
+            pub fn from_prim_unchecked(prim: ::openusd::usd::Prim) -> Self {
                 Self(prim)
             }
 
@@ -376,20 +395,37 @@ fn constructors(class: &RustClass) -> TokenStream {
                 prim.can_apply_api(#constant)
             }
 
+            /// Views `prim` as this schema, or `None` where it does not carry
+            /// it.
+            pub fn from_prim(
+                prim: ::openusd::usd::Prim,
+            ) -> ::openusd::Result<::std::option::Option<Self>> {
+                ::std::result::Result::Ok(prim.has_api_schema(#constant)?.then_some(Self(prim)))
+            }
+
             /// Views the prim at `path` as this schema, or `None` where it does
-            /// not carry it.
+            /// not carry it — [`from_prim`](Self::from_prim) over the prim
+            /// `path` names.
             pub fn get(
                 stage: &::openusd::usd::Stage,
                 path: impl ::openusd::sdf::IntoPath,
             ) -> ::openusd::Result<::std::option::Option<Self>> {
-                let prim = stage.prim(path)?;
-                ::std::result::Result::Ok(prim.has_api_schema(#constant)?.then_some(Self(prim)))
+                Self::from_prim(stage.prim(path)?)
             }
         },
         usd::SchemaKind::MultipleApplyApi => quote! {
             /// Views `prim` as this schema applied under `name`, whether or not
             /// it is.
-            pub fn new(prim: ::openusd::usd::Prim, name: impl ::std::convert::Into<::openusd::tf::Token>) -> Self {
+            ///
+            /// Unchecked of the schema, not of memory: nothing here is
+            /// `unsafe`, and a prim that does not carry this schema under this
+            /// name simply answers nothing for the properties it declares.
+            /// [`get_instance`](Self::get_instance) is the constructor that
+            /// asks.
+            pub fn from_prim_unchecked(
+                prim: ::openusd::usd::Prim,
+                name: impl ::std::convert::Into<::openusd::tf::Token>,
+            ) -> Self {
                 Self { prim, name: name.into() }
             }
 
@@ -449,8 +485,13 @@ fn constructors(class: &RustClass) -> TokenStream {
         // An abstract base is no root here — a root is never lowered — so it
         // is viewed as any schema that is applied to nothing is.
         usd::SchemaKind::AbstractBase | usd::SchemaKind::NonAppliedApi => quote! {
-            /// Views `prim` as this schema.
-            pub fn new(prim: ::openusd::usd::Prim) -> Self {
+            /// Views `prim` as this schema, which any prim can be viewed as.
+            ///
+            /// Unchecked of the schema, not of memory: nothing here is
+            /// `unsafe`. This schema is applied to no prim and names no prim
+            /// type, so there is nothing to ask about one — which is why it has
+            /// no constructor that asks.
+            pub fn from_prim_unchecked(prim: ::openusd::usd::Prim) -> Self {
                 Self(prim)
             }
         },
