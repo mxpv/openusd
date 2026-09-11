@@ -186,6 +186,38 @@ class "Held" (
 }
 "#;
 
+    /// A library declaring a versioned spelling of a schema root.
+    const VERSIONED_ROOT: &str = r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testRoot"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Typed_1" {}
+"#;
+
+    /// The body of a view's inherent `impl` block, which is where its
+    /// constructors are written.
+    fn impl_block<'a>(text: &'a str, name: &str) -> &'a str {
+        let opened = format!("impl {name} {{");
+        let (_, rest) = text
+            .split_once(&opened)
+            .unwrap_or_else(|| panic!("{name} has an impl block"));
+        let (body, _) = rest
+            .split_once(
+                "
+}",
+            )
+            .unwrap_or_else(|| panic!("{name}'s impl block ends"));
+        body
+    }
+
     /// What one schema library generates.
     fn emitted(source: &str) -> String {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -250,23 +282,34 @@ class "Held" (
         }
     }
 
-    /// An abstract schema is a trait over the root it derives from, and a
-    /// concrete one is a struct plus the trait its own accessors live on.
+    /// Every schema is a view struct under its own name plus the trait its own
+    /// accessors live on, abstract and concrete alike, and a view derives from
+    /// the trait of each class behind it.
     #[test]
     fn kinds_take_their_shapes() {
         let text = kinds();
-        assert!(text.contains("pub trait Shape: ::openusd::usd::Typed {"), "{text}");
-        assert!(text.contains("pub trait BallSchema: Shape {"), "{text}");
+        assert!(
+            text.contains("pub trait ShapeSchema: ::openusd::usd::Typed {"),
+            "{text}"
+        );
+        assert!(text.contains("pub trait BallSchema: ShapeSchema {"), "{text}");
+        assert!(text.contains("pub struct Shape(::openusd::usd::Prim);"), "{text}");
         assert!(text.contains("pub struct Ball(::openusd::usd::Prim);"), "{text}");
         assert!(text.contains("impl BallSchema for Ball {}"), "{text}");
-        assert!(text.contains("impl Shape for Ball {}"), "{text}");
+        assert!(text.contains("impl ShapeSchema for Ball {}"), "{text}");
+        assert!(text.contains("impl ::openusd::usd::Typed for Shape {}"), "{text}");
     }
 
-    /// An abstract schema is no prim type, so it gets no view to construct.
+    /// An abstract schema names no type a prim can be defined as, so its view
+    /// recognises a prim without defining one.
     #[test]
-    fn abstract_has_no_view() {
+    fn abstract_constructors() {
         let text = kinds();
-        assert!(!text.contains("pub struct Shape"), "{text}");
+        assert!(
+            text.contains("prim.is_a(tokens::SHAPE)?.then_some(Self(prim))"),
+            "{text}"
+        );
+        assert!(!impl_block(text, "Shape").contains("fn define"), "{text}");
     }
 
     /// A concrete view is a prim type, so it defines and recognises one.
@@ -524,6 +567,17 @@ class "Held" (
             text.contains("::openusd::usd::Typed"),
             "the core's is what a view answers to: {text}"
         );
+    }
+
+    /// Rootness is one question with one answer: a versioned spelling names the
+    /// same family, so the rule that classifies it and the filter that skips it
+    /// reach the same verdict and it is generated no more than `Typed` is.
+    #[test]
+    fn versioned_root_not_generated() {
+        let text = emitted(VERSIONED_ROOT);
+        assert!(text.contains("pub const LIBRARY_NAME"), "the library emits: {text}");
+        assert!(!text.contains("pub trait"), "{text}");
+        assert!(!text.contains("pub struct"), "{text}");
     }
 
     /// The generated file takes three names of its own, and a class that asks

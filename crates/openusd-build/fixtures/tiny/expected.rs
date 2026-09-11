@@ -221,7 +221,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
 );
 
 /// Something with an extent, which everything drawable has.
-pub trait Shape: ::openusd::usd::Typed {
+pub trait ShapeSchema: ::openusd::usd::Typed {
     /// The bounds, in the shape's own space.
     ///
     /// Declared `double3 extent = (1.0, 1.0, 1.0)`. Read it with
@@ -275,8 +275,52 @@ pub trait Shape: ::openusd::usd::Typed {
     }
 }
 
+/// Something with an extent, which everything drawable has.
+#[derive(::std::clone::Clone, ::std::fmt::Debug)]
+pub struct Shape(::openusd::usd::Prim);
+
+impl Shape {
+    /// Views `prim` as this schema, whatever it is.
+    ///
+    /// The prim is not checked; [`get`](Self::get) is the constructor
+    /// that asks.
+    pub fn new(prim: ::openusd::usd::Prim) -> Self {
+        Self(prim)
+    }
+    /// Views the prim at `path` as this schema, or `None` where its
+    /// type does not derive from it.
+    ///
+    /// The stage's registry is what answers, so a stage opened without
+    /// this library's family registered answers `None` for every prim.
+    pub fn get(
+        stage: &::openusd::usd::Stage,
+        path: impl ::openusd::sdf::IntoPath,
+    ) -> ::openusd::Result<::std::option::Option<Self>> {
+        let prim = stage.prim(path)?;
+        ::std::result::Result::Ok(prim.is_a(tokens::SHAPE)?.then_some(Self(prim)))
+    }
+}
+
+impl ::openusd::usd::SchemaBase for Shape {
+    const KIND: ::openusd::usd::SchemaKind = ::openusd::usd::SchemaKind::AbstractTyped;
+    fn prim(&self) -> &::openusd::usd::Prim {
+        &self.0
+    }
+}
+
+impl ::std::ops::Deref for Shape {
+    type Target = ::openusd::usd::Prim;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ShapeSchema for Shape {}
+
+impl ::openusd::usd::Typed for Shape {}
+
 /// A sphere, by another name.
-pub trait BallSchema: Shape {
+pub trait BallSchema: ShapeSchema {
     /// The radius.
     ///
     /// Declared `double radius = 1.0`. Read it with `get::<f64>()`.
@@ -375,7 +419,7 @@ impl BallSchema for Ball {}
 
 impl ::openusd::usd::Typed for Ball {}
 
-impl Shape for Ball {}
+impl ShapeSchema for Ball {}
 
 /// Names a prim for a pipeline to find later.
 #[derive(::std::clone::Clone, ::std::fmt::Debug)]

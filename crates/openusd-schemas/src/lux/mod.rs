@@ -2,7 +2,7 @@
 //!
 //! Typed value-views over a composed [`openusd::usd::Stage`], mirroring Pixar's
 //! `UsdLux` class hierarchy. UsdLux lights are UsdGeom prims, so these views
-//! build on the [`geom`](crate::geom) trait chain: every light is a
+//! build on the [`geom`](crate::geom) chain: every light is a
 //! [`geom::Imageable`](crate::geom::Imageable) /
 //! [`geom::Xformable`](crate::geom::Xformable) prim, and area lights
 //! are additionally [`geom::Boundable`](crate::geom::Boundable).

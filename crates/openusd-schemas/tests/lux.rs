@@ -9,10 +9,11 @@ use openusd::tf::Token;
 use openusd::usd::{SchemaBase, Stage};
 use openusd_schemas::geom::XformableExt;
 use openusd_schemas::lux::{
-    BoundableLightBase, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
+    BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
     DistantLightSchema, DomeLight, DomeLight_1, DomeLight_1Schema, DomeLightSchema, GeometryLight, GeometryLightSchema,
-    LightAPI, LightFilter, LightListAPI, LightListCacheBehavior, NonboundableLightBase, PortalLight, PortalLightSchema,
-    RectLight, RectLightSchema, ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema, TextureFormat,
+    LightAPI, LightFilter, LightListAPI, LightListCacheBehavior, NonboundableLightBaseSchema, PortalLight,
+    PortalLightSchema, RectLight, RectLightSchema, ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema,
+    TextureFormat,
 };
 
 const FIXTURE: &str = "fixtures/usdLux_scene.usda";

@@ -5,14 +5,14 @@ use openusd::sdf;
 use openusd::tf;
 
 use super::tokens;
-use super::{Imageable, Purpose, Visibility};
+use super::{ImageableSchema, Purpose, Visibility};
 
 /// The questions `visibility` and `purpose` are actually asked, both of which
 /// are answered by walking namespace rather than by reading one prim.
 ///
-/// Every [`Imageable`] answers them, so a view has them wherever the generated
-/// accessors are.
-pub trait ImageableExt: Imageable {
+/// Every [`ImageableSchema`] answers them, so a view has them wherever the
+/// generated accessors are.
+pub trait ImageableExt: ImageableSchema {
     /// Resolve the effective composed `visibility`, walking ancestors
     /// (C++ `ComputeVisibility`): an `invisible` opinion on this prim or any
     /// ancestor prunes the subtree, so the result is
@@ -57,4 +57,4 @@ pub trait ImageableExt: Imageable {
     }
 }
 
-impl<T: Imageable> ImageableExt for T {}
+impl<T: ImageableSchema> ImageableExt for T {}

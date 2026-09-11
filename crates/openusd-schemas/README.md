@@ -52,15 +52,15 @@ Open a stage with the core crate, then read a `Mesh` and its point positions and
 normals through the `geom` views:
 
 ```rust,no_run
-// `PointBased` is brought in so its inherited accessors resolve on the view.
-use openusd_schemas::geom::{self, PointBased};
+// `PointBasedSchema` is brought in so its inherited accessors resolve.
+use openusd_schemas::geom::{self, PointBasedSchema};
 use openusd::{gf, usd};
 
 let stage = usd::Stage::open("scene.usda")?;
 
 if let Some(mesh) = geom::Mesh::get(&stage, "/World/Mesh")? {
-    // `points_attr` / `normals_attr` are inherited from the `PointBased` trait
-    // up the chain. `point3f[]` and `normal3f[]` both decode to `Vec<gf::Vec3f>`,
+    // `points_attr` / `normals_attr` are inherited from `PointBasedSchema` up
+    // the chain. `point3f[]` and `normal3f[]` both decode to `Vec<gf::Vec3f>`,
     // so `get` extracts them directly.
     let points = mesh.points_attr().get::<Vec<gf::Vec3f>>()?;
     let normals = mesh.normals_attr().get::<Vec<gf::Vec3f>>()?;

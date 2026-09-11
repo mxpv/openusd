@@ -2,7 +2,7 @@
 //!
 //! Typed value-views over a composed [`openusd::usd::Stage`], mirroring Pixar's
 //! `UsdVol` family — renderable volumes built from file-backed fields. The
-//! views build on the [`geom`](crate::geom) trait chain: a
+//! views build on the [`geom`](crate::geom) chain: a
 //! [`Volume`] is a [`geom::Gprim`](crate::geom::Gprim) and the field
 //! prims are [`geom::Xformable`](crate::geom::Xformable).
 //!
@@ -28,7 +28,7 @@
 //! # Example
 //!
 //! ```
-//! use openusd_schemas::vol::{self, VolumeFieldAsset, VolumeSchema};
+//! use openusd_schemas::vol::{self, VolumeFieldAssetSchema, VolumeSchema};
 //! use openusd::{sdf, usd};
 //!
 //! let stage = usd::Stage::builder()
@@ -36,7 +36,7 @@
 //!     .in_memory("scene.usda").unwrap();
 //!
 //! // A field is a file-backed grid prim; `create_file_path_attr` is inherited
-//! // from the `FieldAsset` interface.
+//! // from `VolumeFieldAssetSchema`, the trait carrying the shared attributes.
 //! let field = vol::OpenVDBAsset::define(&stage, "/Smoke/density").unwrap();
 //! field.create_file_path_attr().unwrap().set(sdf::Value::AssetPath("./smoke.vdb".into())).unwrap();
 //! field.create_field_name_attr().unwrap().set(sdf::Value::token("density")).unwrap();

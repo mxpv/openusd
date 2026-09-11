@@ -8,7 +8,7 @@ use openusd::sdf::{self, Value};
 use openusd::tf::Token;
 use openusd::usd::Stage;
 use openusd_schemas::render::{
-    AspectRatioConformPolicy, Pass, PassSchema, Product, ProductSchema, ProductType, Settings, SettingsBase,
+    AspectRatioConformPolicy, Pass, PassSchema, Product, ProductSchema, ProductType, Settings, SettingsBaseSchema,
     SettingsSchema, SourceType, Var, VarSchema, compute_render_spec,
 };
 

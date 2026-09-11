@@ -368,3 +368,20 @@ impl Origin {
         format!("{}{}", self.layer, self.path)
     }
 }
+
+/// Whether `name` is one of the schema roots, which are the core's own traits
+/// rather than anything a library generates: a layer may still declare one,
+/// since that is how a base is there to inherit from.
+///
+/// The question is asked of the schema family, so a versioned spelling of a
+/// root is one. The rule that classifies a schema and the filter that decides
+/// whether to generate it both ask here, so a root is a root to both: one that
+/// counted for only one of them would be left half generated.
+pub fn is_root(name: &tf::Token) -> bool {
+    // The families are short and a root is spelled unversioned almost always,
+    // so the name itself answers before the family has to be parsed out of it.
+    matches!(name.as_str(), TYPED | API_SCHEMA_BASE | SCHEMA_BASE) || {
+        let (family, _) = usd::SchemaRegistry::parse_schema_family_and_version(name);
+        matches!(family.as_str(), TYPED | API_SCHEMA_BASE | SCHEMA_BASE)
+    }
+}

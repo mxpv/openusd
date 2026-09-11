@@ -42,13 +42,20 @@
 //!
 //! # Conventions
 //!
-//! A view's own accessors live on its `<Class>Schema` trait and the inherited
-//! ones on the trait of the class that declared them, so reading `mesh.points_attr()`
-//! needs `PointBased` in scope. A property is reached through a
+//! Every schema is a view named after it and a `<Class>Schema` trait carrying
+//! its own accessors, so `Mesh` reads through `MeshSchema` and inherits the
+//! rest from the trait of each class behind it: reading `mesh.points_attr()`
+//! needs `PointBasedSchema` in scope. A property is reached through a
 //! `foo_attr()` / `create_foo_attr()` pair, named by the schema's own
 //! `apiName`. An applied API schema is applied to a prim
 //! (`TagAPI::apply(&prim)`) and read back with `get` — or, where it takes an
 //! instance name, `get_instance(&prim, "front")`.
+//!
+//! An abstract class — `Gprim`, `Imageable`, `Xformable` — has a view of its
+//! own, for a prim whose concrete type a caller does not care about:
+//! `Gprim::get(&stage, path)` answers for a prim of any type under it, and
+//! reads the properties they all share. It defines nothing, no prim being of
+//! that type itself.
 
 use std::sync::{Arc, OnceLock};
 

@@ -3,10 +3,11 @@
 //! [`SchemaBase`] is the root of the schema-view hierarchy (C++
 //! `UsdSchemaBase`). Every schema — typed (`IsA`) or applied (API) — is a
 //! lightweight value-type view over a single [`Prim`] and implements this
-//! trait, directly or through an intermediate schema trait (`Imageable`,
-//! `Xformable`, …). [`Typed`] and [`APISchemaBase`] are the roots a generated
-//! chain hangs off, one per side of the typed / API split. The domain schema
-//! crate builds its typed property accessors on top of [`SchemaBase::prim`].
+//! trait, directly or through the intermediate trait a generator mints to
+//! carry each schema's own accessors. [`Typed`] and [`APISchemaBase`] are the
+//! roots a generated chain hangs off, one per side of the typed / API split.
+//! The domain schema crate builds its typed property accessors on top of
+//! [`SchemaBase::prim`].
 
 use crate::sdf;
 
@@ -21,7 +22,7 @@ use super::{Prim, Stage};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SchemaKind {
     /// Abstract base that is never instantiated and is not `UsdTyped`
-    /// (e.g. `SchemaBase` itself, or `Imageable`).
+    /// (e.g. `SchemaBase` itself, or `APISchemaBase`).
     AbstractBase,
     /// Abstract typed schema — a non-instantiable `IsA` base (e.g.
     /// `Boundable`).
@@ -45,10 +46,10 @@ pub enum SchemaKind {
 /// classification — so intermediate schema traits and concrete schemas can
 /// build their accessors on one foundation.
 ///
-/// A schema is constructed by wrapping a [`Prim`] (each concrete schema is a
+/// A schema is constructed by wrapping a [`Prim`] (each schema view is a
 /// `struct Foo(Prim)` newtype). Wrapping is unchecked, mirroring the C++
 /// `UsdSchemaBase(prim)` constructor; a type-gated constructor (the analog of
-/// C++ `UsdSchema::Get`) belongs on each concrete schema.
+/// C++ `UsdSchema::Get`) belongs on each schema view.
 ///
 /// The registry-backed members of C++ `UsdSchemaBase`
 /// (`GetSchemaClassPrimDefinition`, `GetSchemaAttributeNames`) are reached

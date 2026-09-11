@@ -5,7 +5,7 @@ use openusd::Result;
 use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::Stage;
-use openusd_schemas::geom::Boundable;
+use openusd_schemas::geom::BoundableSchema;
 use openusd_schemas::proc::{GenerativeProcedural, GenerativeProceduralSchema};
 
 const FIXTURE: &str = "fixtures/usdProc_scene.usda";

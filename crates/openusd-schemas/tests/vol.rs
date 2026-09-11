@@ -6,7 +6,8 @@ use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::Stage;
 use openusd_schemas::vol::{
-    self, Field3DAsset, Field3DAssetSchema, OpenVDBAsset, OpenVDBAssetSchema, VectorDataRoleHint, VolumeFieldAsset,
+    self, Field3DAsset, Field3DAssetSchema, OpenVDBAsset, OpenVDBAssetSchema, VectorDataRoleHint,
+    VolumeFieldAssetSchema,
 };
 
 const FIXTURE: &str = "fixtures/usdVol_scene.usda";

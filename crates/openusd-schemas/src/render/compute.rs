@@ -19,8 +19,8 @@ use openusd::usd::{Attribute, Relationship, Stage};
 use super::conform::apply_aspect_ratio_policy;
 use super::spec::{Product as SpecProduct, RenderSpec, Var as SpecVar};
 use super::{
-    AspectRatioConformPolicy, Product, ProductSchema, ProductType, Settings, SettingsBase, SettingsSchema, SourceType,
-    Var, VarSchema,
+    AspectRatioConformPolicy, Product, ProductSchema, ProductType, Settings, SettingsBaseSchema, SettingsSchema,
+    SourceType, Var, VarSchema,
 };
 
 /// Compute the [`RenderSpec`](super::spec::RenderSpec) for the `Settings`
@@ -108,7 +108,7 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&s
     }))
 }
 
-/// The camera + framing attributes resolved from a [`SettingsBase`] view,
+/// The camera + framing attributes resolved from a [`SettingsBaseSchema`] view,
 /// with per-attribute fallback to a weaker base (the spec defaults for the
 /// settings, the resolved settings for a product). The intermediate value the
 /// render-spec computation flattens.
@@ -143,7 +143,7 @@ impl ResolvedBase {
     /// product attribute overrides only where the product authors it, mirroring
     /// C++ `_Get(attr, val, getDefaultValue=false)`, which uses the value only
     /// when the attribute has an authored opinion.
-    fn resolve(view: &impl SettingsBase, fallback: &ResolvedBase) -> Result<Self> {
+    fn resolve(view: &impl SettingsBaseSchema, fallback: &ResolvedBase) -> Result<Self> {
         Ok(Self {
             resolution: read_int2(&view.resolution_attr())?.unwrap_or(fallback.resolution),
             pixel_aspect_ratio: read_f32(&view.pixel_aspect_ratio_attr())?.unwrap_or(fallback.pixel_aspect_ratio),

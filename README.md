@@ -99,12 +99,12 @@ shader driving a material's surface:
 
 ```rust,no_run
 use openusd::{gf, usd};
-use openusd_schemas::geom::{self, PointBased};
+use openusd_schemas::geom::{self, PointBasedSchema};
 use openusd_schemas::shade;
 
 let stage = usd::Stage::open("scene.usda")?;
 
-// `PointBased` is in scope so `Mesh` inherits its accessors.
+// `PointBasedSchema` is in scope so `Mesh` inherits its accessors.
 if let Some(mesh) = geom::Mesh::get(&stage, "/World/Mesh")? {
     if let Some(points) = mesh.points_attr().get::<Vec<gf::Vec3f>>()? {
         println!("{} points", points.len());

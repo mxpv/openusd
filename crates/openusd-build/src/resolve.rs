@@ -22,8 +22,8 @@ use openusd::{sdf, tf, usd};
 use crate::error::Error;
 use crate::load::{CustomData, Declaration, PropertyDeclaration, Source};
 use crate::model::{
-    API_SCHEMA_BASE, API_SCHEMA_OVERRIDE, Base, Class, Library, Metadata, NON_APPLIED, Property, PropertyApi,
-    SCHEMA_BASE, Site, TYPED,
+    API_SCHEMA_OVERRIDE, Base, Class, Library, Metadata, NON_APPLIED, Property, PropertyApi, SCHEMA_BASE, Site, TYPED,
+    is_root,
 };
 use crate::names;
 use crate::validate::Violation;
@@ -81,7 +81,7 @@ fn class(
     // the class's own identifier (`Violation::TypeNameMismatch`), and two
     // classes cannot share that, so there is nothing to clear.
     let (family, version) = usd::SchemaRegistry::parse_schema_family_and_version(&declaration.name);
-    let kind = kind(declaration, is_typed, &family)?;
+    let kind = kind(declaration, is_typed)?;
     let metadata = metadata(declaration);
     let properties = properties(flattened, index, declaration, &bases, &metadata, kind)?;
 
@@ -147,12 +147,11 @@ fn chain(index: &HashMap<&tf::Token, &Declaration>, declaration: &Declaration) -
         .iter()
         .rev()
         .map(|parent| {
-            let (family, _) = usd::SchemaRegistry::parse_schema_family_and_version(&parent.name);
             // An `apiSchemaType` nothing can read is a rule broken by the class
             // that wrote it, which validation reports where that class is
             // generated. A descendant merely inheriting from it reads the kind
             // it can see rather than failing on someone else's declaration.
-            let kind = kind(parent, reaches_typed, &family).unwrap_or(usd::SchemaKind::AbstractBase);
+            let kind = kind(parent, reaches_typed).unwrap_or(usd::SchemaKind::AbstractBase);
             reaches_typed |= parent.name.as_str() == TYPED;
             Base {
                 identifier: parent.name.clone(),
@@ -181,16 +180,14 @@ fn class_name(declaration: &Declaration) -> String {
 /// A schema that is neither typed nor concrete, and is not one of the three
 /// roots, is an API schema; `apiSchemaType` then says which of the three kinds,
 /// and defaults to single-apply.
-fn kind(declaration: &Declaration, is_typed: bool, family: &tf::Token) -> Result<usd::SchemaKind, Error> {
+fn kind(declaration: &Declaration, is_typed: bool) -> Result<usd::SchemaKind, Error> {
     // A schema is concrete when it carries a type name of its own.
     let is_concrete = declaration.type_name.is_some();
     // The roots are abstract bases. `SchemaBase` is among them: it inherits
     // nothing and carries no type, which is what an API schema looks like from
     // here, and a library declaring it would otherwise register the root every
     // schema derives from as an API schema of its own.
-    let roots = [TYPED, API_SCHEMA_BASE, SCHEMA_BASE];
-    let is_root = roots.contains(&family.as_str());
-    let is_api = !is_typed && !is_concrete && !is_root;
+    let is_api = !is_typed && !is_concrete && !is_root(&declaration.name);
 
     let spelling = declaration.custom_data.string(API_SCHEMA_TYPE);
     if let Some(spelling) = spelling.as_deref() {

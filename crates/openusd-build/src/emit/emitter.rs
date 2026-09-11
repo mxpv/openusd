@@ -216,10 +216,11 @@ fn view(class: &RustClass) -> TokenStream {
 
 /// What views a prim as the schema, and what authors it.
 ///
-/// A prim type is defined at a path and recognised by what a prim is; an
-/// applied API schema is applied to a prim already there and recognised by what
-/// it carries, under an instance name where the schema takes one. Anything else
-/// is a view over whatever prim a caller hands it.
+/// A prim type is defined at a path and recognised by what a prim is; a base of
+/// prim types is recognised the same way, but defines none, being no type a
+/// prim carries. An applied API schema is applied to a prim already there and
+/// recognised by what it carries, under an instance name where the schema takes
+/// one. Anything else is a view over whatever prim a caller hands it.
 fn constructors(class: &RustClass, shape: &View) -> TokenStream {
     let constant = &class.constant;
 
@@ -243,6 +244,28 @@ fn constructors(class: &RustClass, shape: &View) -> TokenStream {
 
             /// Views the prim at `path` as this schema, or `None` where it is
             /// not one.
+            ///
+            /// The stage's registry is what answers, so a stage opened without
+            /// this library's family registered answers `None` for every prim.
+            pub fn get(
+                stage: &::openusd::usd::Stage,
+                path: impl ::openusd::sdf::IntoPath,
+            ) -> ::openusd::Result<::std::option::Option<Self>> {
+                let prim = stage.prim(path)?;
+                ::std::result::Result::Ok(prim.is_a(#constant)?.then_some(Self(prim)))
+            }
+        },
+        View::Abstract => quote! {
+            /// Views `prim` as this schema, whatever it is.
+            ///
+            /// The prim is not checked; [`get`](Self::get) is the constructor
+            /// that asks.
+            pub fn new(prim: ::openusd::usd::Prim) -> Self {
+                Self(prim)
+            }
+
+            /// Views the prim at `path` as this schema, or `None` where its
+            /// type does not derive from it.
             ///
             /// The stage's registry is what answers, so a stage opened without
             /// this library's family registered answers `None` for every prim.

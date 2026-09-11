@@ -18,7 +18,7 @@ use openusd::sdf;
 use openusd::tf;
 use openusd::usd::{Prim, TimeCode};
 
-use super::Xformable;
+use super::XformableSchema;
 use super::tokens;
 
 const TOKEN_INVERT_PREFIX: &str = "!invert!";
@@ -45,13 +45,13 @@ pub enum XformOpPrecision {
 }
 
 /// A prim that carries a transform stack (C++ `UsdGeomXformable`). Inherits
-/// [`Xformable`].
+/// [`XformableSchema`].
 ///
 /// Reader methods compose the authored `xformOp:*` stack; the `set_*` setters
 /// author one op and append it to `xformOpOrder`, so successive calls build
 /// the canonical T·R·S ordering. Setters consume `self` and return it, so
 /// they chain (`xform.set_translate(t)?.set_rotate_y(d)?`).
-pub trait XformableExt: Xformable {
+pub trait XformableExt: XformableSchema {
     /// The authored `xformOpOrder` token list, flattening any list-op
     /// authoring. `None` when unauthored (C++ `GetXformOpOrderAttr().Get`).
     fn xform_op_order(&self) -> Result<Option<Vec<String>>> {
@@ -283,7 +283,7 @@ fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Mat
 }
 
 /// Author a single `xformOp:<kind>` attribute (does not touch
-/// `xformOpOrder`), on the terms [`Xformable::set_xform_op`] states.
+/// `xformOpOrder`), on the terms [`XformableExt::set_xform_op`] states.
 ///
 /// An op the stage already declares keeps that declaration; one nothing
 /// declares takes `precision`. The value is converted to whichever of the two
@@ -406,9 +406,9 @@ fn value_to_quat_wxyz(v: &sdf::Value) -> Option<[f64; 4]> {
     }
 }
 
-/// Every [`Xformable`] carries the transform stack, so a view has these
+/// Every [`XformableSchema`] carries the transform stack, so a view has these
 /// wherever the generated accessors are.
-impl<T: Xformable> XformableExt for T {}
+impl<T: XformableSchema> XformableExt for T {}
 
 #[cfg(test)]
 mod tests {

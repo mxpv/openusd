@@ -1,9 +1,10 @@
 //! UsdGeom schema views.
 //!
 //! Typed value-views over a composed [`openusd::usd::Stage`], mirroring Pixar's
-//! `UsdGeom` class hierarchy. Each concrete prim type (`Mesh`, `Sphere`,
-//! `Camera`, …) is a newtype wrapping a [`openusd::usd::Prim`] and gains its
-//! property accessors from a chain of schema traits:
+//! `UsdGeom` class hierarchy. Each prim type (`Mesh`, `Sphere`, `Camera`, …) is
+//! a newtype wrapping a [`openusd::usd::Prim`] and gains its property accessors
+//! from a chain of schema traits. So is each class the prim types derive from
+//! (`Imageable`, `Gprim`, …), which views a prim of any type under it:
 //!
 //! ```text
 //! SchemaBase
@@ -29,7 +30,7 @@
 //! ```
 //! // A view's own accessors live on its `<Class>Schema` trait, and the ones it
 //! // inherits on the trait of the class that declared them.
-//! use openusd_schemas::geom::{self, Imageable, MeshSchema};
+//! use openusd_schemas::geom::{self, ImageableSchema, MeshSchema};
 //! use openusd::usd;
 //!
 //! // The registry is what makes a prim a `Mesh` and what resolves the

@@ -27,7 +27,7 @@
 //! ```
 //! use openusd::gf;
 //! use openusd::sdf;
-//! use openusd_schemas::render::{self, ProductSchema, SettingsBase, SettingsSchema};
+//! use openusd_schemas::render::{self, ProductSchema, SettingsBaseSchema, SettingsSchema};
 //! use openusd::usd::Stage;
 //!
 //! let stage = Stage::builder()

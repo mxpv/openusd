@@ -9,12 +9,13 @@ use openusd::tf::Token;
 use openusd::usd::{Attribute, SchemaBase, Stage};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{
-    self, Axis, BasisCurves, BasisCurvesSchema, Boundable, Camera, CameraSchema, Capsule, CapsuleSchema, Cone,
-    ConeSchema, Cube, CubeSchema, Curves, Cylinder, CylinderSchema, ElementType, Gprim, HermiteCurves,
-    HermiteCurvesSchema, Imageable, ImageableExt, InterpolateBoundary, Interpolation, Mesh, MeshSchema, NurbsCurves,
-    NurbsCurvesSchema, NurbsPatch, NurbsPatchSchema, PatchForm, Plane, PlaneSchema, PointBased, PointInstancer,
-    PointInstancerSchema, Points, PointsSchema, Projection, Purpose, Scope, Sphere, SphereSchema, StereoRole,
-    SubdivisionScheme, Subset, SubsetSchema, TetMesh, TetMeshSchema, Visibility, Xform, XformableExt,
+    self, Axis, BasisCurves, BasisCurvesSchema, BoundableSchema, Camera, CameraSchema, Capsule, CapsuleSchema, Cone,
+    ConeSchema, Cube, CubeSchema, CurvesSchema, Cylinder, CylinderSchema, ElementType, Gprim, GprimSchema,
+    HermiteCurves, HermiteCurvesSchema, Imageable, ImageableExt, ImageableSchema, InterpolateBoundary, Interpolation,
+    Mesh, MeshSchema, NurbsCurves, NurbsCurvesSchema, NurbsPatch, NurbsPatchSchema, PatchForm, Plane, PlaneSchema,
+    PointBasedSchema, PointInstancer, PointInstancerSchema, Points, PointsSchema, Projection, Purpose, Scope, Sphere,
+    SphereSchema, StereoRole, SubdivisionScheme, Subset, SubsetSchema, TetMesh, TetMeshSchema, Visibility, Xform,
+    XformableExt,
 };
 
 const FIXTURE: &str = "fixtures/usdGeom_scene.usda";
@@ -31,7 +32,7 @@ fn xform(stage: &Stage, path: &str) -> Result<Xform> {
 
 /// The directly-authored `visibility` opinion, defaulting to `Inherited`
 /// (mirrors the old `read_visibility` over a typed view).
-fn direct_visibility(view: &impl Imageable) -> Result<Visibility> {
+fn direct_visibility(view: &impl ImageableSchema) -> Result<Visibility> {
     Ok(view
         .visibility_attr()
         .get::<Token>()?
@@ -41,7 +42,7 @@ fn direct_visibility(view: &impl Imageable) -> Result<Visibility> {
 }
 
 /// The directly-authored `purpose` opinion, defaulting to `Default`.
-fn direct_purpose(view: &impl Imageable) -> Result<Purpose> {
+fn direct_purpose(view: &impl ImageableSchema) -> Result<Purpose> {
     Ok(view
         .purpose_attr()
         .get::<Token>()?
@@ -158,6 +159,39 @@ fn extent_unauthored_returns_none() -> Result<()> {
     // Camera is Xformable but not Boundable, so it has no `extent`; the
     // /World/Cam prim authors none either way.
     assert!(cam.attribute("extent").get::<sdf::Value>()?.is_none());
+    Ok(())
+}
+
+// Abstract views: the class is no prim type, so the view reads a prim of
+// whatever type under it.
+
+#[test]
+fn gprim_over_any_type() -> Result<()> {
+    let stage = open()?;
+    // Whatever type the prim carries, the view reads what every Gprim
+    // shares — and, through the chain behind it, what every Imageable does.
+    let mesh = Gprim::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Gprim");
+    assert_eq!(mesh.orientation_attr().get::<Token>()?.as_deref(), Some("leftHanded"));
+    let ball = Gprim::get(&stage, sdf::path("/World/Geometry/InvisibleBall")?)?.expect("Gprim");
+    assert_eq!(direct_visibility(&ball)?, Visibility::Invisible);
+    Ok(())
+}
+
+#[test]
+fn abstract_get_gated() -> Result<()> {
+    let stage = open()?;
+    let cam = sdf::path("/World/Cam")?;
+    // A Camera is an Imageable, and nothing under Gprim.
+    assert!(Imageable::get(&stage, cam.clone())?.is_some());
+    assert!(Gprim::get(&stage, cam)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn abstract_view_takes_ext() -> Result<()> {
+    let stage = open()?;
+    let child = Imageable::get(&stage, sdf::path("/World/Hidden/HiddenChild")?)?.expect("Imageable");
+    assert_eq!(child.compute_visibility()?, Visibility::Invisible);
     Ok(())
 }
 

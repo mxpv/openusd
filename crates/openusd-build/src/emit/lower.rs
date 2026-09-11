@@ -17,7 +17,7 @@ use openusd::{sdf, tf, usd, usda};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 
-use crate::model::{API_SCHEMA_BASE, Base, Class, Library, Property, SCHEMA_BASE, TYPED};
+use crate::model::{API_SCHEMA_BASE, Base, Class, Library, Property, TYPED, is_root};
 use crate::validate::Violation;
 use crate::{Externs, doc, error::Error, names, types};
 
@@ -62,7 +62,8 @@ pub struct RustClass {
     pub allows_non_camel_case: bool,
     /// The `usd::SchemaKind` constant the view reports itself as.
     pub kind_constant: syn::Path,
-    /// What a prim is viewed through, or `None` for a class no prim can be.
+    /// What a prim is viewed through, or `None` for a class that is no schema
+    /// of this library's own, which only a schema root is.
     pub view: Option<View>,
     /// The schema's documentation, converted, where it wrote any.
     pub documentation: Option<String>,
@@ -89,6 +90,9 @@ pub struct Reflected {
 pub enum View {
     /// A prim type: defined at a path, and recognised by what a prim is.
     Concrete,
+    /// A base of prim types: recognised by what a prim is, but naming none a
+    /// prim can be defined as.
+    Abstract,
     /// A view over whatever prim a caller hands it, applied to nothing.
     Plain,
     /// Applied to a prim once, under no instance name.
@@ -152,7 +156,7 @@ pub fn library(model: &Library, externs: &Externs) -> Result<RustLibrary, Error>
     lowered.classes = model
         .classes
         .iter()
-        .filter(|class| !is_root(class.identifier.as_str()))
+        .filter(|class| !is_root(&class.identifier))
         .map(|class| lower_class(class, model, externs, &by_value))
         .collect::<Result<_, _>>()?;
 
@@ -209,14 +213,14 @@ fn constants(model: &Library) -> Result<Vec<Constant>, Error> {
 /// nothing stops them, since a consumer includes each in a module of its own.
 fn check_class_names(model: &Library) -> Result<(), Error> {
     // The names the file takes for itself, which a schema may not also take:
-    // `SCHEMAS` is a value, and so is a concrete view's tuple-struct
-    // constructor, so a schema of that name would collide with it. Read from
-    // where the emitter writes them, so renaming one cannot leave this stale.
+    // `SCHEMAS` is a value, and so is a view's tuple-struct constructor, so a
+    // schema of that name would collide with it. Read from where the emitter
+    // writes them, so renaming one cannot leave this stale.
     let mut seen: BTreeMap<String, &str> = super::items::ALL
         .map(|name| (name.to_owned(), "the generated file"))
         .into();
     for class in &model.classes {
-        if is_root(class.identifier.as_str()) {
+        if is_root(&class.identifier) {
             continue;
         }
         let name = &class.metadata.class_name;
@@ -227,7 +231,7 @@ fn check_class_names(model: &Library) -> Result<(), Error> {
         // `Foo`'s trait, but never with `FooAPI`.
         let mut minted = vec![name.clone()];
         if !class.kind.is_applied_api_schema() {
-            minted.push(trait_name(class.kind, name));
+            minted.push(trait_name(name));
         }
         for minted in minted {
             if let Some(first) = seen.insert(minted.clone(), identifier)
@@ -284,7 +288,7 @@ fn lower_class(
         .collect::<Result<Vec<_>, _>>()?;
     let parent = match (class.bases.first(), inherited.first()) {
         (_, Some(Some(path))) => path.clone(),
-        (Some(base), _) => root_trait(base.identifier.as_str()),
+        (Some(base), _) => root_trait(&base.identifier),
         (None, _) => syn::parse_quote! { ::openusd::usd::SchemaBase },
     };
 
@@ -331,7 +335,7 @@ fn lower_class(
         name: identifier(name, &origin)?,
         accessor_trait: match applied {
             true => None,
-            false => Some(identifier(&trait_name(class.kind, name), &origin)?),
+            false => Some(identifier(&trait_name(name), &origin)?),
         },
         parent,
         memberships,
@@ -379,13 +383,6 @@ fn lower_accessor(
             && property.spec_type != sdf::SpecType::Relationship,
         documentation: documentation(property),
     })
-}
-
-/// Whether `name` is one of the schema roots, which are the core's own traits
-/// rather than anything a library generates: a layer of this library may still
-/// declare one, since that is how a base is there to inherit from.
-fn is_root(name: &str) -> bool {
-    matches!(name, TYPED | API_SCHEMA_BASE | SCHEMA_BASE)
 }
 
 /// The `sdf::ValueTypeName` constant an attribute is declared with.
@@ -551,26 +548,23 @@ fn check_methods(class: &Class) -> Result<(), Error> {
 
 /// The trait a class's accessors live on.
 ///
-/// An abstract class is the trait, there being no struct to distinguish it
-/// from; anything a prim can be needs a name of its own, so its accessors take
-/// the `Schema` suffix.
-fn trait_name(kind: usd::SchemaKind, class_name: &str) -> String {
-    match kind {
-        usd::SchemaKind::AbstractTyped | usd::SchemaKind::AbstractBase => class_name.to_owned(),
-        _ => format!("{class_name}Schema"),
-    }
+/// The schema's own name belongs to the view a prim is read through, so the
+/// trait behind it takes the `Schema` suffix — `Mesh` and `MeshSchema`,
+/// `Gprim` and `GprimSchema` — whether the schema is one a prim can be or a
+/// base of ones it can.
+fn trait_name(class_name: &str) -> String {
+    format!("{class_name}Schema")
 }
 
 /// The trait a base contributes to a view that derives from it, or `None` where
 /// the base is one of the roots, which have no accessors and are named directly.
 fn base_trait(class: &Class, base: &Base, model: &Library, externs: &Externs) -> Result<Option<syn::Path>, Error> {
-    let name = base.identifier.as_str();
-    if matches!(name, TYPED | API_SCHEMA_BASE | SCHEMA_BASE) {
+    if is_root(&base.identifier) {
         return Ok(None);
     }
 
     let origin = class.origin.describe();
-    let inherited = identifier(&trait_name(base.kind, &base.class_name), &origin)?;
+    let inherited = identifier(&trait_name(&base.class_name), &origin)?;
     let Some(library) = &base.library else {
         // A base of this library that this run does not generate — one a
         // sublayer declares without a `/GLOBAL` of its own — has no trait for a
@@ -597,11 +591,14 @@ fn base_trait(class: &Class, base: &Base, model: &Library, externs: &Externs) ->
     Ok(Some(syn::parse_quote! { #path::#inherited }))
 }
 
-/// What a prim of this kind is viewed through, or `None` where no prim can be
-/// one: an abstract schema is a trait and nothing more.
+/// What a prim of this kind is viewed through, or `None` for one that is no
+/// schema of this library's own: [`AbstractBase`](usd::SchemaKind::AbstractBase)
+/// is what a schema root is classified as, and [`is_root`] is what keeps one
+/// from reaching here, so nothing generated takes that arm.
 fn view(kind: usd::SchemaKind) -> Option<View> {
     match kind {
-        usd::SchemaKind::AbstractTyped | usd::SchemaKind::AbstractBase => None,
+        usd::SchemaKind::AbstractBase => None,
+        usd::SchemaKind::AbstractTyped => Some(View::Abstract),
         usd::SchemaKind::ConcreteTyped => Some(View::Concrete),
         usd::SchemaKind::NonAppliedApi => Some(View::Plain),
         usd::SchemaKind::SingleApplyApi => Some(View::SingleApply),
@@ -609,12 +606,17 @@ fn view(kind: usd::SchemaKind) -> Option<View> {
     }
 }
 
-/// The root trait a view answers to: a prim type is one of the typed schemas,
-/// and everything else here is something applied to a prim.
+/// The root trait a view answers to: a prim type and a base of prim types are
+/// typed schemas, and everything else here is something applied to a prim.
+///
+/// Every shape names its own side of that split, so adding one is a question
+/// asked here.
 fn schema_root(view: &View) -> syn::Path {
     match view {
-        View::Concrete => syn::parse_quote! { ::openusd::usd::Typed },
-        _ => syn::parse_quote! { ::openusd::usd::APISchemaBase },
+        View::Concrete | View::Abstract => syn::parse_quote! { ::openusd::usd::Typed },
+        View::Plain | View::SingleApply | View::MultipleApply => {
+            syn::parse_quote! { ::openusd::usd::APISchemaBase }
+        }
     }
 }
 
@@ -636,8 +638,13 @@ pub(super) fn kind_constant(kind: usd::SchemaKind) -> syn::Path {
 }
 
 /// The core trait one of the schema roots stands for.
-fn root_trait(name: &str) -> syn::Path {
-    match name {
+///
+/// Asked of the schema family, as [`is_root`] is, so the name that reaches here
+/// answers as the root it spells: a class deriving from a versioned `Typed`
+/// reaches [`Typed`](openusd::usd::Typed) like any other.
+fn root_trait(name: &tf::Token) -> syn::Path {
+    let (family, _) = usd::SchemaRegistry::parse_schema_family_and_version(name);
+    match family.as_str() {
         TYPED => syn::parse_quote! { ::openusd::usd::Typed },
         API_SCHEMA_BASE => syn::parse_quote! { ::openusd::usd::APISchemaBase },
         _ => syn::parse_quote! { ::openusd::usd::SchemaBase },
