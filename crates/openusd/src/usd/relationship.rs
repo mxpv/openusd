@@ -134,17 +134,9 @@ impl Relationship {
     /// which authors an explicit empty list that blocks them. A target
     /// holding no spec is left alone; an attribute at the path is an error.
     pub fn clear_targets(self) -> Result<Self, StageAuthoringError> {
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            authoring::edit_existing_spec(
-                layer.data_mut(),
-                path,
-                sdf::SpecType::Relationship,
-                sdf::RelationshipSpecMut::get,
-                |spec| {
-                    spec.erase(sdf::FieldKey::TargetPaths.as_str());
-                    Ok(())
-                },
-            )
+        authoring::edit_existing::<Self>(&self.stage, &self.path, |spec| {
+            spec.erase(sdf::FieldKey::TargetPaths.as_str());
+            Ok(())
         })?;
         Ok(self)
     }

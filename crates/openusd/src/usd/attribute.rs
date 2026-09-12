@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use super::authoring::PropertySpecKind;
 use super::{
     Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, TimeCode, TypeConflict,
     authoring, interp,
@@ -276,28 +277,16 @@ impl Attribute {
             // Erasing reaches only an attribute spec this layer already holds,
             // so a property it says nothing about stays absent from it.
             let Some(value) = f(local) else {
-                return authoring::edit_existing_spec(
-                    layer.data_mut(),
-                    path,
-                    sdf::SpecType::Attribute,
-                    sdf::AttributeSpecMut::get,
-                    |spec| {
-                        spec.erase(key);
-                        Ok(())
-                    },
-                );
-            };
-            authoring::apply_plan(layer.data_mut(), &path, sdf::SpecType::Attribute, &ensure?)?;
-            authoring::edit_spec(
-                layer.data_mut(),
-                path,
-                sdf::SpecType::Attribute,
-                sdf::AttributeSpecMut::get,
-                |spec| {
-                    spec.set(key, value);
+                return authoring::edit_existing_spec(layer.data_mut(), path, Self::KIND, Self::view, |spec| {
+                    spec.erase(key);
                     Ok(())
-                },
-            )
+                });
+            };
+            authoring::apply_plan(layer.data_mut(), &path, Self::KIND, &ensure?)?;
+            authoring::edit_spec(layer.data_mut(), path, Self::KIND, Self::view, |spec| {
+                spec.set(key, value);
+                Ok(())
+            })
         })?;
         Ok(self)
     }
@@ -922,15 +911,7 @@ impl Attribute {
     where
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            authoring::edit_existing_spec(
-                layer.data_mut(),
-                path,
-                sdf::SpecType::Attribute,
-                sdf::AttributeSpecMut::get,
-                f,
-            )
-        })?;
+        authoring::edit_existing::<Self>(&self.stage, &self.path, f)?;
         Ok(self)
     }
 }

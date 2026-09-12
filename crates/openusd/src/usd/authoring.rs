@@ -77,6 +77,25 @@ pub(super) fn author<P: PropertySpecKind>(
         .map(|_| ())
 }
 
+/// Runs `edit` on the spec `path` already has on the edit target, and does
+/// nothing where it has none.
+///
+/// The path every clear takes. Removing an opinion never stamps a spec to
+/// remove it from, so a layer that says nothing about the property goes on
+/// saying nothing — which is what parts this from [`author`], and why the two
+/// are separate operations rather than one asked to skip a phase.
+pub(super) fn edit_existing<P: PropertySpecKind>(
+    stage: &Stage,
+    path: &sdf::Path,
+    edit: impl FnOnce(&mut P::View<'_>) -> Result<(), StageAuthoringError>,
+) -> Result<(), StageAuthoringError> {
+    stage
+        .with_target_layer_at(path, |layer, spec_path| {
+            edit_existing_spec(layer.data_mut(), spec_path, P::KIND, P::view, edit)
+        })
+        .map(|_| ())
+}
+
 /// What a property spec stamped on the edit target declares: the fields C++
 /// `_StampNewPropertySpec` copies from the declaration it found.
 #[derive(Debug, Clone, PartialEq)]
