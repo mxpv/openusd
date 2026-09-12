@@ -28,7 +28,8 @@ mod sink;
 mod stage;
 mod timecode;
 
-pub use attribute::{Attribute, AttributeQuery};
+pub use attribute::{Attribute, AttributeBuilder, AttributeQuery};
+pub use authoring::{PrimEdit, StageEdit};
 pub use capture::{ReplayStage, UndoStage};
 pub use clips::ClipsAPI;
 pub use collection::{
@@ -44,7 +45,7 @@ pub use interp::InterpolationType;
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use prim_definition::{DefProperty, PrimDefinition};
 pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
-pub use relationship::Relationship;
+pub use relationship::{Relationship, RelationshipBuilder};
 pub use resolve_info::{ResolveInfo, ResolveInfoSource};
 pub use schema::{APISchemaBase, SchemaBase, SchemaKind, Typed};
 pub use schema_decl::{Field, InstanceRestriction, PropertyDecl, SchemaDecl, SchemaFamily};

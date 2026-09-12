@@ -536,26 +536,30 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
     };
 
     // The creator authors what the schema declared, not what a bare property
-    // would default to: a stage reading either back has no schema to ask.
-    let (kind, reader, mut declared) = match &accessor.kind {
+    // would default to: a stage reading either back has no schema to ask. The
+    // builder carries the whole declaration, so it reaches the stage as one
+    // edit.
+    //
+    // Authoring a property leaves it `custom`, as C++ `CreateAttribute` does,
+    // so a schema's own property is the one that has to say it is not.
+    // Only what the schema declares differently from a bare property is said,
+    // so a creator reads as the declaration itself.
+    let custom = (!accessor.custom).then(|| quote! { .custom(false) });
+    let uniform = accessor
+        .uniform
+        .then(|| quote! { .variability(::openusd::sdf::Variability::Uniform) });
+    let (kind, reader, declared) = match &accessor.kind {
         PropertyKind::Relationship => (
             quote! { ::openusd::usd::Relationship },
             quote! { relationship },
-            quote! { #prim.create_relationship(#token)? },
+            quote! { #prim.relationship_builder(#token) #custom .build()? },
         ),
         PropertyKind::Attribute { type_constant } => (
             quote! { ::openusd::usd::Attribute },
             quote! { attribute },
-            quote! { #prim.create_attribute(#token, #type_constant)? },
+            quote! { #prim.attribute_builder(#token, #type_constant) #custom #uniform .build()? },
         ),
     };
-    // Authoring a property leaves it `custom`, as C++ `CreateAttribute` does,
-    // so a schema's own property is the one that has to say it is not.
-    let custom = accessor.custom;
-    declared = quote! { #declared.set_custom(#custom)? };
-    if accessor.uniform {
-        declared = quote! { #declared.set_variability(::openusd::sdf::Variability::Uniform)? };
-    }
 
     let documentation = documentation.lines().map(|line| format!(" {line}"));
     let read = if accessor.custom_get {

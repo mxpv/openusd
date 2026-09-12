@@ -29,8 +29,9 @@ impl Volume {
         if name.is_empty() {
             return Err(SchemaError::EmptyFieldName);
         }
-        self.create_relationship(format!("{FIELD_NAMESPACE}{name}"))?
-            .set_custom(false)?
+        self.relationship_builder(format!("{FIELD_NAMESPACE}{name}"))
+            .custom(false)
+            .build()?
             .add_target(target)?;
         Ok(self)
     }

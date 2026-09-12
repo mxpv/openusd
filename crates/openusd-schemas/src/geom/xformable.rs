@@ -307,7 +307,10 @@ fn author_xform_op(prim: &Prim, op: &str, precision: XformOpPrecision, value: sd
         None => fallback,
     };
     let value = declared.coerce(value)?;
-    prim.create_attribute(name, declared)?.set_custom(false)?.set(value)?;
+    prim.attribute_builder(name, declared)
+        .custom(false)
+        .set(value)
+        .build()?;
     Ok(())
 }
 

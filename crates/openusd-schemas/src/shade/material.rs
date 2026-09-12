@@ -80,9 +80,10 @@ impl Shader {
     /// Author `info:sourceAsset` (`uniform asset`) (C++ `SetSourceAsset`).
     pub fn create_source_asset_attr(&self) -> Result<usd::Attribute> {
         Ok(self
-            .create_attribute(node_def::INFO_SOURCE_ASSET, sdf::ValueTypeName::ASSET)?
-            .set_custom(false)?
-            .set_variability(sdf::Variability::Uniform)?)
+            .attribute_builder(node_def::INFO_SOURCE_ASSET, sdf::ValueTypeName::ASSET)
+            .custom(false)
+            .variability(sdf::Variability::Uniform)
+            .build()?)
     }
 
     /// Selects one definition inside a multi-shader source asset.
@@ -96,9 +97,10 @@ impl Shader {
     /// Author `info:sourceAsset:subIdentifier` (`uniform token`).
     pub fn create_source_asset_subidentifier_attr(&self) -> Result<usd::Attribute> {
         Ok(self
-            .create_attribute(node_def::INFO_SOURCE_ASSET_SUBIDENTIFIER, sdf::ValueTypeName::TOKEN)?
-            .set_custom(false)?
-            .set_variability(sdf::Variability::Uniform)?)
+            .attribute_builder(node_def::INFO_SOURCE_ASSET_SUBIDENTIFIER, sdf::ValueTypeName::TOKEN)
+            .custom(false)
+            .variability(sdf::Variability::Uniform)
+            .build()?)
     }
 
     /// Inline shader source; pairs with
@@ -113,9 +115,10 @@ impl Shader {
     /// Author `info:sourceCode` (`uniform string`) (C++ `SetSourceCode`).
     pub fn create_source_code_attr(&self) -> Result<usd::Attribute> {
         Ok(self
-            .create_attribute(node_def::INFO_SOURCE_CODE, sdf::ValueTypeName::STRING)?
-            .set_custom(false)?
-            .set_variability(sdf::Variability::Uniform)?)
+            .attribute_builder(node_def::INFO_SOURCE_CODE, sdf::ValueTypeName::STRING)
+            .custom(false)
+            .variability(sdf::Variability::Uniform)
+            .build()?)
     }
 }
 
@@ -416,7 +419,7 @@ impl Material {
     fn create_terminal_output(&self, render_context: &str, kind: TerminalKind) -> Result<Output> {
         let name = terminal_output_name(render_context, kind);
         Ok(Output::new(
-            self.create_attribute(name.as_ref(), "token")?.set_custom(false)?,
+            self.attribute_builder(name.as_ref(), "token").custom(false).build()?,
         ))
     }
 }

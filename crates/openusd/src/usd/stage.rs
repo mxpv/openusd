@@ -610,6 +610,23 @@ pub enum StageAuthoringError {
         layer: String,
     },
 
+    /// The edit target moved while a [`StageEdit`](super::StageEdit) was open.
+    /// Every queued property resolved its spec path, its value and its sample
+    /// time through the target the batch planned against, so committing them
+    /// through another one would write them somewhere else.
+    #[error("the edit target moved while the batch was open")]
+    EditTargetMoved,
+
+    /// A [`StageEdit`](super::StageEdit) was given the same property twice.
+    /// Each queued property resolves its declaration before the batch opens, so
+    /// a second plan for one property would be resolved against a stage the
+    /// first has not changed yet.
+    #[error("property {path} appears more than once in the batch")]
+    DuplicateProperty {
+        /// The repeated property's path.
+        path: sdf::Path,
+    },
+
     /// A [`Stage::batch_edit`] named the same layer more than once. Each layer in
     /// a batch is opened with a single mutable edit view, so a repeat would alias
     /// it.
@@ -1051,6 +1068,12 @@ impl Stage {
         self.edit_target.borrow().clone()
     }
 
+    /// Whether `target` is still the stage's edit target, borrowing it rather
+    /// than cloning it to compare.
+    pub(super) fn holds_edit_target(&self, target: &EditTarget) -> bool {
+        *self.edit_target.borrow() == *target
+    }
+
     /// Maps a stage time to the spec time the current edit target writes a
     /// time sample at, borrowing the target rather than cloning it. See
     /// [`EditTarget::map_to_spec_time`].
@@ -1343,58 +1366,103 @@ impl Stage {
         })?;
         Ok(super::Prim::new(self, path))
     }
-
-    /// Author an attribute spec at a property path (e.g. `/World/Mesh.points`)
-    /// on the edit target's layer, following C++ `UsdPrim::CreateAttribute`'s
-    /// contract: a spec already at the edit target is returned untouched,
-    /// whatever type it declares; otherwise the declaration composition
-    /// finds — the schema's, else the strongest authored spec's — is stamped;
-    /// only an attribute nothing declares is created with `type_name`,
-    /// variability `Varying` and `custom = true`, the supplied type being
-    /// checked (an empty spelling is rejected) only in that case. Override
-    /// the defaults via the returned [`Attribute`](super::Attribute) handle's
-    /// fluent setters. A relationship at the path is
+    /// Author an attribute spec at a property path on the edit target's layer,
+    /// following C++ `UsdPrim::CreateAttribute`'s contract: an attribute
+    /// already at the edit target is returned untouched, whatever type it
+    /// declares; otherwise the declaration composition finds — the schema's,
+    /// else the strongest authored spec's — is stamped. Only an attribute
+    /// nothing declares is created with `type_name`, variability `Varying`
+    /// and `custom = true`, the supplied type being checked (an empty spelling
+    /// is rejected) only in that case. A
+    /// relationship at the path is
     /// [`SpecKindMismatch`](StageAuthoringError::SpecKindMismatch).
     pub fn create_attribute(
         &self,
         path: impl sdf::IntoPath,
         type_name: impl Into<sdf::ValueTypeName>,
     ) -> Result<super::Attribute, StageAuthoringError> {
-        let path = sdf::try_into_path(path)?;
-        let fallback = super::authoring::PropertyDeclaration::Attribute {
-            type_name: type_name.into(),
-            variability: sdf::Variability::Varying,
-            custom: true,
-        };
-        let plan = super::authoring::plan_property_spec(self, &path, sdf::SpecType::Attribute, Some(fallback))?;
-        self.with_target_layer_at(&path, |layer, layer_path| {
-            // The owning prim and any missing ancestors are auto-created as
-            // `over` specs; the layer records them and the property add.
-            super::authoring::apply_plan(layer.data_mut(), &layer_path, sdf::SpecType::Attribute, &plan)
-        })?;
-        Ok(super::Attribute::new(self, path))
+        self.attribute_builder(path, type_name).build()
+    }
+
+    /// The same authoring, with what the attribute is declared as — and the
+    /// value it starts with — left to the caller. Everything the builder
+    /// carries is authored as one edit of the target layer.
+    pub fn attribute_builder(
+        &self,
+        path: impl sdf::IntoPath,
+        type_name: impl Into<sdf::ValueTypeName>,
+    ) -> super::AttributeBuilder<'static> {
+        super::AttributeBuilder::new(self.property_site(path), type_name.into())
     }
 
     /// Author a relationship spec at a property path on the edit target's
     /// layer, following C++ `UsdPrim::CreateRelationship`'s contract: a
     /// relationship already at the edit target is returned untouched;
     /// otherwise the declaration composition finds — the schema's, else the
-    /// strongest authored spec's — is stamped; only a relationship nothing
-    /// declares is created `custom` and `Uniform` (a relationship is always
-    /// uniform). Add targets via the returned [`Relationship`] handle's
-    /// fluent setters. An attribute at the path is
+    /// strongest authored spec's — is stamped. Only a relationship nothing
+    /// declares is created `custom` and uniform, as C++ generic property
+    /// authoring does; a
+    /// [`relationship_builder`](Self::relationship_builder) says otherwise. An
+    /// attribute at the path is
     /// [`SpecKindMismatch`](StageAuthoringError::SpecKindMismatch).
     pub fn create_relationship(&self, path: impl sdf::IntoPath) -> Result<super::Relationship, StageAuthoringError> {
-        let path = sdf::try_into_path(path)?;
-        let fallback = super::authoring::PropertyDeclaration::Relationship {
-            variability: sdf::Variability::Uniform,
-            custom: true,
-        };
-        let plan = super::authoring::plan_property_spec(self, &path, sdf::SpecType::Relationship, Some(fallback))?;
-        self.with_target_layer_at(&path, |layer, layer_path| {
-            super::authoring::apply_plan(layer.data_mut(), &layer_path, sdf::SpecType::Relationship, &plan)
-        })?;
-        Ok(super::Relationship::new(self, path))
+        self.relationship_builder(path).build()
+    }
+
+    /// The same authoring, with the declaration left to the caller.
+    pub fn relationship_builder(&self, path: impl sdf::IntoPath) -> super::RelationshipBuilder<'static> {
+        super::RelationshipBuilder::new(self.property_site(path))
+    }
+
+    /// The stage and property path a builder authors at, or what naming them
+    /// hit: the stage-tier counterpart of `Prim::property_target`.
+    fn property_site(&self, path: impl sdf::IntoPath) -> Result<(Stage, sdf::Path), StageAuthoringError> {
+        Ok((self.clone(), sdf::try_into_path(path)?))
+    }
+
+    /// Author several properties as one transaction.
+    ///
+    /// `f` receives the transaction: [`StageEdit`](super::StageEdit) offers the
+    /// same authoring entry points this stage does, and the property builders
+    /// they hand out queue their property rather than committing it. The queue
+    /// is stamped and written together when `f` returns — all of it, or on any
+    /// error none of it — and `f`'s own value comes back once it commits, so
+    /// the handle a caller wants returns through it.
+    ///
+    /// Reads inside `f` see the stage as it stands, not what the batch has
+    /// queued. A builder taken from the stage or a [`Prim`](super::Prim) still
+    /// commits on its own, so where a builder came from is what decides whether
+    /// it is part of the transaction.
+    ///
+    /// The batch is tied to the edit target it opened on, and moving that
+    /// target inside `f` is [`StageAuthoringError::EditTargetMoved`]: a queued
+    /// property has already resolved its spec path, its value and its sample
+    /// time through the target it was planned against.
+    ///
+    /// ```
+    /// # use openusd::usd;
+    /// # fn main() -> openusd::Result<()> {
+    /// let stage = usd::Stage::builder().in_memory("anon.usda")?;
+    /// stage.define_prim("/Cylinder")?;
+    ///
+    /// let radius = stage.edit(|edit| {
+    ///     let cylinder = edit.prim("/Cylinder")?;
+    ///     cylinder.attribute_builder("height", "double").set(2.0).build()?;
+    ///     cylinder.attribute_builder("radius", "double").set(1.0).build()
+    /// })?;
+    ///
+    /// assert_eq!(radius.get::<f64>()?, Some(1.0));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn edit<T>(
+        &self,
+        f: impl FnOnce(&super::StageEdit) -> Result<T, StageAuthoringError>,
+    ) -> Result<T, StageAuthoringError> {
+        let edit = super::StageEdit::new(self);
+        let value = f(&edit)?;
+        edit.commit()?;
+        Ok(value)
     }
 
     /// Remove the prim spec at `path` (and its descendant specs) from the
@@ -1605,13 +1673,50 @@ impl Stage {
         self.edit_target_layer(identifier, spec_path, f)
     }
 
-    /// Borrow the layer `identifier` names, hand it and `spec_path` to `f`,
+    /// [`with_target_layer_at`](Self::with_target_layer_at) for several paths
+    /// at once: map each through the current edit target, borrow the target's
+    /// layer, and hand it and the mapped spec paths — in the order the scene
+    /// paths were given — to `f`.
+    ///
+    /// The edit target names one layer whatever path it maps, so the whole
+    /// batch is one layer transaction, one change list, and one invalidation
+    /// pass. An empty batch borrows nothing and reports no change.
+    pub(super) fn with_target_layer_at_each<F>(
+        &self,
+        scene_paths: &[sdf::Path],
+        f: F,
+    ) -> Result<bool, StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::LayerEdit<'_>, Vec<sdf::Path>) -> Result<(), StageAuthoringError>,
+    {
+        if scene_paths.is_empty() {
+            return Ok(false);
+        }
+        let identifier = self.edit_target.borrow().layer_identifier.clone();
+        let mut spec_paths = Vec::with_capacity(scene_paths.len());
+        // Properties of one prim are validated once between them: the check is
+        // a composed query up the prim's ancestors, and a batch is usually
+        // several properties of the same prim.
+        let mut validated: Option<sdf::Path> = None;
+        for scene_path in scene_paths {
+            let prim = scene_path.prim_path();
+            if validated.as_ref() != Some(&prim) {
+                self.validate_edit_prim(scene_path, &identifier)?;
+                validated = Some(prim);
+            }
+            spec_paths.push(self.target_spec_path(scene_path)?.1);
+        }
+        self.edit_target_layer(identifier, spec_paths, f)
+    }
+
+    /// Borrow the layer `identifier` names, hand it and `authored` — whatever
+    /// the closure needs to say where it writes — to `f`,
     /// then drive cache invalidation from the closure's change list: the
     /// transaction behind [`with_target_layer_at`](Self::with_target_layer_at),
     /// once the target mapping and the instancing validation are done.
-    fn edit_target_layer<F>(&self, identifier: String, spec_path: sdf::Path, f: F) -> Result<bool, StageAuthoringError>
+    fn edit_target_layer<P, F>(&self, identifier: String, authored: P, f: F) -> Result<bool, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::LayerEdit<'_>, sdf::Path) -> Result<(), StageAuthoringError>,
+        F: FnOnce(&mut sdf::LayerEdit<'_>, P) -> Result<(), StageAuthoringError>,
     {
         // The target is read under a short borrow released before the layer
         // borrow below. The mapping is cloned out (rather than borrowed across
@@ -1627,7 +1732,7 @@ impl Stage {
                 .id_of(&identifier)
                 .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
             let node = layers.get_mut(layer_id).expect("id_of returned a live id");
-            self.edit_layer(&mut node.layer, mapping.as_ref(), |layer| f(layer, spec_path))
+            self.edit_layer(&mut node.layer, mapping.as_ref(), |layer| f(layer, authored))
         };
         // `edit_layer` reports whether the edit produced a composition change.
         self.process_pending();

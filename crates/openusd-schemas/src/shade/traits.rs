@@ -24,8 +24,9 @@ pub trait Connectable: SchemaBase {
     fn create_input(&self, base: &str, type_name: impl Into<sdf::ValueTypeName>) -> Result<Input> {
         Ok(Input::new(
             self.prim()
-                .create_attribute(input_name(base), type_name)?
-                .set_custom(false)?,
+                .attribute_builder(input_name(base), type_name)
+                .custom(false)
+                .build()?,
         ))
     }
 
@@ -44,8 +45,9 @@ pub trait Connectable: SchemaBase {
     fn create_output(&self, base: &str, type_name: impl Into<sdf::ValueTypeName>) -> Result<Output> {
         Ok(Output::new(
             self.prim()
-                .create_attribute(output_name(base), type_name)?
-                .set_custom(false)?,
+                .attribute_builder(output_name(base), type_name)
+                .custom(false)
+                .build()?,
         ))
     }
 

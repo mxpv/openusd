@@ -261,6 +261,13 @@ class Box "Box" (
 }
 "#;
 
+    /// One schema library's accessors with every space removed, so a generated
+    /// chain can be matched as it is written rather than as `prettyplease` laid
+    /// it out.
+    fn packed_accessors() -> String {
+        accessors().chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
     /// What one schema library generates.
     fn emitted(source: &str) -> String {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -447,12 +454,23 @@ class Box "Box" (
     /// property says that too.
     #[test]
     fn creator_authors_declaration() {
-        let text = accessors();
-        assert!(text.contains(".set_custom(true)?"), "{text}");
-        assert!(text.contains(".set_custom(false)?"), "{text}");
+        let text = packed_accessors();
+        // The whole declaration is one builder chain, so it reaches the stage
+        // as one edit, and it says only what the schema declares differently
+        // from a bare property.
         assert!(
-            text.contains(".set_variability(::openusd::sdf::Variability::Uniform)?"),
-            "{text}"
+            text.contains(
+                "attribute_builder(tokens::RADIUS,::openusd::sdf::ValueTypeName::DOUBLE).custom(false).build()?"
+            ),
+            "a schema's property is not custom, and varies by default: {text}"
+        );
+        assert!(
+            text.contains("attribute_builder(tokens::MODE,::openusd::sdf::ValueTypeName::TOKEN).custom(false).variability(::openusd::sdf::Variability::Uniform).build()?"),
+            "a uniform property says so: {text}"
+        );
+        assert!(
+            text.contains("attribute_builder(tokens::TEMP,::openusd::sdf::ValueTypeName::FLOAT).build()?"),
+            "a `custom` property takes the defaults: {text}"
         );
     }
 
@@ -464,7 +482,10 @@ class Box "Box" (
             text.contains("fn target_rel(&self) -> ::openusd::usd::Relationship {"),
             "{text}"
         );
-        assert!(text.contains("create_relationship(tokens::TARGET)?"), "{text}");
+        assert!(
+            packed_accessors().contains("relationship_builder(tokens::TARGET).custom(false).build()?"),
+            "{text}"
+        );
     }
 
     /// An empty `apiName` asks for no accessor, so none is written.

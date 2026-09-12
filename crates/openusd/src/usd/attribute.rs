@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use super::authoring::PropertySpecKind;
 use super::{
-    Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, TimeCode, TypeConflict,
-    authoring, interp,
+    Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, StageEdit, TimeCode,
+    TypeConflict, authoring, interp,
 };
 use crate::Result;
 use crate::pcp;
@@ -21,11 +21,137 @@ use crate::pcp::AttributeValueSource;
 use crate::sdf;
 use crate::tf;
 
+/// An attribute to author, and everything it is authored with.
+///
+/// Creating an attribute, declaring it and giving it a value are one edit of
+/// the target layer: nothing reaches the stage until [`build`](Self::build),
+/// which is where the value is validated against the declaration that wins.
+///
+/// [`custom`](Self::custom) and [`variability`](Self::variability) are C++
+/// `UsdPrim::CreateAttribute`'s arguments of those names: the declaration to
+/// stamp where the attribute is new to the stage. One a schema declares, or
+/// one a stronger layer already authored, keeps the declaration it has.
+///
+/// A builder from [`Prim`] or [`Stage`] commits on its own; one from a
+/// [`PrimEdit`](super::PrimEdit) or a [`StageEdit`](super::StageEdit) joins
+/// that transaction instead.
+#[derive(Debug)]
+pub struct AttributeBuilder<'a> {
+    /// The stage and the property path to author at, or what naming them hit.
+    /// The failure is carried so the setters need not answer for it.
+    site: Result<(Stage, sdf::Path), StageAuthoringError>,
+    type_name: sdf::ValueTypeName,
+    variability: sdf::Variability,
+    custom: bool,
+    /// The value to author in the same edit, and when it is for.
+    value: Option<(sdf::Value, Option<super::TimeCode>)>,
+    /// The transaction to join, where the builder came from one.
+    batch: Option<&'a StageEdit>,
+}
+
+impl<'a> AttributeBuilder<'a> {
+    /// An attribute of `type_name` at `site`, declared as C++ declares one a
+    /// caller says nothing more about.
+    pub(super) fn new(site: Result<(Stage, sdf::Path), StageAuthoringError>, type_name: sdf::ValueTypeName) -> Self {
+        AttributeBuilder {
+            site,
+            type_name,
+            variability: sdf::Variability::Varying,
+            custom: true,
+            value: None,
+            batch: None,
+        }
+    }
+
+    /// The same attribute, authored as part of `batch` rather than on its own.
+    pub(super) fn in_batch(mut self, batch: &'a StageEdit) -> Self {
+        self.batch = Some(batch);
+        self
+    }
+
+    /// Whether the attribute is the caller's own rather than a schema's
+    /// (C++ `custom`). A schema's property is not.
+    pub fn custom(mut self, custom: bool) -> Self {
+        self.custom = custom;
+        self
+    }
+
+    /// Whether the attribute may vary over time (C++ `SdfVariability`).
+    pub fn variability(mut self, variability: sdf::Variability) -> Self {
+        self.variability = variability;
+        self
+    }
+
+    /// The default value to author with it.
+    ///
+    /// Recorded rather than written: the value is checked against the
+    /// declaration at [`build`](Self::build), which is the only place that
+    /// knows which declaration won.
+    pub fn set(self, value: impl Into<sdf::Value>) -> Self {
+        self.set_at(value, None)
+    }
+
+    /// The value to author at `time`, or the default where `time` is `None`.
+    pub fn set_at(mut self, value: impl Into<sdf::Value>, time: impl Into<Option<super::TimeCode>>) -> Self {
+        self.value = Some((value.into(), time.into()));
+        self
+    }
+
+    /// Authors the attribute and hands back the handle that reads and edits
+    /// it, as one edit of the target layer.
+    ///
+    /// A builder that came from a [`PrimEdit`](super::PrimEdit) or a
+    /// [`StageEdit`](super::StageEdit) is queued into that transaction instead,
+    /// and the handle reads nothing until the transaction commits.
+    pub fn build(mut self) -> Result<Attribute, StageAuthoringError> {
+        let batch = self.batch.take();
+        if let Some(batch) = batch {
+            batch.holds_target()?;
+        }
+        let planned = self.plan()?;
+        let (stage, path) = match batch {
+            Some(batch) => batch.queue(planned)?,
+            None => planned.commit()?,
+        };
+        Ok(Attribute::new(&stage, path))
+    }
+
+    /// Resolves everything the write depends on against composed state, so all
+    /// the transaction has left to do is stamp the spec and write.
+    fn plan(self) -> Result<authoring::PlannedProperty, StageAuthoringError> {
+        let (stage, path) = self.site?;
+        let declaration = authoring::PropertyDeclaration::Attribute {
+            type_name: self.type_name,
+            variability: self.variability,
+            custom: self.custom,
+        };
+
+        let Some((value, time)) = self.value else {
+            let ensure = authoring::plan_property_spec(&stage, &path, sdf::SpecType::Attribute, Some(declaration))?;
+            return Ok(authoring::PlannedProperty::new(
+                stage,
+                path,
+                authoring::PropertyWrite::Attribute(ensure),
+            ));
+        };
+        // The value write stamps the spec itself, so declaring and setting is
+        // the one edit rather than two.
+        let attribute = Attribute::new(&stage, path);
+        let plan = attribute.plan_authoring(value, time, Some(declaration))?;
+        let Attribute { path, .. } = attribute;
+        Ok(authoring::PlannedProperty::new(
+            stage,
+            path,
+            authoring::PropertyWrite::AttributeValue(plan),
+        ))
+    }
+}
+
 /// Stage-composed attribute handle. Mirrors C++ `UsdAttribute`.
 ///
-/// Returned by [`Stage::create_attribute`] / [`Prim::create_attribute`] with
-/// defaults `variability = Varying`, `custom = true`, matching C++ generic
-/// property authoring. Override via the fluent setters below.
+/// Authored through [`Stage::create_attribute`] / [`Prim::create_attribute`],
+/// or through an [`AttributeBuilder`] where it is declared as something other
+/// than the defaults; the setters below edit an attribute that already exists.
 #[derive(Clone, Debug)]
 pub struct Attribute {
     stage: Stage,
@@ -113,15 +239,9 @@ impl Attribute {
         value: impl Into<sdf::Value>,
         time: impl Into<Option<super::TimeCode>>,
     ) -> Result<Self, StageAuthoringError> {
-        let plan = self.plan_authoring(value.into(), time.into())?;
-        self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
-            let mut spec = plan.prepare(layer.data_mut(), &spec_path)?;
-            match plan.spec_time {
-                None => spec.set_default_raw(plan.value),
-                Some(time) => spec.set_time_sample_raw(time, plan.value)?,
-            }
-            Ok(())
-        })?;
+        let plan = self.plan_authoring(value.into(), time.into(), None)?;
+        self.stage
+            .with_target_layer_at(&self.path, |layer, spec_path| plan.write(layer.data_mut(), &spec_path))?;
         Ok(self)
     }
 
@@ -132,7 +252,7 @@ impl Attribute {
     /// lacks it, its local declaration read fallibly — and the `timeSamples`
     /// field is erased whole, without decoding samples the block discards.
     pub fn block(self) -> Result<Self, StageAuthoringError> {
-        let plan = self.plan_authoring(sdf::Value::ValueBlock, None)?;
+        let plan = self.plan_authoring(sdf::Value::ValueBlock, None, None)?;
         self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
             let mut spec = plan.prepare(layer.data_mut(), &spec_path)?;
             spec.erase(sdf::FieldKey::TimeSamples.as_str());
@@ -531,8 +651,9 @@ impl Attribute {
         &self,
         value: sdf::Value,
         time: Option<super::TimeCode>,
+        fallback: Option<authoring::PropertyDeclaration>,
     ) -> Result<AttributeAuthoringPlan, StageAuthoringError> {
-        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, None)?;
+        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, fallback)?;
         let effective = if value.is_value_block() {
             None
         } else {
@@ -922,7 +1043,8 @@ impl Attribute {
 /// which every declaration takes), the spec plan, and the value and time
 /// already mapped for the edit target. The transaction closure receives only
 /// this, which is what keeps a composition query out of it.
-struct AttributeAuthoringPlan {
+#[derive(Debug)]
+pub(super) struct AttributeAuthoringPlan {
     effective: Option<sdf::ValueTypeName>,
     ensure: authoring::EnsurePlan,
     value: sdf::Value,
@@ -954,6 +1076,17 @@ impl AttributeAuthoringPlan {
             })));
         }
         Ok(spec)
+    }
+
+    /// The write itself, once [`prepare`](Self::prepare) has the spec: the
+    /// default opinion, or the sample at the time the plan mapped.
+    pub(super) fn write(self, data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<(), StageAuthoringError> {
+        let mut spec = self.prepare(data, path)?;
+        match self.spec_time {
+            None => spec.set_default_raw(self.value),
+            Some(time) => spec.set_time_sample_raw(time, self.value)?,
+        }
+        Ok(())
     }
 }
 
@@ -1544,10 +1677,7 @@ mod tests {
     fn generic_metadata_matches_its_accessor() -> Result<()> {
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
-        stage
-            .create_attribute("/Sun.collection:lightLink:expansionRule", "double")?
-            .set_variability(sdf::Variability::Varying)?
-            .set_custom(true)?;
+        stage.create_attribute("/Sun.collection:lightLink:expansionRule", "double")?;
 
         // Reading these generically has to give what the accessor that owns the
         // rule gives, not the raw composed opinion.
@@ -1645,9 +1775,10 @@ mod tests {
         let radius = stage
             .define_prim("/Sphere")?
             .set_type_name("Sphere")?
-            .create_attribute("radius", "double")?
-            .set_variability(sdf::Variability::Uniform)?
-            .set(sdf::Value::Double(1.5))?;
+            .attribute_builder("radius", "double")
+            .variability(sdf::Variability::Uniform)
+            .set(sdf::Value::Double(1.5))
+            .build()?;
         assert_eq!(radius.get()?, Some(sdf::Value::Double(1.5)));
         assert_eq!(
             stage.field::<sdf::Value>(radius.path(), sdf::FieldKey::Custom)?,
@@ -1665,14 +1796,14 @@ mod tests {
         let stage = stage()?;
         let prim = stage.define_prim("/A")?.set_type_name("Xform")?;
         let uniform = prim
-            .create_attribute("u", "double")?
-            .set_variability(sdf::Variability::Uniform)?
-            .set_custom(true)?;
+            .attribute_builder("u", "double")
+            .variability(sdf::Variability::Uniform)
+            .build()?;
         assert_eq!(uniform.variability()?, Some(sdf::Variability::Uniform));
         assert!(uniform.is_custom()?);
 
         // A schema-style attribute authored with `custom = false` resolves false.
-        let schema_attr = prim.create_attribute("v", "double")?.set_custom(false)?;
+        let schema_attr = prim.attribute_builder("v", "double").custom(false).build()?;
         assert!(!schema_attr.is_custom()?);
         Ok(())
     }
@@ -2172,6 +2303,24 @@ mod tests {
     /// A session layer, a root layer with one sublayer, each holding `def "A"`
     /// with the given property declaration (empty for none). The edit target
     /// is the root. The directory keeps the files alive for the stage.
+    /// A builder's declaration is the fallback C++ `_CreateSpec` takes only
+    /// when nothing declares the property — a weaker layer that declares it
+    /// wins, however the builder was configured.
+    #[test]
+    fn weaker_declaration_beats_builder() -> Result<()> {
+        let (_dir, stage) = stack("", "", "uniform double x = 1.0")?;
+        stage
+            .attribute_builder("/A.x", "double")
+            .custom(true)
+            .variability(sdf::Variability::Varying)
+            .build()?;
+
+        let x = stage.attribute("/A.x")?;
+        assert_eq!(x.variability()?, Some(sdf::Variability::Uniform));
+        assert!(!x.is_custom()?);
+        Ok(())
+    }
+
     fn stack(session: &str, root: &str, sub: &str) -> Result<(tempfile::TempDir, Stage)> {
         let dir = tempfile::tempdir()?;
         let prim = |decl: &str| format!("#usda 1.0\ndef \"A\" {{\n    {decl}\n}}\n");

@@ -12,13 +12,244 @@
 //! local spec and stamps the resolved declaration. Splitting them keeps
 //! composed queries out of the transaction closure, which holds the layer
 //! graph mutably, and lets a caller stamp the spec and perform its own
-//! mutation as one atomic edit.
+//! mutation as one atomic edit. Holding the read phase of several
+//! properties open before the write is what a [`StageEdit`] does, so a
+//! batch of them commits together.
 
+use std::cell::RefCell;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::{pcp, sdf, tf};
 
-use super::{Attribute, PrimTypeInfo, Relationship, SpecSite, Stage, StageAuthoringError};
+use super::attribute::AttributeAuthoringPlan;
+use super::{
+    Attribute, AttributeBuilder, EditTarget, Prim, PrimTypeInfo, Relationship, RelationshipBuilder, SpecSite, Stage,
+    StageAuthoringError,
+};
+
+/// The properties queued for one stage transaction.
+///
+/// What [`Stage::edit`] hands its closure. The authoring entry points here
+/// mirror the stage's own — [`prim`](Self::prim) for a prim to author on, and
+/// the property builders for a path — but the builders they hand out queue
+/// their property instead of committing it, so where a builder came from is
+/// what puts it in the transaction. The queue is stamped and written when the
+/// closure returns, as one edit of the target layer; any error — from the
+/// closure, from a plan, from a [`sdf::LayerSink`] veto — leaves every property
+/// unchanged.
+///
+/// Reads inside the closure see the stage as it stands, not what the batch has
+/// queued: a queued property reaches the stage only when the batch commits.
+///
+/// The batch is tied to the edit target it opened on. Each queued property
+/// resolved its spec path, its value and its sample time against that target,
+/// so moving the target while the batch is open would write them somewhere
+/// else; the batch reports
+/// [`StageAuthoringError::EditTargetMoved`] rather than commit them through a
+/// target they were not planned for.
+pub struct StageEdit {
+    stage: Stage,
+    /// The edit target every queued property was planned against.
+    target: EditTarget,
+    queued: RefCell<Vec<PlannedProperty>>,
+}
+
+impl fmt::Debug for StageEdit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StageEdit").field("queued", &self.queued).finish()
+    }
+}
+
+impl StageEdit {
+    pub(super) fn new(stage: &Stage) -> Self {
+        StageEdit {
+            stage: stage.clone(),
+            target: stage.edit_target(),
+            queued: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A prim to author on inside the transaction: [`Stage::prim`], whose
+    /// property builders queue rather than commit.
+    pub fn prim(&self, path: impl sdf::IntoPath) -> Result<PrimEdit<'_>, sdf::PathParseError> {
+        Ok(PrimEdit {
+            batch: self,
+            prim: self.stage.prim(path)?,
+        })
+    }
+
+    /// An attribute at a property path, queued rather than committed:
+    /// [`Stage::attribute_builder`] inside the transaction.
+    pub fn attribute_builder(
+        &self,
+        path: impl sdf::IntoPath,
+        type_name: impl Into<sdf::ValueTypeName>,
+    ) -> AttributeBuilder<'_> {
+        self.stage.attribute_builder(path, type_name).in_batch(self)
+    }
+
+    /// A relationship at a property path, queued rather than committed:
+    /// [`Stage::relationship_builder`] inside the transaction.
+    pub fn relationship_builder(&self, path: impl sdf::IntoPath) -> RelationshipBuilder<'_> {
+        self.stage.relationship_builder(path).in_batch(self)
+    }
+
+    /// Queues an already-planned property, and hands back where it will be
+    /// authored for the builder to make its handle from.
+    ///
+    /// Returns [`StageAuthoringError::DuplicateProperty`] where the batch
+    /// already holds that path — two plans for one property each resolve
+    /// against a stage the other has not changed yet, so neither accounts for
+    /// what the other declares.
+    pub(super) fn queue(&self, planned: PlannedProperty) -> Result<(Stage, sdf::Path), StageAuthoringError> {
+        let mut queued = self.queued.borrow_mut();
+        if queued.iter().any(|other| other.path == planned.path) {
+            return Err(StageAuthoringError::DuplicateProperty { path: planned.path });
+        }
+        let site = (planned.stage.clone(), planned.path.clone());
+        queued.push(planned);
+        Ok(site)
+    }
+
+    /// That the stage still has the edit target the batch planned against,
+    /// checked before a builder plans against it and again before the queue is
+    /// written.
+    ///
+    /// A property's spec path, its value and its sample time are all resolved
+    /// through the target that was current when it was queued, so a target the
+    /// batch did not plan for would put the write somewhere else.
+    pub(super) fn holds_target(&self) -> Result<(), StageAuthoringError> {
+        match self.stage.holds_edit_target(&self.target) {
+            true => Ok(()),
+            false => Err(StageAuthoringError::EditTargetMoved),
+        }
+    }
+
+    /// Stamps and writes every queued property as one transaction.
+    pub(super) fn commit(self) -> Result<(), StageAuthoringError> {
+        if self.queued.borrow().is_empty() {
+            return Ok(());
+        }
+        self.holds_target()?;
+
+        let (paths, writes): (Vec<sdf::Path>, Vec<PropertyWrite>) = self
+            .queued
+            .into_inner()
+            .into_iter()
+            .map(|property| (property.path, property.write))
+            .unzip();
+        self.stage
+            .with_target_layer_at_each(&paths, move |layer, spec_paths| {
+                for (write, spec_path) in writes.into_iter().zip(spec_paths) {
+                    write.apply(layer.data_mut(), &spec_path)?;
+                }
+                Ok(())
+            })
+            .map(|_| ())
+    }
+}
+
+/// A prim to author on inside a [`StageEdit`]'s transaction.
+///
+/// The transaction-bound counterpart of [`Prim`]: the same property builders,
+/// each queued into the batch rather than committed on its own. Reads go
+/// through [`prim`](Self::prim), and see the stage as it stands rather than
+/// what the batch has queued.
+#[derive(Debug)]
+pub struct PrimEdit<'a> {
+    batch: &'a StageEdit,
+    prim: Prim,
+}
+
+impl<'a> PrimEdit<'a> {
+    /// The prim itself, for reading it.
+    ///
+    /// It is an ordinary [`Prim`], so its own authoring methods author on their
+    /// own: only the builders below queue into the transaction.
+    pub fn prim(&self) -> &Prim {
+        &self.prim
+    }
+
+    /// An attribute on the prim, queued rather than committed:
+    /// [`Prim::attribute_builder`] inside the transaction.
+    pub fn attribute_builder(
+        &self,
+        name: impl Into<tf::Token>,
+        type_name: impl Into<sdf::ValueTypeName>,
+    ) -> AttributeBuilder<'a> {
+        self.prim.attribute_builder(name, type_name).in_batch(self.batch)
+    }
+
+    /// A relationship on the prim, queued rather than committed:
+    /// [`Prim::relationship_builder`] inside the transaction.
+    pub fn relationship_builder(&self, name: impl Into<tf::Token>) -> RelationshipBuilder<'a> {
+        self.prim.relationship_builder(name).in_batch(self.batch)
+    }
+}
+
+/// A property resolved against composed state, waiting for the transaction
+/// that writes it.
+///
+/// What a builder produces: the composed reads the write depends on are already
+/// done, so applying it needs nothing but the edit target's layer. That is what
+/// lets several properties share one transaction: the read phase a single
+/// property's write already runs first, held open long enough to collect more
+/// of them.
+#[derive(Debug)]
+pub(super) struct PlannedProperty {
+    stage: Stage,
+    path: sdf::Path,
+    write: PropertyWrite,
+}
+
+/// The write phase of one property, run against the edit target's own spec path
+/// for it: all a [`PlannedProperty`] has left to do once the transaction opens.
+#[derive(Debug)]
+pub(super) enum PropertyWrite {
+    /// An attribute declared, and left at whatever value it has.
+    Attribute(EnsurePlan),
+    /// An attribute declared and given the value planned for it.
+    AttributeValue(AttributeAuthoringPlan),
+    /// A relationship declared, and its targets replaced where the caller gave
+    /// some.
+    Relationship {
+        ensure: EnsurePlan,
+        targets: Option<Vec<sdf::Path>>,
+    },
+}
+
+impl PlannedProperty {
+    pub(super) fn new(stage: Stage, path: sdf::Path, write: PropertyWrite) -> Self {
+        PlannedProperty { stage, path, write }
+    }
+
+    /// Writes the property on its own, as one transaction, and hands back where
+    /// it was authored for the caller to build its handle from.
+    pub(super) fn commit(self) -> Result<(Stage, sdf::Path), StageAuthoringError> {
+        let PlannedProperty { stage, path, write } = self;
+        stage.with_target_layer_at(&path, move |layer, spec_path| write.apply(layer.data_mut(), &spec_path))?;
+        Ok((stage, path))
+    }
+}
+
+impl PropertyWrite {
+    fn apply(self, data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<(), StageAuthoringError> {
+        match self {
+            Self::Attribute(ensure) => apply_plan(data, path, Attribute::KIND, &ensure),
+            Self::AttributeValue(plan) => plan.write(data, path),
+            Self::Relationship { ensure, targets } => {
+                apply_plan(data, path, Relationship::KIND, &ensure)?;
+                let Some(targets) = targets else {
+                    return Ok(());
+                };
+                edit_spec(data, path.clone(), Relationship::KIND, Relationship::view, |spec| {
+                    Ok(spec.set_target_paths(targets)?)
+                })
+            }
+        }
+    }
+}
 
 /// A property kind, as the authoring operations below work on it: what its
 /// specs are, and how one is opened for editing.
@@ -415,4 +646,171 @@ pub(super) fn missing_spec(path: &sdf::Path, kind: sdf::SpecType) -> StageAuthor
         reason,
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Result;
+    use crate::sdf;
+    use crate::usd::{EditTarget, Stage, StageAuthoringError, TimeCode};
+
+    fn stage() -> Result<Stage> {
+        Stage::builder().in_memory("anon.usda")
+    }
+
+    /// An edit target on the same layer that maps `/World` into a variant, so
+    /// a property planned against the stage's own target would land elsewhere
+    /// through this one.
+    fn variant_target(stage: &Stage) -> Result<EditTarget, sdf::PathParseError> {
+        let root = stage.edit_target().layer_identifier().to_string();
+        EditTarget::for_local_direct_variant(root, "/World{set=sel}")
+    }
+
+    /// Attributes and relationships share the one batch, and the closure's own
+    /// value comes back once they commit.
+    #[test]
+    fn batch_authors_together() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/World")?;
+        let (height, proxy) = stage.edit(|edit| {
+            let world = edit.prim("/World")?;
+            let height = world.attribute_builder("height", "double").set(2.0).build()?;
+            let proxy = world
+                .relationship_builder("proxy")
+                .custom(false)
+                .set_targets(["/World"])
+                .build()?;
+            Ok((height, proxy))
+        })?;
+
+        assert_eq!(height.get::<f64>()?, Some(2.0));
+        assert_eq!(proxy.targets()?, vec![sdf::Path::new("/World")?]);
+        assert!(!proxy.is_custom()?);
+        Ok(())
+    }
+
+    /// A property path reaches the batch without naming its prim first.
+    #[test]
+    fn batch_takes_property_paths() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/World")?;
+        let height = stage.edit(|edit| edit.attribute_builder("/World.height", "double").set(2.0).build())?;
+
+        assert_eq!(height.get::<f64>()?, Some(2.0));
+        Ok(())
+    }
+
+    /// Where a builder came from is what puts it in the transaction: one taken
+    /// from the prim itself commits on its own, batch or no batch.
+    #[test]
+    fn prim_builder_commits_now() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        let failed = stage.edit(|edit| {
+            prim.attribute_builder("height", "double").set(2.0).build()?;
+            edit.prim("/World")?
+                .attribute_builder("radius", "double")
+                .set(1.0)
+                .build()?;
+            Err::<(), _>(StageAuthoringError::OutsideEditTarget {
+                path: sdf::Path::new("/World.radius")?,
+            })
+        });
+
+        assert!(failed.is_err());
+        // The queued property is rolled back with the batch; the one that
+        // committed on its own is already on the stage.
+        assert!(prim.attribute("height").is_defined()?);
+        assert!(!prim.attribute("radius").is_defined()?);
+        Ok(())
+    }
+
+    /// A closure that gives up leaves the stage as it was, however much it
+    /// queued first.
+    #[test]
+    fn batch_error_authors_none() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        let failed = stage.edit(|edit| {
+            edit.prim("/World")?
+                .attribute_builder("height", "double")
+                .set(2.0)
+                .build()?;
+            Err::<(), _>(StageAuthoringError::OutsideEditTarget {
+                path: sdf::Path::new("/World.height")?,
+            })
+        });
+
+        assert!(matches!(failed, Err(StageAuthoringError::OutsideEditTarget { .. })));
+        assert!(!prim.attribute("height").is_defined()?);
+        Ok(())
+    }
+
+    /// Two plans for one property would each resolve against a stage the other
+    /// has not changed, so the batch refuses the second.
+    #[test]
+    fn duplicate_property_rejected() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        let failed = stage.edit(|edit| {
+            let world = edit.prim("/World")?;
+            world.attribute_builder("height", "double").set(2.0).build()?;
+            world.attribute_builder("height", "double").set(3.0).build()
+        });
+
+        assert!(matches!(failed, Err(StageAuthoringError::DuplicateProperty { .. })));
+        assert!(!prim.attribute("height").is_defined()?);
+        Ok(())
+    }
+
+    /// A queued property was planned against one edit target — its spec path,
+    /// its value and its sample time all mapped through that target — so the
+    /// batch refuses to write it through another.
+    #[test]
+    fn target_move_rejected() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        let variant = variant_target(&stage)?;
+
+        let failed = stage.edit(|edit| {
+            edit.prim("/World")?
+                .attribute_builder("height", "double")
+                .set_at(2.0, TimeCode::new(15.0))
+                .build()?;
+            stage.set_edit_target(variant.clone())?;
+            Ok(())
+        });
+
+        assert!(matches!(failed, Err(StageAuthoringError::EditTargetMoved)));
+        assert!(!prim.attribute("height").is_defined()?);
+        Ok(())
+    }
+
+    /// The same move caught as it happens, rather than at the commit that
+    /// would have written through the wrong target.
+    #[test]
+    fn target_move_rejects_queue() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/World")?;
+        let variant = variant_target(&stage)?;
+
+        let failed = stage.edit(|edit| {
+            stage.set_edit_target(variant.clone())?;
+            edit.prim("/World")?
+                .attribute_builder("height", "double")
+                .set(2.0)
+                .build()
+        });
+
+        assert!(matches!(failed, Err(StageAuthoringError::EditTargetMoved)));
+        Ok(())
+    }
+
+    /// An empty batch is a no-op that still hands back the closure's value.
+    #[test]
+    fn empty_batch_authors_nothing() -> Result<()> {
+        let stage = stage()?;
+        assert_eq!(stage.edit(|_| Ok(7))?, 7);
+        Ok(())
+    }
 }

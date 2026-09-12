@@ -6,15 +6,120 @@
 //! fluent setters take `self` by value and return `Self`, so writes chain in a
 //! single statement that ends with the final handle bound.
 
-use super::{Prim, SpecSite, Stage, StageAuthoringError, authoring};
+use super::{Prim, SpecSite, Stage, StageAuthoringError, StageEdit, authoring};
 use crate::Result;
 use crate::{pcp, sdf};
 
+/// A relationship to author, and everything it is authored with.
+///
+/// The relationship counterpart of [`AttributeBuilder`](super::AttributeBuilder):
+/// creating the relationship, declaring it and giving it targets are one edit
+/// of the target layer, and nothing reaches the stage until
+/// [`build`](Self::build). A relationship carries no type and is always
+/// uniform, so [`custom`](Self::custom) is all there is to declare about one.
+///
+/// A builder from [`Prim`] or [`Stage`] commits on its own; one from a
+/// [`PrimEdit`](super::PrimEdit) or a [`StageEdit`](super::StageEdit) joins
+/// that transaction instead.
+#[derive(Debug)]
+pub struct RelationshipBuilder<'a> {
+    /// The stage and the property path to author at, or what naming them — or
+    /// naming a target — hit. The failure is carried so the setters need not
+    /// answer for it.
+    site: Result<(Stage, sdf::Path), StageAuthoringError>,
+    custom: bool,
+    /// The targets to author in the same edit.
+    targets: Option<Vec<sdf::Path>>,
+    /// The transaction to join, where the builder came from one.
+    batch: Option<&'a StageEdit>,
+}
+
+impl<'a> RelationshipBuilder<'a> {
+    /// A relationship at `site`, declared as C++ declares one a caller says
+    /// nothing more about.
+    pub(super) fn new(site: Result<(Stage, sdf::Path), StageAuthoringError>) -> Self {
+        RelationshipBuilder {
+            site,
+            custom: true,
+            targets: None,
+            batch: None,
+        }
+    }
+
+    /// The same relationship, authored as part of `batch` rather than on its
+    /// own.
+    pub(super) fn in_batch(mut self, batch: &'a StageEdit) -> Self {
+        self.batch = Some(batch);
+        self
+    }
+
+    /// Whether the relationship is the caller's own rather than a schema's
+    /// (C++ `custom`). A schema's property is not.
+    pub fn custom(mut self, custom: bool) -> Self {
+        self.custom = custom;
+        self
+    }
+
+    /// The target list to author with it: [`Relationship::set_targets`] as
+    /// part of the creating edit rather than an edit after it.
+    pub fn set_targets(mut self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Self {
+        match targets
+            .into_iter()
+            .map(sdf::try_into_path)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(targets) => self.targets = Some(targets),
+            Err(err) => self.site = Err(err.into()),
+        }
+        self
+    }
+
+    /// Authors the relationship and hands back the handle that reads and
+    /// edits it, as one edit of the target layer.
+    ///
+    /// A builder that came from a [`PrimEdit`](super::PrimEdit) or a
+    /// [`StageEdit`](super::StageEdit) is queued into that transaction instead,
+    /// and the handle reads nothing until the transaction commits.
+    pub fn build(mut self) -> Result<Relationship, StageAuthoringError> {
+        let batch = self.batch.take();
+        if let Some(batch) = batch {
+            batch.holds_target()?;
+        }
+        let planned = self.plan()?;
+        let (stage, path) = match batch {
+            Some(batch) => batch.queue(planned)?,
+            None => planned.commit()?,
+        };
+        Ok(Relationship::new(&stage, path))
+    }
+
+    /// Resolves everything the write depends on against composed state, so all
+    /// the transaction has left to do is stamp the spec and write.
+    fn plan(self) -> Result<authoring::PlannedProperty, StageAuthoringError> {
+        let (stage, path) = self.site?;
+        let declaration = authoring::PropertyDeclaration::Relationship {
+            variability: sdf::Variability::Uniform,
+            custom: self.custom,
+        };
+        let ensure = authoring::plan_property_spec(&stage, &path, sdf::SpecType::Relationship, Some(declaration))?;
+        Ok(authoring::PlannedProperty::new(
+            stage,
+            path,
+            authoring::PropertyWrite::Relationship {
+                ensure,
+                targets: self.targets,
+            },
+        ))
+    }
+}
+
 /// Stage-composed relationship handle. Mirrors C++ `UsdRelationship`.
 ///
-/// Returned by [`Stage::create_relationship`] / [`Prim::create_relationship`]
-/// with defaults `variability = Varying`, `custom = true`, matching C++
-/// generic property authoring. Override via the fluent setters below.
+/// Returned by [`Stage::create_relationship`] / [`Prim::create_relationship`],
+/// which declare it as C++ generic property authoring does — `custom = true`,
+/// and a relationship is always uniform — or by a [`RelationshipBuilder`]
+/// where it is declared as something else. The fluent setters below edit a
+/// relationship that already exists.
 #[derive(Clone, Debug)]
 pub struct Relationship {
     stage: Stage,
@@ -249,7 +354,6 @@ mod tests {
         stage.define_prim("/World/Material2")?.set_type_name("Material")?;
         let binding = mesh
             .create_relationship("material:binding")?
-            .set_variability(sdf::Variability::Uniform)?
             .add_target(sdf::Path::new("/World/Material")?)?
             .add_target(sdf::Path::new("/World/Material2")?)?;
         assert!(binding.remove_target(&sdf::Path::new("/World/Material2")?)?);

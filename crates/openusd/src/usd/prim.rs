@@ -325,41 +325,65 @@ impl Prim {
 
     /// Author an attribute spec named `name` under this prim (C++
     /// `UsdPrim::CreateAttribute`); see [`Stage::create_attribute`] for the
-    /// contract, under which `type_name` applies only to an attribute nothing
-    /// declares yet. Defaults `variability = Varying`, `custom = true` —
-    /// override via the returned [`Attribute`] handle's fluent setters. A prim
-    /// nothing composes is [`StageAuthoringError::PrimNotValid`], so the
+    /// contract, under which `type_name`, `variability = Varying` and
+    /// `custom = true` apply only to an attribute nothing declares yet. To say
+    /// something else, take an [`attribute_builder`](Self::attribute_builder).
+    /// A prim nothing composes is [`StageAuthoringError::PrimNotValid`], so the
     /// property never conjures its prim.
     pub fn create_attribute(
         &self,
         name: impl Into<Token>,
         type_name: impl Into<sdf::ValueTypeName>,
     ) -> Result<Attribute, StageAuthoringError> {
-        let name = name.into();
-        let attr_path = self.path.append_property(&name)?;
-        self.require_valid()?;
-        self.stage.create_attribute(attr_path, type_name)
+        self.attribute_builder(name, type_name).build()
+    }
+
+    /// The same authoring, with what the attribute is declared as — and the
+    /// value it starts with — left to the caller. Everything the builder
+    /// carries is authored as one edit of the target layer.
+    pub fn attribute_builder(
+        &self,
+        name: impl Into<Token>,
+        type_name: impl Into<sdf::ValueTypeName>,
+    ) -> super::AttributeBuilder<'static> {
+        super::AttributeBuilder::new(self.property_target(name.into()), type_name.into())
     }
 
     /// Author a relationship spec named `name` under this prim (C++
     /// `UsdPrim::CreateRelationship`), under the same prim-validity rule as
     /// [`create_attribute`](Self::create_attribute).
     pub fn create_relationship(&self, name: impl Into<Token>) -> Result<Relationship, StageAuthoringError> {
-        let name = name.into();
-        let rel_path = self.path.append_property(&name)?;
-        self.require_valid()?;
-        self.stage.create_relationship(rel_path)
+        self.relationship_builder(name).build()
     }
 
-    /// Author a relationship `name` with the given target paths and the
-    /// schema-authoring convention `custom = false`. Shortcut for
-    /// `create_relationship(name) + set_custom(false) + set_targets`.
+    /// The same authoring, with the declaration left to the caller.
+    pub fn relationship_builder(&self, name: impl Into<Token>) -> super::RelationshipBuilder<'static> {
+        super::RelationshipBuilder::new(self.property_target(name.into()))
+    }
+
+    /// Where a property named `name` on this prim would be authored: the stage
+    /// and the path, or what naming them hit.
+    ///
+    /// A builder carries the failure rather than reporting it, so that naming
+    /// a property and declaring it read as one expression.
+    fn property_target(&self, name: Token) -> Result<(Stage, sdf::Path), StageAuthoringError> {
+        let path = self.path.append_property(&name)?;
+        self.require_valid()?;
+        Ok((self.stage.clone(), path))
+    }
+
+    /// Author a relationship `name` with the given target paths, declared
+    /// `custom = false` as a schema's own property is where nothing else
+    /// declares it. Declaration and targets reach the stage as one edit.
     pub fn author_relationship_targets(
         &self,
         name: &str,
         targets: impl IntoIterator<Item: sdf::IntoPath>,
     ) -> Result<Relationship, StageAuthoringError> {
-        self.create_relationship(name)?.set_custom(false)?.set_targets(targets)
+        self.relationship_builder(name)
+            .custom(false)
+            .set_targets(targets)
+            .build()
     }
 
     /// Append `value` to the `uniform token[]` attribute named `name` on this
@@ -389,10 +413,11 @@ impl Prim {
         let mut updated = existing;
         updated.push(value);
         self.stage
-            .create_attribute(attr_path, "token[]")?
-            .set_variability(sdf::Variability::Uniform)?
-            .set_custom(false)?
-            .set(sdf::Value::token_vec(updated))?;
+            .attribute_builder(attr_path, "token[]")
+            .custom(false)
+            .variability(sdf::Variability::Uniform)
+            .set(sdf::Value::token_vec(updated))
+            .build()?;
         Ok(true)
     }
 

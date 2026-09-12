@@ -282,24 +282,32 @@ where
 /// `info:implementationSource` alongside its own value, so authoring a source
 /// is what activates it.
 ///
-/// TODO(perf): each step here — the implementation source, then the value
-/// attribute's creation, `custom`, variability and value — is its own layer
-/// transaction with its own change-list derivation and invalidation pass.
-/// Routing the whole setter through one `Stage::batch_edit` would collapse them.
+/// Both properties are authored as one stage edit, so the shader never composes
+/// with a source selected and no source to read.
 fn set_source_value(
     shader: &Shader,
     attr: &SourceAttr,
     source_type: &str,
     value: sdf::Value,
 ) -> Result<usd::Attribute> {
-    shader.create_implementation_source_attr()?.set(attr.implementation)?;
-
     let name = source_property_name(attr, source_type);
-    Ok(shader
-        .create_attribute(name.as_ref(), attr.type_name.clone())?
-        .set_custom(false)?
-        .set_variability(sdf::Variability::Uniform)?
-        .set(value)?)
+    Ok(shader.stage().edit(|edit| {
+        let shader = edit.prim(shader.path())?;
+
+        shader
+            .attribute_builder(tokens::INFO_IMPLEMENTATION_SOURCE, sdf::ValueTypeName::TOKEN)
+            .custom(false)
+            .variability(sdf::Variability::Uniform)
+            .set(attr.implementation)
+            .build()?;
+
+        shader
+            .attribute_builder(name.as_ref(), attr.type_name.clone())
+            .custom(false)
+            .variability(sdf::Variability::Uniform)
+            .set(value)
+            .build()
+    })?)
 }
 
 /// Resolves the active implementation family on a `NodeDef` prim.

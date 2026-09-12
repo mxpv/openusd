@@ -9104,9 +9104,7 @@ fn create_attribute() -> Result<()> {
 fn create_relationship() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
-    let rel = stage
-        .create_relationship("/Mesh.material:binding")?
-        .set_variability(sdf::Variability::Uniform)?;
+    let rel = stage.create_relationship("/Mesh.material:binding")?;
 
     assert!(rel.is_custom()?, "generic relationships are authored custom");
     // The property composes as a relationship (not an attribute).

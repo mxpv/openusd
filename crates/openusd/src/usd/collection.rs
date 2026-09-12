@@ -266,46 +266,50 @@ impl Collection {
     /// non-custom schema property — `includes`/`excludes` are built-in schema
     /// relationships, like the `expansionRule`/`includeRoot` attributes above.
     fn schema_rel(&self, prim: &Prim, suffix: &str) -> Result<Relationship> {
-        Ok(prim.create_relationship(self.rel_name(suffix))?.set_custom(false)?)
+        Ok(prim.relationship_builder(self.rel_name(suffix)).custom(false).build()?)
     }
 
     /// Set `expansionRule` (`uniform token`).
     pub fn set_expansion_rule(&self, stage: &Stage, rule: ExpansionRule) -> Result<()> {
         stage
-            .create_attribute(self.prop(EXPANSION_RULE)?, "token")?
-            .set_variability(Variability::Uniform)?
-            .set_custom(false)?
-            .set(Value::token(rule.as_token()))?;
+            .attribute_builder(self.prop(EXPANSION_RULE)?, "token")
+            .custom(false)
+            .variability(Variability::Uniform)
+            .set(Value::token(rule.as_token()))
+            .build()?;
         Ok(())
     }
 
     /// Set `includeRoot` (`uniform bool`).
     pub fn set_include_root(&self, stage: &Stage, value: bool) -> Result<()> {
         stage
-            .create_attribute(self.prop(INCLUDE_ROOT)?, "bool")?
-            .set_variability(Variability::Uniform)?
-            .set_custom(false)?
-            .set(Value::Bool(value))?;
+            .attribute_builder(self.prop(INCLUDE_ROOT)?, "bool")
+            .custom(false)
+            .variability(Variability::Uniform)
+            .set(Value::Bool(value))
+            .build()?;
         Ok(())
     }
 
     /// Set `membershipExpression` (`uniform pathExpression`).
     pub fn set_membership_expression(&self, stage: &Stage, expression: sdf::PathExpression) -> Result<()> {
         stage
-            .create_attribute(self.prop(MEMBERSHIP_EXPRESSION)?, "pathExpression")?
-            .set_variability(Variability::Uniform)?
-            .set_custom(false)?
-            .set(Value::PathExpression(expression))?;
+            .attribute_builder(self.prop(MEMBERSHIP_EXPRESSION)?, "pathExpression")
+            .custom(false)
+            .variability(Variability::Uniform)
+            .set(Value::PathExpression(expression))
+            .build()?;
         Ok(())
     }
 
     /// Set `mode` (`uniform token`).
     pub fn set_mode(&self, stage: &Stage, mode: CollectionMode) -> Result<()> {
         stage
-            .create_attribute(self.prop(MODE)?, "token")?
-            .set_variability(Variability::Uniform)?
-            .set_custom(false)?
-            .set(Value::token(mode.as_token()))?;
+            .attribute_builder(self.prop(MODE)?, "token")
+            .custom(false)
+            .variability(Variability::Uniform)
+            .set(Value::token(mode.as_token()))
+            .build()?;
         Ok(())
     }
 
@@ -953,13 +957,15 @@ mod tests {
 
         // expansionRule (uniform token), includeRoot (uniform bool), includes rel.
         stage
-            .create_attribute(coll.prop(EXPANSION_RULE)?, "token")?
-            .set_variability(Variability::Uniform)?
-            .set(Value::Token(ExpansionRule::ExplicitOnly.as_token().into()))?;
+            .attribute_builder(coll.prop(EXPANSION_RULE)?, "token")
+            .variability(Variability::Uniform)
+            .set(Value::Token(ExpansionRule::ExplicitOnly.as_token().into()))
+            .build()?;
         stage
-            .create_attribute(coll.prop(INCLUDE_ROOT)?, "bool")?
-            .set_variability(Variability::Uniform)?
-            .set(Value::Bool(true))?;
+            .attribute_builder(coll.prop(INCLUDE_ROOT)?, "bool")
+            .variability(Variability::Uniform)
+            .set(Value::Bool(true))
+            .build()?;
         crate::usd::Prim::new(&stage, w.clone())
             .author_relationship_targets(&format!("collection:render:{INCLUDES}"), [sdf::path("/W/A")?])?;
 
@@ -1107,14 +1113,16 @@ mod tests {
             .add_applied_schema(format!("{API_COLLECTION}:{name}"))?;
         let coll = Collection::new(prim_path.clone(), name)?;
         stage
-            .create_attribute(coll.prop(EXPANSION_RULE)?, "token")?
-            .set_variability(Variability::Uniform)?
-            .set(Value::token(rule.as_token()))?;
+            .attribute_builder(coll.prop(EXPANSION_RULE)?, "token")
+            .variability(Variability::Uniform)
+            .set(Value::token(rule.as_token()))
+            .build()?;
         if include_root {
             stage
-                .create_attribute(coll.prop(INCLUDE_ROOT)?, "bool")?
-                .set_variability(Variability::Uniform)?
-                .set(Value::Bool(true))?;
+                .attribute_builder(coll.prop(INCLUDE_ROOT)?, "bool")
+                .variability(Variability::Uniform)
+                .set(Value::Bool(true))
+                .build()?;
         }
         let prim_handle = crate::usd::Prim::new(stage, prim_path);
         if !includes.is_empty() {
@@ -1357,17 +1365,21 @@ mod tests {
     #[test]
     fn authored_relationships_not_custom() -> Result<()> {
         // includes/excludes are schema relationships, so authoring them via
-        // include_path/exclude_path must mark them non-custom.
+        // include_path/exclude_path must leave them non-custom. `custom` is
+        // false by default, and a spec authors no field that says what the
+        // default already says, so the relationship is there saying nothing
+        // about it.
         let stage = scene()?;
         let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
         coll.include_path(&stage, sdf::path("/W")?)?;
         coll.exclude_path(&stage, sdf::path("/W/A")?)?;
         for suffix in [INCLUDES, EXCLUDES] {
-            assert_eq!(
-                stage.field::<Value>(coll.prop(suffix)?, FieldKey::Custom)?,
-                Some(Value::Bool(false)),
-                "collection:c:{suffix} should be authored non-custom"
+            let relationship = stage.relationship(coll.prop(suffix)?)?;
+            assert!(
+                relationship.has_authored_targets()?,
+                "collection:c:{suffix} should be authored"
             );
+            assert!(!relationship.is_custom()?, "collection:c:{suffix} should not be custom");
         }
         Ok(())
     }

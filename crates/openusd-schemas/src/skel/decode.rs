@@ -327,10 +327,10 @@ mod tests {
             .set(Value::Vec3fVec(vec![[0.0_f32, 0.1, 0.0].into()]))?;
         bs.create_point_indices_attr()?.set(Value::IntVec(vec![0]))?;
         // Author an inbetween at weight 0.5.
-        let inb = bs
-            .create_attribute("inbetweens:half", "vector3f[]")?
-            .set_custom(false)?;
-        inb.set(Value::Vec3fVec(vec![[0.0_f32, 0.04, 0.0].into()]))?
+        bs.attribute_builder("inbetweens:half", "vector3f[]")
+            .custom(false)
+            .set(Value::Vec3fVec(vec![[0.0_f32, 0.04, 0.0].into()]))
+            .build()?
             .set_metadata(tokens::WEIGHT, Value::Float(0.5))?;
 
         let bs = BlendShape::get(&stage, "/Smile")?.expect("BlendShape");

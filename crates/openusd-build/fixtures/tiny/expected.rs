@@ -237,11 +237,12 @@ pub trait ShapeSchema: ::openusd::usd::Typed {
         ::std::result::Result::Ok(
             self
                 .prim()
-                .create_attribute(
+                .attribute_builder(
                     tokens::EXTENT,
                     ::openusd::sdf::ValueTypeName::DOUBLE3,
-                )?
-                .set_custom(false)?,
+                )
+                .custom(false)
+                .build()?,
         )
     }
     /// How the shape draws.
@@ -256,12 +257,13 @@ pub trait ShapeSchema: ::openusd::usd::Typed {
         ::std::result::Result::Ok(
             self
                 .prim()
-                .create_attribute(
+                .attribute_builder(
                     tokens::DRAW_MODE,
                     ::openusd::sdf::ValueTypeName::TOKEN,
-                )?
-                .set_custom(false)?
-                .set_variability(::openusd::sdf::Variability::Uniform)?,
+                )
+                .custom(false)
+                .variability(::openusd::sdf::Variability::Uniform)
+                .build()?,
         )
     }
     /// Authors the property as the schema declares it, and returns it.
@@ -269,11 +271,12 @@ pub trait ShapeSchema: ::openusd::usd::Typed {
         ::std::result::Result::Ok(
             self
                 .prim()
-                .create_attribute(
+                .attribute_builder(
                     tokens::DENSITY,
                     ::openusd::sdf::ValueTypeName::DOUBLE,
-                )?
-                .set_custom(false)?,
+                )
+                .custom(false)
+                .build()?,
         )
     }
 }
@@ -355,8 +358,9 @@ pub trait BallSchema: ShapeSchema {
         ::std::result::Result::Ok(
             self
                 .prim()
-                .create_attribute(tokens::RADIUS, ::openusd::sdf::ValueTypeName::DOUBLE)?
-                .set_custom(false)?,
+                .attribute_builder(tokens::RADIUS, ::openusd::sdf::ValueTypeName::DOUBLE)
+                .custom(false)
+                .build()?,
         )
     }
     /// How warm it is, which no schema owns.
@@ -370,11 +374,11 @@ pub trait BallSchema: ShapeSchema {
         ::std::result::Result::Ok(
             self
                 .prim()
-                .create_attribute(
+                .attribute_builder(
                     tokens::TEMPERATURE,
                     ::openusd::sdf::ValueTypeName::FLOAT,
-                )?
-                .set_custom(true)?,
+                )
+                .build()?,
         )
     }
     /// What the ball is made of.
@@ -386,7 +390,7 @@ pub trait BallSchema: ShapeSchema {
     /// Authors the property as the schema declares it, and returns it.
     fn create_material_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
         ::std::result::Result::Ok(
-            self.prim().create_relationship(tokens::MATERIAL)?.set_custom(false)?,
+            self.prim().relationship_builder(tokens::MATERIAL).custom(false).build()?,
         )
     }
 }
@@ -514,8 +518,9 @@ impl TagAPI {
     pub fn create_tag_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(
             self
-                .create_attribute(tokens::TAG, ::openusd::sdf::ValueTypeName::STRING)?
-                .set_custom(false)?,
+                .attribute_builder(tokens::TAG, ::openusd::sdf::ValueTypeName::STRING)
+                .custom(false)
+                .build()?,
         )
     }
 }
@@ -631,14 +636,15 @@ impl SlotAPI {
     pub fn create_slot_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(
             self
-                .create_attribute(
+                .attribute_builder(
                     ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
                         tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_,
                         self.name.as_str(),
                     ),
                     ::openusd::sdf::ValueTypeName::OPAQUE,
-                )?
-                .set_custom(false)?,
+                )
+                .custom(false)
+                .build()?,
         )
     }
     /// How far in the slot sits.
@@ -657,14 +663,15 @@ impl SlotAPI {
     pub fn create_depth_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(
             self
-                .create_attribute(
+                .attribute_builder(
                     ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
                         tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_DEPTH,
                         self.name.as_str(),
                     ),
                     ::openusd::sdf::ValueTypeName::INT,
-                )?
-                .set_custom(false)?,
+                )
+                .custom(false)
+                .build()?,
         )
     }
     /// Where the slot sits, relative to the prim.
@@ -685,14 +692,15 @@ impl SlotAPI {
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(
             self
-                .create_attribute(
+                .attribute_builder(
                     ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
                         tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_OFFSET,
                         self.name.as_str(),
                     ),
                     ::openusd::sdf::ValueTypeName::DOUBLE3,
-                )?
-                .set_custom(false)?,
+                )
+                .custom(false)
+                .build()?,
         )
     }
 }
