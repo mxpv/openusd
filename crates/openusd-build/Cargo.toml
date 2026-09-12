@@ -31,7 +31,7 @@ thiserror.workspace = true
 prettyplease = "0.2"
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full", "parsing", "printing"] }
+syn = { version = "3", features = ["full", "parsing", "printing"] }
 
 # Prose wrapping for the documentation the generator writes. `smawk` lays a
 # paragraph out so its lines come out even, rather than filling each one as far
