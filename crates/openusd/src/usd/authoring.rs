@@ -18,7 +18,64 @@ use std::sync::Arc;
 
 use crate::{pcp, sdf, tf};
 
-use super::{PrimTypeInfo, SpecSite, Stage, StageAuthoringError};
+use super::{Attribute, PrimTypeInfo, Relationship, SpecSite, Stage, StageAuthoringError};
+
+/// A property kind, as the authoring operations below work on it: what its
+/// specs are, and how one is opened for editing.
+///
+/// Implemented on the stage-tier handles, so an operation names the thing being
+/// authored: `author::<Attribute>`.
+pub(super) trait PropertySpecKind {
+    /// What a spec of this kind answers to, for the checks that a path holds
+    /// the kind the caller meant.
+    const KIND: sdf::SpecType;
+
+    /// A mutable view of one, borrowed from the layer that holds it.
+    type View<'a>;
+
+    /// Opens the spec at `path`, or `None` where the layer holds none.
+    fn view(data: &mut dyn sdf::AbstractData, path: sdf::Path) -> Option<Self::View<'_>>;
+}
+
+impl PropertySpecKind for Attribute {
+    const KIND: sdf::SpecType = sdf::SpecType::Attribute;
+
+    type View<'a> = sdf::AttributeSpecMut<'a>;
+
+    fn view(data: &mut dyn sdf::AbstractData, path: sdf::Path) -> Option<Self::View<'_>> {
+        sdf::AttributeSpecMut::get(data, path)
+    }
+}
+
+impl PropertySpecKind for Relationship {
+    const KIND: sdf::SpecType = sdf::SpecType::Relationship;
+
+    type View<'a> = sdf::RelationshipSpecMut<'a>;
+
+    fn view(data: &mut dyn sdf::AbstractData, path: sdf::Path) -> Option<Self::View<'_>> {
+        sdf::RelationshipSpecMut::get(data, path)
+    }
+}
+
+/// Stamps the spec `path` needs on the edit target and runs `edit` on it, as
+/// one transaction.
+///
+/// The phase order lives here: the read that resolves where the spec comes
+/// from, then the transaction that stamps it and mutates it. A caller supplies
+/// the mutation alone, typed to the spec its kind opens.
+pub(super) fn author<P: PropertySpecKind>(
+    stage: &Stage,
+    path: &sdf::Path,
+    edit: impl FnOnce(&mut P::View<'_>) -> Result<(), StageAuthoringError>,
+) -> Result<(), StageAuthoringError> {
+    let plan = plan_property_spec(stage, path, P::KIND, None)?;
+    stage
+        .with_target_layer_at(path, |layer, spec_path| {
+            apply_plan(layer.data_mut(), &spec_path, P::KIND, &plan)?;
+            edit_spec(layer.data_mut(), spec_path, P::KIND, P::view, edit)
+        })
+        .map(|_| ())
+}
 
 /// What a property spec stamped on the edit target declares: the fields C++
 /// `_StampNewPropertySpec` copies from the declaration it found.

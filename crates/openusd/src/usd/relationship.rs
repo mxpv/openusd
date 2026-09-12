@@ -156,7 +156,7 @@ impl Relationship {
     pub fn remove_target(&self, target: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
         let target = sdf::try_into_path(target)?;
         let mut removed = false;
-        self.edit_spec(|spec| {
+        authoring::author::<Self>(&self.stage, &self.path, |spec| {
             removed = spec.remove_target(&target);
             Ok(())
         })?;
@@ -234,33 +234,8 @@ impl Relationship {
     where
         F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
-        self.edit_spec(f)?;
+        authoring::author::<Self>(&self.stage, &self.path, f)?;
         Ok(self)
-    }
-
-    /// Runs `f` on this relationship's spec at the edit target's layer,
-    /// stamping one from the declaration composition finds — the schema's,
-    /// else the strongest authored spec's — when the target has none (C++
-    /// `UsdStage::_CreatePropertySpecForEditing`).
-    ///
-    /// Every creating mutation goes through here, so a relationship a schema
-    /// declares is authorable on the handle `Prim::relationships` hands back.
-    fn edit_spec<F>(&self, f: F) -> Result<(), StageAuthoringError>
-    where
-        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), StageAuthoringError>,
-    {
-        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Relationship, None)?;
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            authoring::apply_plan(layer.data_mut(), &path, sdf::SpecType::Relationship, &ensure)?;
-            authoring::edit_spec(
-                layer.data_mut(),
-                path,
-                sdf::SpecType::Relationship,
-                sdf::RelationshipSpecMut::get,
-                f,
-            )
-        })?;
-        Ok(())
     }
 }
 

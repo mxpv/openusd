@@ -376,7 +376,7 @@ impl Attribute {
         // A delete list-op still needs a property spec to carry it, stamped
         // as any other write stamps it.
         let mut removed = false;
-        self.edit_spec(|spec| {
+        authoring::author::<Self>(&self.stage, &self.path, |spec| {
             removed = spec.delete_connection_path(&target)?;
             Ok(())
         })?;
@@ -910,29 +910,8 @@ impl Attribute {
     where
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
-        self.edit_spec(f)?;
+        authoring::author::<Self>(&self.stage, &self.path, f)?;
         Ok(self)
-    }
-
-    /// Runs `f` on this attribute's spec at the edit target's layer, stamping
-    /// one from the declaration composition finds when the target has none.
-    /// Every creating mutation goes through here.
-    fn edit_spec<F>(&self, f: F) -> Result<(), StageAuthoringError>
-    where
-        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> Result<(), StageAuthoringError>,
-    {
-        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, None)?;
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            authoring::apply_plan(layer.data_mut(), &path, sdf::SpecType::Attribute, &ensure)?;
-            authoring::edit_spec(
-                layer.data_mut(),
-                path,
-                sdf::SpecType::Attribute,
-                sdf::AttributeSpecMut::get,
-                f,
-            )
-        })?;
-        Ok(())
     }
 
     /// Runs `f` on this attribute's spec at the edit target's layer when the
@@ -2919,7 +2898,7 @@ mod tests {
         // committed, so no spec and no notice survive.
         let error = stage
             .attribute(path)?
-            .edit_spec(|_spec| Err(StageAuthoringError::ReservedField { field: "probe" }))
+            .edit(|_spec| Err(StageAuthoringError::ReservedField { field: "probe" }))
             .expect_err("the closure's error");
         assert!(matches!(error, StageAuthoringError::ReservedField { field: "probe" }));
         assert!(!root_has_spec(&stage, path));
