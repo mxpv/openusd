@@ -933,6 +933,22 @@ where
         self.get(sdf::FieldKey::TimeSamples)
     }
 
+    /// The unit this attribute's values are expressed in (C++
+    /// `SdfAttributeSpec::GetDisplayUnit`): the authored `displayUnit`, and
+    /// otherwise the unit its declared type measures in.
+    ///
+    /// Total, because a unit is always wanted and never worth an error. A
+    /// `displayUnit` naming no unit, or holding something that is not a name
+    /// at all, falls back the way an unauthored one does, and a spec with no
+    /// `typeName` — or one the type table does not know — answers
+    /// [`sdf::Unit::Default`]. Whatever was authored stays readable as the
+    /// field it was written as.
+    pub fn display_unit(&self) -> sdf::Unit {
+        self.get::<tf::Token>(sdf::FieldKey::DisplayUnit)
+            .and_then(|name| sdf::Unit::from_name(name.as_str()))
+            .unwrap_or_else(|| self.type_name().map_or(sdf::Unit::Default, |ty| ty.default_unit()))
+    }
+
     /// Color-space token, if authored.
     pub fn color_space(&self) -> Option<tf::Token> {
         self.get(sdf::FieldKey::ColorSpace)
@@ -1872,6 +1888,38 @@ mod tests {
         let mut data = Data::new();
         data.create_spec(path.clone(), ty);
         (data, path)
+    }
+
+    /// An authored `displayUnit` wins; without one the declared type
+    /// answers, and anything the field cannot mean falls back the same way.
+    #[test]
+    fn display_unit_falls_back() {
+        let (mut data, path) = data_with_spec("/p.a", sdf::SpecType::Attribute);
+        data.set_field(&path, sdf::FieldKey::TypeName.as_str(), sdf::Value::token("point3f"));
+
+        let unit = |data: &Data| {
+            AttributeSpecRef::get(data as &dyn AbstractData, path.clone())
+                .expect("attribute spec")
+                .display_unit()
+        };
+
+        assert_eq!(unit(&data), sdf::Unit::Meter);
+
+        data.set_field(&path, sdf::FieldKey::DisplayUnit.as_str(), sdf::Value::token("mm"));
+        assert_eq!(unit(&data), sdf::Unit::Millimeter);
+
+        // A name no category uses, and a value that is not a name at all.
+        data.set_field(&path, sdf::FieldKey::DisplayUnit.as_str(), sdf::Value::token("furlong"));
+        assert_eq!(unit(&data), sdf::Unit::Meter);
+        data.set_field(&path, sdf::FieldKey::DisplayUnit.as_str(), sdf::Value::Int(3));
+        assert_eq!(unit(&data), sdf::Unit::Meter);
+
+        // A type that measures nothing, and no type at all.
+        data.set_field(&path, sdf::FieldKey::TypeName.as_str(), sdf::Value::token("float"));
+        data.erase_field(&path, sdf::FieldKey::DisplayUnit.as_str());
+        assert_eq!(unit(&data), sdf::Unit::Default);
+        data.erase_field(&path, sdf::FieldKey::TypeName.as_str());
+        assert_eq!(unit(&data), sdf::Unit::Default);
     }
 
     #[test]

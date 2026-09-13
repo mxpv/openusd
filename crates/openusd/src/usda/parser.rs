@@ -602,6 +602,19 @@ impl<'a> Parser<'a> {
                 (_, value) => value,
             };
 
+            // A display unit is one of the names a unit category uses. C++
+            // rejects any other rather than carrying it, so a typo is caught
+            // where it was written instead of silently measuring in metres.
+            if name == FieldKey::DisplayUnit.as_str() {
+                let Some(spelling) = value.try_as_token_ref() else {
+                    bail!("A display unit is spelled by name, as `displayUnit = mm`");
+                };
+                ensure!(
+                    sdf::Unit::from_name(spelling.as_str()).is_some(),
+                    "`{spelling}` is not a valid display unit"
+                );
+            }
+
             spec.add(name, value);
             Ok(())
         })?;
@@ -2729,6 +2742,20 @@ def Scope "Root" (
         let path = sdf::path("/Root").unwrap();
         let spec = data.get(&path).unwrap();
         assert_eq!(spec.get("displayName"), Some(&sdf::Value::String("My Root".into())));
+    }
+
+    /// A display unit is written by name, and one no category uses is
+    /// rejected where it was written rather than carried.
+    #[test]
+    fn display_unit_parses() {
+        let text = "#usda 1.0\ndef \"P\" {\n    custom double a = 1 (\n        displayUnit = mm\n    )\n}\n";
+        assert_eq!(
+            field(text, "/P.a", FieldKey::DisplayUnit.as_str()),
+            Some(sdf::Value::token("mm"))
+        );
+
+        let bad = "#usda 1.0\ndef \"P\" {\n    custom double a = 1 (\n        displayUnit = furlong\n    )\n}\n";
+        assert!(parse_error(bad).contains("not a valid display unit"));
     }
 
     /// Metadata no schema declares - DCC hints and the like - loads, and

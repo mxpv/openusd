@@ -28,6 +28,7 @@ pub mod schema;
 pub mod sink;
 mod spec;
 mod token_value;
+mod unit;
 mod value;
 mod value_type;
 
@@ -63,6 +64,7 @@ pub use spec::{
     PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,
     RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
+pub use unit::{Unit, UnitCategory};
 pub use value::{CastError, FromValueCast, Value, ValueKind, dictionary_over};
 pub use value_type::{Dimensions, Role, ValueTypeError, ValueTypeName};
 

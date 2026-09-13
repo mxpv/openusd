@@ -717,6 +717,23 @@ impl<W: Write> Emitter<'_, W> {
         self.write_indent()?;
         write!(self.out, "{keyword} = ")?;
 
+        // A display unit is written as the bare name of the unit, which is
+        // what the grammar accepts back. Storing it as a token rather than as
+        // C++'s enum is what makes this the field's business and not the
+        // value's: nothing about the token says it is a unit.
+        //
+        // `%` and `default` are not identifiers, so a layer authoring either
+        // cannot be read back — by us or by USD, which emits the same text and
+        // rejects it on import (verified against usd-core 26.8). Emitting what
+        // upstream emits keeps a layer exactly as portable as one it wrote.
+        if keyword == FieldKey::DisplayUnit.as_str()
+            && let Value::Token(unit) = value
+        {
+            write!(self.out, "{}", unit.as_str())?;
+            writeln!(self.out)?;
+            return Ok(());
+        }
+
         self.write_value(value)?;
         writeln!(self.out)?;
         Ok(())
@@ -1519,6 +1536,45 @@ def "Mesh" (
         assert_eq!(
             data.spec(&path).expect("spec").fields,
             reparsed.spec(&path).expect("spec").fields
+        );
+    }
+
+    /// Every unit whose name is an identifier survives emit → re-parse.
+    ///
+    /// `%` and `default` are left out because the grammar has no term for
+    /// them; upstream writes the same unreadable text for those two.
+    #[test]
+    fn display_units_roundtrip() {
+        for unit in ["mm", "cm", "dm", "m", "km", "in", "ft", "yd", "mi", "deg", "rad"] {
+            let source = format!(
+                "#usda 1.0\n\ndef \"Mesh\"\n{{\n    custom double a = 1 (\n        displayUnit = {unit}\n    )\n}}\n"
+            );
+            let data = usda::parse(&source).expect("parses");
+            let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+            let reparsed = usda::parse(&text).unwrap_or_else(|e| panic!("{unit} re-parses: {e:#}"));
+            let path = sdf::Path::new("/Mesh.a").unwrap();
+            assert_eq!(
+                reparsed.spec(&path).expect("spec").get(FieldKey::DisplayUnit.as_str()),
+                Some(&Value::token(unit)),
+                "{unit}"
+            );
+        }
+    }
+
+    /// A display unit is written as the bare name the grammar reads back, not
+    /// as the quoted string every other token becomes.
+    #[test]
+    fn display_unit_roundtrip() {
+        let source = "#usda 1.0\n\ndef \"Mesh\"\n{\n    custom double a = 1 (\n        displayUnit = mm\n    )\n}\n";
+        let data = usda::parse(source).expect("parses");
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+
+        assert!(text.contains("displayUnit = mm"), "{text}");
+        let reparsed = usda::parse(&text).expect("re-parses");
+        let path = sdf::Path::new("/Mesh.a").unwrap();
+        assert_eq!(
+            reparsed.spec(&path).expect("spec").get(FieldKey::DisplayUnit.as_str()),
+            Some(&Value::token("mm"))
         );
     }
 

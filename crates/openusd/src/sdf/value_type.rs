@@ -25,6 +25,7 @@ use strum::{Display, IntoStaticStr};
 use crate::gf::{self, f16};
 use crate::tf;
 
+use super::unit::Unit;
 use super::value::{CastError, Value, ValueKind};
 use super::{AssetPath, PathExpression, TimeCode};
 
@@ -52,13 +53,16 @@ enum Repr {
     Unregistered(tf::Token),
 }
 
-/// A row of the type table. Everything else a registered name answers
-/// derives from `kind` and `role`.
+/// A row of the type table. What a registered name answers comes from these
+/// columns, or derives from `kind` and `role`; C++ registers `unit` as its own
+/// column beside the role rather than deriving it (`SdfSchema`'s
+/// `AddType(...).DefaultUnit(length).Role(point)`), so it is one here too.
 #[derive(Clone, Copy)]
 struct Registered {
     name: &'static str,
     kind: ValueKind,
     role: Option<Role>,
+    unit: Unit,
 }
 
 /// The semantic role a value type name carries (C++ `SdfValueRoleNames`),
@@ -136,8 +140,8 @@ pub enum ValueTypeError {
 const _: () = assert!(mem::size_of::<ValueTypeError>() <= 48);
 
 impl ValueTypeName {
-    const fn registered(name: &'static str, kind: ValueKind, role: Option<Role>) -> Self {
-        Self(Repr::Registered(Registered { name, kind, role }))
+    const fn registered(name: &'static str, kind: ValueKind, role: Option<Role>, unit: Unit) -> Self {
+        Self(Repr::Registered(Registered { name, kind, role, unit }))
     }
 
     /// The registered type with this spelling (C++ `SdfSchema::FindType`):
@@ -208,6 +212,18 @@ impl ValueTypeName {
         }
     }
 
+    /// The unit values of this type are expressed in where nothing says
+    /// otherwise (C++ `GetDefaultUnit`): metres for the point, vector and
+    /// normal types, and [`Unit::Default`] for every other type and for an
+    /// unregistered name, which is what C++ substitutes where a type
+    /// registers no unit of its own.
+    pub fn default_unit(&self) -> Unit {
+        match &self.0 {
+            Repr::Registered(row) => row.unit,
+            Repr::Unregistered(_) => Unit::Default,
+        }
+    }
+
     /// The tuple nesting of this type's text literal (C++ `GetDimensions`).
     pub fn dimensions(&self) -> Option<Dimensions> {
         self.kind().map(ValueKind::dimensions)
@@ -240,7 +256,12 @@ impl ValueTypeName {
         };
         match row.kind.element_kind() {
             None => Some(self.clone()),
-            Some(element) => Some(Self::registered(row.name.strip_suffix("[]")?, element, row.role)),
+            Some(element) => Some(Self::registered(
+                row.name.strip_suffix("[]")?,
+                element,
+                row.role,
+                row.unit,
+            )),
         }
     }
 
@@ -255,7 +276,7 @@ impl ValueTypeName {
             return Some(self.clone());
         }
         let array = row.kind.array_kind()?;
-        Some(Self::registered(array_name(row.name)?, array, row.role))
+        Some(Self::registered(array_name(row.name)?, array, row.role, row.unit))
     }
 
     /// Every registered spelling of this type, standard first and in table
@@ -577,7 +598,7 @@ impl ValueKind {
     /// `Vec3f` is `float3`, never `color3f`; `None` for a kind no attribute
     /// holds.
     pub fn type_name(self) -> Option<ValueTypeName> {
-        preferred_spelling(self, None).map(|name| ValueTypeName::registered(name, self, None))
+        preferred_spelling(self, None).and_then(ValueTypeName::find)
     }
 }
 
@@ -613,11 +634,12 @@ fn constant_ident_of(kind: ValueKind, role: Option<Role>) -> Option<&'static str
 impl ValueTypeName {
     /// The `opaque` value type: an attribute carrying no value (C++
     /// `SdfOpaqueValue`). It has no array form.
-    pub const OPAQUE: ValueTypeName = ValueTypeName::registered("opaque", ValueKind::Opaque, None);
+    pub const OPAQUE: ValueTypeName = ValueTypeName::registered("opaque", ValueKind::Opaque, None, Unit::Default);
 
     /// The `group` value type: `opaque` with the [`Role::Group`] role, a proxy
     /// for several values. It has no array form.
-    pub const GROUP: ValueTypeName = ValueTypeName::registered("group", ValueKind::Opaque, Some(Role::Group));
+    pub const GROUP: ValueTypeName =
+        ValueTypeName::registered("group", ValueKind::Opaque, Some(Role::Group), Unit::Default);
 }
 
 /// The type table. Each row declares a scalar spelling with its kind and
@@ -625,20 +647,25 @@ impl ValueTypeName {
 /// and legacy slices, and the lookups by spelling and by identity.
 macro_rules! value_types {
     (
-        $( pub $scalar:ident / $array:ident = $name:literal => $kind:ident $(as $role:ident)? ; )*
-        legacy: $( $legacy:literal => $legacy_kind:ident $(as $legacy_role:ident)? ; )*
+        $( pub $scalar:ident / $array:ident = $name:literal => $kind:ident $(as $role:ident)? $(in $unit:ident)? ; )*
+        legacy: $( $legacy:literal => $legacy_kind:ident $(as $legacy_role:ident)? $(in $legacy_unit:ident)? ; )*
     ) => {
         impl ValueTypeName {
             $(
                 #[doc = concat!("The `", $name, "` value type.")]
-                pub const $scalar: ValueTypeName =
-                    ValueTypeName::registered($name, ValueKind::$kind, value_types!(@role $($role)?));
+                pub const $scalar: ValueTypeName = ValueTypeName::registered(
+                    $name,
+                    ValueKind::$kind,
+                    value_types!(@role $($role)?),
+                    value_types!(@unit $($unit)?),
+                );
 
                 #[doc = concat!("The `", $name, "[]` value type.")]
                 pub const $array: ValueTypeName = ValueTypeName::registered(
                     concat!($name, "[]"),
                     array_of(ValueKind::$kind),
                     value_types!(@role $($role)?),
+                    value_types!(@unit $($unit)?),
                 );
             )*
         }
@@ -654,11 +681,17 @@ macro_rules! value_types {
         /// The legacy spellings, each scalar followed by its array.
         static LEGACY: &[ValueTypeName] = &[
             $(
-                ValueTypeName::registered($legacy, ValueKind::$legacy_kind, value_types!(@role $($legacy_role)?)),
+                ValueTypeName::registered(
+                    $legacy,
+                    ValueKind::$legacy_kind,
+                    value_types!(@role $($legacy_role)?),
+                    value_types!(@unit $($legacy_unit)?),
+                ),
                 ValueTypeName::registered(
                     concat!($legacy, "[]"),
                     array_of(ValueKind::$legacy_kind),
                     value_types!(@role $($legacy_role)?),
+                    value_types!(@unit $($legacy_unit)?),
                 ),
             )*
         ];
@@ -674,6 +707,7 @@ macro_rules! value_types {
                         $legacy,
                         ValueKind::$legacy_kind,
                         value_types!(@role $($legacy_role)?),
+                        value_types!(@unit $($legacy_unit)?),
                     )),
                 )*
                 _ => None,
@@ -717,6 +751,8 @@ macro_rules! value_types {
             }
         }
     };
+    (@unit) => { Unit::Default };
+    (@unit $unit:ident) => { Unit::$unit };
     (@role) => { None };
     (@role $role:ident) => { Some(Role::$role) };
 }
@@ -748,15 +784,15 @@ value_types! {
     pub INT2 / INT2_ARRAY = "int2" => Vec2i;
     pub INT3 / INT3_ARRAY = "int3" => Vec3i;
     pub INT4 / INT4_ARRAY = "int4" => Vec4i;
-    pub POINT3H / POINT3H_ARRAY = "point3h" => Vec3h as Point;
-    pub POINT3F / POINT3F_ARRAY = "point3f" => Vec3f as Point;
-    pub POINT3D / POINT3D_ARRAY = "point3d" => Vec3d as Point;
-    pub VECTOR3H / VECTOR3H_ARRAY = "vector3h" => Vec3h as Vector;
-    pub VECTOR3F / VECTOR3F_ARRAY = "vector3f" => Vec3f as Vector;
-    pub VECTOR3D / VECTOR3D_ARRAY = "vector3d" => Vec3d as Vector;
-    pub NORMAL3H / NORMAL3H_ARRAY = "normal3h" => Vec3h as Normal;
-    pub NORMAL3F / NORMAL3F_ARRAY = "normal3f" => Vec3f as Normal;
-    pub NORMAL3D / NORMAL3D_ARRAY = "normal3d" => Vec3d as Normal;
+    pub POINT3H / POINT3H_ARRAY = "point3h" => Vec3h as Point in Meter;
+    pub POINT3F / POINT3F_ARRAY = "point3f" => Vec3f as Point in Meter;
+    pub POINT3D / POINT3D_ARRAY = "point3d" => Vec3d as Point in Meter;
+    pub VECTOR3H / VECTOR3H_ARRAY = "vector3h" => Vec3h as Vector in Meter;
+    pub VECTOR3F / VECTOR3F_ARRAY = "vector3f" => Vec3f as Vector in Meter;
+    pub VECTOR3D / VECTOR3D_ARRAY = "vector3d" => Vec3d as Vector in Meter;
+    pub NORMAL3H / NORMAL3H_ARRAY = "normal3h" => Vec3h as Normal in Meter;
+    pub NORMAL3F / NORMAL3F_ARRAY = "normal3f" => Vec3f as Normal in Meter;
+    pub NORMAL3D / NORMAL3D_ARRAY = "normal3d" => Vec3d as Normal in Meter;
     pub COLOR3H / COLOR3H_ARRAY = "color3h" => Vec3h as Color;
     pub COLOR3F / COLOR3F_ARRAY = "color3f" => Vec3f as Color;
     pub COLOR3D / COLOR3D_ARRAY = "color3d" => Vec3d as Color;
@@ -793,12 +829,12 @@ value_types! {
     "Vec4h" => Vec4h;
     "Vec4f" => Vec4f;
     "Vec4d" => Vec4d;
-    "Point" => Vec3d as Point;
-    "PointFloat" => Vec3f as Point;
-    "Normal" => Vec3d as Normal;
-    "NormalFloat" => Vec3f as Normal;
-    "Vector" => Vec3d as Vector;
-    "VectorFloat" => Vec3f as Vector;
+    "Point" => Vec3d as Point in Meter;
+    "PointFloat" => Vec3f as Point in Meter;
+    "Normal" => Vec3d as Normal in Meter;
+    "NormalFloat" => Vec3f as Normal in Meter;
+    "Vector" => Vec3d as Vector in Meter;
+    "VectorFloat" => Vec3f as Vector in Meter;
     "Color" => Vec3d as Color;
     "ColorFloat" => Vec3f as Color;
     "Quath" => Quath;
@@ -816,12 +852,48 @@ value_types! {
 
 #[cfg(test)]
 mod tests {
+
     use std::collections::{BTreeSet, HashSet};
     use std::hash::DefaultHasher;
 
     use strum::IntoEnumIterator;
 
     use super::*;
+
+    /// A length quantity measures in metres, and so does its array - C++ hands
+    /// the array row the unit the scalar registered. Every other type measures
+    /// in nothing.
+    #[test]
+    fn default_unit_per_type() {
+        let lengths = [
+            "point3h",
+            "point3f",
+            "point3d",
+            "vector3h",
+            "vector3f",
+            "vector3d",
+            "normal3h",
+            "normal3f",
+            "normal3d",
+            "Point",
+            "PointFloat",
+            "Normal",
+            "NormalFloat",
+            "Vector",
+            "VectorFloat",
+        ];
+
+        for ty in ValueTypeName::all() {
+            let expected = if lengths.contains(&ty.scalar_type().expect("scalar").as_str()) {
+                Unit::Meter
+            } else {
+                Unit::Default
+            };
+            assert_eq!(ty.default_unit(), expected, "{ty}");
+        }
+
+        assert_eq!(ValueTypeName::from("noSuchType").default_unit(), Unit::Default);
+    }
 
     fn find(name: &str) -> ValueTypeName {
         ValueTypeName::find(name).unwrap_or_else(|| panic!("{name} is registered"))
