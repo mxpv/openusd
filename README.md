@@ -32,15 +32,14 @@ If you encounter a file that can't be read, please open an [issue](https://githu
 
 ## Compliance
 
-The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d-development-introducing-aousd-core-specification-1-0/) has been officially ratified. As part of the specification, sample implementations for compliance testing are provided as Python scripts with JSON baselines. Where JSON baselines are available, the crate parses them and verifies that its output matches.
+The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d-development-introducing-aousd-core-specification-1-0/)
+ships sample implementations for compliance testing, as Python scripts with
+JSON baselines. Where a baseline exists these crates parse it and check their
+own output against it, and the vendored suites run on every CI build: text and
+binary parsing, composition, value resolution, and list-op combine chains.
 
-| Area | Status | Notes |
-|------|--------|-------|
-| [Text format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text) | :white_check_mark:&nbsp;Passes | 10 tests against JSON baselines |
-| [Binary format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary) | :white_check_mark:&nbsp;Passes | 42 tests manually backported from the reference suite's `test_binary.py` in [`tests/binary_format.rs`](crates/openusd/tests/binary_format.rs) |
-| [Composition](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark:&nbsp;Passes | [`tests/composition.rs`](crates/openusd/tests/composition.rs) runs the full vendor suite (138 assets) through both the text and binary parsers, regenerating each `pcp.txt` dump to validate strength ordering, prim/property stacks, and time offsets |
-| [Value resolution](vendor/core-spec-supplemental-release_dec2025/value_resolution) | :ballot_box_with_check:&nbsp;Partial | 8 tests in [`tests/value_resolution.rs`](crates/openusd/tests/value_resolution.rs) (defaults, time samples, value clips). Excludes attribute fallbacks and splines |
-| [Combine chains](vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain) | :white_check_mark:&nbsp;Passes | [`ListOp::combined_with`](crates/openusd/src/sdf/list_op.rs) and [`ListOp::reduced`](crates/openusd/src/sdf/list_op.rs) against JSON baselines |
+Refer to the [compliance table](crates/openusd/README.md#compliance) for what
+is currently covered.
 
 ## Getting started
 

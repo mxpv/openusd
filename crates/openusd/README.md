@@ -29,6 +29,18 @@ physics, rendering, and more.
 
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
 
+## Compliance
+
+The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d-development-introducing-aousd-core-specification-1-0/) has been officially ratified. As part of the specification, sample implementations for compliance testing are provided as Python scripts with JSON baselines. Where JSON baselines are available, the crate parses them and verifies that its output matches.
+
+| Area | Status | Notes |
+|------|--------|-------|
+| [Text format parsing](https://github.com/mxpv/openusd/tree/main/vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text) | :white_check_mark:&nbsp;Passes | 10 tests against JSON baselines |
+| [Binary format parsing](https://github.com/mxpv/openusd/tree/main/vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary) | :white_check_mark:&nbsp;Passes | 42 tests manually backported from the reference suite's `test_binary.py` in [`tests/binary_format.rs`](https://github.com/mxpv/openusd/blob/main/crates/openusd/tests/binary_format.rs) |
+| [Composition](https://github.com/mxpv/openusd/tree/main/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark:&nbsp;Passes | [`tests/composition.rs`](https://github.com/mxpv/openusd/blob/main/crates/openusd/tests/composition.rs) runs the full vendor suite (138 assets) through both the text and binary parsers, regenerating each `pcp.txt` dump to validate strength ordering, prim/property stacks, and time offsets |
+| [Value resolution](https://github.com/mxpv/openusd/tree/main/vendor/core-spec-supplemental-release_dec2025/value_resolution) | :ballot_box_with_check:&nbsp;Partial | 8 tests in [`tests/value_resolution.rs`](https://github.com/mxpv/openusd/blob/main/crates/openusd/tests/value_resolution.rs) (defaults, time samples, value clips). Excludes attribute fallbacks and splines |
+| [Combine chains](https://github.com/mxpv/openusd/tree/main/vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain) | :white_check_mark:&nbsp;Passes | [`ListOp::combined_with`](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/sdf/list_op.rs) and [`ListOp::reduced`](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/sdf/list_op.rs) against JSON baselines |
+
 ## Getting started
 
 Add the crate to your `Cargo.toml` (or run `cargo add openusd`):
