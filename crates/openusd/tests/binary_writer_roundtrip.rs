@@ -120,6 +120,85 @@ fn compressed_int_array_roundtrips() {
     assert_eq!(round_long, Value::IntVec(long));
 }
 
+/// An unregistered value decodes out of a crate file upstream wrote.
+///
+/// These two come from the vendored compliance suite and are real
+/// `PXR-USDC` files, so they pin the wrapper layout - a forward offset, the
+/// body, then the nested value's own rep - against something this crate did
+/// not produce. Each expectation is the literal the file's own `.usda` twin
+/// authors, so a decode that drifts shows up as text that no longer matches.
+#[test]
+fn cpp_authored_unregistered_values() {
+    const ASSETS: &str = concat!(
+        env!("CARGO_WORKSPACE_DIR"),
+        "vendor/core-spec-supplemental-release_dec2025/composition/tests/assets"
+    );
+
+    for (file, spec, field, literal) in [
+        ("relocates/entry.usd", "/", "sublayers", "[@sublayer.usd@]"),
+        (
+            "BasicVariantWithConnections_root/camera.usd",
+            "/camera{projection=perspective}Lens.focalLength",
+            "avar",
+            "true",
+        ),
+    ] {
+        let full = Path::new(ASSETS).join(file);
+        let reader = std::fs::File::open(&full).unwrap_or_else(|e| panic!("open {}: {e}", full.display()));
+        let data = CrateData::open(reader, true).unwrap_or_else(|e| panic!("parse {}: {e:#}", full.display()));
+
+        let value = (&data as &dyn AbstractData)
+            .get_field(&path(spec).expect("a path"), field)
+            .unwrap_or_else(|e| panic!("{file} has no {field}: {e}"))
+            .into_owned();
+        assert_eq!(value, Value::UnregisteredValue(literal.to_owned()), "{file}");
+    }
+}
+
+/// The three shapes an unregistered field can hold survive the crate format.
+///
+/// Each is wrapped in one `SdfUnregisteredValue` on disk, whose body is a
+/// nested, self-describing value, so reading one back means telling a string,
+/// a dictionary and a list op apart by what that nested value holds.
+#[test]
+fn unregistered_values_roundtrip() {
+    let mut data = Data::new();
+    let root = sdf::Path::abs_root();
+    let root_spec = data.create_spec(root.clone(), SpecType::PseudoRoot);
+    root_spec.add(ChildrenKey::PrimChildren, Value::TokenVec(vec!["M".into()]));
+
+    let prim = path("/M").unwrap();
+    let prim_spec = data.create_spec(prim.clone(), SpecType::Prim);
+    prim_spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
+
+    let list_op = sdf::ListOp::<String> {
+        prepended_items: vec!["1, 2".to_owned()],
+        deleted_items: vec!["3".to_owned()],
+        ..Default::default()
+    };
+    let dictionary = sdf::Dictionary::from([("myKey".to_owned(), Value::Int(8))]);
+    let fields = [
+        ("madeUpField", Value::UnregisteredValue("1.50".to_owned())),
+        ("madeUpList", Value::UnregisteredValueListOp(list_op)),
+        ("madeUpDict", Value::UnregisteredDictionary(dictionary)),
+    ];
+    for (name, value) in &fields {
+        prim_spec.add(*name, value.clone());
+    }
+
+    let mut buf = Vec::new();
+    CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("write");
+
+    let round = CrateData::open(Cursor::new(&buf), true).expect("re-parse");
+    for (name, value) in &fields {
+        let read = (&round as &dyn AbstractData)
+            .get_field(&prim, name)
+            .expect("field")
+            .into_owned();
+        assert_eq!(&read, value, "{name}");
+    }
+}
+
 #[test]
 fn asset_array_roundtrips() {
     // `asset[]` is written with the `AssetPath` type code (string-table

@@ -716,6 +716,7 @@ impl<W: Write> Emitter<'_, W> {
 
         self.write_indent()?;
         write!(self.out, "{keyword} = ")?;
+
         self.write_value(value)?;
         writeln!(self.out)?;
         Ok(())
@@ -777,6 +778,13 @@ impl<W: Write> Emitter<'_, W> {
             }
             Value::UInt64ListOp(op) => {
                 self.emit_listop_statement(name, op, |s, v| write!(s, "{v}").map_err(Into::into))?;
+                Ok(Some(true))
+            }
+            Value::UnregisteredValueListOp(op) => {
+                self.emit_listop_statement(name, op, |s, body: &String| {
+                    s.push_str(body);
+                    Ok(())
+                })?;
                 Ok(Some(true))
             }
             _ => Ok(None),
@@ -1052,8 +1060,15 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
         }
 
         Value::ValueVec(v) => format_vec(s, v, format_value)?,
-        Value::UnregisteredValue(v) => write_quoted(s, v)?,
-        Value::UnregisteredValueListOp(op) => format_inline_listop(s, op, |s, t: &String| write_quoted(s, t))?,
+        // An unregistered value is the literal a layer was written with,
+        // recorded because nothing could type it. Quoting it would make it a
+        // string; it is copied out as it came in.
+        Value::UnregisteredValue(v) => s.push_str(v),
+        Value::UnregisteredValueListOp(op) => format_inline_listop(s, op, |s, body: &String| {
+            s.push_str(body);
+            Ok(())
+        })?,
+        Value::UnregisteredDictionary(dict) => format_dictionary(s, dict)?,
 
         Value::TimeCode(t) => format_double(s, t.0),
         Value::TimeCodeVec(v) => format_vec(s, v, |s, t| {
@@ -1248,7 +1263,9 @@ fn format_dictionary(s: &mut String, dict: &HashMap<String, Value>) -> Result<()
         // other entry carries the role-blind name of its value's kind, as C++
         // emits it.
         let type_name = match value {
-            Value::Dictionary(_) => Some(Token::new("dictionary")),
+            // A dictionary under an unregistered field is still spelled as
+            // one; only the field around it was unregistered.
+            Value::Dictionary(_) | Value::UnregisteredDictionary(_) => Some(Token::new("dictionary")),
             other => sdf::ValueKind::from(other).type_name().map(|ty| ty.as_token()),
         };
         s.push_str("    ");
@@ -1433,6 +1450,126 @@ fn is_relationship_structural_field(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::sdf::{Data, path};
+    use crate::{sdf, usda};
+
+    /// An unregistered value is the literal a layer was written with, so it
+    /// is copied out, not quoted. Quoting `(1, 2, 3)` would turn a tuple into
+    /// a string the next reader could not tell apart from one.
+    #[test]
+    fn unregistered_value_is_copied() {
+        for literal in ["7", "(1, 2, 3)", "[a, b]", "\"already quoted\""] {
+            let mut out = String::new();
+            format_value(&mut out, &Value::UnregisteredValue(literal.to_owned())).expect("writes");
+            assert_eq!(out, literal);
+        }
+    }
+
+    /// Each item of an unregistered list op is the recorded text of a whole
+    /// body, so the brackets stay even for one item — `[1, 2]`, never `1, 2`.
+    #[test]
+    fn unregistered_listop_keeps_brackets() {
+        let op = sdf::ListOp::<String> {
+            explicit: true,
+            explicit_items: vec!["1, 2".to_owned()],
+            ..Default::default()
+        };
+
+        let mut out = String::new();
+        format_value(&mut out, &Value::UnregisteredValueListOp(op)).expect("writes");
+        assert_eq!(out, "[1, 2]");
+    }
+
+    /// An operation with nothing in it still writes a body.
+    #[test]
+    fn unregistered_listop_empty() {
+        let op = sdf::ListOp::<String> {
+            explicit: true,
+            ..Default::default()
+        };
+
+        let mut out = String::new();
+        format_value(&mut out, &Value::UnregisteredValueListOp(op)).expect("writes");
+        assert_eq!(out, "[]");
+    }
+
+    /// An unregistered field's operations come back out as statements, each
+    /// body inside the brackets it was authored with - the shared list-op
+    /// helper would write a lone item bare and turn `[1, 2]` into `1, 2`.
+    #[test]
+    fn unregistered_metadata_statements() {
+        let source = r#"#usda 1.0
+
+def "Mesh" (
+    prepend madeUpList = [1, 2]
+    delete madeUpList = 3
+    madeUpField = 1.50
+)
+{
+}
+"#;
+        let data = usda::parse(source).expect("parses");
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+
+        assert!(text.contains("prepend madeUpList = [1, 2]"), "{text}");
+        assert!(text.contains("delete madeUpList = [3]"), "{text}");
+        assert!(text.contains("madeUpField = 1.50"), "{text}");
+
+        let reparsed = usda::parse(&text).expect("re-parses");
+        let path = sdf::Path::new("/Mesh").unwrap();
+        assert_eq!(
+            data.spec(&path).expect("spec").fields,
+            reparsed.spec(&path).expect("spec").fields
+        );
+    }
+
+    /// A dictionary under an unregistered field is spelled `dictionary` like
+    /// any other, so a dictionary holding one still re-parses.
+    #[test]
+    fn nested_unregistered_dictionary() {
+        let mut data = Data::new();
+        let root = sdf::Path::abs_root();
+        data.create_spec(root.clone(), sdf::SpecType::PseudoRoot);
+        let inner = sdf::Dictionary::from([("k".to_owned(), Value::Int(1))]);
+        let outer = sdf::Dictionary::from([("nested".to_owned(), Value::UnregisteredDictionary(inner))]);
+        data.set_field(&root, FieldKey::CustomLayerData.as_str(), Value::Dictionary(outer));
+
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+        assert!(text.contains("dictionary nested"), "{text}");
+        usda::parse(&text).expect("re-parses");
+    }
+
+    /// An unregistered type's value survives load → save → load as the text
+    /// it was authored with, which is the whole point of recording it.
+    #[test]
+    fn unregistered_value_roundtrip() {
+        let source = r#"#usda 1.0
+
+def "Mesh"
+{
+    custom myType tuple = (1, 2, 3)
+    custom myType asset = @a/b.usd@
+    custom myType target = </Mesh>
+    custom myType quoted = "a]b"
+}
+"#;
+        let data = usda::parse(source).expect("parses");
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+        let reparsed = usda::parse(&text).expect("re-parses");
+
+        for (name, literal) in [
+            ("tuple", "(1, 2, 3)"),
+            ("asset", "@a/b.usd@"),
+            ("target", "</Mesh>"),
+            ("quoted", "\"a]b\""),
+        ] {
+            let path = sdf::Path::new(&format!("/Mesh.{name}")).unwrap();
+            assert_eq!(
+                reparsed.spec(&path).expect("spec").get("default"),
+                Some(&Value::UnregisteredValue(literal.to_owned())),
+                "{name}"
+            );
+        }
+    }
 
     /// A relationship keeps its variability through emit → re-parse. The text
     /// form spells only the `varying` case, so the uniform default has to

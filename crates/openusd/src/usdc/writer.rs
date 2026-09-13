@@ -16,7 +16,7 @@ use bytemuck::{Pod, bytes_of};
 use num_traits::{AsPrimitive, PrimInt};
 
 use crate::{
-    gf,
+    gf, sdf,
     sdf::{AbstractData, FormatError, LayerOffset, ListOp, Path, PathElement, Payload, Reference, Value},
     tf,
 };
@@ -122,7 +122,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             if let Some(field_names) = data.list_fields(path) {
                 for name in field_names {
                     let value = data.get_field(path, &name)?.into_owned();
-                    let token = if name == crate::sdf::ChildrenKey::PropertyChildren.as_str() {
+                    let token = if name == sdf::ChildrenKey::PropertyChildren.as_str() {
                         super::CRATE_PROPERTY_CHILDREN.to_owned()
                     } else {
                         name
@@ -490,10 +490,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 let idx = self.tokens.intern(s.authored_path.clone());
                 Ok(rep_inline(Type::AssetPath, idx as u64))
             }
-            Value::String(s) => {
-                let sidx = self.intern_string(s);
-                Ok(rep_inline(Type::String, sidx as u64))
-            }
+            Value::String(s) => self.write_string_rep(s),
 
             // Out-of-line scalars
             Value::Int64(v) => self.write_pod_out(Type::Int64, v),
@@ -653,21 +650,15 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 }
                 Ok(())
             }),
-            Value::UnregisteredValueListOp(op) => self.write_listop(Type::UnregisteredValueListOp, op, |w, items| {
-                w.write_count(items.len() as u64)?;
-                for s in items {
-                    let sidx = w.intern_string(s);
-                    w.write_pod(&sidx)?;
-                }
-                Ok(())
-            }),
-
             Value::TimeSamples(samples) => self.write_time_samples(samples),
 
-            Value::UnregisteredValue(s) => {
-                let idx = self.tokens.intern(s.clone());
-                Ok(rep_inline(Type::UnregisteredValue, idx as u64))
-            }
+            // Nothing declares the field these hold, so each is wrapped the
+            // way C++ wraps it: one `SdfUnregisteredValue` whose body is a
+            // nested, self-describing value - a string, a dictionary, or a
+            // list op of recorded bodies (`Write(SdfUnregisteredValue const&)`).
+            Value::UnregisteredValue(s) => self.write_unregistered(|w| w.write_string_rep(s)),
+            Value::UnregisteredDictionary(d) => self.write_unregistered(|w| w.write_dictionary(d)),
+            Value::UnregisteredValueListOp(op) => self.write_unregistered(|w| w.write_unregistered_listop(op)),
             Value::PathExpression(expr) => {
                 let idx = self.tokens.intern(expr.to_string());
                 Ok(rep_inline(Type::PathExpression, idx as u64))
@@ -814,9 +805,6 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
     fn write_token_vec(&mut self, ty: Type, v: &[tf::Token]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
-        // Token arrays: just write the indices (no inner count for the
-        // Type::Token array path — reader does `unpack_array_len` then
-        // `read_vec::<u32>(count)`).
         self.write_count(v.len() as u64)?;
         for t in v {
             let idx = self.tokens.intern(t.to_string());
@@ -856,25 +844,69 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             let sidx = self.intern_string(k);
             self.write_pod(&sidx)?;
 
-            // Layout per entry: i64 recursive_offset, then ValueRep at the
-            // target. The reader does `seek(Current(offset - 8))` after
-            // consuming the i64, so `recursive_offset = pre_rep - offset_slot`.
-            let offset_slot = self.pos()?;
-            self.write_pod(&0_i64)?; // placeholder
-
-            let rep = self.write_value(&d[k.as_str()])?;
-
-            let pre_rep = self.pos()?;
-            self.write_pod(&rep.0)?;
-
-            let end = self.pos()?;
-            let recursive_offset = (pre_rep as i64) - (offset_slot as i64);
-            self.out.seek(SeekFrom::Start(offset_slot))?;
-            self.write_pod(&recursive_offset)?;
-            self.out.seek(SeekFrom::Start(end))?;
+            let value = &d[k.as_str()];
+            self.write_nested(|w| w.write_value(value))?;
         }
 
         Ok(())
+    }
+
+    /// Serialize a nested, self-describing value: a forward offset to where
+    /// its `ValueRep` lands, the body `write_body` emits, then that rep
+    /// (C++ `Write(VtValue const &)`).
+    ///
+    /// The reader does `seek(Current(offset - 8))` after consuming the
+    /// offset, so the offset is measured from its own slot rather than from
+    /// past it.
+    fn write_nested<F>(&mut self, write_body: F) -> Result<(), FormatError>
+    where
+        F: FnOnce(&mut Self) -> Result<ValueRep, FormatError>,
+    {
+        let offset_slot = self.pos()?;
+        self.write_pod(&0_i64)?; // placeholder
+
+        let rep = write_body(self)?;
+
+        let pre_rep = self.pos()?;
+        self.write_pod(&rep.0)?;
+
+        let end = self.pos()?;
+        let recursive_offset = (pre_rep as i64) - (offset_slot as i64);
+        self.out.seek(SeekFrom::Start(offset_slot))?;
+        self.write_pod(&recursive_offset)?;
+        self.out.seek(SeekFrom::Start(end))?;
+        Ok(())
+    }
+
+    /// Serialize the wrapper an unregistered field's value is carried in: the
+    /// body `write_body` emits as a nested value, addressed by one rep of
+    /// [`Type::UnregisteredValue`].
+    fn write_unregistered<F>(&mut self, write_body: F) -> Result<ValueRep, FormatError>
+    where
+        F: FnOnce(&mut Self) -> Result<ValueRep, FormatError>,
+    {
+        let off = self.pos()?;
+        self.write_nested(write_body)?;
+        Ok(rep_heap(Type::UnregisteredValue, off, false))
+    }
+
+    /// A string, interned into the string table and addressed inline.
+    fn write_string_rep(&mut self, text: &str) -> Result<ValueRep, FormatError> {
+        let sidx = self.intern_string(text);
+        Ok(rep_inline(Type::String, sidx as u64))
+    }
+
+    /// Serialize an unregistered field's list op, whose element type is
+    /// itself an `SdfUnregisteredValue`: every item is a nested value holding
+    /// the body it was recorded as.
+    fn write_unregistered_listop(&mut self, op: &ListOp<String>) -> Result<ValueRep, FormatError> {
+        self.write_listop(Type::UnregisteredValueListOp, op, |w, items| {
+            w.write_count(items.len() as u64)?;
+            for item in items {
+                w.write_nested(|w| w.write_string_rep(item))?;
+            }
+            Ok(())
+        })
     }
 
     fn write_path_vec(&mut self, v: &[Path]) -> Result<ValueRep, FormatError> {

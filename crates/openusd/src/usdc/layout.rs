@@ -192,7 +192,7 @@ impl ListOpHeader {
 /// For values that aren't stored inline, the 6 data bytes are the offset from
 /// the start of the file to the value's location.
 #[repr(transparent)]
-#[derive(Default, Copy, Clone, Pod, Zeroable)]
+#[derive(Default, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
 pub struct ValueRep(pub u64);
 
 impl fmt::Debug for ValueRep {

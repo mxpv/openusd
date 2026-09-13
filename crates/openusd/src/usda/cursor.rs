@@ -26,6 +26,10 @@ pub(super) struct Cursor<'source> {
     iter: Peekable<SpannedIter<'source, Token<'source>>>,
     source: &'source str,
     last_span: Option<Range<usize>>,
+    /// Where the token most recently *consumed* ended, which
+    /// [`last_span`](Self::last_span) cannot say: that one follows lookahead
+    /// too, so it moves past text no caller has taken yet.
+    consumed_end: usize,
 }
 
 impl<'source> Cursor<'source> {
@@ -34,6 +38,7 @@ impl<'source> Cursor<'source> {
             iter: Token::lexer(source).spanned().peekable(),
             source,
             last_span: None,
+            consumed_end: 0,
         }
     }
 
@@ -50,6 +55,24 @@ impl<'source> Cursor<'source> {
     /// This accessor reads that state rather than advancing the lexer.
     pub(super) fn diagnostic_span(&self) -> Range<usize> {
         self.last_span.clone().unwrap_or(self.source.len()..self.source.len())
+    }
+
+    /// Where the next token begins, without consuming it.
+    ///
+    /// For a caller recording the source text of something it is about to
+    /// read. [`diagnostic_span`](Self::diagnostic_span) cannot answer this:
+    /// it follows whatever was last observed, lookahead included.
+    pub(super) fn next_offset(&mut self) -> usize {
+        match self.iter.peek() {
+            Some((_, span)) => span.start,
+            None => self.source.len(),
+        }
+    }
+
+    /// Where the token most recently consumed ended, or the start of the input
+    /// if nothing has been consumed.
+    pub(super) fn consumed_end(&self) -> usize {
+        self.consumed_end
     }
 
     /// Returns the next token without consuming it, or `None` at the end of the
@@ -85,6 +108,7 @@ impl<'source> Cursor<'source> {
             self.last_span = Some(self.source.len()..self.source.len());
             bail!("Unexpected end of tokens");
         };
+        self.consumed_end = span.end;
         self.last_span = Some(span);
         token.map_err(|_| RawError::new("Logos error"))
     }

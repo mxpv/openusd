@@ -63,6 +63,13 @@ pub struct CrateFile<R> {
     pub paths: Vec<sdf::Path>,
     // All specs.
     pub specs: Vec<Spec>,
+
+    /// The nested values currently being read, innermost last.
+    ///
+    /// A crate file addresses a nested value by offset, so nothing in the
+    /// format stops one from pointing at itself; C++ keeps the same set for
+    /// the same reason (`_LocalUnpackRecursionGuard`).
+    unpacking: Vec<ValueRep>,
 }
 
 impl<R> CrateFile<R> {
@@ -88,6 +95,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             fieldsets: Vec::new(),
             paths: Vec::new(),
             specs: Vec::new(),
+            unpacking: Vec::new(),
         };
 
         file.read_sections().ctx("sections")?;
@@ -874,12 +882,6 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
     /// Reads a crate dictionary value (`customData`, `assetInfo`, and nested
     /// dictionaries).
-    ///
-    /// TODO: this recurses through `value`, which re-enters here for a nested
-    /// `Type::Dictionary`, so a deeply nested dictionary overflows the stack —
-    /// one Rust frame per nesting level over file-controlled data. Bound the
-    /// depth (a guard or an explicit stack), as `build_compressed_paths` does
-    /// for wide path trees.
     fn read_custom_data(&mut self) -> Result<HashMap<String, Value>, ReadError> {
         let mut count = self.reader.read_count()?;
         let mut dict = HashMap::default();
@@ -887,29 +889,62 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         while count > 0 {
             let key = self.read_string()?;
 
-            let value = {
-                self.apply_recursive_offset()?;
-
-                let value = self.reader.read_pod::<ValueRep>()?;
-
-                corrupt!(value.ty()? != Type::Invalid, "Can't parse dictionary value type");
-
-                // Save current position.
-                let saved_position = self.reader.stream_position()?;
-
-                let value = self.value(value)?;
-
-                // Restore position
-                self.set_position(saved_position)?;
-
-                value
-            };
-
-            dict.insert(key, value);
+            dict.insert(key, self.read_nested_value()?);
             count -= 1;
         }
 
         Ok(dict)
+    }
+
+    /// Read a nested, self-describing value: the forward offset to its
+    /// `ValueRep`, then the value that rep describes, leaving the stream just
+    /// past the rep (C++ `Read<VtValue>`).
+    ///
+    /// A dictionary entry, an unregistered value and the items of an
+    /// unregistered list op all arrive this way, and each can nest another, so
+    /// a value that names itself is refused here rather than recursed into.
+    ///
+    /// TODO: the nesting itself is still one Rust frame per level, so a deep
+    /// but acyclic chain over file-controlled data can exhaust the stack.
+    /// Bound the depth as `build_compressed_paths` does for wide path trees.
+    fn read_nested_value(&mut self) -> Result<Value, ReadError> {
+        self.apply_recursive_offset()?;
+
+        let rep = self.reader.read_pod::<ValueRep>()?;
+        corrupt!(rep.ty()? != Type::Invalid, "Can't parse nested value type");
+        corrupt!(
+            !self.unpacking.contains(&rep),
+            "A nested value recursively contains itself"
+        );
+
+        let resume = self.reader.stream_position()?;
+        self.unpacking.push(rep);
+        let value = self.value(rep);
+        self.unpacking.pop();
+        let value = value?;
+        self.set_position(resume)?;
+
+        Ok(value)
+    }
+
+    /// Read one operation's items from an unregistered field's list op: a
+    /// count, then that many nested values, each holding a recorded body.
+    ///
+    /// C++ lets an item hold a dictionary or a further list op as well as a
+    /// recorded body, which [`sdf::Value::UnregisteredValueListOp`] has no
+    /// room for. Such an item is dropped rather than failing the layer around
+    /// it, since the rest of the file reads perfectly well without it.
+    ///
+    /// TODO: widen the list op's item type so those survive.
+    fn read_unregistered_items(&mut self) -> Result<Vec<String>, ReadError> {
+        let count = self.reader.read_count()?;
+        let mut items = Vec::new();
+        for _ in 0..count {
+            if let sdf::Value::String(text) = self.read_nested_value()? {
+                items.push(text);
+            }
+        }
+        Ok(items)
     }
 
     /// Read an array of fixed-size vectors (e.g. `Vec<[f32; 3]>`).
@@ -1462,13 +1497,25 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::PathExpression(sdf::PathExpression::parse(&expr))
             }
 
+            // An unregistered value wraps a nested, self-describing value,
+            // which tells apart the three shapes C++ accepts here.
             Type::UnregisteredValue => {
-                let token = self.read_token(value)?;
-                sdf::Value::UnregisteredValue(token)
+                corrupt!(!value.is_inlined());
+                self.set_position(value.payload())?;
+                match self.read_nested_value()? {
+                    sdf::Value::String(text) => sdf::Value::UnregisteredValue(text),
+                    sdf::Value::Dictionary(entries) => sdf::Value::UnregisteredDictionary(entries),
+                    list_op @ sdf::Value::UnregisteredValueListOp(_) => list_op,
+                    _ => {
+                        return Err(ReadError::corrupt(
+                            "An unregistered value holds none of a string, a dictionary or a list op",
+                        ));
+                    }
+                }
             }
             Type::UnregisteredValueListOp => {
                 corrupt!(!value.is_inlined());
-                let list = self.read_list_op(value, |file: &mut Self| file.read_string_vec())?;
+                let list = self.read_list_op(value, Self::read_unregistered_items)?;
                 sdf::Value::UnregisteredValueListOp(list)
             }
 

@@ -161,6 +161,14 @@ pub enum Value {
     UnregisteredValue(String),
     #[from(skip)]
     UnregisteredValueListOp(StringListOp),
+    /// A dictionary authored under a field nothing declares.
+    ///
+    /// Apart from [`Dictionary`](Self::Dictionary) because the field is what
+    /// is unregistered, not the value: a dictionary spells its own types, so
+    /// it survives as one, and this is what remembers that no schema asked
+    /// for it (C++ wraps the same thing in `SdfUnregisteredValue`).
+    #[from(skip)]
+    UnregisteredDictionary(HashMap<String, Value>),
 
     TimeCode(TimeCode),
     TimeCodeVec(Vec<TimeCode>),
@@ -296,6 +304,7 @@ impl serde::Serialize for Value {
 
             Value::UnregisteredValue(v) => v.serialize(serializer),
             Value::UnregisteredValueListOp(v) => v.serialize(serializer),
+            Value::UnregisteredDictionary(v) => v.serialize(serializer),
 
             // Time samples serialize as a map with string keys.
             Value::TimeSamples(v) => {

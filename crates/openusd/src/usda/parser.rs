@@ -178,10 +178,13 @@ impl<'a> Parser<'a> {
                         let value = types::parse_value(&mut this.cursor, ty)
                             .with_context(|| format!("Unable to parse value for {known_name}"))?;
                         root.add(known_name, value);
-                    } else {
+                    } else if sdf::is_registered_field(name) {
                         let value = types::parse_untyped_value(&mut this.cursor)
                             .with_context(|| format!("Unable to parse pseudo root metadata value for {name}"))?;
                         root.add(name, value);
+                    } else {
+                        record_unregistered_metadata(&mut this.cursor, &mut root, name, None)
+                            .with_context(|| format!("Unable to record pseudo root metadata value for {name}"))?;
                     }
                 }
                 _ => bail!("Unexpected token {next:?}"),
@@ -581,25 +584,22 @@ impl<'a> Parser<'a> {
             };
 
             this.cursor.expect_punctuation('=')?;
+
+            if !sdf::is_registered_field(&name) {
+                return record_unregistered_metadata(&mut this.cursor, spec, &name, list_op.as_ref())
+                    .with_context(|| format!("Unable to record attribute metadata value for {name}"));
+            }
+
+            ensure!(list_op.is_none(), "{name} metadata does not support list ops");
             let value = types::parse_untyped_value(&mut this.cursor)
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
 
-            // Some attribute metadata fields are registered as `token` in their
-            // schema's plugInfo (UsdGeom's `interpolation`, UsdShade's
-            // `renderType`); an untyped metadata value parses as a string, so
-            // retag those as tokens.
-            let value = match (name.as_str(), value) {
-                ("interpolation" | "renderType", sdf::Value::String(s)) => sdf::Value::token(s),
+            // An untyped parse reads a name as a string, so a field its schema
+            // declares as `token` is retagged to what was declared.
+            let declared = sdf::schema_field_type(&name).and_then(|ty| ty.kind());
+            let value = match (declared, value) {
+                (Some(sdf::ValueKind::Token), sdf::Value::String(s)) => sdf::Value::token(s),
                 (_, value) => value,
-            };
-
-            // Wrap in a dictionary keyed by the list op name to match the baseline format.
-            let value = match list_op {
-                Some(ref tok @ (Token::Prepend | Token::Append | Token::Delete | Token::Add)) => {
-                    let key = tok.keyword_lexeme().unwrap().to_owned();
-                    sdf::Value::Dictionary(HashMap::from([(key, value)]))
-                }
-                _ => value,
             };
 
             spec.add(name, value);
@@ -756,18 +756,16 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::AssetInfo.as_str() => {
                 ensure!(list_op.is_none(), "assetInfo does not support list ops");
                 let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse assetInfo")?;
-                spec.add(FieldKey::AssetInfo, value);
+                spec.add(FieldKey::AssetInfo, sdf::Value::Dictionary(value));
             }
             n if n == FieldKey::VariantSelection.as_str() => {
                 ensure!(list_op.is_none(), "variants does not support list ops");
-                let dict = types::parse_dictionary(&mut self.cursor).context("Unable to parse variants")?;
-                if let sdf::Value::Dictionary(map) = dict {
-                    let selections: HashMap<String, String> = map
-                        .into_iter()
-                        .filter_map(|(k, v)| v.try_as_string().map(|s| (k, s.clone())))
-                        .collect();
-                    spec.add(FieldKey::VariantSelection, sdf::Value::VariantSelectionMap(selections));
-                }
+                let map = types::parse_dictionary(&mut self.cursor).context("Unable to parse variants")?;
+                let selections: HashMap<String, String> = map
+                    .into_iter()
+                    .filter_map(|(k, v)| v.try_as_string().map(|s| (k, s)))
+                    .collect();
+                spec.add(FieldKey::VariantSelection, sdf::Value::VariantSelectionMap(selections));
             }
             n if n == FieldKey::VariantSetNames.as_str() => {
                 let values = self
@@ -817,7 +815,7 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::Clips.as_str() => {
                 ensure!(list_op.is_none(), "clips metadata does not support list ops");
                 let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse clips dictionary")?;
-                spec.add(FieldKey::Clips, value);
+                spec.add(FieldKey::Clips, sdf::Value::Dictionary(value));
             }
             n if n == FieldKey::ClipSets.as_str() => {
                 let values = self
@@ -826,16 +824,17 @@ impl<'a> Parser<'a> {
                 let list_op = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
                 spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
             }
-            // Unknown prim metadata - e.g. DCC / Omniverse hints like
+            // A field no schema declares - DCC hints like
             // `hide_in_stage_window` or `no_delete`. The Sdf grammar accepts
-            // arbitrary identifier-keyed fields in the metadata block, so
-            // tolerate and stash them on the spec rather than failing the
-            // parse (matches Pixar, which preserves unrecognized metadata).
+            // any identifier in a metadata block, so the layer still loads and
+            // the field passes through to whatever it is saved as.
+            other if !sdf::is_registered_field(other) => {
+                record_unregistered_metadata(&mut self.cursor, spec, other, list_op.as_ref())
+                    .with_context(|| format!("Unable to record prim metadata value for {other}"))?;
+            }
+            // A registered field none of the productions above claims.
             other => {
-                ensure!(
-                    list_op.is_none(),
-                    "list ops are not supported for unknown prim metadata: {other}"
-                );
+                ensure!(list_op.is_none(), "{other} metadata does not support list ops");
                 let value = types::parse_untyped_value(&mut self.cursor)
                     .with_context(|| format!("Unable to parse prim metadata value for {other}"))?;
                 spec.add(other, value);
@@ -852,15 +851,85 @@ fn apply_list_op<T: Default + Clone + PartialEq>(
     op: Option<Token<'_>>,
     items: Vec<T>,
 ) -> Result<sdf::ListOp<T>, RawError> {
+    let Some(op) = op else {
+        return Ok(sdf::ListOp::explicit(items));
+    };
+    let mut list_op = sdf::ListOp::default();
+    set_list_op_items(&mut list_op, &op, items)?;
+    Ok(list_op)
+}
+
+/// Store a metadata field no schema declares as the text it was authored
+/// with, so it passes through loading and saving unchanged.
+///
+/// Nothing gives the literal a type, so nothing can parse it into a value.
+/// A dictionary is the exception: it spells the type of every entry, so it
+/// survives as one, and only the field around it is unregistered.
+///
+/// The rules are C++'s (`Sdf_TextParserHelpers`' generic-metadata path). An
+/// assignment with no operation keyword replaces whatever was stored, since
+/// its list-op status is unknown. An operation stores the whole body as one
+/// recorded item and replaces that operation's items rather than adding to
+/// them, so a repeated `prepend` keeps the last. An operation arriving after
+/// a value that is not a list op is dropped, leaving the earlier value: only
+/// a hand edit produces that, and the first value is as good an answer as any.
+fn record_unregistered_metadata(
+    cursor: &mut Cursor<'_>,
+    spec: &mut sdf::SpecData,
+    name: &str,
+    list_op: Option<&Token<'_>>,
+) -> Result<(), RawError> {
+    if cursor.at_punctuation('{')? {
+        let entries = types::parse_dictionary(cursor)?;
+        spec.add(name, sdf::Value::UnregisteredDictionary(entries));
+        return Ok(());
+    }
+
+    let literal = types::record_literal(cursor)?;
+
+    let Some(op) = list_op else {
+        spec.add(name, sdf::Value::UnregisteredValue(literal.to_owned()));
+        return Ok(());
+    };
+
+    // The enclosing brackets come off so the writer does not emit a second
+    // pair around the body; `None` records no items at all.
+    let items = match literal {
+        "None" => Vec::new(),
+        body => {
+            let body = body.strip_prefix('[').unwrap_or(body);
+            vec![body.strip_suffix(']').unwrap_or(body).to_owned()]
+        }
+    };
+
+    match spec.get_mut(name) {
+        Some(sdf::Value::UnregisteredValueListOp(stored)) => set_list_op_items(stored, op, items)?,
+        Some(_) => {}
+        None => {
+            let mut stored = sdf::ListOp::default();
+            set_list_op_items(&mut stored, op, items)?;
+            spec.add(name, sdf::Value::UnregisteredValueListOp(stored));
+        }
+    }
+    Ok(())
+}
+
+/// Replace the items of the one operation `op` names (C++
+/// `SdfListOp::SetItems`), leaving every other operation as it stands.
+fn set_list_op_items<T: Default + Clone + PartialEq>(
+    list_op: &mut sdf::ListOp<T>,
+    op: &Token<'_>,
+    items: Vec<T>,
+) -> Result<(), RawError> {
     match op {
-        None => Ok(sdf::ListOp::explicit(items)),
-        Some(Token::Prepend) => Ok(sdf::ListOp::prepended(items)),
-        Some(Token::Append) => Ok(sdf::ListOp::appended(items)),
-        Some(Token::Add) => Ok(sdf::ListOp::added(items)),
-        Some(Token::Delete) => Ok(sdf::ListOp::deleted(items)),
-        Some(Token::Reorder) => Ok(sdf::ListOp::ordered(items)),
+        Token::Prepend => list_op.prepended_items = items,
+        Token::Append => list_op.appended_items = items,
+        Token::Add => list_op.added_items = items,
+        Token::Delete => list_op.deleted_items = items,
+        Token::Reorder => list_op.ordered_items = items,
         other => bail!("Unsupported list op: {other:?}"),
     }
+    Ok(())
 }
 
 /// Push a string into a Vec if it's not already present.
@@ -1985,10 +2054,12 @@ def Xform "root" {
         let bind_material_as = relationship_spec
             .get("bindMaterialAs")
             .expect("bindMaterialAs metadata present");
+        // UsdShade declares the field `token`, so that is what it stores.
         assert_eq!(
             bind_material_as
-                .try_as_string_ref()
-                .expect("bindMaterialAs stored as string"),
+                .try_as_token_ref()
+                .expect("bindMaterialAs stored as token")
+                .as_str(),
             "weakerThanDescendants"
         );
 
@@ -2283,9 +2354,109 @@ def Xform "Anim"
         );
     }
 
+    /// A type the table does not know has no shape to read a literal by, so
+    /// the literal is kept as it was written and the layer still loads — the
+    /// layers C++ accepts, we accept (C++ `Sdf_ParserValueContext`).
     #[test]
-    fn unknown_value_rejected() {
-        assert!(parse_error("#usda 1.0\ndef \"P\" {\n    myType x = \"v\"\n}\n").contains("unregistered"));
+    fn unregistered_records_literal() {
+        for literal in [
+            "7",
+            "(1, 2, 3)",
+            "[1, 2]",
+            "[(1, 2), (3, 4)]",
+            "\"a]b\"",
+            "@a/b.usd@",
+            "</P>",
+        ] {
+            let text = format!("#usda 1.0\ndef \"P\" {{\n    custom myType x = {literal}\n}}\n");
+            assert_eq!(
+                field(&text, "/P.x", FieldKey::Default.as_str()),
+                Some(sdf::Value::UnregisteredValue(literal.to_owned())),
+                "{literal}"
+            );
+        }
+    }
+
+    /// `None` is a value block whatever the type, so an unregistered one does
+    /// not record the word.
+    #[test]
+    fn unregistered_none_blocks() {
+        let text = "#usda 1.0\ndef \"P\" {\n    custom myType x = None\n}\n";
+        assert_eq!(
+            field(text, "/P.x", FieldKey::Default.as_str()),
+            Some(sdf::Value::ValueBlock)
+        );
+    }
+
+    /// The literal ends where the value does: what follows it is the
+    /// attribute's metadata, not part of what was recorded.
+    #[test]
+    fn literal_stops_at_value() {
+        let text = "#usda 1.0\ndef \"P\" {\n    custom myType x = 7 (\n        doc = \"note\"\n    )\n}\n";
+        assert_eq!(
+            field(text, "/P.x", FieldKey::Default.as_str()),
+            Some(sdf::Value::UnregisteredValue("7".to_owned()))
+        );
+        assert_eq!(
+            field(text, "/P.x", FieldKey::Documentation.as_str()),
+            Some(sdf::Value::String("note".to_owned()))
+        );
+    }
+
+    /// A sign and the word it signs lex as two tokens, so a recorded literal
+    /// has to take both or it stops halfway through the value.
+    #[test]
+    fn literal_records_signed_inf() {
+        for literal in ["-inf", "inf", "-1.5", "(-inf, inf)"] {
+            let text = format!("#usda 1.0\ndef \"P\" {{\n    custom myType x = {literal}\n}}\n");
+            assert_eq!(
+                field(&text, "/P.x", FieldKey::Default.as_str()),
+                Some(sdf::Value::UnregisteredValue(literal.to_owned())),
+                "{literal}"
+            );
+        }
+
+        let metadata = "#usda 1.0\ndef \"P\" (\n    madeUpField = -inf\n)\n{\n}\n";
+        assert_eq!(
+            field(metadata, "/P", "madeUpField"),
+            Some(sdf::Value::UnregisteredValue("-inf".to_owned()))
+        );
+    }
+
+    /// A comment sits between tokens, so it lands inside the recorded text
+    /// and the literal still re-parses as what it was.
+    #[test]
+    fn literal_keeps_comments() {
+        let text = "#usda 1.0\ndef \"P\" {\n    custom myType x = [1, # note\n        2]\n}\n";
+        assert_eq!(
+            field(text, "/P.x", FieldKey::Default.as_str()),
+            Some(sdf::Value::UnregisteredValue("[1, # note\n        2]".to_owned()))
+        );
+    }
+
+    /// Every sample of an unregistered type records its own literal; the map
+    /// around them is read as a map like any other.
+    #[test]
+    fn unregistered_time_samples() {
+        let text = "#usda 1.0\ndef \"P\" {\n    custom myType x.timeSamples = {\n        1: (2, 3),\n        2: None,\n    }\n}\n";
+        let samples = field(text, "/P.x", FieldKey::TimeSamples.as_str())
+            .expect("samples")
+            .try_as_time_samples()
+            .expect("a sample map");
+        assert_eq!(
+            samples,
+            vec![
+                (1.0, sdf::Value::UnregisteredValue("(2, 3)".to_owned())),
+                (2.0, sdf::Value::ValueBlock),
+            ]
+        );
+    }
+
+    /// An unbalanced value is a parse error rather than a literal that eats
+    /// the rest of the file.
+    #[test]
+    fn unbalanced_value_rejected() {
+        assert!(!parse_error("#usda 1.0\ndef \"P\" {\n    custom myType x = [1, 2\n}\n").is_empty());
     }
 
     #[test]
@@ -2560,32 +2731,166 @@ def Scope "Root" (
         assert_eq!(spec.get("displayName"), Some(&sdf::Value::String("My Root".into())));
     }
 
+    /// Metadata no schema declares - DCC hints and the like - loads, and
+    /// keeps the text it was authored with so it survives being saved again.
     #[test]
-    fn parse_tolerates_unknown_prim_metadata() {
-        // DCC / Omniverse author non-standard prim metadata; the parser must
-        // not choke on it, and should stash the fields on the spec.
-        let parser = Parser::new(
-            r#"#usda 1.0
+    fn unknown_prim_metadata_recorded() {
+        let text = r#"#usda 1.0
 
 def Xform "Root" (
     hide_in_stage_window = false
-    no_delete = true
     custom_label = "hi"
     custom_rank = 5
 )
 {
 }
-"#,
-        );
-        let data = parser.parse().unwrap();
-        let spec = data.get(&sdf::path("/Root").unwrap()).unwrap();
+"#;
+        for (name, literal) in [
+            ("hide_in_stage_window", "false"),
+            ("custom_label", "\"hi\""),
+            ("custom_rank", "5"),
+        ] {
+            assert_eq!(
+                field(text, "/Root", name),
+                Some(sdf::Value::UnregisteredValue(literal.to_owned())),
+                "{name}"
+            );
+        }
+    }
+
+    /// Nothing types the literal, so nothing normalizes it either: `1.50`
+    /// comes back as it was written, not as `1.5`.
+    #[test]
+    fn unknown_metadata_keeps_spelling() {
+        let text = "#usda 1.0\ndef \"P\" (\n    madeUpField = 1.50\n)\n{\n}\n";
         assert_eq!(
-            spec.get("hide_in_stage_window"),
-            Some(&sdf::Value::Token("false".into()))
+            field(text, "/P", "madeUpField"),
+            Some(sdf::Value::UnregisteredValue("1.50".to_owned()))
         );
-        assert_eq!(spec.get("no_delete"), Some(&sdf::Value::Token("true".into())));
-        assert_eq!(spec.get("custom_label"), Some(&sdf::Value::String("hi".into())));
-        assert_eq!(spec.get("custom_rank"), Some(&sdf::Value::Int64(5)));
+    }
+
+    /// A registered field none of the productions above claims still parses
+    /// into a value; only unregistered ones turn opaque.
+    #[test]
+    fn registered_metadata_stays_typed() {
+        let text = "#usda 1.0\ndef \"P\" (\n    hidden = true\n)\n{\n}\n";
+        assert_eq!(field(text, "/P", "hidden"), Some(sdf::Value::token("true")));
+    }
+
+    /// An operation stores the whole body as one recorded item, brackets
+    /// stripped, since the writer puts them back around it.
+    #[test]
+    fn unknown_metadata_list_ops() {
+        let text = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = [1, 2]\n    delete madeUpList = 3\n)\n{\n}\n";
+        let expected = sdf::ListOp::<String> {
+            prepended_items: vec!["1, 2".to_owned()],
+            deleted_items: vec!["3".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(
+            field(text, "/P", "madeUpList"),
+            Some(sdf::Value::UnregisteredValueListOp(expected))
+        );
+    }
+
+    /// An operation replaces its own items rather than adding to them, so the
+    /// last statement of a kind is the one that stands.
+    #[test]
+    fn repeated_prepend_replaces() {
+        let text = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = [1]\n    prepend madeUpList = [2]\n)\n{\n}\n";
+        let expected = sdf::ListOp::<String> {
+            prepended_items: vec!["2".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(
+            field(text, "/P", "madeUpList"),
+            Some(sdf::Value::UnregisteredValueListOp(expected))
+        );
+    }
+
+    /// An assignment carries no operation keyword, so its list-op status is
+    /// unknown and it replaces whatever was stored.
+    #[test]
+    fn list_op_then_assignment() {
+        let text = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = [1]\n    madeUpList = 2\n)\n{\n}\n";
+        assert_eq!(
+            field(text, "/P", "madeUpList"),
+            Some(sdf::Value::UnregisteredValue("2".to_owned()))
+        );
+    }
+
+    /// The other order drops the operation: only a hand edit writes one
+    /// against a field already holding a plain value, and the first value
+    /// stands.
+    #[test]
+    fn assignment_then_list_op() {
+        let text = "#usda 1.0\ndef \"P\" (\n    madeUpList = 2\n    prepend madeUpList = [1]\n)\n{\n}\n";
+        assert_eq!(
+            field(text, "/P", "madeUpList"),
+            Some(sdf::Value::UnregisteredValue("2".to_owned()))
+        );
+    }
+
+    /// `None` records no items at all, while `[]` records one item holding an
+    /// empty body - two different stored values that spell themselves back.
+    #[test]
+    fn none_vs_empty_list() {
+        let none = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = None\n)\n{\n}\n";
+        assert_eq!(
+            field(none, "/P", "madeUpList"),
+            Some(sdf::Value::UnregisteredValueListOp(sdf::ListOp::default()))
+        );
+
+        let empty = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = []\n)\n{\n}\n";
+        let expected = sdf::ListOp::<String> {
+            prepended_items: vec![String::new()],
+            ..Default::default()
+        };
+        assert_eq!(
+            field(empty, "/P", "madeUpList"),
+            Some(sdf::Value::UnregisteredValueListOp(expected))
+        );
+    }
+
+    /// A dictionary entry names its own type, and nothing in a dictionary can
+    /// hold a literal whose type went unrecorded, so an unknown one is
+    /// refused rather than written back out as something else.
+    #[test]
+    fn dict_entry_type_rejected() {
+        let text = "#usda 1.0\ndef \"P\" (\n    madeUpDict = {\n        myType a = (1, 2)\n    }\n)\n{\n}\n";
+        assert!(parse_error(text).contains("Unrecognized value typename"));
+    }
+
+    /// A dictionary spells the type of every entry, so it survives as one and
+    /// only the field around it is unregistered.
+    #[test]
+    fn unknown_dictionary_wrapped() {
+        let text = "#usda 1.0\ndef \"P\" (\n    madeUpDict = {\n        int a = 1\n    }\n)\n{\n}\n";
+        let entries = field(text, "/P", "madeUpDict")
+            .expect("a value")
+            .try_as_unregistered_dictionary()
+            .expect("a wrapped dictionary");
+        assert_eq!(entries["a"], sdf::Value::Int(1));
+    }
+
+    /// Property metadata follows the same rule as a prim's.
+    #[test]
+    fn unknown_property_metadata() {
+        let text = "#usda 1.0\ndef \"P\" {\n    custom int x = 1 (\n        madeUpField = 2\n    )\n}\n";
+        assert_eq!(
+            field(text, "/P.x", "madeUpField"),
+            Some(sdf::Value::UnregisteredValue("2".to_owned()))
+        );
+    }
+
+    /// So does a layer's.
+    #[test]
+    fn unknown_layer_metadata() {
+        let text = "#usda 1.0\n(\n    madeUpField = 2\n)\n";
+        assert_eq!(
+            field(text, "/", "madeUpField"),
+            Some(sdf::Value::UnregisteredValue("2".to_owned()))
+        );
     }
 
     #[test]

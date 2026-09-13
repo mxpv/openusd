@@ -40,6 +40,7 @@ fn assert_text_format(name: &str) {
     normalize_json(&mut expected_json);
     drop_relationship_variability(&mut actual_json);
     drop_relationship_variability(&mut expected_json);
+    check_unregistered_fields(&mut actual_json, &mut expected_json, name);
     expand_baseline_escapes(&mut expected_json);
 
     let diffs = diff_json::compare_values(&actual_json, &expected_json);
@@ -130,6 +131,51 @@ fn drop_relationship_variability(v: &mut serde_json::Value) {
         let Some(fields) = spec.as_object_mut() else { continue };
         if !fields.contains_key("typeName") && fields.get("variability") == Some(&serde_json::json!("uniform")) {
             fields.remove("variability");
+        }
+    }
+}
+
+/// Metadata fields the two suites represent differently, as
+/// `(file, spec path, field, the JSON we store)`.
+///
+/// Nothing declares these fields, so C++ keeps the text each was authored with
+/// and writes it back unchanged, which is how a layer carries metadata some
+/// other tool understands (`SdfUnregisteredValue`,
+/// `Sdf_TextParserHelpers`). This Python baseline has no such concept and
+/// parses the value like any other, so a quoted string loses its quotes, a
+/// `None` becomes nothing at all, and a list op holds parsed numbers. We
+/// follow C++, and the fourth column is what we store instead, which
+/// [`check_unregistered_fields`] asserts before setting the field aside.
+const UNREGISTERED_FIELDS: &[(&str, &str, &str, &str)] = &[
+    ("layermetadata", "/", "baz", r#""None""#),
+    ("relations", "/foo/otherFoo.everything:in:one", "foo", r#""\"bar\"""#),
+    (
+        "relations",
+        "/foo/otherFoo.everything:in:one",
+        "this_metadata_value",
+        r#"{"prepend": ["5.67"]}"#,
+    ),
+];
+
+/// Check each divergent field against what this implementation stores, then
+/// take it out of both sides so the rest of the spec still compares.
+///
+/// Asserting here is what keeps the cell covered: dropping the field alone
+/// would let a later change stop recording the literal, or record a different
+/// one, without any test noticing.
+fn check_unregistered_fields(actual: &mut serde_json::Value, expected: &mut serde_json::Value, name: &str) {
+    for (_, path, field, ours) in UNREGISTERED_FIELDS.iter().filter(|(file, ..)| *file == name) {
+        let ours: serde_json::Value = serde_json::from_str(ours).expect("valid JSON in the table");
+        let found = actual
+            .get(path)
+            .and_then(|fields| fields.get(field))
+            .unwrap_or_else(|| panic!("{name}: {path} has no {field}"));
+        assert_eq!(found, &ours, "{name}: {path}.{field}");
+
+        for side in [&mut *actual, expected] {
+            if let Some(fields) = side.get_mut(path).and_then(serde_json::Value::as_object_mut) {
+                fields.remove(*field);
+            }
         }
     }
 }

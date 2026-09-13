@@ -1,7 +1,11 @@
+use strum::VariantArray;
+
+use super::ValueTypeName;
+
 /// The following fields are pre-registered by Sdf.
 ///
 /// See <https://github.com/PixarAnimationStudios/OpenUSD/blob/release/pxr/usd/sdf/schema.h#L597>
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, VariantArray)]
 pub enum FieldKey {
     Active,
     AllowedTokens,
@@ -81,6 +85,14 @@ impl AsRef<str> for FieldKey {
 }
 
 impl FieldKey {
+    /// The field `name` denotes, or `None` where this enum does not name it.
+    ///
+    /// A schema may declare fields of its own, so a `None` here does not mean
+    /// the field is unregistered; [`is_registered_field`] answers that.
+    pub fn from_name(name: &str) -> Option<Self> {
+        FieldKey::VARIANTS.iter().copied().find(|key| key.as_str() == name)
+    }
+
     pub const fn as_str(&self) -> &'static str {
         match self {
             FieldKey::Active => "active",
@@ -195,6 +207,83 @@ impl ChildrenKey {
     }
 }
 
+/// The metadata fields the libraries shipped with USD declare, beyond the
+/// core fields [`FieldKey`] names, each with the type its declaration gives
+/// it.
+///
+/// C++ discovers these from the `SdfMetadata` block of every plugin's
+/// `plugInfo.json` and registers them before any layer is read, so a layer
+/// authoring one is authoring a registered field even where nothing has
+/// loaded the library that declares it (`SdfSchemaBase::_AddFieldsFromPlugins`).
+/// That is why this reaches past the families `openusd-schemas` implements,
+/// to `usdImaging` and `execIr`.
+///
+/// TODO: let a schema family register its own fields, so one defined outside
+/// this crate is registered too, and carry the spec types each applies to
+/// (C++ `appliesTo`) so a field can be rejected where it does not belong.
+/// Until then this is the set the families shipped with USD declare.
+const SCHEMA_METADATA: [(&str, &str); 22] = [
+    ("bindMaterialAs", "token"),
+    ("connectability", "token"),
+    ("constraintTargetIdentifier", "token"),
+    ("elementSize", "int"),
+    ("faceIndexPrimvar", "token"),
+    ("faceOffsetPrimvar", "token"),
+    ("inactiveIds", "int64listop"),
+    ("interpolation", "token"),
+    ("irIsInvertible", "bool"),
+    ("irRole", "token"),
+    ("kilogramsPerUnit", "double"),
+    ("metersPerUnit", "double"),
+    ("outputName", "token"),
+    ("payloadAssetDependencies", "asset[]"),
+    ("renderSettingsPrimPath", "string"),
+    ("renderType", "token"),
+    ("sdrMetadata", "dictionary"),
+    ("uiHints", "dictionary"),
+    ("unauthoredValuesIndex", "int"),
+    ("upAxis", "token"),
+    ("uvPrimvar", "token"),
+    ("weight", "float"),
+];
+
+/// Whether some schema declares `name` as a metadata field.
+///
+/// A layer may author any identifier in a metadata block. One this answers
+/// `false` for is unregistered: nothing gives its literal a type, so a reader
+/// carries the text it was written as rather than a value
+/// (C++ `SdfSchemaBase::SpecDefinition::IsValidField`).
+///
+/// Narrower than C++ in one direction, which is the safe one: C++ also
+/// rejects a field that is registered but is not metadata for the spec type
+/// being read, and without a per-spec-type table this treats such a field as
+/// registered rather than misfiling it as opaque.
+// TODO(perf): both halves scan their table, once per metadata field read.
+// The lookup wants a map, or a `match` the compiler can turn into one; neither
+// is worth a third copy of the field names before a profile asks for it.
+pub fn is_registered_field(name: &str) -> bool {
+    FieldKey::from_name(name).is_some() || schema_field_spelling(name).is_some()
+}
+
+/// The type the schema declaring `name` gives that metadata field, or `None`
+/// where no schema declares it.
+///
+/// A spelling the value-type table does not know — `dictionary`, and the
+/// list-op types — comes back as an unregistered [`ValueTypeName`] answering
+/// no [`kind`](ValueTypeName::kind), so a caller that can only act on a type
+/// it recognises skips those without needing a second table.
+pub fn schema_field_type(name: &str) -> Option<ValueTypeName> {
+    schema_field_spelling(name).map(ValueTypeName::from)
+}
+
+/// How the declaring library spells that field's type, without resolving it.
+fn schema_field_spelling(name: &str) -> Option<&'static str> {
+    SCHEMA_METADATA
+        .iter()
+        .find(|(field, _)| *field == name)
+        .map(|(_, ty)| *ty)
+}
+
 /// Whether generic field resolution folds list-op opinions authored for
 /// `field` (spec 12.2.6).
 ///
@@ -224,6 +313,35 @@ pub fn folds_list_ops(field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn field_key_from_name() {
+        for key in FieldKey::VARIANTS {
+            assert_eq!(
+                FieldKey::from_name(key.as_str()).map(|k| k.as_str()),
+                Some(key.as_str())
+            );
+        }
+        assert!(FieldKey::from_name("madeUpField").is_none());
+    }
+
+    #[test]
+    fn registered_fields() {
+        assert!(is_registered_field(FieldKey::DisplayUnit.as_str()));
+        assert!(is_registered_field("interpolation"));
+        assert!(!is_registered_field("hide_in_stage_window"));
+    }
+
+    #[test]
+    fn schema_field_types() {
+        assert_eq!(schema_field_type("interpolation"), Some(ValueTypeName::TOKEN));
+        assert_eq!(schema_field_type("elementSize"), Some(ValueTypeName::INT));
+        // A spelling the type table does not know still names the field.
+        assert!(schema_field_type("sdrMetadata").is_some_and(|ty| ty.kind().is_none()));
+        assert_eq!(schema_field_type("hide_in_stage_window"), None);
+        // Declared by a library outside the families this workspace builds.
+        assert_eq!(schema_field_type("uvPrimvar"), Some(ValueTypeName::TOKEN));
+    }
 
     #[test]
     fn child_key_str() {

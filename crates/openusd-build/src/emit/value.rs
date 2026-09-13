@@ -229,7 +229,8 @@ pub(super) fn value_expr(value: &sdf::Value) -> Result<TokenStream, sdf::ValueKi
         | sdf::Value::TimeSamples(_)
         | sdf::Value::LayerOffsetVec(_)
         | sdf::Value::UnregisteredValue(_)
-        | sdf::Value::UnregisteredValueListOp(_) => return Err(sdf::ValueKind::from(value)),
+        | sdf::Value::UnregisteredValueListOp(_)
+        | sdf::Value::UnregisteredDictionary(_) => return Err(sdf::ValueKind::from(value)),
     })
 }
 

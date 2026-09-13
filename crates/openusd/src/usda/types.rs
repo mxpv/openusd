@@ -37,6 +37,40 @@ pub(super) fn parse_type(cursor: &mut Cursor<'_>) -> Result<Option<sdf::ValueTyp
     Ok(Some(sdf::ValueTypeName::from(format!("{base}[]"))))
 }
 
+/// The source text of one value, consumed without knowing its type.
+///
+/// A value is either one token or a bracketed run of them, so the shape is
+/// followed by depth alone: `[`, `(` and `{` open, their partners close, and
+/// the value ends when the depth returns to zero. A string or an asset
+/// reference is a single token however many brackets it spells, so nothing
+/// inside one is counted. A leading `-` or `+` signs the token after it
+/// (`-inf`), so the two are taken together.
+///
+/// An unbalanced opener runs to the end of the token stream and fails there,
+/// which is the diagnostic a malformed value should give.
+pub(super) fn record_literal<'source>(cursor: &mut Cursor<'source>) -> Result<&'source str, RawError> {
+    let start = cursor.next_offset();
+    let mut depth = 0usize;
+    loop {
+        match cursor.bump()? {
+            Token::Punctuation('[' | '(' | '{') => depth += 1,
+            Token::Punctuation(closing @ (']' | ')' | '}')) => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| RawError::new(format!("Unexpected `{closing}` in a value")))?;
+            }
+            Token::Punctuation('-' | '+') if depth == 0 => {
+                cursor.bump()?;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            break;
+        }
+    }
+    Ok(&cursor.source()[start..cursor.consumed_end()])
+}
+
 /// Decode a value of the declared type `ty`, dispatching on the
 /// [`sdf::ValueKind`] the type table assigns it.
 ///
@@ -49,11 +83,12 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> R
         return Ok(sdf::Value::ValueBlock);
     }
 
-    // TODO: record the literal of an unregistered type's value as
-    // `sdf::Value::UnregisteredValue` (C++ `SdfUnregisteredValue`), which the
-    // writer would then emit verbatim; the writer quotes that variant today.
+    // A type the table does not know has no shape to read the literal by, so
+    // the literal itself is what is kept (C++ `Sdf_ParserValueContext::
+    // ProduceValue` records the string when the type name is not valid). The
+    // writer emits it back as it came in.
     let Some(kind) = ty.kind() else {
-        bail!("Cannot parse a value for unregistered type `{ty}`");
+        return Ok(sdf::Value::UnregisteredValue(record_literal(cursor)?.to_owned()));
     };
     ensure!(kind != sdf::ValueKind::Opaque, "`{ty}` attributes cannot have a value");
     check_shape(cursor, ty)?;
@@ -234,7 +269,7 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value,
 
     // Handle dictionary case by peeking, so parse_dictionary can consume the '{'
     if cursor.at_punctuation('{')? {
-        return parse_dictionary(cursor);
+        return Ok(sdf::Value::Dictionary(parse_dictionary(cursor)?));
     }
 
     let token = cursor.bump()?;
@@ -257,7 +292,7 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value,
 }
 
 /// Parse a dictionary value from `{` to `}`.
-pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawError> {
+pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<HashMap<String, sdf::Value>, RawError> {
     let mut dict = HashMap::new();
 
     parse_block(cursor, '{', '}', |c| {
@@ -280,8 +315,13 @@ pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value, Ra
         c.expect_punctuation('=')?;
 
         let value = if nested {
-            parse_dictionary(c)?
+            sdf::Value::Dictionary(parse_dictionary(c)?)
         } else if let Some(ty) = type_hint {
+            // An entry spells its own type, and a dictionary keeps no room to
+            // record one alongside a literal, so an unregistered spelling
+            // could not be written back out. Upstream refuses it here for the
+            // same reason (`Unrecognized value typename ... for dictionary`).
+            ensure!(ty.is_registered(), "Unrecognized value typename `{ty}` for dictionary");
             parse_value(c, &ty)?
         } else {
             parse_untyped_value(c)?
@@ -290,7 +330,7 @@ pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<sdf::Value, Ra
         Ok(())
     })?;
 
-    Ok(sdf::Value::Dictionary(dict))
+    Ok(dict)
 }
 
 /// Parse a time sample map: `{ time : value, time : value, ... }`.
@@ -395,9 +435,7 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                 while c.eat_punctuation(';')? {
                     if c.at_punctuation('{')? {
                         // Per-knot custom data
-                        let sdf::Value::Dictionary(dict) = parse_dictionary(c)? else {
-                            unreachable!();
-                        };
+                        let dict = parse_dictionary(c)?;
                         let time_key = if time.fract() == 0.0 && time.is_finite() {
                             format!("{}", time as i64)
                         } else {
@@ -641,10 +679,7 @@ fn parse_reference_layer_offset(
                 layer_offset.scale = value.try_as_double().context("Expected double for scale")?;
             }
             Token::CustomData => {
-                let sdf::Value::Dictionary(dict) = parse_dictionary(c)? else {
-                    unreachable!("parse_dictionary always returns Dictionary");
-                };
-                custom_data = dict;
+                custom_data = parse_dictionary(c)?;
             }
             unexpected => bail!("Unexpected token in layer offset: {unexpected:?}"),
         }
@@ -924,7 +959,7 @@ mod tests {
         assert!(matches!(cursor.peek().unwrap(), Some(Token::Dictionary)));
 
         let mut cursor = Cursor::new("{ dictionary sub = { int a = 1 }, string s = \"x\" }");
-        let dict = parse_dictionary(&mut cursor).unwrap().try_as_dictionary().unwrap();
+        let dict = parse_dictionary(&mut cursor).unwrap();
         let sub = dict["sub"].clone().try_as_dictionary().unwrap();
         assert_eq!(sub["a"], sdf::Value::Int(1));
         assert_eq!(dict["s"], sdf::Value::String("x".into()));
