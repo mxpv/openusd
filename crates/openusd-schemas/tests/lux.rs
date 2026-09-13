@@ -265,10 +265,10 @@ fn token_round_trips() {
     assert_eq!(TextureFormat::from_token("angular"), Some(TextureFormat::Angular));
     assert_eq!(TextureFormat::from_token("bogus"), None);
 
-    assert_eq!(
-        LightListCacheBehavior::default(),
-        LightListCacheBehavior::ConsumeAndContinue
-    );
+    // The schema documents `ignore` as the fallback without declaring one, and
+    // C++ `UsdLuxLightListAPI::_Traverse` consults the cache only for the two
+    // consuming values, so everything else traverses.
+    assert_eq!(LightListCacheBehavior::default(), LightListCacheBehavior::Ignore);
     assert_eq!(
         LightListCacheBehavior::from_token("ignore"),
         Some(LightListCacheBehavior::Ignore)

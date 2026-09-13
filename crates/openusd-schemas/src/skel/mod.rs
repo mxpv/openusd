@@ -72,39 +72,6 @@ pub use skeleton_query::SkeletonResolver;
 pub use skinning_query::SkinningResolver;
 pub use topology::{NO_PARENT, Topology, TopologyError};
 
-use openusd::tf;
-
-use tokens::*;
-
-/// `primvars:skel:skinningMethod` token values on [`BindingAPI`]. The
-/// default when unauthored is [`SkinningMethod::ClassicLinear`] — standard
-/// linear blend skinning. [`SkinningMethod::DualQuaternion`] is the only other
-/// Pixar-defined value; consumers without DQ support typically fall back to
-/// classic LBS.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SkinningMethod {
-    #[default]
-    ClassicLinear,
-    DualQuaternion,
-}
-
-impl SkinningMethod {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            SkinningMethod::ClassicLinear => CLASSIC_LINEAR,
-            SkinningMethod::DualQuaternion => DUAL_QUATERNION,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            CLASSIC_LINEAR => SkinningMethod::ClassicLinear,
-            DUAL_QUATERNION => SkinningMethod::DualQuaternion,
-            _ => return None,
-        })
-    }
-}
-
 /// Authored `interpolation` on the joint-influence primvars. `Constant`
 /// encodes rigid skinning (one set of weights for the whole prim); `Vertex` is
 /// per-point weights — the unauthored default and the only interpolation that
@@ -124,8 +91,8 @@ impl InfluenceInterpolation {
         }
     }
 
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
+    pub fn from_token(token: impl AsRef<str>) -> Option<Self> {
+        Some(match token.as_ref() {
             crate::geom::tokens::CONSTANT => InfluenceInterpolation::Constant,
             crate::geom::tokens::VERTEX => InfluenceInterpolation::Vertex,
             _ => return None,
@@ -135,4 +102,4 @@ impl InfluenceInterpolation {
 
 // `From`/`TryFrom<Value>` for the token-valued enums, so they pass straight to
 // `Attribute::set` / `get::<Enum>()` and the primvar-metadata accessors.
-crate::token_value::impl_token_value!(SkinningMethod, InfluenceInterpolation);
+openusd::sdf::impl_token_value!(InfluenceInterpolation);

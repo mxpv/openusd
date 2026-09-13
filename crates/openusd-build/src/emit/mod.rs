@@ -23,7 +23,7 @@ use proc_macro2::{Ident, Span, TokenStream};
 use crate::Views;
 use crate::decl;
 use crate::model::Library;
-use crate::{Externs, error::Error};
+use crate::{Externs, TokenEnum, error::Error};
 
 /// One library's generated file, `schema` naming what it came from.
 ///
@@ -33,10 +33,16 @@ use crate::{Externs, error::Error};
 /// [`Builder::schema_data`](crate::Builder::schema_data). The data is not
 /// optional either way: it is what a registry is built from, so a file without
 /// it would leave the schemas unregisterable.
-pub fn emit(model: &Library, externs: &Externs, schema: &str, views: Views) -> Result<String, Error> {
+pub fn emit(
+    model: &Library,
+    externs: &Externs,
+    schema: &str,
+    views: Views,
+    enums: &[TokenEnum],
+) -> Result<String, Error> {
     let lowered = match views {
-        Views::Generate => lower::library(model, externs)?,
-        Views::Skip => lower::tokens(model)?,
+        Views::Generate => lower::library(model, externs, enums)?,
+        Views::Skip => lower::tokens(model, enums)?,
     };
     let declarations = decl::with_family(model, family::declarations)?;
     render(emitter::library(&lowered, &declarations), schema)
@@ -107,6 +113,7 @@ mod tests {
     use crate::error::Error;
     use crate::tests::read_source;
     use crate::validate::Violation;
+    use crate::{TokenEnum, TokenEnumError};
 
     /// A library covering the kinds that emit differently.
     const KINDS: &str = r#"#usda 1.0
@@ -272,7 +279,7 @@ class Box "Box" (
     fn emitted(source: &str) -> String {
         let dir = tempfile::tempdir().expect("tempdir");
         let model = read_source(dir.path(), source).expect("resolves");
-        emit(&model, &Externs::new(), "schema.usda", Views::Generate).expect("emits")
+        emit(&model, &Externs::new(), "schema.usda", Views::Generate, &[]).expect("emits")
     }
 
     /// The kinds fixture, emitted once for the tests that read it.
@@ -303,7 +310,7 @@ class Box "Box" (
                 .read(&dir.join("schema.usda"))
                 .map(|(library, _)| library)
                 .expect("the values fixture resolves");
-            emit(&library, &Externs::new(), "schema.usda", Views::Generate).expect("emits")
+            emit(&library, &Externs::new(), "schema.usda", Views::Generate, &[]).expect("emits")
         });
         &ONCE
     }
@@ -488,6 +495,184 @@ class Box "Box" (
         );
     }
 
+    /// A library whose token properties an enum can be sourced from.
+    const TOKEN_ENUMS: &str = r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testTokenEnums"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Held" (
+    inherits = </Typed>
+) {
+    uniform token mode = "a" (
+        allowedTokens = ["a", "b"]
+        doc = "Which way it runs."
+    )
+
+    uniform token axis = "X" (
+        allowedTokens = ["X", "Y", "Z"]
+    )
+
+    uniform token style (
+        allowedTokens = ["", "plain"]
+    )
+
+    uniform token phase (
+        allowedTokens = ["start", "end"]
+    )
+
+    uniform token outcome = "ok" (
+        allowedTokens = ["ok", "error"]
+    )
+
+    double radius = 1
+}
+"#;
+
+    /// Generates the library above with `enums` configured, or says why it
+    /// would not.
+    fn with_enums(enums: Vec<TokenEnum>) -> Result<String, Error> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = read_source(dir.path(), TOKEN_ENUMS).expect("the schema reads");
+        emit(&model, &Externs::new(), "schema.usda", Views::Generate, &enums)
+    }
+
+    /// What a configured enum generates: a variant per allowed token, defined
+    /// in terms of the constants rather than repeating their strings.
+    #[test]
+    fn token_enum_over_allowed_tokens() {
+        let text = with_enums(vec![TokenEnum::new("Mode", "testTokenEnums", "Held.mode")]).expect("generates");
+
+        assert!(text.contains("pub enum Mode {"), "{text}");
+        assert!(text.contains("A,"), "{text}");
+        assert!(text.contains("B,"), "{text}");
+        assert!(text.contains("Self::A => tokens::A"), "{text}");
+        assert!(
+            text.contains("tokens::A => ::std::option::Option::Some(Self::A)"),
+            "{text}"
+        );
+        // Nothing is derived for the other token properties, which no
+        // configuration named.
+        assert!(!text.contains("pub enum Axis"), "{text}");
+        assert!(!text.contains("pub enum Style"), "{text}");
+    }
+
+    /// A token set carries no default, so one is generated only where the
+    /// configuration asked for the source property's fallback.
+    #[test]
+    fn default_is_opt_in() {
+        let plain = with_enums(vec![TokenEnum::new("Mode", "testTokenEnums", "Held.mode")]).expect("generates");
+        assert!(!plain.contains("::std::default::Default"), "{plain}");
+        assert!(!plain.contains("#[default]"), "{plain}");
+
+        let defaulted = with_enums(vec![
+            TokenEnum::new("Mode", "testTokenEnums", "Held.mode").with_default(),
+        ])
+        .expect("generates");
+        assert!(defaulted.contains("::std::default::Default"), "{defaulted}");
+        assert!(defaulted.contains("#[default]"), "{defaulted}");
+    }
+
+    /// Asking for a default from a property that declares no fallback stops
+    /// generation rather than inventing one.
+    #[test]
+    fn default_without_fallback_rejected() {
+        let error = with_enums(vec![
+            TokenEnum::new("Phase", "testTokenEnums", "Held.phase").with_default(),
+        ])
+        .expect_err("phase declares no fallback");
+
+        assert!(
+            matches!(
+                error,
+                Error::TokenEnum {
+                    cause: TokenEnumError::NoFallback { .. },
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    /// A token Rust has no name for is named by the caller or not at all.
+    #[test]
+    fn unnameable_token_rejected() {
+        let error =
+            with_enums(vec![TokenEnum::new("Style", "testTokenEnums", "Held.style")]).expect_err("`\"\"` has no name");
+        assert!(
+            matches!(
+                error,
+                Error::TokenEnum {
+                    cause: TokenEnumError::UnnameableToken { .. },
+                    ..
+                }
+            ),
+            "{error}"
+        );
+
+        let text = with_enums(vec![
+            TokenEnum::new("Style", "testTokenEnums", "Held.style").variant("", "Unset"),
+        ])
+        .expect("generates with the name the caller gave");
+        assert!(text.contains("Unset"), "{text}");
+    }
+
+    /// Reading and authoring an enum as a value is the core's own macro, so an
+    /// enum written here and one written by hand convert alike. What the macro
+    /// expands to is `openusd`'s to test, including the token spelled `error`
+    /// that gives an enum an `Error` variant.
+    #[test]
+    fn conversions_come_from_the_core() {
+        let text = with_enums(vec![TokenEnum::new("Outcome", "testTokenEnums", "Held.outcome")]).expect("generates");
+
+        assert!(text.contains("Error,"), "the token is still a variant: {text}");
+        assert!(text.contains("::openusd::sdf::impl_token_value!(Outcome);"), "{text}");
+        assert!(!text.contains("impl ::std::convert::TryFrom"), "{text}");
+    }
+
+    /// The generated file declares a token module, a library name and a
+    /// declaration table of its own, so an enum may not take one of those
+    /// names: the file would carry two items under it, and the consumer's
+    /// build would be the first to say so.
+    #[test]
+    fn reserved_name_rejected() {
+        for name in items::ALL {
+            let error = with_enums(vec![TokenEnum::new(name, "testTokenEnums", "Held.mode")]).expect_err(name);
+            assert!(
+                matches!(
+                    error,
+                    Error::TokenEnum {
+                        cause: TokenEnumError::ReservedName,
+                        ..
+                    }
+                ),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    /// Configuration that names nothing the schema declares stops generation,
+    /// saying which part of it could not be found.
+    #[test]
+    fn unknown_source_rejected() {
+        for (source, expected) in [
+            ("Nope.mode", "class `Nope`"),
+            ("Held.nope", "`Held.nope`"),
+            ("Held.radius", "allowedTokens"),
+            ("Held", "Class.property"),
+        ] {
+            let error = with_enums(vec![TokenEnum::new("Mode", "testTokenEnums", source)]).expect_err(source);
+            assert!(error.to_string().contains(expected), "{source}: {error}");
+        }
+    }
+
     /// An empty `apiName` asks for no accessor, so none is written.
     #[test]
     fn suppressed_has_none() {
@@ -540,7 +725,7 @@ class "Typed" {}
         )
         .expect("the library itself is well formed");
 
-        let text = emit(&library, &Externs::new(), "schema.usda", Views::Generate).expect("both are named");
+        let text = emit(&library, &Externs::new(), "schema.usda", Views::Generate, &[]).expect("both are named");
         // `draw_mode` sorts before `drawMode`, so it is the one that keeps the
         // name; both say which string they hold.
         assert!(text.contains("pub const DRAW_MODE: &str = \"b\";"), "{text}");
@@ -584,7 +769,7 @@ class "Held" (
         )
         .expect("the library itself is well formed");
 
-        match emit(&library, &Externs::new(), "schema.usda", Views::Generate) {
+        match emit(&library, &Externs::new(), "schema.usda", Views::Generate, &[]) {
             Err(Error::Definition {
                 violation: Violation::MethodCollision { method, .. },
                 ..
@@ -624,7 +809,7 @@ class "Held" (
         )
         .expect("the library itself is well formed");
 
-        match emit(&library, &Externs::new(), "schema.usda", Views::Generate) {
+        match emit(&library, &Externs::new(), "schema.usda", Views::Generate, &[]) {
             Err(Error::Definition {
                 violation: Violation::NotAnIdentifier { name },
                 ..
@@ -762,7 +947,7 @@ class Crate "Crate" (
         let model = inheriting(dir.path());
         let externs = Externs::from([("testElsewhere".to_owned(), "not a path!".to_owned())]);
 
-        match emit(&model, &externs, "schema.usda", Views::Generate) {
+        match emit(&model, &externs, "schema.usda", Views::Generate, &[]) {
             Err(Error::Definition {
                 violation: Violation::UnreadableLibraryPath { library, path },
                 ..
@@ -781,7 +966,7 @@ class Crate "Crate" (
         let dir = tempfile::tempdir().expect("tempdir");
         let model = inheriting(dir.path());
 
-        match emit(&model, &Externs::new(), "schema.usda", Views::Generate) {
+        match emit(&model, &Externs::new(), "schema.usda", Views::Generate, &[]) {
             Err(Error::Definition {
                 violation: Violation::UnknownLibrary { library, .. },
                 ..
@@ -799,7 +984,7 @@ class Crate "Crate" (
         let model = read_source(dir.path(), KINDS).expect("resolves");
         let externs = Externs::from([("testElsewhere".to_owned(), "not a path!".to_owned())]);
 
-        emit(&model, &externs, "schema.usda", Views::Generate).expect("emits");
+        emit(&model, &externs, "schema.usda", Views::Generate, &[]).expect("emits");
     }
 
     /// The generated file takes three names of its own, and a class that asks
@@ -832,7 +1017,7 @@ class "Held" (
         )
         .expect("the library itself is well formed");
 
-        match emit(&library, &Externs::new(), "schema.usda", Views::Generate) {
+        match emit(&library, &Externs::new(), "schema.usda", Views::Generate, &[]) {
             Err(Error::Definition {
                 violation: Violation::RustNameCollision { name, .. },
                 ..
@@ -869,7 +1054,7 @@ class "Held" (
         )
         .expect("the type is one a stage resolves");
 
-        match emit(&library, &Externs::new(), "schema.usda", Views::Generate) {
+        match emit(&library, &Externs::new(), "schema.usda", Views::Generate, &[]) {
             Err(Error::Definition {
                 violation: Violation::UnnameableType { property, .. },
                 ..
@@ -916,7 +1101,7 @@ class "Deeper" (
         )
         .expect("the library itself is well formed");
 
-        match emit(&library, &Externs::new(), "schema.usda", Views::Generate) {
+        match emit(&library, &Externs::new(), "schema.usda", Views::Generate, &[]) {
             Err(Error::Definition {
                 violation: Violation::CustomGetWithoutAccessor { property },
                 ..

@@ -56,7 +56,7 @@ mod model;
 mod names;
 mod types;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -70,7 +70,7 @@ use crate::model::Library;
 /// views are reachable at.
 pub(crate) type Externs = BTreeMap<String, String>;
 
-pub use error::Error;
+pub use error::{Error, TokenEnumError};
 pub use validate::Violation;
 
 /// What generating one schema library produced.
@@ -146,6 +146,95 @@ pub enum Views {
     Skip,
 }
 
+/// A Rust enum over one token attribute's `allowedTokens`.
+///
+/// Generation is opt-in and explicit, because a token set is not an identity:
+/// two properties can admit the same tokens and mean different things, and two
+/// properties meaning the same thing can declare different fallbacks. So the
+/// enum is named here and sourced from the one property that defines it.
+/// Nothing else is associated with it — a property admitting the same tokens is
+/// free to use it or not, and the generated accessors are unchanged either
+/// way.
+///
+/// ```no_run
+/// # fn main() -> Result<(), openusd_build::Error> {
+/// use openusd_build::TokenEnum;
+///
+/// openusd_build::configure()
+///     .schema("schemas/usdGeom/schema.usda")
+///     .token_enum(TokenEnum::new("Purpose", "usdGeom", "Imageable.purpose").with_default())
+///     .generate()?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct TokenEnum {
+    /// The Rust type to generate.
+    pub(crate) name: String,
+    /// The `libraryName` of the schema declaring the source property.
+    pub(crate) library: String,
+    /// `Class.property`, naming the declaration the variants come from.
+    source: String,
+    /// Whether to derive `Default` from the source property's fallback.
+    pub(crate) default: bool,
+    /// Variant names the caller spelled, by the token each stands for.
+    pub(crate) variants: BTreeMap<String, String>,
+}
+
+impl TokenEnum {
+    /// An enum called `name` over the `allowedTokens` of `source`, a property
+    /// of `library` named `Class.property`.
+    ///
+    /// `Class` is the schema's registered identifier, as the class prim spells
+    /// it, not the Rust name its `className` may ask for.
+    pub fn new(name: impl Into<String>, library: impl Into<String>, source: impl Into<String>) -> Self {
+        TokenEnum {
+            name: name.into(),
+            library: library.into(),
+            source: source.into(),
+            default: false,
+            variants: BTreeMap::new(),
+        }
+    }
+
+    /// Derives `Default` from the source property's fallback.
+    ///
+    /// Off unless asked for: a token set carries no default of its own, and the
+    /// corpus shows why — `guideVisibility` falls back to `invisible` where
+    /// `proxyVisibility` and `renderVisibility` fall back to `inherited`, all
+    /// three admitting the same tokens. So the default is the source
+    /// property's, said explicitly, and a source with no token fallback is an
+    /// error rather than a guess.
+    #[must_use]
+    pub fn with_default(mut self) -> Self {
+        self.default = true;
+        self
+    }
+
+    /// Spells the variant for `token` rather than casing it.
+    ///
+    /// For a token Rust has no name for — an empty spelling, one opening with a
+    /// digit — and for two tokens that would otherwise reach one name. Naming a
+    /// token the source property does not admit is an error, so an override
+    /// cannot quietly do nothing.
+    #[must_use]
+    pub fn variant(mut self, token: impl Into<String>, variant: impl Into<String>) -> Self {
+        self.variants.insert(token.into(), variant.into());
+        self
+    }
+
+    /// The class and property its variants come from, or the spelling that is
+    /// neither.
+    pub(crate) fn source(&self) -> Result<(&str, &str), TokenEnumError> {
+        self.source
+            .split_once('.')
+            .filter(|(class, property)| !class.is_empty() && !property.is_empty())
+            .ok_or_else(|| TokenEnumError::MalformedSource {
+                spelling: self.source.clone(),
+            })
+    }
+}
+
 /// Starts describing what to generate. See [`Builder`].
 pub fn configure() -> Builder {
     Builder {
@@ -153,6 +242,7 @@ pub fn configure() -> Builder {
         search_paths: Vec::new(),
         extern_libraries: BTreeMap::new(),
         schemas: Vec::new(),
+        token_enums: Vec::new(),
     }
 }
 
@@ -167,6 +257,8 @@ pub struct Builder {
     extern_libraries: Externs,
     /// Each schema to generate, and whether its views are wanted with it.
     schemas: Vec<(PathBuf, Views)>,
+    /// The enums to generate over token properties, in the order declared.
+    token_enums: Vec<TokenEnum>,
 }
 
 impl Builder {
@@ -232,6 +324,23 @@ impl Builder {
         self
     }
 
+    /// Adds a Rust enum over a token property's `allowedTokens`. Repeatable.
+    ///
+    /// See [`TokenEnum`] for what it takes and why it is named rather than
+    /// derived. The enum joins the generated file of the library its source
+    /// property belongs to, beside that library's token constants; a library no
+    /// configured enum names generates exactly what it did before.
+    ///
+    /// An enum whose library this run does not build generates nothing, so one
+    /// list of enums describes families that are each behind their own
+    /// feature. Naming a library this build neither generates nor declares
+    /// with [`extern_library`](Self::extern_library) is an error.
+    #[must_use]
+    pub fn token_enum(mut self, declared: TokenEnum) -> Self {
+        self.token_enums.push(declared);
+        self
+    }
+
     /// Generates every configured library.
     ///
     /// Configuring no schemas is not an error and writes nothing: a consumer
@@ -282,6 +391,28 @@ impl Builder {
             .map(|(schema, views)| self.build(schema, *views))
             .collect::<Result<Vec<_>, Error>>()?;
 
+        // A library this run builds, or one declared so a view can name it: an
+        // enum naming anything else matches nothing, ever. A family behind
+        // a feature that is off is still declared, so this does not catch
+        // one that is simply switched off.
+        let known: BTreeSet<&str> = outputs
+            .iter()
+            .map(Output::library_name)
+            .chain(self.extern_libraries.keys().map(String::as_str))
+            .collect();
+        if let Some(declared) = self
+            .token_enums
+            .iter()
+            .find(|declared| !known.contains(declared.library.as_str()))
+        {
+            return Err(Error::TokenEnum {
+                name: declared.name.clone(),
+                cause: TokenEnumError::UnknownLibrary {
+                    library: declared.library.clone(),
+                },
+            });
+        }
+
         for output in &outputs {
             for warning in &output.warnings {
                 println!("cargo:warning={warning}");
@@ -324,7 +455,13 @@ impl Builder {
             true => Views::Skip,
             false => views,
         };
-        let rust = emit::emit(&library, &self.extern_libraries, &named.to_string_lossy(), views)?;
+        let rust = emit::emit(
+            &library,
+            &self.extern_libraries,
+            &named.to_string_lossy(),
+            views,
+            &self.token_enums,
+        )?;
 
         Ok(Output {
             rust,

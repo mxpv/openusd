@@ -27,9 +27,12 @@ mod path_table;
 pub mod schema;
 pub mod sink;
 mod spec;
+mod token_value;
 mod value;
 mod value_type;
 
+#[doc(inline)]
+pub use crate::impl_token_value;
 pub use asset_path::AssetPath;
 pub(crate) use asset_path::{
     AssetExpressionFailure, AssetOutcome, evaluate_asset_paths, holds_asset_expression, resolve_asset_paths,

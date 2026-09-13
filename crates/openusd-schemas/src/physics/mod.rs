@@ -55,7 +55,6 @@
 
 openusd::include_schema!("usdPhysics");
 
-use openusd::tf;
 use tokens::*;
 
 /// The physics-specific material binding, which is `material:binding` under
@@ -70,101 +69,6 @@ pub const DRIVE_SUB_TARGET_VELOCITY: &str = "targetVelocity";
 pub const DRIVE_SUB_DAMPING: &str = "damping";
 pub const DRIVE_SUB_STIFFNESS: &str = "stiffness";
 pub const DRIVE_SUB_MAX_FORCE: &str = "maxForce";
-
-/// The axis a single-axis joint acts about (`physics:axis` on revolute /
-/// prismatic / spherical joints). Pixar's spec default is [`JointAxis::X`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum JointAxis {
-    #[default]
-    X,
-    Y,
-    Z,
-}
-
-impl JointAxis {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            JointAxis::X => X,
-            JointAxis::Y => Y,
-            JointAxis::Z => Z,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            X => JointAxis::X,
-            Y => JointAxis::Y,
-            Z => JointAxis::Z,
-            _ => return None,
-        })
-    }
-}
-
-/// `drive:<dof>:physics:type` token values — whether a drive applies a force or
-/// a mass-independent acceleration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DriveType {
-    #[default]
-    Force,
-    Acceleration,
-}
-
-impl DriveType {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            DriveType::Force => FORCE,
-            DriveType::Acceleration => ACCELERATION,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            FORCE => DriveType::Force,
-            ACCELERATION => DriveType::Acceleration,
-            _ => return None,
-        })
-    }
-}
-
-/// `physics:approximation` token values on [`MeshCollisionAPI`] — how a mesh's
-/// collision shape is approximated for the simulator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CollisionApprox {
-    /// Default — engine-specific fallback (a convex hull for dynamic bodies, a
-    /// trimesh for static ones).
-    #[default]
-    None,
-    ConvexHull,
-    ConvexDecomposition,
-    BoundingSphere,
-    BoundingCube,
-    MeshSimplification,
-}
-
-impl CollisionApprox {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            CollisionApprox::None => NONE,
-            CollisionApprox::ConvexHull => CONVEX_HULL,
-            CollisionApprox::ConvexDecomposition => CONVEX_DECOMPOSITION,
-            CollisionApprox::BoundingSphere => BOUNDING_SPHERE,
-            CollisionApprox::BoundingCube => BOUNDING_CUBE,
-            CollisionApprox::MeshSimplification => MESH_SIMPLIFICATION,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            NONE => CollisionApprox::None,
-            CONVEX_HULL => CollisionApprox::ConvexHull,
-            CONVEX_DECOMPOSITION => CollisionApprox::ConvexDecomposition,
-            BOUNDING_SPHERE => CollisionApprox::BoundingSphere,
-            BOUNDING_CUBE => CollisionApprox::BoundingCube,
-            MESH_SIMPLIFICATION => CollisionApprox::MeshSimplification,
-            _ => return None,
-        })
-    }
-}
 
 /// A joint degree of freedom, used as the multi-apply instance name on
 /// [`DriveAPI`] / [`LimitAPI`] (`transX`..`rotZ` for generic joints; `linear` /
@@ -200,8 +104,8 @@ impl Dof {
         }
     }
 
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
+    pub fn from_token(token: impl AsRef<str>) -> Option<Self> {
+        Some(match token.as_ref() {
             TRANS_X => Dof::TransX,
             TRANS_Y => Dof::TransY,
             TRANS_Z => Dof::TransZ,
@@ -215,7 +119,3 @@ impl Dof {
         })
     }
 }
-
-// `From`/`TryFrom<Value>` for the token-valued enums, so they pass straight to
-// `Attribute::set` / `get::<Enum>()`.
-crate::token_value::impl_token_value!(JointAxis, DriveType, CollisionApprox);

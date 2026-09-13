@@ -20,7 +20,7 @@ use quote::quote;
 
 use crate::model::{API_SCHEMA_BASE, Base, Class, Library, Property, TYPED, is_root};
 use crate::validate::Violation;
-use crate::{Externs, doc, error::Error, names, types};
+use crate::{Externs, TokenEnum, doc, error::Error, error::TokenEnumError, names, types};
 
 /// A whole library, ready to render.
 pub struct RustLibrary {
@@ -28,8 +28,34 @@ pub struct RustLibrary {
     pub library: String,
     /// The token constants, in the order they are declared.
     pub tokens: Vec<Constant>,
+    /// The enums over token properties the configuration asked for, in the
+    /// order it declared them.
+    pub enums: Vec<RustEnum>,
     /// The schemas, in the order the root layer declares them.
     pub classes: Vec<RustClass>,
+}
+
+/// One enum over a token property's `allowedTokens`.
+pub struct RustEnum {
+    /// The type's name, as the configuration spelled it.
+    pub name: Ident,
+    /// What it is, and where its values came from.
+    pub documentation: String,
+    /// Its values, in the order the source property lists them.
+    pub variants: Vec<RustVariant>,
+    /// The variant `Default` returns, where one was asked for.
+    pub default: Option<Ident>,
+}
+
+/// One value a token enum admits.
+pub struct RustVariant {
+    /// The variant's name.
+    pub name: Ident,
+    /// The `tokens::` constant holding the value, or the value itself where the
+    /// library minted no constant for it.
+    pub constant: TokenStream,
+    /// The token it stands for, for its documentation.
+    pub value: String,
 }
 
 /// One token constant.
@@ -247,28 +273,30 @@ impl<'a> ClassNames<'a> {
 }
 
 /// Lowers a library to Rust, resolving every name it will mint.
-pub fn library(model: &Library, externs: &Externs) -> Result<RustLibrary, Error> {
-    let mut lowered = tokens(model)?;
-    let by_value: BTreeMap<&str, &Ident> = lowered
-        .tokens
-        .iter()
-        .map(|constant| (constant.value.as_str(), &constant.name))
-        .collect();
+pub fn library(model: &Library, externs: &Externs, enums: &[TokenEnum]) -> Result<RustLibrary, Error> {
+    let tokens = constants(model)?;
+    let by_value = by_value(&tokens);
+    let enums = lower_enums(model, enums, &by_value)?;
 
     // Every name the library mints, settled before anything is checked or
     // lowered against it, and one symbol table built from it.
     let inventory = inventory(model);
-    check_class_names(&inventory)?;
+    check_class_names(&inventory, &enums)?;
     let externs = extern_paths(model, externs)?;
     let library = library_symbols(&inventory);
-    lowered.classes = model
+    let classes = model
         .classes
         .iter()
         .filter(|class| !is_root(&class.identifier))
         .map(|class| lower_class(class, model, &externs, &by_value, &inventory, &library))
         .collect::<Result<_, _>>()?;
 
-    Ok(lowered)
+    Ok(RustLibrary {
+        library: model.name.clone(),
+        tokens,
+        enums,
+        classes,
+    })
 }
 
 /// The tokens alone, for a library that gets no views.
@@ -277,12 +305,194 @@ pub fn library(model: &Library, externs: &Externs) -> Result<RustLibrary, Error>
 /// different rules: what a Rust name would collide with, or which type has no
 /// constant to declare it, says nothing about a library whose API is written by
 /// hand. Asking for one or the other says which set applies.
-pub fn tokens(model: &Library) -> Result<RustLibrary, Error> {
+pub fn tokens(model: &Library, enums: &[TokenEnum]) -> Result<RustLibrary, Error> {
+    let tokens = constants(model)?;
+    let enums = lower_enums(model, enums, &by_value(&tokens))?;
     Ok(RustLibrary {
         library: model.name.clone(),
-        tokens: constants(model)?,
+        tokens,
+        enums,
         classes: Vec::new(),
     })
+}
+
+/// The constant each token value is emitted as, which is how a lowered value
+/// names the constant that holds it.
+fn by_value(tokens: &[Constant]) -> BTreeMap<&str, &Ident> {
+    tokens
+        .iter()
+        .map(|constant| (constant.value.as_str(), &constant.name))
+        .collect()
+}
+
+/// The enums the configuration asked this library for, each resolved against
+/// the property it named.
+///
+/// An enum exists because the configuration named one, and its variants come
+/// from the single property that configuration pointed at.
+fn lower_enums(
+    model: &Library,
+    enums: &[TokenEnum],
+    by_value: &BTreeMap<&str, &Ident>,
+) -> Result<Vec<RustEnum>, Error> {
+    let mut minted: BTreeSet<&str> = BTreeSet::new();
+    let mut lowered = Vec::new();
+
+    for declared in enums.iter().filter(|declared| declared.library == model.name) {
+        let name = declared.name.as_str();
+        // What the configuration alone decides is settled here, where the name
+        // it chose is in hand; what the schema decides is resolved below.
+        let resolved = if !names::is_rust_identifier(name) {
+            Err(TokenEnumError::InvalidName)
+        } else if super::items::ALL.contains(&name) {
+            Err(TokenEnumError::ReservedName)
+        } else if !minted.insert(name) {
+            Err(TokenEnumError::Duplicate)
+        } else {
+            lower_enum(model, declared, by_value)
+        };
+        lowered.push(resolved.map_err(|cause| Error::TokenEnum {
+            name: name.to_owned(),
+            cause,
+        })?);
+    }
+    Ok(lowered)
+}
+
+/// One configured enum, resolved against the property it sources.
+fn lower_enum(
+    model: &Library,
+    declared: &TokenEnum,
+    by_value: &BTreeMap<&str, &Ident>,
+) -> Result<RustEnum, TokenEnumError> {
+    let (class_name, property_name) = declared.source()?;
+    let class = model
+        .classes
+        .iter()
+        .find(|class| class.identifier.as_str() == class_name)
+        .ok_or_else(|| TokenEnumError::UnknownClass {
+            class: class_name.to_owned(),
+        })?;
+    let property = class
+        .properties
+        .iter()
+        .find(|property| property.name.as_str() == property_name)
+        .ok_or_else(|| TokenEnumError::UnknownProperty {
+            class: class_name.to_owned(),
+            property: property_name.to_owned(),
+        })?;
+
+    let allowed = property.allowed_tokens();
+    if allowed.is_empty() {
+        return Err(TokenEnumError::NoAllowedTokens {
+            class: class_name.to_owned(),
+            property: property_name.to_owned(),
+        });
+    }
+
+    // An override for a token the property does not admit would read as a
+    // decision and do nothing, so it is a mistake rather than dead
+    // configuration.
+    if let Some(token) = declared
+        .variants
+        .keys()
+        .find(|token| !allowed.iter().any(|allowed| allowed.as_str() == token.as_str()))
+    {
+        return Err(TokenEnumError::UnknownVariantToken { token: token.clone() });
+    }
+
+    let variants = variants(declared, &allowed, by_value)?;
+    // A variant carries the token it stands for, so the fallback is looked up
+    // by value.
+    let mut default = None;
+    if declared.default {
+        let fallback = property
+            .fallback()
+            .and_then(sdf::Value::try_as_token_ref)
+            .ok_or_else(|| TokenEnumError::NoFallback {
+                class: class_name.to_owned(),
+                property: property_name.to_owned(),
+            })?;
+        let named = variants
+            .iter()
+            .find(|variant| variant.value == fallback.as_str())
+            .ok_or_else(|| TokenEnumError::UnknownFallback {
+                token: fallback.to_string(),
+            })?;
+        default = Some(named.name.clone());
+    }
+
+    Ok(RustEnum {
+        name: Ident::new(&declared.name, Span::call_site()),
+        documentation: enum_documentation(class_name, property_name, property),
+        variants,
+        default,
+    })
+}
+
+/// A token enum's documentation: what the schema wrote about the property its
+/// values come from, then what the type is.
+///
+/// The schema's own text carries no symbol table here — a library's symbols are
+/// built from an inventory of classes, which a library getting no views has
+/// none of — so a reference it makes to another schema reads as the text it was
+/// written as.
+fn enum_documentation(class: &str, property: &str, source: &Property) -> String {
+    let declared = doc::wrap(&format!(
+        "The values `{class}.{property}` admits, as a Rust type. \
+         Read and written as the tokens themselves."
+    ));
+    match source.documentation() {
+        Some(text) => format!("{}\n\n{declared}", doc::to_markdown(text, &doc::Symbols::default())),
+        None => declared,
+    }
+}
+
+/// A variant per allowed token, named by the configuration or by casing.
+///
+/// Order follows the property's `allowedTokens`, so a library mints the same
+/// enum on every run, while membership is compared by value: two spellings of
+/// one set are one set however they were listed.
+fn variants(
+    declared: &TokenEnum,
+    allowed: &[tf::Token],
+    by_value: &BTreeMap<&str, &Ident>,
+) -> Result<Vec<RustVariant>, TokenEnumError> {
+    let mut minted: BTreeMap<String, String> = BTreeMap::new();
+    let mut variants = Vec::with_capacity(allowed.len());
+
+    for token in allowed {
+        let value = token.as_str();
+        let spelled = declared.variants.get(value);
+        let name = spelled.cloned().unwrap_or_else(|| names::proper_case(value));
+        if !names::is_rust_identifier(&name) {
+            return Err(match spelled {
+                Some(_) => TokenEnumError::InvalidVariant {
+                    token: value.to_owned(),
+                    variant: name,
+                },
+                None => TokenEnumError::UnnameableToken {
+                    token: value.to_owned(),
+                },
+            });
+        }
+        // A suffixed variant is a name nobody chose, sitting in a public API;
+        // the caller is asked for one instead.
+        if let Some(first) = minted.insert(name.clone(), value.to_owned()) {
+            return Err(TokenEnumError::VariantCollision {
+                first,
+                second: value.to_owned(),
+                variant: name,
+            });
+        }
+
+        variants.push(RustVariant {
+            name: Ident::new(&name, Span::call_site()),
+            constant: constant_of(by_value, token),
+            value: value.to_owned(),
+        });
+    }
+    Ok(variants)
 }
 
 /// The constant each token is emitted as.
@@ -319,7 +529,7 @@ fn constants(model: &Library) -> Result<Vec<Constant>, Error> {
 ///
 /// The scope is this module: two libraries may each have a `Sphere`, and
 /// nothing stops them, since a consumer includes each in a module of its own.
-fn check_class_names(inventory: &Inventory<'_>) -> Result<(), Error> {
+fn check_class_names(inventory: &Inventory<'_>, enums: &[RustEnum]) -> Result<(), Error> {
     // The names the file takes for itself, which a schema may not also take:
     // `SCHEMAS` is a value, and so is a view's tuple-struct constructor, so a
     // schema of that name would collide with it. Read from where the emitter
@@ -327,6 +537,13 @@ fn check_class_names(inventory: &Inventory<'_>) -> Result<(), Error> {
     let mut seen: BTreeMap<String, &str> = super::items::ALL
         .map(|name| (name.to_owned(), "the generated file"))
         .into();
+    // A configured enum mints a type into the same module, so it is one of the
+    // names a schema may not also take. Two enums reaching one name, and an
+    // enum reaching one of the file's own items, are both refused where the
+    // enum is lowered, so nothing here displaces an earlier entry.
+    for generated in enums {
+        seen.insert(generated.name.to_string(), "a token enum");
+    }
     for names in inventory.values() {
         let identifier = names.class.identifier.as_str();
 

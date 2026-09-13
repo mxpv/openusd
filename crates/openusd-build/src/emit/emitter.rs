@@ -35,7 +35,8 @@ use quote::quote;
 use super::{ident, items};
 
 use super::lower::{
-    AccessorTrait, Constant, PropertyKind, Reflected, RustAccessor, RustClass, RustLibrary, kind_constant, schema_root,
+    AccessorTrait, Constant, PropertyKind, Reflected, RustAccessor, RustClass, RustEnum, RustLibrary, kind_constant,
+    schema_root,
 };
 use crate::doc;
 
@@ -64,6 +65,8 @@ pub fn library(library: &RustLibrary, declarations: &TokenStream) -> TokenStream
         }
     });
 
+    let enums = library.enums.iter().map(token_enum);
+
     let tokens = ident(items::TOKENS);
     let library_name = ident(items::LIBRARY_NAME);
 
@@ -77,11 +80,82 @@ pub fn library(library: &RustLibrary, declarations: &TokenStream) -> TokenStream
             #(#constants)*
         }
 
+        #(#enums)*
+
         /// The library these schemas belong to, as their manifest records it.
         pub const #library_name: &str = #name;
 
         #declarations
         #(#classes)*
+    }
+}
+
+/// One token enum: its values, the tokens they are written as, and the call
+/// that makes it a value.
+///
+/// The token constants are what the variants are defined in terms of, so the
+/// enum and the strings it stands for cannot drift apart. Reading and authoring
+/// it as a value is `openusd`'s own macro, which every token enum invokes.
+fn token_enum(generated: &RustEnum) -> TokenStream {
+    let RustEnum {
+        name,
+        documentation,
+        variants,
+        default,
+    } = generated;
+    let documentation = documentation.lines().map(|line| format!(" {line}"));
+
+    let declared = variants.iter().map(|variant| {
+        let name = &variant.name;
+        let documentation = format!(" `{:?}`.", variant.value);
+        let default = (default.as_ref() == Some(name)).then(|| quote! { #[default] });
+        quote! {
+            #[doc = #documentation]
+            #default
+            #name
+        }
+    });
+    let written = variants.iter().map(|variant| {
+        let (name, constant) = (&variant.name, &variant.constant);
+        quote! { Self::#name => #constant }
+    });
+    let read = variants.iter().map(|variant| {
+        let (name, constant) = (&variant.name, &variant.constant);
+        quote! { #constant => ::std::option::Option::Some(Self::#name) }
+    });
+
+    // `Default` only where the configuration asked for the source property's
+    // fallback, since a token set carries no default of its own.
+    let derive_default = default.as_ref().map(|_| quote! { , ::std::default::Default });
+
+    quote! {
+        #(#[doc = #documentation])*
+        #[derive(
+            ::std::clone::Clone, ::std::marker::Copy, ::std::fmt::Debug,
+            ::std::cmp::PartialEq, ::std::cmp::Eq, ::std::hash::Hash #derive_default
+        )]
+        pub enum #name {
+            #(#declared),*
+        }
+
+        impl #name {
+            /// The token this value is written as.
+            pub const fn as_token(self) -> &'static str {
+                match self {
+                    #(#written),*
+                }
+            }
+
+            /// The value `token` names, or `None` where it names none.
+            pub fn from_token(token: impl ::std::convert::AsRef<str>) -> ::std::option::Option<Self> {
+                match token.as_ref() {
+                    #(#read,)*
+                    _ => ::std::option::Option::None,
+                }
+            }
+        }
+
+        ::openusd::sdf::impl_token_value!(#name);
     }
 }
 

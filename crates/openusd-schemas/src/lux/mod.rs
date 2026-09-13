@@ -37,116 +37,21 @@
 //! [`openusd::usd::Prim::add_applied_schema`].
 //!
 //! Token-valued attributes (`texture:format`, `poleAxis`,
-//! `lightList:cacheBehavior`) decode through the enums at the end of this
-//! module via `from_token` / `as_token`.
+//! `lightList:cacheBehavior`) decode through the enums generated with the
+//! views, via `from_token` / `as_token`.
 
 openusd::include_schema!("usdLux");
 
-use openusd::tf;
-use tokens::*;
-
-// Token-valued attribute enums. Each decodes one `allowedTokens` attribute via
-// `from_token` / `as_token`, with the Pixar default as its `Default`. The
-// views expose the raw `Attribute` handles; pass the handle's token through
-// these to classify it.
-
-/// `UsdLuxDomeLight.inputs:texture:format` token values.
-///
-/// Per Pixar's schema the default is [`TextureFormat::Automatic`] — the
-/// renderer picks based on the image aspect ratio.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TextureFormat {
-    #[default]
-    Automatic,
-    Latlong,
-    MirroredBall,
-    Angular,
-    CubeMapVerticalCross,
-}
-
-impl TextureFormat {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            TextureFormat::Automatic => AUTOMATIC,
-            TextureFormat::Latlong => LATLONG,
-            TextureFormat::MirroredBall => MIRRORED_BALL,
-            TextureFormat::Angular => ANGULAR,
-            TextureFormat::CubeMapVerticalCross => CUBE_MAP_VERTICAL_CROSS,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            AUTOMATIC => TextureFormat::Automatic,
-            LATLONG => TextureFormat::Latlong,
-            MIRRORED_BALL => TextureFormat::MirroredBall,
-            ANGULAR => TextureFormat::Angular,
-            CUBE_MAP_VERTICAL_CROSS => TextureFormat::CubeMapVerticalCross,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdLuxDomeLight_1.poleAxis` token values.
-///
-/// Selects which axis points to the dome's "north pole" — i.e. which axis the
-/// texture wraps around. Pixar's spec default is [`PoleAxis::SceneUp`], which
-/// defers to the stage's `upAxis` metadata. Only meaningful on `DomeLight_1`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PoleAxis {
-    #[default]
-    SceneUp,
-    Y,
-    Z,
-}
-
-impl PoleAxis {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            PoleAxis::SceneUp => SCENE,
-            PoleAxis::Y => Y,
-            PoleAxis::Z => Z,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            SCENE => PoleAxis::SceneUp,
-            Y => PoleAxis::Y,
-            Z => PoleAxis::Z,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdLuxLightListAPI.lightList:cacheBehavior` token values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LightListCacheBehavior {
-    /// Use the cached `lightList` rel and also continue traversing children
-    /// for any additional lights. Spec default.
-    #[default]
-    ConsumeAndContinue,
-    /// Use the cached `lightList` only; don't recurse into children.
-    ConsumeAndHalt,
-    /// Ignore the cache and traverse normally.
-    Ignore,
-}
-
-impl LightListCacheBehavior {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            LightListCacheBehavior::ConsumeAndContinue => CONSUME_AND_CONTINUE,
-            LightListCacheBehavior::ConsumeAndHalt => CONSUME_AND_HALT,
-            LightListCacheBehavior::Ignore => IGNORE,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            CONSUME_AND_CONTINUE => LightListCacheBehavior::ConsumeAndContinue,
-            CONSUME_AND_HALT => LightListCacheBehavior::ConsumeAndHalt,
-            IGNORE => LightListCacheBehavior::Ignore,
-            _ => return None,
-        })
+impl Default for LightListCacheBehavior {
+    /// `ignore`: the cache is not consulted and lights are discovered by
+    /// traversal.
+    ///
+    /// The schema documents this as the fallback without declaring one, so the
+    /// generator has nothing to take a `Default` from and it is written here.
+    /// C++ `UsdLuxLightListAPI::_Traverse` consults the cache only for
+    /// `consumeAndHalt` and `consumeAndContinue`, so every other value —
+    /// including an unauthored one — traverses.
+    fn default() -> Self {
+        Self::Ignore
     }
 }

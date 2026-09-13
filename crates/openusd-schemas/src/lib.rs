@@ -67,11 +67,6 @@ use openusd::usd::{self, SchemaRegistry};
 // to whatever `openusd` names at the expansion site.
 pub(crate) use ::openusd;
 
-// The families that name a token-valued enum. The three others that use the
-// macro — `physics`, `skel` and `vol` — enable `geom`, which is already here.
-#[cfg(any(feature = "geom", feature = "render", feature = "shade", feature = "ui"))]
-mod token_value;
-
 /// Any failure a schema view can report: a schema-domain failure of its own,
 /// or a core failure ([`Core`](Self::Core)) from the composed queries and
 /// authoring calls the view is built on.

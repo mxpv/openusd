@@ -84,17 +84,11 @@ openusd::include_schema!("usdGeom");
 mod imageable;
 mod xformable;
 
-// The token enums below name the generated constants directly.
-use openusd::tf;
+// The enums still written by hand name the generated constants directly.
 use tokens::*;
 
 pub use imageable::ImageableExt;
 pub use xformable::{XformOpPrecision, XformableExt};
-
-// Each enum decodes one `allowedTokens` attribute via `from_token` /
-// `as_token`, with the Pixar default as its `Default`. The view types expose
-// the raw `Attribute` handles; pass the handle's token through these to
-// classify it.
 
 /// The namespace a primvar is authored under: a primvar named `st` is the
 /// attribute `primvars:st`.
@@ -105,301 +99,11 @@ pub const PRIMVARS_NAMESPACE: &str = "primvars:";
 /// declares it.
 pub const META_KIND: &str = "kind";
 
-/// `UsdGeomImageable.visibility` token values. The spec default
-/// (unauthored) is [`Visibility::Inherited`] — children inherit
-/// their parent's effective visibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Visibility {
-    #[default]
-    Inherited,
-    Invisible,
-}
-
-impl Visibility {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            Visibility::Inherited => INHERITED,
-            Visibility::Invisible => INVISIBLE,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            INHERITED => Visibility::Inherited,
-            INVISIBLE => Visibility::Invisible,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdGeomImageable.purpose` token values. The spec default
-/// (unauthored) is [`Purpose::Default`] — included in every traversal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Purpose {
-    #[default]
-    Default,
-    Render,
-    Proxy,
-    Guide,
-}
-
-impl Purpose {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            Purpose::Default => DEFAULT_,
-            Purpose::Render => RENDER,
-            Purpose::Proxy => PROXY,
-            Purpose::Guide => GUIDE,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            DEFAULT_ => Purpose::Default,
-            RENDER => Purpose::Render,
-            PROXY => Purpose::Proxy,
-            GUIDE => Purpose::Guide,
-            _ => return None,
-        })
-    }
-}
-
-/// Authored winding rule on a `UsdGeomGprim`. Renderers use this to
-/// decide which face is "front" — `LeftHanded` flips the convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Orientation {
-    #[default]
-    RightHanded,
-    LeftHanded,
-}
-
-impl Orientation {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            Orientation::RightHanded => RIGHT_HANDED,
-            Orientation::LeftHanded => LEFT_HANDED,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            RIGHT_HANDED => Orientation::RightHanded,
-            LEFT_HANDED => Orientation::LeftHanded,
-            _ => return None,
-        })
-    }
-}
-
-/// `axis` token authored on radial shapes (Cylinder / Capsule / Cone)
-/// and on Plane. Per Pixar's spec the default is `Z`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Axis {
-    X,
-    Y,
-    #[default]
-    Z,
-}
-
-impl Axis {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            Axis::X => X,
-            Axis::Y => Y,
-            Axis::Z => Z,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            X => Axis::X,
-            Y => Axis::Y,
-            Z => Axis::Z,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdGeomCamera.projection` token values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Projection {
-    #[default]
-    Perspective,
-    Orthographic,
-}
-
-impl Projection {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            Projection::Perspective => PERSPECTIVE,
-            Projection::Orthographic => ORTHOGRAPHIC,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            PERSPECTIVE => Projection::Perspective,
-            ORTHOGRAPHIC => Projection::Orthographic,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdGeomCamera.stereoRole` token values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum StereoRole {
-    #[default]
-    Mono,
-    Left,
-    Right,
-}
-
-impl StereoRole {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            StereoRole::Mono => MONO,
-            StereoRole::Left => LEFT,
-            StereoRole::Right => RIGHT,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            MONO => StereoRole::Mono,
-            LEFT => StereoRole::Left,
-            RIGHT => StereoRole::Right,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdGeomMesh.subdivisionScheme` token values. The Pixar default
-/// is [`SubdivisionScheme::CatmullClark`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SubdivisionScheme {
-    None,
-    #[default]
-    CatmullClark,
-    Loop,
-    Bilinear,
-}
-
 impl SubdivisionScheme {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            SubdivisionScheme::None => NONE,
-            SubdivisionScheme::CatmullClark => CATMULL_CLARK,
-            SubdivisionScheme::Loop => LOOP,
-            SubdivisionScheme::Bilinear => BILINEAR,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            NONE => SubdivisionScheme::None,
-            CATMULL_CLARK => SubdivisionScheme::CatmullClark,
-            LOOP => SubdivisionScheme::Loop,
-            BILINEAR => SubdivisionScheme::Bilinear,
-            _ => return None,
-        })
-    }
-
     /// `true` when the scheme actually requests subdivision (i.e. not
     /// [`SubdivisionScheme::None`]).
     pub fn is_subdivision(self) -> bool {
         !matches!(self, SubdivisionScheme::None)
-    }
-}
-
-/// `UsdGeomMesh.interpolateBoundary` token values. Pixar's spec
-/// default is [`InterpolateBoundary::EdgeAndCorner`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum InterpolateBoundary {
-    None,
-    EdgeOnly,
-    #[default]
-    EdgeAndCorner,
-}
-
-impl InterpolateBoundary {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            InterpolateBoundary::None => NONE,
-            InterpolateBoundary::EdgeOnly => EDGE_ONLY,
-            InterpolateBoundary::EdgeAndCorner => EDGE_AND_CORNER,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            NONE => InterpolateBoundary::None,
-            EDGE_ONLY => InterpolateBoundary::EdgeOnly,
-            EDGE_AND_CORNER => InterpolateBoundary::EdgeAndCorner,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdGeomMesh.faceVaryingLinearInterpolation` token values. Pixar's
-/// spec default is [`FaceVaryingLinearInterpolation::CornersPlus1`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FaceVaryingLinearInterpolation {
-    None,
-    CornersOnly,
-    #[default]
-    CornersPlus1,
-    CornersPlus2,
-    Boundaries,
-    All,
-}
-
-impl FaceVaryingLinearInterpolation {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            FaceVaryingLinearInterpolation::None => NONE,
-            FaceVaryingLinearInterpolation::CornersOnly => CORNERS_ONLY,
-            FaceVaryingLinearInterpolation::CornersPlus1 => CORNERS_PLUS1,
-            FaceVaryingLinearInterpolation::CornersPlus2 => CORNERS_PLUS2,
-            FaceVaryingLinearInterpolation::Boundaries => BOUNDARIES,
-            FaceVaryingLinearInterpolation::All => ALL,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            NONE => FaceVaryingLinearInterpolation::None,
-            CORNERS_ONLY => FaceVaryingLinearInterpolation::CornersOnly,
-            CORNERS_PLUS1 => FaceVaryingLinearInterpolation::CornersPlus1,
-            CORNERS_PLUS2 => FaceVaryingLinearInterpolation::CornersPlus2,
-            BOUNDARIES => FaceVaryingLinearInterpolation::Boundaries,
-            ALL => FaceVaryingLinearInterpolation::All,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdGeomMesh.triangleSubdivisionRule` token values. Pixar's spec
-/// default is [`TriangleSubdivisionRule::CatmullClark`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TriangleSubdivisionRule {
-    #[default]
-    CatmullClark,
-    Smooth,
-}
-
-impl TriangleSubdivisionRule {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            TriangleSubdivisionRule::CatmullClark => CATMULL_CLARK,
-            TriangleSubdivisionRule::Smooth => SMOOTH,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            CATMULL_CLARK => TriangleSubdivisionRule::CatmullClark,
-            SMOOTH => TriangleSubdivisionRule::Smooth,
-            _ => return None,
-        })
     }
 }
 
@@ -432,70 +136,13 @@ impl Interpolation {
         }
     }
 
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
+    pub fn from_token(token: impl AsRef<str>) -> Option<Self> {
+        Some(match token.as_ref() {
             CONSTANT => Interpolation::Constant,
             UNIFORM => Interpolation::Uniform,
             VARYING => Interpolation::Varying,
             VERTEX => Interpolation::Vertex,
             FACE_VARYING => Interpolation::FaceVarying,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdGeomSubset.elementType` — what kind of mesh component the
-/// subset enumerates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ElementType {
-    #[default]
-    Face,
-    Point,
-    Edge,
-    Tetrahedron,
-}
-
-impl ElementType {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            ElementType::Face => FACE,
-            ElementType::Point => POINT,
-            ElementType::Edge => EDGE,
-            ElementType::Tetrahedron => TETRAHEDRON,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            FACE => ElementType::Face,
-            POINT => ElementType::Point,
-            EDGE => ElementType::Edge,
-            TETRAHEDRON => ElementType::Tetrahedron,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdGeomBasisCurves.type` token values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CurveType {
-    #[default]
-    Cubic,
-    Linear,
-}
-
-impl CurveType {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            CurveType::Cubic => CUBIC,
-            CurveType::Linear => LINEAR,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            CUBIC => CurveType::Cubic,
-            LINEAR => CurveType::Linear,
             _ => return None,
         })
     }
@@ -521,8 +168,8 @@ impl CurveBasis {
         }
     }
 
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
+    pub fn from_token(token: impl AsRef<str>) -> Option<Self> {
+        Some(match token.as_ref() {
             BEZIER => CurveBasis::Bezier,
             BSPLINE => CurveBasis::Bspline,
             CATMULL_ROM => CurveBasis::CatmullRom,
@@ -532,87 +179,9 @@ impl CurveBasis {
     }
 }
 
-/// `UsdGeomBasisCurves.wrap` — whether curves form closed loops.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CurveWrap {
-    #[default]
-    Nonperiodic,
-    Periodic,
-    Pinned,
-}
-
-impl CurveWrap {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            CurveWrap::Nonperiodic => NONPERIODIC,
-            CurveWrap::Periodic => PERIODIC,
-            CurveWrap::Pinned => PINNED,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            NONPERIODIC => CurveWrap::Nonperiodic,
-            PERIODIC => CurveWrap::Periodic,
-            PINNED => CurveWrap::Pinned,
-            _ => return None,
-        })
-    }
-}
-
-/// `UsdGeomNurbsPatch.uForm` / `vForm` token values. Each axis
-/// independently describes whether the surface is open (default),
-/// closed (control points wrap, knot vector does not), or periodic
-/// (both control points and knots wrap).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PatchForm {
-    #[default]
-    Open,
-    Closed,
-    Periodic,
-}
-
-impl PatchForm {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            PatchForm::Open => OPEN,
-            PatchForm::Closed => CLOSED,
-            PatchForm::Periodic => PERIODIC,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            OPEN => PatchForm::Open,
-            CLOSED => PatchForm::Closed,
-            PERIODIC => PatchForm::Periodic,
-            _ => return None,
-        })
-    }
-}
-
 // Bidirectional `From`/`TryFrom<Value>` for each token enum, so they pass
 // straight to `Attribute::set` / `get::<Enum>()`. See the macro's own docs.
-use crate::token_value::impl_token_value;
-
-impl_token_value!(
-    Visibility,
-    Purpose,
-    Orientation,
-    Axis,
-    Projection,
-    StereoRole,
-    SubdivisionScheme,
-    InterpolateBoundary,
-    FaceVaryingLinearInterpolation,
-    TriangleSubdivisionRule,
-    Interpolation,
-    ElementType,
-    CurveType,
-    CurveBasis,
-    CurveWrap,
-    PatchForm,
-);
+openusd::sdf::impl_token_value!(Interpolation, CurveBasis);
 
 #[cfg(test)]
 mod tests {

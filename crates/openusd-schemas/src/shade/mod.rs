@@ -108,7 +108,6 @@ pub const CONNECTABILITY: &str = "connectability";
 /// property metadata rather than a property.
 pub const RENDER_TYPE: &str = "renderType";
 
-use openusd::tf;
 use tokens::*;
 
 /// Implement the shading-attribute surface shared by [`Input`] and [`Output`]:
@@ -340,39 +339,6 @@ macro_rules! impl_shading_attribute {
 
 pub(crate) use impl_shading_attribute;
 
-/// `info:implementationSource` on a Shader — selects which `info:*` attribute
-/// carries the shader's implementation. Pixar's fallback is
-/// [`ImplementationSource::Id`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ImplementationSource {
-    /// `id` — look the shader up in the Sdr registry by `info:id`.
-    #[default]
-    Id,
-    /// `sourceAsset` — `info:sourceAsset` points at a parsable asset.
-    SourceAsset,
-    /// `sourceCode` — `info:sourceCode` holds inline source.
-    SourceCode,
-}
-
-impl ImplementationSource {
-    pub fn as_token(self) -> &'static str {
-        match self {
-            ImplementationSource::Id => ID,
-            ImplementationSource::SourceAsset => SOURCE_ASSET,
-            ImplementationSource::SourceCode => SOURCE_CODE,
-        }
-    }
-
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
-            ID => ImplementationSource::Id,
-            SOURCE_ASSET => ImplementationSource::SourceAsset,
-            SOURCE_CODE => ImplementationSource::SourceCode,
-            _ => return None,
-        })
-    }
-}
-
 /// `connectability` metadata on a UsdShadeInput — restricts what the input may
 /// be connected to. Pixar's fallback is [`Connectability::Full`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -393,8 +359,8 @@ impl Connectability {
         }
     }
 
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
+    pub fn from_token(token: impl AsRef<str>) -> Option<Self> {
+        Some(match token.as_ref() {
             FULL => Connectability::Full,
             INTERFACE_ONLY => Connectability::InterfaceOnly,
             _ => return None,
@@ -422,8 +388,8 @@ impl BindingStrength {
         }
     }
 
-    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
-        Some(match token.into().as_str() {
+    pub fn from_token(token: impl AsRef<str>) -> Option<Self> {
+        Some(match token.as_ref() {
             WEAKER_THAN_DESCENDANTS => BindingStrength::WeakerThanDescendants,
             STRONGER_THAN_DESCENDANTS => BindingStrength::StrongerThanDescendants,
             _ => return None,
@@ -433,4 +399,4 @@ impl BindingStrength {
 
 // `From`/`TryFrom<Value>` for the token-valued enums, so they pass straight to
 // `Attribute::set` / `get::<Enum>()`.
-crate::token_value::impl_token_value!(ImplementationSource, Connectability, BindingStrength);
+openusd::sdf::impl_token_value!(Connectability, BindingStrength);
