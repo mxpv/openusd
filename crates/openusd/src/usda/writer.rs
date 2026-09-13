@@ -785,7 +785,7 @@ impl<W: Write> Emitter<'_, W> {
 
     fn emit_listop_statement<T, F>(&mut self, prefix: &str, op: &ListOp<T>, mut fmt_item: F) -> Result<(), FormatError>
     where
-        T: Default + Clone + PartialEq,
+        T: ListOpItem,
         F: FnMut(&mut String, &T) -> Result<(), FormatError>,
     {
         if op.explicit {
@@ -813,11 +813,17 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
+    /// The body of one list-op statement: the items bracketed, `None` for an
+    /// empty list, and a lone item bare where its type allows it
+    /// (C++ `_WriteListOpList`).
     fn write_listop_items<T, F>(&mut self, items: &[T], fmt_item: &mut F) -> Result<(), FormatError>
     where
+        T: ListOpItem,
         F: FnMut(&mut String, &T) -> Result<(), FormatError>,
     {
-        if items.len() == 1 {
+        if items.is_empty() {
+            self.out.write_all(b"None")?;
+        } else if items.len() == 1 && !items[0].needs_brackets() {
             let mut buf = String::new();
             fmt_item(&mut buf, &items[0])?;
             self.out.write_all(buf.as_bytes())?;
@@ -1077,6 +1083,52 @@ where
     }
     s.push(']');
     Ok(())
+}
+
+/// An item of a list op, which knows whether it can be written without the
+/// brackets around it when it is the only one.
+///
+/// C++ answers this per element type too
+/// (`_ListOpWriter<T>::SingleItemRequiresBrackets`), and for the same reason:
+/// `prepend apiSchemas = "X"` does not read as a list, while
+/// `prepend references = @a.usd@` does.
+trait ListOpItem: Default + Clone + PartialEq {
+    fn needs_brackets(&self) -> bool;
+}
+
+/// A lone name or number keeps its brackets: nothing else marks it as a list.
+macro_rules! bracketed_items {
+    ($($ty:ty),* $(,)?) => {
+        $(impl ListOpItem for $ty {
+            fn needs_brackets(&self) -> bool {
+                true
+            }
+        })*
+    };
+}
+
+bracketed_items!(Token, String, i32, u32, i64, u64);
+
+/// A lone path is already delimited by its angle brackets.
+impl ListOpItem for sdf::Path {
+    fn needs_brackets(&self) -> bool {
+        false
+    }
+}
+
+/// A lone payload is already delimited by its asset path.
+impl ListOpItem for sdf::Payload {
+    fn needs_brackets(&self) -> bool {
+        false
+    }
+}
+
+/// A reference writes bare like a payload, until custom data gives it a
+/// parenthesised block that would swallow a following item.
+impl ListOpItem for sdf::Reference {
+    fn needs_brackets(&self) -> bool {
+        !self.custom_data.is_empty()
+    }
 }
 
 fn format_inline_listop<T, F>(s: &mut String, op: &ListOp<T>, fmt_item: F) -> Result<(), FormatError>
