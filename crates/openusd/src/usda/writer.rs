@@ -707,6 +707,17 @@ impl<W: Write> Emitter<'_, W> {
             name
         };
 
+        // Variant-set names write as a name vector, which brackets only a list
+        // of more than one. C++ gives the field its own emitter for this
+        // rather than sending it through the generic list-op path.
+        if keyword == "variantSets"
+            && let Value::StringListOp(op) = value
+        {
+            let names = op.clone().map(Name);
+            self.emit_listop_statement(keyword, &names, |s, name| write_quoted(s, &name.0))?;
+            return Ok(());
+        }
+
         // ListOps in metadata blocks render as multi-line prepend/append/... entries.
         if let Some(emitted) = self.try_emit_listop_metadata(keyword, value)?
             && emitted
@@ -1141,6 +1152,17 @@ macro_rules! bracketed_items {
 
 bracketed_items!(Token, String, i32, u32, i64, u64);
 
+/// A name, which writes bare even when alone: the grammar takes a single
+/// name without brackets (C++ `Sdf_FileIOUtility::WriteNameVector`).
+#[derive(Default, Clone, PartialEq)]
+struct Name(String);
+
+impl ListOpItem for Name {
+    fn needs_brackets(&self) -> bool {
+        false
+    }
+}
+
 /// A lone path is already delimited by its angle brackets.
 impl ListOpItem for sdf::Path {
     fn needs_brackets(&self) -> bool {
@@ -1558,6 +1580,31 @@ def "Mesh" (
                 Some(&Value::token(unit)),
                 "{unit}"
             );
+        }
+    }
+
+    /// Variant-set names write as a name vector: one name bare, several
+    /// bracketed. The generic list-op rule would bracket the lone name too.
+    #[test]
+    fn variant_sets_name_vector() {
+        for (authored, expected) in [
+            ("\"v\"", "prepend variantSets = \"v\""),
+            ("[\"a\", \"b\"]", "prepend variantSets = [\"a\", \"b\"]"),
+        ] {
+            let source = format!(
+                "#usda 1.0
+
+def \"P\" (
+    prepend variantSets = {authored}
+)
+{{
+}}
+"
+            );
+            let data = usda::parse(&source).expect("parses");
+            let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+            assert!(text.contains(expected), "{authored} -> {text}");
+            usda::parse(&text).unwrap_or_else(|e| panic!("{authored} re-parses: {e:#}"));
         }
     }
 

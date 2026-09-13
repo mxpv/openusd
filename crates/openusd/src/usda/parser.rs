@@ -781,11 +781,14 @@ impl<'a> Parser<'a> {
                 spec.add(FieldKey::VariantSelection, sdf::Value::VariantSelectionMap(selections));
             }
             n if n == FieldKey::VariantSetNames.as_str() => {
+                // Names, not tokens: C++ registers the field as an
+                // `SdfStringListOp`, which is also what the crate format
+                // carries it as.
                 let values = self
-                    .parse_one_or_list(types::parse_token::<tf::Token>)
+                    .parse_one_or_list(types::parse_token::<String>)
                     .context("Unable to parse variantSets")?;
                 let list_op = apply_list_op(list_op, values).context("Unable to build variantSets listOp")?;
-                spec.add_list_op(FieldKey::VariantSetNames, sdf::Value::TokenListOp(list_op));
+                spec.add_list_op(FieldKey::VariantSetNames, sdf::Value::StringListOp(list_op));
             }
             n if n == FieldKey::Specializes.as_str() => {
                 let paths = self.parse_one_or_list(types::parse_path_reference)?;
@@ -2742,6 +2745,24 @@ def Scope "Root" (
         let path = sdf::path("/Root").unwrap();
         let spec = data.get(&path).unwrap();
         assert_eq!(spec.get("displayName"), Some(&sdf::Value::String("My Root".into())));
+    }
+
+    /// Variant-set names are strings, which is what upstream registers the
+    /// field as and what the crate format carries.
+    #[test]
+    fn variant_sets_are_strings() {
+        let text = "#usda 1.0
+def \"P\" (
+    prepend variantSets = \"v\"
+)
+{
+}
+";
+        let names = field(text, "/P", FieldKey::VariantSetNames.as_str())
+            .expect("variantSets")
+            .try_as_string_list_op()
+            .expect("a string list op");
+        assert_eq!(names.prepended_items, vec!["v".to_owned()]);
     }
 
     /// A display unit is written by name, and one no category uses is

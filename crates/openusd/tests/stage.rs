@@ -9332,7 +9332,7 @@ fn listener_info_under_variant_target() -> Result<()> {
         let mut prim = e.prim_mut("/Prim")?.expect("the prim spec is on the root layer");
         prim.set(
             sdf::FieldKey::VariantSetNames.as_str(),
-            sdf::Value::TokenListOp(sdf::TokenListOp::prepended([tf::Token::new("set")])),
+            sdf::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
         );
         prim.set(
             sdf::FieldKey::VariantSelection.as_str(),

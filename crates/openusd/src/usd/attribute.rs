@@ -3353,7 +3353,7 @@ mod tests {
             let mut prim = e.prim_mut("/Prim")?.expect("the prim spec");
             prim.set(
                 sdf::FieldKey::VariantSetNames.as_str(),
-                sdf::Value::TokenListOp(sdf::TokenListOp::prepended([tf::Token::from("set")])),
+                sdf::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
             );
             prim.set(
                 sdf::FieldKey::VariantSelection.as_str(),
