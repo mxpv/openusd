@@ -58,7 +58,7 @@ pub use ordering::{apply_ordering, element_cmp};
 pub use path::{IntoPath, Path, PathComponent, PathComponents, PathElement, PathParseError, path, try_into_path};
 pub use path_expr::{EvalError, ExpressionReference, PathExpression, PathPattern, PredicateExpression};
 pub use path_table::PathTable;
-pub use schema::{ChildrenKey, FieldKey, folds_list_ops, is_registered_field, schema_field_type};
+pub use schema::{ChildrenKey, FieldKey, folds_list_ops, is_registered_field, is_vector_field, schema_field_type};
 pub use spec::{
     AttributeSpec, AttributeSpecMut, AttributeSpecRef, PrimSpec, PrimSpecMut, PrimSpecRef, PropertySpec,
     PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,

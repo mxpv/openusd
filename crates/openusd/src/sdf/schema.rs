@@ -284,6 +284,32 @@ fn schema_field_spelling(name: &str) -> Option<&'static str> {
         .map(|(_, ty)| *ty)
 }
 
+/// Whether `field` holds a vector rather than an array of the same element.
+///
+/// C++ separates `std::vector<T>` from `VtArray<T>`: `subLayers` is a vector
+/// of strings, while a `string[]` attribute's value is an array of them.
+/// [`Value::TokenVec`](super::Value::TokenVec) and
+/// [`Value::StringVec`](super::Value::StringVec) carry both, so a format that
+/// encodes them differently has to ask the field which it is looking at.
+///
+/// These are the fields `SdfSchema` registers with a `std::vector` fallback
+/// and whose element has an array spelling too; the path and layer-offset
+/// vectors need no entry, having no array form to be confused with.
+pub fn is_vector_field(field: &str) -> bool {
+    const VECTORS: [&str; 9] = [
+        ChildrenKey::ExpressionChildren.as_str(),
+        ChildrenKey::MapperArgChildren.as_str(),
+        ChildrenKey::PrimChildren.as_str(),
+        ChildrenKey::PropertyChildren.as_str(),
+        ChildrenKey::VariantChildren.as_str(),
+        ChildrenKey::VariantSetChildren.as_str(),
+        FieldKey::PrimOrder.as_str(),
+        FieldKey::PropertyOrder.as_str(),
+        FieldKey::SubLayers.as_str(),
+    ];
+    VECTORS.contains(&field)
+}
+
 /// Whether generic field resolution folds list-op opinions authored for
 /// `field` (spec 12.2.6).
 ///
@@ -323,6 +349,15 @@ mod tests {
             );
         }
         assert!(FieldKey::from_name("madeUpField").is_none());
+    }
+
+    #[test]
+    fn vector_fields() {
+        assert!(is_vector_field(ChildrenKey::PrimChildren.as_str()));
+        assert!(is_vector_field(FieldKey::SubLayers.as_str()));
+        // A path-valued children field, and an array-valued metadata field.
+        assert!(!is_vector_field(ChildrenKey::ConnectionChildren.as_str()));
+        assert!(!is_vector_field(FieldKey::AllowedTokens.as_str()));
     }
 
     #[test]

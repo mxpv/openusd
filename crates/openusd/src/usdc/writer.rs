@@ -122,13 +122,13 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             if let Some(field_names) = data.list_fields(path) {
                 for name in field_names {
                     let value = data.get_field(path, &name)?.into_owned();
+                    let rep = self.write_field_value(&name, &value)?;
                     let token = if name == sdf::ChildrenKey::PropertyChildren.as_str() {
                         super::CRATE_PROPERTY_CHILDREN.to_owned()
                     } else {
                         name
                     };
                     let token_idx = self.tokens.intern(token);
-                    let rep = self.write_value(&value)?;
                     let field_idx = self.fields.intern((token_idx, rep.0));
                     self.fieldsets.push(Some(field_idx));
                 }
@@ -461,6 +461,27 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // Value encoding
     // -----------------------------------------------------------------
 
+    /// Serialize the value of the field named `name`.
+    ///
+    /// A vector and an array of the same element share a [`Value`] variant but
+    /// not a type code, so the field is what tells them apart
+    /// ([`sdf::is_vector_field`]). Everything else needs no name.
+    ///
+    /// Getting this wrong is quiet rather than loud: a reader that wants a
+    /// `TfTokenVector` and finds a `token[]` yields nothing, so a layer opens
+    /// with its children missing. Checked against usd-core 26.8, which reads
+    /// the result back with its namespace intact.
+    fn write_field_value(&mut self, name: &str, value: &Value) -> Result<ValueRep, FormatError> {
+        if sdf::is_vector_field(name) {
+            match value {
+                Value::TokenVec(v) => return self.write_token_vec(Type::TokenVector, false, v),
+                Value::StringVec(v) => return self.write_string_vec(Type::StringVector, false, v),
+                _ => {}
+            }
+        }
+        self.write_value(value)
+    }
+
     fn write_value(&mut self, value: &Value) -> Result<ValueRep, FormatError> {
         match value {
             // `Value::None` represents an absent opinion and has no crate
@@ -571,9 +592,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::TimeCodeVec(v) => self.write_array_f64_type(Type::TimeCode, v.len(), v.iter().map(|t| t.0)),
 
             // Strings stored in their own arrays (StringVec also via token lookup).
-            Value::StringVec(v) => self.write_string_vec(Type::String, v),
-            Value::AssetPathVec(v) => self.write_string_vec(Type::AssetPath, v),
-            Value::TokenVec(v) => self.write_token_vec(Type::Token, v),
+            Value::StringVec(v) => self.write_string_vec(Type::String, true, v),
+            Value::AssetPathVec(v) => self.write_string_vec(Type::AssetPath, true, v),
+            Value::TokenVec(v) => self.write_token_vec(Type::Token, true, v),
 
             // Complex heap types.
             Value::Dictionary(d) => self.write_dictionary(d),
@@ -665,7 +686,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             }
             Value::PathExpressionVec(v) => {
                 let texts: Vec<String> = v.iter().map(|expr| expr.to_string()).collect();
-                self.write_string_vec(Type::PathExpression, &texts)
+                self.write_string_vec(Type::PathExpression, true, &texts)
             }
 
             Value::Opaque => Err(FormatError::Encode {
@@ -803,24 +824,28 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_token_vec(&mut self, ty: Type, v: &[tf::Token]) -> Result<ValueRep, FormatError> {
+    /// Serialize a run of tokens as a count and its interned indices, under
+    /// `ty` and flagged `array` — the payload is the same either way, and only
+    /// the rep says whether this is `token[]` or a `TfTokenVector`.
+    fn write_token_vec(&mut self, ty: Type, array: bool, v: &[tf::Token]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for t in v {
             let idx = self.tokens.intern(t.to_string());
             self.write_pod(&idx)?;
         }
-        Ok(rep_heap(ty, off, true))
+        Ok(rep_heap(ty, off, array))
     }
 
-    fn write_string_vec<S: AsRef<str>>(&mut self, ty: Type, v: &[S]) -> Result<ValueRep, FormatError> {
+    /// The same for strings, telling `string[]` from a vector of strings.
+    fn write_string_vec<S: AsRef<str>>(&mut self, ty: Type, array: bool, v: &[S]) -> Result<ValueRep, FormatError> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for s in v {
             let sidx = self.intern_string(s.as_ref());
             self.write_pod(&sidx)?;
         }
-        Ok(rep_heap(ty, off, true))
+        Ok(rep_heap(ty, off, array))
     }
 
     fn write_dictionary(&mut self, d: &HashMap<String, Value>) -> Result<ValueRep, FormatError> {
