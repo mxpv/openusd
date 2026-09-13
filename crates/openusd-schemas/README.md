@@ -29,7 +29,14 @@ openusd = "0.7"
 openusd-schemas = { version = "0.7", features = ["geom", "lux"] }
 ```
 
-Nothing is enabled by default.
+Nothing is enabled by default. A family that builds on another's views enables
+it, so `lux`, `media`, `physics`, `proc`, `skel` and `vol` each pull in `geom`.
+
+Hand `schema_registry()` to the stage you open. It is what makes a prim a
+`Mesh`, what resolves the fallback a schema declares for a property nothing
+authored, and what answers `is_a` along a schema's inheritance; a stage opened
+without it knows only the core `usd` family, and the typed `get` constructors
+answer `None`.
 
 ### Feature flags
 
@@ -56,7 +63,9 @@ normals through the `geom` views:
 use openusd_schemas::geom::{self, PointBasedSchema};
 use openusd::{gf, usd};
 
-let stage = usd::Stage::open("scene.usda")?;
+let stage = usd::Stage::builder()
+    .schema_registry(openusd_schemas::schema_registry())
+    .open("scene.usda")?;
 
 if let Some(mesh) = geom::Mesh::get(&stage, "/World/Mesh")? {
     // `points_attr` / `normals_attr` are inherited from `PointBasedSchema` up
@@ -72,7 +81,21 @@ if let Some(mesh) = geom::Mesh::get(&stage, "/World/Mesh")? {
 ```
 
 Values a prim does not author fall back to what the schema declares, resolved
-through the core's `usd::SchemaRegistry`.
+through the registry handed to the builder above.
+
+## Vendored schemas
+
+Every view is generated at build time from the schema definitions under
+`schemas/<library>/schema.usda`, copied from OpenUSD v26.05 — the same files
+upstream's own `usdGenSchema` reads. `build.rs` runs
+[`openusd-build`](https://github.com/mxpv/openusd/tree/main/crates/openusd-build)
+over them to emit a family's views, its tokens, and the schema data the
+registry reads fallbacks and inheritance from. What is hand-written beside
+them is what a property cannot express: a transform stack, a skinning
+topology, a computed render spec.
+
+`schemas/README.md` records where each file came from and the one place this
+copy departs from upstream.
 
 ## License
 

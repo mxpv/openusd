@@ -102,7 +102,11 @@ use openusd::{gf, usd};
 use openusd_schemas::geom::{self, PointBasedSchema};
 use openusd_schemas::shade;
 
-let stage = usd::Stage::open("scene.usda")?;
+// The registry is what makes a prim a `Mesh` and what resolves the fallbacks
+// its schema declares; without it the typed constructors answer `None`.
+let stage = usd::Stage::builder()
+    .schema_registry(openusd_schemas::schema_registry())
+    .open("scene.usda")?;
 
 // `PointBasedSchema` is in scope so `Mesh` inherits its accessors.
 if let Some(mesh) = geom::Mesh::get(&stage, "/World/Mesh")? {

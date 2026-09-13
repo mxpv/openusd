@@ -25,6 +25,26 @@
 //! [`ShapingAPI`], [`ShadowAPI`], and [`LightListAPI`] are the other applied
 //! schemas.
 //!
+//! # Example
+//!
+//! ```
+//! // A light's own accessors live on its `<Class>Schema` trait; the ones
+//! // every light shares come from the light interface it derives through.
+//! use openusd_schemas::lux::{self, BoundableLightBaseSchema, SphereLightSchema};
+//! use openusd::usd;
+//!
+//! let stage = usd::Stage::builder()
+//!     .schema_registry(openusd_schemas::schema_registry())
+//!     .in_memory("scene.usda").unwrap();
+//!
+//! let bulb = lux::SphereLight::define(&stage, "/World/Bulb").unwrap();
+//! bulb.create_radius_attr().unwrap().set(0.25_f32).unwrap();
+//! // `intensity` is the shared light interface, not SphereLight's own.
+//! bulb.create_intensity_attr().unwrap().set(800.0_f32).unwrap();
+//!
+//! assert_eq!(bulb.radius_attr().get::<f32>().unwrap(), Some(0.25));
+//! ```
+//!
 //! # Conventions
 //!
 //! Property accessors mirror the C++ `Get*Attr` / `Create*Attr` pair: a

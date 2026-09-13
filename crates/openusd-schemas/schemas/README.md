@@ -1,6 +1,6 @@
 # Vendored OpenUSD schema definitions
 
-Each `<library>/schema.usda` is copied verbatim, with no modifications, from
+Each `<library>/schema.usda` is copied from
 [OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD) v26.05 (commit
 `2095fafafd033fa23386d7ec6d58c7cc33974518`), where it lives at
 `pxr/usd/<library>/schema.usda`. These are the definitions upstream's own
@@ -11,6 +11,11 @@ them through `openusd-build`.
 `Typed`, `APISchemaBase` and the core API schemas the domain families inherit
 from. No views are generated for it — the core crate carries the `usd` family
 itself, and `openusd::usd` holds its hand-written views.
+
+Every file is verbatim but that one, which adds a `SchemaBase` class upstream
+registers through `plugInfo.json` instead. The addition is marked in the file
+itself; `vendor/OpenUSD/README.md` in the repository says why it is needed and
+what to re-apply after vendoring a newer OpenUSD.
 
 ## License
 

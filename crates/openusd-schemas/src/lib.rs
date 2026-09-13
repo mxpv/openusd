@@ -6,12 +6,13 @@
 //! skinning weights — as Rust types, rather than by attribute name and hand
 //! decoding. Every view authors as well as reads.
 //!
-//! Every view is generated from the schema definitions this crate vendors, by
-//! [`openusd-build`](https://docs.rs/openusd-build) at build time: a family's
-//! views, the tokens it names things by, and the schema data a registry reads
-//! its fallbacks and inheritance from. What is hand-written beside them is
-//! what a property cannot say — a transform stack, a skinning topology, a
-//! render spec.
+//! Every view is generated at build time by
+//! [`openusd-build`](https://docs.rs/openusd-build) from the definitions this
+//! crate vendors under `schemas/<library>/schema.usda`, copied from OpenUSD
+//! v26.05: a family's views, the tokens it names things by, and the schema
+//! data a registry reads its fallbacks and inheritance from. What is
+//! hand-written beside them is what a property cannot say — a transform
+//! stack, a skinning topology, a render spec.
 //!
 //! Each family is feature-gated, so a caller compiles only the domains it
 //! reads. A family that builds on another's views enables it:
