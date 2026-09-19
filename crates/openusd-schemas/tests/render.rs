@@ -6,7 +6,7 @@ use openusd::gf;
 
 use openusd::sdf::{self, Value};
 use openusd::tf::Token;
-use openusd::usd::Stage;
+use openusd::usd::{CollectionAPI, SchemaBase, Stage};
 use openusd_schemas::render::{
     AspectRatioConformPolicy, Pass, PassSchema, Product, ProductSchema, ProductType, Settings, SettingsBaseSchema,
     SettingsSchema, SourceType, Var, VarSchema, compute_render_spec,
@@ -219,5 +219,25 @@ fn render_var_roundtrip() -> Result<()> {
     assert_eq!(v.data_type_attr().get::<Token>()?.as_deref(), Some("normal3f"));
     assert_eq!(v.source_name_attr().get::<String>()?.as_deref(), Some("Nworld"));
     assert_eq!(v.source_type_attr().get::<SourceType>()?, Some(SourceType::Primvar));
+    Ok(())
+}
+
+/// A pass carries four built-in collections, and the definition decides each
+/// one's `includeRoot` separately: visibility links everything until something
+/// says otherwise, while pruning and matteing start empty.
+#[test]
+fn pass_collections_include_root() -> Result<()> {
+    let stage = memory()?;
+    let pass = Pass::define(&stage, "/Render/Passes/beauty")?;
+
+    for (name, root) in [
+        ("renderVisibility", true),
+        ("cameraVisibility", true),
+        ("prune", false),
+        ("matte", false),
+    ] {
+        let collection = CollectionAPI::from_prim_unchecked(pass.prim().clone(), name);
+        assert_eq!(collection.include_root()?, root, "{name} includeRoot");
+    }
     Ok(())
 }
