@@ -19,7 +19,7 @@ use std::collections::hash_map::Entry;
 use openusd::Result;
 
 use openusd::sdf::{self, Path, Value};
-use openusd::usd::{Collection, MembershipQuery, Relationship, Stage, is_collection_api_path};
+use openusd::usd::{CollectionAPI, MembershipQuery, Relationship, Stage, is_collection_api_path};
 
 use super::BindingStrength;
 use super::MaterialBindingAPI;
@@ -264,7 +264,9 @@ fn is_collection_member(
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => {
             let query = match is_collection_api_path(collection_path) {
-                Some((prim, name)) => Some(Collection::new(prim, name)?.compute_membership_query(stage)?),
+                Some((prim, name)) => {
+                    Some(CollectionAPI::from_prim_unchecked(stage.prim(prim)?, name).compute_membership_query()?)
+                }
                 None => None,
             };
             e.insert(query)
@@ -461,7 +463,7 @@ mod tests {
         stage.define_prim("/Set/A")?.set_type_name("Mesh")?;
         stage.define_prim("/Set/B")?.set_type_name("Mesh")?;
         let coll = openusd::usd::apply_collection(&stage, sdf::path("/Set")?, "metal")?;
-        coll.include_path(&stage, sdf::path("/Set/A")?)?;
+        coll.include_path(sdf::path("/Set/A")?)?;
         let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?;
         binding.bind(sdf::path("/MatDir")?)?;
         binding.bind_collection(
@@ -492,7 +494,7 @@ mod tests {
         // Two collections that both include /Set/A.
         for c in ["first", "second"] {
             let coll = openusd::usd::apply_collection(&stage, sdf::path("/Set")?, c)?;
-            coll.include_path(&stage, sdf::path("/Set/A")?)?;
+            coll.include_path(sdf::path("/Set/A")?)?;
         }
         // Author binding "aaa" (collection `second`) before "zzz" (collection
         // `first`) — native *property* order, not target order, decides.

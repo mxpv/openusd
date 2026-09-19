@@ -15,7 +15,7 @@ use crate::sdf::path_expr::{
 use crate::sdf::{self, Path};
 use crate::usd::{Prim, SchemaRegistry, Stage};
 
-use super::collection::Collection;
+use super::{CollectionAPI, SchemaBase};
 
 /// One stage object a membership-expression predicate evaluates against —
 /// a prim or a property (C++ `UsdObject`). Predicates that only make sense
@@ -144,12 +144,12 @@ impl CollectionSearcher<'_> {
 // TODO: report the dropped references (unknown collection, cycle); C++ warns
 // through `TF_WARN` and flags circular dependencies. This crate has no
 // diagnostic channel for a query build to carry the report out through.
-pub fn resolve_complete_membership_expression(stage: &Stage, collection: &Collection) -> Result<sdf::PathExpression> {
+pub fn resolve_complete_membership_expression(collection: &CollectionAPI) -> Result<sdf::PathExpression> {
     let mut state = ResolveState {
-        visited: HashSet::from([(collection.prim().clone(), collection.name().to_string())]),
+        visited: HashSet::from([(collection.path().clone(), collection.name().to_string())]),
         memo: HashMap::new(),
     };
-    Ok(resolve_impl(stage, collection, &mut state)?.expression)
+    Ok(resolve_impl(collection, &mut state)?.expression)
 }
 
 /// The bookkeeping one complete-expression resolution carries: the active
@@ -170,8 +170,8 @@ struct Resolved {
     cacheable: bool,
 }
 
-fn resolve_impl(stage: &Stage, collection: &Collection, state: &mut ResolveState) -> Result<Resolved> {
-    let Some(expression) = collection.membership_expression(stage)? else {
+fn resolve_impl(collection: &CollectionAPI, state: &mut ResolveState) -> Result<Resolved> {
+    let Some(expression) = collection.membership_expression()? else {
         return Ok(Resolved {
             expression: sdf::PathExpression::nothing(),
             cacheable: true,
@@ -179,7 +179,7 @@ fn resolve_impl(stage: &Stage, collection: &Collection, state: &mut ResolveState
     };
     // Composition already anchored and namespace-mapped a typed expression;
     // anchoring again covers the lenient string-typed opinions.
-    let expression = expression.make_absolute(collection.prim());
+    let expression = expression.make_absolute(collection.path());
     let mut cacheable = true;
     let mut error = None;
     let expression = expression.resolve_references(&mut |reference| {
@@ -187,7 +187,7 @@ fn resolve_impl(stage: &Stage, collection: &Collection, state: &mut ResolveState
             return sdf::PathExpression::nothing();
         }
         let prim = if reference.path.is_empty() {
-            collection.prim().clone()
+            collection.path().clone()
         } else {
             reference.path.clone()
         };
@@ -199,8 +199,9 @@ fn resolve_impl(stage: &Stage, collection: &Collection, state: &mut ResolveState
             cacheable = false;
             return sdf::PathExpression::nothing();
         }
-        let nested = Collection::from_parts(prim, reference.name.clone());
-        let resolved = match resolve_impl(stage, &nested, state) {
+        // A referenced collection resolves on the referring one's stage.
+        let nested = CollectionAPI::from_prim_unchecked(Prim::new(collection.stage(), prim), reference.name.as_str());
+        let resolved = match resolve_impl(&nested, state) {
             Ok(resolved) => resolved,
             Err(e) => {
                 error = Some(e);

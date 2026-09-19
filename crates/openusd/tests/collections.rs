@@ -4,15 +4,17 @@
 //! carried across a reference arc.
 
 use openusd::sdf;
-use openusd::usd::{self, Collection, PrimPredicate, compute_included_paths, resolve_complete_membership_expression};
+use openusd::usd::{
+    self, CollectionAPI, PrimPredicate, compute_included_paths, resolve_complete_membership_expression,
+};
 
 fn open() -> usd::Stage {
     usd::Stage::open("fixtures/collections.usda").expect("open collections fixture")
 }
 
-fn included(stage: &usd::Stage, coll: &Collection) -> Vec<String> {
-    let query = coll.compute_membership_query(stage).expect("query");
-    let mut paths: Vec<String> = compute_included_paths(stage, &query, PrimPredicate::DEFAULT)
+fn included(coll: &CollectionAPI) -> Vec<String> {
+    let query = coll.compute_membership_query().expect("query");
+    let mut paths: Vec<String> = compute_included_paths(coll.stage(), &query, PrimPredicate::DEFAULT)
         .expect("included paths")
         .into_iter()
         .map(|p| p.to_string())
@@ -24,13 +26,13 @@ fn included(stage: &usd::Stage, coll: &Collection) -> Vec<String> {
 #[test]
 fn weaker_expression_composes() {
     let stage = open();
-    let coll = Collection::new(sdf::path("/Sets").unwrap(), "heroes").unwrap();
+    let coll = CollectionAPI::from_prim_unchecked(stage.prim("/Sets").unwrap(), "heroes");
 
     // The strong layer's `%_` picked up the weak layer's expression.
-    let expr = coll.membership_expression(&stage).unwrap().expect("authored");
+    let expr = coll.membership_expression().unwrap().expect("authored");
     assert_eq!(expr.to_string(), "/World/Chars/M* /World/Chars/Sully");
 
-    let query = coll.compute_membership_query(&stage).unwrap();
+    let query = coll.compute_membership_query().unwrap();
     assert!(!query.uses_path_expansion_rule_map());
     assert!(query.is_path_included(&sdf::path("/World/Chars/Mike").unwrap()));
     assert!(query.is_path_included(&sdf::path("/World/Chars/Sully").unwrap()));
@@ -40,16 +42,16 @@ fn weaker_expression_composes() {
 #[test]
 fn collection_reference_expands() {
     let stage = open();
-    let coll = Collection::new(sdf::path("/Sets").unwrap(), "combined").unwrap();
+    let coll = CollectionAPI::from_prim_unchecked(stage.prim("/Sets").unwrap(), "combined");
 
-    let resolved = resolve_complete_membership_expression(&stage, &coll).expect("resolve");
+    let resolved = resolve_complete_membership_expression(&coll).expect("resolve");
     assert_eq!(
         resolved.to_string(),
         "/World/Chars/M* /World/Chars/Sully /World/Props//"
     );
 
     assert_eq!(
-        included(&stage, &coll),
+        included(&coll),
         [
             "/World/Chars/Mike",
             "/World/Chars/Sully",
@@ -62,12 +64,12 @@ fn collection_reference_expands() {
 #[test]
 fn expression_across_reference() {
     let stage = open();
-    let coll = Collection::new(sdf::path("/RefRoot").unwrap(), "parts").unwrap();
+    let coll = CollectionAPI::from_prim_unchecked(stage.prim("/RefRoot").unwrap(), "parts");
 
     // Authored as `.//` against /Asset in the referenced layer; composition
     // anchored it there and mapped it into the referencing namespace.
-    let expr = coll.membership_expression(&stage).unwrap().expect("authored");
+    let expr = coll.membership_expression().unwrap().expect("authored");
     assert_eq!(expr.to_string(), "/RefRoot//");
 
-    assert_eq!(included(&stage, &coll), ["/RefRoot", "/RefRoot/Bolt"]);
+    assert_eq!(included(&coll), ["/RefRoot", "/RefRoot/Bolt"]);
 }

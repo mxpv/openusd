@@ -32,14 +32,14 @@ pub use attribute::{Attribute, AttributeBuilder, AttributeQuery};
 pub use authoring::{PrimEdit, StageEdit};
 pub use capture::{ReplayStage, UndoStage};
 pub use collection::{
-    Collection, CollectionMode, ExpansionRule, MembershipQuery, PathExpansionRuleMap, PathRule, apply_collection,
-    collections_on, compute_included_paths, is_collection_api_path,
+    MembershipQuery, PathExpansionRuleMap, PathRule, apply_collection, collections_on, compute_included_paths,
+    is_collection_api_path,
 };
 pub use collection_expr::{CollectionEvaluator, CollectionSearcher, resolve_complete_membership_expression};
 pub use connections::ConnectionGraph;
 pub use core_schemas::{
-    ClipsAPI, ClipsAPISchema, CollectionAPI, ColorSpaceAPI, ColorSpaceDefinitionAPI, ModelAPI, ModelAPISchema, SCHEMAS,
-    tokens,
+    ClipsAPI, ClipsAPISchema, CollectionAPI, CollectionMode, ColorSpaceAPI, ColorSpaceDefinitionAPI, ExpansionRule,
+    ModelAPI, ModelAPISchema, SCHEMAS, tokens,
 };
 pub use diff::{ApplyMode, Diff, Edit, FieldValue};
 pub use editor::{NamespaceEditError, NamespaceEditor};

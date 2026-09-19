@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use openusd_build::Views;
+use openusd_build::{TokenEnum, Views};
 
 mod common;
 
@@ -32,6 +32,8 @@ fn built() -> &'static openusd_build::Output {
     static ONCE: LazyLock<openusd_build::Output> = LazyLock::new(|| {
         openusd_build::configure()
             .search_path(schema().parent().and_then(Path::parent).expect("the schemas root"))
+            .token_enum(TokenEnum::new("ExpansionRule", "usd", "CollectionAPI.expansionRule").with_default())
+            .token_enum(TokenEnum::new("CollectionMode", "usd", "CollectionAPI.mode").with_default())
             .build_library(schema(), Views::Generate)
             .expect("the core definitions build")
     });

@@ -99,6 +99,121 @@ pub mod tokens {
     pub const TYPED: &str = "Typed";
 }
 
+/// Specifies how the paths that are included in
+/// the collection must be expanded to determine its members.
+///
+/// The values `CollectionAPI.expansionRule` admits, as a Rust type. Read and
+/// written as the tokens themselves.
+#[derive(
+    ::std::clone::Clone,
+    ::std::marker::Copy,
+    ::std::fmt::Debug,
+    ::std::cmp::PartialEq,
+    ::std::cmp::Eq,
+    ::std::hash::Hash,
+    ::std::default::Default
+)]
+pub enum ExpansionRule {
+    /// `"explicitOnly"`.
+    ExplicitOnly,
+    /// `"expandPrims"`.
+    #[default]
+    ExpandPrims,
+    /// `"expandPrimsAndProperties"`.
+    ExpandPrimsAndProperties,
+}
+
+impl ExpansionRule {
+    /// The token this value is written as.
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::ExplicitOnly => tokens::EXPLICIT_ONLY,
+            Self::ExpandPrims => tokens::EXPAND_PRIMS,
+            Self::ExpandPrimsAndProperties => tokens::EXPAND_PRIMS_AND_PROPERTIES,
+        }
+    }
+    /// The value `token` names, or `None` where it names none.
+    pub fn from_token(
+        token: impl ::std::convert::AsRef<str>,
+    ) -> ::std::option::Option<Self> {
+        match token.as_ref() {
+            tokens::EXPLICIT_ONLY => ::std::option::Option::Some(Self::ExplicitOnly),
+            tokens::EXPAND_PRIMS => ::std::option::Option::Some(Self::ExpandPrims),
+            tokens::EXPAND_PRIMS_AND_PROPERTIES => {
+                ::std::option::Option::Some(Self::ExpandPrimsAndProperties)
+            }
+            _ => ::std::option::Option::None,
+        }
+    }
+}
+
+::openusd::sdf::impl_token_value!(ExpansionRule);
+
+/// Specifies which mode the collection uses to determine
+/// membership: `automatic`, `relationship`, or `expression`.
+///
+/// - `automatic` - the collection's mode is inferred from its authored
+///   properties. If either or both of the `includes` and `excludes`
+///   relationships have valid targets, or the `includeRoot` attribute
+///   is set to `true`, the collection is in *relationship-mode* and the
+///   `membershipExpression` attribute is ignored. Otherwise, the collection
+///   is in *expression-mode* and the `membershipExpression` attribute applies.
+///   This is the default behavior and is backward compatible with collections
+///   that predate this attribute.
+/// - `relationship` - the collection is explicitly in *relationship-mode*. The
+///   `includes`, `excludes`, and `includeRoot` attributes determine membership,
+///   and `membershipExpression` is ignored.
+/// - `expression` - the collection is explicitly in *expression-mode*. The
+///   `membershipExpression` attribute determines membership, and `includes`,
+///   `excludes`, and `includeRoot` are ignored.
+///
+/// The fallback value is `automatic`.
+///
+/// The values `CollectionAPI.mode` admits, as a Rust type. Read and written as
+/// the tokens themselves.
+#[derive(
+    ::std::clone::Clone,
+    ::std::marker::Copy,
+    ::std::fmt::Debug,
+    ::std::cmp::PartialEq,
+    ::std::cmp::Eq,
+    ::std::hash::Hash,
+    ::std::default::Default
+)]
+pub enum CollectionMode {
+    /// `"automatic"`.
+    #[default]
+    Automatic,
+    /// `"relationship"`.
+    Relationship,
+    /// `"expression"`.
+    Expression,
+}
+
+impl CollectionMode {
+    /// The token this value is written as.
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::Automatic => tokens::AUTOMATIC,
+            Self::Relationship => tokens::RELATIONSHIP,
+            Self::Expression => tokens::EXPRESSION,
+        }
+    }
+    /// The value `token` names, or `None` where it names none.
+    pub fn from_token(
+        token: impl ::std::convert::AsRef<str>,
+    ) -> ::std::option::Option<Self> {
+        match token.as_ref() {
+            tokens::AUTOMATIC => ::std::option::Option::Some(Self::Automatic),
+            tokens::RELATIONSHIP => ::std::option::Option::Some(Self::Relationship),
+            tokens::EXPRESSION => ::std::option::Option::Some(Self::Expression),
+            _ => ::std::option::Option::None,
+        }
+    }
+}
+
+::openusd::sdf::impl_token_value!(CollectionMode);
+
 /// The library these schemas belong to, as their manifest records it.
 pub const LIBRARY_NAME: &str = "usd";
 
