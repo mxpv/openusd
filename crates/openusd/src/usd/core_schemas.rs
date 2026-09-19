@@ -757,9 +757,6 @@ impl ColorSpaceDefinitionAPI {
         }
     }
     /// The name of the color space defined on this prim.
-    /// ```text
-    ///
-    /// ```
     ///
     /// Declared `uniform token colorSpaceDefinition:__INSTANCE_NAME__:name =
     /// "custom"`. Read it with `get::<::openusd::tf::Token>()`.
@@ -1032,7 +1029,7 @@ impl ::openusd::usd::APISchemaBase for ColorSpaceDefinitionAPI {}
 /// See the detailed descriptions of the built-in properties below for more
 /// details.
 ///
-/// \section `usd_collectionapi_properties` Collection API Properties
+/// # Collection API Properties
 ///
 /// The built-in properties for this schema are in the `collection:instanceName`
 /// namespace, where `instanceName` is the user-provided applied API schema
@@ -1044,18 +1041,33 @@ impl ::openusd::usd::APISchemaBase for ColorSpaceDefinitionAPI {}
 ///   `excludes` relationship targets to determine the collection's members.
 ///   In *expression-mode*, specifies how matching scene objects against the
 ///   `membershipExpression` proceeds. Possible values include:
-/// ```text
 ///
-///     - `expandPrims` - in *relationship-mode*, all the prims descendent to the `includes` relationship targets (and not descendent to `excludes` relationship targets) belong to the collection.  Any `includes`-targeted property paths also belong to the collection. This is the default behavior. In *expression-mode*, the functions UsdComputeIncludedObjectsFromCollection() and UsdComputeIncludedPathsFromCollection() only test prims against the `membershipExpression` to determine membership.
+///     - `expandPrims` - in *relationship-mode*, all the prims descendent
+///       to the `includes` relationship targets (and not descendent
+///       to `excludes` relationship targets) belong to the collection.
+///       Any `includes`-targeted property paths also belong to the
+///       collection. This is the default behavior. In *expression-mode*,
+///       the functions `UsdComputeIncludedObjectsFromCollection()` and
+///       `UsdComputeIncludedPathsFromCollection()` only test prims against the
+///       `membershipExpression` to determine membership.
 ///
-///     - `expandPrimsAndProperties` - like `expandPrims`, but in *relationship-mode*, all properties on all included prims also belong to the collection. In *expression-mode*, the functions UsdComputeIncludedObjectsFromCollection() and UsdComputeIncludedPathsFromCollection() test both prims and properties against the `membershipExpression` to determine membership.
+///     - `expandPrimsAndProperties` - like `expandPrims`, but in
+///       *relationship-mode*, all properties on all included prims
+///       also belong to the collection. In *expression-mode*, the
+///       functions `UsdComputeIncludedObjectsFromCollection()` and
+///       `UsdComputeIncludedPathsFromCollection()` test both prims and
+///       properties against the `membershipExpression` to determine membership.
 ///
-///     - `explicitOnly` - in *relationship-mode*, only paths in the `includes` relationship targets and not those in the `excludes` relationship targets belong to the collection. Does not apply to *expression-mode*. If set in *expression-mode*, the functions UsdComputeIncludedObjectsFromCollection() and UsdComputeIncludedPathsFromCollection() return no results.
+///     - `explicitOnly` - in *relationship-mode*, only paths in the
+///       `includes` relationship targets and not those in the `excludes`
+///       relationship targets belong to the collection. Does not
+///       apply to *expression-mode*. If set in *expression-mode*, the
+///       functions `UsdComputeIncludedObjectsFromCollection()` and
+///       `UsdComputeIncludedPathsFromCollection()` return no results.
 ///
 ///
 ///
 ///
-/// ```
 /// - `bool collection:instanceName:includeRoot` - boolean attribute indicating
 ///   whether the pseudo-root path `</>` should be counted as one of the
 ///   included target paths in *relationship-mode*. This separate attribute
@@ -1107,16 +1119,14 @@ impl ::openusd::usd::APISchemaBase for ColorSpaceDefinitionAPI {}
 ///
 ///
 ///
-/// \subsection `usd_collectionapi_implicit_inclusion` Implicit Inclusion
+/// ## Implicit Inclusion
 ///
 /// In some scenarios it is useful to express a collection that includes
 /// everything except certain paths.  To support this, a *relationship-mode*
 /// collection that has an exclude that is not descendent to any include will
 /// include the root path `</>`.
 ///
-/// \section `usd_collectionapi_creating_cpp` Creating Collections in C++
-///
-/// \snippet `examples_usd.cpp` `ApplyCollections`
+/// # Creating Collections in C++
 #[derive(::std::clone::Clone, ::std::fmt::Debug)]
 pub struct CollectionAPI {
     prim: ::openusd::usd::Prim,
@@ -1518,9 +1528,7 @@ impl ::openusd::usd::APISchemaBase for CollectionAPI {}
 /// allows one to specify a sequence of usd files (clips) to be consulted,
 /// over time, as a source of varying overrides for the prims at and
 /// beneath this prim in namespace.
-/// ```text
 ///
-/// ```
 /// `SetClipAssetPaths()` establishes the set of clips that can be consulted.
 /// `SetClipActive()` specifies the ordering of clip application over time
 /// (clips can be repeated), while `SetClipTimes()` specifies time-mapping
@@ -1548,9 +1556,7 @@ impl ::openusd::usd::APISchemaBase for CollectionAPI {}
 /// composed across composition arcs, so clip sets for a prim may be
 /// defined in multiple sublayers or references, for example. Individual
 /// metadata for a given clip set may be sparsely overridden.
-/// ```text
 ///
-/// ```
 /// Important facts about clips:
 /// - Within the layerstack in which clips are established, the opinions within
 ///   the clips will be *weaker* than any local opinions in the layerstack, but
@@ -1558,9 +1564,7 @@ impl ::openusd::usd::APISchemaBase for CollectionAPI {}
 /// - We will never look for metadata or default opinions in clips when
 ///   performing value resolution on the owning stage, since these quantities
 ///   must be time-invariant.
-/// ```text
 ///
-/// ```
 /// This leads to the common structure in which we reference a model asset
 /// on a prim, and then author clips at the same site: the asset reference
 /// will provide the topology and unvarying data for the model, while the
@@ -1574,9 +1578,7 @@ pub trait ClipsAPISchema: ::openusd::usd::APISchemaBase {}
 /// allows one to specify a sequence of usd files (clips) to be consulted,
 /// over time, as a source of varying overrides for the prims at and
 /// beneath this prim in namespace.
-/// ```text
 ///
-/// ```
 /// `SetClipAssetPaths()` establishes the set of clips that can be consulted.
 /// `SetClipActive()` specifies the ordering of clip application over time
 /// (clips can be repeated), while `SetClipTimes()` specifies time-mapping
@@ -1604,9 +1606,7 @@ pub trait ClipsAPISchema: ::openusd::usd::APISchemaBase {}
 /// composed across composition arcs, so clip sets for a prim may be
 /// defined in multiple sublayers or references, for example. Individual
 /// metadata for a given clip set may be sparsely overridden.
-/// ```text
 ///
-/// ```
 /// Important facts about clips:
 /// - Within the layerstack in which clips are established, the opinions within
 ///   the clips will be *weaker* than any local opinions in the layerstack, but
@@ -1614,9 +1614,7 @@ pub trait ClipsAPISchema: ::openusd::usd::APISchemaBase {}
 /// - We will never look for metadata or default opinions in clips when
 ///   performing value resolution on the owning stage, since these quantities
 ///   must be time-invariant.
-/// ```text
 ///
-/// ```
 /// This leads to the common structure in which we reference a model asset
 /// on a prim, and then author clips at the same site: the asset reference
 /// will provide the topology and unvarying data for the model, while the

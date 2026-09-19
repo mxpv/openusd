@@ -131,8 +131,14 @@ pub fn to_markdown(documentation: &str, symbols: &Symbols<'_>) -> String {
                     // which rustdoc reads as Rust and runs as a doctest. What
                     // a schema indented is a sample, so it is fenced as one
                     // and shown as it stands. A blank line inside one belongs
-                    // to it.
-                    let indented = line.starts_with("    ") || (sample && line.trim().is_empty());
+                    // to it, and an indented item is a nested item, which
+                    // Markdown reads as the list it is.
+                    let blank = line.trim().is_empty();
+                    let nested = marker(line.trim_start()) > 0;
+                    let indented = match sample {
+                        true => line.starts_with("    ") || blank,
+                        false => line.starts_with("    ") && !blank && !nested,
+                    };
                     if indented != sample {
                         out.push_str(FENCE);
                         if indented {
@@ -236,6 +242,9 @@ fn dedent(text: &str) -> String {
         .enumerate()
         .map(|(at, line)| match at {
             0 => line,
+            // A line of nothing but whitespace is blank however wide it was
+            // written, so it is not left carrying an indent of its own.
+            _ if line.trim().is_empty() => "",
             _ => line.get(common..).unwrap_or(""),
         })
         .collect::<Vec<_>>()
@@ -438,9 +447,6 @@ fn render_line(line: &str, symbols: &Symbols<'_>) -> String {
 /// Only the commands schema documentation actually reaches for; anything else
 /// keeps the spelling it was written with, which reads as prose rather than
 /// disappearing.
-// TODO: `\section` and `\subsection` take a label before their title, and
-// `\snippet` names a file this crate cannot see. Both are rare in schema
-// documentation and are left as written until one shows up.
 fn render_command<'a>(command: &Command<'a>, symbols: &Symbols<'_>, out: &mut String) -> &'a str {
     match command.name {
         // An emphasis command takes the one word that follows it.
@@ -454,6 +460,19 @@ fn render_command<'a>(command: &Command<'a>, symbols: &Symbols<'_>, out: &mut St
             out.push_str("- ");
             return command.after.strip_prefix(' ').unwrap_or(command.after);
         }
+        // A section opens with a label naming it for a link, which this
+        // crate makes none of, and the rest of the line is its title.
+        "section" | "subsection" => {
+            let (_label, title) = next_word(command.after);
+            out.push_str(match command.name {
+                "section" => "# ",
+                _ => "## ",
+            });
+            return title.trim_start();
+        }
+        // `\snippet file label` points at an example this crate cannot see,
+        // and names nothing a reader here can reach.
+        "snippet" => return "",
         "note" => out.push_str("Note:"),
         "todo" => out.push_str("Todo:"),
         "deprecated" => out.push_str("Deprecated:"),
@@ -808,6 +827,47 @@ mod tests {
     fn stray_backtick_escapes() {
         assert_eq!(to_markdown("a name 'beauty` here"), "a name 'beauty\\` here");
         assert_eq!(to_markdown("a `span` here"), "a `span` here");
+    }
+
+    /// A line of nothing but whitespace is a blank line, so it opens no
+    /// sample of its own — however far the schema indented it.
+    #[test]
+    fn blank_line_is_no_sample() {
+        assert_eq!(to_markdown("one\n        \ntwo"), "one\n\ntwo");
+    }
+
+    /// An indented item is a nested item. Markdown reads it as the list it
+    /// is, where a sample would show its marker verbatim.
+    #[test]
+    fn nested_items_stay_items() {
+        assert_eq!(
+            to_markdown("Values:\n- outer:\n    - inner\n    - other"),
+            "Values:\n- outer:\n    - inner\n    - other"
+        );
+    }
+
+    /// A section reads as a heading. Its label names it for a link this crate
+    /// makes none of, so only the title survives.
+    #[test]
+    fn sections_become_headings() {
+        assert_eq!(
+            to_markdown(r"\section usd_props Collection Properties"),
+            "# Collection Properties"
+        );
+        assert_eq!(
+            to_markdown(r"\subsection usd_props_a Implicit Inclusion"),
+            "## Implicit Inclusion"
+        );
+    }
+
+    /// A snippet names a file outside this crate, so it reaches nothing a
+    /// reader here can open.
+    #[test]
+    fn snippets_drop() {
+        assert_eq!(
+            to_markdown("before\n\n\\snippet examples.cpp ApplyCollections"),
+            "before"
+        );
     }
 
     /// What a schema indented is shown as it stands, fenced so that rustdoc
