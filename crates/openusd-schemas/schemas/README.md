@@ -9,8 +9,8 @@ them through `openusd-build`.
 
 `usd/schema.usda` is here because every other file sublayers it: it declares
 `Typed`, `APISchemaBase` and the core API schemas the domain families inherit
-from. No views are generated for it — the core crate carries the `usd` family
-itself, and `openusd::usd` holds its hand-written views.
+from. This crate generates nothing from it: the core crate carries the `usd`
+family itself, its views included, in a file generated once and committed.
 
 Every file is verbatim but that one, which adds a `SchemaBase` class upstream
 registers through `plugInfo.json` instead. The addition is marked in the file

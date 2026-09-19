@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 /// `crates/openusd-schemas/schemas/<library>/schema.usda`.
 ///
 /// `usd` is the core family: it declares the roots every other library
-/// inherits from, and `openusd` carries its views rather than generating them.
+/// inherits from. Its views are generated into `openusd` itself rather than
+/// into `openusd-schemas`, which `core_family.rs` checks.
 pub const LIBRARIES: &[&str] = &[
     "usd",
     "usdGeom",

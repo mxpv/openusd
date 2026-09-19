@@ -140,9 +140,8 @@ pub enum Views {
     /// Generate the trait and view per schema.
     Generate,
     /// Generate the tokens and the schema data alone, for a library whose API
-    /// is written by hand — `openusd`'s own `usd` family is the case this
-    /// exists for. A schema declaring `skipCodeGeneration` is treated this way
-    /// however it was asked for.
+    /// is written by hand. A schema declaring `skipCodeGeneration` is treated
+    /// this way however it was asked for.
     Skip,
 }
 
@@ -312,9 +311,8 @@ impl Builder {
     /// The generated file still carries the tokens and the declaration table a
     /// registry is built from; what it leaves out is the trait and view per
     /// schema. That is what a crate whose API for these schemas is written by
-    /// hand wants, `openusd` itself being the case this exists for: its `usd`
-    /// family has hand-written views, and generating a second set beside them
-    /// would collide.
+    /// hand wants: the declarations a registry needs, without a generated set
+    /// of views beside its own to collide with.
     ///
     /// A schema that declares `skipCodeGeneration` is treated this way whether
     /// or not it is named here.
