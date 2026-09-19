@@ -623,6 +623,7 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
     let RustAccessor {
         getter,
         creator,
+        builder,
         token,
         instanced,
         documentation,
@@ -667,16 +668,18 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
     let uniform = accessor
         .uniform
         .then(|| quote! { .variability(::openusd::sdf::Variability::Uniform) });
-    let (kind, reader, declared) = match &accessor.kind {
+    let (kind, reader, builder_kind, declared) = match &accessor.kind {
         PropertyKind::Relationship => (
             quote! { ::openusd::usd::Relationship },
             quote! { relationship },
-            quote! { #prim.relationship_builder(#token) #custom .build()? },
+            quote! { ::openusd::usd::RelationshipBuilder<'static> },
+            quote! { #prim.relationship_builder(#token) #custom },
         ),
         PropertyKind::Attribute { type_constant } => (
             quote! { ::openusd::usd::Attribute },
             quote! { attribute },
-            quote! { #prim.attribute_builder(#token, #type_constant) #custom #uniform .build()? },
+            quote! { ::openusd::usd::AttributeBuilder<'static> },
+            quote! { #prim.attribute_builder(#token, #type_constant) #custom #uniform },
         ),
     };
 
@@ -695,9 +698,16 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
     quote! {
         #read
 
+        /// The property's declaration, unauthored. Give it a value and
+        /// `build` it to author both as one edit; `build` it alone for the
+        /// declaration by itself.
+        #visibility fn #builder(&self) -> #builder_kind {
+            #declared
+        }
+
         /// Authors the property as the schema declares it, and returns it.
         #visibility fn #creator(&self) -> ::openusd::Result<#kind> {
-            ::std::result::Result::Ok(#declared)
+            ::std::result::Result::Ok(self.#builder().build()?)
         }
     }
 }

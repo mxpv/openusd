@@ -138,6 +138,9 @@ pub struct RustAccessor {
     pub getter: Ident,
     /// The method that authors it.
     pub creator: Ident,
+    /// The method handing back its declaration unauthored, for a caller
+    /// writing a value in the same edit.
+    pub builder: Ident,
     /// Whether the library writes the reader by hand, so only the creator is
     /// emitted and the reader's name is left reserved.
     pub custom_get: bool,
@@ -204,6 +207,8 @@ struct AccessorNames<'a> {
     getter: String,
     /// The method that authors it.
     creator: String,
+    /// The method handing back its declaration unauthored.
+    builder: String,
     /// What upstream calls the pair, less the `Get` or `Create` it opens with:
     /// `ExtentAttr` for `GetExtentAttr()`.
     cpp: String,
@@ -248,6 +253,7 @@ impl<'a> ClassNames<'a> {
                     cpp: format!("{}{suffix}", names::proper_case(property.api_name()?)),
                     getter: accessor.getter,
                     creator: accessor.creator,
+                    builder: accessor.builder,
                 })
             })
             .collect();
@@ -725,6 +731,7 @@ fn lower_accessor(
     Ok(RustAccessor {
         getter: identifier(&accessor.getter, &origin)?,
         creator: identifier(&accessor.creator, &origin)?,
+        builder: identifier(&accessor.builder, &origin)?,
         custom_get: property.api.custom_get,
         token: constant_of(by_value, &property.schematics_name),
         instanced: class.kind.is_multiple_apply_api_schema(),
@@ -832,6 +839,7 @@ fn identifier(name: &str, origin: &str) -> Result<Ident, Error> {
 struct Accessor {
     getter: String,
     creator: String,
+    builder: String,
 }
 
 /// The methods an accessor of `api_name` contributes to a property of
@@ -846,6 +854,7 @@ fn named(api_name: Option<&str>, spec_type: sdf::SpecType) -> Option<Accessor> {
     let getter = format!("{}_{suffix}", names::snake_case(api_name?));
     Some(Accessor {
         creator: format!("create_{getter}"),
+        builder: format!("{getter}_builder"),
         getter,
     })
 }
@@ -861,7 +870,7 @@ fn offered(property: &Property) -> impl Iterator<Item = String> {
         .sites
         .iter()
         .filter_map(|site| named(site.api_name.as_deref(), property.spec_type))
-        .flat_map(|accessor| [accessor.getter, accessor.creator])
+        .flat_map(|accessor| [accessor.getter, accessor.creator, accessor.builder])
 }
 
 /// Whether a redeclaration would offer a method an ancestor's trait already

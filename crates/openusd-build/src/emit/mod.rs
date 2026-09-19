@@ -486,22 +486,24 @@ class Box "Box" (
     #[test]
     fn creator_authors_declaration() {
         let text = packed_accessors();
-        // The whole declaration is one builder chain, so it reaches the stage
-        // as one edit, and it says only what the schema declares differently
-        // from a bare property.
+        // The declaration is one builder, so whoever takes it can give it a
+        // value and reach the stage in one edit. It says only what the schema
+        // declares differently from a bare property.
         assert!(
-            text.contains(
-                "attribute_builder(tokens::RADIUS,::openusd::sdf::ValueTypeName::DOUBLE).custom(false).build()?"
-            ),
+            text.contains("attribute_builder(tokens::RADIUS,::openusd::sdf::ValueTypeName::DOUBLE).custom(false)}"),
             "a schema's property is not custom, and varies by default: {text}"
         );
         assert!(
-            text.contains("attribute_builder(tokens::MODE,::openusd::sdf::ValueTypeName::TOKEN).custom(false).variability(::openusd::sdf::Variability::Uniform).build()?"),
+            text.contains("attribute_builder(tokens::MODE,::openusd::sdf::ValueTypeName::TOKEN).custom(false).variability(::openusd::sdf::Variability::Uniform)}"),
             "a uniform property says so: {text}"
         );
         assert!(
-            text.contains("attribute_builder(tokens::TEMP,::openusd::sdf::ValueTypeName::FLOAT).build()?"),
+            text.contains("attribute_builder(tokens::TEMP,::openusd::sdf::ValueTypeName::FLOAT)}"),
             "a `custom` property takes the defaults: {text}"
+        );
+        assert!(
+            text.contains("::std::result::Result::Ok(self.radius_attr_builder().build()?)"),
+            "the creator is that declaration, authored: {text}"
         );
     }
 
@@ -514,7 +516,11 @@ class Box "Box" (
             "{text}"
         );
         assert!(
-            packed_accessors().contains("relationship_builder(tokens::TARGET).custom(false).build()?"),
+            packed_accessors().contains("relationship_builder(tokens::TARGET).custom(false)}"),
+            "{text}"
+        );
+        assert!(
+            packed_accessors().contains("::std::result::Result::Ok(self.target_rel_builder().build()?)"),
             "{text}"
         );
     }

@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::Result;
-use crate::sdf::{self, Path, Value, Variability};
+use crate::sdf::{self, Path, Value};
 use crate::tf;
 use crate::usd::{Attribute, Prim, PrimPredicate, SchemaBase, Stage};
 
@@ -129,26 +129,26 @@ impl CollectionAPI {
 
     /// Set `expansionRule` (`uniform token`).
     pub fn set_expansion_rule(&self, rule: ExpansionRule) -> Result<()> {
-        author_uniform(&self.expansion_rule_attr(), sdf::ValueTypeName::TOKEN, rule)
+        self.expansion_rule_attr_builder().set(rule).build()?;
+        Ok(())
     }
 
     /// Set `includeRoot` (`uniform bool`).
     pub fn set_include_root(&self, value: bool) -> Result<()> {
-        author_uniform(&self.include_root_attr(), sdf::ValueTypeName::BOOL, value)
+        self.include_root_attr_builder().set(value).build()?;
+        Ok(())
     }
 
     /// Set `membershipExpression` (`uniform pathExpression`).
     pub fn set_membership_expression(&self, expression: sdf::PathExpression) -> Result<()> {
-        author_uniform(
-            &self.membership_expression_attr(),
-            sdf::ValueTypeName::PATH_EXPRESSION,
-            expression,
-        )
+        self.membership_expression_attr_builder().set(expression).build()?;
+        Ok(())
     }
 
     /// Set `mode` (`uniform token`).
     pub fn set_mode(&self, mode: CollectionMode) -> Result<()> {
-        author_uniform(&self.mode_attr(), sdf::ValueTypeName::TOKEN, mode)
+        self.mode_attr_builder().set(mode).build()?;
+        Ok(())
     }
 
     /// Make `path` a member, minimizing edits (spec §15, mirroring C++
@@ -688,18 +688,6 @@ fn composed_or_default<T: TryFrom<Value> + Default>(attr: &Attribute) -> Result<
     Ok(composed(attr)?
         .and_then(|value| T::try_from(value).ok())
         .unwrap_or_default())
-}
-
-/// Author `value` on `attr` as the schema declares it — a non-custom,
-/// uniform attribute of `type_name` — in one edit.
-fn author_uniform(attr: &Attribute, type_name: sdf::ValueTypeName, value: impl Into<Value>) -> Result<()> {
-    attr.stage()
-        .attribute_builder(attr.path().clone(), type_name)
-        .custom(false)
-        .variability(Variability::Uniform)
-        .set(value)
-        .build()?;
-    Ok(())
 }
 
 /// Whether `rule` admits a path, given whether the governing opinion sits on

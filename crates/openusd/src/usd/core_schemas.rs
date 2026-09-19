@@ -593,20 +593,24 @@ impl ColorSpaceAPI {
     pub fn color_space_name_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(tokens::COLOR_SPACE_NAME)
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn color_space_name_attr_builder(
+        &self,
+    ) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                tokens::COLOR_SPACE_NAME,
+                ::openusd::sdf::ValueTypeName::TOKEN,
+            )
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_color_space_name_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    tokens::COLOR_SPACE_NAME,
-                    ::openusd::sdf::ValueTypeName::TOKEN,
-                )
-                .custom(false)
-                .variability(::openusd::sdf::Variability::Uniform)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.color_space_name_attr_builder().build()?)
     }
 }
 
@@ -767,21 +771,23 @@ impl ColorSpaceDefinitionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn name_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_NAME,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::TOKEN,
+            )
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_name_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_NAME,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::TOKEN,
-                )
-                .custom(false)
-                .variability(::openusd::sdf::Variability::Uniform)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.name_attr_builder().build()?)
     }
     /// Red chromaticity coordinates
     ///
@@ -795,22 +801,24 @@ impl ColorSpaceDefinitionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn red_chroma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_RED_CHROMA,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT2,
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_red_chroma_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_RED_CHROMA,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::FLOAT2,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.red_chroma_attr_builder().build()?)
     }
     /// Green chromaticity coordinates
     ///
@@ -824,22 +832,26 @@ impl ColorSpaceDefinitionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn green_chroma_attr_builder(
+        &self,
+    ) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT2,
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_green_chroma_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::FLOAT2,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.green_chroma_attr_builder().build()?)
     }
     /// Blue chromaticity coordinates
     ///
@@ -853,22 +865,24 @@ impl ColorSpaceDefinitionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn blue_chroma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT2,
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_blue_chroma_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::FLOAT2,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.blue_chroma_attr_builder().build()?)
     }
     /// Whitepoint chromaticity coordinates
     ///
@@ -883,22 +897,24 @@ impl ColorSpaceDefinitionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn white_point_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_WHITE_POINT,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT2,
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_white_point_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_WHITE_POINT,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::FLOAT2,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.white_point_attr_builder().build()?)
     }
     /// Gamma value of the log section
     ///
@@ -912,20 +928,22 @@ impl ColorSpaceDefinitionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn gamma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT,
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_gamma_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::FLOAT,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.gamma_attr_builder().build()?)
     }
     /// Linear bias of the log section
     ///
@@ -939,22 +957,24 @@ impl ColorSpaceDefinitionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn linear_bias_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT,
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_linear_bias_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::FLOAT,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.linear_bias_attr_builder().build()?)
     }
 }
 
@@ -1223,23 +1243,27 @@ impl CollectionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn expansion_rule_attr_builder(
+        &self,
+    ) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXPANSION_RULE,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::TOKEN,
+            )
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_expansion_rule_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXPANSION_RULE,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::TOKEN,
-                )
-                .custom(false)
-                .variability(::openusd::sdf::Variability::Uniform)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.expansion_rule_attr_builder().build()?)
     }
     /// Boolean attribute indicating whether the pseudo-root
     /// path `</>` should be counted as one of the included target
@@ -1256,23 +1280,27 @@ impl CollectionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn include_root_attr_builder(
+        &self,
+    ) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDE_ROOT,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::BOOL,
+            )
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_include_root_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDE_ROOT,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::BOOL,
-                )
-                .custom(false)
-                .variability(::openusd::sdf::Variability::Uniform)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.include_root_attr_builder().build()?)
     }
     /// Specifies a list of targets that are included in the collection.
     /// This can target prims or properties directly. A collection can insert
@@ -1289,21 +1317,23 @@ impl CollectionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn includes_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
+        self.relationship_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDES,
+                    self.name.as_str(),
+                ),
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_includes_rel(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Relationship> {
-        ::std::result::Result::Ok(
-            self
-                .relationship_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDES,
-                        self.name.as_str(),
-                    ),
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.includes_rel_builder().build()?)
     }
     /// Specifies a list of targets that are excluded below
     /// the included paths in this collection. This can target prims or
@@ -1327,21 +1357,23 @@ impl CollectionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn excludes_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
+        self.relationship_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
+                    self.name.as_str(),
+                ),
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_excludes_rel(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Relationship> {
-        ::std::result::Result::Ok(
-            self
-                .relationship_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
-                        self.name.as_str(),
-                    ),
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.excludes_rel_builder().build()?)
     }
     /// Specifies a path expression that determines membership in this
     /// collection.
@@ -1357,23 +1389,27 @@ impl CollectionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn membership_expression_attr_builder(
+        &self,
+    ) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MEMBERSHIP_EXPRESSION,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::PATH_EXPRESSION,
+            )
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_membership_expression_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MEMBERSHIP_EXPRESSION,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::PATH_EXPRESSION,
-                )
-                .custom(false)
-                .variability(::openusd::sdf::Variability::Uniform)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.membership_expression_attr_builder().build()?)
     }
     /// Specifies which mode the collection uses to determine
     /// membership: `automatic`, `relationship`, or `expression`.
@@ -1406,21 +1442,23 @@ impl CollectionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn mode_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MODE,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::TOKEN,
+            )
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_mode_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MODE,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::TOKEN,
-                )
-                .custom(false)
-                .variability(::openusd::sdf::Variability::Uniform)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.mode_attr_builder().build()?)
     }
     /// This property represents the collection for the purpose of
     /// allowing another collection to include it. When this property is
@@ -1437,23 +1475,25 @@ impl CollectionAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn collection_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::OPAQUE,
+            )
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_collection_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::OPAQUE,
-                )
-                .custom(false)
-                .variability(::openusd::sdf::Variability::Uniform)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.collection_attr_builder().build()?)
     }
 }
 

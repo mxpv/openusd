@@ -232,18 +232,17 @@ pub trait ShapeSchema: ::openusd::usd::Typed {
     fn extent_attr(&self) -> ::openusd::usd::Attribute {
         self.prim().attribute(tokens::EXTENT)
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn extent_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.prim()
+            .attribute_builder(tokens::EXTENT, ::openusd::sdf::ValueTypeName::DOUBLE3)
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     fn create_extent_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .prim()
-                .attribute_builder(
-                    tokens::EXTENT,
-                    ::openusd::sdf::ValueTypeName::DOUBLE3,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.extent_attr_builder().build()?)
     }
     /// How the shape draws.
     ///
@@ -252,32 +251,30 @@ pub trait ShapeSchema: ::openusd::usd::Typed {
     fn draw_mode_attr(&self) -> ::openusd::usd::Attribute {
         self.prim().attribute(tokens::DRAW_MODE)
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn draw_mode_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.prim()
+            .attribute_builder(tokens::DRAW_MODE, ::openusd::sdf::ValueTypeName::TOKEN)
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
     /// Authors the property as the schema declares it, and returns it.
     fn create_draw_mode_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .prim()
-                .attribute_builder(
-                    tokens::DRAW_MODE,
-                    ::openusd::sdf::ValueTypeName::TOKEN,
-                )
-                .custom(false)
-                .variability(::openusd::sdf::Variability::Uniform)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.draw_mode_attr_builder().build()?)
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn density_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.prim()
+            .attribute_builder(tokens::DENSITY, ::openusd::sdf::ValueTypeName::DOUBLE)
+            .custom(false)
     }
     /// Authors the property as the schema declares it, and returns it.
     fn create_density_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .prim()
-                .attribute_builder(
-                    tokens::DENSITY,
-                    ::openusd::sdf::ValueTypeName::DOUBLE,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.density_attr_builder().build()?)
     }
 }
 
@@ -353,15 +350,17 @@ pub trait BallSchema: ShapeSchema {
     fn radius_attr(&self) -> ::openusd::usd::Attribute {
         self.prim().attribute(tokens::RADIUS)
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn radius_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.prim()
+            .attribute_builder(tokens::RADIUS, ::openusd::sdf::ValueTypeName::DOUBLE)
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     fn create_radius_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .prim()
-                .attribute_builder(tokens::RADIUS, ::openusd::sdf::ValueTypeName::DOUBLE)
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.radius_attr_builder().build()?)
     }
     /// How warm it is, which no schema owns.
     ///
@@ -369,17 +368,16 @@ pub trait BallSchema: ShapeSchema {
     fn temperature_attr(&self) -> ::openusd::usd::Attribute {
         self.prim().attribute(tokens::TEMPERATURE)
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn temperature_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.prim()
+            .attribute_builder(tokens::TEMPERATURE, ::openusd::sdf::ValueTypeName::FLOAT)
+    }
     /// Authors the property as the schema declares it, and returns it.
     fn create_temperature_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .prim()
-                .attribute_builder(
-                    tokens::TEMPERATURE,
-                    ::openusd::sdf::ValueTypeName::FLOAT,
-                )
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.temperature_attr_builder().build()?)
     }
     /// What the ball is made of.
     ///
@@ -387,11 +385,15 @@ pub trait BallSchema: ShapeSchema {
     fn material_rel(&self) -> ::openusd::usd::Relationship {
         self.prim().relationship(tokens::MATERIAL)
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn material_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
+        self.prim().relationship_builder(tokens::MATERIAL).custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     fn create_material_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
-        ::std::result::Result::Ok(
-            self.prim().relationship_builder(tokens::MATERIAL).custom(false).build()?,
-        )
+        ::std::result::Result::Ok(self.material_rel_builder().build()?)
     }
 }
 
@@ -514,14 +516,16 @@ impl TagAPI {
     pub fn tag_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(tokens::TAG)
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn tag_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(tokens::TAG, ::openusd::sdf::ValueTypeName::STRING)
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_tag_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(tokens::TAG, ::openusd::sdf::ValueTypeName::STRING)
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.tag_attr_builder().build()?)
     }
 }
 
@@ -659,20 +663,22 @@ impl SlotAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn slot_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::OPAQUE,
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_slot_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::OPAQUE,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.slot_attr_builder().build()?)
     }
     /// How far in the slot sits.
     ///
@@ -686,20 +692,22 @@ impl SlotAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn depth_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_DEPTH,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::INT,
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_depth_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_DEPTH,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::INT,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.depth_attr_builder().build()?)
     }
     /// Where the slot sits, relative to the prim.
     ///
@@ -713,22 +721,24 @@ impl SlotAPI {
             ),
         )
     }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn slot_offset_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                    tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_OFFSET,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::DOUBLE3,
+            )
+            .custom(false)
+    }
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_slot_offset_attr(
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(
-            self
-                .attribute_builder(
-                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
-                        tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_OFFSET,
-                        self.name.as_str(),
-                    ),
-                    ::openusd::sdf::ValueTypeName::DOUBLE3,
-                )
-                .custom(false)
-                .build()?,
-        )
+        ::std::result::Result::Ok(self.slot_offset_attr_builder().build()?)
     }
 }
 
