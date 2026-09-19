@@ -10,7 +10,8 @@
 //!
 //! Per-set getters/setters take a clip-set name (the key in the `clips`
 //! dictionary); the conventional default set is named `"default"`. Authored
-//! names are discovered via [`ClipsAPI::clip_set_names`].
+//! names are discovered via [`Prim::clip_set_names`](super::Prim::clip_set_names),
+//! which every clips view reaches through its prim.
 
 use std::collections::HashMap;
 
@@ -38,15 +39,6 @@ use super::{ClipsAPI, SchemaBase, StageAuthoringError};
 /// # }
 /// ```
 impl ClipsAPI {
-    /// Names of the authored clip sets (the keys of the `clips` dictionary),
-    /// sorted, empty when none are authored. This enumerates every authored set
-    /// regardless of `clipSets`; a set listed here may still resolve no clip
-    /// values (e.g. a template set with invalid metadata, or a name excluded by
-    /// `clipSets`). Use [`clip_sets`](Self::clip_sets) for the strength order.
-    pub fn clip_set_names(&self) -> Result<Vec<String>> {
-        self.prim().clip_sets()
-    }
-
     /// The composed `clipSets` strength-ordering list-op (C++
     /// `UsdClipsAPI::GetClipSets`), folding the list-op edits across layers and
     /// preserving the prepend/append/delete structure. `None` when `clipSets`

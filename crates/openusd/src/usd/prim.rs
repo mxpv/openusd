@@ -422,13 +422,15 @@ impl Prim {
     }
 
     /// Names of the value-clip sets composed onto this prim, sorted by name
-    /// (spec 12.3.4). Reads the composed `clips` dictionary across layers;
-    /// returns an empty vector when none are authored.
+    /// (spec 12.3.4, C++ `clipSetNames`). Reads the composed `clips`
+    /// dictionary across layers; returns an empty vector when none are
+    /// authored.
     ///
     /// This is read-only introspection — clip values are resolved through
-    /// [`Attribute::get_at`]. The `clipSets` strength order is not applied to
-    /// the returned names.
-    pub fn clip_sets(&self) -> Result<Vec<String>> {
+    /// [`Attribute::get_at`]. The strength order the `clipSets` list-op
+    /// carries is [`ClipsAPI::clip_sets`](super::ClipsAPI::clip_sets), and is
+    /// not applied to these names.
+    pub fn clip_set_names(&self) -> Result<Vec<String>> {
         let Some(sdf::Value::Dictionary(sets)) = self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::Clips)?
         else {
             return Ok(Vec::new());
@@ -441,7 +443,7 @@ impl Prim {
     /// Returns `true` when one or more value-clip sets are composed onto this
     /// prim (spec 12.3.4).
     pub fn has_clips(&self) -> Result<bool> {
-        Ok(!self.clip_sets()?.is_empty())
+        Ok(!self.clip_set_names()?.is_empty())
     }
 
     /// Composed `typeName`, if set. Mirrors C++ `UsdPrim::GetTypeName`.
@@ -1915,7 +1917,7 @@ mod tests {
         Ok(())
     }
 
-    /// `Prim::has_clips`/`clip_sets` report composed clip sets, and
+    /// `Prim::has_clips`/`clip_set_names` report composed clip sets, and
     /// `Attribute::get_at` resolves clip values (spec 12.3.4).
     #[test]
     fn clip_introspection() -> Result<()> {
@@ -1927,7 +1929,7 @@ mod tests {
 
         let model = super::Prim::new(&stage, sdf::path("/Model")?);
         assert!(model.has_clips()?);
-        assert_eq!(model.clip_sets()?, vec!["default".to_string()]);
+        assert_eq!(model.clip_set_names()?, vec!["default".to_string()]);
 
         // get_at flows through clip resolution: the clip overrides the reference.
         let size = super::Attribute::new(&stage, sdf::path("/Model.size")?);
