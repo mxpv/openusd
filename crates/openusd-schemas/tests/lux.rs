@@ -6,7 +6,7 @@
 use openusd::Result;
 use openusd::sdf;
 use openusd::tf::Token;
-use openusd::usd::{SchemaBase, Stage};
+use openusd::usd::{CollectionAPI, SchemaBase, Stage};
 use openusd_schemas::geom::XformableExt;
 use openusd_schemas::lux::{
     BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
@@ -322,6 +322,28 @@ fn geometry_light_links_mesh() -> Result<()> {
 
     let g = GeometryLight::get(&stage, "/Light")?.expect("GeometryLight");
     assert_eq!(g.geometry_rel().targets()?, vec![sdf::path("/Emitter")?]);
+    Ok(())
+}
+
+/// `LightAPI` brings two built-in collections, both declared with
+/// `includeRoot = 1`, so a light links to everything before anything is
+/// authored (C++ `UsdLuxLightAPI::GetLightLinkCollectionAPI`).
+#[test]
+fn light_links_include_root() -> Result<()> {
+    let stage = memory()?;
+    stage.define_prim("/World/Geo")?.set_type_name("Mesh")?;
+    let light = DistantLight::define(&stage, "/World/Sun")?;
+
+    for name in ["lightLink", "shadowLink"] {
+        let linking = CollectionAPI::from_prim_unchecked(light.prim().clone(), name);
+        assert!(linking.include_root()?, "{name} includes the pseudo-root");
+        assert!(
+            linking
+                .compute_membership_query()?
+                .is_path_included(&sdf::path("/World/Geo")?),
+            "{name} links the geometry"
+        );
+    }
     Ok(())
 }
 

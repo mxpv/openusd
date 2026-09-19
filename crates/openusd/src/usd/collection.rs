@@ -29,15 +29,15 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::Result;
-use crate::sdf::{self, FieldKey, Path, Value, Variability};
+use crate::sdf::{self, Path, Value, Variability};
 use crate::usd::{Attribute, Prim, PrimPredicate, SchemaBase, Stage};
 
 use super::collection_expr::{CollectionEvaluator, CollectionSearcher, resolve_complete_membership_expression};
 use super::{CollectionAPI, CollectionMode, ExpansionRule, tokens};
 
-/// A collection read as values rather than as properties: the authored
-/// opinions, the membership they resolve to, and authoring that keeps edits
-/// minimal.
+/// A collection read as values rather than as properties: the composed
+/// opinions with the prim definition's fallbacks behind them, the membership
+/// they resolve to, and authoring that keeps edits minimal.
 ///
 /// The generated accessors (`expansion_rule_attr`, `includes_rel`, …) hand
 /// back the property itself; these read and write what it holds.
@@ -52,13 +52,13 @@ impl CollectionAPI {
 
     /// `expansionRule` — defaults to [`ExpansionRule::ExpandPrims`].
     pub fn expansion_rule(&self) -> Result<ExpansionRule> {
-        authored_or_default(&self.expansion_rule_attr())
+        composed_or_default(&self.expansion_rule_attr())
     }
 
     /// `includeRoot` — whether the pseudo-root `</>` counts as included.
     /// Defaults to `false`.
     pub fn include_root(&self) -> Result<bool> {
-        authored_or_default(&self.include_root_attr())
+        composed_or_default(&self.include_root_attr())
     }
 
     /// The authored `includes` relationship targets.
@@ -71,11 +71,11 @@ impl CollectionAPI {
         self.excludes_rel().targets()
     }
 
-    /// The composed `membershipExpression`, if authored. Composition already
-    /// substituted `%_` chains and mapped the expression across arcs; a
-    /// string- or token-typed opinion parses leniently.
+    /// The composed `membershipExpression`, if there is one. Composition
+    /// already substituted `%_` chains and mapped the expression across arcs;
+    /// a string- or token-typed opinion parses leniently.
     pub fn membership_expression(&self) -> Result<Option<sdf::PathExpression>> {
-        Ok(match authored(&self.membership_expression_attr())? {
+        Ok(match composed(&self.membership_expression_attr())? {
             Some(Value::PathExpression(expr)) => Some(expr),
             Some(Value::String(s)) => Some(sdf::PathExpression::parse(&s)),
             Some(Value::Token(s)) => Some(sdf::PathExpression::parse(s.as_str())),
@@ -86,7 +86,7 @@ impl CollectionAPI {
     /// The membership language governing this collection — defaults to
     /// [`CollectionMode::Automatic`].
     pub fn mode(&self) -> Result<CollectionMode> {
-        authored_or_default(&self.mode_attr())
+        composed_or_default(&self.mode_attr())
     }
 
     /// Resolve this collection's authored opinions into a
@@ -219,7 +219,10 @@ impl CollectionAPI {
     pub fn has_no_included_paths(&self) -> Result<bool> {
         Ok(self.includes()?.is_empty()
             && !self.include_root()?
-            && (!self.excludes()?.is_empty() || self.membership_expression()?.is_none()))
+            && (!self.excludes()?.is_empty()
+                || self
+                    .membership_expression()?
+                    .is_none_or(|expression| expression.is_empty())))
     }
 
     fn build_into(&self, map: &mut PathExpansionRuleMap, visited: &mut HashSet<Path>) -> Result<()> {
@@ -693,24 +696,20 @@ impl MembershipQuery {
     }
 }
 
-/// The composed `default` field of `attr`, read as authored, with no
-/// fallback applied.
-fn authored(attr: &Attribute) -> Result<Option<Value>> {
-    Ok(attr.stage().field::<Value>(attr.path(), FieldKey::Default)?)
+/// The composed value of `attr` — the strongest `default` opinion, or the
+/// fallback the prim definition declares behind it. A schema that overrides an
+/// inherited fallback answers with its own: `LightAPI` and `RenderPass`
+/// declare their built-in collections' `includeRoot` as `1`, so those
+/// collections include the pseudo-root until something says otherwise.
+fn composed(attr: &Attribute) -> Result<Option<Value>> {
+    attr.get::<Value>()
 }
 
-/// The composed `default` field of `attr` as a `T`, or `T::default()` where
-/// it is unauthored or holds a value `T` does not accept. A failed read
+/// The composed value of `attr` as a `T`, or `T::default()` where there is
+/// none and where what is there is a value `T` does not accept. A failed read
 /// propagates.
-///
-/// TODO: fall back to the value the prim definition declares rather than to
-/// `T::default()`. A schema that overrides an inherited fallback — `LightAPI`
-/// and `RenderPass` both declare their built-in collections' `includeRoot` as
-/// `1` — reads back the inherited default instead, where C++
-/// `UsdCollectionAPI::GetIncludeRootAttr().Get()` answers what the definition
-/// says.
-fn authored_or_default<T: TryFrom<Value> + Default>(attr: &Attribute) -> Result<T> {
-    Ok(authored(attr)?
+fn composed_or_default<T: TryFrom<Value> + Default>(attr: &Attribute) -> Result<T> {
+    Ok(composed(attr)?
         .and_then(|value| T::try_from(value).ok())
         .unwrap_or_default())
 }
@@ -751,6 +750,7 @@ mod tests {
     use crate::Result;
     use crate::sdf;
     use crate::sdf::Variability;
+    use crate::usd::SchemaRegistry;
 
     fn query(entries: &[(&str, PathRule)]) -> MembershipQuery {
         let map = entries.iter().map(|(p, r)| (sdf::path(p).unwrap(), *r)).collect();
@@ -838,6 +838,34 @@ mod tests {
         let bare = author_collection(&stage, "/X", "c")?;
         assert_eq!(bare.expansion_rule()?, ExpansionRule::ExpandPrims);
         assert!(!bare.include_root()?);
+        Ok(())
+    }
+
+    /// A collection a schema declares as a built-in reads that schema's
+    /// fallbacks, not the ones the collection schema alone would give: the
+    /// test family's `LightAPI` declares its `lightLink` collection with
+    /// `includeRoot = 1`, so the light illuminates everything until something
+    /// says otherwise (C++ `UsdLuxLightAPI`'s light linking).
+    #[test]
+    fn include_root_from_definition() -> Result<()> {
+        let stage = Stage::builder()
+            .schema_registry(SchemaRegistry::test_registry())
+            .in_memory("anon.usda")?;
+        let prim = stage.define_prim("/Light")?.apply_api("LightAPI")?;
+        let coll = CollectionAPI::from_prim_unchecked(prim, "lightLink");
+
+        assert!(coll.include_root()?, "the definition declares includeRoot");
+        assert!(!coll.has_no_included_paths()?);
+        assert!(
+            coll.compute_membership_query()?
+                .is_path_included(&sdf::path("/World/Geo")?),
+            "including the pseudo-root includes every path"
+        );
+
+        // An authored opinion still wins over the definition.
+        coll.set_include_root(false)?;
+        assert!(!coll.include_root()?);
+        assert!(coll.has_no_included_paths()?);
         Ok(())
     }
 
