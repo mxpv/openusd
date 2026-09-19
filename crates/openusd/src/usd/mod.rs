@@ -31,14 +31,16 @@ mod timecode;
 pub use attribute::{Attribute, AttributeBuilder, AttributeQuery};
 pub use authoring::{PrimEdit, StageEdit};
 pub use capture::{ReplayStage, UndoStage};
-pub use clips::ClipsAPI;
 pub use collection::{
     Collection, CollectionMode, ExpansionRule, MembershipQuery, PathExpansionRuleMap, PathRule, apply_collection,
     collections_on, compute_included_paths, is_collection_api_path,
 };
 pub use collection_expr::{CollectionEvaluator, CollectionSearcher, resolve_complete_membership_expression};
 pub use connections::ConnectionGraph;
-pub use core_schemas::{SCHEMAS, tokens};
+pub use core_schemas::{
+    ClipsAPI, ClipsAPISchema, CollectionAPI, ColorSpaceAPI, ColorSpaceDefinitionAPI, ModelAPI, ModelAPISchema, SCHEMAS,
+    tokens,
+};
 pub use diff::{ApplyMode, Diff, Edit, FieldValue};
 pub use editor::{NamespaceEditError, NamespaceEditor};
 pub use interp::InterpolationType;
@@ -59,16 +61,15 @@ pub use stage::{
     StageAuthoringError, StageBuilder, TypeConflict, WeakStage,
 };
 
-/// The core `usd` family's schema data, generated from OpenUSD's own
-/// `usd/schema.usda` and committed rather than built here: `openusd-build`
-/// depends on this crate, so generating it at build time would be a cycle. The
-/// `core_family` test there rewrites it and fails when it drifts.
+/// The core `usd` family, generated from OpenUSD's own `usd/schema.usda` and
+/// committed rather than built here: `openusd-build` depends on this crate, so
+/// generating it at build time would be a cycle. The `core_family` test there
+/// rewrites it and fails when it drifts.
 ///
-/// Only the declarations are generated; the views for these schemas
-/// ([`Collection`], [`ClipsAPI`]) are hand-written beside them. What it
-/// declares is re-exported as [`SCHEMAS`] and [`tokens`], the shape every
-/// generated family takes, so a caller can register the core family on a
-/// builder of its own and name what its schemas call things.
+/// It carries what every generated family does: the declarations, re-exported
+/// as [`SCHEMAS`] and [`tokens`] so a caller can register the core family on a
+/// builder of its own and name what its schemas call things, and a view for
+/// each schema.
 mod core_schemas {
     // Included rather than declared, which is also how a consumer's own
     // generated views reach it: `cargo fmt` walks modules and would lay this

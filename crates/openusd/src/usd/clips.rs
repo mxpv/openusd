@@ -20,15 +20,15 @@ use crate::pcp::clip::keys;
 use crate::pcp::clip_manifest;
 use crate::sdf::{self, AssetPath, Value};
 
-use super::{Prim, StageAuthoringError};
+use super::{ClipsAPI, SchemaBase, StageAuthoringError};
 
-/// Read/write view of the value-clip metadata on a prim (C++ `UsdClipsAPI`).
+/// Reading and writing the value-clip metadata on a prim. `ClipsAPI` is a
+/// non-applied schema, so any prim can be viewed as one:
 ///
 /// ```no_run
 /// # use openusd::usd::{Stage, ClipsAPI};
 /// # fn demo(stage: &Stage) -> openusd::Result<()> {
-/// let prim = stage.prim("/World/Anim")?;
-/// let clips = ClipsAPI::new(&prim);
+/// let clips = ClipsAPI::from_prim_unchecked(stage.prim("/World/Anim")?);
 /// for set in clips.clip_set_names()? {
 ///     let assets = clips.clip_asset_paths(&set)?;
 ///     let active = clips.clip_active(&set)?;
@@ -37,23 +37,14 @@ use super::{Prim, StageAuthoringError};
 /// # Ok(())
 /// # }
 /// ```
-pub struct ClipsAPI {
-    prim: Prim,
-}
-
 impl ClipsAPI {
-    /// Wrap `prim` for clip-metadata introspection and authoring.
-    pub fn new(prim: &Prim) -> Self {
-        Self { prim: prim.clone() }
-    }
-
     /// Names of the authored clip sets (the keys of the `clips` dictionary),
     /// sorted, empty when none are authored. This enumerates every authored set
     /// regardless of `clipSets`; a set listed here may still resolve no clip
     /// values (e.g. a template set with invalid metadata, or a name excluded by
     /// `clipSets`). Use [`clip_sets`](Self::clip_sets) for the strength order.
     pub fn clip_set_names(&self) -> Result<Vec<String>> {
-        self.prim.clip_sets()
+        self.prim().clip_sets()
     }
 
     /// The composed `clipSets` strength-ordering list-op (C++
@@ -61,9 +52,8 @@ impl ClipsAPI {
     /// preserving the prepend/append/delete structure. `None` when `clipSets`
     /// is unauthored — clip sets then fall back to name order (spec 12.3.4.1).
     pub fn clip_sets(&self) -> Result<Option<sdf::StringListOp>> {
-        let path = self.prim.path().clone();
+        let path = self.path().clone();
         Ok(self
-            .prim
             .stage()
             .masked(&path, |g, cache| cache.clip_sets_list_op(g, &path))?)
     }
@@ -73,7 +63,7 @@ impl ClipsAPI {
     /// [`sdf::StringListOp::explicit`] for a plain ordered list, or with the
     /// prepend/append/delete operators to edit a composed order.
     pub fn set_clip_sets(&self, clip_sets: sdf::StringListOp) -> Result<(), StageAuthoringError> {
-        self.prim
+        self.prim()
             .clone()
             .set_metadata(sdf::FieldKey::ClipSets.as_str(), Value::StringListOp(clip_sets))?;
         Ok(())
@@ -84,9 +74,8 @@ impl ClipsAPI {
     /// fields, since each per-field getter re-resolves the entire dictionary.
     pub fn clips(&self) -> Result<Option<sdf::Dictionary>> {
         Ok(self
-            .prim
             .stage()
-            .field::<Value>(self.prim.path(), sdf::FieldKey::Clips)?
+            .field::<Value>(self.path(), sdf::FieldKey::Clips)?
             .and_then(Value::try_as_dictionary))
     }
 
@@ -94,7 +83,7 @@ impl ClipsAPI {
     /// Authors all sets in one write, unlike the per-field setters which each
     /// read-modify-write the dictionary.
     pub fn set_clips(&self, clips: sdf::Dictionary) -> Result<(), StageAuthoringError> {
-        self.prim
+        self.prim()
             .clone()
             .set_metadata(sdf::FieldKey::Clips.as_str(), Value::Dictionary(clips))?;
         Ok(())
@@ -285,7 +274,7 @@ impl ClipsAPI {
     /// ```no_run
     /// # use openusd::{sdf, usd::{Stage, ClipsAPI}};
     /// # fn demo(stage: &Stage) -> openusd::Result<()> {
-    /// let clips = ClipsAPI::new(&stage.prim("/World/Anim")?);
+    /// let clips = ClipsAPI::from_prim_unchecked(stage.prim("/World/Anim")?);
     /// if let Some(manifest) = clips.generate_clip_manifest("default", false)? {
     ///     manifest.export("manifest.usda")?;
     ///     clips.set_clip_manifest_asset_path("default", "./manifest.usda")?;
@@ -294,8 +283,8 @@ impl ClipsAPI {
     /// # }
     /// ```
     pub fn generate_clip_manifest(&self, clip_set: &str, write_blocks_for_missing: bool) -> Result<Option<sdf::Layer>> {
-        let path = self.prim.path().clone();
-        Ok(self.prim.stage().masked(&path, |g, cache| {
+        let path = self.path().clone();
+        Ok(self.stage().masked(&path, |g, cache| {
             cache.generate_clip_manifest(g, &path, clip_set, write_blocks_for_missing)
         })?)
     }
@@ -345,7 +334,7 @@ impl ClipsAPI {
     fn set_field(&self, clip_set: &str, key: &str, value: Value) -> Result<(), StageAuthoringError> {
         let clip_set = clip_set.to_string();
         let key = key.to_string();
-        self.prim
+        self.prim()
             .clone()
             .update_metadata(sdf::FieldKey::Clips.as_str(), move |current| {
                 let mut sets = match current {
@@ -388,7 +377,7 @@ mod tests {
     #[test]
     fn reads_explicit_clip_set_from_fixture() -> Result<()> {
         let stage = Stage::open(&fixture("clip_asset_anchor"))?;
-        let clips = ClipsAPI::new(&stage.prim("/Model")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Model")?);
 
         assert_eq!(clips.clip_set_names()?, vec!["default".to_string()]);
         assert_eq!(clips.clip_asset_paths("default")?, vec![AssetPath::new("./clip.usda")]);
@@ -404,7 +393,7 @@ mod tests {
     #[test]
     fn reads_template_clip_set_from_fixture() -> Result<()> {
         let stage = Stage::open(&fixture("clip_template"))?;
-        let clips = ClipsAPI::new(&stage.prim("/Model")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Model")?);
 
         assert_eq!(
             clips.clip_template_asset_path("default")?.as_deref(),
@@ -445,7 +434,7 @@ mod tests {
             "clips",
             Value::Dictionary([("default".to_string(), set)].into_iter().collect()),
         )?;
-        let clips = ClipsAPI::new(&stage.prim("/Anim")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Anim")?);
 
         assert_eq!(
             clips.clip_times("default")?,
@@ -461,7 +450,11 @@ mod tests {
         // Missing set, missing field, and a prim with no clips at all.
         assert!(clips.clip_asset_paths("nope")?.is_empty());
         assert!(clips.clip_prim_path("default")?.is_none());
-        assert!(ClipsAPI::new(&stage.prim("/Absent")?).clip_set_names()?.is_empty());
+        assert!(
+            ClipsAPI::from_prim_unchecked(stage.prim("/Absent")?)
+                .clip_set_names()?
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -472,7 +465,7 @@ mod tests {
     fn set_get_round_trip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Anim")?;
-        let clips = ClipsAPI::new(&stage.prim("/Anim")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Anim")?);
 
         clips.set_clip_asset_paths("default", ["a.usda", "b.usda"])?;
         clips.set_clip_active("default", vec![gf::vec2d(0.0, 0.0), gf::vec2d(10.0, 1.0)])?;
@@ -530,7 +523,7 @@ mod tests {
     fn clip_sets_list_op_round_trip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Anim")?;
-        let clips = ClipsAPI::new(&stage.prim("/Anim")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Anim")?);
 
         assert!(clips.clip_sets()?.is_none());
         clips.set_clip_sets(sdf::StringListOp::explicit(vec!["b".into(), "a".into()]))?;
@@ -545,7 +538,7 @@ mod tests {
     fn clips_dict_round_trip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Anim")?;
-        let clips = ClipsAPI::new(&stage.prim("/Anim")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Anim")?);
         assert!(clips.clips()?.is_none());
 
         let set = Value::Dictionary([(keys::PRIM_PATH.to_string(), Value::String("/Geo".into()))].into());
@@ -576,7 +569,7 @@ mod tests {
     #[test]
     fn generate_manifest_declares_sampled() -> Result<()> {
         let stage = Stage::open(&fixture("clip_manifest_gen"))?;
-        let clips = ClipsAPI::new(&stage.prim("/Model")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Model")?);
 
         let manifest = clips.generate_clip_manifest("default", false)?.expect("set resolves");
         assert_eq!(
@@ -597,7 +590,7 @@ mod tests {
     #[test]
     fn generate_manifest_blocks_missing() -> Result<()> {
         let stage = Stage::open(&fixture("clip_manifest_gen"))?;
-        let clips = ClipsAPI::new(&stage.prim("/Model")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Model")?);
 
         let manifest = clips.generate_clip_manifest("default", true)?.expect("set resolves");
         let blocked = |path: &str| -> Result<Vec<f64>> {
@@ -626,7 +619,7 @@ mod tests {
     fn generate_manifest_round_trip() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let stage = Stage::open(&fixture("clip_manifest_gen"))?;
-        let clips = ClipsAPI::new(&stage.prim("/Model")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Model")?);
         assert!(clips.generate_clip_manifest("nope", false)?.is_none());
 
         // `a` is declared by the clips, `d` is authored without samples.
@@ -679,7 +672,7 @@ def "Model" (
         )?;
 
         let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
-        let clips = ClipsAPI::new(&stage.prim("/Model")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Model")?);
         let error = clips
             .generate_clip_manifest("default", false)
             .expect_err("clip missing");
@@ -725,7 +718,7 @@ def "Model" (
         let root = stage.root_layer().identifier().to_string();
         stage.insert_layer(&root, 0, weaker, sdf::LayerOffset::IDENTITY)?;
 
-        let clips = ClipsAPI::new(&stage.prim("/Model")?);
+        let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Model")?);
         clips.set_clip_prim_path("default", "/Geo")?;
         assert_eq!(clips.clip_prim_path("default")?.as_deref(), Some("/Geo"));
         let root_layer = stage.root_layer();

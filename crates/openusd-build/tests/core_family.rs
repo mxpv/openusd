@@ -1,4 +1,5 @@
-//! The core `usd` family that `openusd` itself carries.
+//! The core `usd` family that `openusd` itself carries: its declarations and
+//! its views.
 //!
 //! `openusd` cannot generate it at build time — this crate depends on it, so a
 //! build script there would be a cycle — and it cannot be left ungenerated
@@ -31,23 +32,20 @@ fn built() -> &'static openusd_build::Output {
     static ONCE: LazyLock<openusd_build::Output> = LazyLock::new(|| {
         openusd_build::configure()
             .search_path(schema().parent().and_then(Path::parent).expect("the schemas root"))
-            .build_library(schema(), Views::Skip)
+            .build_library(schema(), Views::Generate)
             .expect("the core definitions build")
     });
     &ONCE
 }
 
 /// What `openusd` carries is what this generator makes of the vendored
-/// definitions.
-///
-/// The views are left out: `openusd::usd` writes its own by hand, and a
-/// generated set beside them would collide.
+/// definitions, views included.
 #[test]
 fn core_family_is_generated() {
     let output = built();
 
     assert_eq!(output.library_name(), "usd");
-    assert!(!output.views, "the core family's views are hand-written");
+    assert!(output.views, "the core family's views are generated");
 
     common::matches(&generated(), &output.rust);
 }

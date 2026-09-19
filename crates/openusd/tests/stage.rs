@@ -8417,8 +8417,7 @@ fn clips_edit_resolves_live() -> Result<()> {
         "the reference time sample resolves before any clips are authored",
     );
 
-    let prim = stage.prim("/Model")?;
-    let api = usd::ClipsAPI::new(&prim);
+    let api = usd::ClipsAPI::from_prim_unchecked(stage.prim("/Model")?);
     api.set_clip_asset_paths("default", vec![clip.display().to_string()])?;
     api.set_clip_prim_path("default", "/Model")?;
     api.set_clip_manifest_asset_path("default", manifest.display().to_string())?;

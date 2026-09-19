@@ -313,3 +313,1130 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
             .bases(&["APISchemaBase"]),
     ],
 );
+
+/// [`ModelAPI`] is an API schema that provides an interface to a prim's
+/// model qualities, if it does, in fact, represent the root prim of a model.
+///
+/// The first and foremost model quality is its *kind*, i.e. the metadata
+/// that establishes it as a model (See `KindRegistry`).  [`ModelAPI`] provides
+/// various methods for setting and querying the prim's kind, as well as
+/// queries (also available on `UsdPrim`) for asking what category of model
+/// the prim is.  See Kind and Model-ness.
+///
+/// [`ModelAPI`] also provides access to a prim's `assetInfo`
+/// data.  While any prim *can* host `assetInfo`, it is common that published
+/// (referenced) assets are packaged as models, therefore it is convenient
+/// to provide access to the one from the other.
+///
+/// Todo: establish an `_IsCompatible()` override that returns `IsModel()`
+/// Todo: `GetModelInstanceName()`
+pub trait ModelAPISchema: ::openusd::usd::APISchemaBase {}
+
+/// [`ModelAPI`] is an API schema that provides an interface to a prim's
+/// model qualities, if it does, in fact, represent the root prim of a model.
+///
+/// The first and foremost model quality is its *kind*, i.e. the metadata
+/// that establishes it as a model (See `KindRegistry`).  [`ModelAPI`] provides
+/// various methods for setting and querying the prim's kind, as well as
+/// queries (also available on `UsdPrim`) for asking what category of model
+/// the prim is.  See Kind and Model-ness.
+///
+/// [`ModelAPI`] also provides access to a prim's `assetInfo`
+/// data.  While any prim *can* host `assetInfo`, it is common that published
+/// (referenced) assets are packaged as models, therefore it is convenient
+/// to provide access to the one from the other.
+///
+/// Todo: establish an `_IsCompatible()` override that returns `IsModel()`
+/// Todo: `GetModelInstanceName()`
+#[derive(::std::clone::Clone, ::std::fmt::Debug)]
+pub struct ModelAPI(::openusd::usd::Prim);
+
+impl ModelAPI {
+    /// Views `prim` as this schema, which any prim can be viewed as.
+    ///
+    /// Unchecked of the schema, not of memory: nothing here is
+    /// `unsafe`. This schema is applied to no prim and names no prim
+    /// type, so there is nothing to ask about one — which is why it has
+    /// no constructor that asks.
+    pub fn from_prim_unchecked(prim: ::openusd::usd::Prim) -> Self {
+        Self(prim)
+    }
+}
+
+impl ::openusd::usd::SchemaBase for ModelAPI {
+    const KIND: ::openusd::usd::SchemaKind = ::openusd::usd::SchemaKind::NonAppliedApi;
+    fn prim(&self) -> &::openusd::usd::Prim {
+        &self.0
+    }
+}
+
+impl ::std::ops::Deref for ModelAPI {
+    type Target = ::openusd::usd::Prim;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ModelAPISchema for ModelAPI {}
+
+impl ::openusd::usd::APISchemaBase for ModelAPI {}
+
+/// [`ColorSpaceAPI`] is an API schema that introduces a `colorSpace`
+/// property for authoring scene referred color space opinions. It also provides
+/// a mechanism to determine the applicable color space within a scope through
+/// inheritance. Accordingly, this schema may be applied to any prim to
+/// introduce a color space at any point in a compositional hierarchy.
+///
+/// Color space resolution involves determining the color space authored on an
+/// attribute by first examining the attribute itself for a color space which
+/// may have been authored via `UsdAttribute::SetColorSpace()`. If none is
+/// found,
+/// the attribute's prim is checked for the existence of the `UsdColorSpaceAPI`,
+/// and any color space authored there. If none is found on the attribute's
+/// prim, the prim's ancestors are examined up the hierarchy until an authored
+/// color space is found. If no color space is found, an empty `TfToken` is
+/// returned. When no color space is found, the default color space is linear,
+/// with Rec709 primaries and D65 white point, corresponding to the
+/// `GfColorSpace`
+/// token `LinearRec709`.
+///
+/// For a list of built in color space token values, see `GfColorSpaceNames`.
+///
+/// Use a pattern like this when determining an attribute's resolved color
+/// space:
+///
+/// ```text
+/// TfToken attrCs = attr.GetColorSpace();
+/// if (!attrCs.IsEmpty()) {
+///     return attrCs;
+/// }
+/// auto csAPI = UsdColorSpaceAPI(attr.GetPrim());
+/// return UsdColorSpaceAPI::ComputeColorSpaceName(attr);
+/// ```
+///
+///
+/// `GfColorSpace` and its associated utilities can be used to perform color
+/// transformations; some examples:
+///
+/// ```text
+/// srcSpace = GfColorSpace(ComputeColorSpaceName(attr))
+/// targetSpace = GfColorSpace(targetSpaceName)
+/// targetColor = srcSpace.Convert(targetSpace, srcColor)
+/// srcSpace.ConvertRGBSpan(targetSpace, colorSpan)
+/// ```
+///
+///
+/// It is recommended that in situations where performance is a concern, an
+/// application should perform conversions infrequently and cache results
+/// wherever possible.
+#[derive(::std::clone::Clone, ::std::fmt::Debug)]
+pub struct ColorSpaceAPI(::openusd::usd::Prim);
+
+impl ColorSpaceAPI {
+    /// Views `prim` as this schema whether or not it carries it.
+    ///
+    /// Unchecked of the schema, not of memory: nothing here is
+    /// `unsafe`, and a prim that does not carry this schema simply
+    /// answers nothing for the properties it declares.
+    /// [`from_prim`](Self::from_prim) is the constructor that asks.
+    pub fn from_prim_unchecked(prim: ::openusd::usd::Prim) -> Self {
+        Self(prim)
+    }
+    /// Applies the schema to `prim` and views it.
+    pub fn apply(prim: &::openusd::usd::Prim) -> ::openusd::Result<Self> {
+        ::std::result::Result::Ok(Self(prim.clone().apply_api(tokens::COLOR_SPACE_API)?))
+    }
+    /// Whether the schema may be applied to `prim`.
+    pub fn can_apply(
+        prim: &::openusd::usd::Prim,
+    ) -> ::std::result::Result<(), ::openusd::usd::ApplyApiError> {
+        prim.can_apply_api(tokens::COLOR_SPACE_API)
+    }
+    /// Views `prim` as this schema, or `None` where it does not carry
+    /// it.
+    pub fn from_prim(
+        prim: ::openusd::usd::Prim,
+    ) -> ::openusd::Result<::std::option::Option<Self>> {
+        ::std::result::Result::Ok(
+            prim.has_api_schema(tokens::COLOR_SPACE_API)?.then_some(Self(prim)),
+        )
+    }
+    /// Views the prim at `path` as this schema, or `None` where it does
+    /// not carry it — [`from_prim`](Self::from_prim) over the prim
+    /// `path` names.
+    pub fn get(
+        stage: &::openusd::usd::Stage,
+        path: impl ::openusd::sdf::IntoPath,
+    ) -> ::openusd::Result<::std::option::Option<Self>> {
+        Self::from_prim(stage.prim(path)?)
+    }
+    /// The color space that applies to attributes with
+    /// unauthored color spaces on this prim and its descendents.
+    ///
+    /// Declared `uniform token colorSpace:name`. Read it with
+    /// `get::<::openusd::tf::Token>()`.
+    pub fn color_space_name_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(tokens::COLOR_SPACE_NAME)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_color_space_name_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    tokens::COLOR_SPACE_NAME,
+                    ::openusd::sdf::ValueTypeName::TOKEN,
+                )
+                .custom(false)
+                .variability(::openusd::sdf::Variability::Uniform)
+                .build()?,
+        )
+    }
+}
+
+impl ::openusd::usd::SchemaBase for ColorSpaceAPI {
+    const KIND: ::openusd::usd::SchemaKind = ::openusd::usd::SchemaKind::SingleApplyApi;
+    fn prim(&self) -> &::openusd::usd::Prim {
+        &self.0
+    }
+}
+
+impl ::std::ops::Deref for ColorSpaceAPI {
+    type Target = ::openusd::usd::Prim;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ::openusd::usd::APISchemaBase for ColorSpaceAPI {}
+
+/// [`ColorSpaceDefinitionAPI`] is an API schema for defining a custom
+/// color space. Custom color spaces become available for use on prims or for
+/// assignment to attributes via the colorSpace:name property on prims that have
+/// applied `UsdColorSpaceAPI`. Since color spaces inherit hierarchically, a
+/// custom color space defined on a prim will be available to all descendants of
+/// that prim, unless overridden by a more local color space definition bearing
+/// the same name. Locally redefining color spaces within the same layer could
+/// be confusing, so that practice is discouraged.
+///
+/// The default color space values are equivalent to an identity transform, so
+/// applying this schema and invoking `UsdColorSpaceAPI::ComputeColorSpace()`
+/// on a prim resolving to a defaulted color definition will return a color
+/// space equivalent to the identity transform.
+#[derive(::std::clone::Clone, ::std::fmt::Debug)]
+pub struct ColorSpaceDefinitionAPI {
+    prim: ::openusd::usd::Prim,
+    name: ::openusd::tf::Token,
+}
+
+impl ColorSpaceDefinitionAPI {
+    /// Views `prim` as this schema applied under `name`, whether or not
+    /// it is.
+    ///
+    /// Unchecked of the schema, not of memory: nothing here is
+    /// `unsafe`, and a prim that does not carry this schema under this
+    /// name simply answers nothing for the properties it declares.
+    /// [`get_instance`](Self::get_instance) is the constructor that
+    /// asks.
+    pub fn from_prim_unchecked(
+        prim: ::openusd::usd::Prim,
+        name: impl ::std::convert::Into<::openusd::tf::Token>,
+    ) -> Self {
+        Self { prim, name: name.into() }
+    }
+    /// The instance name this view reads its properties under.
+    pub fn name(&self) -> &::openusd::tf::Token {
+        &self.name
+    }
+    /// Applies the schema to `prim` under `name` and views it.
+    pub fn apply(
+        prim: &::openusd::usd::Prim,
+        name: impl ::std::convert::Into<::openusd::tf::Token>,
+    ) -> ::openusd::Result<Self> {
+        let name = name.into();
+        let applied = ::openusd::usd::SchemaRegistry::make_applied_name(
+            tokens::COLOR_SPACE_DEFINITION_API,
+            name.as_str(),
+        );
+        ::std::result::Result::Ok(Self {
+            prim: prim.clone().apply_api(applied)?,
+            name,
+        })
+    }
+    /// Views `prim` as this schema applied under `name`, or `None`
+    /// where it does not carry it.
+    pub fn get_instance(
+        prim: &::openusd::usd::Prim,
+        name: impl ::std::convert::Into<::openusd::tf::Token>,
+    ) -> ::openusd::Result<::std::option::Option<Self>> {
+        let name = name.into();
+        let applied = ::openusd::usd::SchemaRegistry::make_applied_name(
+            tokens::COLOR_SPACE_DEFINITION_API,
+            name.as_str(),
+        );
+        let carried = prim.has_api_schema(applied)?;
+        ::std::result::Result::Ok(carried.then(|| Self { prim: prim.clone(), name }))
+    }
+    /// Whether the schema may be applied to `prim` under `name`.
+    pub fn can_apply(
+        prim: &::openusd::usd::Prim,
+        name: &str,
+    ) -> ::std::result::Result<(), ::openusd::usd::ApplyApiError> {
+        prim.can_apply_api(
+            ::openusd::usd::SchemaRegistry::make_applied_name(
+                tokens::COLOR_SPACE_DEFINITION_API,
+                name,
+            ),
+        )
+    }
+    /// Every instance of this schema applied to `prim`.
+    pub fn get_all(
+        prim: &::openusd::usd::Prim,
+    ) -> ::openusd::Result<::std::vec::Vec<Self>> {
+        let mut found = ::std::vec::Vec::new();
+        for applied in prim.api_schemas()? {
+            let (schema, instance) = ::openusd::usd::SchemaRegistry::type_name_and_instance(
+                &applied,
+            );
+            let mine = instance
+                .filter(|_| schema.as_str() == tokens::COLOR_SPACE_DEFINITION_API);
+            if let ::std::option::Option::Some(name) = mine {
+                found.push(Self { prim: prim.clone(), name });
+            }
+        }
+        ::std::result::Result::Ok(found)
+    }
+    /// The name of the color space defined on this prim.
+    /// ```text
+    ///
+    /// ```
+    ///
+    /// Declared `uniform token colorSpaceDefinition:__INSTANCE_NAME__:name =
+    /// "custom"`. Read it with `get::<::openusd::tf::Token>()`.
+    pub fn name_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_NAME,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_name_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_NAME,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::TOKEN,
+                )
+                .custom(false)
+                .variability(::openusd::sdf::Variability::Uniform)
+                .build()?,
+        )
+    }
+    /// Red chromaticity coordinates
+    ///
+    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:redChroma = (1.0,
+    /// 0.0)`. Read it with `get::<::openusd::gf::Vec2f>()`.
+    pub fn red_chroma_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_RED_CHROMA,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_red_chroma_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_RED_CHROMA,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::FLOAT2,
+                )
+                .custom(false)
+                .build()?,
+        )
+    }
+    /// Green chromaticity coordinates
+    ///
+    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:greenChroma = (0.0,
+    /// 1.0)`. Read it with `get::<::openusd::gf::Vec2f>()`.
+    pub fn green_chroma_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_green_chroma_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::FLOAT2,
+                )
+                .custom(false)
+                .build()?,
+        )
+    }
+    /// Blue chromaticity coordinates
+    ///
+    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:blueChroma = (0.0,
+    /// 0.0)`. Read it with `get::<::openusd::gf::Vec2f>()`.
+    pub fn blue_chroma_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_blue_chroma_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::FLOAT2,
+                )
+                .custom(false)
+                .build()?,
+        )
+    }
+    /// Whitepoint chromaticity coordinates
+    ///
+    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:whitePoint
+    /// = (0.3333333432674408, 0.3333333432674408)`. Read it with
+    /// `get::<::openusd::gf::Vec2f>()`.
+    pub fn white_point_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_WHITE_POINT,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_white_point_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_WHITE_POINT,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::FLOAT2,
+                )
+                .custom(false)
+                .build()?,
+        )
+    }
+    /// Gamma value of the log section
+    ///
+    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:gamma = 1.0`. Read it
+    /// with `get::<f32>()`.
+    pub fn gamma_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_gamma_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::FLOAT,
+                )
+                .custom(false)
+                .build()?,
+        )
+    }
+    /// Linear bias of the log section
+    ///
+    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:linearBias = 0.0`.
+    /// Read it with `get::<f32>()`.
+    pub fn linear_bias_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_linear_bias_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::FLOAT,
+                )
+                .custom(false)
+                .build()?,
+        )
+    }
+}
+
+impl ::openusd::usd::SchemaBase for ColorSpaceDefinitionAPI {
+    const KIND: ::openusd::usd::SchemaKind = ::openusd::usd::SchemaKind::MultipleApplyApi;
+    fn prim(&self) -> &::openusd::usd::Prim {
+        &self.prim
+    }
+}
+
+impl ::std::ops::Deref for ColorSpaceDefinitionAPI {
+    type Target = ::openusd::usd::Prim;
+    fn deref(&self) -> &Self::Target {
+        &self.prim
+    }
+}
+
+impl ::openusd::usd::APISchemaBase for ColorSpaceDefinitionAPI {}
+
+/// A general purpose API schema used to describe a collection of prims
+/// and properties within a scene. This API schema can be applied to a prim
+/// multiple times with different instance names to define several collections
+/// on a single prim.
+///
+/// A collection's membership is specified one of two ways. The first way uses
+/// the built-in relationships `includes` and `excludes`, and the attribute
+/// `includeRoot` to determine membership. The second way is termed a
+/// pattern-based collection, and uses the built-in attribute
+/// `membershipExpression` to determine membership. Here we will refer to
+/// collections using `includes`, `excludes` and `includeRoot` as being in
+/// *relationship-mode* and those using the `membershipExpression` as being in
+/// *expression-mode*.
+///
+/// The `mode` attribute controls which mode the collection uses.  When set to
+/// `relationship` the collection is explicitly in *relationship-mode*, and when
+/// set to `expression` it is explicitly in *expression-mode*.  Properties
+/// belonging to the non-selected mode are ignored.  When `mode` is `automatic`
+/// (the default), the mode is inferred from the collection's authored
+/// properties: the collection is in *relationship-mode* when either or both of
+/// its `includes` and `excludes` relationships have valid targets, or the
+/// `includeRoot` attribute is set to `true`; otherwise it is in
+/// *expression-mode* and the `membershipExpression` attribute applies.
+///
+/// In *relationship-mode* the `includes` and `excludes` relationships specify
+/// the collection members as a set of paths to include and a set of paths to
+/// exclude.  Whether or not the descendants of an included path belong to a
+/// collection is decided by its expansion rule (see below).  If the collection
+/// excludes paths that are not descendent to included paths, the collection
+/// implicitly includes the root path `</>`.  If such a collection also
+/// includes paths that are not descendent to the excluded paths, it is
+/// considered invalid since the intent is ambiguous.
+///
+/// In *expression-mode*, the pattern-based `membershipExpression` attribute is
+/// used with the `expansionRule` attribute to determine collection membership.
+/// See the detailed descriptions of the built-in properties below for more
+/// details.
+///
+/// \section `usd_collectionapi_properties` Collection API Properties
+///
+/// The built-in properties for this schema are in the `collection:instanceName`
+/// namespace, where `instanceName` is the user-provided applied API schema
+/// instance name.
+///
+///
+/// - `uniform token collection:instanceName:expansionRule` - in
+///   *relationship-mode*, specifies how to expand the `includes` and
+///   `excludes` relationship targets to determine the collection's members.
+///   In *expression-mode*, specifies how matching scene objects against the
+///   `membershipExpression` proceeds. Possible values include:
+/// ```text
+///
+///     - `expandPrims` - in *relationship-mode*, all the prims descendent to the `includes` relationship targets (and not descendent to `excludes` relationship targets) belong to the collection.  Any `includes`-targeted property paths also belong to the collection. This is the default behavior. In *expression-mode*, the functions UsdComputeIncludedObjectsFromCollection() and UsdComputeIncludedPathsFromCollection() only test prims against the `membershipExpression` to determine membership.
+///
+///     - `expandPrimsAndProperties` - like `expandPrims`, but in *relationship-mode*, all properties on all included prims also belong to the collection. In *expression-mode*, the functions UsdComputeIncludedObjectsFromCollection() and UsdComputeIncludedPathsFromCollection() test both prims and properties against the `membershipExpression` to determine membership.
+///
+///     - `explicitOnly` - in *relationship-mode*, only paths in the `includes` relationship targets and not those in the `excludes` relationship targets belong to the collection. Does not apply to *expression-mode*. If set in *expression-mode*, the functions UsdComputeIncludedObjectsFromCollection() and UsdComputeIncludedPathsFromCollection() return no results.
+///
+///
+///
+///
+/// ```
+/// - `bool collection:instanceName:includeRoot` - boolean attribute indicating
+///   whether the pseudo-root path `</>` should be counted as one of the
+///   included target paths in *relationship-mode*. This separate attribute
+///   is required because relationships cannot directly target the root.
+///   When `expansionRule` is `explicitOnly`, this attribute is ignored.
+///   The fallback value is false. When set to `true`, this collection is in
+///   *relationship-mode*. This attribute is ignored in *expression-mode*.
+///
+/// - `rel collection:instanceName:includes` - in *relationship-mode*,
+///   specifies a list of targets that are included in the collection. This
+///   can target prims or properties directly. A collection can insert the
+///   rules of another collection by making its `includes` relationship target
+///   the `collection:otherInstanceName` property from the collection to be
+///   included (see [`collection_attr`](CollectionAPI::collection_attr)). Note
+///   that including another collection does not guarantee the contents of that
+///   collection will be in the final collection; instead, the rules are merged.
+///   This means, for example, an exclude entry may exclude a portion of the
+///   included collection. When a collection includes one or more collections,
+///   the order in which targets are added to the includes relationship may
+///   become significant, if there are conflicting opinions about the same
+///   path. Targets that are added later are considered to be stronger than
+///   earlier targets for the same path. This relationship is ignored in
+///   *expression-mode*.
+///
+/// - `rel collection:instanceName:excludes` - in *relationship-mode*,
+///   specifies a list of targets that are excluded below the **included**
+///   paths in this collection. This can target prims or properties
+///   directly, but **cannot target another collection**. This is to keep
+///   the membership determining logic simple, efficient and easier to
+///   reason about. Finally, it is invalid for a collection to exclude paths
+///   that are not included in it. The presence of such "orphaned" excluded
+///   paths will not affect the set of paths included in the collection,
+///   but may affect the performance of querying membership of a path in
+///   the collection (see `UsdCollectionMembershipQuery::IsPathIncluded`)
+///   or of enumerating the objects belonging to the collection (see
+///   `UsdCollectionAPI::ComputeIncludedObjects`). This relationship is ignored
+///   in *expression-mode*.
+///
+/// - `uniform opaque collection:instanceName` - opaque attribute (meaning it
+///   can never have a value) that represents the collection for the purpose
+///   of allowing another collection to include it in *relationship-mode*. When
+///   this property is targeted by another collection's `includes` relationship,
+///   the rules of this collection will be inserted into the rules of the
+///   collection that includes it.
+///
+/// - `uniform pathExpression collection:instanceName:membershipExpression` -
+///   in *expression-mode*, defines the `SdfPathExpression` used to test objects
+///   for collection membership.
+///
+///
+///
+/// \subsection `usd_collectionapi_implicit_inclusion` Implicit Inclusion
+///
+/// In some scenarios it is useful to express a collection that includes
+/// everything except certain paths.  To support this, a *relationship-mode*
+/// collection that has an exclude that is not descendent to any include will
+/// include the root path `</>`.
+///
+/// \section `usd_collectionapi_creating_cpp` Creating Collections in C++
+///
+/// \snippet `examples_usd.cpp` `ApplyCollections`
+#[derive(::std::clone::Clone, ::std::fmt::Debug)]
+pub struct CollectionAPI {
+    prim: ::openusd::usd::Prim,
+    name: ::openusd::tf::Token,
+}
+
+impl CollectionAPI {
+    /// Views `prim` as this schema applied under `name`, whether or not
+    /// it is.
+    ///
+    /// Unchecked of the schema, not of memory: nothing here is
+    /// `unsafe`, and a prim that does not carry this schema under this
+    /// name simply answers nothing for the properties it declares.
+    /// [`get_instance`](Self::get_instance) is the constructor that
+    /// asks.
+    pub fn from_prim_unchecked(
+        prim: ::openusd::usd::Prim,
+        name: impl ::std::convert::Into<::openusd::tf::Token>,
+    ) -> Self {
+        Self { prim, name: name.into() }
+    }
+    /// The instance name this view reads its properties under.
+    pub fn name(&self) -> &::openusd::tf::Token {
+        &self.name
+    }
+    /// Applies the schema to `prim` under `name` and views it.
+    pub fn apply(
+        prim: &::openusd::usd::Prim,
+        name: impl ::std::convert::Into<::openusd::tf::Token>,
+    ) -> ::openusd::Result<Self> {
+        let name = name.into();
+        let applied = ::openusd::usd::SchemaRegistry::make_applied_name(
+            tokens::COLLECTION_API,
+            name.as_str(),
+        );
+        ::std::result::Result::Ok(Self {
+            prim: prim.clone().apply_api(applied)?,
+            name,
+        })
+    }
+    /// Views `prim` as this schema applied under `name`, or `None`
+    /// where it does not carry it.
+    pub fn get_instance(
+        prim: &::openusd::usd::Prim,
+        name: impl ::std::convert::Into<::openusd::tf::Token>,
+    ) -> ::openusd::Result<::std::option::Option<Self>> {
+        let name = name.into();
+        let applied = ::openusd::usd::SchemaRegistry::make_applied_name(
+            tokens::COLLECTION_API,
+            name.as_str(),
+        );
+        let carried = prim.has_api_schema(applied)?;
+        ::std::result::Result::Ok(carried.then(|| Self { prim: prim.clone(), name }))
+    }
+    /// Whether the schema may be applied to `prim` under `name`.
+    pub fn can_apply(
+        prim: &::openusd::usd::Prim,
+        name: &str,
+    ) -> ::std::result::Result<(), ::openusd::usd::ApplyApiError> {
+        prim.can_apply_api(
+            ::openusd::usd::SchemaRegistry::make_applied_name(
+                tokens::COLLECTION_API,
+                name,
+            ),
+        )
+    }
+    /// Every instance of this schema applied to `prim`.
+    pub fn get_all(
+        prim: &::openusd::usd::Prim,
+    ) -> ::openusd::Result<::std::vec::Vec<Self>> {
+        let mut found = ::std::vec::Vec::new();
+        for applied in prim.api_schemas()? {
+            let (schema, instance) = ::openusd::usd::SchemaRegistry::type_name_and_instance(
+                &applied,
+            );
+            let mine = instance.filter(|_| schema.as_str() == tokens::COLLECTION_API);
+            if let ::std::option::Option::Some(name) = mine {
+                found.push(Self { prim: prim.clone(), name });
+            }
+        }
+        ::std::result::Result::Ok(found)
+    }
+    /// Specifies how the paths that are included in
+    /// the collection must be expanded to determine its members.
+    ///
+    /// Declared `uniform token collection:__INSTANCE_NAME__:expansionRule
+    /// = "expandPrims"`. One of `explicitOnly`, `expandPrims`,
+    /// `expandPrimsAndProperties`. Read it with `get::<::openusd::tf::Token>()`.
+    pub fn expansion_rule_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXPANSION_RULE,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_expansion_rule_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXPANSION_RULE,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::TOKEN,
+                )
+                .custom(false)
+                .variability(::openusd::sdf::Variability::Uniform)
+                .build()?,
+        )
+    }
+    /// Boolean attribute indicating whether the pseudo-root
+    /// path `</>` should be counted as one of the included target
+    /// paths.  The fallback is false.  This separate attribute is
+    /// required because relationships cannot directly target the root.
+    ///
+    /// Declared `uniform bool collection:__INSTANCE_NAME__:includeRoot`. Read it
+    /// with `get::<bool>()`.
+    pub fn include_root_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDE_ROOT,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_include_root_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDE_ROOT,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::BOOL,
+                )
+                .custom(false)
+                .variability(::openusd::sdf::Variability::Uniform)
+                .build()?,
+        )
+    }
+    /// Specifies a list of targets that are included in the collection.
+    /// This can target prims or properties directly. A collection can insert
+    /// the rules of another collection by making its *includes*
+    /// relationship target the **collection:{collectionName}** property on
+    /// the owning prim of the collection to be included
+    ///
+    /// Declared `rel collection:__INSTANCE_NAME__:includes`.
+    pub fn includes_rel(&self) -> ::openusd::usd::Relationship {
+        self.relationship(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDES,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_includes_rel(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Relationship> {
+        ::std::result::Result::Ok(
+            self
+                .relationship_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDES,
+                        self.name.as_str(),
+                    ),
+                )
+                .custom(false)
+                .build()?,
+        )
+    }
+    /// Specifies a list of targets that are excluded below
+    /// the included paths in this collection. This can target prims or
+    /// properties directly, but cannot target another collection. This is to
+    /// keep the membership determining logic simple, efficient and easier to
+    /// reason about. Finally, it is invalid for a collection to exclude
+    /// paths that are not included in it. The presence of such "orphaned"
+    /// excluded paths will not affect the set of paths included in the
+    /// collection, but may affect the performance of querying membership of
+    /// a path in the collection (see
+    /// `UsdCollectionAPI::MembershipQuery::IsPathIncluded`)
+    /// or of enumerating the objects belonging to the collection (see
+    /// `UsdCollectionAPI::GetIncludedObjects`).
+    ///
+    /// Declared `rel collection:__INSTANCE_NAME__:excludes`.
+    pub fn excludes_rel(&self) -> ::openusd::usd::Relationship {
+        self.relationship(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_excludes_rel(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Relationship> {
+        ::std::result::Result::Ok(
+            self
+                .relationship_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
+                        self.name.as_str(),
+                    ),
+                )
+                .custom(false)
+                .build()?,
+        )
+    }
+    /// Specifies a path expression that determines membership in this
+    /// collection.
+    ///
+    /// Declared `uniform pathExpression
+    /// collection:__INSTANCE_NAME__:membershipExpression`. Read it with
+    /// `get::<::openusd::sdf::PathExpression>()`.
+    pub fn membership_expression_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MEMBERSHIP_EXPRESSION,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_membership_expression_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MEMBERSHIP_EXPRESSION,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::PATH_EXPRESSION,
+                )
+                .custom(false)
+                .variability(::openusd::sdf::Variability::Uniform)
+                .build()?,
+        )
+    }
+    /// Specifies which mode the collection uses to determine
+    /// membership: `automatic`, `relationship`, or `expression`.
+    ///
+    /// - `automatic` - the collection's mode is inferred from its authored
+    ///   properties. If either or both of the `includes` and `excludes`
+    ///   relationships have valid targets, or the `includeRoot` attribute
+    ///   is set to `true`, the collection is in *relationship-mode* and the
+    ///   `membershipExpression` attribute is ignored. Otherwise, the collection
+    ///   is in *expression-mode* and the `membershipExpression` attribute applies.
+    ///   This is the default behavior and is backward compatible with collections
+    ///   that predate this attribute.
+    /// - `relationship` - the collection is explicitly in *relationship-mode*. The
+    ///   `includes`, `excludes`, and `includeRoot` attributes determine membership,
+    ///   and `membershipExpression` is ignored.
+    /// - `expression` - the collection is explicitly in *expression-mode*. The
+    ///   `membershipExpression` attribute determines membership, and `includes`,
+    ///   `excludes`, and `includeRoot` are ignored.
+    ///
+    /// The fallback value is `automatic`.
+    ///
+    /// Declared `uniform token collection:__INSTANCE_NAME__:mode = "automatic"`.
+    /// One of `automatic`, `relationship`, `expression`. Read it with
+    /// `get::<::openusd::tf::Token>()`.
+    pub fn mode_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MODE,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_mode_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MODE,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::TOKEN,
+                )
+                .custom(false)
+                .variability(::openusd::sdf::Variability::Uniform)
+                .build()?,
+        )
+    }
+    /// This property represents the collection for the purpose of
+    /// allowing another collection to include it. When this property is
+    /// targeted by another collection's *includes* relationship, the rules
+    /// of this collection will be inserted into the rules of the collection
+    /// that includes it.
+    ///
+    /// Declared `uniform opaque collection:__INSTANCE_NAME__`.
+    pub fn collection_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_collection_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(
+            self
+                .attribute_builder(
+                    ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                        tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
+                        self.name.as_str(),
+                    ),
+                    ::openusd::sdf::ValueTypeName::OPAQUE,
+                )
+                .custom(false)
+                .variability(::openusd::sdf::Variability::Uniform)
+                .build()?,
+        )
+    }
+}
+
+impl ::openusd::usd::SchemaBase for CollectionAPI {
+    const KIND: ::openusd::usd::SchemaKind = ::openusd::usd::SchemaKind::MultipleApplyApi;
+    fn prim(&self) -> &::openusd::usd::Prim {
+        &self.prim
+    }
+}
+
+impl ::std::ops::Deref for CollectionAPI {
+    type Target = ::openusd::usd::Prim;
+    fn deref(&self) -> &Self::Target {
+        &self.prim
+    }
+}
+
+impl ::openusd::usd::APISchemaBase for CollectionAPI {}
+
+///  [`ClipsAPI`] is an API schema that provides an interface to
+/// a prim's clip metadata. Clips are a "value resolution" feature that
+/// allows one to specify a sequence of usd files (clips) to be consulted,
+/// over time, as a source of varying overrides for the prims at and
+/// beneath this prim in namespace.
+/// ```text
+///
+/// ```
+/// `SetClipAssetPaths()` establishes the set of clips that can be consulted.
+/// `SetClipActive()` specifies the ordering of clip application over time
+/// (clips can be repeated), while `SetClipTimes()` specifies time-mapping
+/// from stage-time to clip-time for the clip active at a given stage-time,
+/// which allows for time-dilation and repetition of clips.
+/// Finally, `SetClipPrimPath()` determines the path within each clip that will
+/// map to this prim, i.e. the location within the clip at which we will look
+/// for opinions for this prim.
+///
+/// The clip asset paths, times and active metadata can also be specified
+/// through template clip metadata. This can be desirable when your set of
+/// assets is very large, as the template metadata is much more concise.
+/// `SetClipTemplateAssetPath()` establishes the asset identifier pattern of the
+/// set of clips to be consulted. `SetClipTemplateStride()`,
+/// `SetClipTemplateEndTime()`, and `SetClipTemplateStartTime()` specify the
+/// range
+/// in which USD will search, based on the template. From the set of resolved
+/// asset paths, times and active will be derived internally.
+///
+/// A prim may have multiple "clip sets" -- named sets of clips that each
+/// have their own values for the metadata described above. For example,
+/// a prim might have a clip set named "`Clips_1`" that specifies some group
+/// of clip asset paths, and another clip set named "`Clips_2`" that uses
+/// an entirely different set of clip asset paths. These clip sets are
+/// composed across composition arcs, so clip sets for a prim may be
+/// defined in multiple sublayers or references, for example. Individual
+/// metadata for a given clip set may be sparsely overridden.
+/// ```text
+///
+/// ```
+/// Important facts about clips:
+/// - Within the layerstack in which clips are established, the opinions within
+///   the clips will be *weaker* than any local opinions in the layerstack, but
+///   em stronger than varying opinions coming across references and variants.
+/// - We will never look for metadata or default opinions in clips when
+///   performing value resolution on the owning stage, since these quantities
+///   must be time-invariant.
+/// ```text
+///
+/// ```
+/// This leads to the common structure in which we reference a model asset
+/// on a prim, and then author clips at the same site: the asset reference
+/// will provide the topology and unvarying data for the model, while the
+/// clips will provide the time-sampled animation.
+///
+/// For further information, see `Usd_Page_ValueClips`
+pub trait ClipsAPISchema: ::openusd::usd::APISchemaBase {}
+
+///  [`ClipsAPI`] is an API schema that provides an interface to
+/// a prim's clip metadata. Clips are a "value resolution" feature that
+/// allows one to specify a sequence of usd files (clips) to be consulted,
+/// over time, as a source of varying overrides for the prims at and
+/// beneath this prim in namespace.
+/// ```text
+///
+/// ```
+/// `SetClipAssetPaths()` establishes the set of clips that can be consulted.
+/// `SetClipActive()` specifies the ordering of clip application over time
+/// (clips can be repeated), while `SetClipTimes()` specifies time-mapping
+/// from stage-time to clip-time for the clip active at a given stage-time,
+/// which allows for time-dilation and repetition of clips.
+/// Finally, `SetClipPrimPath()` determines the path within each clip that will
+/// map to this prim, i.e. the location within the clip at which we will look
+/// for opinions for this prim.
+///
+/// The clip asset paths, times and active metadata can also be specified
+/// through template clip metadata. This can be desirable when your set of
+/// assets is very large, as the template metadata is much more concise.
+/// `SetClipTemplateAssetPath()` establishes the asset identifier pattern of the
+/// set of clips to be consulted. `SetClipTemplateStride()`,
+/// `SetClipTemplateEndTime()`, and `SetClipTemplateStartTime()` specify the
+/// range
+/// in which USD will search, based on the template. From the set of resolved
+/// asset paths, times and active will be derived internally.
+///
+/// A prim may have multiple "clip sets" -- named sets of clips that each
+/// have their own values for the metadata described above. For example,
+/// a prim might have a clip set named "`Clips_1`" that specifies some group
+/// of clip asset paths, and another clip set named "`Clips_2`" that uses
+/// an entirely different set of clip asset paths. These clip sets are
+/// composed across composition arcs, so clip sets for a prim may be
+/// defined in multiple sublayers or references, for example. Individual
+/// metadata for a given clip set may be sparsely overridden.
+/// ```text
+///
+/// ```
+/// Important facts about clips:
+/// - Within the layerstack in which clips are established, the opinions within
+///   the clips will be *weaker* than any local opinions in the layerstack, but
+///   em stronger than varying opinions coming across references and variants.
+/// - We will never look for metadata or default opinions in clips when
+///   performing value resolution on the owning stage, since these quantities
+///   must be time-invariant.
+/// ```text
+///
+/// ```
+/// This leads to the common structure in which we reference a model asset
+/// on a prim, and then author clips at the same site: the asset reference
+/// will provide the topology and unvarying data for the model, while the
+/// clips will provide the time-sampled animation.
+///
+/// For further information, see `Usd_Page_ValueClips`
+#[derive(::std::clone::Clone, ::std::fmt::Debug)]
+pub struct ClipsAPI(::openusd::usd::Prim);
+
+impl ClipsAPI {
+    /// Views `prim` as this schema, which any prim can be viewed as.
+    ///
+    /// Unchecked of the schema, not of memory: nothing here is
+    /// `unsafe`. This schema is applied to no prim and names no prim
+    /// type, so there is nothing to ask about one — which is why it has
+    /// no constructor that asks.
+    pub fn from_prim_unchecked(prim: ::openusd::usd::Prim) -> Self {
+        Self(prim)
+    }
+}
+
+impl ::openusd::usd::SchemaBase for ClipsAPI {
+    const KIND: ::openusd::usd::SchemaKind = ::openusd::usd::SchemaKind::NonAppliedApi;
+    fn prim(&self) -> &::openusd::usd::Prim {
+        &self.0
+    }
+}
+
+impl ::std::ops::Deref for ClipsAPI {
+    type Target = ::openusd::usd::Prim;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ClipsAPISchema for ClipsAPI {}
+
+impl ::openusd::usd::APISchemaBase for ClipsAPI {}
