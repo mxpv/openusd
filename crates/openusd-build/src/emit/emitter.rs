@@ -35,8 +35,8 @@ use quote::quote;
 use super::{ident, items};
 
 use super::lower::{
-    AccessorTrait, Constant, PropertyKind, Reflected, RustAccessor, RustClass, RustEnum, RustLibrary, kind_constant,
-    schema_root,
+    AccessorTrait, Constant, Instancing, PropertyKind, Reflected, RustAccessor, RustClass, RustEnum, RustLibrary,
+    kind_constant, schema_root,
 };
 use crate::doc;
 
@@ -487,7 +487,9 @@ fn constructors(class: &RustClass) -> TokenStream {
                 Self::from_prim(stage.prim(path)?)
             }
         },
-        usd::SchemaKind::MultipleApplyApi => quote! {
+        usd::SchemaKind::MultipleApplyApi => {
+            let decoding = class.instancing.as_ref().map(decoding);
+            quote! {
             /// Views `prim` as this schema applied under `name`, whether or not
             /// it is.
             ///
@@ -555,7 +557,10 @@ fn constructors(class: &RustClass) -> TokenStream {
                 }
                 ::std::result::Result::Ok(found)
             }
-        },
+
+            #decoding
+            }
+        }
         // An abstract base is no root here — a root is never lowered — so it
         // is viewed as any schema that is applied to nothing is.
         usd::SchemaKind::AbstractBase | usd::SchemaKind::NonAppliedApi => quote! {
@@ -569,6 +574,46 @@ fn constructors(class: &RustClass) -> TokenStream {
                 Self(prim)
             }
         },
+    }
+}
+
+/// Reading an instance back out of one of its property paths, which only a
+/// multiple-apply schema's properties carry (C++ `IsSchemaPropertyBaseName`
+/// and `Is<Name>Path`).
+///
+/// A property of an instance is `<prefix>:<instance name>:<base name>`, so
+/// what remains between the prefix and a name the schema declares is the
+/// instance. The identity property is the case with nothing after the
+/// instance at all.
+fn decoding(instancing: &Instancing) -> TokenStream {
+    let Instancing { prefix, base_names } = instancing;
+    quote! {
+        /// Whether `base_name` is one of the property names this schema
+        /// declares, which an instance name may therefore not end with.
+        pub fn is_schema_property_base_name(base_name: &str) -> bool {
+            ::std::matches!(base_name, #(#base_names)|*)
+        }
+
+        /// The prim and instance name a property path of this schema names,
+        /// or `None` where `path` names no instance of it.
+        ///
+        /// The identity property is what this recognises: a path reaching a
+        /// property the schema declares belongs to an instance, but does not
+        /// name one.
+        pub fn instance_at_path(
+            path: &::openusd::sdf::Path,
+        ) -> ::std::option::Option<(::openusd::sdf::Path, ::openusd::tf::Token)> {
+            let (prim, property) = path.split_property()?;
+            if !property.split(':').all(::openusd::sdf::Path::is_valid_identifier) {
+                return ::std::option::Option::None;
+            }
+            let instance = property.strip_prefix(#prefix)?.strip_prefix(':')?;
+            let base_name = instance.rsplit(':').next()?;
+            match Self::is_schema_property_base_name(base_name) {
+                true => ::std::option::Option::None,
+                false => ::std::option::Option::Some((prim, ::openusd::tf::Token::from(instance))),
+            }
+        }
     }
 }
 

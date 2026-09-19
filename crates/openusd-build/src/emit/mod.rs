@@ -272,7 +272,13 @@ class Box "Box" (
     /// chain can be matched as it is written rather than as `prettyplease` laid
     /// it out.
     fn packed_accessors() -> String {
-        accessors().chars().filter(|c| !c.is_whitespace()).collect()
+        packed(accessors())
+    }
+
+    /// `text` with its whitespace removed, so an assertion reads as the call
+    /// chain rather than as the layout `prettyplease` chose for it.
+    fn packed(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
     /// What one schema library generates.
@@ -414,6 +420,24 @@ class Box "Box" (
         );
         assert!(text.contains("tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_DEPTH"), "{text}");
         assert!(text.contains("self.name.as_str()"), "{text}");
+    }
+
+    /// A multiple-apply schema reads an instance back out of a property path
+    /// of one, which means knowing the names it declares itself.
+    #[test]
+    fn instances_decode_from_a_path() {
+        let text = packed(kinds());
+        assert!(
+            text.contains(r#"is_schema_property_base_name(base_name:&str)->bool{::std::matches!(base_name,"depth")"#),
+            "the names it declares are the ones an instance may not end with: {text}"
+        );
+        assert!(
+            text.contains(r#"property.strip_prefix("slot")?.strip_prefix(':')?"#),
+            "an instance is what follows the schema's namespace: {text}"
+        );
+        // A single-apply schema names its properties without an instance, so
+        // there is nothing to read back out of one.
+        assert!(!impl_block(kinds(), "TagAPI").contains("instance_at_path"), "{text}");
     }
 
     /// The file carries no `use` block, every path being spelled in full, since

@@ -19,7 +19,7 @@ use std::collections::hash_map::Entry;
 use openusd::Result;
 
 use openusd::sdf::{self, Path, Value};
-use openusd::usd::{CollectionAPI, MembershipQuery, Relationship, Stage, is_collection_api_path};
+use openusd::usd::{CollectionAPI, MembershipQuery, Relationship, Stage};
 
 use super::BindingStrength;
 use super::MaterialBindingAPI;
@@ -263,7 +263,7 @@ fn is_collection_member(
     let query = match cache.entry(collection_path.clone()) {
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => {
-            let query = match is_collection_api_path(collection_path) {
+            let query = match CollectionAPI::instance_at_path(collection_path) {
                 Some((prim, name)) => {
                     Some(CollectionAPI::from_prim_unchecked(stage.prim(prim)?, name).compute_membership_query()?)
                 }

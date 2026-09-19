@@ -31,10 +31,7 @@ mod timecode;
 pub use attribute::{Attribute, AttributeBuilder, AttributeQuery};
 pub use authoring::{PrimEdit, StageEdit};
 pub use capture::{ReplayStage, UndoStage};
-pub use collection::{
-    MembershipQuery, PathExpansionRuleMap, PathRule, apply_collection, collections_on, compute_included_paths,
-    is_collection_api_path,
-};
+pub use collection::{MembershipQuery, PathExpansionRuleMap, PathRule, apply_collection, compute_included_paths};
 pub use collection_expr::{CollectionEvaluator, CollectionSearcher, resolve_complete_membership_expression};
 pub use connections::ConnectionGraph;
 pub use core_schemas::{

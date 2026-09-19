@@ -722,6 +722,36 @@ impl ColorSpaceDefinitionAPI {
         }
         ::std::result::Result::Ok(found)
     }
+    /// Whether `base_name` is one of the property names this schema
+    /// declares, which an instance name may therefore not end with.
+    pub fn is_schema_property_base_name(base_name: &str) -> bool {
+        ::std::matches!(
+            base_name, "name" | "redChroma" | "greenChroma" | "blueChroma" | "whitePoint"
+            | "gamma" | "linearBias"
+        )
+    }
+    /// The prim and instance name a property path of this schema names,
+    /// or `None` where `path` names no instance of it.
+    ///
+    /// The identity property is what this recognises: a path reaching a
+    /// property the schema declares belongs to an instance, but does not
+    /// name one.
+    pub fn instance_at_path(
+        path: &::openusd::sdf::Path,
+    ) -> ::std::option::Option<(::openusd::sdf::Path, ::openusd::tf::Token)> {
+        let (prim, property) = path.split_property()?;
+        if !property.split(':').all(::openusd::sdf::Path::is_valid_identifier) {
+            return ::std::option::Option::None;
+        }
+        let instance = property.strip_prefix("colorSpaceDefinition")?.strip_prefix(':')?;
+        let base_name = instance.rsplit(':').next()?;
+        match Self::is_schema_property_base_name(base_name) {
+            true => ::std::option::Option::None,
+            false => {
+                ::std::option::Option::Some((prim, ::openusd::tf::Token::from(instance)))
+            }
+        }
+    }
     /// The name of the color space defined on this prim.
     /// ```text
     ///
@@ -1148,6 +1178,36 @@ impl CollectionAPI {
             }
         }
         ::std::result::Result::Ok(found)
+    }
+    /// Whether `base_name` is one of the property names this schema
+    /// declares, which an instance name may therefore not end with.
+    pub fn is_schema_property_base_name(base_name: &str) -> bool {
+        ::std::matches!(
+            base_name, "expansionRule" | "includeRoot" | "includes" | "excludes" |
+            "membershipExpression" | "mode" | ""
+        )
+    }
+    /// The prim and instance name a property path of this schema names,
+    /// or `None` where `path` names no instance of it.
+    ///
+    /// The identity property is what this recognises: a path reaching a
+    /// property the schema declares belongs to an instance, but does not
+    /// name one.
+    pub fn instance_at_path(
+        path: &::openusd::sdf::Path,
+    ) -> ::std::option::Option<(::openusd::sdf::Path, ::openusd::tf::Token)> {
+        let (prim, property) = path.split_property()?;
+        if !property.split(':').all(::openusd::sdf::Path::is_valid_identifier) {
+            return ::std::option::Option::None;
+        }
+        let instance = property.strip_prefix("collection")?.strip_prefix(':')?;
+        let base_name = instance.rsplit(':').next()?;
+        match Self::is_schema_property_base_name(base_name) {
+            true => ::std::option::Option::None,
+            false => {
+                ::std::option::Option::Some((prim, ::openusd::tf::Token::from(instance)))
+            }
+        }
     }
     /// Specifies how the paths that are included in
     /// the collection must be expanded to determine its members.

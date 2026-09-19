@@ -30,6 +30,7 @@ use std::rc::Rc;
 
 use crate::Result;
 use crate::sdf::{self, Path, Value, Variability};
+use crate::tf;
 use crate::usd::{Attribute, Prim, PrimPredicate, SchemaBase, Stage};
 
 use super::collection_expr::{CollectionEvaluator, CollectionSearcher, resolve_complete_membership_expression};
@@ -241,7 +242,7 @@ impl CollectionAPI {
         for included in self.includes()? {
             // A target that is itself a collection is merged recursively, on
             // this collection's stage.
-            if let Some((prim, name)) = is_collection_api_path(&included) {
+            if let Some((prim, name)) = Self::instance_at_path(&included) {
                 let nested = CollectionAPI::from_prim_unchecked(Prim::new(self.stage(), prim), name);
                 if visited.insert(nested.collection_path()?) {
                     nested.build_into(map, visited)?;
@@ -272,50 +273,25 @@ impl CollectionAPI {
 ///
 /// Where the generated [`CollectionAPI::apply`] needs a prim the stage already
 /// composes, this one takes a path and creates the prim. It is also stricter:
-/// an instance name that is not a single identifier is refused.
+/// an instance name the schema does not allow is refused rather than authored,
+/// which is what C++ `UsdCollectionAPI::CanApply` reports.
 pub fn apply_collection(stage: &Stage, prim: impl sdf::IntoPath, name: impl Into<String>) -> Result<CollectionAPI> {
     let prim = sdf::try_into_path(prim)?;
-    let name = name.into();
-    // The instance name is a single token (`:` is the namespace delimiter), so
-    // reject anything that isn't a valid identifier before it produces an
-    // ambiguous `collection:<name>:...` namespace.
-    if !Path::is_valid_identifier(&name) {
-        return Err(super::StageAuthoringError::InvalidIdentifier {
-            name,
-            what: "collection name",
-        }
-        .into());
+    let name = tf::Token::from(name.into());
+    // An instance name becomes a namespace component of every property the
+    // schema instantiates, so a name the registry refuses is rejected before
+    // it authors anything. An unregistered schema declares no properties to
+    // collide with and no names to restrict, so it refuses nothing — the
+    // stance [`Prim::apply_api`](super::Prim::apply_api) takes.
+    let schema = tf::Token::new(tokens::COLLECTION_API);
+    let registry = stage.schema_registry();
+    if registry.schema_info(&schema).is_some() && !registry.is_allowed_instance_name(&schema, &name) {
+        return Err(super::ApplyApiError::InstanceNameNotAllowed { schema, instance: name }.into());
     }
     // Author an `over` when the prim has no spec on the edit-target layer yet,
     // mirroring C++ `UsdCollectionAPI::Apply` (which authors the spec as
     // needed). `override_prim` is idempotent when a spec already exists.
     CollectionAPI::apply(&stage.override_prim(prim)?, name)
-}
-
-/// Every `UsdCollectionAPI` instance applied to `prim`, decoded from its
-/// `apiSchemas` (`CollectionAPI:<name>`).
-///
-/// Stricter than the generated [`CollectionAPI::get_all`]: an entry whose
-/// instance name is not a single identifier is skipped.
-pub fn collections_on(stage: &Stage, prim: impl sdf::IntoPath) -> Result<Vec<CollectionAPI>> {
-    let prim = Prim::new(stage, sdf::try_into_path(prim)?);
-    let mut all = CollectionAPI::get_all(&prim)?;
-    all.retain(|collection| Path::is_valid_identifier(collection.name().as_str()));
-    Ok(all)
-}
-
-/// If `path` is a collection identity path `<prim>.collection:<name>`,
-/// return `(prim, name)`. Used to detect when an `includes` target points
-/// at another collection (chained collections). A deeper property path like
-/// `collection:<name>:includes` is *not* a collection identity and yields
-/// `None`.
-pub fn is_collection_api_path(path: &Path) -> Option<(Path, String)> {
-    // TODO: generate this for every multiple-apply schema (C++
-    // `Is<Name>APIPath`), with the instance-name check as registry policy
-    // (C++ `UsdSchemaRegistry::IsAllowedAPISchemaInstanceName`).
-    let (prim, property) = path.split_property()?;
-    let rest = property.strip_prefix(tokens::COLLECTION)?.strip_prefix(':')?;
-    Path::is_valid_identifier(rest).then(|| (prim, rest.to_string()))
 }
 
 /// Enumerate the paths that `query` includes on `stage`, restricted to the
@@ -777,18 +753,27 @@ mod tests {
 
     #[test]
     fn decodes_collection_paths() -> Result<()> {
+        let decode = |path: &str| -> Result<Option<(Path, String)>> {
+            Ok(CollectionAPI::instance_at_path(&sdf::path(path)?).map(|(prim, name)| (prim, name.to_string())))
+        };
         assert_eq!(
-            is_collection_api_path(&sdf::path("/W.collection:render")?),
+            decode("/W.collection:render")?,
             Some((sdf::path("/W")?, "render".to_string()))
         );
-        // A deeper property (the includes rel) is not a collection identity.
+        // An instance name is namespaced as deeply as it was applied.
         assert_eq!(
-            is_collection_api_path(&sdf::path("/W.collection:render:includes")?),
-            None
+            decode("/W.collection:lighting:key")?,
+            Some((sdf::path("/W")?, "lighting:key".to_string()))
         );
-        // A non-collection property / a prim path.
-        assert_eq!(is_collection_api_path(&sdf::path("/W.foo")?), None);
-        assert_eq!(is_collection_api_path(&sdf::path("/W")?), None);
+        // A property the schema declares belongs to a collection but names
+        // none, however deep the instance name before it.
+        assert_eq!(decode("/W.collection:render:includes")?, None);
+        assert_eq!(decode("/W.collection:includes")?, None);
+        // A non-collection property, a prim path, and the namespace itself
+        // naming no instance.
+        assert_eq!(decode("/W.foo")?, None);
+        assert_eq!(decode("/W")?, None);
+        assert_eq!(decode("/W.collection")?, None);
         Ok(())
     }
 
@@ -802,7 +787,7 @@ mod tests {
             .add_applied_schema("CollectionAPI:proxy")?
             .add_applied_schema("MaterialBindingAPI")?; // not a collection — ignored
 
-        let names: Vec<String> = collections_on(&stage, &sdf::path("/W")?)?
+        let names: Vec<String> = CollectionAPI::get_all(&stage.prim("/W")?)?
             .into_iter()
             .map(|c| c.name().to_string())
             .collect();
@@ -1182,7 +1167,7 @@ mod tests {
         assert!(q.is_path_included(&sdf::path("/W/A")?));
         assert!(!q.is_path_included(&sdf::path("/W/A/C")?));
         // And it's discoverable as an applied collection.
-        assert_eq!(collections_on(&stage, &sdf::path("/W")?)?.len(), 1);
+        assert_eq!(CollectionAPI::get_all(&stage.prim("/W")?)?.len(), 1);
         Ok(())
     }
 
@@ -1208,34 +1193,41 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
         coll.include_path(sdf::path("/W/A")?)?;
-        assert_eq!(collections_on(&stage, &sdf::path("/W")?)?.len(), 1);
+        assert_eq!(CollectionAPI::get_all(&stage.prim("/W")?)?.len(), 1);
         assert!(coll.compute_membership_query()?.is_path_included(&sdf::path("/W/A")?));
         Ok(())
     }
 
+    /// The rules are the registry's: a name it cannot spell as a namespace,
+    /// or one ending in a property name of the schema itself, is refused —
+    /// and a merely namespaced name is not.
     #[test]
     fn apply_rejects_bad_name() -> Result<()> {
         let stage = scene()?;
-        assert!(apply_collection(&stage, sdf::path("/W")?, "").is_err()); // empty
-        assert!(apply_collection(&stage, sdf::path("/W")?, "a:b").is_err()); // extra ':'
+        assert!(apply_collection(&stage, sdf::path("/W")?, "").is_err());
+        assert!(apply_collection(&stage, sdf::path("/W")?, "no space").is_err());
+        assert!(apply_collection(&stage, sdf::path("/W")?, "includes").is_err());
+        assert!(apply_collection(&stage, sdf::path("/W")?, "lighting:key").is_ok());
         assert!(apply_collection(&stage, sdf::path("/W")?, "render").is_ok());
         Ok(())
     }
 
+    /// An entry naming no instance is not one; a namespaced name is, and
+    /// enumerating finds it (C++ `UsdCollectionAPI::GetAll`).
     #[test]
-    fn skips_malformed_schemas() -> Result<()> {
+    fn enumerates_namespaced_names() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage
             .define_prim("/W")?
             .set_type_name("Scope")?
             .add_applied_schema("CollectionAPI:render")?
-            .add_applied_schema("CollectionAPI:")? // empty instance name
-            .add_applied_schema("CollectionAPI:a:b")?; // extra ':'
-        let names: Vec<String> = collections_on(&stage, &sdf::path("/W")?)?
+            .add_applied_schema("CollectionAPI:")? // no instance name
+            .add_applied_schema("CollectionAPI:lighting:key")?;
+        let names: Vec<String> = CollectionAPI::get_all(&stage.prim("/W")?)?
             .into_iter()
             .map(|c| c.name().to_string())
             .collect();
-        assert_eq!(names, vec!["render".to_string()]);
+        assert_eq!(names, vec!["render".to_string(), "lighting:key".to_string()]);
         Ok(())
     }
 

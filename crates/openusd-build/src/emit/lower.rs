@@ -94,6 +94,21 @@ pub struct RustClass {
     /// The API schemas whose properties it offers as its own, each as the
     /// method that views a prim through it.
     pub reflected: Vec<Reflected>,
+    /// How its instances name their properties, for a multiple-apply schema:
+    /// what a property path of one looks like, and so how one is read back
+    /// out of a path.
+    pub instancing: Option<Instancing>,
+}
+
+/// What a multiple-apply schema's instances call their properties.
+pub struct Instancing {
+    /// The namespace every instance's properties live under, which is the
+    /// first component of each of their paths.
+    pub prefix: String,
+    /// The base names the schema declares, each being what follows the
+    /// instance name in one of its property paths. The identity property
+    /// contributes the empty name, having nothing after it.
+    pub base_names: Vec<String>,
 }
 
 /// The trait a class's own accessors live on.
@@ -671,6 +686,23 @@ fn lower_class(
             .map(|text| doc::to_markdown(text, &links)),
         accessors,
         reflected,
+        instancing: instancing(class),
+    })
+}
+
+/// How `class`'s instances name their properties, where it is a multiple-apply
+/// schema that declares any.
+fn instancing(class: &Class) -> Option<Instancing> {
+    let prefix = class.metadata.property_namespace_prefix.as_ref()?;
+    class.kind.is_multiple_apply_api_schema().then(|| Instancing {
+        prefix: prefix.to_string(),
+        base_names: class
+            .local_properties()
+            .map(|property| {
+                usd::SchemaRegistry::multiple_apply_name_template_base_name(property.schematics_name.as_str())
+                    .to_string()
+            })
+            .collect(),
     })
 }
 
