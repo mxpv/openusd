@@ -8,35 +8,60 @@
 [![codecov](https://codecov.io/gh/mxpv/openusd/graph/badge.svg?token=LAPV2T3AI8)](https://codecov.io/gh/mxpv/openusd)
 [![dependency status](https://deps.rs/repo/github/mxpv/openusd/status.svg)](https://deps.rs/repo/github/mxpv/openusd)
 
-`openusd` is a Rust implementation of Pixar's [Universal Scene Description](https://openusd.org/release/index.html) (USD) format with no C++ dependencies.
+`openusd` is a Rust implementation of Pixar's
+[Universal Scene Description](https://openusd.org/release/index.html) (USD),
+with no C++ dependencies. Read and write USD files, compose layers into scenes,
+and query or edit them through a typed Rust API.
 
 This repository contains the following crates:
 
-| Crate | Description | |
+| Crate | Description | Release / docs |
 |-------|-------------|-|
-| [`openusd`](crates/openusd) | Core USD library — file formats, composition engine, and the composed `Stage` API. | [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)<br>[![docs.rs](https://img.shields.io/docsrs/openusd)](https://docs.rs/crate/openusd/latest) |
-| [`openusd‑schemas`](crates/openusd-schemas) | Typed views for USD's standard schemas — `UsdGeom`, `UsdShade`, `UsdSkel`, and more. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-schemas)](https://crates.io/crates/openusd-schemas)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-schemas)](https://docs.rs/crate/openusd-schemas/latest) |
+| [`openusd`](crates/openusd) | File formats, scene composition, and the `Stage` API. | [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)<br>[![docs.rs](https://img.shields.io/docsrs/openusd)](https://docs.rs/crate/openusd/latest) |
+| [`openusd‑schemas`](crates/openusd-schemas) | Typed views for reading and authoring standard schemas, including `UsdGeom`, `UsdShade`, and `UsdSkel`. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-schemas)](https://crates.io/crates/openusd-schemas)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-schemas)](https://docs.rs/crate/openusd-schemas/latest) |
+| [`openusd‑build`](crates/openusd-build) | Build-time Rust code generation from OpenUSD `schema.usda` files. | Will be published as part of the next release. |
 
-For a detailed comparison with the C++ reference implementation and current progress, see the [Roadmap](ROADMAP.md).
+This README describes the current development version. See the
+[roadmap](ROADMAP.md) for release versions, remaining work, and a comparison
+with the C++ reference implementation.
 
 ## Features
 
-- File formats — reads and writes `.usda` (text), `.usdc` (binary), and `.usdz` (archive).
-- A fully featured [composition engine](crates/openusd/src/pcp) — [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering over a per-prim node graph, with [list editing](https://openusd.org/release/glossary.html#usdglossary-listediting), scene-graph [instancing](https://openusd.org/release/glossary.html#usdglossary-instancing), non-destructive [relocates](https://openusd.org/release/glossary.html#usdglossary-relocates), and [variable expressions](https://openusd.org/dev/user_guides/variable_expressions.html).
-- A composed [`Stage`](crates/openusd/src/usd/stage.rs) — lazy cached per-prim composition with typed value resolution, predicate-based traversal, and full prim/property query API over the composed scene.
-- An authoring API — build scenes through [layer](crates/openusd/src/sdf/layer.rs)- and [stage](crates/openusd/src/usd/stage.rs)-tier APIs, with typed [spec views](crates/openusd/src/sdf/spec.rs), composed [prim/attribute/relationship handles](crates/openusd/src/usd/prim.rs) with chained fluent edits, `EditTarget` routing to a specific layer, in-memory anonymous-root stages, and applied API schema authoring.
-- Live sync friendly — listen to `Stage` edit events and capture each edit as a transferable, replayable [`Diff`](crates/openusd/src/usd/diff.rs) for live mirroring across processes.
-- Domain schema readers (opt-in per family, layered on the composed stage) — [`UsdGeom`](crates/openusd-schemas/src/geom), [`UsdLux`](crates/openusd-schemas/src/lux), [`UsdPhysics`](crates/openusd-schemas/src/physics), [`UsdRender`](crates/openusd-schemas/src/render), [`UsdSkel`](crates/openusd-schemas/src/skel), and [`UsdShade`](crates/openusd-schemas/src/shade).
+- Read and write `.usda` (text), `.usdc` (binary), and `.usdz` (packages), with
+  automatic format detection for `.usd` files.
+- Compose sublayers, references, payloads, variants, inherits, and specializes
+  with [LIVERPS strength ordering](crates/openusd/src/pcp). Supports list
+  editing, scene instancing, relocates, and variable expressions.
+- Query a composed [`Stage`](crates/openusd/src/usd/stage.rs) through prim,
+  attribute, and relationship handles. Composition is cached per prim, with
+  traversal predicates, population masks, and payload loading controls.
+- Resolve animated values with time-sample interpolation, layer offsets, and
+  value clips.
+- Author scenes through [layer](crates/openusd/src/sdf/layer.rs) and stage
+  APIs, route edits to a chosen layer, and rename or reparent prims with the
+  [namespace editor](crates/openusd/src/usd/editor.rs).
+- Observe stage changes, [undo edits](crates/openusd/src/usd/capture.rs), and
+  capture replayable [diffs](crates/openusd/src/usd/diff.rs) for live sync.
+- Define [collections](crates/openusd/src/usd/collection.rs) using explicit
+  includes and excludes or path expressions, then query their membership.
+- Read and author ten standard [schema families](crates/openusd-schemas),
+  enabled individually by feature flags. They cover geometry, lighting,
+  materials, skeletons, physics, rendering, volumes, media, UI, and procedurals.
+- Generate typed views and registry declarations for custom schemas with
+  [`openusd-build`](crates/openusd-build), using the same workflow as the
+  standard schema crate.
+- Integrate custom [asset resolvers](crates/openusd/src/ar.rs) and
+  [file formats](crates/openusd/src/sdf/file_format.rs).
 
-If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
+If a file fails to load, please open an
+[issue](https://github.com/mxpv/openusd/issues) with the USD file and the error.
 
 ## Compliance
 
-The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d-development-introducing-aousd-core-specification-1-0/)
-ships sample implementations for compliance testing, as Python scripts with
-JSON baselines. Where a baseline exists these crates parse it and check their
-own output against it, and the vendored suites run on every CI build: text and
-binary parsing, composition, value resolution, and list-op combine chains.
+The test suite checks text and binary parsing, composition, value resolution,
+and list-operation combining against reference tests and baselines from the
+[AOUSD Core Specification](docs/aousd_core_spec_1.0.1.pdf) supplemental material.
+CI runs the workspace tests on Linux, macOS, and Windows.
 
 Refer to the [compliance table](crates/openusd/README.md#compliance) for what
 is currently covered.
@@ -44,12 +69,10 @@ is currently covered.
 ## Getting started
 
 > [!WARNING]
-> These crates are under active development. No API stability is guaranteed until version 1.0.
+> These crates are under active development. APIs may change before version 1.0.
 
-Make sure you have [`Rust`](https://www.rust-lang.org/tools/install) installed on your system, `rustup` will do the rest.
-
-Add the crates you need — `openusd-schemas` is optional, with one feature per
-schema family:
+Add the crates you need to `Cargo.toml`. `openusd-schemas` is optional, with
+one feature per schema family:
 
 ```toml
 [dependencies]
@@ -79,7 +102,7 @@ if let Some(r) = radius.get::<f64>()? {
 }
 ```
 
-Authoring works the same way round:
+Create an in-memory stage and author a sphere:
 
 ```rust
 use openusd::usd;
@@ -93,21 +116,20 @@ stage.set_default_prim("World")?;
 stage.create_attribute("/World/Sphere.radius", "double")?.set(2.5_f64)?;
 ```
 
-Typed schema views layer on top of that stage — here a mesh's points and the
-shader driving a material's surface:
+For typed schema access, register the enabled schema families when opening the
+stage. This example reads a mesh's points and finds a material's surface shader:
 
 ```rust,no_run
 use openusd::{gf, usd};
 use openusd_schemas::geom::{self, PointBasedSchema};
 use openusd_schemas::shade;
 
-// The registry is what makes a prim a `Mesh` and what resolves the fallbacks
-// its schema declares; without it the typed constructors answer `None`.
+// Register schema types, inheritance, and property fallback values.
 let stage = usd::Stage::builder()
     .schema_registry(openusd_schemas::schema_registry())
     .open("scene.usda")?;
 
-// `PointBasedSchema` is in scope so `Mesh` inherits its accessors.
+// Import `PointBasedSchema` to use its accessors on `Mesh`.
 if let Some(mesh) = geom::Mesh::get(&stage, "/World/Mesh")? {
     if let Some(points) = mesh.points_attr().get::<Vec<gf::Vec3f>>()? {
         println!("{} points", points.len());
@@ -126,13 +148,23 @@ if let Some(material) = shade::Material::get(&stage, "/World/Material")? {
 }
 ```
 
+More runnable examples, including file conversion and variant authoring, are
+available in [`crates/openusd/examples`](crates/openusd/examples):
+
+```sh
+cargo run -p openusd --example dump_usdc -- path/to/file.usdc
+cargo run -p openusd --example author_variant_and_reference
+```
+
 ## Minimum supported Rust version (MSRV)
 
-The project targets stable Rust and aims for the latest Rust editions. The MSRV
-is bumped on an as-needed basis, whenever it makes sense for the project. Please
-refer to [rust-toolchain.toml](./rust-toolchain.toml) for the exact version
-currently used by our CIs.
+The MSRV is declared in the workspace's [Cargo.toml](Cargo.toml) as
+`rust-version` and may increase as the project develops.
+[rust-toolchain.toml](rust-toolchain.toml) pins the toolchain used for
+development and CI.
 
 ## License
 
-Licensed under the [MIT License](LICENSE).
+Licensed under the [MIT License](LICENSE), with exceptions for vendored OpenUSD
+schemas and generated code covered by the Tomorrow Open Source Technology
+License 1.0. See the [OpenUSD notices](vendor/OpenUSD/README.md) for details.
