@@ -5,7 +5,7 @@ use openusd::Result;
 use openusd::gf;
 use openusd::sdf;
 use openusd::usd;
-use openusd::usd::Stage;
+use openusd::usd::{PrimPredicate, Stage};
 use openusd_schemas::physics::{
     self, CollisionAPI, CollisionApprox, CollisionGroupSchema, DistanceJointSchema, DriveAPI, DriveType, Joint,
     JointAxis, JointSchema, LimitAPI, MassAPI, MeshCollisionAPI, PrismaticJointSchema, RevoluteJoint,
@@ -18,6 +18,17 @@ fn open() -> Result<usd::Stage> {
     usd::Stage::builder()
         .schema_registry(openusd_schemas::schema_registry())
         .open(FIXTURE)
+}
+
+/// A stage opened from `usda` source, for the scenes a fixture does not carry.
+fn from_usda(usda: &str) -> Result<Stage> {
+    // Persist the tempdir so it outlives the stage; the process exits at test
+    // end, so the OS reclaims it.
+    let path = tempfile::tempdir()?.keep().join("scene.usda");
+    std::fs::write(&path, usda)?;
+    Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .open(path.to_str().unwrap())
 }
 
 #[test]
@@ -156,6 +167,75 @@ fn collision_group() -> Result<()> {
         group.merge_group_name_attr().get::<String>()?.as_deref(),
         Some("default")
     );
+    Ok(())
+}
+
+/// A group's colliders are the members of its built-in collection, which
+/// expands as any collection does — the group targets two prims and both are
+/// members.
+#[test]
+fn group_colliders_collection() -> Result<()> {
+    let stage = open()?;
+    let group = physics::CollisionGroup::get(&stage, sdf::path("/World/Group")?)?.expect("CollisionGroup");
+
+    let query = group.colliders_collection().compute_membership_query()?;
+    assert!(query.is_path_included(&sdf::path("/World/Base")?));
+    assert!(query.is_path_included(&sdf::path("/World/Arm")?));
+    assert!(!query.is_path_included(&sdf::path("/World/Ball")?));
+
+    let mut colliders = usd::compute_included_paths(&stage, &query, PrimPredicate::DEFAULT_PROXIES)?;
+    colliders.sort();
+    assert_eq!(colliders, vec![sdf::path("/World/Arm")?, sdf::path("/World/Base")?]);
+    Ok(())
+}
+
+/// A collection reaches into instanced content, so a collider inside an
+/// instance is a member — which is why enumerating them asks for instance
+/// proxies. The walk behind the group table does not, and so cannot see a
+/// group inside a prototype.
+#[test]
+fn colliders_reach_instance_proxies() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+
+class Xform "Proto"
+{
+    def Cube "Body" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+    {
+    }
+
+    def PhysicsCollisionGroup "Inner"
+    {
+    }
+}
+
+def Xform "World"
+{
+    def Xform "Inst" (
+        instanceable = true
+        prepend references = </Proto>
+    )
+    {
+    }
+
+    def PhysicsCollisionGroup "Group"
+    {
+        rel collection:colliders:includes = [</World/Inst>]
+    }
+}
+"#,
+    )?;
+
+    let group = physics::CollisionGroup::get(&stage, "/World/Group")?.expect("CollisionGroup");
+    let query = group.colliders_collection().compute_membership_query()?;
+
+    let proxies = usd::compute_included_paths(&stage, &query, PrimPredicate::DEFAULT_PROXIES)?;
+    assert!(
+        proxies.contains(&sdf::path("/World/Inst/Body")?),
+        "the collider inside the instance is a member: {proxies:?}"
+    );
+    let plain = usd::compute_included_paths(&stage, &query, PrimPredicate::DEFAULT)?;
+    assert!(!plain.contains(&sdf::path("/World/Inst/Body")?));
     Ok(())
 }
 

@@ -55,6 +55,8 @@
 
 openusd::include_schema!("usdPhysics");
 
+mod collision_group;
+
 use tokens::*;
 
 /// The physics-specific material binding, which is `material:binding` under
