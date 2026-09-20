@@ -4,7 +4,6 @@
 use openusd::Result;
 use openusd::gf;
 use openusd::sdf;
-use openusd::tf::Token;
 use openusd::usd;
 use openusd::usd::Stage;
 use openusd_schemas::physics::{
@@ -154,7 +153,7 @@ fn collision_group() -> Result<()> {
     let stage = open()?;
     let group = physics::CollisionGroup::get(&stage, sdf::path("/World/Group")?)?.expect("CollisionGroup");
     assert_eq!(
-        group.merge_group_name_attr().get::<Token>()?.as_deref(),
+        group.merge_group_name_attr().get::<String>()?.as_deref(),
         Some("default")
     );
     Ok(())
