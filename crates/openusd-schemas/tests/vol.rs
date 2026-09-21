@@ -2,12 +2,13 @@
 
 use openusd::Result;
 
+use openusd::gf;
 use openusd::sdf;
 use openusd::tf::Token;
-use openusd::usd::Stage;
+use openusd::usd::{self, Stage};
 use openusd_schemas::vol::{
-    self, Field3DAsset, Field3DAssetSchema, OpenVDBAsset, OpenVDBAssetSchema, VectorDataRoleHint,
-    VolumeFieldAssetSchema,
+    self, Field3DAsset, Field3DAssetSchema, OpenVDBAsset, OpenVDBAssetSchema, ParticleField3DGaussianSplatSchema,
+    SplatData, VectorDataRoleHint, VolumeFieldAssetSchema,
 };
 
 const FIXTURE: &str = "fixtures/usdVol_scene.usda";
@@ -92,5 +93,57 @@ fn openvdb_asset_roundtrip() -> Result<()> {
         Some(VectorDataRoleHint::NoRole)
     );
     assert_eq!(a.field_class_attr().get::<Token>()?.as_deref(), Some("fogVolume"));
+    Ok(())
+}
+
+/// A splat stores each quantity twice over, at float and at half precision,
+/// and which one carries the data is read off the data itself: the float
+/// attribute where it holds anything, the half one otherwise.
+#[test]
+fn splat_prefers_authored_precision() -> Result<()> {
+    let stage = memory()?;
+    let splat = vol::ParticleField3DGaussianSplat::define(&stage, "/Splat")?;
+    let in_use = |data| Ok::<_, openusd::Error>(splat.attribute_in_use(data)?.path().clone());
+
+    // Nothing authored: the half attribute answers, holding nothing itself.
+    assert_eq!(in_use(SplatData::Positions)?, sdf::path("/Splat.positionsh")?);
+    assert!(!splat.uses_float(SplatData::Positions)?, "and says so as a bool");
+
+    // An empty float array is no more authored than none at all.
+    let positions = splat.create_positions_attr()?.set(Vec::<gf::Vec3f>::new())?;
+    assert_eq!(in_use(SplatData::Positions)?, sdf::path("/Splat.positionsh")?);
+
+    positions.set(vec![gf::vec3f(0.0, 1.0, 2.0)])?;
+    assert_eq!(in_use(SplatData::Positions)?, sdf::path("/Splat.positions")?);
+
+    // Each pair answers for itself.
+    splat
+        .create_scalesh_attr()?
+        .set(vec![gf::vec3h(gf::f16::ONE, gf::f16::ONE, gf::f16::ONE)])?;
+    assert_eq!(in_use(SplatData::Scales)?, sdf::path("/Splat.scalesh")?);
+    Ok(())
+}
+
+/// The earliest time sample is what decides it, so a splat animated from an
+/// empty first sample still reads as half-precision.
+#[test]
+fn splat_precision_at_earliest_time() -> Result<()> {
+    let stage = memory()?;
+    let splat = vol::ParticleField3DGaussianSplat::define(&stage, "/Splat")?;
+    splat
+        .create_positions_attr()?
+        .set_at(Vec::<gf::Vec3f>::new(), usd::TimeCode::from(1.0))?
+        .set_at(vec![gf::vec3f(0.0, 0.0, 0.0)], usd::TimeCode::from(2.0))?;
+
+    assert!(!splat.uses_float(SplatData::Positions)?, "the earliest sample is empty");
+
+    // The samples are what is read, not the default: the same shape with a
+    // filled first sample answers the other way.
+    let filled = vol::ParticleField3DGaussianSplat::define(&stage, "/Filled")?;
+    filled
+        .create_positions_attr()?
+        .set_at(vec![gf::vec3f(0.0, 0.0, 0.0)], usd::TimeCode::from(1.0))?
+        .set_at(Vec::<gf::Vec3f>::new(), usd::TimeCode::from(2.0))?;
+    assert!(filled.uses_float(SplatData::Positions)?);
     Ok(())
 }

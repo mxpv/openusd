@@ -23,7 +23,10 @@
 //! their own `fieldClass` / `fieldPurpose`.
 //!
 //! The `ParticleField*` schemas (Gaussian-splat volumes) are generated beside
-//! them; the subsystem that consumes them is not modelled here.
+//! them, each reflecting the attribute APIs its data comes from, with
+//! [`ParticleField3DGaussianSplat::attribute_in_use`] over the pairs they
+//! store at two precisions. The subsystem that renders them is not modelled
+//! here.
 //!
 //! # Example
 //!
@@ -53,6 +56,8 @@
 
 openusd::include_schema!("usdVol");
 
+mod splat;
 mod volume;
 
+pub use splat::SplatData;
 pub use volume::FIELD_NAMESPACE;
