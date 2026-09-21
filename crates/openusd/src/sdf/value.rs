@@ -332,6 +332,23 @@ impl Value {
         T::try_from(self).ok()
     }
 
+    /// How many elements this holds, where it holds an array, and `None`
+    /// where it holds a single value (C++ `VtValue::GetArraySize`, which
+    /// answers zero for both).
+    ///
+    /// A dictionary answers `None` too: what it holds is named rather than
+    /// counted.
+    pub fn array_len(&self) -> Option<usize> {
+        match self {
+            // The arrays no attribute holds, which the scalar/array table has
+            // no row for: these carry metadata rather than a value's elements.
+            Value::PathVec(items) => Some(items.len()),
+            Value::LayerOffsetVec(items) => Some(items.len()),
+            Value::ValueVec(items) => Some(items.len()),
+            value => value.attribute_array_len(),
+        }
+    }
+
     /// Whether this value carries `asset` paths, and so needs anchoring and
     /// expression evaluation before it is handed to a reader.
     ///
@@ -1102,6 +1119,25 @@ pub fn dictionary_over(stronger: &mut super::Dictionary, weaker: super::Dictiona
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An array answers how many elements it holds; a single value answers
+    /// that it is not an array at all.
+    #[test]
+    fn len_of_arrays() {
+        assert_eq!(Value::FloatVec(vec![1.0, 2.0]).array_len(), Some(2));
+        assert_eq!(Value::Vec3fVec(Vec::new()).array_len(), Some(0));
+        assert_eq!(Value::TokenVec(vec![Token::from("a")]).array_len(), Some(1));
+        // An array no attribute holds still answers, the table it is missing
+        // from being about attribute values.
+        assert_eq!(Value::PathVec(vec![Path::abs_root()]).array_len(), Some(1));
+        assert_eq!(Value::Float(1.0).array_len(), None);
+        assert_eq!(Value::None.array_len(), None);
+        assert_eq!(
+            Value::Dictionary(Dictionary::new()).array_len(),
+            None,
+            "a dictionary is named, not counted"
+        );
+    }
 
     #[test]
     fn kind_of_value() {

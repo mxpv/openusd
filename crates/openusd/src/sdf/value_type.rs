@@ -487,6 +487,17 @@ macro_rules! array_pairs {
                 }
             }
         }
+
+        impl Value {
+            /// How many elements an attribute array holds, which
+            /// [`array_len`](Value::array_len) answers for every array.
+            pub(super) fn attribute_array_len(&self) -> Option<usize> {
+                match self {
+                    $(Value::$array(items) => Some(items.len()),)*
+                    _ => None,
+                }
+            }
+        }
     };
 }
 
