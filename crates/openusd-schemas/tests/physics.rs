@@ -5,7 +5,7 @@ use openusd::Result;
 use openusd::gf;
 use openusd::sdf;
 use openusd::usd;
-use openusd::usd::{PrimPredicate, Stage};
+use openusd::usd::{PrimPredicate, SchemaBase, Stage};
 use openusd_schemas::physics::{
     self, CollisionAPI, CollisionApprox, CollisionGroupSchema, DistanceJointSchema, DriveAPI, DriveType, Joint,
     JointAxis, JointSchema, LimitAPI, MassAPI, MeshCollisionAPI, PrismaticJointSchema, RevoluteJoint,
@@ -236,6 +236,311 @@ def Xform "World"
     );
     let plain = usd::compute_included_paths(&stage, &query, PrimPredicate::DEFAULT)?;
     assert!(!plain.contains(&sdf::path("/World/Inst/Body")?));
+
+    // The group inside the prototype is not one the table knows.
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert_eq!(table.groups(), [sdf::path("/World/Group")?]);
+    Ok(())
+}
+
+/// Every pair answers the same both ways round, and by path as by index.
+fn assert_symmetric(table: &physics::CollisionGroupTable) {
+    for (ia, a) in table.groups().iter().enumerate() {
+        for (ib, b) in table.groups().iter().enumerate() {
+            assert_eq!(
+                table.is_collision_enabled_at(ia, ib),
+                table.is_collision_enabled_at(ib, ia),
+                "{a} vs {b} by index"
+            );
+            assert_eq!(
+                table.is_collision_enabled(a, b),
+                table.is_collision_enabled(b, a),
+                "{a} vs {b}"
+            );
+            assert_eq!(table.is_collision_enabled(a, b), table.is_collision_enabled_at(ia, ib));
+        }
+    }
+}
+
+/// Define collision groups at `paths`, in order.
+fn groups(stage: &Stage, paths: &[&str]) -> Result<Vec<physics::CollisionGroup>> {
+    paths
+        .iter()
+        .map(|path| physics::CollisionGroup::define(stage, *path))
+        .collect()
+}
+
+/// A group filtering another disables the pair both ways, and one filtering
+/// itself disables its own (C++ `test_collision_group_table`).
+#[test]
+fn group_table_filters() -> Result<()> {
+    let stage = memory()?;
+    let all = groups(&stage, &["/a", "/b", "/c"])?;
+    let (a, b, c) = (&all[0], &all[1], &all[2]);
+    b.create_filtered_groups_rel()?.add_target(c.path().clone())?;
+    c.create_filtered_groups_rel()?.add_target(c.path().clone())?;
+
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert_eq!(table.groups().len(), 3);
+    assert!(table.is_collision_enabled(a.path(), a.path()));
+    assert!(table.is_collision_enabled(a.path(), b.path()));
+    assert!(table.is_collision_enabled(a.path(), c.path()));
+    assert!(table.is_collision_enabled(b.path(), b.path()));
+    assert!(!table.is_collision_enabled(b.path(), c.path()));
+    assert!(
+        !table.is_collision_enabled(c.path(), c.path()),
+        "a group filtering itself"
+    );
+    assert_symmetric(&table);
+    Ok(())
+}
+
+/// An inverted filter disables everything it does not name — its own pair
+/// included, since it did not name itself (C++
+/// `test_collision_group_inversion`).
+#[test]
+fn group_table_inversion() -> Result<()> {
+    let stage = memory()?;
+    let all = groups(&stage, &["/a", "/b", "/c"])?;
+    let (a, b, c) = (&all[0], &all[1], &all[2]);
+    a.create_filtered_groups_rel()?.add_target(c.path().clone())?;
+    a.create_invert_filtered_groups_attr()?.set(true)?;
+
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert!(!table.is_collision_enabled(a.path(), a.path()));
+    assert!(!table.is_collision_enabled(a.path(), b.path()));
+    assert!(table.is_collision_enabled(a.path(), c.path()));
+    assert!(table.is_collision_enabled(b.path(), b.path()));
+    assert!(table.is_collision_enabled(b.path(), c.path()));
+    assert!(table.is_collision_enabled(c.path(), c.path()));
+    assert_symmetric(&table);
+    Ok(())
+}
+
+/// Merging a plain filter into an inverted group disables every pair either
+/// of them had: rules combine, and combining only ever disables. The C++
+/// documentation warns about exactly this.
+#[test]
+fn inverted_merge_disables_all() -> Result<()> {
+    let stage = memory()?;
+    let all = groups(&stage, &["/allOthers", "/grpXCollider", "/grpX", "/grpA"])?;
+    let (others, collider, x, a) = (&all[0], &all[1], &all[2], &all[3]);
+    x.create_filtered_groups_rel()?.add_target(collider.path().clone())?;
+    x.create_invert_filtered_groups_attr()?.set(true)?;
+    a.create_filtered_groups_rel()?.add_target(collider.path().clone())?;
+
+    // Apart, each group keeps its own rules.
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert!(table.is_collision_enabled(x.path(), collider.path()));
+    assert!(!table.is_collision_enabled(x.path(), others.path()));
+    assert!(!table.is_collision_enabled(a.path(), collider.path()));
+
+    // Merged, `grpA`'s filter and `grpX`'s inversion together leave nothing.
+    x.create_merge_group_name_attr()?.set("mergeTest".to_string())?;
+    a.create_merge_group_name_attr()?.set("mergeTest".to_string())?;
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert!(!table.is_collision_enabled(x.path(), collider.path()));
+    assert!(!table.is_collision_enabled(x.path(), others.path()));
+    assert!(!table.is_collision_enabled(a.path(), collider.path()));
+    assert!(!table.is_collision_enabled(a.path(), others.path()));
+    assert_symmetric(&table);
+    Ok(())
+}
+
+/// A merged group's filters are every member's (C++
+/// `test_collision_group_simple_merging`).
+#[test]
+fn group_table_simple_merge() -> Result<()> {
+    let stage = memory()?;
+    let all = groups(&stage, &["/a", "/b", "/c"])?;
+    let (a, b, c) = (&all[0], &all[1], &all[2]);
+    a.create_filtered_groups_rel()?.add_target(c.path().clone())?;
+    a.create_merge_group_name_attr()?.set("mergeTest".to_string())?;
+    b.create_merge_group_name_attr()?.set("mergeTest".to_string())?;
+
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert!(table.is_collision_enabled(a.path(), a.path()));
+    assert!(table.is_collision_enabled(a.path(), b.path()));
+    assert!(!table.is_collision_enabled(a.path(), c.path()));
+    assert!(!table.is_collision_enabled(b.path(), c.path()), "b inherits a's filter");
+    assert!(table.is_collision_enabled(c.path(), c.path()));
+    assert_symmetric(&table);
+    Ok(())
+}
+
+/// A filter between two merge groups applies to every member on both sides
+/// (C++ `test_collision_group_complex_merging`).
+#[test]
+fn group_table_complex_merge() -> Result<()> {
+    let stage = memory()?;
+    let all = groups(&stage, &["/a", "/b", "/c", "/d"])?;
+    let (a, b, c, d) = (&all[0], &all[1], &all[2], &all[3]);
+    a.create_filtered_groups_rel()?.add_target(c.path().clone())?;
+    for (group, name) in [(a, "mergeAB"), (b, "mergeAB"), (c, "mergeCD"), (d, "mergeCD")] {
+        group.create_merge_group_name_attr()?.set(name.to_string())?;
+    }
+
+    let table = physics::compute_collision_group_table(&stage)?;
+    for near in [a, b] {
+        assert!(table.is_collision_enabled(near.path(), a.path()));
+        assert!(table.is_collision_enabled(near.path(), b.path()));
+        assert!(!table.is_collision_enabled(near.path(), c.path()));
+        assert!(!table.is_collision_enabled(near.path(), d.path()));
+    }
+    assert!(table.is_collision_enabled(c.path(), d.path()));
+    assert!(table.is_collision_enabled(d.path(), d.path()));
+    assert_symmetric(&table);
+    Ok(())
+}
+
+/// Both members of a merge group answer alike, whichever order their indices
+/// fall in.
+///
+/// Merge names `a, b, c, a` give the four groups merged indices `0, 1, 2, 0`,
+/// so the last group's index is below the third's — the case where reading a
+/// pair without putting it in order first lands on `(1, 1)`, the second
+/// group's own pair, which is left enabled here precisely so that a wrong
+/// read shows up. Symmetry does not catch it: the wrong value reaches both
+/// halves of the pair.
+#[test]
+fn merged_index_stays_ordered() -> Result<()> {
+    let stage = memory()?;
+    let all = groups(&stage, &["/p0", "/p1", "/p2", "/p3"])?;
+    for (group, name) in [(&all[0], "a"), (&all[1], "b"), (&all[2], "c"), (&all[3], "a")] {
+        group.create_merge_group_name_attr()?.set(name.to_string())?;
+    }
+    all[0].create_filtered_groups_rel()?.add_target(all[2].path().clone())?;
+
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert!(
+        table.is_collision_enabled(all[1].path(), all[1].path()),
+        "the cell a wrong read lands on"
+    );
+    assert!(!table.is_collision_enabled(all[0].path(), all[2].path()));
+    assert!(
+        !table.is_collision_enabled(all[3].path(), all[2].path()),
+        "the other member of the same merge group answers alike"
+    );
+    assert_symmetric(&table);
+    Ok(())
+}
+
+/// A filter target naming no collision group filters nothing, rather than
+/// filtering against whichever group came first.
+#[test]
+fn unknown_filter_target_ignored() -> Result<()> {
+    let stage = memory()?;
+    let all = groups(&stage, &["/a", "/b"])?;
+    let (a, b) = (&all[0], &all[1]);
+    stage.define_prim("/NotAGroup")?.set_type_name("Cube")?;
+    b.create_filtered_groups_rel()?.add_target(sdf::path("/NotAGroup")?)?;
+
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert!(table.is_collision_enabled(a.path(), a.path()));
+    assert!(table.is_collision_enabled(a.path(), b.path()));
+    assert!(table.is_collision_enabled(b.path(), b.path()));
+
+    // Inverted, an unknown target is not among what stays enabled either, so
+    // the group is left colliding with nothing.
+    b.create_invert_filtered_groups_attr()?.set(true)?;
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert!(!table.is_collision_enabled(b.path(), b.path()));
+    assert!(!table.is_collision_enabled(a.path(), b.path()));
+    assert!(table.is_collision_enabled(a.path(), a.path()));
+    Ok(())
+}
+
+/// Merging turns on whether anything authors `mergeGroup`, not on whether a
+/// value comes back: a declaration alone and a block both merge the group
+/// under the empty name, as C++ does, while an unauthored one merges with
+/// nothing.
+#[test]
+fn merge_name_authorship() -> Result<()> {
+    let stage = memory()?;
+    let all = groups(&stage, &["/absent", "/empty", "/declared", "/blocked", "/other"])?;
+    all[1].create_merge_group_name_attr()?.set(String::new())?;
+    all[2].create_merge_group_name_attr()?;
+    all[3].create_merge_group_name_attr()?.block()?;
+    all[4].create_filtered_groups_rel()?.add_target(all[1].path().clone())?;
+
+    // The filter against `/empty` reaches every group merged under the empty
+    // name, and no further.
+    let table = physics::compute_collision_group_table(&stage)?;
+    for merged in [&all[1], &all[2], &all[3]] {
+        assert!(
+            !table.is_collision_enabled(merged.path(), all[4].path()),
+            "{} merges under the empty name",
+            merged.path()
+        );
+    }
+    assert!(
+        table.is_collision_enabled(all[0].path(), all[4].path()),
+        "an unauthored name merges with nothing"
+    );
+    assert_symmetric(&table);
+    Ok(())
+}
+
+/// Inversion turns on a value rather than on authorship: a declaration with
+/// no value, and a blocked one, leave filtering the usual way round.
+#[test]
+fn inversion_missing_values() -> Result<()> {
+    let stage = memory()?;
+    let all = groups(&stage, &["/a", "/b"])?;
+    let (a, b) = (&all[0], &all[1]);
+    a.create_filtered_groups_rel()?.add_target(b.path().clone())?;
+
+    for author in [0, 1, 2] {
+        match author {
+            1 => {
+                a.create_invert_filtered_groups_attr()?;
+            }
+            2 => {
+                a.create_invert_filtered_groups_attr()?.block()?;
+            }
+            _ => {}
+        }
+        let table = physics::compute_collision_group_table(&stage)?;
+        assert!(
+            !table.is_collision_enabled(a.path(), b.path()),
+            "the named pair is filtered"
+        );
+        assert!(table.is_collision_enabled(a.path(), a.path()), "nothing else is");
+    }
+    Ok(())
+}
+
+/// A value of the wrong type is an error, not a group quietly left unmerged.
+/// A stage carrying a recoverable composition diagnostic still computes.
+#[test]
+fn malformed_merge_name_errors() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+
+def PhysicsCollisionGroup "Group"
+{
+    uniform token physics:mergeGroup = "wrongType"
+}
+"#,
+    )?;
+    assert!(physics::compute_collision_group_table(&stage).is_err());
+
+    let stage = from_usda(
+        r#"#usda 1.0
+(
+    subLayers = [
+        @nowhere.usda@
+    ]
+)
+
+def PhysicsCollisionGroup "Group"
+{
+}
+"#,
+    )?;
+    assert!(!stage.composition_errors().is_empty(), "the sublayer is unresolvable");
+    let table = physics::compute_collision_group_table(&stage)?;
+    assert_eq!(table.groups(), [sdf::path("/Group")?]);
     Ok(())
 }
 

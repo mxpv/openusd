@@ -57,6 +57,8 @@ openusd::include_schema!("usdPhysics");
 
 mod collision_group;
 
+pub use collision_group::{CollisionGroupTable, compute_collision_group_table};
+
 use tokens::*;
 
 /// The physics-specific material binding, which is `material:binding` under
