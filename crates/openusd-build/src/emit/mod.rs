@@ -89,6 +89,7 @@ fn render(file: TokenStream, schema: &str) -> Result<String, Error> {
         .map(|item| {
             let one = syn::File {
                 shebang: None,
+                frontmatter: None,
                 attrs: Vec::new(),
                 items: vec![item],
             };
