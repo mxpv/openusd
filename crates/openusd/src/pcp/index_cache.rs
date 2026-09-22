@@ -636,10 +636,13 @@ struct InfoResolver<'a> {
 }
 
 impl InfoResolver<'_> {
-    /// Records the source that answered and the site it answered at.
-    fn select(&mut self, kind: ResolveSourceKind, site: &OpinionSite<'_>) {
+    /// Records the source that answered and the node it answered at. The spec
+    /// is the caller's, since a value clip answers from a layer the site it
+    /// was reached at does not name.
+    fn select(&mut self, kind: ResolveSourceKind, site: &OpinionSite<'_>, spec: Option<SpecSiteRecord>) {
         self.resolution.source = kind;
         self.resolution.node = Some(ResolveNode::capture(self.graph, site.node, self.stage));
+        self.resolution.spec = spec;
     }
 }
 
@@ -653,14 +656,14 @@ impl OpinionResolver for InfoResolver<'_> {
             self.resolution.value = ValueState::Blocked;
             return Step::Stop;
         }
-        self.select(ResolveSourceKind::TimeSamples, site);
+        self.select(ResolveSourceKind::TimeSamples, site, Some(site.spec_record(self.graph)));
         self.resolution.value = ValueState::Present;
         Step::Stop
     }
 
     fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
         self.resolution.authored = true;
-        self.select(ResolveSourceKind::Default, site);
+        self.select(ResolveSourceKind::Default, site, Some(site.spec_record(self.graph)));
         self.resolution.value = ValueState::Present;
         Step::Stop
     }
@@ -706,7 +709,20 @@ impl OpinionResolver for InfoResolver<'_> {
         self.resolution.authored = true;
         self.resolution.value = state;
         if matches!(state, ValueState::Present) {
-            self.select(ResolveSourceKind::ValueClips, site);
+            // The site the set was reached at authors the `clips` metadata, not
+            // the value: the spec to report is the one a property stack lists,
+            // which is the clip layer itself. An untimed query selects no clip,
+            // so it names none.
+            // TODO(perf): this re-derives what the answer already knew — the
+            // active entry, the clip path and the manifest — and for a
+            // synthesized manifest that is not yet complete it regenerates one,
+            // reopening every clip asset. A probe form returning the answer and
+            // its site together would fold both passes.
+            let spec = match self.time {
+                Some(time) => probe.spec_record_at(time, site.offset)?,
+                None => None,
+            };
+            self.select(ResolveSourceKind::ValueClips, site, spec);
         }
         Ok(Step::Stop)
     }
@@ -751,6 +767,18 @@ pub struct SpecSiteRecord {
     pub offset: LayerOffset,
 }
 
+impl SpecSiteRecord {
+    /// The record for a spec `graph` holds, naming its layer as every query
+    /// that reports a site names it.
+    pub(crate) fn in_graph(graph: &LayerGraph, layer: LayerId, path: Path, offset: LayerOffset) -> Self {
+        Self {
+            layer: graph.identifier(layer).to_string(),
+            path,
+            offset,
+        }
+    }
+}
+
 impl OpinionResolver for StackResolver<'_> {
     fn on_site(&mut self, site: &OpinionSite<'_>) -> Step {
         let Some(spec_type) = self.graph.layer(site.layer).data().spec_type(&site.query_path) else {
@@ -761,11 +789,7 @@ impl OpinionResolver for StackResolver<'_> {
             .defining
             .admit(spec_type, layer, &site.query_path, self.prop_path, self.prim_path)
         {
-            None => self.sites.push(SpecSiteRecord {
-                layer: layer.to_string(),
-                path: site.query_path.clone(),
-                offset: site.offset,
-            }),
+            None => self.sites.push(site.spec_record(self.graph)),
             Some(conflict) => self.conflicts.report(conflict),
         }
         Step::Continue
@@ -792,12 +816,8 @@ impl OpinionResolver for StackResolver<'_> {
         let Some(time) = self.time else {
             return Ok(Step::Continue);
         };
-        if let Some((layer, path)) = probe.spec_site_at(time)? {
-            self.sites.push(SpecSiteRecord {
-                layer,
-                path,
-                offset: site.offset,
-            });
+        if let Some(record) = probe.spec_record_at(time, site.offset)? {
+            self.sites.push(record);
         }
         Ok(Step::Continue)
     }
@@ -1323,6 +1343,9 @@ impl IndexCache {
         suffix: &str,
         site: &SelectedSite,
     ) -> Result<Option<Value>, QueryError> {
+        // TODO(perf): a value read and a resolve info over one attribute compose
+        // the same value twice; a composed-value-with-provenance cache would
+        // fold the two.
         let value = self
             .cached(prim)
             .resolve_strongest(FieldKey::Default.as_str(), graph, Some(suffix), Some(site))?;

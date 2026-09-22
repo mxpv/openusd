@@ -6037,10 +6037,14 @@ fn spec_site_carries_offset() -> Result<()> {
         .set(sdf::Value::Double(1.0))?;
     reference_with_offset(&stage, sdf::LayerOffset::new(10.0, 2.0))?;
 
-    let stack = stage.attribute("/Prim.x")?.property_stack()?;
+    let attr = stage.attribute("/Prim.x")?;
+    let stack = attr.property_stack()?;
     let site = stack.first().expect("one contributing spec");
     assert_eq!(site.path, sdf::path("/Source.x")?);
     assert_eq!(site.offset, sdf::LayerOffset::new(10.0, 2.0));
+    // The resolve info answers with that same site, so the two queries cannot
+    // disagree about where an opinion lives.
+    assert_eq!(attr.resolve_info()?.spec_site(), Some(site));
     Ok(())
 }
 
@@ -6059,6 +6063,81 @@ fn resolve_info_names_node() -> Result<()> {
     let node = info.node().expect("an authored opinion names its node");
     assert_eq!(node.arc(), pcp::ArcType::Reference);
     assert_eq!(node.path(), &sdf::path("/Source")?);
+    Ok(())
+}
+
+/// Two sublayers of one layer stack share a composition node, so the node
+/// alone cannot say which of them answered; the spec can.
+#[test]
+fn sublayer_contributors_differ() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    for (name, value) in [("strong.usda", 1.0), ("weak.usda", 2.0)] {
+        fs::write(
+            dir.path().join(name),
+            format!("#usda 1.0\ndef \"A\"\n{{\n    double x = {value}\n}}\n"),
+        )?;
+    }
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    subLayers = [\n        @./strong.usda@,\n        @./weak.usda@\n    ]\n)\n",
+    )?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+
+    let attr = stage.attribute("/A.x")?;
+    let info = attr.resolve_info()?;
+    let site = info.spec_site().expect("an authored opinion names its spec");
+    assert!(
+        site.layer.ends_with("strong.usda"),
+        "the stronger sublayer answered: {site:?}"
+    );
+    // Both sublayers contribute under one node, which is why the spec is what
+    // tells them apart.
+    let stack = attr.property_stack()?;
+    assert_eq!(stack.len(), 2);
+    assert_eq!(site, &stack[0]);
+    assert_eq!(attr.get::<f64>()?, Some(1.0));
+    Ok(())
+}
+
+/// A value clip names the layer a property stack lists for it, which for an
+/// active clip holding the samples is the clip itself.
+#[test]
+fn clip_names_its_layer() -> Result<()> {
+    let stage = Stage::open(&clip_asset("clip_basic"))?;
+    let attr = stage.attribute("/Model.size")?;
+    let at = usd::TimeCode::new(10.0);
+
+    let info = attr.resolve_info_at(at)?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::ValueClips);
+    let site = info.spec_site().expect("a clip names the layer it was read from");
+    assert!(site.layer.ends_with("clip.usd"), "the clip layer answered: {site:?}");
+    assert_eq!(site, attr.property_stack_at(at)?.first().expect("a clip site"));
+
+    // Without a time no clip is selected, so there is no layer to name.
+    assert!(attr.resolve_info()?.spec_site().is_none());
+    Ok(())
+}
+
+/// A gap `interpolateMissingClipValues` fills is the case where the spec a
+/// resolve info names is *not* where the value came from: the stack lists the
+/// manifest, while the samples were interpolated across the clips surrounding
+/// the gap. The accessor promises the stack's site, and this pins that.
+#[test]
+fn clip_interpolated_gap_site() -> Result<()> {
+    let stage = Stage::open(&fixture_path("clip_missing_interp/root.usda"))?;
+    let attr = stage.attribute("/Model.size")?;
+    let at = usd::TimeCode::new(15.0);
+
+    // The value is interpolated between clipA's 0 and clipC's 100, so it came
+    // from neither the empty middle clip nor the manifest.
+    assert_eq!(value_f64(&stage, "/Model.size", 15.0), Some(75.0));
+    let info = attr.resolve_info_at(at)?;
+    let site = info.spec_site().expect("the stack's site");
+    assert!(
+        site.layer.ends_with("manifest.usda"),
+        "the stack names the manifest, not the clips the samples came from: {site:?}"
+    );
+    assert!(attr.property_stack_at(at)?.contains(site), "the stack lists it too");
     Ok(())
 }
 
@@ -7670,6 +7749,18 @@ fn manifest_joins_timed_stack() -> Result<()> {
         "the manifest fills the gap, so it is the reported spec: {timed:?}"
     );
     assert!(!timed.iter().any(|layer| layer.ends_with("clip.usda")), "{timed:?}");
+    // The resolve info names the same spec: here the manifest is both what the
+    // stack lists and where the value came from.
+    let info = attr.resolve_info_at(usd::TimeCode::new(0.0))?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::ValueClips);
+    assert!(
+        info.spec_site()
+            .expect("the manifest answered")
+            .layer
+            .ends_with("manifest.usda"),
+        "{:?}",
+        info.spec_site()
+    );
     Ok(())
 }
 

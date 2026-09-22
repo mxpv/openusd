@@ -831,15 +831,16 @@ impl Attribute {
                 false => ResolveInfoSource::None,
             },
         };
-        // A schema fallback and an absent value come from no composition node,
-        // even when a block at one is what sent resolution there.
-        let node = match source {
-            ResolveInfoSource::Fallback | ResolveInfoSource::None => None,
-            _ => resolved.node,
+        // A schema fallback and an absent value come from no composition node
+        // and no spec, even when a block at one is what sent resolution there.
+        let (node, spec) = match source {
+            ResolveInfoSource::Fallback | ResolveInfoSource::None => (None, None),
+            _ => (resolved.node, resolved.spec),
         };
         Ok(ResolveInfo {
             source,
             node,
+            spec,
             value_is_blocked: resolved.value == pcp::ValueState::Blocked,
             has_authored_opinion: resolved.authored,
         })
@@ -1411,8 +1412,8 @@ mod tests {
         Ok(())
     }
 
-    /// A schema fallback comes from no composition node, even when a block at
-    /// one is what sent resolution there.
+    /// A schema fallback comes from no composition node and no spec, even when
+    /// a block at one is what sent resolution there.
     #[test]
     fn fallback_names_no_node() -> Result<()> {
         let stage = schema_stage()?;
@@ -1423,6 +1424,7 @@ mod tests {
         assert_eq!(info.source(), ResolveInfoSource::Fallback);
         assert!(info.value_is_blocked());
         assert!(info.node().is_none());
+        assert!(info.spec_site().is_none());
         Ok(())
     }
 

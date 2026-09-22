@@ -1,6 +1,7 @@
 //! Where value resolution found an attribute's answer (C++ `UsdResolveInfo`).
 
 use crate::pcp;
+use crate::usd::SpecSite;
 
 /// The kind of source an attribute's resolved value came from (C++
 /// `UsdResolveInfoSource`).
@@ -34,6 +35,7 @@ pub enum ResolveInfoSource {
 pub struct ResolveInfo {
     pub(super) source: ResolveInfoSource,
     pub(super) node: Option<pcp::ResolveNode>,
+    pub(super) spec: Option<SpecSite>,
     pub(super) value_is_blocked: bool,
     /// Whether any layer authored a value opinion, including one that withholds
     /// a value. Wider than both `source` and `value_is_blocked`: a blocked
@@ -60,6 +62,26 @@ impl ResolveInfo {
     /// resolution consulted it.
     pub fn node(&self) -> Option<&pcp::ResolveNode> {
         self.node.as_ref()
+    }
+
+    /// The spec a property stack lists for the source that answered, or `None`
+    /// where nothing authored one — a schema fallback, no source at all, or a
+    /// value clip reached without a time, which selects none.
+    ///
+    /// The layer, the path inside it, and the cumulative offset that reaches
+    /// it (C++ splits these across `GetLayer`, `GetPrimPathInLayerStack` and
+    /// `GetLayerToStageOffset`).
+    ///
+    /// This is the site
+    /// [`Attribute::property_stack`](super::Attribute::property_stack) lists
+    /// for that source, so the two queries agree about where an opinion lives.
+    ///
+    /// For a value clip the site is the layer the stack names at that time,
+    /// which is not always the layer the value was read from: a gap filled
+    /// under `interpolateMissingClipValues` names the manifest while the
+    /// samples came from the clips around it.
+    pub fn spec_site(&self) -> Option<&SpecSite> {
+        self.spec.as_ref()
     }
 
     /// Whether an opinion blocked the value

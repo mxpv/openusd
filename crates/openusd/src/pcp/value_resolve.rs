@@ -17,6 +17,7 @@ use super::QueryError;
 use super::asset_resolve::AssetSite;
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::diagnostics::Diagnostics;
+use super::index_cache::SpecSiteRecord;
 use super::layer_graph::StackIdentity;
 use super::prim_graph::{ArcType, Node};
 use super::{LayerGraph, LayerId, LayerStackId, LayerStackIdentifier, MapFunction};
@@ -138,7 +139,7 @@ pub(crate) enum ValueState {
 
 /// What one run of the shared walk learned about a property.
 ///
-/// The three facts are recorded independently because they are independent: an
+/// The facts are recorded independently because they are independent: an
 /// authored opinion need not supply a value, a source can be selected and then
 /// withhold one, and an opinion the walk did not resolve from is authored all
 /// the same. Deriving any of them from another is what made
@@ -153,6 +154,11 @@ pub(crate) struct Resolution {
     /// The site the answering source was found at, when a composition node
     /// supplied it.
     pub(crate) node: Option<ResolveNode>,
+    /// The spec a property stack lists for the answering source: the layer the
+    /// opinion was authored in, or — for a value clip — the layer that stack
+    /// names at the queried time. `None` where no source answered, and for a
+    /// clip reached without a time, which selects none.
+    pub(crate) spec: Option<SpecSiteRecord>,
     /// Whether that source supplied a value.
     pub(crate) value: ValueState,
     /// Whether any layer authored an opinion at all, whatever became of it.
@@ -337,6 +343,12 @@ impl OpinionSite<'_> {
         }
     }
 
+    /// This site as a property stack lists it: the layer, the path inside it,
+    /// and the offset that reaches it.
+    pub(crate) fn spec_record(&self, graph: &LayerGraph) -> SpecSiteRecord {
+        SpecSiteRecord::in_graph(graph, self.layer, self.query_path.clone(), self.offset)
+    }
+
     /// Provenance for an `asset` value authored here. Copies two strings, so
     /// build it only for a value that actually holds asset paths.
     pub(crate) fn asset_site(&self, graph: &LayerGraph) -> AssetSite {
@@ -432,11 +444,18 @@ impl ClipProbe<'_> {
             .clip_introspection_in_set(self.graph, self.diagnostics, self.set, &self.query)
     }
 
-    /// The layer a property stack lists for the set at `time`, with the property
-    /// path inside it. `None` when the set does not source the property.
-    pub(crate) fn spec_site_at(&mut self, time: f64) -> Result<Option<(String, sdf::Path)>, QueryError> {
-        self.cache
-            .clip_spec_site_in_set(self.graph, self.diagnostics, self.set, &self.query, time)
+    /// The site a property stack lists for the set at `time`, carrying the
+    /// reaching site's own offset — a set is only reached at the layer that
+    /// introduced it. `None` when the set does not source the property.
+    pub(crate) fn spec_record_at(
+        &mut self,
+        time: f64,
+        offset: sdf::LayerOffset,
+    ) -> Result<Option<SpecSiteRecord>, QueryError> {
+        let site = self
+            .cache
+            .clip_spec_site_in_set(self.graph, self.diagnostics, self.set, &self.query, time)?;
+        Ok(site.map(|(layer, path)| SpecSiteRecord { layer, path, offset }))
     }
 }
 
