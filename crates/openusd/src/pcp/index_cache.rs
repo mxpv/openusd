@@ -34,11 +34,11 @@ use super::prim_index::{
     TargetMemoKey,
 };
 use super::prim_indexer::ExprVarDeps;
-use super::prim_resolve::InvalidTargetKind;
+use super::prim_resolve::{InvalidTargetKind, composes_over_weaker};
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::value_resolve::{
     self, ClipProbe, OpinionResolver, OpinionSite, Resolution, ResolveMode, ResolveNode, ResolveSourceKind,
-    SampleField, SelectedSite, Step, ValueState, Withheld,
+    ResolvedSite, SampleField, SelectedSite, Step, ValueState, Withheld,
 };
 use super::{
     CompositionDiagnostic, IncompleteClipManifest, LayerId, MapFunction, QueryError, StackIdentity, VariantFallbackMap,
@@ -633,6 +633,13 @@ struct InfoResolver<'a> {
     /// samples answer exactly as the value read does.
     interp: &'a dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     resolution: Resolution,
+    /// Whether the query asks what composed into the value. A proximal one
+    /// does not: it answers which source would answer.
+    chains: bool,
+    /// The site a winning `default` was found at, which the composing pass
+    /// after the walk starts from. `None` when another tier answered, or when
+    /// nothing composed into its value.
+    default_site: Option<SelectedSite>,
 }
 
 impl InfoResolver<'_> {
@@ -661,10 +668,17 @@ impl OpinionResolver for InfoResolver<'_> {
         Step::Stop
     }
 
-    fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
+    fn on_default(&mut self, value: &Value, site: &OpinionSite<'_>) -> Step {
         self.resolution.authored = true;
         self.select(ResolveSourceKind::Default, site, Some(site.spec_record(self.graph)));
         self.resolution.value = ValueState::Present;
+        // Contributors cost a second walk, so they are collected only where
+        // there are any to find and someone to read them: the kinds
+        // `PrimIndex::resolve_strongest` keeps reading past, asked for by a
+        // query about a value rather than about which source would answer.
+        if self.chains && composes_over_weaker(value) {
+            self.default_site = Some(site.select());
+        }
         Step::Stop
     }
 
@@ -1235,9 +1249,30 @@ impl IndexCache {
             },
             interp,
             resolution: Resolution::default(),
+            chains: !matches!(mode, ResolveMode::Proximal),
+            default_site: None,
         };
         self.resolve_property(graph, &prim, &suffix, mode, &mut resolver)?;
-        Ok(resolver.resolution)
+        let InfoResolver {
+            mut resolution,
+            default_site,
+            ..
+        } = resolver;
+        // A site is here only where the walk found a value that composes and
+        // the query asked what composed into it.
+        if let Some(site) = default_site {
+            let index = self.cached(&prim);
+            if let Some(composed) =
+                index.resolve_composed(FieldKey::Default.as_str(), graph, Some(&suffix), Some(&site))?
+            {
+                resolution.weaker = composed
+                    .weaker
+                    .into_iter()
+                    .map(|site| ResolvedSite::capture(graph, index.node(site.node), stage, site))
+                    .collect();
+            }
+        }
+        Ok(resolution)
     }
 
     /// Resolves an attribute's value at `time`, honoring value clips
@@ -6009,9 +6044,8 @@ def "Anchor" (inherits = </Rig>) {}
     }
 
     /// Builds a sublayer chain authoring `opinions[i]` (strongest first) as
-    /// `field` on `/World` of layer `i`, and resolves the field across the
-    /// stack.
-    fn resolve_stacked(field: &str, opinions: &[Value]) -> Result<Option<Value>> {
+    /// `field` on `/World` of layer `i`.
+    fn stacked_graph(field: &str, opinions: &[Value]) -> Result<(LayerGraph, Path)> {
         let world = sdf::path("/World")?;
         let mut layers = Vec::new();
         for (i, opinion) in opinions.iter().enumerate() {
@@ -6032,10 +6066,107 @@ def "Anchor" (inherits = </Rig>) {}
                 .expect("authored");
             layers.push(layer);
         }
+        Ok((LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default()), world))
+    }
 
-        let graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+    /// The field resolved across that stack.
+    fn resolve_stacked(field: &str, opinions: &[Value]) -> Result<Option<Value>> {
+        let (graph, world) = stacked_graph(field, opinions)?;
+        Ok(fresh_cache().resolve_field(&graph, &world, field)?)
+    }
+
+    /// The layers whose opinions composed into `field`, strongest first.
+    fn contributors_stacked(field: &str, opinions: &[Value]) -> Result<Vec<String>> {
+        let (graph, world) = stacked_graph(field, opinions)?;
         let mut cache = fresh_cache();
-        Ok(cache.resolve_field(&graph, &world, field)?)
+        cache.ensure_index(&graph, &world)?;
+        let composed = cache
+            .cached(&world)
+            .resolve_composed(field, &graph, None, None)?
+            .expect("an opinion");
+        Ok(composed
+            .weaker
+            .iter()
+            .map(|site| graph.identifier(site.layer).to_string())
+            .collect())
+    }
+
+    /// A dictionary names every weaker dictionary it merged, and neither the
+    /// opinion of another kind it skipped nor the block that ended the merge.
+    #[test]
+    fn dict_merge_records_contributors() -> Result<()> {
+        let dict = |key: &str| {
+            let mut d = sdf::Dictionary::new();
+            d.insert(key.to_string(), Value::Int(1));
+            Value::Dictionary(d)
+        };
+        assert_eq!(
+            contributors_stacked("meta", &[dict("a"), Value::Int(7), dict("c")])?,
+            ["layer2.usda"],
+            "the int between the dictionaries composed nothing"
+        );
+        assert_eq!(
+            contributors_stacked("meta", &[dict("a"), Value::ValueBlock, dict("c")])?,
+            [] as [&str; 0],
+            "the block ended the merge before anything weaker"
+        );
+        Ok(())
+    }
+
+    /// A path expression names each opinion its `%_` drew on — including one
+    /// authored as text, which composes as an expression — and stops naming
+    /// them once no weaker reference is left.
+    #[test]
+    fn path_expr_records_contributors() -> Result<()> {
+        let expr = |text: &str| Value::PathExpression(sdf::PathExpression::parse(text));
+        assert_eq!(
+            contributors_stacked("expr", &[expr("/a// %_"), expr("/b// %_"), expr("/c//"), expr("/d//")])?,
+            ["layer1.usda", "layer2.usda"],
+            "the opinion after the last `%_` is not a contributor"
+        );
+        assert_eq!(
+            contributors_stacked("expr", &[expr("/a// %_"), Value::String("/b//".to_string())])?,
+            ["layer1.usda"],
+            "a weaker string parses into the expression, so it contributed"
+        );
+        assert_eq!(
+            contributors_stacked("expr", &[expr("/a//"), expr("/b//")])?,
+            [] as [&str; 0],
+            "an expression with no weaker reference is won outright"
+        );
+        Ok(())
+    }
+
+    /// The predicate that decides whether contributors are worth collecting
+    /// and the composition that reports them are two statements of one rule,
+    /// so a kind added to either alone shows up here rather than as a chain
+    /// that is quietly empty.
+    #[test]
+    fn composing_kinds_agree() -> Result<()> {
+        let dict = || {
+            let mut d = sdf::Dictionary::new();
+            d.insert("a".to_string(), Value::Int(1));
+            Value::Dictionary(d)
+        };
+        let cases = [
+            dict(),
+            Value::PathExpression(sdf::PathExpression::parse("/a// %_")),
+            Value::PathExpression(sdf::PathExpression::parse("/a//")),
+            Value::PathExpressionVec(vec![sdf::PathExpression::parse("/a// %_")]),
+            Value::Int(7),
+            Value::String("/a//".to_string()),
+        ];
+        for strongest in cases {
+            // A weaker opinion of the same kind, so a kind that composes has
+            // something to report.
+            let reports = !contributors_stacked("f", &[strongest.clone(), strongest.clone()])?.is_empty();
+            assert_eq!(
+                composes_over_weaker(&strongest),
+                reports,
+                "{strongest:?} composes but reports no contributor, or the other way round"
+            );
+        }
+        Ok(())
     }
 
     /// A custom metadata field authored as a list op composes by folding its

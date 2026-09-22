@@ -16,7 +16,7 @@ use super::asset_resolve::{self, AssetSite};
 use super::clip;
 use super::diagnostics::Diagnostics;
 use super::mapping::MapFunction;
-use super::prim_graph::{ArcType, Node};
+use super::prim_graph::{ArcType, Node, NodeId};
 use super::prim_index::PrimIndex;
 use super::value_resolve::SelectedSite;
 use super::{LayerGraph, LayerId, QueryError};
@@ -29,6 +29,9 @@ use super::{LayerGraph, LayerId, QueryError};
 struct Opinion<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
     node: &'a Node,
+    /// That node's arena handle, which outlives the borrow and so is what a
+    /// composed value names its contributors by.
+    node_id: NodeId,
     /// Id of the contributing layer, as yielded by
     /// [`Node::layers`](super::prim_graph::Node::layers) and used with
     /// [`LayerGraph::layer`](super::LayerGraph::layer) — not a position within
@@ -46,6 +49,16 @@ struct Opinion<'a> {
 }
 
 impl Opinion<'_> {
+    /// This opinion as a contributor to a composed value.
+    fn site(&self) -> ComposedSite {
+        ComposedSite {
+            node: self.node_id,
+            layer: self.layer,
+            query_path: self.query_path.as_ref().clone(),
+            offset: self.offset,
+        }
+    }
+
     /// Maps this opinion's value into the stage's time frame through the
     /// contributing layer's offset
     /// ([`LayerOffset::apply_to_value`](sdf::LayerOffset::apply_to_value)). The
@@ -58,6 +71,57 @@ impl Opinion<'_> {
     }
 }
 
+/// A composed value, with the weaker sites that went into it.
+///
+/// Composition is what makes this more than a value: a dictionary merges
+/// weaker dictionaries and a path expression substitutes weaker expressions,
+/// so the answer can come from several sites at once and a caller asking where
+/// it came from needs all of them.
+pub(crate) struct Composed {
+    /// The composed value.
+    pub(crate) value: Value,
+    /// The sites weaker than the winning one that composed into it, strongest
+    /// first. Empty for a value won outright, which is every value kind but
+    /// the two that compose, and for a caller that did not ask for them.
+    pub(crate) weaker: Vec<ComposedSite>,
+}
+
+impl Composed {
+    /// A value no weaker opinion composed into.
+    fn won(value: Value) -> Self {
+        Self {
+            value,
+            weaker: Vec::new(),
+        }
+    }
+}
+
+/// Whether a value keeps reading past the opinion that holds it, composing
+/// weaker opinions in — the kinds [`PrimIndex::resolve_strongest`] reports
+/// contributors for.
+pub(crate) fn composes_over_weaker(value: &Value) -> bool {
+    match value {
+        Value::Dictionary(_) => true,
+        Value::PathExpression(expr) => expr.contains_weaker_reference(),
+        _ => false,
+    }
+}
+
+/// One weaker opinion that composed into a [`Composed`] value, held as the
+/// handles the owning index resolves while it still has the graph.
+pub(crate) struct ComposedSite {
+    /// The contributing node's arena handle, resolved through
+    /// [`PrimIndex::node`](super::PrimIndex::node) by whoever owns the index.
+    pub(crate) node: NodeId,
+    /// Id of the contributing layer (see [`Opinion::layer`]).
+    pub(crate) layer: LayerId,
+    /// The path the opinion was read from in that layer.
+    pub(crate) query_path: Path,
+    /// Effective time offset of the contributing layer (see
+    /// [`Opinion::offset`]).
+    pub(crate) offset: LayerOffset,
+}
+
 /// A live contributing spec site: a [`SpecSite`](super::prim_graph::SpecSite)
 /// whose node still contributes opinions (inert and culled nodes filtered
 /// out), paired with the path to query in the contributing layer. The shared
@@ -68,6 +132,8 @@ impl Opinion<'_> {
 struct ContributingSite<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
     node: &'a Node,
+    /// That node's arena handle (see [`Opinion::node_id`]).
+    node_id: NodeId,
     /// Id of the contributing layer (see [`Opinion::layer`]).
     layer: LayerId,
     /// Effective time offset of the contributing layer to the root namespace,
@@ -482,6 +548,7 @@ impl PrimIndex {
         self.live_spec_sites().map(move |(site, node)| {
             Ok(ContributingSite {
                 node,
+                node_id: site.node,
                 layer: site.layer,
                 offset: site.offset,
                 query_path: Self::query_path(node, prop_suffix),
@@ -529,6 +596,7 @@ impl PrimIndex {
             match stack.layer(site.layer).data().try_field(&site.query_path, field) {
                 Ok(Some(value)) => Some(Ok(Opinion {
                     node: site.node,
+                    node_id: site.node_id,
                     layer: site.layer,
                     query_path: site.query_path,
                     value,
@@ -591,6 +659,37 @@ impl PrimIndex {
         prop_suffix: Option<&str>,
         start: Option<&SelectedSite>,
     ) -> Result<Option<Value>, QueryError> {
+        Ok(self
+            .compose(field, stack, prop_suffix, start, false)?
+            .map(|composed| composed.value))
+    }
+
+    /// [`resolve_strongest`](Self::resolve_strongest) reporting the weaker
+    /// sites that composed into the value as well as the value.
+    ///
+    /// Only the kinds that keep reading past the strongest opinion report any:
+    /// a value won outright has no contributor to name.
+    pub(crate) fn resolve_composed(
+        &self,
+        field: &str,
+        stack: &LayerGraph,
+        prop_suffix: Option<&str>,
+        start: Option<&SelectedSite>,
+    ) -> Result<Option<Composed>, QueryError> {
+        self.compose(field, stack, prop_suffix, start, true)
+    }
+
+    /// The shared body: `contributors` says whether the weaker sites a
+    /// composing kind consumes are collected, which only a caller that asks
+    /// for them pays for.
+    fn compose(
+        &self,
+        field: &str,
+        stack: &LayerGraph,
+        prop_suffix: Option<&str>,
+        start: Option<&SelectedSite>,
+        contributors: bool,
+    ) -> Result<Option<Composed>, QueryError> {
         let mut opinions = self.opinions(field, stack, prop_suffix);
         // With a `start`, composition begins at the site the shared
         // value-resolution walk selected instead of searching for the strongest
@@ -617,43 +716,57 @@ impl PrimIndex {
         match first.value.into_owned() {
             Value::ValueBlock => Ok(None),
             Value::Dictionary(mut merged) => {
+                let mut weaker_sites = Vec::new();
                 for opinion in opinions {
-                    match opinion?.value.into_owned() {
+                    let opinion = opinion?;
+                    let site = contributors.then(|| opinion.site());
+                    match opinion.value.into_owned() {
                         Value::ValueBlock => break,
-                        Value::Dictionary(weaker) => sdf::dictionary_over(&mut merged, weaker),
+                        Value::Dictionary(weaker) => {
+                            sdf::dictionary_over(&mut merged, weaker);
+                            weaker_sites.extend(site);
+                        }
+                        // An opinion of another kind neither merges nor ends the
+                        // merge, so it contributed nothing to name.
                         _ => {}
                     }
                 }
-                Ok(Some(Value::Dictionary(merged)))
+                Ok(Some(Composed {
+                    value: Value::Dictionary(merged),
+                    weaker: weaker_sites,
+                }))
             }
             Value::PathExpression(expr) => {
                 let mut composed =
                     Self::map_expression_to_root(expr, &first.query_path.prim_path(), &first.node.map_to_root);
+                let mut weaker_sites = Vec::new();
                 for opinion in opinions {
                     if !composed.contains_weaker_reference() {
                         break;
                     }
                     let opinion = opinion?;
                     // String and token opinions parse leniently, matching the
-                    // schema-less reads collection queries accept.
-                    let weaker = match opinion.value.into_owned() {
+                    // schema-less reads collection queries accept — they compose
+                    // as expressions and so are contributors like any other.
+                    let weaker = match opinion.value.as_ref() {
                         Value::ValueBlock => break,
-                        Value::PathExpression(weaker) => weaker,
-                        Value::String(text) => sdf::PathExpression::parse(&text),
+                        Value::PathExpression(weaker) => weaker.clone(),
+                        Value::String(text) => sdf::PathExpression::parse(text),
                         Value::Token(text) => sdf::PathExpression::parse(text.as_str()),
                         _ => continue,
                     };
-                    let weaker = Self::map_expression_to_root(
-                        weaker,
-                        &opinion.query_path.prim_path(),
-                        &opinion.node.map_to_root,
-                    );
+                    let anchor = opinion.query_path.prim_path();
+                    let weaker = Self::map_expression_to_root(weaker, &anchor, &opinion.node.map_to_root);
                     composed = composed.compose_over(&weaker);
+                    weaker_sites.extend(contributors.then(|| opinion.site()));
                 }
                 // A weaker reference that outlived the stack has no opinion
                 // left to name: it resolves to the empty expression.
                 composed = composed.compose_over(&sdf::PathExpression::nothing());
-                Ok(Some(Value::PathExpression(composed)))
+                Ok(Some(Composed {
+                    value: Value::PathExpression(composed),
+                    weaker: weaker_sites,
+                }))
             }
             Value::PathExpressionVec(exprs) => {
                 // Array elements translate across arcs like the scalar form;
@@ -667,9 +780,9 @@ impl PrimIndex {
                             .compose_over(&sdf::PathExpression::nothing())
                     })
                     .collect();
-                Ok(Some(Value::PathExpressionVec(composed)))
+                Ok(Some(Composed::won(Value::PathExpressionVec(composed))))
             }
-            other => Ok(Some(other)),
+            other => Ok(Some(Composed::won(other))),
         }
     }
 
@@ -846,6 +959,7 @@ impl PrimIndex {
                 query_path,
                 value,
                 offset,
+                ..
             } = opinion?;
             let node_stack = node.layer_stack_id();
             match value.into_owned() {

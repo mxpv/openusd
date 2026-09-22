@@ -36,6 +36,7 @@ pub struct ResolveInfo {
     pub(super) source: ResolveInfoSource,
     pub(super) node: Option<pcp::ResolveNode>,
     pub(super) spec: Option<SpecSite>,
+    pub(super) weaker: Vec<ResolveInfo>,
     pub(super) value_is_blocked: bool,
     /// Whether any layer authored a value opinion, including one that withholds
     /// a value. Wider than both `source` and `value_is_blocked`: a blocked
@@ -72,9 +73,12 @@ impl ResolveInfo {
     /// it (C++ splits these across `GetLayer`, `GetPrimPathInLayerStack` and
     /// `GetLayerToStageOffset`).
     ///
-    /// This is the site
+    /// For the source that answered, this is the site
     /// [`Attribute::property_stack`](super::Attribute::property_stack) lists
-    /// for that source, so the two queries agree about where an opinion lives.
+    /// for it. A site in [`weaker_sources`](Self::weaker_sources) is the spec
+    /// its opinion was authored in, which the stack can leave out: the stack
+    /// admits a spec only where its kind agrees with the property's, and value
+    /// resolution asks no such question of an opinion it composes.
     ///
     /// For a value clip the site is the layer the stack names at that time,
     /// which is not always the layer the value was read from: a gap filled
@@ -82,6 +86,23 @@ impl ResolveInfo {
     /// samples came from the clips around it.
     pub fn spec_site(&self) -> Option<&SpecSite> {
         self.spec.as_ref()
+    }
+
+    /// The weaker sources that composed into the resolved value, strongest
+    /// first (C++ walks the same chain through `GetNextWeakerInfo`).
+    ///
+    /// Empty unless the value composes across opinions rather than being won
+    /// outright: a `default` holding a path expression whose `%_` draws on
+    /// weaker opinions, or a dictionary merged over weaker dictionaries. A
+    /// dense value, a `timeSamples` source and a value clip each answer alone.
+    ///
+    /// A proximal [`resolve_info`](super::Attribute::resolve_info) reports
+    /// none: it answers which source would answer, not what went into a value.
+    ///
+    /// Each is a `default` a layer authored, so it names its own node and
+    /// spec and chains no further.
+    pub fn weaker_sources(&self) -> &[ResolveInfo] {
+        &self.weaker
     }
 
     /// Whether an opinion blocked the value
@@ -119,10 +140,11 @@ impl ResolveInfo {
     /// which has the attribute's own sample count to consult: a `timeSamples`
     /// source reports `true` even holding a single sample.
     ///
-    /// A `default` source reports `false`. That holds because a `default` here
-    /// never composes over a weaker time-varying source; were cross-source
-    /// composition added, this would have to recurse through the weaker sources
-    /// the way C++ does.
+    /// A `default` source reports `false` even where it composed over weaker
+    /// opinions ([`weaker_sources`](Self::weaker_sources)): what it composes
+    /// over is weaker `default`s, which do not vary over time either. C++
+    /// recurses through its chain here because a link of its own can be a clip
+    /// or a time sample.
     pub fn value_source_might_be_time_varying(&self) -> bool {
         matches!(
             self.source,

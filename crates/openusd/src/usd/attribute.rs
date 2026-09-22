@@ -833,14 +833,28 @@ impl Attribute {
         };
         // A schema fallback and an absent value come from no composition node
         // and no spec, even when a block at one is what sent resolution there.
-        let (node, spec) = match source {
-            ResolveInfoSource::Fallback | ResolveInfoSource::None => (None, None),
-            _ => (resolved.node, resolved.spec),
+        let (node, spec, weaker) = match source {
+            ResolveInfoSource::Fallback | ResolveInfoSource::None => (None, None, Vec::new()),
+            _ => (resolved.node, resolved.spec, resolved.weaker),
         };
+        // Every contributor answered from a `default` it authored, so each
+        // link is that much of a resolve info and chains no further.
+        let weaker = weaker
+            .into_iter()
+            .map(|site| ResolveInfo {
+                source: ResolveInfoSource::Default,
+                node: Some(site.node),
+                spec: Some(site.spec),
+                weaker: Vec::new(),
+                value_is_blocked: false,
+                has_authored_opinion: true,
+            })
+            .collect();
         Ok(ResolveInfo {
             source,
             node,
             spec,
+            weaker,
             value_is_blocked: resolved.value == pcp::ValueState::Blocked,
             has_authored_opinion: resolved.authored,
         })

@@ -20,6 +20,7 @@ use super::diagnostics::Diagnostics;
 use super::index_cache::SpecSiteRecord;
 use super::layer_graph::StackIdentity;
 use super::prim_graph::{ArcType, Node};
+use super::prim_resolve;
 use super::{LayerGraph, LayerId, LayerStackId, LayerStackIdentifier, MapFunction};
 
 /// Which value-resolution walk to run — the Rust form of C++
@@ -165,6 +166,37 @@ pub(crate) struct Resolution {
     /// Accumulated as the walk goes, so an opinion it declined to resolve from
     /// still counts.
     pub(crate) authored: bool,
+    /// The weaker sites that composed into the answering source's value,
+    /// strongest first. Empty unless the value composes across opinions.
+    pub(crate) weaker: Vec<ResolvedSite>,
+}
+
+/// A site a composed value drew an opinion from, captured by value the way
+/// [`ResolveNode`] is: the node a contributing `default` came from, and the
+/// spec it was authored in.
+///
+/// `usd` gives each one the public shape C++ gives a link — a whole resolve
+/// info — which this carries the two facts of that `pcp` can name.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ResolvedSite {
+    pub(crate) node: ResolveNode,
+    pub(crate) spec: SpecSiteRecord,
+}
+
+impl ResolvedSite {
+    /// Captures a contributor the composed read reported, resolving its arena
+    /// handles against the graph that produced them.
+    pub(crate) fn capture(
+        graph: &LayerGraph,
+        node: &Node,
+        stage: &LayerStackIdentifier,
+        site: prim_resolve::ComposedSite,
+    ) -> Self {
+        Self {
+            node: ResolveNode::capture(graph, node, stage),
+            spec: SpecSiteRecord::in_graph(graph, site.layer, site.query_path, site.offset),
+        }
+    }
 }
 
 /// Which kind of source answered the walk — the authored tiers only. The schema

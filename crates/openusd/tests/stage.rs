@@ -6115,6 +6115,8 @@ fn clip_names_its_layer() -> Result<()> {
 
     // Without a time no clip is selected, so there is no layer to name.
     assert!(attr.resolve_info()?.spec_site().is_none());
+    // A clip value is read whole rather than composed, so it answers alone.
+    assert!(info.weaker_sources().is_empty());
     Ok(())
 }
 
@@ -6138,6 +6140,213 @@ fn clip_interpolated_gap_site() -> Result<()> {
         "the stack names the manifest, not the clips the samples came from: {site:?}"
     );
     assert!(attr.property_stack_at(at)?.contains(site), "the stack lists it too");
+    Ok(())
+}
+
+/// Authors `opinions[i]` as `/A.expr` on sublayer `i` of a fresh stage,
+/// strongest first, and opens it. Each opinion is its declared type and its
+/// literal, so a text-valued opinion and a block author through it too.
+fn expression_stack(dir: &FsPath, opinions: &[(&str, &str)]) -> Result<Stage> {
+    for (i, (kind, literal)) in opinions.iter().enumerate() {
+        let body = format!("def \"A\"\n{{\n    uniform {kind} expr = {literal}\n}}\n");
+        let text = match i + 1 < opinions.len() {
+            true => format!("#usda 1.0\n(\n    subLayers = [@./layer{}.usda@]\n)\n{body}", i + 1),
+            false => format!("#usda 1.0\n{body}"),
+        };
+        fs::write(dir.join(format!("layer{i}.usda")), text)?;
+    }
+    Stage::open(dir.join("layer0.usda").to_str().expect("utf-8 path"))
+}
+
+/// A path expression composed from weaker opinions names every one it drew
+/// on, strongest first, each with the node and spec it came from.
+#[test]
+fn chain_names_contributors() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = expression_stack(
+        dir.path(),
+        &[("pathExpression", "\"/a// %_\""), ("pathExpression", "\"/b//\"")],
+    )?;
+    let attr = stage.attribute("/A.expr")?;
+
+    assert_eq!(
+        attr.get::<sdf::PathExpression>()?,
+        Some(sdf::PathExpression::parse("/a// /b//"))
+    );
+    let info = attr.resolve_info_at(None)?;
+    let links = info.weaker_sources();
+    assert_eq!(links.len(), 1);
+    let site = links[0].spec_site().expect("a link names its spec");
+    assert!(site.layer.ends_with("layer1.usda"), "{site:?}");
+    // A link names its node as the head does, and here both are the root.
+    assert_eq!(
+        links[0].node().expect("a link names its node").arc(),
+        pcp::ArcType::Root
+    );
+    Ok(())
+}
+
+/// The chain stops where composition does: the opinion after the one that
+/// consumed the last `%_` never contributed and is not named.
+#[test]
+fn chain_stops_unreferenced() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = expression_stack(
+        dir.path(),
+        &[
+            ("pathExpression", "\"/a// %_\""),
+            ("pathExpression", "\"/b// %_\""),
+            ("pathExpression", "\"/c//\""),
+            ("pathExpression", "\"/d//\""),
+        ],
+    )?;
+    let attr = stage.attribute("/A.expr")?;
+
+    // Compared as text: composing left-to-right nests the tree differently
+    // from parsing the same expression in one go.
+    assert_eq!(
+        attr.get::<sdf::PathExpression>()?.map(|expr| expr.to_string()),
+        Some("/a// (/b// /c//)".to_string())
+    );
+    let info = attr.resolve_info_at(None)?;
+    let layers = stack_layers(
+        info.weaker_sources()
+            .iter()
+            .map(|link| link.spec_site().expect("a link names its spec").clone())
+            .collect(),
+    );
+    assert_eq!(layers.len(), 2, "the opinion after the last `%_` is not a contributor");
+    assert!(layers[0].ends_with("layer1.usda"), "{layers:?}");
+    assert!(layers[1].ends_with("layer2.usda"), "{layers:?}");
+    Ok(())
+}
+
+/// A weaker opinion authored as text composes as an expression, so it is a
+/// contributor; one of a kind that composes nothing is skipped without ending
+/// the chain.
+#[test]
+fn chain_parses_text() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = expression_stack(
+        dir.path(),
+        &[
+            ("pathExpression", "\"/a// %_\""),
+            ("token", "\"/b//\""),
+            ("pathExpression", "\"/c//\""),
+        ],
+    )?;
+    let attr = stage.attribute("/A.expr")?;
+
+    // The token parses into the `%_`, so it is what the value composed over.
+    assert_eq!(
+        attr.get::<sdf::PathExpression>()?,
+        Some(sdf::PathExpression::parse("/a// /b//"))
+    );
+    let info = attr.resolve_info_at(None)?;
+    assert_eq!(info.weaker_sources().len(), 1);
+    assert!(
+        info.weaker_sources()[0]
+            .spec_site()
+            .expect("a link names its spec")
+            .layer
+            .ends_with("layer1.usda"),
+        "the text opinion is the contributor"
+    );
+    Ok(())
+}
+
+/// A block ends the chain: it composes nothing itself, and nothing weaker is
+/// reached.
+#[test]
+fn chain_ends_at_block() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = expression_stack(
+        dir.path(),
+        &[
+            ("pathExpression", "\"/a// %_\""),
+            ("pathExpression", "None"),
+            ("pathExpression", "\"/c//\""),
+        ],
+    )?;
+    let attr = stage.attribute("/A.expr")?;
+
+    assert_eq!(
+        attr.get::<sdf::PathExpression>()?,
+        Some(sdf::PathExpression::parse("/a//")),
+        "the surviving `%_` resolves to nothing"
+    );
+    assert!(attr.resolve_info_at(None)?.weaker_sources().is_empty());
+    Ok(())
+}
+
+/// The chain follows the tier that answered rather than the time asked for: a
+/// numeric-time query over a composing `default` chains, while a proximal one
+/// — which answers which source would answer, not what went into a value —
+/// reports none.
+#[test]
+fn chain_follows_tier() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = expression_stack(
+        dir.path(),
+        &[("pathExpression", "\"/a// %_\""), ("pathExpression", "\"/b//\"")],
+    )?;
+    let attr = stage.attribute("/A.expr")?;
+
+    let info = attr.resolve_info_at(usd::TimeCode::new(5.0))?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::Default);
+    assert_eq!(info.weaker_sources().len(), 1);
+    assert!(attr.resolve_info()?.weaker_sources().is_empty());
+    Ok(())
+}
+
+/// The head and its links are specs the property stack lists, in the same
+/// relative order. The stack lists more — sites with no `default`, and the
+/// opinions composition skipped — so this is containment, not equality.
+#[test]
+fn chain_matches_property_stack() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = expression_stack(
+        dir.path(),
+        &[
+            ("pathExpression", "\"/a// %_\""),
+            ("pathExpression", "\"/b// %_\""),
+            ("pathExpression", "\"/c//\""),
+        ],
+    )?;
+    let attr = stage.attribute("/A.expr")?;
+    let info = attr.resolve_info_at(None)?;
+
+    let stack = attr.property_stack()?;
+    let mut composed = vec![info.spec_site().expect("the head names its spec").clone()];
+    composed.extend(
+        info.weaker_sources()
+            .iter()
+            .map(|link| link.spec_site().expect("a link names its spec").clone()),
+    );
+
+    let positions: Vec<usize> = composed
+        .iter()
+        .map(|site| {
+            stack
+                .iter()
+                .position(|listed| listed == site)
+                .expect("listed in the stack")
+        })
+        .collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{positions:?}");
+    Ok(())
+}
+
+/// Samples are read whole rather than composed, so that tier answers alone.
+#[test]
+fn samples_have_no_chain() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let samples = stage.define_prim("/S")?.create_attribute("x", "double")?;
+    samples.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?;
+
+    let info = stage.attribute("/S.x")?.resolve_info_at(usd::TimeCode::new(0.0))?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::TimeSamples);
+    assert!(info.weaker_sources().is_empty());
     Ok(())
 }
 
