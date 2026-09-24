@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
@@ -360,6 +361,33 @@ impl Value {
     /// than by recursion — see `PrimIndex::resolve_clip_sets`.
     pub fn is_asset_valued(&self) -> bool {
         matches!(self, Value::AssetPath(_) | Value::AssetPathVec(_))
+    }
+
+    /// This value read as a path expression, or `None` for a kind that is not
+    /// one. Borrowed where the value already is one, parsed where it spells
+    /// one.
+    ///
+    /// A `string` or `token` parses leniently into the expression it spells,
+    /// which is what lets a collection be read from a layer no schema declared
+    /// the property in — and what value resolution composes such an opinion
+    /// as. The single source of truth for that reading, so a read and a
+    /// composition cannot disagree about which opinions are expressions.
+    pub fn as_path_expression(&self) -> Option<Cow<'_, PathExpression>> {
+        match self {
+            Value::PathExpression(expr) => Some(Cow::Borrowed(expr)),
+            Value::String(text) => Some(Cow::Owned(PathExpression::parse(text))),
+            Value::Token(text) => Some(Cow::Owned(PathExpression::parse(text.as_str()))),
+            _ => None,
+        }
+    }
+
+    /// [`as_path_expression`](Self::as_path_expression) taking ownership, which
+    /// the expression a value already holds is handed over for.
+    pub fn into_path_expression(self) -> Option<PathExpression> {
+        match self {
+            Value::PathExpression(expr) => Some(expr),
+            other => other.as_path_expression().map(Cow::into_owned),
+        }
     }
 
     /// Whether this value holds a time coordinate that

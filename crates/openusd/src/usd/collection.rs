@@ -76,12 +76,7 @@ impl CollectionAPI {
     /// already substituted `%_` chains and mapped the expression across arcs;
     /// a string- or token-typed opinion parses leniently.
     pub fn membership_expression(&self) -> Result<Option<sdf::PathExpression>> {
-        Ok(match composed(&self.membership_expression_attr())? {
-            Some(Value::PathExpression(expr)) => Some(expr),
-            Some(Value::String(s)) => Some(sdf::PathExpression::parse(&s)),
-            Some(Value::Token(s)) => Some(sdf::PathExpression::parse(s.as_str())),
-            _ => None,
-        })
+        Ok(composed(&self.membership_expression_attr())?.and_then(Value::into_path_expression))
     }
 
     /// The membership language governing this collection — defaults to
