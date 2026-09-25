@@ -10,6 +10,7 @@
 //! child-name list (`compute_prim_child_names`), renaming or hiding relocated
 //! sources and exposing targets in place.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
 
@@ -34,7 +35,9 @@ use super::prim_index::{
     TargetMemoKey,
 };
 use super::prim_indexer::ExprVarDeps;
-use super::prim_resolve::{InvalidTargetKind, composes_over_weaker};
+use super::prim_resolve::{
+    self, Composed, Composing, Folded, InvalidTargetKind, Series, Supplied, composes_over_weaker, composition_rewrites,
+};
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::value_resolve::{
     self, ClipProbe, OpinionResolver, OpinionSite, Resolution, ResolveMode, ResolveNode, ResolveSourceKind,
@@ -199,11 +202,11 @@ pub(crate) enum AttributeValueSource {
         offset: LayerOffset,
         site: AssetSite,
     },
-    /// Value clips are authoritative for this attribute (spec 12.3.4). Clip
-    /// resolution selects a different clip layer per time, so a cached view
-    /// falls back to [`IndexCache::value_at`] for every query rather than
-    /// snapshotting a single source.
-    Clips,
+    /// The value is resolved per time code through [`IndexCache::value_at`]
+    /// rather than snapshotted: value clips select a different clip layer per
+    /// time (spec 12.3.4), and a composing value can draw on a source that
+    /// does, so neither can be replayed from one answer.
+    PerTime,
 }
 
 impl Default for AttributeValueSource {
@@ -373,8 +376,11 @@ impl<'a> ClipTier<'a> {
                     };
                     resolver.on_clips(&mut probe, site)
                 };
-                if step?.stop() {
-                    return Ok(Step::Stop);
+                // A set that answered has spoken for this site, so no other
+                // set introduced here is consulted for the same value.
+                let step = step?;
+                if step.leaves_site() {
+                    return Ok(step);
                 }
             }
         }
@@ -411,77 +417,107 @@ impl<'a> ClipTier<'a> {
     }
 }
 
-/// Which source answered the shared walk. The tier that won is decided by the
-/// walk; extracting a `default`'s value is left to composed field resolution,
-/// which merges dictionaries and path expressions across weaker opinions.
-enum Winner {
-    /// Nothing authored survived.
-    None,
-    /// A `timeSamples` map won, already interpolated into stage time.
-    Samples {
-        value: Option<Value>,
-        site: Option<AssetSite>,
-    },
-    /// A `default` won at this site; its composed value is read separately,
-    /// starting there.
-    Default { site: SelectedSite },
-    /// A value-clip set owns the property.
-    Clips { value: Option<Value> },
+/// Folds a source's value into a composition a walk is reading the *shape* of,
+/// and reports what it did to it.
+///
+/// The value is owned only where the answer depends on keeping it: a value
+/// nothing weaker can change closes the composition, and a walk that asks only
+/// how far to read never copies one — which is every source of an ordinary
+/// dense value. A walk that wants the composed value itself folds it in
+/// through [`Composing::fold`] instead.
+fn probe_source(composing: &mut Composing, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Folded {
+    if composing.is_empty() && !composes_over_weaker(&value) {
+        return Folded::Closed;
+    }
+    composing.fold(value.into_owned(), &site.query_path, &site.node.map_to_root)
 }
 
-/// Resolves an attribute's value at one time (the resolver behind
+/// Resolves an attribute's value (the resolver behind
 /// [`IndexCache::value_at`]).
+///
+/// Each tier it reaches folds into one [`Composing`] value, so a source whose
+/// value can still take a weaker opinion does not end the walk: a path
+/// expression's `%_` draws on whatever answers next, be that a weaker layer's
+/// `default`, its samples, or a value clip. C++ composes the same way, walking
+/// the chain of resolve infos it built in one pass.
 struct ValueAtResolver<'a> {
-    graph: &'a LayerGraph,
-    time: f64,
+    /// The stage time to resolve at, or `None` for the default time — which
+    /// reaches neither of the time-varying tiers, since the walk skips them.
+    time: Option<f64>,
     interp: &'a dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    winner: Winner,
+    composing: Composing,
+    /// The site the strongest source came from, which anchors an `asset` in the
+    /// composed value. `None` where it holds no asset path, and where a value
+    /// clip answered first, since the clip tier anchors its own values.
+    anchor: Option<SelectedSite>,
+}
+
+impl ValueAtResolver<'_> {
+    /// Folds a source's value in and reports how far the walk goes on.
+    ///
+    /// `anchors` says whether the site can resolve an `asset` in the value.
+    /// Only the strongest source is asked: a weaker one composes into a value
+    /// whose provenance is already settled.
+    fn fold(&mut self, value: Value, site: &OpinionSite<'_>, anchors: bool) -> Step {
+        if self.composing.is_empty() {
+            // Building the site copies two strings, so only a value that turns
+            // out to hold asset paths asks for one.
+            self.anchor = (anchors && value.is_asset_valued()).then(|| site.select());
+        }
+        self.composing
+            .fold(value, &site.query_path, &site.node.map_to_root)
+            .step()
+    }
 }
 
 impl OpinionResolver for ValueAtResolver<'_> {
     fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
-        let value = site.offset.sample_in_stage_time(samples, self.time, self.interp);
-        // Only an asset-valued result needs provenance, and building it copies
-        // two strings, so an ordinary read never asks for one.
-        let asset_site = value
-            .as_ref()
-            .is_some_and(Value::is_asset_valued)
-            .then(|| site.asset_site(self.graph));
-        self.winner = Winner::Samples {
-            value,
-            site: asset_site,
+        let Some(time) = self.time else {
+            return Step::Continue;
         };
-        Step::Stop
+        let Some(value) = site.offset.sample_in_stage_time(samples, time, self.interp) else {
+            // The map answers the walk by being here, but supplies no value at
+            // this time, so nothing weaker is read either.
+            return Step::Stop;
+        };
+        self.fold(value, site, true)
     }
 
-    fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
-        self.winner = Winner::Default { site: site.select() };
-        Step::Stop
+    fn on_default(&mut self, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
+        let mut value = value.into_owned();
+        // The opinion is authored in the layer's own time frame, so a time code
+        // in it reaches the stage through that layer's offset (spec 12.3.2.1).
+        site.offset.apply_to_value(&mut value);
+        self.fold(value, site, true)
     }
 
-    fn on_withheld(&mut self, kind: Withheld, site: &OpinionSite<'_>) -> Step {
-        if !matches!(kind, Withheld::DefaultBlock) {
+    fn on_withheld(&mut self, kind: Withheld, _site: &OpinionSite<'_>) -> Step {
+        match kind {
             // Only samples were withheld: resolution carries on to this site's
             // own `default` and then to weaker sources.
-            return Step::Continue;
+            Withheld::TimeSamplesFieldBlock => Step::Continue,
+            // A blocked `default` withholds the value from everything weaker,
+            // leaving whatever stronger sources composed so far.
+            Withheld::DefaultBlock => Step::Stop,
         }
-        // The block is a `default` opinion like any other, and composing from it
-        // is what turns it back into "no value".
-        self.winner = Winner::Default { site: site.select() };
-        Step::Stop
     }
 
-    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
-        let answer = probe.answer_at(self.time, self.interp)?;
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        let Some(time) = self.time else {
+            return Ok(Step::Continue);
+        };
+        let answer = probe.answer_at(time, self.interp)?;
         if matches!(answer.value_state(), ValueState::Absent) {
             return Ok(Step::Continue);
         }
         // A set that owns the property answers even where it supplies no value,
         // so nothing weaker contributes.
-        self.winner = Winner::Clips {
-            value: answer.into_value(),
+        let Some(value) = answer.into_value() else {
+            return Ok(Step::Stop);
         };
-        Ok(Step::Stop)
+        // The clip tier resolves the assets in what it hands back, so the
+        // composed value needs no anchor of its own from here.
+        Ok(self.fold(value, site, false))
     }
 }
 
@@ -490,10 +526,23 @@ impl OpinionResolver for ValueAtResolver<'_> {
 struct SourceResolver<'a> {
     graph: &'a LayerGraph,
     source: Option<AttributeValueSource>,
-    /// The site a winning `default` was found at, whose composed value the
+    /// The site the strongest `default` was found at, whose composed value the
     /// cached source holds. `None` when samples or clips won, or when nothing
     /// was authored.
     default_site: Option<SelectedSite>,
+    /// What the `default` opinions found so far compose to, which decides
+    /// whether the walk reads on — an opinion the composition ignores does not
+    /// end it, and the sources it goes on to draw on decide the answer.
+    composing: Composing,
+}
+
+impl SourceResolver<'_> {
+    /// Records the site a `default` answered at, which is the strongest one:
+    /// a weaker source is reached only because that value composes, and the
+    /// composition is read from where it began.
+    fn select(&mut self, site: &OpinionSite<'_>) {
+        self.default_site.get_or_insert_with(|| site.select());
+    }
 }
 
 impl OpinionResolver for SourceResolver<'_> {
@@ -504,6 +553,16 @@ impl OpinionResolver for SourceResolver<'_> {
     /// instead and resolving them when a replayed value first needs them would
     /// pay the copies only where they are read.
     fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        // A map is replayed from one snapshot only where the samples are what
+        // resolution reports: a value composition rewrites — one that draws on
+        // weaker sources, or whose paths reach the stage through this node — is
+        // resolved per time instead, as is anything a stronger composing value
+        // draws on. Scanning the map costs what cloning it does, which this is
+        // about to pay anyway.
+        if !self.composing.is_empty() || samples.iter().any(|(_, value)| composition_rewrites(value)) {
+            self.source = Some(AttributeValueSource::PerTime);
+            return Step::Stop;
+        }
         self.source = Some(AttributeValueSource::TimeSamples {
             samples: samples.clone(),
             offset: site.offset,
@@ -512,17 +571,21 @@ impl OpinionResolver for SourceResolver<'_> {
         Step::Stop
     }
 
-    /// A `default` answers through composed field resolution, so only the site
-    /// it won at is recorded; the value is composed from there below.
-    fn on_default(&mut self, _value: &Value, site: &OpinionSite<'_>) -> Step {
-        self.default_site = Some(site.select());
-        Step::Stop
+    /// A `default` answers with the value composed from the site it won at, so
+    /// only that site is recorded and the value is read from it below.
+    ///
+    /// A composing one reads on: what it draws on decides whether the composed
+    /// value can be snapshotted at all, and only a weaker source that varies
+    /// with time rules that out.
+    fn on_default(&mut self, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
+        self.select(site);
+        probe_source(&mut self.composing, value, site).step()
     }
 
     fn on_withheld(&mut self, kind: Withheld, site: &OpinionSite<'_>) -> Step {
         match matches!(kind, Withheld::DefaultBlock) {
             true => {
-                self.default_site = Some(site.select());
+                self.select(site);
                 Step::Stop
             }
             false => Step::Continue,
@@ -531,10 +594,11 @@ impl OpinionResolver for SourceResolver<'_> {
 
     fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
         // Participation alone decides: clip values are time-dependent, so the
-        // query replays them through `value_at` per time code.
+        // query replays them through `value_at` per time code — whether the set
+        // answers or a stronger composing `default` draws on it.
         match probe.introspection()? {
             Some(_) => {
-                self.source = Some(AttributeValueSource::Clips);
+                self.source = Some(AttributeValueSource::PerTime);
                 Ok(Step::Stop)
             }
             None => Ok(Step::Continue),
@@ -545,23 +609,35 @@ impl OpinionResolver for SourceResolver<'_> {
 /// Resolves an attribute's composed sample times and whether its winning source
 /// can vary over time (the resolver behind [`IndexCache::time_sample_times`] and
 /// [`IndexCache::time_sample_summary`]).
+///
+/// A composed value is a function of time, so this asks its question of one: a
+/// source can block at one time, compose at another and be passed over at a
+/// third, and only a per-time series says which. Every source folds into
+/// [`SampleSeries`], and the times it answers with are that series'.
 struct SampleTimesResolver {
-    /// `None` until a source answers; the empty vector is a real answer for a
-    /// participating clip set with no discrete times.
-    times: Option<Vec<f64>>,
+    /// What the sources so far compose to over time. Its finite times are the
+    /// answer, and whether any of them is still open decides how far the walk
+    /// reads.
+    series: Series<Composed>,
+    /// Whether a source has answered, which the empty series cannot say: a
+    /// participating clip set with no discrete times contributes no entry.
+    answered: bool,
     /// The winning source's sample map, retimed into stage time. Only filled
-    /// for [`Want::Map`], and only when a `timeSamples` opinion won: a clip set
-    /// answers with a schedule rather than a map (see
+    /// for [`Want::Map`], and only when a `timeSamples` opinion won on its own:
+    /// a clip set answers with a schedule rather than a map, and a composed
+    /// value is held by no authored map at all (see
     /// [`IndexCache::time_samples`]).
     map: Option<sdf::TimeSampleMap>,
     /// Whether the winning source is a clip set whose schedule alone can vary
     /// the value.
     clip_may_vary: bool,
-    /// How many samples the winning source holds, which the count-only
-    /// consumers read instead of `times`.
-    count: usize,
+    /// The sample count, where it is read without the times themselves.
+    count: Option<usize>,
     /// How much of the winning source the caller reads.
     want: Want,
+    /// Whether the walk follows a composing value to the sources it draws on.
+    /// A map query does not: those samples belong to no one authored map.
+    chains: bool,
 }
 
 /// How much of the winning `timeSamples` source a sample query needs, so the
@@ -577,31 +653,69 @@ enum Want {
     Map,
 }
 
+impl SampleTimesResolver {
+    /// The times the composed value can change at, ascending.
+    fn times(&self) -> Vec<f64> {
+        self.series.times().collect()
+    }
+
+    /// How many times it can change at.
+    fn count(&self) -> usize {
+        self.count.unwrap_or_else(|| self.series.times().count())
+    }
+
+    /// Folds a source's series in and reports how far the walk reads on.
+    fn fold(&mut self, source: Series<Supplied>) -> Step {
+        self.series.fold(&source);
+        match self.chains && self.series.is_open() {
+            true => Step::NextSite,
+            false => Step::Stop,
+        }
+    }
+}
+
 impl OpinionResolver for SampleTimesResolver {
     fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
         // A map supplying no value is not a value source, so it contributes no
         // times — the same judgement the value read and the resolve info make of
         // it. It still answers, blocking weaker sources.
         if !value_resolve::samples_supply_any_value(samples) {
-            self.times = Some(Vec::new());
+            self.answered = true;
             return Step::Stop;
         }
-        self.times = Some(match self.want {
-            Want::Count => Vec::new(),
-            Want::Times | Want::Map => samples.iter().map(|(t, _)| site.offset.apply(*t)).collect(),
-        });
-        if self.want == Want::Map {
-            let mut map = samples.clone();
-            site.offset.apply_to_samples(&mut map);
-            self.map = Some(map);
+        // A map that composes nothing draws on nothing weaker, so with nothing
+        // composed before it its samples are the whole answer: counting them
+        // needs no series, and the map is one an authored spec holds. Whether a
+        // *stronger* composition would read these values is a different
+        // question, and not this one.
+        let composes = samples.iter().any(|(_, value)| composes_over_weaker(value));
+        if !composes && self.series.is_empty() {
+            if self.want == Want::Count {
+                self.answered = true;
+                self.count = Some(samples.len());
+                return Step::Stop;
+            }
+            if self.want == Want::Map {
+                let mut map = samples.clone();
+                site.offset.apply_to_samples(&mut map);
+                self.map = Some(map);
+            }
         }
-        self.count = samples.len();
-        Step::Stop
+        self.answered = true;
+        let root = |value| prim_resolve::rooted_at(value, site);
+        let source = Series::sampled(
+            samples
+                .iter()
+                .map(|(time, value)| (site.offset.apply(*time), Supplied::classify(value, &root))),
+        );
+        self.fold(source)
     }
 
-    /// A `default` is a constant: it answers, contributing no sample times.
-    fn on_default(&mut self, _value: &Value, _site: &OpinionSite<'_>) -> Step {
-        Step::Stop
+    /// A `default` holds at every time, so it contributes no sample times of
+    /// its own — but a composing one draws on sources that do.
+    fn on_default(&mut self, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
+        let root = |value| prim_resolve::rooted_at(value, site);
+        self.fold(Series::held(Supplied::classify(&value, &root)))
     }
 
     fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
@@ -609,15 +723,14 @@ impl OpinionResolver for SampleTimesResolver {
         // times to read the length. `ClipSet::stage_sample_times` builds the
         // vector; a count-only form over the same per-clip times would answer
         // `num_time_samples` and `value_might_be_time_varying` without it.
-        match probe.introspection()? {
-            Some((times, may_vary)) => {
-                self.count = times.len();
-                self.times = Some(times);
-                self.clip_may_vary = may_vary;
-                Ok(Step::Stop)
-            }
-            None => Ok(Step::Continue),
-        }
+        let Some(clips) = probe.introspection()? else {
+            return Ok(Step::Continue);
+        };
+        self.answered = true;
+        self.clip_may_vary = clips.may_vary;
+        // A clip set supplies a value per stage time like any other source, read
+        // from the samples its times were read from.
+        Ok(self.fold(Series::sampled(clips.supplied)))
     }
 }
 
@@ -633,53 +746,105 @@ struct InfoResolver<'a> {
     /// samples answer exactly as the value read does.
     interp: &'a dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     resolution: Resolution,
-    /// Whether the query asks what composed into the value. A proximal one
-    /// does not: it answers which source would answer.
+    /// Whether the query asks what composed into the value. A proximal one does
+    /// not — it answers which source would answer — so it records no link, as
+    /// C++'s nullary `GetResolveInfo` builds no chain. It still reads past a
+    /// composing source, to learn whether one it draws on varies with time.
     chains: bool,
-    /// The site a winning `default` was found at, which the composing pass
-    /// after the walk starts from. `None` when another tier answered, or when
-    /// nothing composed into its value.
-    default_site: Option<SelectedSite>,
+    /// What the sources found so far compose to, which decides whether the walk
+    /// reads on: only a value a weaker source could still change has a chain.
+    composing: Composing,
 }
 
 impl InfoResolver<'_> {
-    /// Records the source that answered and the node it answered at. The spec
-    /// is the caller's, since a value clip answers from a layer the site it
-    /// was reached at does not name.
-    fn select(&mut self, kind: ResolveSourceKind, site: &OpinionSite<'_>, spec: Option<SpecSiteRecord>) {
-        self.resolution.source = kind;
-        self.resolution.node = Some(ResolveNode::capture(self.graph, site.node, self.stage));
-        self.resolution.spec = spec;
+    /// Records a source that answered and reports how far the walk goes on.
+    ///
+    /// The strongest source is the one reported. A weaker one is reached only
+    /// because the value composes, so it becomes a link — where it composed in
+    /// rather than merely answered — and, if it varies with time, says that the
+    /// composed value varies with it.
+    ///
+    /// The spec is the caller's, since a value clip answers from a layer the
+    /// site it was reached at does not name.
+    fn answer(
+        &mut self,
+        kind: ResolveSourceKind,
+        site: &OpinionSite<'_>,
+        spec: Option<SpecSiteRecord>,
+        value: Option<Cow<'_, Value>>,
+    ) -> Step {
+        if matches!(self.resolution.source, ResolveSourceKind::None) {
+            self.resolution.source = kind;
+            self.resolution.node = Some(ResolveNode::capture(self.graph, site.node, self.stage));
+            self.resolution.spec = spec;
+            self.resolution.value = ValueState::Present;
+            return self.compose(value, site).step();
+        }
+        // Only a composing value reads this far, so a source that varies with
+        // time varies the composed value with it (C++ records the same of a
+        // query that names no time, as
+        // `_defaultCanComposeOverWeakerTimeVaryingSources`).
+        self.resolution.varies |= matches!(kind, ResolveSourceKind::TimeSamples | ResolveSourceKind::ValueClips);
+        let folded = self.compose(value, site);
+        if folded.composed() && self.chains {
+            let node = ResolveNode::capture(self.graph, site.node, self.stage);
+            self.resolution.weaker.push(ResolvedSite { kind, node, spec });
+        }
+        folded.step()
+    }
+
+    /// Folds a source's value in, so the walk knows whether anything weaker
+    /// still composes into it.
+    ///
+    /// The value is owned only where it is kept: a source that closes the
+    /// composition — which is every source of an ordinary dense value — ends
+    /// the walk without being copied.
+    fn compose(&mut self, value: Option<Cow<'_, Value>>, site: &OpinionSite<'_>) -> Folded {
+        match value {
+            Some(value) => probe_source(&mut self.composing, value, site),
+            None => Folded::Blocked,
+        }
     }
 }
 
 impl OpinionResolver for InfoResolver<'_> {
     fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
         self.resolution.authored = true;
+        // The sample that answers is read once, and interpolated exactly as the
+        // value read interpolates it, so an introspection query and the read
+        // cannot disagree about whether the map answered. A proximal query
+        // names no time to read a sample at, and judges the map as a whole.
+        let value = self
+            .time
+            .map(|time| site.offset.sample_in_stage_time(samples, time, self.interp));
+        let supplies = match &value {
+            Some(value) => value.is_some(),
+            None => value_resolve::samples_supply_any_value(samples),
+        };
         // A map that supplies no value here is not a value source: the read
         // falls through to the schema tier, and reporting `TimeSamples` would
         // disagree with it. It still answers the walk, blocking weaker sources.
-        if !value_resolve::samples_supply_value(samples, site.offset, self.time, self.interp) {
-            self.resolution.value = ValueState::Blocked;
+        if !supplies {
+            // Only the source that answers is blocked; a stronger one this
+            // would have composed into keeps the value it has.
+            if matches!(self.resolution.source, ResolveSourceKind::None) {
+                self.resolution.value = ValueState::Blocked;
+            }
             return Step::Stop;
         }
-        self.select(ResolveSourceKind::TimeSamples, site, Some(site.spec_record(self.graph)));
-        self.resolution.value = ValueState::Present;
-        Step::Stop
+        let spec = Some(site.spec_record(self.graph));
+        self.answer(
+            ResolveSourceKind::TimeSamples,
+            site,
+            spec,
+            value.flatten().map(Cow::Owned),
+        )
     }
 
-    fn on_default(&mut self, value: &Value, site: &OpinionSite<'_>) -> Step {
+    fn on_default(&mut self, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
         self.resolution.authored = true;
-        self.select(ResolveSourceKind::Default, site, Some(site.spec_record(self.graph)));
-        self.resolution.value = ValueState::Present;
-        // Contributors cost a second walk, so they are collected only where
-        // there are any to find and someone to read them: the kinds
-        // `PrimIndex::resolve_strongest` keeps reading past, asked for by a
-        // query about a value rather than about which source would answer.
-        if self.chains && composes_over_weaker(value) {
-            self.default_site = Some(site.select());
-        }
-        Step::Stop
+        let spec = Some(site.spec_record(self.graph));
+        self.answer(ResolveSourceKind::Default, site, spec, Some(value))
     }
 
     fn on_withheld(&mut self, kind: Withheld, _site: &OpinionSite<'_>) -> Step {
@@ -691,7 +856,11 @@ impl OpinionResolver for InfoResolver<'_> {
         self.resolution.authored = true;
         match kind {
             Withheld::DefaultBlock => {
-                self.resolution.value = ValueState::Blocked;
+                // Only the source that answers is blocked; a stronger one this
+                // composed into keeps the value it has.
+                if matches!(self.resolution.source, ResolveSourceKind::None) {
+                    self.resolution.value = ValueState::Blocked;
+                }
                 Step::Stop
             }
             Withheld::TimeSamplesFieldBlock => Step::Continue,
@@ -704,13 +873,23 @@ impl OpinionResolver for InfoResolver<'_> {
         self.resolution.authored = true;
     }
 
+    /// Whether any layer authored an opinion is part of what a resolve info
+    /// answers, so this walk reads the samples it resolves past.
+    fn wants_unresolved_samples(&self) -> bool {
+        true
+    }
+
     fn on_clips(&mut self, probe: &mut ClipProbe<'_>, site: &OpinionSite<'_>) -> Result<Step, QueryError> {
         // A set that sources the property does not necessarily supply a value:
         // at a numeric time it may be inactive or blocked, and without one it
         // may carry nothing for the property anywhere. Both forms decide that
         // the way the value read does.
-        let state = match self.time {
-            Some(time) => probe.answer_at(time, self.interp)?.value_state(),
+        let answer = match self.time {
+            Some(time) => Some(probe.answer_at(time, self.interp)?),
+            None => None,
+        };
+        let state = match &answer {
+            Some(answer) => answer.value_state(),
             None => probe.answer_untimed()?,
         };
         if matches!(state, ValueState::Absent) {
@@ -721,24 +900,27 @@ impl OpinionResolver for InfoResolver<'_> {
         // sends the read to the schema tier, and naming the clip would disagree
         // with that — C++ reports the clip either way.
         self.resolution.authored = true;
-        self.resolution.value = state;
-        if matches!(state, ValueState::Present) {
-            // The site the set was reached at authors the `clips` metadata, not
-            // the value: the spec to report is the one a property stack lists,
-            // which is the clip layer itself. An untimed query selects no clip,
-            // so it names none.
-            // TODO(perf): this re-derives what the answer already knew — the
-            // active entry, the clip path and the manifest — and for a
-            // synthesized manifest that is not yet complete it regenerates one,
-            // reopening every clip asset. A probe form returning the answer and
-            // its site together would fold both passes.
-            let spec = match self.time {
-                Some(time) => probe.spec_record_at(time, site.offset)?,
-                None => None,
-            };
-            self.select(ResolveSourceKind::ValueClips, site, spec);
+        if matches!(self.resolution.source, ResolveSourceKind::None) {
+            self.resolution.value = state;
         }
-        Ok(Step::Stop)
+        if !matches!(state, ValueState::Present) {
+            return Ok(Step::Stop);
+        }
+        // The site the set was reached at authors the `clips` metadata, not
+        // the value: the spec to report is the one a property stack lists,
+        // which is the clip layer itself. An untimed query selects no clip,
+        // so it names none.
+        // TODO(perf): this re-derives what the answer already knew — the
+        // active entry, the clip path and the manifest — and for a
+        // synthesized manifest that is not yet complete it regenerates one,
+        // reopening every clip asset. A probe form returning the answer and
+        // its site together would fold both passes.
+        let spec = match self.time {
+            Some(time) => probe.spec_record_at(time, site.offset)?,
+            None => None,
+        };
+        let value = answer.and_then(|answer| answer.into_value()).map(Cow::Owned);
+        Ok(self.answer(ResolveSourceKind::ValueClips, site, spec, value))
     }
 }
 
@@ -1175,7 +1357,11 @@ impl IndexCache {
             // so that a clip introduced there is still consulted; one lookup
             // rules the field probes out at those.
             if node.has_specs() && data.has_spec(&node.path) {
+                // At the default time the field is read only for a resolver
+                // that reports what it walked past; the value read skips it.
+                let probes_samples = mode.visits_time_samples() || resolver.wants_unresolved_samples();
                 if !samples_blocked
+                    && probes_samples
                     && let Some(value) = data.try_field(&site.query_path, FieldKey::TimeSamples.as_str())?
                 {
                     // What the field holds decides whether there is an opinion
@@ -1197,18 +1383,24 @@ impl IndexCache {
                         (SampleField::Map(samples), true) => resolver.on_time_samples(samples, &site),
                         (SampleField::Blocked, true) => resolver.on_withheld(Withheld::TimeSamplesFieldBlock, &site),
                     };
-                    if step.stop() {
-                        return Ok(());
+                    match step {
+                        Step::Stop => return Ok(()),
+                        // This site has answered; a weaker source, if the
+                        // answer still takes one, comes from the next site.
+                        Step::NextSite => continue,
+                        Step::Continue => {}
                     }
                 }
                 if let Some(value) = data.try_field(&site.query_path, FieldKey::Default.as_str())? {
                     found_opinion = true;
-                    let step = match &*value {
-                        Value::ValueBlock | Value::None => resolver.on_withheld(Withheld::DefaultBlock, &site),
-                        other => resolver.on_default(other, &site),
+                    let step = match value_resolve::is_block(&value) {
+                        true => resolver.on_withheld(Withheld::DefaultBlock, &site),
+                        false => resolver.on_default(value, &site),
                     };
-                    if step.stop() {
-                        return Ok(());
+                    match step {
+                        Step::Stop => return Ok(()),
+                        Step::NextSite => continue,
+                        Step::Continue => {}
                     }
                 }
             }
@@ -1250,68 +1442,70 @@ impl IndexCache {
             interp,
             resolution: Resolution::default(),
             chains: !matches!(mode, ResolveMode::Proximal),
-            default_site: None,
+            composing: Composing::new(),
         };
+        // TODO(perf): a value read and a resolve info over one attribute run
+        // the walk twice and compose the same value twice. A composed-value-
+        // with-provenance cache would fold the two.
         self.resolve_property(graph, &prim, &suffix, mode, &mut resolver)?;
         let InfoResolver {
             mut resolution,
-            default_site,
+            composing,
+            chains: resolver_chains,
             ..
         } = resolver;
-        // A site is here only where the walk found a value that composes and
-        // the query asked what composed into it.
-        if let Some(site) = default_site {
-            let index = self.cached(&prim);
-            if let Some(composed) =
-                index.resolve_composed(FieldKey::Default.as_str(), graph, Some(&suffix), Some(&site))?
-            {
-                resolution.weaker = composed
-                    .weaker
-                    .into_iter()
-                    .map(|site| ResolvedSite::capture(graph, index.node(site.node), stage, site))
-                    .collect();
-            }
-        }
+        // What the layer opinions could not finish is the schema tier's to
+        // answer, and `usd` reports that tier as the chain's last link — which
+        // a query that asks for no chain does not want either.
+        resolution.open = resolver_chains && composing.is_open();
         Ok(resolution)
     }
 
     /// Resolves an attribute's value at `time`, honoring value clips
-    /// (spec 12.3.4). Runs [`Self::resolve_property`], so the source it answers
+    /// (spec 12.3.4), or at the default time when `time` is `None` — which
+    /// answers from `default` opinions alone, since neither samples nor clips
+    /// supply one. Runs [`Self::resolve_property`], so the source it answers
     /// from is the one every other value query reports.
     ///
     /// `interp` applies the stage's interpolation policy to a sample map at a
     /// given time; it is supplied by the caller so this layer stays free of any
     /// interpolation policy.
+    ///
+    /// A value that composes comes back with its composition still open: the
+    /// layer stack is the weakest tier `pcp` has, and `usd` closes what it
+    /// composed over the schema fallback
+    /// ([`prim_resolve::close_composition`]).
     pub(crate) fn value_at(
         &mut self,
         graph: &LayerGraph,
         attr_path: &Path,
-        time: f64,
+        time: Option<f64>,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>, QueryError> {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
             return Ok(None);
         };
         let mut resolver = ValueAtResolver {
-            graph,
             time,
             interp,
-            winner: Winner::None,
+            composing: Composing::new(),
+            anchor: None,
         };
-        self.resolve_property(graph, &prim, &suffix, ResolveMode::Numeric(time), &mut resolver)?;
-        match resolver.winner {
-            Winner::None => Ok(None),
-            Winner::Samples { value, site } => Ok(self.resolve_asset_values(graph, value, site.as_ref())),
-            Winner::Clips { value } => Ok(value),
-            Winner::Default { site } => self.composed_default(graph, &prim, &suffix, &site),
-        }
+        self.resolve_property(graph, &prim, &suffix, ResolveMode::at(time), &mut resolver)?;
+        let ValueAtResolver { composing, anchor, .. } = resolver;
+        let value = match &anchor {
+            Some(anchor) => self.resolve_asset_at(graph, composing.into_open(), anchor),
+            None => composing.into_open(),
+        };
+        Ok(value.and_then(block_to_none))
     }
 
     /// Resolves the cacheable value source for an attribute (the source half of
     /// [`Self::value_at`]), so a [`Stage::attribute_query`] can replay it across
-    /// time codes. When value clips claim the attribute the source is
-    /// [`AttributeValueSource::Clips`]: the query then falls back to `value_at`
-    /// per call, since clip resolution is time-dependent.
+    /// time codes. A source no snapshot can stand in for — value clips, or a
+    /// value that composes — resolves as
+    /// [`AttributeValueSource::PerTime`], and the query falls back to
+    /// `value_at` per call.
     ///
     /// [`Stage::attribute_query`]: crate::usd::Stage::attribute_query
     pub(crate) fn resolve_value_source(
@@ -1326,6 +1520,7 @@ impl IndexCache {
             graph,
             source: None,
             default_site: None,
+            composing: Composing::new(),
         };
         self.resolve_property(graph, &prim, &suffix, ResolveMode::Proximal, &mut resolver)?;
         let source = match resolver.source {
@@ -1333,7 +1528,7 @@ impl IndexCache {
             // A winning `default` composes from the site the walk selected; with
             // no site nothing was authored, which is the same static `None`.
             None => match resolver.default_site {
-                Some(site) => AttributeValueSource::Static(self.composed_default(graph, &prim, &suffix, &site)?),
+                Some(site) => AttributeValueSource::Static(self.default_at(graph, &prim, &suffix, &site)?),
                 None => AttributeValueSource::Static(None),
             },
         };
@@ -1364,26 +1559,21 @@ impl IndexCache {
         }
     }
 
-    /// The composed `default` for a property whose winning site the shared walk
-    /// selected.
+    /// The `default` a walk answered with at `site`, read back for a caller
+    /// that recorded the site rather than the value.
     ///
-    /// A `default` composes across weaker opinions (dictionaries merge, path
-    /// expressions substitute), so the value comes from composed field
-    /// resolution rather than from the winning site alone — begun at that site,
-    /// which also anchors any `asset` in the result.
-    fn composed_default(
+    /// Composed across the nodes from the strongest opinion, which is what
+    /// `site` names; `site` also anchors any `asset` in the result.
+    fn default_at(
         &mut self,
         graph: &LayerGraph,
         prim: &Path,
         suffix: &str,
         site: &SelectedSite,
     ) -> Result<Option<Value>, QueryError> {
-        // TODO(perf): a value read and a resolve info over one attribute compose
-        // the same value twice; a composed-value-with-provenance cache would
-        // fold the two.
         let value = self
             .cached(prim)
-            .resolve_strongest(FieldKey::Default.as_str(), graph, Some(suffix), Some(site))?;
+            .resolve_strongest(FieldKey::Default.as_str(), graph, Some(suffix))?;
         Ok(self.resolve_asset_at(graph, value, site).and_then(block_to_none))
     }
 
@@ -1393,13 +1583,16 @@ impl IndexCache {
     ///
     /// Reports the times of whichever source [`Self::value_at`] resolves the
     /// value from, because both run [`Self::resolve_property`]. A winning
-    /// `default` is a constant, so it contributes none.
+    /// `default` is a constant, so it contributes none — unless it composes,
+    /// where the times are those of the source it draws on, which is where the
+    /// composed value changes.
     pub(crate) fn time_sample_times(
         &mut self,
         graph: &LayerGraph,
         attr_path: &Path,
     ) -> Result<Option<Vec<f64>>, QueryError> {
-        Ok(self.sample_times(graph, attr_path, Want::Times)?.times)
+        let resolved = self.sample_times(graph, attr_path, Want::Times)?;
+        Ok(resolved.answered.then(|| resolved.times()))
     }
 
     /// Resolves an attribute's composed `timeSamples` map, retimed to stage
@@ -1410,10 +1603,11 @@ impl IndexCache {
     /// from, because both run [`Self::resolve_property`]: a stronger `default`
     /// hides a weaker layer's samples here exactly as it does in the read.
     ///
-    /// A winning value-clip set answers with a schedule rather than a map, so
-    /// this reports `None` for one; its times reach
-    /// [`Self::time_sample_times`], and its values are read per time code
-    /// through [`Self::value_at`].
+    /// Two source shapes own no map and report `None`: a value-clip set, which
+    /// answers with a schedule, and a composing `default`, whose value is
+    /// assembled from sources rather than held anywhere. Both reach
+    /// [`Self::time_sample_times`] for their times and
+    /// [`Self::value_at`] for a value per time code.
     pub(crate) fn time_samples(
         &mut self,
         graph: &LayerGraph,
@@ -1452,7 +1646,7 @@ impl IndexCache {
     /// `(0, false)` when no source has samples or the prim is masked out.
     fn time_sample_summary(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<(usize, bool), QueryError> {
         let resolved = self.sample_times(graph, attr_path, Want::Count)?;
-        Ok((resolved.count, resolved.clip_may_vary))
+        Ok((resolved.count(), resolved.clip_may_vary))
     }
 
     /// The composed sample times of whichever source [`Self::value_at`] would
@@ -1465,11 +1659,13 @@ impl IndexCache {
         want: Want,
     ) -> Result<SampleTimesResolver, QueryError> {
         let mut resolver = SampleTimesResolver {
-            times: None,
+            series: Series::default(),
+            answered: false,
             map: None,
             clip_may_vary: false,
-            count: 0,
+            count: None,
             want,
+            chains: want != Want::Map,
         };
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
             return Ok(resolver);
@@ -3316,7 +3512,7 @@ def "Unrelated"
     ) -> Result<Option<Value>> {
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         loop {
-            let value = cache.value_at(graph, path, time, &interp)?;
+            let value = cache.value_at(graph, path, Some(time), &interp)?;
             let mut pending = Vec::new();
             cache.swap_pending_loads(&mut pending);
             if !graph.intern_demanded(&pending) {
@@ -3782,7 +3978,7 @@ def \"Model\"
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         cache.ensure_index(&graph, &sdf::path("/Inst")?)?;
         // Reading through the proxy mints and materializes the prototype.
-        cache.value_at(&graph, &sdf::path("/Inst/Scope.x")?, 0.0, &interp)?;
+        cache.value_at(&graph, &sdf::path("/Inst/Scope.x")?, Some(0.0), &interp)?;
 
         let scope = sdf::path("/__Prototype_0/Scope")?;
         let index = cache.cached(&scope);
@@ -4018,7 +4214,7 @@ def "A" (
         cache.ensure_index(&graph, &a)?;
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A.marker")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/A.marker")?, Some(0.0), &interp)?,
             Some(Value::String("ok".to_string())),
             "the prim's local opinion survives the broken expression arc"
         );
@@ -4816,8 +5012,9 @@ def "Anchor" (inherits = </Rig>) {}
         let interp =
             |samples: &sdf::TimeSampleMap, t: f64| samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone());
 
-        let size =
-            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &interp);
+        let size = |cache: &mut IndexCache, t: f64| {
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &interp)
+        };
         assert_eq!(size(&mut cache, 1.0)?, Some(sdf::Value::Float(10.0)));
         assert_eq!(size(&mut cache, 2.0)?, Some(sdf::Value::Float(20.0)));
         Ok(())
@@ -4830,8 +5027,9 @@ def "Anchor" (inherits = </Rig>) {}
     fn template_clip_schedule_retimed_by_offset() -> Result<()> {
         let root = format!("{}/fixtures/clip_template_offset/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
-        let size =
-            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
+        let size = |cache: &mut IndexCache, t: f64| {
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact)
+        };
         assert_eq!(size(&mut cache, 11.0)?, Some(Value::Float(10.0)));
         assert_eq!(size(&mut cache, 12.0)?, Some(Value::Float(20.0)));
         Ok(())
@@ -4845,8 +5043,9 @@ def "Anchor" (inherits = </Rig>) {}
     fn explicit_asset_paths_anchor_over_template() -> Result<()> {
         let root = format!("{}/fixtures/clip_asset_anchor/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
-        let size =
-            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
+        let size = |cache: &mut IndexCache, t: f64| {
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact)
+        };
         assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(42.0)));
         Ok(())
     }
@@ -4885,8 +5084,9 @@ def "Anchor" (inherits = </Rig>) {}
     fn missing_clip_value_uses_manifest_default() -> Result<()> {
         let root = format!("{}/fixtures/clip_missing_default/root.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
-        let size =
-            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
+        let size = |cache: &mut IndexCache, t: f64| {
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact)
+        };
         assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(5.0)));
         assert_eq!(size(&mut cache, 10.0)?, Some(Value::Float(99.0)));
         Ok(())
@@ -4900,8 +5100,9 @@ def "Anchor" (inherits = </Rig>) {}
     fn missing_clip_value_without_default_blocks() -> Result<()> {
         let root = format!("{}/fixtures/clip_missing_block/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
-        let size =
-            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &exact);
+        let size = |cache: &mut IndexCache, t: f64| {
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact)
+        };
         assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(5.0)));
         assert_eq!(size(&mut cache, 10.0)?, None);
         Ok(())
@@ -4909,7 +5110,7 @@ def "Anchor" (inherits = </Rig>) {}
 
     /// `resolve_value_source` gates clips precisely: on a clip-bearing prim, an
     /// attribute the manifest declares (`size`) resolves as
-    /// [`AttributeValueSource::Clips`], while a sibling the manifest does not
+    /// [`AttributeValueSource::PerTime`], while a sibling the manifest does not
     /// declare (`extra`) falls through to its referenced `timeSamples` rather
     /// than being routed conservatively through the per-call clip path.
     #[test]
@@ -4919,7 +5120,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         assert!(matches!(
             cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?.source,
-            AttributeValueSource::Clips
+            AttributeValueSource::PerTime
         ));
         // `extra` is not in the manifest, so the clip set does not own it; the
         // source is the reference's time samples, queryable on the fast path.
@@ -4945,12 +5146,12 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = collected_stack(&root);
 
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Model.size")?, 5.0, &lerp)?,
+            cache.value_at(&graph, &sdf::path("/Model.size")?, Some(5.0), &lerp)?,
             Some(Value::Float(50.0))
         );
         assert!(matches!(
             cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?.source,
-            AttributeValueSource::Clips
+            AttributeValueSource::PerTime
         ));
         Ok(())
     }
@@ -4985,7 +5186,7 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/clip_missing_interp/root.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let size =
-            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), t, &lerp);
+            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &lerp);
         assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(0.0)));
         assert_eq!(size(&mut cache, 15.0)?, Some(Value::Float(75.0)));
         assert_eq!(size(&mut cache, 20.0)?, Some(Value::Float(100.0)));
@@ -5003,7 +5204,7 @@ def "Anchor" (inherits = </Rig>) {}
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
         // Query /A first so it mints /__Prototype_0 for its key.
-        let size = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), 0.0, &interp);
+        let size = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp);
         assert_eq!(size(&mut cache, "/A/Child.size")?, Some(sdf::Value::Double(5.0)));
         assert_eq!(size(&mut cache, "/B/Child.size")?, Some(sdf::Value::Double(5.0)));
         assert_eq!(size(&mut cache, "/C/Child.size")?, Some(sdf::Value::Double(9.0)));
@@ -5029,7 +5230,7 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/instancing_deep.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
-        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), 0.0, &interp);
+        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp);
 
         // Reading the deep value walks the proxy ancestors (/A/Mid, /B/Mid),
         // testing each for instance-ness.
@@ -5056,7 +5257,7 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/instancing_nested_in_prototype.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
-        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), 0.0, &interp);
+        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp);
 
         // /A mints /__Prototype_0 (for /Outer); the nested instance mints
         // /__Prototype_1 (for /Inner). Both the outer proxy and the
@@ -5133,7 +5334,7 @@ def "Anchor" (inherits = </Rig>) {}
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp)?,
             Some(Value::Double(1.0))
         );
         assert_eq!(cache.prototypes().len(), 3, "one prototype per nesting level");
@@ -5148,7 +5349,7 @@ def "Anchor" (inherits = </Rig>) {}
         // The chain re-registers from scratch and resolves again, so the drop
         // left behind no stale index, redirection, or key.
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp)?,
             Some(Value::Double(1.0))
         );
         assert_eq!(cache.prototypes().len(), 3);
@@ -5165,7 +5366,7 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
-        cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, 0.0, &interp)?;
+        cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp)?;
         let registered = cache.prototypes();
         assert_eq!(registered.len(), 3, "one prototype per nesting level");
 
@@ -5192,7 +5393,7 @@ def "Anchor" (inherits = </Rig>) {}
         // /__Prototype_1 for /Library/Inner, and the outer proxy's descendant
         // stands in for a prim there.
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A/Nested/Leaf.v")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/A/Nested/Leaf.v")?, Some(0.0), &interp)?,
             Some(Value::Double(3.0))
         );
         assert_eq!(
@@ -5243,12 +5444,12 @@ def "Anchor" (inherits = </Rig>) {}
         // The nested reference's opinions resolve on the shared descendant.
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/World/Inst/OtherChild.size")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/World/Inst/OtherChild.size")?, Some(0.0), &interp)?,
             Some(Value::Double(7.0)),
             "nested-reference descendant value survives in the shared subtree"
         );
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/World/Inst.otherAttr")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/World/Inst.otherAttr")?, Some(0.0), &interp)?,
             Some(Value::Double(5.0)),
             "nested-reference attribute survives on the instance root"
         );
@@ -5280,7 +5481,7 @@ def "Anchor" (inherits = </Rig>) {}
         // referenced subtree is there rather than an empty root.
         assert_eq!(cache.prim_children(&graph, &proto)?, vec![Token::from("ProtoChild")]);
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/__Prototype_0.protoAttr")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/__Prototype_0.protoAttr")?, Some(0.0), &interp)?,
             Some(Value::Double(3.0)),
         );
 
@@ -5290,7 +5491,7 @@ def "Anchor" (inherits = </Rig>) {}
             vec![Token::from("ProtoChild")]
         );
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Deep/G/A/ProtoChild.size")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/Deep/G/A/ProtoChild.size")?, Some(0.0), &interp)?,
             Some(Value::Double(7.0)),
         );
         Ok(())
@@ -5333,11 +5534,11 @@ def "Anchor" (inherits = </Rig>) {}
         // Its content composes in place rather than redirecting back through it.
         assert_eq!(cache.prim_children(&graph, &proto)?, vec![Token::from("BodyChild")]);
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/__Prototype_0.bodyAttr")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/__Prototype_0.bodyAttr")?, Some(0.0), &interp)?,
             Some(Value::Double(4.0)),
         );
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/World/Place.bodyAttr")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/World/Place.bodyAttr")?, Some(0.0), &interp)?,
             Some(Value::Double(4.0)),
         );
         Ok(())
@@ -6075,100 +6276,6 @@ def "Anchor" (inherits = </Rig>) {}
         Ok(fresh_cache().resolve_field(&graph, &world, field)?)
     }
 
-    /// The layers whose opinions composed into `field`, strongest first.
-    fn contributors_stacked(field: &str, opinions: &[Value]) -> Result<Vec<String>> {
-        let (graph, world) = stacked_graph(field, opinions)?;
-        let mut cache = fresh_cache();
-        cache.ensure_index(&graph, &world)?;
-        let composed = cache
-            .cached(&world)
-            .resolve_composed(field, &graph, None, None)?
-            .expect("an opinion");
-        Ok(composed
-            .weaker
-            .iter()
-            .map(|site| graph.identifier(site.layer).to_string())
-            .collect())
-    }
-
-    /// A dictionary names every weaker dictionary it merged, and neither the
-    /// opinion of another kind it skipped nor the block that ended the merge.
-    #[test]
-    fn dict_merge_records_contributors() -> Result<()> {
-        let dict = |key: &str| {
-            let mut d = sdf::Dictionary::new();
-            d.insert(key.to_string(), Value::Int(1));
-            Value::Dictionary(d)
-        };
-        assert_eq!(
-            contributors_stacked("meta", &[dict("a"), Value::Int(7), dict("c")])?,
-            ["layer2.usda"],
-            "the int between the dictionaries composed nothing"
-        );
-        assert_eq!(
-            contributors_stacked("meta", &[dict("a"), Value::ValueBlock, dict("c")])?,
-            [] as [&str; 0],
-            "the block ended the merge before anything weaker"
-        );
-        Ok(())
-    }
-
-    /// A path expression names each opinion its `%_` drew on — including one
-    /// authored as text, which composes as an expression — and stops naming
-    /// them once no weaker reference is left.
-    #[test]
-    fn path_expr_records_contributors() -> Result<()> {
-        let expr = |text: &str| Value::PathExpression(sdf::PathExpression::parse(text));
-        assert_eq!(
-            contributors_stacked("expr", &[expr("/a// %_"), expr("/b// %_"), expr("/c//"), expr("/d//")])?,
-            ["layer1.usda", "layer2.usda"],
-            "the opinion after the last `%_` is not a contributor"
-        );
-        assert_eq!(
-            contributors_stacked("expr", &[expr("/a// %_"), Value::String("/b//".to_string())])?,
-            ["layer1.usda"],
-            "a weaker string parses into the expression, so it contributed"
-        );
-        assert_eq!(
-            contributors_stacked("expr", &[expr("/a//"), expr("/b//")])?,
-            [] as [&str; 0],
-            "an expression with no weaker reference is won outright"
-        );
-        Ok(())
-    }
-
-    /// The predicate that decides whether contributors are worth collecting
-    /// and the composition that reports them are two statements of one rule,
-    /// so a kind added to either alone shows up here rather than as a chain
-    /// that is quietly empty.
-    #[test]
-    fn composing_kinds_agree() -> Result<()> {
-        let dict = || {
-            let mut d = sdf::Dictionary::new();
-            d.insert("a".to_string(), Value::Int(1));
-            Value::Dictionary(d)
-        };
-        let cases = [
-            dict(),
-            Value::PathExpression(sdf::PathExpression::parse("/a// %_")),
-            Value::PathExpression(sdf::PathExpression::parse("/a//")),
-            Value::PathExpressionVec(vec![sdf::PathExpression::parse("/a// %_")]),
-            Value::Int(7),
-            Value::String("/a//".to_string()),
-        ];
-        for strongest in cases {
-            // A weaker opinion of the same kind, so a kind that composes has
-            // something to report.
-            let reports = !contributors_stacked("f", &[strongest.clone(), strongest.clone()])?.is_empty();
-            assert_eq!(
-                composes_over_weaker(&strongest),
-                reports,
-                "{strongest:?} composes but reports no contributor, or the other way round"
-            );
-        }
-        Ok(())
-    }
-
     /// A custom metadata field authored as a list op composes by folding its
     /// edits across layers (spec 12.2.6), resolving to a baked explicit list
     /// op.
@@ -6335,7 +6442,7 @@ def "Anchor" (inherits = </Rig>) {}
         let mut cache = fresh_cache();
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Inst.e")?, 0.0, &interp)?,
+            cache.value_at(&graph, &sdf::path("/Inst.e")?, Some(0.0), &interp)?,
             Some(Value::PathExpression(sdf::PathExpression::parse(
                 "/local// /Inst/child//"
             )))

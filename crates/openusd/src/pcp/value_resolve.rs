@@ -11,16 +11,17 @@
 //! One walk is what keeps the per-time read, the cached source, the sample
 //! times and the property stack answering from the same strength order.
 
+use std::borrow::Cow;
+
 use crate::sdf;
 
 use super::QueryError;
 use super::asset_resolve::AssetSite;
-use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
+use super::clip::{ClipCache, ClipIntrospection, ClipQuery, ResolvedClipSet};
 use super::diagnostics::Diagnostics;
 use super::index_cache::SpecSiteRecord;
 use super::layer_graph::StackIdentity;
 use super::prim_graph::{ArcType, Node};
-use super::prim_resolve;
 use super::{LayerGraph, LayerId, LayerStackId, LayerStackIdentifier, MapFunction};
 
 /// Which value-resolution walk to run — the Rust form of C++
@@ -48,6 +49,15 @@ pub(crate) enum ResolveMode {
 }
 
 impl ResolveMode {
+    /// The mode a value read at `time` runs under: a numeric stage time, or the
+    /// default time when there is none.
+    pub(crate) fn at(time: Option<f64>) -> Self {
+        match time {
+            Some(time) => Self::Numeric(time),
+            None => Self::Default,
+        }
+    }
+
     /// Whether the walk probes `timeSamples` at each site.
     pub(crate) fn visits_time_samples(self) -> bool {
         !matches!(self, Self::Default)
@@ -64,13 +74,23 @@ impl ResolveMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
 pub(crate) enum Step {
+    /// Keep looking, at this site's remaining tiers and then at weaker sites.
     Continue,
+    /// This site has answered, but the answer can still take a weaker source:
+    /// the walk resumes at the next site, since a site supplies one value (C++
+    /// moves to the next layer once a tier there has answered).
+    NextSite,
     Stop,
 }
 
 impl Step {
     pub(crate) fn stop(self) -> bool {
         matches!(self, Self::Stop)
+    }
+
+    /// Whether the rest of this site's tiers are skipped.
+    pub(crate) fn leaves_site(self) -> bool {
+        matches!(self, Self::Stop | Self::NextSite)
     }
 }
 
@@ -169,6 +189,18 @@ pub(crate) struct Resolution {
     /// The weaker sites that composed into the answering source's value,
     /// strongest first. Empty unless the value composes across opinions.
     pub(crate) weaker: Vec<ResolvedSite>,
+    /// Whether the composed value is still open — a `%_` the layer stack ran
+    /// out of opinions for, a dictionary a weaker one would still merge into.
+    /// The tier below the stack decides what that draws on, so `usd` reads this
+    /// to know whether the schema fallback answered as well.
+    pub(crate) open: bool,
+    /// Whether the value composes over a source that varies with time.
+    ///
+    /// What [`weaker`](Self::weaker) says of a query that named a time, for one
+    /// that did not: the walk still reads past a composing `default` to find
+    /// out, because the answer is what tells a reader the value is not
+    /// constant (C++ `_defaultCanComposeOverWeakerTimeVaryingSources`).
+    pub(crate) varies: bool,
 }
 
 /// A site a composed value drew an opinion from, captured by value the way
@@ -179,24 +211,12 @@ pub(crate) struct Resolution {
 /// info — which this carries the two facts of that `pcp` can name.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedSite {
+    /// The tier it answered from, which a link reports as its own source.
+    pub(crate) kind: ResolveSourceKind,
     pub(crate) node: ResolveNode,
-    pub(crate) spec: SpecSiteRecord,
-}
-
-impl ResolvedSite {
-    /// Captures a contributor the composed read reported, resolving its arena
-    /// handles against the graph that produced them.
-    pub(crate) fn capture(
-        graph: &LayerGraph,
-        node: &Node,
-        stage: &LayerStackIdentifier,
-        site: prim_resolve::ComposedSite,
-    ) -> Self {
-        Self {
-            node: ResolveNode::capture(graph, node, stage),
-            spec: SpecSiteRecord::in_graph(graph, site.layer, site.query_path, site.offset),
-        }
-    }
+    /// The spec a property stack lists for it, or `None` where the source
+    /// names none — a value clip reached without a time selects no layer.
+    pub(crate) spec: Option<SpecSiteRecord>,
 }
 
 /// Which kind of source answered the walk — the authored tiers only. The schema
@@ -208,24 +228,6 @@ pub(crate) enum ResolveSourceKind {
     Default,
     TimeSamples,
     ValueClips,
-}
-
-/// Whether a `timeSamples` opinion supplies a value for a query at `time`,
-/// authored in a layer whose cumulative offset to the stage is `offset`.
-///
-/// At a numeric time this interpolates exactly as the value read does, so an
-/// introspection query and the read cannot disagree about whether the map
-/// answered. Without a time it falls to [`samples_supply_any_value`].
-pub(crate) fn samples_supply_value(
-    samples: &sdf::TimeSampleMap,
-    offset: sdf::LayerOffset,
-    time: Option<f64>,
-    interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<sdf::Value>,
-) -> bool {
-    match time {
-        Some(time) => offset.sample_in_stage_time(samples, time, interp).is_some(),
-        None => samples_supply_any_value(samples),
-    }
 }
 
 /// Whether a `timeSamples` opinion supplies a value at any time at all.
@@ -357,13 +359,6 @@ pub(crate) struct SelectedSite {
     pub(crate) query_path: sdf::Path,
 }
 
-impl SelectedSite {
-    /// Whether `(layer, node, path)` is this site.
-    pub(crate) fn is(&self, layer: LayerId, node: &Node, path: &sdf::Path) -> bool {
-        self.layer == layer && self.layer_stack == node.layer_stack_id() && self.query_path == *path
-    }
-}
-
 impl OpinionSite<'_> {
     /// This site as a [`SelectedSite`], for a resolver whose answer is finished
     /// after the walk.
@@ -469,9 +464,10 @@ impl ClipProbe<'_> {
             .untimed_answer_in_set(self.graph, self.diagnostics, self.set, &self.query)
     }
 
-    /// The stage sample times the set contributes, and whether its schedule
-    /// alone can vary the value. `None` when it does not participate.
-    pub(crate) fn introspection(&mut self) -> Result<Option<(Vec<f64>, bool)>, QueryError> {
+    /// The stage sample times the set contributes, whether its schedule alone
+    /// can vary the value, and whether it holds anything a composition would
+    /// read. `None` when the set does not participate.
+    pub(crate) fn introspection(&mut self) -> Result<Option<ClipIntrospection>, QueryError> {
         self.cache
             .clip_introspection_in_set(self.graph, self.diagnostics, self.set, &self.query)
     }
@@ -513,15 +509,32 @@ pub(crate) trait OpinionResolver {
         Step::Continue
     }
 
-    /// A `default` opinion at this site, borrowed in the layer's time frame.
-    fn on_default(&mut self, _value: &sdf::Value, _site: &OpinionSite<'_>) -> Step {
+    /// A `default` opinion at this site, in the layer's own time frame. Owned
+    /// where the backend decoded it for this read, so a resolver that keeps
+    /// the value takes it rather than copying it.
+    fn on_default(&mut self, _value: Cow<'_, sdf::Value>, _site: &OpinionSite<'_>) -> Step {
         Step::Continue
     }
 
     /// A `timeSamples` opinion the walk will not resolve from, because
     /// [`ResolveMode::Default`] answers from `default` alone. It is still an
     /// authored opinion, which is all a resolver can learn about it here.
+    ///
+    /// Only a resolver that says so through
+    /// [`wants_unresolved_samples`](Self::wants_unresolved_samples) is told.
     fn on_unresolved_samples(&mut self, _site: &OpinionSite<'_>) {}
+
+    /// Whether a default-time walk still reads the `timeSamples` it will not
+    /// resolve from, to report them through
+    /// [`on_unresolved_samples`](Self::on_unresolved_samples).
+    ///
+    /// Reading a field costs what the backend charges to decode it — a whole
+    /// sample map, for a format that stores one compressed — so a value read
+    /// pays nothing for the opinions it is going to walk past. An
+    /// introspection query that counts them opts in.
+    fn wants_unresolved_samples(&self) -> bool {
+        false
+    }
 
     /// An opinion that exists and withholds a value.
     ///

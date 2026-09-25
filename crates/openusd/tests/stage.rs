@@ -6147,11 +6147,21 @@ fn clip_interpolated_gap_site() -> Result<()> {
 /// strongest first, and opens it. Each opinion is its declared type and its
 /// literal, so a text-valued opinion and a block author through it too.
 fn expression_stack(dir: &FsPath, opinions: &[(&str, &str)]) -> Result<Stage> {
-    for (i, (kind, literal)) in opinions.iter().enumerate() {
-        let body = format!("def \"A\"\n{{\n    uniform {kind} expr = {literal}\n}}\n");
-        let text = match i + 1 < opinions.len() {
-            true => format!("#usda 1.0\n(\n    subLayers = [@./layer{}.usda@]\n)\n{body}", i + 1),
-            false => format!("#usda 1.0\n{body}"),
+    let bodies: Vec<_> = opinions
+        .iter()
+        .map(|(kind, literal)| format!("    uniform {kind} expr = {literal}\n"))
+        .collect();
+    sublayer_stack(dir, &bodies)
+}
+
+/// Authors `bodies[i]` as the body of `/A` on sublayer `i` of a fresh stage,
+/// strongest first, and opens it.
+fn sublayer_stack(dir: &FsPath, bodies: &[impl AsRef<str>]) -> Result<Stage> {
+    for (i, body) in bodies.iter().enumerate() {
+        let prim = format!("def \"A\"\n{{\n{}}}\n", body.as_ref());
+        let text = match i + 1 < bodies.len() {
+            true => format!("#usda 1.0\n(\n    subLayers = [@./layer{}.usda@]\n)\n{prim}", i + 1),
+            false => format!("#usda 1.0\n{prim}"),
         };
         fs::write(dir.join(format!("layer{i}.usda")), text)?;
     }
@@ -6218,6 +6228,811 @@ fn chain_stops_unreferenced() -> Result<()> {
     assert_eq!(layers.len(), 2, "the opinion after the last `%_` is not a contributor");
     assert!(layers[0].ends_with("layer1.usda"), "{layers:?}");
     assert!(layers[1].ends_with("layer2.usda"), "{layers:?}");
+    Ok(())
+}
+
+/// A composed value changes wherever any source it draws on does, so the
+/// sample times it reports are every contributing source's.
+#[test]
+fn chain_unions_sample_times() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e.timeSamples = {
+        0: \"/s// %_\",
+    }
+",
+            "    pathExpression e.timeSamples = {
+        1: \"/w//\",
+        2: \"/x//\",
+    }
+",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+
+    assert_eq!(attr.time_sample_times()?, vec![0.0, 1.0, 2.0]);
+    assert!(attr.value_might_be_time_varying()?);
+    // The composed samples are held by no one authored map, so there is none
+    // to report — and no `%_` reaches a reader through one.
+    assert_eq!(attr.time_samples()?, None);
+    // What the times promise: the value really does change at each of them.
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(2.0))?,
+        Some(sdf::PathExpression::parse("/s// /x//"))
+    );
+    Ok(())
+}
+
+/// A clip supplies a value like any other source: an expression that fills a
+/// stronger `%_` closes the composition, so the sources under it are masked
+/// and name no times — the same answer the read gives.
+#[test]
+fn closed_clip_expression_masks_weaker() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+(
+    subLayers = [@./weak.usda@]
+)
+
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/Model"
+            asset manifestAssetPath = @./manifest.usda@
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e.timeSamples = {
+        0: "/clip//",
+    }
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e.timeSamples = {
+        1: "/y//",
+        2: "/z//",
+    }
+}
+"#,
+    )?;
+    let strong = dir.path().join("strong.usda");
+    fs::write(
+        &strong,
+        r#"#usda 1.0
+(
+    subLayers = [@./root.usda@]
+)
+
+over "Model"
+{
+    pathExpression e = "/s// %_"
+}
+"#,
+    )?;
+    let stage = Stage::open(strong.to_str().expect("utf-8 path"))?;
+    let attr = stage.attribute("/Model.e")?;
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(2.0))?,
+        Some(sdf::PathExpression::parse("/s// /clip//"))
+    );
+    assert_eq!(attr.time_sample_times()?, vec![0.0]);
+    Ok(())
+}
+
+/// A sample time is reported as authored, whatever its value: an infinite key
+/// is a sample like any other, and the count and the times agree about it.
+#[test]
+fn non_finite_sample_time_survives() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let attr = stage.define_prim("/A")?.create_attribute("x", "double")?;
+    attr.set_at(1.0_f64, usd::TimeCode::new(f64::INFINITY))?;
+
+    let attr = stage.attribute("/A.x")?;
+    assert_eq!(attr.time_sample_times()?, vec![f64::INFINITY]);
+    assert_eq!(attr.num_time_samples()?, 1);
+    Ok(())
+}
+
+/// An ordinary text-valued clip answers on its own: a stronger composition
+/// could have read what it holds, but nothing here draws on anything weaker,
+/// so the sources under it are masked and name no times.
+#[test]
+fn text_clip_masks_weaker_times() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+(
+    subLayers = [@./weak.usda@]
+)
+
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/Model"
+            asset manifestAssetPath = @./manifest.usda@
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    string s
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    string s
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    string s.timeSamples = {
+        0: "fixed",
+    }
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        r#"#usda 1.0
+
+def "Model"
+{
+    string s.timeSamples = {
+        1: "one",
+        2: "two",
+    }
+}
+"#,
+    )?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+    let attr = stage.attribute("/Model.s")?;
+
+    for time in [0.0, 1.0, 2.0] {
+        assert_eq!(
+            attr.get_at::<String>(usd::TimeCode::new(time))?,
+            Some("fixed".into()),
+            "at {time}"
+        );
+    }
+    assert_eq!(attr.time_sample_times()?, vec![0.0]);
+    Ok(())
+}
+
+/// A `string` or `token` attribute is an ordinary sampled attribute: a
+/// composition could read one, but that is a question about a *stronger*
+/// value, and it does not stop this map from being the answer.
+#[test]
+fn text_samples_keep_their_map() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let attr = stage.define_prim("/A")?.create_attribute("s", "string")?;
+    attr.clone().set_at("first", usd::TimeCode::new(0.0))?;
+    attr.set_at("second", usd::TimeCode::new(1.0))?;
+
+    let samples = stage.attribute("/A.s")?.time_samples()?.expect("an authored map");
+    assert_eq!(samples.len(), 2);
+    assert_eq!(
+        stage.attribute("/A.s")?.get_at::<String>(usd::TimeCode::new(1.0))?,
+        Some("second".into())
+    );
+    Ok(())
+}
+
+/// A source that withholds the value ends the composition that reaches it,
+/// where one it merely passes over does not: the times a still-weaker source
+/// names are behind the block, and the count and the read agree on that.
+#[test]
+fn blocked_sample_closes_chain() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/s// %_\"
+",
+            "    pathExpression e.timeSamples = {
+        0: None,
+        1: \"/w//\",
+    }
+",
+            "    pathExpression e.timeSamples = {
+        5: \"/never//\",
+    }
+",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+
+    // The block leaves nothing to draw on, so the weakest map never answers.
+    let read = attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(5.0))?;
+    assert_eq!(read, Some(sdf::PathExpression::parse("/s// /w//")));
+    let times = attr.time_sample_times()?;
+    assert!(!times.contains(&5.0), "the block ended the composition: {times:?}");
+    assert_eq!(attr.num_time_samples()?, times.len());
+    Ok(())
+}
+
+/// A source is not one thing over all time: a map can withhold a value at one
+/// time and be passed over at another, and neither ends what the sources under
+/// it contribute.
+#[test]
+fn blocked_sample_keeps_chain_open() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/s// %_\"
+",
+            "    int e.timeSamples = {
+        0: None,
+        1: 7,
+    }
+",
+            "    pathExpression e.timeSamples = {
+        2: \"/y//\",
+        3: \"/z//\",
+    }
+",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(3.0))?,
+        Some(sdf::PathExpression::parse("/s// /z//"))
+    );
+    let times = attr.time_sample_times()?;
+    assert!(times.contains(&2.0) && times.contains(&3.0), "{times:?}");
+    assert_eq!(attr.num_time_samples()?, times.len());
+    Ok(())
+}
+
+/// A clip holding nothing a composition reads is passed over the same way, so
+/// the sources under it still reach the times.
+#[test]
+fn ignored_clip_keeps_chain_open() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+(
+    subLayers = [@./weak.usda@]
+)
+
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/Model"
+            asset manifestAssetPath = @./manifest.usda@
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    int e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    int e.timeSamples = {
+        0: 7,
+    }
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e.timeSamples = {
+        1: "/y//",
+        2: "/z//",
+    }
+}
+"#,
+    )?;
+    let strong = dir.path().join("strong.usda");
+    fs::write(
+        &strong,
+        r#"#usda 1.0
+(
+    subLayers = [@./root.usda@]
+)
+
+over "Model"
+{
+    pathExpression e = "/s// %_"
+}
+"#,
+    )?;
+    let stage = Stage::open(strong.to_str().expect("utf-8 path"))?;
+    let times = stage.attribute("/Model.e")?.time_sample_times()?;
+    assert!(times.contains(&1.0) && times.contains(&2.0), "{times:?}");
+    Ok(())
+}
+
+/// Counting samples follows the composition as the times do: a map the
+/// composition passes over ends nothing, so what it draws on afterwards is
+/// still counted.
+#[test]
+fn sample_count_reads_past_ignored() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/s// %_\"
+",
+            "    int e.timeSamples = {
+        0: 3,
+    }
+",
+            "    pathExpression e.timeSamples = {
+        1: \"/y//\",
+        2: \"/z//\",
+    }
+",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(2.0))?,
+        Some(sdf::PathExpression::parse("/s// /z//"))
+    );
+    let times = attr.time_sample_times()?;
+    assert_eq!(attr.num_time_samples()?, times.len(), "{times:?}");
+    assert!(attr.value_might_be_time_varying()?);
+    Ok(())
+}
+
+/// A clip sample authored as text is an expression where it composes into one,
+/// so what it spells decides how far clip discovery reads — the same question
+/// the ordinary sample path asks, asked of the same composition.
+#[test]
+fn text_clip_samples_keep_chain_open() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+(
+    subLayers = [@./weak.usda@]
+)
+
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/Model"
+            asset manifestAssetPath = @./manifest.usda@
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    token e.timeSamples = {
+        0: "/clip// %_",
+    }
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e.timeSamples = {
+        1: "/y//",
+        2: "/z//",
+    }
+}
+"#,
+    )?;
+    let strong = dir.path().join("strong.usda");
+    fs::write(
+        &strong,
+        r#"#usda 1.0
+(
+    subLayers = [@./root.usda@]
+)
+
+over "Model"
+{
+    pathExpression e = "/s// %_"
+}
+"#,
+    )?;
+    let stage = Stage::open(strong.to_str().expect("utf-8 path"))?;
+    let attr = stage.attribute("/Model.e")?;
+
+    // The set stays active from 0, so the clip's own `%_` draws on the weaker
+    // sample and the stronger expression draws on both.
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(2.0))?,
+        Some(sdf::PathExpression::parse("/s// (/clip// /z//)"))
+    );
+    assert_eq!(attr.time_sample_times()?, vec![0.0, 1.0, 2.0]);
+    Ok(())
+}
+
+/// A clip that authors no samples for the attribute is filled from the
+/// manifest's default, so a composition that default leaves open draws on the
+/// sources weaker than the set, and reports their times.
+#[test]
+fn manifest_default_chains_sample_times() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+(
+    subLayers = [@./weak.usda@]
+)
+
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/Model"
+            asset manifestAssetPath = @./manifest.usda@
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e = "/manifest// %_"
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e.timeSamples = {
+        1: "/y//",
+        2: "/z//",
+    }
+}
+"#,
+    )?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+    let attr = stage.attribute("/Model.e")?;
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(2.0))?,
+        Some(sdf::PathExpression::parse("/manifest// /z//"))
+    );
+    assert_eq!(attr.time_sample_times()?, vec![0.0, 1.0, 2.0]);
+    Ok(())
+}
+
+/// A sample authored as text is an expression where it composes into one, so
+/// what it spells decides how far discovery reads — including a `%_` of its
+/// own, and one a closed sample before it does not speak for.
+#[test]
+fn text_samples_keep_chain_open() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/s// %_\"
+",
+            "    token e.timeSamples = {
+        0: \"/t// %_\",
+    }
+",
+            "    pathExpression e.timeSamples = {
+        1: \"/y//\",
+        2: \"/z//\",
+    }
+",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+    assert_eq!(attr.time_sample_times()?, vec![0.0, 1.0, 2.0]);
+    assert_eq!(attr.num_time_samples()?, 3);
+
+    // A closed sample does not speak for the map: a later one still composing
+    // keeps the sources under it in reach.
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/s// %_\"
+",
+            "    token e.timeSamples = {
+        0: \"/a//\",
+        5: \"/b// %_\",
+    }
+",
+            "    pathExpression e.timeSamples = {
+        7: \"/y//\",
+    }
+",
+        ],
+    )?;
+    assert_eq!(stage.attribute("/A.e")?.time_sample_times()?, vec![0.0, 5.0, 7.0]);
+    Ok(())
+}
+
+/// A clip whose samples compose draws on the sources weaker than it, so the
+/// times it reports are theirs too.
+#[test]
+fn clip_chain_unions_sample_times() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+(
+    subLayers = [@./weak.usda@]
+)
+
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/Model"
+            asset manifestAssetPath = @./manifest.usda@
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e.timeSamples = {
+        0: "/clip// %_",
+    }
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e.timeSamples = {
+        1: "/y//",
+        2: "/z//",
+    }
+}
+"#,
+    )?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+    let attr = stage.attribute("/Model.e")?;
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(2.0))?,
+        Some(sdf::PathExpression::parse("/clip// /z//"))
+    );
+    assert_eq!(attr.time_sample_times()?, vec![0.0, 1.0, 2.0]);
+    Ok(())
+}
+
+/// Sample times follow the composition past an opinion it ignores, whichever
+/// tier the composing value came from.
+#[test]
+fn sampled_chain_reads_past_ignored() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e.timeSamples = {
+        0: \"/s// %_\",
+    }
+",
+            "    int e = 3
+",
+            "    pathExpression e.timeSamples = {
+        1: \"/y//\",
+        2: \"/z//\",
+    }
+",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(2.0))?,
+        Some(sdf::PathExpression::parse("/s// /z//"))
+    );
+    assert_eq!(attr.time_sample_times()?, vec![0.0, 1.0, 2.0]);
+    Ok(())
+}
+
+/// A cached query reports an expression in the stage's namespace, as a direct
+/// read does: a sample authored across a reference names paths in the
+/// referenced prim's namespace, not the stage's.
+#[test]
+fn query_maps_sampled_expression() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ref.usda"),
+        "#usda 1.0
+def \"Original\"
+{
+    pathExpression e.timeSamples = {
+        0: \"/Original/child//\",
+    }
+}
+",
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0
+def \"A\" (
+    references = @./ref.usda@</Original>
+)
+{
+}
+",
+    )?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+    let attr = stage.attribute("/A.e")?;
+    let at = usd::TimeCode::new(0.0);
+
+    assert_eq!(
+        usd::AttributeQuery::new(&attr).get_at::<sdf::PathExpression>(at)?,
+        attr.get_at::<sdf::PathExpression>(at)?
+    );
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(at)?,
+        Some(sdf::PathExpression::parse("/A/child//"))
+    );
+    Ok(())
+}
+
+/// An opinion the composition ignores does not end it: the sources it goes on
+/// to draw on still reach the cached query and the sample times.
+#[test]
+fn chain_reads_past_ignored_opinion() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/s// %_\"
+",
+            "    int e = 3
+",
+            "    pathExpression e.timeSamples = {
+        1: \"/y//\",
+        2: \"/z//\",
+    }
+",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+    let at = usd::TimeCode::new(2.0);
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(at)?,
+        Some(sdf::PathExpression::parse("/s// /z//"))
+    );
+    assert_eq!(
+        usd::AttributeQuery::new(&attr).get_at::<sdf::PathExpression>(at)?,
+        attr.get_at::<sdf::PathExpression>(at)?
+    );
+    assert_eq!(attr.time_sample_times()?, vec![1.0, 2.0]);
+    Ok(())
+}
+
+/// A weaker opinion authored as text is an expression like any other, so it
+/// reaches the value in the root namespace: its patterns are anchored at the
+/// prim that authored it and mapped across the arc that brought it in.
+#[test]
+fn text_opinion_maps_across_arc() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ref.usda"),
+        "#usda 1.0
+def \"Original\"
+{
+    token e = \"child//\"
+}
+",
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0
+def \"A\" (
+    references = @./ref.usda@</Original>
+)
+{
+    pathExpression e = \"/A/strong// %_\"
+}
+",
+    )?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+
+    assert_eq!(
+        stage.attribute("/A.e")?.get::<sdf::PathExpression>()?,
+        Some(sdf::PathExpression::parse("/A/strong// /A/child//"))
+    );
     Ok(())
 }
 
@@ -6347,6 +7162,319 @@ fn samples_have_no_chain() -> Result<()> {
     let info = stage.attribute("/S.x")?.resolve_info_at(usd::TimeCode::new(0.0))?;
     assert_eq!(info.source(), usd::ResolveInfoSource::TimeSamples);
     assert!(info.weaker_sources().is_empty());
+    Ok(())
+}
+
+/// A sample that composes nothing still closes: a weaker reference is a
+/// composition token, and a read never hands one back.
+#[test]
+fn sampled_expression_closes() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let expr = stage.define_prim("/S")?.create_attribute("e", "pathExpression")?;
+    expr.set_at(sdf::PathExpression::parse("/s// %_"), usd::TimeCode::new(0.0))?;
+
+    assert_eq!(
+        stage
+            .attribute("/S.e")?
+            .get_at::<sdf::PathExpression>(usd::TimeCode::new(0.0))?,
+        Some(sdf::PathExpression::parse("/s//"))
+    );
+    Ok(())
+}
+
+/// Composition crosses the tiers: a `default` whose `%_` outlives the layers
+/// that hold `default`s draws on a weaker layer's time samples, and names that
+/// tier as the link.
+#[test]
+fn chain_reaches_samples() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/strong// %_\"\n",
+            "    pathExpression e.timeSamples = {\n        0: \"/sampled//\",\n    }\n",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+    let at = usd::TimeCode::new(0.0);
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(at)?,
+        Some(sdf::PathExpression::parse("/strong// /sampled//"))
+    );
+    let info = attr.resolve_info_at(at)?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::Default);
+    let links = info.weaker_sources();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].source(), usd::ResolveInfoSource::TimeSamples);
+    assert!(
+        links[0]
+            .spec_site()
+            .is_some_and(|site| site.layer.ends_with("layer1.usda")),
+        "{links:?}"
+    );
+    Ok(())
+}
+
+/// A value clip is a source like any other, so a composing `default` stronger
+/// than the set draws on what the clip holds and names the clip as its link.
+#[test]
+fn chain_reaches_clip() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    // The clips are authored a layer below the composing opinion: a set is
+    // consulted only at the layer that declared it, and a site that answers
+    // never consults its own.
+    write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/Model"
+            asset manifestAssetPath = @./manifest.usda@
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e
+}
+"#,
+        r#"#usda 1.0
+
+def "Model"
+{
+    pathExpression e.timeSamples = {
+        0: "/clipped//",
+    }
+}
+"#,
+    )?;
+    let strong = dir.path().join("strong.usda");
+    fs::write(
+        &strong,
+        r#"#usda 1.0
+(
+    subLayers = [@./root.usda@]
+)
+
+over "Model"
+{
+    pathExpression e = "/strong// %_"
+}
+"#,
+    )?;
+    let stage = Stage::open(strong.to_str().expect("utf-8 path"))?;
+    let attr = stage.attribute("/Model.e")?;
+    let at = usd::TimeCode::new(0.0);
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(at)?,
+        Some(sdf::PathExpression::parse("/strong// /clipped//"))
+    );
+    let info = attr.resolve_info_at(at)?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::Default);
+    let links = info.weaker_sources();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].source(), usd::ResolveInfoSource::ValueClips);
+    assert!(
+        links[0]
+            .spec_site()
+            .is_some_and(|site| site.layer.ends_with("clip.usda")),
+        "the link names the clip the value came from: {links:?}"
+    );
+    Ok(())
+}
+
+/// A site supplies one source: samples that answer there hide that site's own
+/// `default`, so a composing sample draws on the next site rather than on the
+/// opinion beside it (C++ moves to the next layer once a tier has answered).
+#[test]
+fn chain_skips_answered_site() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/beside//\"\n    pathExpression e.timeSamples = {\n        0: \"/sampled// %_\",\n    }\n",
+            "    pathExpression e = \"/weak//\"\n",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+    let at = usd::TimeCode::new(0.0);
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(at)?,
+        Some(sdf::PathExpression::parse("/sampled// /weak//"))
+    );
+    let links = attr.resolve_info_at(at)?.weaker_sources().to_vec();
+    assert_eq!(links.len(), 1);
+    assert!(
+        links[0]
+            .spec_site()
+            .is_some_and(|site| site.layer.ends_with("layer1.usda")),
+        "the `default` beside the samples is not a source: {links:?}"
+    );
+    Ok(())
+}
+
+/// A cached query answers a composing value exactly as a direct read does: its
+/// source is not one snapshot, because what the value draws on changes with
+/// time.
+#[test]
+fn query_matches_composed_read() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/strong// %_\"\n",
+            "    pathExpression e.timeSamples = {\n        0: \"/sampled//\",\n    }\n",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+    let at = usd::TimeCode::new(0.0);
+    let query = usd::AttributeQuery::new(&attr);
+
+    assert_eq!(
+        query.get_at::<sdf::PathExpression>(at)?,
+        attr.get_at::<sdf::PathExpression>(at)?
+    );
+    assert_eq!(
+        query.get_at::<sdf::PathExpression>(at)?,
+        Some(sdf::PathExpression::parse("/strong// /sampled//"))
+    );
+    Ok(())
+}
+
+/// The same for a composing value a clip answers: the set is reached only
+/// because the stronger value composes, and it still rules out a snapshot.
+#[test]
+fn sampled_expression_query_varies() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e.timeSamples = {\n        0: \"/a// %_\",\n        10: \"/b// %_\",\n    }\n",
+            "    pathExpression e = \"/weak//\"\n",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+    let query = usd::AttributeQuery::new(&attr);
+
+    for time in [0.0, 10.0] {
+        let at = usd::TimeCode::new(time);
+        assert_eq!(
+            query.get_at::<sdf::PathExpression>(at)?,
+            attr.get_at::<sdf::PathExpression>(at)?,
+            "at {time}"
+        );
+    }
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(usd::TimeCode::new(10.0))?,
+        Some(sdf::PathExpression::parse("/b// /weak//"))
+    );
+    Ok(())
+}
+
+/// A value that composes over time samples is not constant, and a query that
+/// names no time says so too — it reads past the composing source to find out,
+/// without reporting the chain a timed query would.
+#[test]
+fn proximal_reports_varying() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/strong// %_\"\n",
+            "    pathExpression e.timeSamples = {\n        0: \"/sampled//\",\n    }\n",
+        ],
+    )?;
+    let info = stage.attribute("/A.e")?.resolve_info()?;
+
+    assert_eq!(info.source(), usd::ResolveInfoSource::Default);
+    assert!(info.value_source_might_be_time_varying());
+    assert!(info.weaker_sources().is_empty(), "a proximal query builds no chain");
+    Ok(())
+}
+
+/// A source that answers under a composing value but composes nothing into it
+/// is no link: the chain names what the value is made of.
+#[test]
+fn chain_omits_foreign_kind() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/strong// %_\"\n",
+            "    int e = 3\n",
+            "    pathExpression e = \"/weak//\"\n",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+
+    assert_eq!(
+        attr.get::<sdf::PathExpression>()?,
+        Some(sdf::PathExpression::parse("/strong// /weak//"))
+    );
+    let links = attr.resolve_info_at(None)?.weaker_sources().to_vec();
+    assert_eq!(links.len(), 1, "the int composed nothing: {links:?}");
+    assert!(
+        links[0]
+            .spec_site()
+            .is_some_and(|site| site.layer.ends_with("layer2.usda")),
+        "{links:?}"
+    );
+    Ok(())
+}
+
+/// A weaker source that supplies no value blocks nothing it never answered
+/// for: the composing value that reached it is still the answer.
+#[test]
+fn chain_keeps_value_past_block() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        dir.path(),
+        &[
+            "    pathExpression e = \"/strong// %_\"\n",
+            "    pathExpression e = None\n",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+    let info = attr.resolve_info_at(None)?;
+
+    assert_eq!(
+        attr.get::<sdf::PathExpression>()?,
+        Some(sdf::PathExpression::parse("/strong//"))
+    );
+    assert_eq!(info.source(), usd::ResolveInfoSource::Default);
+    assert!(!info.value_is_blocked(), "the block answered nothing");
+
+    let sampled = tempfile::tempdir()?;
+    let stage = sublayer_stack(
+        sampled.path(),
+        &[
+            "    pathExpression e = \"/strong// %_\"\n",
+            "    pathExpression e.timeSamples = {\n        0: None,\n    }\n",
+        ],
+    )?;
+    let attr = stage.attribute("/A.e")?;
+    let at = usd::TimeCode::new(0.0);
+    let info = attr.resolve_info_at(at)?;
+
+    assert_eq!(
+        attr.get_at::<sdf::PathExpression>(at)?,
+        Some(sdf::PathExpression::parse("/strong//"))
+    );
+    assert_eq!(info.source(), usd::ResolveInfoSource::Default);
+    assert!(!info.value_is_blocked(), "the blocked samples answered nothing");
     Ok(())
 }
 

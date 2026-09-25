@@ -37,6 +37,10 @@ pub struct ResolveInfo {
     pub(super) node: Option<pcp::ResolveNode>,
     pub(super) spec: Option<SpecSite>,
     pub(super) weaker: Vec<ResolveInfo>,
+    /// Whether the value composes over a source that varies with time, where
+    /// the chain does not say so itself — what a query that named no time
+    /// learns by reading past a composing source.
+    pub(super) composes_over_varying: bool,
     pub(super) value_is_blocked: bool,
     /// Whether any layer authored a value opinion, including one that withholds
     /// a value. Wider than both `source` and `value_is_blocked`: a blocked
@@ -75,10 +79,10 @@ impl ResolveInfo {
     ///
     /// For the source that answered, this is the site
     /// [`Attribute::property_stack`](super::Attribute::property_stack) lists
-    /// for it. A site in [`weaker_sources`](Self::weaker_sources) is the spec
-    /// its opinion was authored in, which the stack can leave out: the stack
-    /// admits a spec only where its kind agrees with the property's, and value
-    /// resolution asks no such question of an opinion it composes.
+    /// for it. A link in [`weaker_sources`](Self::weaker_sources) names the
+    /// spec its own source answered from, which the stack can leave out: the
+    /// stack admits a spec only where its kind agrees with the property's, and
+    /// value resolution asks no such question of an opinion it composes.
     ///
     /// For a value clip the site is the layer the stack names at that time,
     /// which is not always the layer the value was read from: a gap filled
@@ -91,16 +95,20 @@ impl ResolveInfo {
     /// The weaker sources that composed into the resolved value, strongest
     /// first (C++ walks the same chain through `GetNextWeakerInfo`).
     ///
-    /// Empty unless the value composes across opinions rather than being won
-    /// outright: a `default` holding a path expression whose `%_` draws on
-    /// weaker opinions, or a dictionary merged over weaker dictionaries. A
-    /// dense value, a `timeSamples` source and a value clip each answer alone.
+    /// Empty unless the value composes across sources rather than being won
+    /// outright: a path expression whose `%_` draws on weaker opinions, or a
+    /// dictionary merged over weaker dictionaries. A dense value answers alone.
+    ///
+    /// A link can come from any tier the walk reaches — a weaker layer's
+    /// `default` or `timeSamples`, a value clip — and the last can be the
+    /// schema fallback, where the authored sources ran out before the
+    /// composition closed. Each names the node and spec it answered from, as
+    /// [`source`](Self::source) does, except the fallback, which was authored
+    /// in no layer and names neither. None chains further: the whole chain is
+    /// here.
     ///
     /// A proximal [`resolve_info`](super::Attribute::resolve_info) reports
     /// none: it answers which source would answer, not what went into a value.
-    ///
-    /// Each is a `default` a layer authored, so it names its own node and
-    /// spec and chains no further.
     pub fn weaker_sources(&self) -> &[ResolveInfo] {
         &self.weaker
     }
@@ -140,15 +148,22 @@ impl ResolveInfo {
     /// which has the attribute's own sample count to consult: a `timeSamples`
     /// source reports `true` even holding a single sample.
     ///
-    /// A `default` source reports `false` even where it composed over weaker
-    /// opinions ([`weaker_sources`](Self::weaker_sources)): what it composes
-    /// over is weaker `default`s, which do not vary over time either. C++
-    /// recurses through its chain here because a link of its own can be a clip
-    /// or a time sample.
+    /// A `default` source reports `true` where a source it composed over can
+    /// vary: the value is only as constant as everything that went into it, so
+    /// this walks the whole chain (C++ recurses through `GetNextWeakerInfo`).
+    ///
+    /// A proximal [`resolve_info`](super::Attribute::resolve_info) builds no
+    /// chain to walk, and still answers: the walk reads past a composing
+    /// source to learn whether one it draws on varies, which is the question
+    /// this asks (C++ keeps the same answer in
+    /// `_defaultCanComposeOverWeakerTimeVaryingSources`).
     pub fn value_source_might_be_time_varying(&self) -> bool {
-        matches!(
-            self.source,
-            ResolveInfoSource::TimeSamples | ResolveInfoSource::ValueClips
-        )
+        let varies = |info: &ResolveInfo| {
+            matches!(
+                info.source,
+                ResolveInfoSource::TimeSamples | ResolveInfoSource::ValueClips
+            )
+        };
+        self.composes_over_varying || varies(self) || self.weaker.iter().any(varies)
     }
 }

@@ -16,9 +16,9 @@ use super::asset_resolve::{self, AssetSite};
 use super::clip;
 use super::diagnostics::Diagnostics;
 use super::mapping::MapFunction;
-use super::prim_graph::{ArcType, Node, NodeId};
+use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
-use super::value_resolve::SelectedSite;
+use super::value_resolve::{self, OpinionSite, Step};
 use super::{LayerGraph, LayerId, QueryError};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
@@ -29,9 +29,6 @@ use super::{LayerGraph, LayerId, QueryError};
 struct Opinion<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
     node: &'a Node,
-    /// That node's arena handle, which outlives the borrow and so is what a
-    /// composed value names its contributors by.
-    node_id: NodeId,
     /// Id of the contributing layer, as yielded by
     /// [`Node::layers`](super::prim_graph::Node::layers) and used with
     /// [`LayerGraph::layer`](super::LayerGraph::layer) — not a position within
@@ -49,16 +46,6 @@ struct Opinion<'a> {
 }
 
 impl Opinion<'_> {
-    /// This opinion as a contributor to a composed value.
-    fn site(&self) -> ComposedSite {
-        ComposedSite {
-            node: self.node_id,
-            layer: self.layer,
-            query_path: self.query_path.as_ref().clone(),
-            offset: self.offset,
-        }
-    }
-
     /// Maps this opinion's value into the stage's time frame through the
     /// contributing layer's offset
     /// ([`LayerOffset::apply_to_value`](sdf::LayerOffset::apply_to_value)). The
@@ -71,34 +58,416 @@ impl Opinion<'_> {
     }
 }
 
-/// A composed value, with the weaker sites that went into it.
+/// A value being composed from sources in strength order.
 ///
-/// Composition is what makes this more than a value: a dictionary merges
-/// weaker dictionaries and a path expression substitutes weaker expressions,
-/// so the answer can come from several sites at once and a caller asking where
-/// it came from needs all of them.
-pub(crate) struct Composed {
-    /// The composed value.
-    pub(crate) value: Value,
-    /// The sites weaker than the winning one that composed into it, strongest
-    /// first. Empty for a value won outright, which is every value kind but
-    /// the two that compose, and for a caller that did not ask for them.
-    pub(crate) weaker: Vec<ComposedSite>,
+/// Two value kinds read past the opinion that holds them: a dictionary merges
+/// weaker dictionaries into itself (spec 12.2.5), and a path expression
+/// substitutes each `%_` with what a weaker opinion holds (C++ registers
+/// `SdfPathExpression`'s compose-over with generic value resolution). Every
+/// other kind is whatever the strongest opinion says.
+///
+/// Sources fold in as a walk reaches them, strongest first, and the fold says
+/// when the value can take nothing more — which is where the walk stops. The
+/// walk decides what a source *is*: a field read composes one field across the
+/// prim's nodes ([`PrimIndex::resolve_strongest`]), while an attribute's value
+/// composes across the `timeSamples`, clip and `default` tiers of every site
+/// ([`IndexCache::value_at`](super::IndexCache::value_at)) and `usd` closes
+/// the result over the schema fallback.
+pub(crate) struct Composing {
+    value: Option<Value>,
 }
 
-impl Composed {
-    /// A value no weaker opinion composed into.
-    fn won(value: Value) -> Self {
-        Self {
-            value,
-            weaker: Vec::new(),
+/// What one source did to a [`Composing`] value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Folded {
+    /// It composed in, and a weaker source could still change the result.
+    Composed,
+    /// It composed in and closed the value: nothing weaker can change it.
+    Closed,
+    /// Its kind does not compose with what is already there, so it changed
+    /// nothing. A walk carries on to the next source it can reach.
+    Skipped,
+    /// It withholds the value from everything weaker (a `ValueBlock`), so
+    /// there is nothing further to fold.
+    Blocked,
+}
+
+impl Folded {
+    /// How far the walk that folded this source goes on.
+    ///
+    /// A source that composed nothing has answered all the same, so the walk
+    /// resumes at the next site rather than reading another tier of the one
+    /// that just answered.
+    pub(crate) fn step(self) -> Step {
+        match self {
+            Self::Composed | Self::Skipped => Step::NextSite,
+            Self::Closed | Self::Blocked => Step::Stop,
+        }
+    }
+
+    /// Whether the source became part of the value.
+    pub(crate) fn composed(self) -> bool {
+        matches!(self, Self::Composed | Self::Closed)
+    }
+}
+
+impl Composing {
+    /// Nothing composed yet.
+    pub(crate) fn new() -> Self {
+        Self { value: None }
+    }
+
+    /// A composition another walk left open, for the tier below it to finish.
+    pub(crate) fn resumed(value: Value) -> Self {
+        Self { value: Some(value) }
+    }
+
+    /// Whether any source has answered yet.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.value.is_none()
+    }
+
+    /// Folds in one source's `value`, weaker than everything folded so far.
+    ///
+    /// `query_path` and `map_to_root` are what place a path expression in the
+    /// root namespace: the node's own namespace is not the one the result is
+    /// read in, and two nodes' expressions cannot compose until both are
+    /// rooted.
+    pub(crate) fn fold(&mut self, value: Value, query_path: &Path, map_to_root: &MapFunction) -> Folded {
+        // The anchor is built inside the rooting, so only a source that turns
+        // out to hold an expression pays for it.
+        self.compose(value, &|expr| {
+            PrimIndex::map_expression_to_root(expr, &query_path.prim_path(), map_to_root)
+        })
+    }
+
+    /// [`fold`](Self::fold) for a value already in the root namespace, which a
+    /// schema fallback is: no node introduced it, so nothing translates it.
+    pub(crate) fn fold_rooted(&mut self, value: Value) -> Folded {
+        self.compose(value, &|expr| expr)
+    }
+
+    /// The shared fold: `root` places an expression in the root namespace,
+    /// and every expression that enters the value goes through it — including
+    /// one a `string` or `token` opinion spells, which is an expression like
+    /// any other once it is read as one.
+    fn compose(&mut self, value: Value, root: &dyn Fn(sdf::PathExpression) -> sdf::PathExpression) -> Folded {
+        if value_resolve::is_block(&value) {
+            return Folded::Blocked;
+        }
+        let Some(composed) = self.value.take() else {
+            // The strongest source stands on its own; what it holds decides
+            // whether anything weaker is read at all.
+            let value = match value {
+                Value::PathExpression(expr) => Value::PathExpression(root(expr)),
+                // Array elements translate across arcs like the scalar form,
+                // with no per-element weaker stack for a reference to draw on,
+                // so only the strongest source's array is ever read.
+                Value::PathExpressionVec(exprs) => Value::PathExpressionVec(exprs.into_iter().map(root).collect()),
+                other => other,
+            };
+            let folded = match composes_over_weaker(&value) {
+                true => Folded::Composed,
+                false => Folded::Closed,
+            };
+            self.value = Some(value);
+            return folded;
+        };
+        match (composed, value) {
+            (Value::Dictionary(mut merged), Value::Dictionary(weaker)) => {
+                sdf::dictionary_over(&mut merged, weaker);
+                self.value = Some(Value::Dictionary(merged));
+                Folded::Composed
+            }
+            // A string or token opinion reads as the expression it spells,
+            // matching the schema-less reads collection queries accept.
+            (Value::PathExpression(expr), weaker) => {
+                let Some(weaker) = weaker.into_path_expression() else {
+                    self.value = Some(Value::PathExpression(expr));
+                    return Folded::Skipped;
+                };
+                let expr = expr.compose_over(&root(weaker));
+                let folded = match expr.contains_weaker_reference() {
+                    true => Folded::Composed,
+                    false => Folded::Closed,
+                };
+                self.value = Some(Value::PathExpression(expr));
+                folded
+            }
+            (composed, _) => {
+                self.value = Some(composed);
+                Folded::Skipped
+            }
+        }
+    }
+
+    /// Whether a weaker source could still change the value.
+    pub(crate) fn is_open(&self) -> bool {
+        self.value.as_ref().is_some_and(composes_over_weaker)
+    }
+
+    /// The value as it stands, with its composition still open, for a caller
+    /// whose own tier has a weaker opinion left to offer.
+    pub(crate) fn into_open(self) -> Option<Value> {
+        self.value
+    }
+
+    /// The finished value: a `%_` no source answered resolves to the empty
+    /// expression, which is what keeps a composition token out of a resolved
+    /// value (C++ composes the finished value over `VtBackground`).
+    pub(crate) fn close(self) -> Option<Value> {
+        self.value.map(close_value)
+    }
+}
+
+/// What a source supplies at one time, as far as composing it with a weaker
+/// source goes.
+///
+/// A source is classified once, where it is read: what a composition does with
+/// it then follows from the classification alone, so no later step re-derives
+/// it from the value.
+#[derive(Debug, Clone)]
+pub(crate) enum Supplied {
+    /// A value a composition reads: an expression, the text that spells one,
+    /// or a dictionary. Carried in the root namespace, since what it holds
+    /// decides both whether it contributes and whether anything weaker does.
+    Composable(Value),
+    /// A value no composition reads. Only its presence matters, so it is never
+    /// copied — which is what keeps a query about times off the values of
+    /// animated geometry.
+    Opaque,
+    /// The value is withheld from here down.
+    Blocked,
+}
+
+impl Supplied {
+    /// What `value`, authored at a site `root` places in the root namespace,
+    /// supplies.
+    pub(crate) fn classify(value: &Value, root: &dyn Fn(Value) -> Value) -> Self {
+        if value_resolve::is_block(value) {
+            return Self::Blocked;
+        }
+        match reads_into_composition(value) {
+            true => Self::Composable(root(value.clone())),
+            false => Self::Opaque,
         }
     }
 }
 
+/// A composition as it stands at one time.
+#[derive(Debug, Clone)]
+pub(crate) enum Composed {
+    /// The value here, which a weaker source can still change.
+    Open(Value),
+    /// Nothing weaker can change the value here — because the composition
+    /// finished, because a source withheld it, or because there was never a
+    /// composition to begin with.
+    Closed,
+}
+
+impl Composed {
+    /// What one source alone composes to.
+    pub(crate) fn source(supplied: &Supplied) -> Self {
+        let Supplied::Composable(value) = supplied else {
+            return Self::Closed;
+        };
+        match composes_over_weaker(value) {
+            true => Self::Open(value.clone()),
+            false => Self::Closed,
+        }
+    }
+
+    /// Whether a weaker source can still change the value here.
+    pub(crate) fn is_open(&self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+
+    /// This composition with what a weaker source supplies folded in.
+    ///
+    /// The three answers the fold gives are the three a weaker source can have
+    /// here: it contributes — closing the composition or leaving it open —
+    /// it is passed over, or it withholds the value from everything weaker.
+    fn over(self, weaker: &Supplied) -> Self {
+        let Self::Open(value) = self else {
+            return Self::Closed;
+        };
+        let weaker = match weaker {
+            // Nothing contributes past a withheld value.
+            Supplied::Blocked => return Self::Closed,
+            // A value no composition reads changes nothing and ends nothing.
+            Supplied::Opaque => return Self::Open(value),
+            Supplied::Composable(weaker) => weaker,
+        };
+        let mut composing = Composing::resumed(value);
+        let folded = composing.fold_rooted(weaker.clone());
+        match (folded, composing.into_open()) {
+            // A source the composition passed over changed nothing, so what
+            // was open before it still is.
+            (Folded::Composed | Folded::Skipped, Some(value)) => Self::Open(value),
+            _ => Self::Closed,
+        }
+    }
+}
+
+/// A value as a function of stage time: what it is at each time it can change
+/// at, and what it is at every other time.
+///
+/// Sources and compositions are both read this way, so one composition rule
+/// answers for both. C++ composes the same series pairwise, through
+/// `SdfComposeTimeSampleSeries`.
+#[derive(Debug, Clone)]
+pub(crate) struct Series<T> {
+    /// What a source naming no time of its own supplies — a `default`, the
+    /// schema fallback — which is the value at every time no entry speaks for.
+    held: Option<T>,
+    /// Ascending in stage time, one entry per time a source authored a value
+    /// at. A time is an authored one whatever its value: an infinite key is a
+    /// sample like any other, and is reported as one.
+    entries: Vec<(f64, T)>,
+}
+
+impl<T> Default for Series<T> {
+    fn default() -> Self {
+        Self {
+            held: None,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<T> Series<T> {
+    /// The series a source holding one value at every time contributes, which
+    /// is what a `default` is.
+    pub(crate) fn held(value: T) -> Self {
+        Self {
+            held: Some(value),
+            entries: Vec::new(),
+        }
+    }
+
+    /// The series a source authoring a value per time contributes. Times are
+    /// in stage time; any order is accepted.
+    pub(crate) fn sampled(entries: impl IntoIterator<Item = (f64, T)>) -> Self {
+        let mut entries: Vec<_> = entries.into_iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+        Self { held: None, entries }
+    }
+
+    /// Whether any source has contributed yet.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.held.is_none() && self.entries.is_empty()
+    }
+
+    /// The times the value can change at, ascending. A source that holds at
+    /// every time names none of its own.
+    pub(crate) fn times(&self) -> impl Iterator<Item = f64> + '_ {
+        self.entries.iter().map(|(time, _)| *time)
+    }
+
+    /// Everything the series holds, entries and the held value alike.
+    fn values(&self) -> impl Iterator<Item = &T> {
+        self.held.iter().chain(self.entries.iter().map(|(_, value)| value))
+    }
+
+    /// This series read through `f`.
+    fn map<U>(&self, f: impl Fn(&T) -> U) -> Series<U> {
+        Series {
+            held: self.held.as_ref().map(&f),
+            entries: self.entries.iter().map(|(time, value)| (*time, f(value))).collect(),
+        }
+    }
+
+    /// What this series holds at `time`: the last entry authored at or before
+    /// it, or the first, since a sample holds backwards from where it begins.
+    /// A source that names no time holds its one value everywhere.
+    fn at(&self, time: f64) -> Option<&T> {
+        if self.entries.is_empty() {
+            return self.held.as_ref();
+        }
+        let index = self.entries.partition_point(|(at, _)| *at <= time);
+        Some(&self.entries[index.saturating_sub(1)].1)
+    }
+}
+
+impl Series<Composed> {
+    /// Whether a weaker source could still change the value at some time.
+    pub(crate) fn is_open(&self) -> bool {
+        self.values().any(Composed::is_open)
+    }
+
+    /// Composes what a weaker source supplies into this one, which every time
+    /// in either now answers from.
+    pub(crate) fn fold(&mut self, weaker: &Series<Supplied>) {
+        if weaker.is_empty() {
+            return;
+        }
+        if self.is_empty() {
+            *self = weaker.map(Composed::source);
+            return;
+        }
+        // Neither names a time, so one value answers at every one.
+        if self.entries.is_empty() && weaker.entries.is_empty() {
+            self.held = self
+                .held
+                .take()
+                .zip(weaker.held.as_ref())
+                .map(|(composed, weaker)| composed.over(weaker));
+            return;
+        }
+        let mut times: Vec<_> = self.times().chain(weaker.times()).collect();
+        times.sort_by(f64::total_cmp);
+        times.dedup();
+        self.entries = times
+            .into_iter()
+            .map(|time| {
+                let composed = match (self.at(time), weaker.at(time)) {
+                    (Some(composed), Some(weaker)) => composed.clone().over(weaker),
+                    (Some(composed), None) => composed.clone(),
+                    (None, Some(weaker)) => Composed::source(weaker),
+                    (None, None) => Composed::Closed,
+                };
+                (time, composed)
+            })
+            .collect();
+        // Every time either side names is an entry now, and a value holds
+        // outside its own times, so nothing is left for a held value to say.
+        self.held = None;
+    }
+}
+
+/// `value` placed in the root namespace as the site that authored it puts it
+/// there — what [`Composing::fold`] does before composing one, exposed for a
+/// caller that builds a [`Composed`] of its own.
+pub(crate) fn rooted_at(value: Value, site: &OpinionSite<'_>) -> Value {
+    let mut composing = Composing::new();
+    composing.fold(value, &site.query_path, &site.node.map_to_root);
+    composing.into_open().unwrap_or(Value::ValueBlock)
+}
+
+/// Whether a composition would read a value of this kind at all — as one that
+/// composes, or as one a composing value draws on. A kind it would pass over
+/// is never carried past the source that authored it.
+pub(crate) fn reads_into_composition(value: &Value) -> bool {
+    composition_rewrites(value) || value.as_path_expression().is_some()
+}
+
+/// Whether composition reports a value of this kind as something other than
+/// what the site authored: it merges weaker opinions into it, or places its
+/// paths in the root namespace.
+///
+/// A kind composition leaves alone is exactly what the site that authored it
+/// holds, so a reader that has that is holding the composed value already —
+/// which is what lets one be snapshotted and replayed. Every kind
+/// [`composes_over_weaker`] accepts is one of these.
+pub(crate) fn composition_rewrites(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Dictionary(_) | Value::PathExpression(_) | Value::PathExpressionVec(_)
+    )
+}
+
 /// Whether a value keeps reading past the opinion that holds it, composing
-/// weaker opinions in — the kinds [`PrimIndex::resolve_strongest`] reports
-/// contributors for.
+/// weaker opinions in — the kinds a weaker source can still change.
 pub(crate) fn composes_over_weaker(value: &Value) -> bool {
     match value {
         Value::Dictionary(_) => true,
@@ -107,19 +476,15 @@ pub(crate) fn composes_over_weaker(value: &Value) -> bool {
     }
 }
 
-/// One weaker opinion that composed into a [`Composed`] value, held as the
-/// handles the owning index resolves while it still has the graph.
-pub(crate) struct ComposedSite {
-    /// The contributing node's arena handle, resolved through
-    /// [`PrimIndex::node`](super::PrimIndex::node) by whoever owns the index.
-    pub(crate) node: NodeId,
-    /// Id of the contributing layer (see [`Opinion::layer`]).
-    pub(crate) layer: LayerId,
-    /// The path the opinion was read from in that layer.
-    pub(crate) query_path: Path,
-    /// Effective time offset of the contributing layer (see
-    /// [`Opinion::offset`]).
-    pub(crate) offset: LayerOffset,
+/// `value` with every weaker reference it still holds resolved to the empty
+/// expression.
+fn close_value(value: Value) -> Value {
+    let close = |expr: sdf::PathExpression| expr.compose_over(&sdf::PathExpression::nothing());
+    match value {
+        Value::PathExpression(expr) => Value::PathExpression(close(expr)),
+        Value::PathExpressionVec(exprs) => Value::PathExpressionVec(exprs.into_iter().map(close).collect()),
+        other => other,
+    }
 }
 
 /// A live contributing spec site: a [`SpecSite`](super::prim_graph::SpecSite)
@@ -132,8 +497,6 @@ pub(crate) struct ComposedSite {
 struct ContributingSite<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
     node: &'a Node,
-    /// That node's arena handle (see [`Opinion::node_id`]).
-    node_id: NodeId,
     /// Id of the contributing layer (see [`Opinion::layer`]).
     layer: LayerId,
     /// Effective time offset of the contributing layer to the root namespace,
@@ -203,6 +566,9 @@ impl PrimIndex {
     /// When `prop_suffix` is `None`, queries use the node's path directly (zero-copy).
     /// When `Some`, appends the suffix to form a property path for each node.
     /// A [`Value::ValueBlock`] blocks opinions from weaker layers.
+    ///
+    /// A composition the layer stack could not finish comes back open, for
+    /// [`close_composition`] to settle against whatever the tier below offers.
     pub(crate) fn resolve_field(
         &self,
         field: &str,
@@ -221,12 +587,15 @@ impl PrimIndex {
         if field == FieldKey::TimeSamples.as_str() {
             return Ok(self.resolve_time_samples(stack, prop_suffix)?.map(Value::TimeSamples));
         }
-        match self.resolve_strongest(field, stack, prop_suffix, None)? {
+        let composed = match self.resolve_strongest(field, stack, prop_suffix)? {
             Some(strongest) if sdf::folds_list_ops(field) => {
-                self.resolve_list_op(field, stack, prop_suffix, strongest).map(Some)
+                Some(self.resolve_list_op(field, stack, prop_suffix, strongest)?)
             }
-            other => Ok(other),
-        }
+            other => other,
+        };
+        // A field read has no tier under the nodes to offer a weakest opinion,
+        // so a composition they left open closes here.
+        Ok(composed.map(close_value))
     }
 
     /// Folds a list-op-valued field across every contributing opinion into a
@@ -548,7 +917,6 @@ impl PrimIndex {
         self.live_spec_sites().map(move |(site, node)| {
             Ok(ContributingSite {
                 node,
-                node_id: site.node,
                 layer: site.layer,
                 offset: site.offset,
                 query_path: Self::query_path(node, prop_suffix),
@@ -596,7 +964,6 @@ impl PrimIndex {
             match stack.layer(site.layer).data().try_field(&site.query_path, field) {
                 Ok(Some(value)) => Some(Ok(Opinion {
                     node: site.node,
-                    node_id: site.node_id,
                     layer: site.layer,
                     query_path: site.query_path,
                     value,
@@ -640,150 +1007,34 @@ impl PrimIndex {
         None
     }
 
-    /// Walks nodes from strongest to weakest, returning the first opinion.
-    /// A [`Value::ValueBlock`] returns `None`, blocking weaker layers. Two
-    /// value kinds keep composing past the strongest opinion:
+    /// Composes a field across the prim's nodes, strongest to weakest.
     ///
-    /// - a dictionary recursively merges weaker dictionary opinions into
-    ///   itself (spec 12.2.5); a `ValueBlock` then blocks only the remaining
-    ///   weaker opinions, and weaker non-dictionary opinions are ignored
-    /// - a path expression substitutes each `%_` with the next-weaker
-    ///   opinion's expression (C++ registers `SdfPathExpression`'s
-    ///   compose-over with generic value resolution); a surviving `%_`
-    ///   resolves to the empty expression, and every opinion is mapped into
-    ///   the root namespace through its node first
+    /// Each node's opinion folds into a [`Composing`] value, so a dictionary
+    /// merges weaker dictionaries and a path expression substitutes its `%_`
+    /// with what weaker opinions hold; every other kind is the strongest
+    /// opinion alone. A [`Value::ValueBlock`] withholds the value from
+    /// everything weaker, which for the strongest opinion means no value at
+    /// all.
+    ///
+    /// A `%_` that outlives the nodes is left in the value for the caller's
+    /// own weakest tier to answer: [`PrimIndex::resolve_field`] has none and
+    /// closes it, while `usd` first offers the schema fallback.
     pub(crate) fn resolve_strongest(
         &self,
         field: &str,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-        start: Option<&SelectedSite>,
     ) -> Result<Option<Value>, QueryError> {
-        Ok(self
-            .compose(field, stack, prop_suffix, start, false)?
-            .map(|composed| composed.value))
-    }
-
-    /// [`resolve_strongest`](Self::resolve_strongest) reporting the weaker
-    /// sites that composed into the value as well as the value.
-    ///
-    /// Only the kinds that keep reading past the strongest opinion report any:
-    /// a value won outright has no contributor to name.
-    pub(crate) fn resolve_composed(
-        &self,
-        field: &str,
-        stack: &LayerGraph,
-        prop_suffix: Option<&str>,
-        start: Option<&SelectedSite>,
-    ) -> Result<Option<Composed>, QueryError> {
-        self.compose(field, stack, prop_suffix, start, true)
-    }
-
-    /// The shared body: `contributors` says whether the weaker sites a
-    /// composing kind consumes are collected, which only a caller that asks
-    /// for them pays for.
-    fn compose(
-        &self,
-        field: &str,
-        stack: &LayerGraph,
-        prop_suffix: Option<&str>,
-        start: Option<&SelectedSite>,
-        contributors: bool,
-    ) -> Result<Option<Composed>, QueryError> {
-        let mut opinions = self.opinions(field, stack, prop_suffix);
-        // With a `start`, composition begins at the site the shared
-        // value-resolution walk selected instead of searching for the strongest
-        // opinion again — which is what keeps the composed value and the source
-        // that walk reports naming one site. A site that fails to read on the
-        // way there is still the walk's to report rather than to skip.
-        let first = match start {
-            Some(start) => {
-                let mut found = None;
-                for opinion in opinions.by_ref() {
-                    let opinion = opinion?;
-                    if start.is(opinion.layer, opinion.node, &opinion.query_path) {
-                        found = Some(opinion);
-                        break;
-                    }
-                }
-                found
+        let mut composing = Composing::new();
+        for opinion in self.opinions(field, stack, prop_suffix) {
+            let opinion = opinion?;
+            let anchor = opinion.query_path.prim_path();
+            let folded = composing.fold(opinion.value.into_owned(), &anchor, &opinion.node.map_to_root);
+            if folded.step().stop() {
+                break;
             }
-            None => opinions.next().transpose()?,
-        };
-        let Some(first) = first else {
-            return Ok(None);
-        };
-        match first.value.into_owned() {
-            Value::ValueBlock => Ok(None),
-            Value::Dictionary(mut merged) => {
-                let mut weaker_sites = Vec::new();
-                for opinion in opinions {
-                    let opinion = opinion?;
-                    let site = contributors.then(|| opinion.site());
-                    match opinion.value.into_owned() {
-                        Value::ValueBlock => break,
-                        Value::Dictionary(weaker) => {
-                            sdf::dictionary_over(&mut merged, weaker);
-                            weaker_sites.extend(site);
-                        }
-                        // An opinion of another kind neither merges nor ends the
-                        // merge, so it contributed nothing to name.
-                        _ => {}
-                    }
-                }
-                Ok(Some(Composed {
-                    value: Value::Dictionary(merged),
-                    weaker: weaker_sites,
-                }))
-            }
-            Value::PathExpression(expr) => {
-                let mut composed =
-                    Self::map_expression_to_root(expr, &first.query_path.prim_path(), &first.node.map_to_root);
-                let mut weaker_sites = Vec::new();
-                for opinion in opinions {
-                    if !composed.contains_weaker_reference() {
-                        break;
-                    }
-                    let opinion = opinion?;
-                    // String and token opinions parse leniently, matching the
-                    // schema-less reads collection queries accept — they compose
-                    // as expressions and so are contributors like any other.
-                    let weaker = match opinion.value.as_ref() {
-                        Value::ValueBlock => break,
-                        Value::PathExpression(weaker) => weaker.clone(),
-                        Value::String(text) => sdf::PathExpression::parse(text),
-                        Value::Token(text) => sdf::PathExpression::parse(text.as_str()),
-                        _ => continue,
-                    };
-                    let anchor = opinion.query_path.prim_path();
-                    let weaker = Self::map_expression_to_root(weaker, &anchor, &opinion.node.map_to_root);
-                    composed = composed.compose_over(&weaker);
-                    weaker_sites.extend(contributors.then(|| opinion.site()));
-                }
-                // A weaker reference that outlived the stack has no opinion
-                // left to name: it resolves to the empty expression.
-                composed = composed.compose_over(&sdf::PathExpression::nothing());
-                Ok(Some(Composed {
-                    value: Value::PathExpression(composed),
-                    weaker: weaker_sites,
-                }))
-            }
-            Value::PathExpressionVec(exprs) => {
-                // Array elements translate across arcs like the scalar form;
-                // with no per-element weaker stack to draw on, a surviving
-                // weaker reference resolves to the empty expression.
-                let anchor = first.query_path.prim_path();
-                let composed = exprs
-                    .into_iter()
-                    .map(|expr| {
-                        Self::map_expression_to_root(expr, &anchor, &first.node.map_to_root)
-                            .compose_over(&sdf::PathExpression::nothing())
-                    })
-                    .collect();
-                Ok(Some(Composed::won(Value::PathExpressionVec(composed))))
-            }
-            other => Ok(Some(Composed::won(other))),
         }
+        Ok(composing.into_open())
     }
 
     /// Resolves `timeSamples` across the composition graph, applying each
@@ -959,7 +1210,6 @@ impl PrimIndex {
                 query_path,
                 value,
                 offset,
-                ..
             } = opinion?;
             let node_stack = node.layer_stack_id();
             match value.into_owned() {
@@ -1281,5 +1531,293 @@ fn retime_clip_stage_times(value: Value, offset: LayerOffset) -> Value {
             Value::Vec2dVec(pairs.into_iter().map(|p| gf::vec2d(offset.apply(p.x), p.y)).collect())
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tf;
+
+    fn dict(key: &str) -> Value {
+        let mut d = sdf::Dictionary::new();
+        d.insert(key.to_string(), Value::Int(1));
+        Value::Dictionary(d)
+    }
+
+    fn expr(text: &str) -> Value {
+        Value::PathExpression(sdf::PathExpression::parse(text))
+    }
+
+    /// A dictionary merges every weaker dictionary, ignores a source of another
+    /// kind without ending the merge, and stops at a block.
+    #[test]
+    fn dictionary_merges_weaker() {
+        let mut composing = Composing::new();
+        assert_eq!(composing.fold_rooted(dict("a")), Folded::Composed);
+        assert_eq!(composing.fold_rooted(Value::Int(7)), Folded::Skipped);
+        assert_eq!(composing.fold_rooted(dict("b")), Folded::Composed);
+        assert_eq!(composing.fold_rooted(Value::ValueBlock), Folded::Blocked);
+
+        let merged = composing
+            .close()
+            .expect("a value")
+            .try_as_dictionary()
+            .expect("a dictionary");
+        assert_eq!(merged.len(), 2, "{merged:?}");
+    }
+
+    /// A path expression substitutes each `%_` with the next source, including
+    /// one authored as text, and is finished once none is left.
+    #[test]
+    fn expression_composes_weaker() {
+        let mut composing = Composing::new();
+        assert_eq!(composing.fold_rooted(expr("/a// %_")), Folded::Composed);
+        assert_eq!(composing.fold_rooted(Value::Int(7)), Folded::Skipped);
+        assert_eq!(
+            composing.fold_rooted(Value::String("/b// %_".to_string())),
+            Folded::Composed
+        );
+        assert_eq!(composing.fold_rooted(expr("/c//")), Folded::Closed);
+
+        // Each substitution nests where the `%_` stood, which is not how the
+        // same union parses.
+        assert_eq!(composing.close(), Some(expr("/a// (/b// /c//)")));
+    }
+
+    /// A weaker reference nothing answered resolves to the empty expression, so
+    /// no composition token reaches a reader.
+    #[test]
+    fn open_expression_closes() {
+        let mut composing = Composing::new();
+        composing.fold_rooted(expr("/a// %_"));
+        assert!(composing.is_open());
+        assert_eq!(composing.close(), Some(expr("/a//")));
+    }
+
+    /// The strongest source alone answers for a kind that composes with
+    /// nothing, and the walk that folded it is told to stop.
+    #[test]
+    fn dense_value_wins_outright() {
+        let mut composing = Composing::new();
+        assert_eq!(composing.fold_rooted(Value::Int(7)), Folded::Closed);
+        assert!(!composing.is_open());
+        assert_eq!(composing.close(), Some(Value::Int(7)));
+    }
+
+    /// What a source supplies at one time, needing no translation.
+    fn supplies(value: Value) -> Supplied {
+        Supplied::classify(&value, &|value| value)
+    }
+
+    /// A source holding one value at every time.
+    fn held_source(value: Value) -> Series<Supplied> {
+        Series::held(supplies(value))
+    }
+
+    /// A source authoring a value per time.
+    fn sampled_source(entries: impl IntoIterator<Item = (f64, Value)>) -> Series<Supplied> {
+        Series::sampled(entries.into_iter().map(|(time, value)| (time, supplies(value))))
+    }
+
+    /// What the composition holds at `time`, as text.
+    fn reads(series: &Series<Composed>, time: f64) -> String {
+        match series.at(time) {
+            Some(Composed::Open(value)) => format!("{value:?}"),
+            Some(Composed::Closed) => "closed".to_string(),
+            None => "nothing".to_string(),
+        }
+    }
+
+    /// The composition of `sources`, strongest first.
+    fn compose_sources(sources: impl IntoIterator<Item = Series<Supplied>>) -> Series<Composed> {
+        let mut composed = Series::<Composed>::default();
+        for source in sources {
+            composed.fold(&source);
+        }
+        composed
+    }
+
+    /// Every kind of weaker source a composition can meet, and what each does
+    /// to it. These are the four outcomes the fold has to tell apart: a source
+    /// that contributes and closes, one that contributes and leaves it open,
+    /// one the composition passes over, and one that withholds the value.
+    #[test]
+    fn weaker_source_outcomes() {
+        let open = || held_source(expr("/s// %_"));
+        // A composition answers about *when* a value changes, so what it holds
+        // once closed no longer matters: a source that contributed closes it,
+        // and one it passed over leaves the value it had standing.
+        let unchanged = format!("{:?}", expr("/s// %_"));
+        let cases = [
+            // (weaker value, still open, what the composition reads)
+            (expr("/w//"), false, "closed"),
+            (expr("/w// %_"), true, "/s// (/w// %_)"),
+            (Value::String("/w//".to_string()), false, "closed"),
+            (Value::Int(7), true, unchanged.as_str()),
+            (Value::ValueBlock, false, "closed"),
+        ];
+        for (weaker, stays_open, effect) in cases {
+            let composed = compose_sources([open(), held_source(weaker.clone())]);
+            assert_eq!(composed.is_open(), stays_open, "{weaker:?}");
+            let read = reads(&composed, 0.0);
+            let effect = match effect.starts_with('/') {
+                true => format!("{:?}", expr(effect)),
+                false => effect.to_string(),
+            };
+            assert_eq!(read, effect, "{weaker:?}");
+        }
+    }
+
+    /// The same outcomes hold whichever tier the weaker source is: a `default`
+    /// holding at every time, and a map authoring one at a time, answer alike.
+    #[test]
+    fn source_tiers_compose_alike() {
+        for weaker in [expr("/w//"), Value::Int(7), Value::ValueBlock] {
+            let held = compose_sources([held_source(expr("/s// %_")), held_source(weaker.clone())]);
+            let sampled = compose_sources([held_source(expr("/s// %_")), sampled_source([(0.0, weaker.clone())])]);
+            assert_eq!(
+                held.is_open(),
+                sampled.is_open(),
+                "{weaker:?} answered differently as a sample than as a default"
+            );
+            assert_eq!(reads(&held, 0.0), reads(&sampled, 0.0), "{weaker:?}");
+        }
+    }
+
+    /// A source is not one thing over all time: the same map can withhold a
+    /// value at one time, be passed over at another, and contribute at a third.
+    #[test]
+    fn outcomes_vary_over_time() {
+        let mixed = || sampled_source([(0.0, Value::ValueBlock), (1.0, Value::Int(7)), (2.0, expr("/w//"))]);
+        let composed = compose_sources([held_source(expr("/s// %_")), mixed()]);
+
+        assert_eq!(reads(&composed, 0.0), "closed", "the block withheld the value");
+        assert_eq!(
+            reads(&composed, 1.0),
+            format!("{:?}", expr("/s// %_")),
+            "the int was passed over"
+        );
+        assert_eq!(reads(&composed, 2.0), "closed", "the expression contributed");
+        assert!(composed.is_open(), "the time the int was passed over is still open");
+
+        // A weaker source is reached only where the composition stayed open —
+        // at 1, where the int changed nothing — and the time it authors is one
+        // the composed value can change at.
+        let deeper = compose_sources([
+            held_source(expr("/s// %_")),
+            mixed(),
+            sampled_source([(3.0, expr("/z//"))]),
+        ]);
+        assert_eq!(deeper.times().collect::<Vec<_>>(), vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(reads(&deeper, 1.0), "closed", "the weakest source composed in there");
+        assert!(!deeper.is_open());
+    }
+
+    /// A value no composition reads is never copied, which is what keeps a
+    /// query about *when* a value changes off the values of animated geometry.
+    #[test]
+    fn dense_sample_is_not_carried() {
+        assert!(matches!(supplies(Value::DoubleVec(vec![1.0; 128])), Supplied::Opaque));
+    }
+
+    /// A sample holds backwards from where it begins, so a weaker source names
+    /// times before the stronger one's first sample and still composes there.
+    #[test]
+    fn series_holds_first_sample_backwards() {
+        let composed = compose_sources([
+            sampled_source([(5.0, expr("/a// %_"))]),
+            sampled_source([(1.0, expr("/w//"))]),
+        ]);
+
+        assert_eq!(composed.times().collect::<Vec<_>>(), vec![1.0, 5.0]);
+        assert!(!composed.is_open(), "the weaker expression composed in at both times");
+    }
+
+    /// A source that holds at every time names none of its own, and composes
+    /// with a weaker one at every time that one names.
+    #[test]
+    fn held_source_names_no_time() {
+        let held = compose_sources([held_source(expr("/a// %_"))]);
+        assert!(held.times().next().is_none());
+
+        let composed = compose_sources([held_source(expr("/a// %_")), sampled_source([(2.0, expr("/w//"))])]);
+        assert_eq!(composed.times().collect::<Vec<_>>(), vec![2.0]);
+        assert!(!composed.is_open(), "the sampled expression composed in");
+    }
+
+    /// The questions a walk asks about a value nest, from the narrowest — does
+    /// it compose here — out to the widest — would a composition read it at
+    /// all. A kind that answered a narrow one and not a wider one would let a
+    /// walk mask a source that contributes.
+    #[test]
+    fn composition_questions_nest() {
+        let cases = [
+            dict("a"),
+            expr("/a// %_"),
+            expr("/a//"),
+            Value::PathExpressionVec(vec![sdf::PathExpression::parse("/a//")]),
+            Value::Int(7),
+            Value::String("/a//".to_string()),
+            Value::String("/a// %_".to_string()),
+            Value::Token(tf::Token::new("fixed")),
+        ];
+        for value in cases {
+            assert!(
+                !composes_over_weaker(&value) || reads_into_composition(&value),
+                "{value:?} composes but is not read into a composition"
+            );
+            assert!(
+                !composes_over_weaker(&value) || composition_rewrites(&value),
+                "{value:?} composes but is reported as authored"
+            );
+            // A value a composition reads is carried by the classification;
+            // one it does not read is the only kind that may be dropped.
+            assert_eq!(
+                reads_into_composition(&value),
+                matches!(supplies(value.clone()), Supplied::Composable(_)),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// The predicate that decides whether a walk reads on and the fold that
+    /// reads are two statements of one rule, so a kind added to either alone
+    /// shows up here rather than as a chain that is quietly empty.
+    #[test]
+    fn composing_kinds_agree() {
+        let cases = [
+            dict("a"),
+            expr("/a// %_"),
+            expr("/a//"),
+            Value::PathExpressionVec(vec![sdf::PathExpression::parse("/a// %_")]),
+            Value::Int(7),
+            Value::String("/a//".to_string()),
+        ];
+        for value in cases {
+            let mut composing = Composing::new();
+            let folded = composing.fold_rooted(value.clone());
+            assert_eq!(
+                composes_over_weaker(&value),
+                folded == Folded::Composed,
+                "{value:?} composes but the fold does not read on, or the other way round"
+            );
+            assert_eq!(composes_over_weaker(&value), composing.is_open(), "{value:?}");
+        }
+    }
+
+    /// The tier below the walk gets the last word on a composition it resumes:
+    /// its opinion folds in before the value closes, and a value that took
+    /// nothing from it closes just the same.
+    #[test]
+    fn weakest_closes_composition() {
+        let mut composing = Composing::resumed(expr("/a// %_"));
+        assert!(composing.is_open());
+        composing.fold_rooted(expr("/fallback//"));
+        assert_eq!(composing.close(), Some(expr("/a// /fallback//")));
+
+        let dense = Composing::resumed(Value::Int(7));
+        assert!(!dense.is_open());
+        assert_eq!(dense.close(), Some(Value::Int(7)));
     }
 }

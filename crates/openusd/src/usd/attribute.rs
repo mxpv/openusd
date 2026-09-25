@@ -705,15 +705,35 @@ impl Attribute {
         T: TryFrom<sdf::Value>,
         T::Error: Into<crate::Error>,
     {
-        let value = match time.into() {
-            None => self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::Default)?,
-            Some(time) => self.stage.resolve_at(&self.path, time.value())?,
+        let value = self
+            .stage
+            .resolve_at(&self.path, time.into().map(|time| time.value()))?;
+        super::decode_value(self.finish_composition(value)?)
+    }
+
+    /// Closes what the authored sources composed against the schema tier,
+    /// which owns the weakest opinion an attribute has.
+    ///
+    /// The authored sources are as far as composition reaches in `pcp`, so a
+    /// value that outlived them — a path expression still holding a `%_`, a
+    /// dictionary — comes back with its composition open, and a property none
+    /// of them answered comes back with none at all. The fallback is the last
+    /// opinion to fold into either (C++
+    /// `UsdStage::_ResolveInfoResolver::ProcessFallback`), and a reference no
+    /// opinion answers then resolves to the empty expression rather than
+    /// leaving a `%_` in a resolved value — including one the fallback itself
+    /// holds.
+    fn finish_composition(&self, value: Option<sdf::Value>) -> Result<Option<sdf::Value>> {
+        let mut composing = match value {
+            Some(value) => pcp::Composing::resumed(value),
+            None => pcp::Composing::new(),
         };
-        let value = match value {
-            Some(value) => Some(value),
-            None => self.fallback_value()?,
-        };
-        super::decode_value(value)
+        if (composing.is_empty() || composing.is_open())
+            && let Some(fallback) = self.fallback_value()?
+        {
+            composing.fold_rooted(fallback);
+        }
+        Ok(composing.close())
     }
 
     /// The value this attribute's schema declares when nothing is authored
@@ -810,11 +830,7 @@ impl Attribute {
     /// `time` is `None` for the default time — matching
     /// [`get_at`](Self::get_at) — or `Some(tc)` for a numeric one.
     pub fn resolve_info_at(&self, time: impl Into<Option<TimeCode>>) -> Result<ResolveInfo> {
-        let mode = match time.into() {
-            None => pcp::ResolveMode::Default,
-            Some(time) => pcp::ResolveMode::Numeric(time.value()),
-        };
-        self.build_resolve_info(mode)
+        self.build_resolve_info(pcp::ResolveMode::at(time.into().map(|time| time.value())))
     }
 
     /// Adds the schema tier `pcp` knows nothing about to the authored source it
@@ -823,13 +839,11 @@ impl Attribute {
     fn build_resolve_info(&self, mode: pcp::ResolveMode) -> Result<ResolveInfo> {
         let resolved = self.stage.resolve_info(&self.path, mode)?;
         let source = match resolved.source {
-            pcp::ResolveSourceKind::Default => ResolveInfoSource::Default,
-            pcp::ResolveSourceKind::TimeSamples => ResolveInfoSource::TimeSamples,
-            pcp::ResolveSourceKind::ValueClips => ResolveInfoSource::ValueClips,
             pcp::ResolveSourceKind::None => match self.has_schema_fallback()? {
                 true => ResolveInfoSource::Fallback,
                 false => ResolveInfoSource::None,
             },
+            kind => source_of(kind),
         };
         // A schema fallback and an absent value come from no composition node
         // and no spec, even when a block at one is what sent resolution there.
@@ -837,24 +851,41 @@ impl Attribute {
             ResolveInfoSource::Fallback | ResolveInfoSource::None => (None, None, Vec::new()),
             _ => (resolved.node, resolved.spec, resolved.weaker),
         };
-        // Every contributor answered from a `default` it authored, so each
-        // link is that much of a resolve info and chains no further.
-        let weaker = weaker
+        // A contributor answered the same walk the reported source did, from
+        // whichever tier it was found in, so each link is that much of a
+        // resolve info and chains no further.
+        let mut weaker: Vec<_> = weaker
             .into_iter()
             .map(|site| ResolveInfo {
-                source: ResolveInfoSource::Default,
+                source: source_of(site.kind),
                 node: Some(site.node),
-                spec: Some(site.spec),
+                spec: site.spec,
                 weaker: Vec::new(),
+                composes_over_varying: false,
                 value_is_blocked: false,
                 has_authored_opinion: true,
             })
             .collect();
+        // A composition the layer opinions left open ends at the schema tier,
+        // so the fallback that closed it is the chain's last link — authored by
+        // no layer, and so naming no node and no spec.
+        if resolved.open && self.has_schema_fallback()? {
+            weaker.push(ResolveInfo {
+                source: ResolveInfoSource::Fallback,
+                node: None,
+                spec: None,
+                weaker: Vec::new(),
+                composes_over_varying: false,
+                value_is_blocked: false,
+                has_authored_opinion: false,
+            });
+        }
         Ok(ResolveInfo {
             source,
             node,
             spec,
             weaker,
+            composes_over_varying: resolved.varies,
             value_is_blocked: resolved.value == pcp::ValueState::Blocked,
             has_authored_opinion: resolved.authored,
         })
@@ -1221,10 +1252,7 @@ impl AttributeQuery {
             // The untimed read goes through the attribute, which resolves the
             // `default` field and the schema fallback behind it.
             None => self.attr.get_at::<sdf::Value>(None)?,
-            Some(time) => match self.value_at(time.value())? {
-                Some(value) => Some(value),
-                None => self.attr.fallback_value()?,
-            },
+            Some(time) => self.attr.finish_composition(self.value_at(time.value())?)?,
         };
         super::decode_value(value)
     }
@@ -1302,8 +1330,22 @@ impl AttributeQuery {
                 // `value`.
                 Ok(stage.with_cache(|g, c| Ok(c.resolve_asset_values(g, value.clone(), Some(site))))?)
             }
-            AttributeValueSource::Clips => stage.resolve_at(self.attr.path(), time),
+            AttributeValueSource::PerTime => stage.resolve_at(self.attr.path(), Some(time)),
         }
+    }
+}
+
+/// The public source for a tier the shared walk resolves from, and `None`
+/// where it found none.
+///
+/// The schema fallback is not one of them: it is the tier `usd` adds under the
+/// layers, and only [`Attribute::build_resolve_info`] knows when it answered.
+fn source_of(kind: pcp::ResolveSourceKind) -> ResolveInfoSource {
+    match kind {
+        pcp::ResolveSourceKind::Default => ResolveInfoSource::Default,
+        pcp::ResolveSourceKind::TimeSamples => ResolveInfoSource::TimeSamples,
+        pcp::ResolveSourceKind::ValueClips => ResolveInfoSource::ValueClips,
+        pcp::ResolveSourceKind::None => ResolveInfoSource::None,
     }
 }
 
@@ -1517,6 +1559,99 @@ mod tests {
 
         let rule = stage.attribute("/Group.collection:render:expansionRule")?;
         assert_eq!(rule.get::<tf::Token>()?, Some(tf::Token::new("expandPrims")));
+        Ok(())
+    }
+
+    /// A stage whose one schema declares a path-expression attribute with a
+    /// fallback — the weakest opinion a composing value can draw on, which the
+    /// core families declare for no property.
+    fn expression_stage() -> Result<Stage> {
+        const MANIFEST: &str = r#"#usda 1.0
+
+def "Typed"
+{
+    uniform token schemaKind = "abstractBase"
+}
+
+def "Marker"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Typed"]
+}
+"#;
+        const SCHEMATICS: &str = r#"#usda 1.0
+
+class "Typed"
+{
+}
+
+class Marker "Marker"
+{
+    uniform pathExpression mask = "/Fallback//"
+    uniform pathExpression open = "/Fallback// %_"
+}
+"#;
+        Stage::builder()
+            .schema_registry(SchemaRegistry::test_family(MANIFEST, SCHEMATICS))
+            .in_memory("anon.usda")
+    }
+
+    /// A `%_` that outlives the layer opinions draws on the schema fallback,
+    /// which then ends the chain of sources that composed the value.
+    #[test]
+    fn fallback_closes_expression() -> Result<()> {
+        let stage = expression_stage()?;
+        stage.define_prim("/M")?.set_type_name("Marker")?;
+        let mask = stage.attribute("/M.mask")?;
+        mask.clone().set(sdf::PathExpression::parse("/a// %_"))?;
+
+        assert_eq!(
+            mask.get::<sdf::PathExpression>()?,
+            Some(sdf::PathExpression::parse("/a// /Fallback//"))
+        );
+        let info = mask.resolve_info_at(None)?;
+        assert_eq!(info.source(), ResolveInfoSource::Default);
+        let links = info.weaker_sources();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].source(), ResolveInfoSource::Fallback);
+        // Authored in no layer, so the link names neither node nor spec.
+        assert!(links[0].node().is_none());
+        assert!(links[0].spec_site().is_none());
+        Ok(())
+    }
+
+    /// A fallback is a composed value like any other, so a weaker reference it
+    /// holds resolves to the empty expression rather than reaching a reader.
+    #[test]
+    fn fallback_closes_itself() -> Result<()> {
+        let stage = expression_stage()?;
+        stage.define_prim("/M")?.set_type_name("Marker")?;
+
+        // Nothing is authored, so the fallback is the whole answer — and there
+        // is no weaker opinion left for its `%_` to draw on.
+        let open = stage.attribute("/M.open")?;
+        assert_eq!(
+            open.get::<sdf::PathExpression>()?,
+            Some(sdf::PathExpression::parse("/Fallback//"))
+        );
+        assert_eq!(open.resolve_info()?.source(), ResolveInfoSource::Fallback);
+        Ok(())
+    }
+
+    /// An expression the layers finished themselves never reaches the schema:
+    /// the fallback is an opinion weaker than every layer, not an override.
+    #[test]
+    fn closed_expression_keeps_layers() -> Result<()> {
+        let stage = expression_stage()?;
+        stage.define_prim("/M")?.set_type_name("Marker")?;
+        let mask = stage.attribute("/M.mask")?;
+        mask.clone().set(sdf::PathExpression::parse("/a//"))?;
+
+        assert_eq!(
+            mask.get::<sdf::PathExpression>()?,
+            Some(sdf::PathExpression::parse("/a//"))
+        );
+        assert!(mask.resolve_info_at(None)?.weaker_sources().is_empty());
         Ok(())
     }
 

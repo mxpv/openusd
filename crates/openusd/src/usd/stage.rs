@@ -2627,9 +2627,10 @@ impl Stage {
         Ok(self.masked(&attr_path, |g, c| c.value_might_be_time_varying(g, &attr_path))?)
     }
 
-    /// Evaluate an attribute's value at `time` under the stage's current
-    /// [`InterpolationType`]. The crate-internal resolution engine behind
-    /// [`Attribute::get`](super::Attribute::get) with a numeric time code.
+    /// Evaluate an attribute's value at `time`, or at the default time when it
+    /// is `None`, under the stage's current [`InterpolationType`]. The
+    /// crate-internal resolution engine behind
+    /// [`Attribute::get`](super::Attribute::get).
     ///
     /// Resolution visits the prim's contributing sites strongest-first,
     /// probing `timeSamples` (interpolated per §12.5) then `default` at each,
@@ -2641,7 +2642,7 @@ impl Stage {
     /// authored value is a [`sdf::Value::ValueBlock`] / [`sdf::Value::None`]
     /// (the spec sentinels for "no value"), or when the queried prim
     /// is excluded by the stage's population mask.
-    pub(crate) fn resolve_at(&self, attr_path: impl sdf::IntoPath, time: f64) -> Result<Option<sdf::Value>> {
+    pub(crate) fn resolve_at(&self, attr_path: impl sdf::IntoPath, time: Option<f64>) -> Result<Option<sdf::Value>> {
         let attr_path = sdf::try_into_path(attr_path)?;
         let interp_type = self.interpolation_type.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);

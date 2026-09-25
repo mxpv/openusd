@@ -36,6 +36,7 @@ use super::diagnostics::Diagnostics;
 use super::index_cache::block_to_none;
 use super::layer_graph::LayerGraph;
 use super::prim_graph::Node;
+use super::prim_resolve::Supplied;
 use super::value_resolve::ValueState;
 use super::{ClipLoad, CompositionDiagnostic, LayerId, LayerStackId, QueryError};
 
@@ -115,6 +116,28 @@ pub(crate) struct ClipSet {
     /// the nearest surrounding clips rather than by the manifest default
     /// (spec 12.3.4.6-7).
     pub interpolate_missing: bool,
+}
+
+/// What a clip set authors for one attribute: each of its clips' own sample
+/// times and what each supplies, in schedule order, with what fills a gap
+/// where a clip authors none.
+struct ClipSamples {
+    per_clip: Vec<Vec<(f64, Supplied)>>,
+    /// What the set supplies where a clip authors no sample for the attribute,
+    /// which the manifest's default fills.
+    gap: Supplied,
+}
+
+/// What a value-clip set contributes to a query that names no time: the stage
+/// times its value changes at, whether its schedule alone can vary the value
+/// ([`ClipSet::may_be_time_varying`]), and the strongest sample that still
+/// composes, which a walk reading a composition carries on from.
+pub(crate) struct ClipIntrospection {
+    pub(crate) may_vary: bool,
+    /// What the set supplies at each of those times, read from the samples the
+    /// times were read from, so a composition judges a clip exactly as it
+    /// judges a layer's own samples.
+    pub(crate) supplied: Vec<(f64, Supplied)>,
 }
 
 /// A parsed clip set plus the site that introduced it.
@@ -351,7 +374,42 @@ impl ClipSet {
     /// query is answered from the active clip alone. Whether the set sources the
     /// attribute at all is decided by the caller's participation check before
     /// this routine runs.
-    pub(crate) fn stage_sample_times(&self, per_clip: &[Vec<f64>]) -> Vec<f64> {
+    pub(crate) fn stage_samples(&self, per_clip: &[Vec<(f64, Supplied)>], gap: &Supplied) -> Vec<(f64, Supplied)> {
+        self.stage_sample_times(
+            &per_clip
+                .iter()
+                .map(|clip| clip.iter().map(|(time, _)| *time).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .map(|time| {
+            let supplied = self.supplied_at(per_clip, gap, time);
+            (time, supplied)
+        })
+        .collect()
+    }
+
+    /// What the set supplies at `time`: the value the active clip holds at the
+    /// clip time this maps to, or `gap` where that clip authors none — which is
+    /// what the manifest's default fills (spec 12.3.4.6).
+    ///
+    /// A clip sample holds backwards from where it begins, as a layer's does.
+    fn supplied_at(&self, per_clip: &[Vec<(f64, Supplied)>], gap: &Supplied, time: f64) -> Supplied {
+        let Some((_, clip_index)) = self.active_entry(time) else {
+            return gap.clone();
+        };
+        let samples = per_clip.get(clip_index).map_or(&[][..], Vec::as_slice);
+        if samples.is_empty() {
+            return gap.clone();
+        }
+        let clip_time = self.map_stage_to_clip(time);
+        let index = samples.partition_point(|(at, _)| *at <= clip_time);
+        samples[index.saturating_sub(1)].1.clone()
+    }
+
+    /// The stage times the set contributes, which [`Self::stage_samples`] pairs
+    /// with what is supplied at each.
+    fn stage_sample_times(&self, per_clip: &[Vec<f64>]) -> Vec<f64> {
         let mut out: Vec<f64> = Vec::new();
         for (k, &(start, clip_index)) in self.active.iter().enumerate() {
             let samples = per_clip.get(clip_index).map_or(&[][..], Vec::as_slice);
@@ -880,10 +938,10 @@ impl ClipCache {
         query: &ClipQuery<'_>,
     ) -> Result<ValueState, QueryError> {
         let clip_path = clip_attr_path(query, &resolved.set.clip_prim_path(query.anchor))?;
-        let Some(per_clip) = self.clip_set_participates(graph, diagnostics, resolved, query.anchor, &clip_path)? else {
+        let Some(samples) = self.clip_set_participates(graph, diagnostics, resolved, query.anchor, &clip_path)? else {
             return Ok(ValueState::Absent);
         };
-        if per_clip.iter().any(|times| !times.is_empty()) {
+        if samples.per_clip.iter().any(|clip| !clip.is_empty()) {
             return Ok(ValueState::Present);
         }
         let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
@@ -908,13 +966,16 @@ impl ClipCache {
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
-    ) -> Result<Option<(Vec<f64>, bool)>, QueryError> {
+    ) -> Result<Option<ClipIntrospection>, QueryError> {
         let clip_path = clip_attr_path(query, &resolved.set.clip_prim_path(query.anchor))?;
-        let Some(per_clip) = self.clip_set_participates(graph, diagnostics, resolved, query.anchor, &clip_path)? else {
+        let Some(samples) = self.clip_set_participates(graph, diagnostics, resolved, query.anchor, &clip_path)? else {
             return Ok(None);
         };
         let set = &resolved.set;
-        Ok(Some((set.stage_sample_times(&per_clip), set.may_be_time_varying())))
+        Ok(Some(ClipIntrospection {
+            supplied: set.stage_samples(&samples.per_clip, &samples.gap),
+            may_vary: set.may_be_time_varying(),
+        }))
     }
 
     /// Generates a manifest for `resolved` from the clips its `active` schedule
@@ -1285,7 +1346,7 @@ impl ClipCache {
         resolved: &ResolvedClipSet,
         prim: &Path,
         clip_path: &Path,
-    ) -> Result<Option<Vec<Vec<f64>>>, QueryError> {
+    ) -> Result<Option<ClipSamples>, QueryError> {
         let set = &resolved.set;
         // With no active schedule no clip is ever selected, so the set sources
         // nothing regardless of what its clips author.
@@ -1296,26 +1357,50 @@ impl ClipCache {
         if !self.manifest_declares(graph, manifest.as_deref(), clip_path)? {
             return Ok(None);
         }
-        let mut per_clip: Vec<Vec<f64>> = Vec::with_capacity(set.asset_paths.len());
+        let mut per_clip: Vec<Vec<(f64, Supplied)>> = Vec::with_capacity(set.asset_paths.len());
         for asset in &set.asset_paths {
-            per_clip.push(self.clip_in_clip_times(graph, asset.asset_path(), resolved.source.layer, clip_path)?);
+            per_clip.push(self.clip_in_clip_samples(graph, asset.asset_path(), resolved.source.layer, clip_path)?);
         }
-        Ok(Some(per_clip))
+        // A clip authoring no samples for the attribute is filled from the
+        // manifest's default (spec 12.3.4.6), so that value composes where the
+        // clip's own would have. With no gap there is none to read.
+        // A clip authoring no sample for the attribute is filled from the
+        // manifest's default (spec 12.3.4.6), so that value is what the set
+        // supplies there. With no gap it is never read.
+        let gap = match per_clip.iter().any(Vec::is_empty) {
+            true => match manifest.as_deref() {
+                Some(manifest) => self
+                    .manifest_default(graph, manifest, clip_path)?
+                    .map_or(Supplied::Blocked, |value| Supplied::classify(&value, &|value| value)),
+                None => Supplied::Blocked,
+            },
+            false => Supplied::Blocked,
+        };
+        Ok(Some(ClipSamples { per_clip, gap }))
     }
 
     /// The in-clip authored sample times for `clip_path` in a single clip layer,
-    /// or empty when the layer is unresolved or authors no samples there.
-    fn clip_in_clip_times(
+    /// with what each supplies: the map is read whole to list the times, so
+    /// what it holds is classified while it is in hand rather than fetched
+    /// again per time. Empty when the layer is unresolved or authors no samples
+    /// there.
+    ///
+    /// The times are the clip's own, which the set's schedule maps to stage
+    /// time.
+    fn clip_in_clip_samples(
         &mut self,
         graph: &LayerGraph,
         asset: &str,
         anchor_layer: LayerId,
         clip_path: &Path,
-    ) -> Result<Vec<f64>, QueryError> {
-        Ok(self
-            .clip_time_samples(graph, asset, anchor_layer, clip_path)?
-            .map(|(_, samples)| samples.iter().map(|(t, _)| *t).collect())
-            .unwrap_or_default())
+    ) -> Result<Vec<(f64, Supplied)>, QueryError> {
+        let Some((_, samples)) = self.clip_time_samples(graph, asset, anchor_layer, clip_path)? else {
+            return Ok(Vec::new());
+        };
+        Ok(samples
+            .iter()
+            .map(|(time, value)| (*time, Supplied::classify(value, &|value| value)))
+            .collect())
     }
 
     /// Reads the `timeSamples` map authored for `clip_path` in a single clip
