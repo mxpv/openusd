@@ -590,6 +590,13 @@ impl Path {
         self.ancestors().take_while(|p| !p.is_abs_root())
     }
 
+    /// Iterates the strict ancestors of `self` from leaf upward, stopping
+    /// before the absolute root — [`ancestors_below_root`](Self::ancestors_below_root)
+    /// without `self` itself. Empty for a root prim and for the absolute root.
+    pub fn strict_ancestors_below_root(&self) -> impl Iterator<Item = Path> + use<> {
+        self.strict_ancestors().take_while(|p| !p.is_abs_root())
+    }
+
     /// Returns the name of this path's root prim — the first prim component,
     /// whatever the depth — or `None` for the pseudo-root, the empty path, and
     /// a relative path that opens with an anchor rather than a name.
@@ -1823,10 +1830,13 @@ mod tests {
             strs(&mut p.ancestors_below_root()),
             ["/A/B/C.attr", "/A/B/C", "/A/B", "/A"]
         );
+        assert_eq!(strs(&mut p.strict_ancestors_below_root()), ["/A/B/C", "/A/B", "/A"]);
         // The pseudo-root yields only itself, no strict ancestors, nothing below.
         assert_eq!(Path::abs_root().ancestors().count(), 1);
         assert_eq!(Path::abs_root().strict_ancestors().count(), 0);
         assert_eq!(Path::abs_root().ancestors_below_root().count(), 0);
+        assert_eq!(Path::abs_root().strict_ancestors_below_root().count(), 0);
+        assert_eq!(Path::new("/A").unwrap().strict_ancestors_below_root().count(), 0);
     }
 
     #[test]

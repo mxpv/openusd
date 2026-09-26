@@ -430,10 +430,7 @@ impl IndexCache {
         let mut victims: Vec<Path> = Vec::new();
         for p in touched {
             victims.push(p.clone());
-            for ancestor in p.strict_ancestors() {
-                if ancestor.is_abs_root() {
-                    break;
-                }
+            for ancestor in p.strict_ancestors_below_root() {
                 let rule = self.load_rules.effective_rule(&ancestor);
                 if rule == Rule::All {
                     break;

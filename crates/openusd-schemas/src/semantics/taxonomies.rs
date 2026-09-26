@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use openusd::Result;
-use openusd::tf::Token;
+use openusd::tf;
 use openusd::usd::Prim;
 
 use super::{LabelsAPI, tokens};
@@ -13,7 +13,7 @@ impl LabelsAPI {
     /// The taxonomies `prim` itself carries labels under: the instance name of
     /// every application of this schema on it (C++
     /// `UsdSemanticsLabelsAPI::GetDirectTaxonomies`).
-    pub fn direct_taxonomies(prim: &Prim) -> Result<Vec<Token>> {
+    pub fn direct_taxonomies(prim: &Prim) -> Result<Vec<tf::Token>> {
         prim.api_schema_instance_names(tokens::SEMANTICS_LABELS_API)
     }
 
@@ -25,13 +25,13 @@ impl LabelsAPI {
     /// inherit down namespace, so this is the set of taxonomies worth asking
     /// `prim` about — not the labels it answers with, which are each
     /// taxonomy's own.
-    pub fn inherited_taxonomies(prim: &Prim) -> Result<Vec<Token>> {
+    pub fn inherited_taxonomies(prim: &Prim) -> Result<Vec<tf::Token>> {
         let stage = prim.stage();
-        let mut taxonomies = BTreeSet::new();
+        let mut taxonomies: BTreeSet<tf::Token> = Self::direct_taxonomies(prim)?.into_iter().collect();
         // TODO(rayon): each hop is an independent composed `apiSchemas` query
         // over `&stage`, so every ancestor could resolve at once and merge its
         // names in.
-        for path in prim.path().ancestors_below_root() {
+        for path in prim.path().strict_ancestors_below_root() {
             taxonomies.extend(Self::direct_taxonomies(&stage.prim(path)?)?);
         }
         Ok(taxonomies.into_iter().collect())
