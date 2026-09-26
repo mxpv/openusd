@@ -15,7 +15,7 @@ fn main() {
     let schemas = Path::new("schemas");
     let mut builder = configured(schemas);
 
-    for (family, library) in FAMILIES {
+    for &(family, library) in FAMILIES {
         if env::var_os(format!("CARGO_FEATURE_{}", family.to_uppercase())).is_some() {
             builder = builder.schema(schemas.join(library).join("schema.usda"));
         }

@@ -1113,13 +1113,13 @@ impl SchemaFamily<'_> {
     /// from. Authoring goes through the same spec constructors a schematics
     /// layer is written with, so a family declared in Rust and the same family
     /// read from a layer reach a registry as the same data.
-    // TODO(perf): the ten domain families of `openusd-schemas` build in 2.5 ms
+    // TODO(perf): the domain families of `openusd-schemas` build in 2.5 ms
     // here, against 3.4 ms to parse and copy the equivalent layers. Most of
     // what is left is child-list bookkeeping the caller already knows the
     // answer to: every property spec re-appends to its prim's
     // `propertyChildren` (the O(n²) noted in `sdf/spec.rs`) and re-checks the
     // pseudo-root's `primChildren`, which clones that whole token vector once
-    // per property — measured at ~14k token clones over the ten families.
+    // per property — measured at ~14k token clones over those families.
     // Both lists are known up front here, so authoring them once and creating
     // each spec directly would leave the same data behind for a fraction of
     // the work.

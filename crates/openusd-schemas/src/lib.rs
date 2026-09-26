@@ -25,6 +25,7 @@
 //! | `physics` | `physics` | `UsdPhysics`  | the token enums; needs `geom` |
 //! | `proc`    | `proc`    | `UsdProc`     | needs `geom` |
 //! | `render`  | `render`  | `UsdRender`   | the computed render spec, aperture conforming, the stage's settings prim |
+//! | `semantics` | `semantics` | `UsdSemantics` | the taxonomies a prim is labelled under, directly and down namespace |
 //! | `shade`   | `shade`   | `UsdShade`    | the `Connectable` interface, connection resolution, material terminals, the `UsdPreviewSurface` reader |
 //! | `skel`    | `skel`    | `UsdSkel`     | the skinning toolkit: topology, animation mapping, resolvers, pure-math LBS; needs `geom` |
 //! | `ui`      | `ui`      | `UsdUI`       | |
@@ -181,6 +182,8 @@ pub mod physics;
 pub mod proc;
 #[cfg(feature = "render")]
 pub mod render;
+#[cfg(feature = "semantics")]
+pub mod semantics;
 #[cfg(feature = "shade")]
 pub mod shade;
 #[cfg(feature = "skel")]
@@ -224,6 +227,8 @@ pub static ALL: &[&usd::SchemaFamily<'static>] = &[
     proc::SCHEMAS,
     #[cfg(feature = "render")]
     render::SCHEMAS,
+    #[cfg(feature = "semantics")]
+    semantics::SCHEMAS,
     #[cfg(feature = "shade")]
     shade::SCHEMAS,
     #[cfg(feature = "skel")]

@@ -1,0 +1,23 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World" (
+    prepend apiSchemas = ["SemanticsLabelsAPI:category"]
+)
+{
+    token[] semantics:labels:category = ["set"]
+
+    def Xform "Kitchen" (
+        prepend apiSchemas = ["SemanticsLabelsAPI:category", "SemanticsLabelsAPI:style"]
+    )
+    {
+        token[] semantics:labels:category = ["room", "interior"]
+        token[] semantics:labels:style = ["modern"]
+
+        def Xform "Chair"
+        {
+        }
+    }
+}

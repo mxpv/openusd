@@ -22,6 +22,7 @@ pub const LIBRARIES: &[&str] = &[
     "usdPhysics",
     "usdProc",
     "usdRender",
+    "usdSemantics",
     "usdShade",
     "usdSkel",
     "usdUI",

@@ -1,4 +1,4 @@
-//! The eleven schema libraries OpenUSD ships, generated from the definitions
+//! The twelve schema libraries OpenUSD ships, generated from the definitions
 //! `openusd-schemas` vendors.
 //!
 //! What the tiny fixture proves about shape, this proves about scale: every
@@ -13,11 +13,11 @@ mod common;
 
 use common::{LIBRARIES, configured, schemas};
 
-/// Every library generates, and the eleven compose into one registry: no
+/// Every library generates, and the twelve compose into one registry: no
 /// declaration this crate cannot represent, no name it cannot mint, no
 /// collision between the names it does, and a family for each.
 ///
-/// One test, because generating the eleven is the expensive part and both
+/// One test, because generating the twelve is the expensive part and both
 /// questions are about the same output.
 #[test]
 fn every_library_builds_and_registers() {
@@ -35,7 +35,7 @@ fn every_library_builds_and_registers() {
         builder = output.with_family(|family| builder.register(family));
     }
 
-    let registry = builder.build().expect("the eleven compose");
+    let registry = builder.build().expect("the twelve compose");
     let named = |name: &str| tf::Token::from(name);
     assert!(registry.is_a(&named("Sphere"), &named("Gprim")), "a sphere is a gprim");
     assert!(

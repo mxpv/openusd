@@ -16,13 +16,14 @@
 /// views needs to know where the geom ones are. Every family is named for
 /// that, whether or not a build generates it, since the feature graph is what
 /// keeps a view from deriving from a module that is not there.
-const FAMILIES: [(&str, &str); 10] = [
+const FAMILIES: &[(&str, &str)] = &[
     ("geom", "usdGeom"),
     ("lux", "usdLux"),
     ("media", "usdMedia"),
     ("physics", "usdPhysics"),
     ("proc", "usdProc"),
     ("render", "usdRender"),
+    ("semantics", "usdSemantics"),
     ("shade", "usdShade"),
     ("skel", "usdSkel"),
     ("ui", "usdUI"),
@@ -49,7 +50,7 @@ fn configured(schemas: &Path) -> openusd_build::Builder {
     use openusd_build::TokenEnum;
 
     let mut builder = openusd_build::configure().search_path(schemas);
-    for (family, library) in FAMILIES {
+    for &(family, library) in FAMILIES {
         builder = builder.extern_library(library, format!("crate::{family}"));
     }
 

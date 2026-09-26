@@ -28,6 +28,7 @@ physics = ["geom"]
 # views build on the geom schema traits.
 proc = ["geom"]
 render = []
+semantics = []
 shade = []
 # UsdSkelRoot and UsdSkelSkeleton are UsdGeomBoundable-derived prims, so the
 # skel views build on the geom schema traits.
@@ -83,6 +84,10 @@ required-features = ["proc"]
 [[test]]
 name = "render"
 required-features = ["render"]
+
+[[test]]
+name = "semantics"
+required-features = ["semantics"]
 
 [[test]]
 name = "shade"

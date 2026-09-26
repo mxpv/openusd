@@ -378,7 +378,7 @@ impl Builder {
         // its destination and renamed onto it.
         //
         // TODO(rayon): a library is an independent stage open, composition and
-        // emission over `&self`, so the ten families of `openusd-schemas` could
+        // emission over `&self`, so the families of `openusd-schemas` could
         // build at once. `Output` is what stands in the way: its model holds
         // `sdf::Value`s read from a stage that is neither `Send` nor `Sync`, so
         // a parallel version has to finish with each library inside the worker

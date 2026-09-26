@@ -48,6 +48,7 @@ answer `None`.
 | `physics` | [`UsdPhysics`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/physics) — scenes, joints, collisions, limit/drive APIs |
 | `proc` | [`UsdProc`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/proc) — GenerativeProcedural |
 | `render` | [`UsdRender`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/render) — RenderSettings, RenderProduct, RenderVar, RenderPass |
+| `semantics` | [`UsdSemantics`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/semantics) — LabelsAPI, the taxonomies a prim is labelled under |
 | `shade` | [`UsdShade`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/shade) — materials, shader networks, bindings, UsdPreviewSurface |
 | `skel` | [`UsdSkel`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/skel) — skeleton reader and skinning toolkit |
 | `ui` | [`UsdUI`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas/src/ui) — Backdrop, SceneGraphPrimAPI, NodeGraphNodeAPI |

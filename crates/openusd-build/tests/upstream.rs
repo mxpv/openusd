@@ -1,4 +1,5 @@
-//! The ten domain families against the schema data OpenUSD generates for them.
+//! The eleven domain families against the schema data OpenUSD generates for
+//! them.
 //!
 //! This is the only oracle in the workspace that this crate did not produce.
 //! Everything else compares one of its outputs against another — the compiled

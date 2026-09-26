@@ -44,9 +44,10 @@ with the C++ reference implementation.
   capture replayable [diffs](crates/openusd/src/usd/diff.rs) for live sync.
 - Define [collections](crates/openusd/src/usd/collection.rs) using explicit
   includes and excludes or path expressions, then query their membership.
-- Read and author ten standard [schema families](crates/openusd-schemas),
+- Read and author the standard [schema families](crates/openusd-schemas),
   enabled individually by feature flags. They cover geometry, lighting,
-  materials, skeletons, physics, rendering, volumes, media, UI, and procedurals.
+  materials, skeletons, physics, rendering, volumes, media, UI, procedurals,
+  and semantic labels.
 - Generate typed views and registry declarations for custom schemas with
   [`openusd-build`](crates/openusd-build), using the same workflow as the
   standard schema crate.

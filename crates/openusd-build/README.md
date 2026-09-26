@@ -16,7 +16,7 @@ It is written in Rust and requires no C++ or Python dependencies.
 Add it as a build dependency, configure your schema libraries in `build.rs`,
 and include the generated code with `openusd::include_schema!`.
 [`openusd-schemas`](https://github.com/mxpv/openusd/tree/main/crates/openusd-schemas)
-uses this workflow to build its ten standard schema families.
+uses this workflow to build its eleven standard schema families.
 
 Each library produces a single Rust file containing:
 

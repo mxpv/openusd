@@ -37,6 +37,7 @@ doc-valid-idents = [
     "UsdPreviewSurface",
     "UsdProc",
     "UsdRender",
+    "UsdSemantics",
     "UsdShade",
     "UsdShadeInput",
     "UsdShadeOutput",
