@@ -10,9 +10,9 @@
 //! carry as many taxonomies at once as a pipeline has questions to ask of it.
 //!
 //! [`LabelsAPI::direct_taxonomies`] and [`LabelsAPI::inherited_taxonomies`]
-//! answer which taxonomies a prim can be asked about. The labels it answers
-//! with, resolved down namespace and over time, are C++
-//! `UsdSemanticsLabelsQuery`, which this crate does not have yet.
+//! answer which taxonomies a prim can be asked about, and [`LabelsQuery`] the
+//! labels it answers with under one of them, read at a time and gathered down
+//! namespace.
 //!
 //! # Example
 //!
@@ -39,4 +39,7 @@
 
 openusd::include_schema!("usdSemantics");
 
+mod labels_query;
 mod taxonomies;
+
+pub use labels_query::{LabelsQuery, QueryTime};

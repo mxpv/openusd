@@ -25,7 +25,7 @@
 //! | `physics` | `physics` | `UsdPhysics`  | the token enums; needs `geom` |
 //! | `proc`    | `proc`    | `UsdProc`     | needs `geom` |
 //! | `render`  | `render`  | `UsdRender`   | the computed render spec, aperture conforming, the stage's settings prim |
-//! | `semantics` | `semantics` | `UsdSemantics` | the taxonomies a prim is labelled under, directly and down namespace |
+//! | `semantics` | `semantics` | `UsdSemantics` | the taxonomies a prim is labelled under, and the labels it carries under one of them over time and down namespace |
 //! | `shade`   | `shade`   | `UsdShade`    | the `Connectable` interface, connection resolution, material terminals, the `UsdPreviewSurface` reader |
 //! | `skel`    | `skel`    | `UsdSkel`     | the skinning toolkit: topology, animation mapping, resolvers, pure-math LBS; needs `geom` |
 //! | `ui`      | `ui`      | `UsdUI`       | |
@@ -123,6 +123,14 @@ pub enum SchemaError {
     /// A volume field relationship needs a non-empty field name.
     #[error("Volume field name must not be empty")]
     EmptyFieldName,
+
+    /// A labels query needs a taxonomy to read labels under.
+    #[error("Labels query taxonomy must not be empty")]
+    EmptyTaxonomy,
+
+    /// A labels query over an interval needs one that holds a time.
+    #[error("Labels query interval must not be empty")]
+    EmptyInterval,
 
     /// A render context that is neither the universal context nor a
     /// namespaced identifier.
