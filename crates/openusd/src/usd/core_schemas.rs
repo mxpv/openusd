@@ -678,10 +678,9 @@ impl ColorSpaceDefinitionAPI {
             tokens::COLOR_SPACE_DEFINITION_API,
             name.as_str(),
         );
-        ::std::result::Result::Ok(Self {
-            prim: prim.clone().apply_api(applied)?,
-            name,
-        })
+        ::std::result::Result::Ok(
+            Self::from_prim_unchecked(prim.clone().apply_api(applied)?, name),
+        )
     }
     /// Views `prim` as this schema applied under `name`, or `None`
     /// where it does not carry it.
@@ -695,7 +694,9 @@ impl ColorSpaceDefinitionAPI {
             name.as_str(),
         );
         let carried = prim.has_api_schema(applied)?;
-        ::std::result::Result::Ok(carried.then(|| Self { prim: prim.clone(), name }))
+        ::std::result::Result::Ok(
+            carried.then(|| Self::from_prim_unchecked(prim.clone(), name)),
+        )
     }
     /// Whether the schema may be applied to `prim` under `name`.
     pub fn can_apply(
@@ -713,18 +714,13 @@ impl ColorSpaceDefinitionAPI {
     pub fn get_all(
         prim: &::openusd::usd::Prim,
     ) -> ::openusd::Result<::std::vec::Vec<Self>> {
-        let mut found = ::std::vec::Vec::new();
-        for applied in prim.api_schemas()? {
-            let (schema, instance) = ::openusd::usd::SchemaRegistry::type_name_and_instance(
-                &applied,
-            );
-            let mine = instance
-                .filter(|_| schema.as_str() == tokens::COLOR_SPACE_DEFINITION_API);
-            if let ::std::option::Option::Some(name) = mine {
-                found.push(Self { prim: prim.clone(), name });
-            }
-        }
-        ::std::result::Result::Ok(found)
+        prim.api_schema_instance_names(tokens::COLOR_SPACE_DEFINITION_API)
+            .map(|names| {
+                names
+                    .into_iter()
+                    .map(|name| Self::from_prim_unchecked(prim.clone(), name))
+                    .collect()
+            })
     }
     /// Whether `base_name` is one of the property names this schema
     /// declares, which an instance name may therefore not end with.
@@ -1162,10 +1158,9 @@ impl CollectionAPI {
             tokens::COLLECTION_API,
             name.as_str(),
         );
-        ::std::result::Result::Ok(Self {
-            prim: prim.clone().apply_api(applied)?,
-            name,
-        })
+        ::std::result::Result::Ok(
+            Self::from_prim_unchecked(prim.clone().apply_api(applied)?, name),
+        )
     }
     /// Views `prim` as this schema applied under `name`, or `None`
     /// where it does not carry it.
@@ -1179,7 +1174,9 @@ impl CollectionAPI {
             name.as_str(),
         );
         let carried = prim.has_api_schema(applied)?;
-        ::std::result::Result::Ok(carried.then(|| Self { prim: prim.clone(), name }))
+        ::std::result::Result::Ok(
+            carried.then(|| Self::from_prim_unchecked(prim.clone(), name)),
+        )
     }
     /// Whether the schema may be applied to `prim` under `name`.
     pub fn can_apply(
@@ -1197,17 +1194,13 @@ impl CollectionAPI {
     pub fn get_all(
         prim: &::openusd::usd::Prim,
     ) -> ::openusd::Result<::std::vec::Vec<Self>> {
-        let mut found = ::std::vec::Vec::new();
-        for applied in prim.api_schemas()? {
-            let (schema, instance) = ::openusd::usd::SchemaRegistry::type_name_and_instance(
-                &applied,
-            );
-            let mine = instance.filter(|_| schema.as_str() == tokens::COLLECTION_API);
-            if let ::std::option::Option::Some(name) = mine {
-                found.push(Self { prim: prim.clone(), name });
-            }
-        }
-        ::std::result::Result::Ok(found)
+        prim.api_schema_instance_names(tokens::COLLECTION_API)
+            .map(|names| {
+                names
+                    .into_iter()
+                    .map(|name| Self::from_prim_unchecked(prim.clone(), name))
+                    .collect()
+            })
     }
     /// Whether `base_name` is one of the property names this schema
     /// declares, which an instance name may therefore not end with.

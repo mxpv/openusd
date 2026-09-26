@@ -505,15 +505,48 @@ impl Prim {
         // keeps the answer from depending on how much of the scene's schema
         // data this build happens to have: C++ drops such a name, which it can
         // afford because its registry is always fully populated.
+        // TODO(perf): both lists come off one `PrimTypeInfo`, which every prim
+        // of this identity shares, so the union could be composed once there
+        // and handed back as a slice rather than rebuilt on each call.
         let composed: HashSet<&Token> = names.iter().collect();
-        let unknown: Vec<Token> = self
-            .authored_api_schemas()?
-            .into_iter()
-            .filter(|name| !composed.contains(name))
+        let unknown: Vec<Token> = info
+            .id()
+            .applied_api_schemas()
+            .iter()
+            .filter(|name| !composed.contains(*name))
+            .cloned()
             .collect();
 
         names.extend(unknown);
         Ok(names)
+    }
+
+    /// The instance names of every application of `schema` to this prim, in
+    /// the order [`api_schemas`](Self::api_schemas) reports them: a prim
+    /// carrying `CollectionAPI:render` and `CollectionAPI:proxy` answers
+    /// `render` and `proxy` for `CollectionAPI`. `schema` is a bare schema
+    /// identifier, so an instance-qualified name matches nothing.
+    ///
+    /// An application naming no instance contributes nothing, so a
+    /// single-apply schema answers empty. C++
+    /// `UsdAPISchemaBase::_GetMultipleApplyInstanceNames` reports an empty
+    /// instance name for one instead, which here would name a view whose
+    /// properties resolve under no instance at all.
+    // TODO: C++ keeps that function on `UsdAPISchemaBase` as a protected static
+    // keyed by the schema's own type, which the faithful home here would mirror
+    // as a provided method on the `APISchemaBase` trait over a schema-identifier
+    // const on `SchemaBase` — retiring the identifier the emitter threads
+    // through every generated view, and with it the chance of pairing a view
+    // with the wrong constant.
+    pub fn api_schema_instance_names(&self, schema: &str) -> Result<Vec<Token>> {
+        Ok(self
+            .api_schemas()?
+            .iter()
+            .filter_map(|applied| {
+                let instance = applied.strip_prefix(schema)?.strip_prefix(':')?;
+                (!instance.is_empty()).then(|| Token::from(instance))
+            })
+            .collect())
     }
 
     /// The prim's composed `apiSchemas` list op, flattened across all
@@ -648,18 +681,21 @@ impl Prim {
     ) -> Result<Option<u32>> {
         let family = family.into();
         let registry = self.stage.schema_registry();
-        let definition = self.prim_definition()?;
+        let type_info = self.prim_type_info()?;
 
         // A version composition rejected — one conflicting with a stronger
         // built-in of the same family — is absent from the definition's list
         // (C++ `GetAppliedSchemas`).
-        let composed = definition.applied_api_schemas().iter().filter_map(|name| {
-            let (info, applied_instance) = registry.check_applied_name(name).ok().flatten()?;
-            Some((info.family().clone(), info.version(), applied_instance))
-        });
+        let composed = type_info
+            .prim_definition()
+            .applied_api_schemas()
+            .iter()
+            .filter_map(|name| {
+                let (info, applied_instance) = registry.check_applied_name(name).ok().flatten()?;
+                Some((info.family().clone(), info.version(), applied_instance))
+            });
 
-        let authored = self.authored_api_schemas()?;
-        let unregistered = authored.iter().filter_map(|name| {
+        let unregistered = type_info.id().applied_api_schemas().iter().filter_map(|name| {
             let (schema, applied_instance) = SchemaRegistry::type_name_and_instance(name);
             if registry.schema_info(&schema).is_some() {
                 return None;
@@ -1642,6 +1678,33 @@ mod tests {
         // A prim of another family is in none of it.
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         assert!(!stage.prim("/Sun")?.is_in_family(&family, VersionFilter::All)?);
+        Ok(())
+    }
+
+    #[test]
+    fn instances_per_schema() -> Result<()> {
+        let stage = schema_stage()?;
+        stage
+            .define_prim("/W")?
+            .add_applied_schema("CollectionAPI:render")?
+            .add_applied_schema("CollectionAPI:proxy")?
+            .add_applied_schema("CollectionAPI:")?; // names no instance
+
+        // The instances of the named schema, in `api_schemas` order.
+        assert_eq!(
+            stage.prim("/W")?.api_schema_instance_names("CollectionAPI")?,
+            vec![Token::new("render"), Token::new("proxy")]
+        );
+
+        // A built-in application is an instance like any authored one, and the
+        // single-apply schema that brings it in names none of its own.
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let sun = stage.prim("/Sun")?;
+        assert_eq!(
+            sun.api_schema_instance_names("CollectionAPI")?,
+            vec![Token::new("lightLink")]
+        );
+        assert!(sun.api_schema_instance_names("LightAPI")?.is_empty());
         Ok(())
     }
 

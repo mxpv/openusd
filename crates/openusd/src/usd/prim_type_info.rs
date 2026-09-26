@@ -73,9 +73,12 @@ impl PrimTypeInfo {
 }
 
 impl PrimTypeId {
-    /// The identity of a prim with this `typeName` and these composed
+    /// The identity of a prim with this `typeName` and these authored
     /// `apiSchemas`. An empty type name and no applied schemas is the identity
     /// of a prim that has no schema at all.
+    ///
+    /// The authored names are the identity because the composed list is what
+    /// the definition they select reports back.
     pub fn new(type_name: Option<tf::Token>, applied: Vec<tf::Token>) -> PrimTypeId {
         PrimTypeId {
             type_name: type_name.unwrap_or_default(),
@@ -101,7 +104,8 @@ impl PrimTypeId {
         &self.type_name
     }
 
-    /// The prim's composed `apiSchemas`, strongest first.
+    /// The prim's authored `apiSchemas`, strongest first, including names no
+    /// registered schema answers to.
     pub fn applied_api_schemas(&self) -> &[tf::Token] {
         &self.applied
     }
