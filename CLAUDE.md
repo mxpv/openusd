@@ -195,8 +195,14 @@ When implementing a new feature from the spec:
   was not carried) signals the fix is at the wrong altitude — generalize the
   mechanism or carry the missing state instead. When a module mirrors C++
   OpenUSD, factor the concern the way the C++ model does (e.g. a layer's lexical
-  identifier vs. its resolved real path). Note genuinely deferred depth as a
-  `TODO` naming the missing generalization.
+  identifier vs. its resolved real path).
+- Fix a gap you find in the current session, even when it sits outside the
+  module you set out to change. Leave a `TODO` only for a large remaining
+  gap that needs its own planning, or for one whose fix diverges
+  significantly from the work currently planned. Name the missing
+  generalization in it. A `TODO` never stands in for a fix that fits in the current change.
+  `TODO(rayon)` / `TODO(perf)` markers for performance seams are separate
+  (see Code Quality).
 
 ## Code Quality
 
