@@ -81,7 +81,7 @@ fn resolve_recursive(
 
     // Nothing upstream produced a value, so an authored value here is what a
     // consumer resolves to — a NodeGraph or Material interface value.
-    if filter == ProducerFilter::Any && !found && attribute.attribute().resolve_info()?.has_authored_value() {
+    if filter == ProducerFilter::Any && !found && attribute.attribute().has_authored_value()? {
         producing.push(attribute);
         found = true;
     }

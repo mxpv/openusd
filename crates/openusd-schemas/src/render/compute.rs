@@ -256,7 +256,7 @@ fn f64_to_f32(d: f64) -> f32 {
 /// say for itself, and a schema fallback is not the product saying anything
 /// (C++ passes `getDefaultValue = false` for exactly this).
 fn authored(attr: &Attribute) -> Result<Option<Value>> {
-    match attr.resolve_info()?.has_authored_value() {
+    match attr.has_authored_value()? {
         true => attr.get::<Value>(),
         false => Ok(None),
     }

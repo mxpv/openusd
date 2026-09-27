@@ -815,6 +815,13 @@ impl Attribute {
         Ok(info.prim_definition().has_property(&name).then_some((info, name)))
     }
 
+    /// `true` when a layer authors a value for this attribute, as a `default`,
+    /// time samples or value clips (C++ `UsdAttribute::HasAuthoredValue`). A
+    /// block is not a value, and neither is the schema fallback.
+    pub fn has_authored_value(&self) -> Result<bool> {
+        Ok(self.resolve_info()?.has_authored_value())
+    }
+
     /// Where the value [`get`](Self::get) returns comes from, without producing
     /// it (C++ `UsdAttribute::GetResolveInfo`).
     ///

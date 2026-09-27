@@ -84,10 +84,10 @@ fn compute_visibility_inherits_invisible_from_ancestor() -> Result<()> {
     // HiddenChild has no authored visibility, but /World/Hidden is
     // invisible — so the composed visibility should be Invisible.
     let child = Sphere::get(&stage, sdf::path("/World/Hidden/HiddenChild")?)?.expect("Sphere");
-    assert_eq!(child.compute_visibility()?, Visibility::Invisible);
+    assert_eq!(child.compute_visibility(None)?, Visibility::Invisible);
     // Hero is not under any invisible ancestor.
     let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
-    assert_eq!(hero.compute_visibility()?, Visibility::Inherited);
+    assert_eq!(hero.compute_visibility(None)?, Visibility::Inherited);
     Ok(())
 }
 
@@ -202,7 +202,7 @@ fn from_prim_gated() -> Result<()> {
 fn abstract_view_takes_ext() -> Result<()> {
     let stage = open()?;
     let child = Imageable::get(&stage, sdf::path("/World/Hidden/HiddenChild")?)?.expect("Imageable");
-    assert_eq!(child.compute_visibility()?, Visibility::Invisible);
+    assert_eq!(child.compute_visibility(None)?, Visibility::Invisible);
     Ok(())
 }
 

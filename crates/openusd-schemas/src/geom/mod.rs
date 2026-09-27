@@ -69,9 +69,12 @@
 //! `renderVisibility`) share [`PurposeVisibility`], which derives no `Default`
 //! because their fallbacks differ; a model's `model:drawMode` and
 //! `model:cardGeometry` decode to [`DrawMode`] and [`CardGeometry`].
-//! `visibility` and `purpose` are inherited down namespace;
-//! [`ImageableExt::compute_visibility`] / [`ImageableExt::compute_purpose`] resolve
-//! the effective value walking ancestors.
+//! `visibility`, `purpose` and the purpose visibilities are inherited down
+//! namespace. [`ImageableExt::compute_visibility`],
+//! [`ImageableExt::compute_effective_visibility`] and
+//! [`ImageableExt::compute_purpose`] resolve the effective value by walking
+//! imageable ancestors. A purpose visibility counts only where
+//! [`VisibilityAPI`] is applied.
 //!
 //! # Primvars
 //!
@@ -87,6 +90,7 @@
 openusd::include_schema!("usdGeom");
 
 mod imageable;
+mod visibility_api;
 mod xformable;
 
 // The enums still written by hand name the generated constants directly.
