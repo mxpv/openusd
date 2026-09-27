@@ -22,8 +22,8 @@ use openusd::{sdf, tf, usd};
 use crate::error::Error;
 use crate::load::{CustomData, Declaration, PropertyDeclaration, Source};
 use crate::model::{
-    API_SCHEMA_OVERRIDE, Base, Class, Library, Metadata, NON_APPLIED, Property, PropertyApi, SCHEMA_BASE, Site, TYPED,
-    is_root,
+    API_SCHEMA_OVERRIDE, Base, Class, ForeignClass, Library, Metadata, NON_APPLIED, Property, PropertyApi, SCHEMA_BASE,
+    Shape, Site, TYPED, is_root,
 };
 use crate::names;
 use crate::validate::Violation;
@@ -57,11 +57,48 @@ pub fn library(source: &Source) -> Result<Library, Error> {
         classes.push(class(&flattened, &index, declaration)?);
     }
 
+    // What the classes reflect is resolved from the same stage, so a schema
+    // this run does not generate can lend its accessors here. One it generates
+    // is already among the classes; whether a view exists to reflect from is
+    // lowering's question.
+    let mut reflected: Vec<Class> = Vec::new();
+    for owner in &classes {
+        for schema in &owner.metadata.reflected_api_schemas {
+            if classes
+                .iter()
+                .chain(&reflected)
+                .any(|class| &class.identifier == schema)
+            {
+                continue;
+            }
+            let Some(declaration) = index.get(schema) else {
+                return Err(owner.violation(Violation::UnknownReflectedSchema { schema: schema.clone() }));
+            };
+            reflected.push(class(&flattened, &index, declaration)?);
+        }
+    }
+
+    // Every class another library declares, by name, for documentation to link
+    // where prose names one. A class of this library that only a sublayer
+    // declares is not among them, having no view anywhere to link to.
+    let foreign = source
+        .declarations
+        .iter()
+        .filter(|declaration| declaration.library != source.library)
+        .map(|declaration| ForeignClass {
+            library: declaration.library.clone(),
+            class_name: class_name(declaration),
+            upstream_name: upstream_name(declaration),
+        })
+        .collect();
+
     Ok(Library {
         name: source.library.clone(),
         use_literal_identifiers: source.use_literal_identifiers,
         skip_code_generation: source.skip_code_generation,
         classes,
+        reflected,
+        foreign,
         source_layers: source.source_layers.clone(),
         declared_tokens: source.tokens.clone(),
     })
@@ -89,6 +126,8 @@ fn class(
         identifier: declaration.name.clone(),
         family,
         version,
+        library: declaration.library.clone(),
+        upstream_name: upstream_name(declaration),
         kind,
         is_typed,
         authored_base_count: declaration.bases.len(),
@@ -155,7 +194,9 @@ fn chain(index: &HashMap<&tf::Token, &Declaration>, declaration: &Declaration) -
             reaches_typed |= parent.name.as_str() == TYPED;
             Base {
                 identifier: parent.name.clone(),
-                library: (parent.library != declaration.library).then(|| parent.library.clone()),
+                library: parent.library.clone(),
+                generated: parent.generated,
+                reflected_api_schemas: parent.custom_data.tokens("reflectedAPISchemas"),
                 class_name: class_name(parent),
                 kind,
             }
@@ -173,6 +214,11 @@ fn class_name(declaration: &Declaration) -> String {
         .custom_data
         .string("className")
         .unwrap_or_else(|| names::proper_case(declaration.name.as_str()))
+}
+
+/// What upstream calls a class: its library's prefix before its class name.
+fn upstream_name(declaration: &Declaration) -> String {
+    format!("{}{}", declaration.prefix, class_name(declaration))
 }
 
 /// What kind of schema a class is.
@@ -301,12 +347,12 @@ fn properties(
     let mut properties = Vec::new();
     for name in prim.property_children().unwrap_or_default() {
         let path = declaration.origin.path.append_property(name.as_str())?;
-        let Some(composed) = read_property(flattened, &path)? else {
+        let Some(shape) = shape_at(flattened, &path)? else {
             continue;
         };
 
         let local = declaration.properties.iter().find(|p| p.name == name);
-        let sites = declaring_sites(index, declaration, bases, &name);
+        let sites = declaring_sites(flattened, index, declaration, bases, &name)?;
         // A property no declaration carries was found on this class, which is
         // what one reaching the model through composition alone looks like.
         let origin = sites
@@ -317,9 +363,9 @@ fn properties(
             api: property_api(declaration, local)?,
             is_local: local.is_some(),
             name,
-            spec_type: composed.spec_type,
+            shape,
             sites,
-            fields: composed.fields,
+            fields: composed_fields(flattened, &path)?,
             origin,
         });
     }
@@ -327,21 +373,27 @@ fn properties(
     Ok(properties)
 }
 
-/// One property as the flattened layer holds it.
-struct Composed {
-    spec_type: sdf::SpecType,
-    fields: BTreeMap<String, sdf::Value>,
-}
-
-/// One property of the flattened layer: what kind of property it is, and every
-/// field composition left on it.
-fn read_property(flattened: &sdf::Layer, path: &sdf::Path) -> Result<Option<Composed>, Error> {
-    let spec_type = match flattened.data().spec_type(path) {
+/// What the property at `path` is in the flattened layer: the three fields a
+/// [`Shape`] is made of, read as `sdf` reads them on a property spec, so the
+/// variability is varying and `custom` false where neither is authored. `None`
+/// where the path holds no property.
+fn shape_at(flattened: &sdf::Layer, path: &sdf::Path) -> Result<Option<Shape>, Error> {
+    let data = flattened.data();
+    let spec_type = match data.spec_type(path) {
         Some(spec_type @ (sdf::SpecType::Attribute | sdf::SpecType::Relationship)) => spec_type,
         _ => return Ok(None),
     };
-    let fields = composed_fields(flattened, path)?;
-    Ok(Some(Composed { spec_type, fields }))
+    let field = |key: sdf::FieldKey| data.try_field(path, key.as_str());
+    Ok(Some(Shape {
+        spec_type,
+        type_name: field(sdf::FieldKey::TypeName)?.and_then(|value| value.try_as_token_ref().cloned()),
+        variability: field(sdf::FieldKey::Variability)?
+            .and_then(|value| value.into_owned().get())
+            .unwrap_or_default(),
+        custom: field(sdf::FieldKey::Custom)?
+            .and_then(|value| value.into_owned().get())
+            .unwrap_or(false),
+    }))
 }
 
 /// Every field composition left at a path, whether that is a class prim or one
@@ -361,31 +413,40 @@ fn composed_fields(flattened: &sdf::Layer, path: &sdf::Path) -> Result<BTreeMap<
     Ok(fields)
 }
 
-/// Every class declaring a property, nearest first.
+/// Every class declaring a property, nearest first, each with what the
+/// property composes to there.
 ///
 /// This class comes first where it redeclares the property, then each ancestor
 /// that declared it, which is the order their opinions run in. A class
 /// redeclaring a property refines what is already there, so the furthest site
-/// is the one that introduced it.
+/// is the one that introduced it. Each site's [`Shape`] is read where the
+/// property composes at that class.
 fn declaring_sites(
+    flattened: &sdf::Layer,
     index: &HashMap<&tf::Token, &Declaration>,
     declaration: &Declaration,
     bases: &[Base],
     name: &tf::Token,
-) -> Vec<Site> {
+) -> Result<Vec<Site>, Error> {
     let ancestors = bases.iter().filter_map(|base| index.get(&base.identifier).copied());
-    iter::once(declaration)
-        .chain(ancestors)
-        .filter_map(|class| {
-            let property = class.properties.iter().find(|p| &p.name == name)?;
-            Some(Site {
-                class: class.name.clone(),
-                is_override: property.custom_data.flag(API_SCHEMA_OVERRIDE).unwrap_or(false),
-                api_name: api_name(&property.custom_data, name),
-                origin: property.origin.clone(),
-            })
-        })
-        .collect()
+    let mut sites = Vec::new();
+    for class in iter::once(declaration).chain(ancestors) {
+        let Some(property) = class.properties.iter().find(|p| &p.name == name) else {
+            continue;
+        };
+        let path = class.origin.path.append_property(name.as_str())?;
+        let Some(shape) = shape_at(flattened, &path)? else {
+            continue;
+        };
+        sites.push(Site {
+            class: class.name.clone(),
+            is_override: property.custom_data.flag(API_SCHEMA_OVERRIDE).unwrap_or(false),
+            shape,
+            api_name: api_name(&property.custom_data, name),
+            origin: property.origin.clone(),
+        });
+    }
+    Ok(sites)
 }
 
 /// The accessor name one declaration of a property asks for.
@@ -585,6 +646,37 @@ mod tests {
             property.sites.last().map(|site| site.class.as_str()),
             Some("Base"),
             "while Base is still what introduced it"
+        );
+    }
+
+    /// A schema another library declares is resolved when a class here
+    /// reflects it, and only then: the corpus reflects
+    /// `TestReflectedExternalAPI` from its `usd` sublayer, and nothing else
+    /// from outside its own layer.
+    #[test]
+    fn reflected_foreign_resolved() {
+        let library = read_fixture("schema.usda").expect("resolves");
+
+        let names: Vec<&str> = library
+            .reflected
+            .iter()
+            .map(|class| class.identifier.as_str())
+            .collect();
+        assert_eq!(names, vec!["TestReflectedExternalAPI"]);
+
+        let external = &library.reflected[0];
+        assert_eq!(external.library, "usd");
+        assert_eq!(external.kind, usd::SchemaKind::SingleApplyApi);
+        let mut properties: Vec<&str> = external.local_properties().map(|p| p.name.as_str()).collect();
+        properties.sort_unstable();
+        assert_eq!(
+            properties,
+            vec![
+                "testAttrDuplicate",
+                "testAttrExternal",
+                "testRelDuplicate",
+                "testRelExternal"
+            ]
         );
     }
 

@@ -236,13 +236,7 @@ fn linked(path: &syn::Path) -> String {
     if path.segments.len() == 1 && path.leading_colon.is_none() {
         return doc::link(&name, None);
     }
-
-    let leading = match path.leading_colon.is_some() {
-        true => "::",
-        false => "",
-    };
-    let full: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
-    doc::link(&name, Some(&format!("{leading}{}", full.join("::"))))
+    doc::link(&name, Some(&super::path_text(path)))
 }
 
 /// Names in a sentence, the last joined with `and`.
@@ -266,18 +260,10 @@ fn accessor_trait(class: &RustClass) -> TokenStream {
     let documentation = documented(class, &trait_note(class));
     let allow = allow_non_camel_case(class);
     let methods = class.accessors.iter().map(|accessor| method(accessor, false));
-    // A reflected schema's own view is one method away, for what it offers
-    // beyond its properties.
-    let reflected = class.reflected.iter().map(|reflected| {
-        let Reflected { accessor, view } = reflected;
-        let documentation = format!(" Views the prim through `{view}`, whose properties this schema carries.");
-        quote! {
-            #[doc = #documentation]
-            fn #accessor(&self) -> #view {
-                #view::from_prim_unchecked(self.prim().clone())
-            }
-        }
-    });
+    let reflected = class
+        .reflected
+        .iter()
+        .map(|reflected| reflected_method(reflected, false));
 
     quote! {
         #documentation
@@ -286,6 +272,41 @@ fn accessor_trait(class: &RustClass) -> TokenStream {
             #(#reflected)*
             #(#methods)*
         }
+    }
+}
+
+/// The method that views the prim through a schema the class reflects, for
+/// what that schema offers beyond the properties this one carries. It goes
+/// wherever the class's accessors go.
+fn reflected_method(reflected: &Reflected, inherent: bool) -> TokenStream {
+    let Reflected { accessor, view } = reflected;
+    let documentation = doc::wrap(&format!(
+        "Views the prim through {}, whose properties this schema carries.",
+        linked(view)
+    ));
+    let documentation = documentation.lines().map(|line| format!(" {line}"));
+    let (visibility, prim) = reach(inherent);
+
+    quote! {
+        #(#[doc = #documentation])*
+        #visibility fn #accessor(&self) -> #view {
+            #view::from_prim_unchecked(::openusd::usd::Prim::clone(#prim))
+        }
+    }
+}
+
+/// How a method written as a trait default or as an inherent method is
+/// declared, and how it reaches the prim.
+///
+/// A trait default reaches the prim through `SchemaBase`, which its own
+/// supertrait bound brings along. An inherent method cannot: the generated file
+/// carries no `use`, so a trait the consumer's module has not imported is not
+/// in scope there, however the type implements it. Those reach the prim through
+/// the view's own `Deref` instead.
+fn reach(inherent: bool) -> (TokenStream, TokenStream) {
+    match inherent {
+        true => (quote! { pub }, quote! { self }),
+        false => (TokenStream::new(), quote! { self.prim() }),
     }
 }
 
@@ -331,12 +352,19 @@ fn view(class: &RustClass) -> TokenStream {
     };
 
     // An applied API schema is never derived from, so its accessors are written
-    // on the view rather than on a trait nothing would implement. A class with
-    // a trait puts them all there instead, so this is empty for it.
+    // on the view rather than on a trait nothing would implement, and the
+    // methods viewing the prim through what it reflects go with them. A class
+    // with a trait puts them all there instead, so this is empty for it.
     let inherent = class
         .accessor_trait
         .is_none()
-        .then(|| class.accessors.iter().map(|accessor| method(accessor, true)))
+        .then(|| {
+            class
+                .reflected
+                .iter()
+                .map(|reflected| reflected_method(reflected, true))
+                .chain(class.accessors.iter().map(|accessor| method(accessor, true)))
+        })
         .into_iter()
         .flatten();
     let own = class.accessor_trait.iter().map(|own| {
@@ -635,21 +663,7 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
         false => token.clone(),
     };
 
-    let visibility = if inherent {
-        quote! { pub }
-    } else {
-        TokenStream::new()
-    };
-    // A trait default reaches the prim through `SchemaBase`, which its own
-    // supertrait bound brings along. An inherent method cannot: the generated
-    // file carries no `use`, so a trait the consumer's module has not imported
-    // is not in scope there, however the type implements it. Those reach the
-    // prim through the view's own `Deref` instead.
-    let prim = if inherent {
-        quote! { self }
-    } else {
-        quote! { self.prim() }
-    };
+    let (visibility, prim) = reach(inherent);
 
     // The creator authors what the schema declared, not what a bare property
     // would default to: a stage reading either back has no schema to ask. The

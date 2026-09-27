@@ -53,10 +53,24 @@ fn configured(schemas: &Path) -> openusd_build::Builder {
     for &(family, library) in FAMILIES {
         builder = builder.extern_library(library, format!("crate::{family}"));
     }
+    // The core family's views live in `openusd` itself, which is where a doc
+    // naming one of its schemas links to.
+    builder = builder.extern_library("usd", "::openusd::usd");
 
     builder
         .token_enum(TokenEnum::new("Visibility", "usdGeom", "Imageable.visibility").with_default())
+        // The three purpose visibilities admit one token set and fall back
+        // differently (guide to `invisible`, proxy and render to `inherited`),
+        // so the shared set derives no `Default`; an attribute's own fallback
+        // comes from the registry through `get`.
+        .token_enum(TokenEnum::new(
+            "PurposeVisibility",
+            "usdGeom",
+            "VisibilityAPI.guideVisibility",
+        ))
         .token_enum(TokenEnum::new("Purpose", "usdGeom", "Imageable.purpose").with_default())
+        .token_enum(TokenEnum::new("DrawMode", "usdGeom", "GeomModelAPI.model:drawMode").with_default())
+        .token_enum(TokenEnum::new("CardGeometry", "usdGeom", "GeomModelAPI.model:cardGeometry").with_default())
         .token_enum(TokenEnum::new("Orientation", "usdGeom", "Gprim.orientation").with_default())
         .token_enum(TokenEnum::new("Axis", "usdGeom", "Cylinder.axis").with_default())
         .token_enum(TokenEnum::new("ElementType", "usdGeom", "GeomSubset.elementType").with_default())

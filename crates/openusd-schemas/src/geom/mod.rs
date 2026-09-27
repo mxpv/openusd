@@ -62,9 +62,14 @@
 //! handle. `Subset` is the lone typed-but-not-imageable schema.
 //!
 //! Token-valued attributes (`visibility`, `purpose`, `projection`, `axis`,
-//! `subdivisionScheme`, …) decode through the token enums defined at the end
-//! of this module, which carry `from_token` / `as_token`. `visibility` and
-//! `purpose` are inherited down namespace;
+//! `subdivisionScheme`, …) decode through generated token enums, which carry
+//! `from_token` / `as_token`; `Interpolation` and `CurveBasis`, whose values no
+//! single property declares, are written by hand at the end of this module.
+//! The purpose visibilities (`guideVisibility`, `proxyVisibility`,
+//! `renderVisibility`) share [`PurposeVisibility`], which derives no `Default`
+//! because their fallbacks differ; a model's `model:drawMode` and
+//! `model:cardGeometry` decode to [`DrawMode`] and [`CardGeometry`].
+//! `visibility` and `purpose` are inherited down namespace;
 //! [`ImageableExt::compute_visibility`] / [`ImageableExt::compute_purpose`] resolve
 //! the effective value walking ancestors.
 //!

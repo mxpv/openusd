@@ -18,7 +18,7 @@ use openusd::{sdf, tf, usd, usda};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 
-use crate::model::{API_SCHEMA_BASE, Base, Class, Library, Property, TYPED, is_root};
+use crate::model::{API_SCHEMA_BASE, Base, Class, Library, Property, Reflection, TYPED, is_root};
 use crate::validate::Violation;
 use crate::{Externs, TokenEnum, doc, error::Error, error::TokenEnumError, names, types};
 
@@ -128,8 +128,9 @@ pub struct AccessorTrait {
 pub struct Reflected {
     /// What the method that views the prim through the schema is called.
     pub accessor: Ident,
-    /// The view it returns.
-    pub view: Ident,
+    /// The view it returns: a name of this module, or the path to one another
+    /// library's module declares.
+    pub view: syn::Path,
 }
 
 /// One property's accessor pair.
@@ -184,6 +185,12 @@ pub enum PropertyKind {
 /// emitted.
 type Inventory<'a> = BTreeMap<&'a tf::Token, ClassNames<'a>>;
 
+/// Where each placed library's views live, by library: the Rust path that
+/// reaches them, or the spelling the configuration gave that does not read as
+/// one. A library never placed is absent, which is what
+/// [`Violation::UnknownLibrary`] is for.
+type Placed<'a> = BTreeMap<&'a str, Result<syn::Path, &'a str>>;
+
 /// What one class generates.
 struct ClassNames<'a> {
     /// The class it names, for a diagnostic to point at.
@@ -193,7 +200,9 @@ struct ClassNames<'a> {
     /// What upstream calls the same class: its library's prefix and that name.
     qualified: String,
     /// Where a caller reaches its accessors: the trait they live on, or the
-    /// view itself for an applied API schema, which has none.
+    /// view itself for an applied API schema, which has none. Spelled from the
+    /// module the documentation is written in, so a class of another library
+    /// carries the path to it.
     qualifier: String,
     /// The accessors it emits, in property order.
     accessors: Vec<AccessorNames<'a>>,
@@ -220,17 +229,18 @@ struct AccessorNames<'a> {
 /// ancestor already offers an accessor for generates nothing either: the
 /// ancestor's is what a caller reaches.
 fn inventory(model: &Library) -> Inventory<'_> {
-    let prefix = names::proper_case(&model.name);
     model
         .classes
         .iter()
         .filter(|class| !is_root(&class.identifier))
-        .map(|class| (&class.identifier, ClassNames::of(class, &prefix)))
+        .map(|class| (&class.identifier, ClassNames::of(class, None)))
         .collect()
 }
 
 impl<'a> ClassNames<'a> {
-    fn of(class: &'a Class, prefix: &str) -> Self {
+    /// The names `class` generates, reached through `home` where it is a class
+    /// of another library's module.
+    fn of(class: &'a Class, home: Option<&syn::Path>) -> Self {
         let view = class.metadata.class_name.clone();
         // An applied API schema writes its accessors on the view, there being
         // no trait to derive from; everything else puts them on its trait.
@@ -238,13 +248,17 @@ impl<'a> ClassNames<'a> {
             true => view.clone(),
             false => trait_name(&view),
         };
+        let qualifier = match home {
+            Some(home) => super::within(home, &qualifier),
+            None => qualifier,
+        };
 
         let accessors = class
             .local_properties()
             .filter(|property| offers(class, property))
             .filter_map(|property| {
-                let accessor = named(property.api_name(), property.spec_type)?;
-                let suffix = match property.spec_type {
+                let accessor = named(property.api_name(), property.shape.spec_type)?;
+                let suffix = match property.shape.spec_type {
                     sdf::SpecType::Relationship => "Rel",
                     _ => "Attr",
                 };
@@ -260,7 +274,7 @@ impl<'a> ClassNames<'a> {
 
         ClassNames {
             class,
-            qualified: format!("{prefix}{view}"),
+            qualified: class.upstream_name.clone(),
             view,
             qualifier,
             accessors,
@@ -303,13 +317,13 @@ pub fn library(model: &Library, externs: &Externs, enums: &[TokenEnum]) -> Resul
     // lowered against it, and one symbol table built from it.
     let inventory = inventory(model);
     check_class_names(&inventory, &enums)?;
-    let externs = extern_paths(model, externs)?;
-    let library = library_symbols(&inventory);
+    let placed = placed(externs, model);
+    let library = library_symbols(&inventory, model, &placed);
     let classes = model
         .classes
         .iter()
         .filter(|class| !is_root(&class.identifier))
-        .map(|class| lower_class(class, model, &externs, &by_value, &inventory, &library))
+        .map(|class| lower_class(class, model, &placed, &by_value, &inventory, &library))
         .collect::<Result<_, _>>()?;
 
     Ok(RustLibrary {
@@ -595,12 +609,13 @@ fn check_class_names(inventory: &Inventory<'_>, enums: &[RustEnum]) -> Result<()
 fn lower_class(
     class: &Class,
     model: &Library,
-    externs: &BTreeMap<&str, syn::Path>,
+    placed: &Placed<'_>,
     by_value: &BTreeMap<&str, &Ident>,
     inventory: &Inventory<'_>,
     library: &doc::Symbols<'_>,
 ) -> Result<RustClass, Error> {
-    check_methods(class)?;
+    let reflections = class.reflections(model);
+    check_methods(class, model, &reflections)?;
 
     for property in class.local_properties().filter(|property| !offers(class, property)) {
         // The ancestor's accessor is what a caller reaches, and it is generated
@@ -612,7 +627,10 @@ fn lower_class(
             }));
         }
     }
-    let links = class_symbols(class, inventory, library);
+    // Documentation on a class means that class's property, so its own chain
+    // answers first and nearest wins.
+    let chain = iter::once(&class.identifier).chain(class.bases.iter().map(|base| &base.identifier));
+    let links = class_symbols(chain.filter_map(|owner| inventory.get(owner)), library);
     let mine = inventory.get(&class.identifier).expect("a class of this library");
     let accessors = mine
         .accessors
@@ -626,7 +644,7 @@ fn lower_class(
     let inherited = class
         .bases
         .iter()
-        .map(|base| base_trait(class, base, model, externs))
+        .map(|base| base_trait(class, base, model, placed))
         .collect::<Result<Vec<_>, _>>()?;
     let parent = match (class.bases.first(), inherited.first()) {
         (_, Some(Some(path))) => path.clone(),
@@ -639,38 +657,51 @@ fn lower_class(
     let inherited: Vec<syn::Path> = inherited.into_iter().flatten().collect();
 
     // What a class reflects reads as its own: the properties of an API schema
-    // that every prim of this type carries anyway.
+    // that every prim of this type carries anyway. A reflected accessor goes
+    // wherever the rest of them go, nothing marking it apart. A schema of this
+    // library is in the inventory; one of another library is named through the
+    // module its views live in, and one of this library that is not generated
+    // has no view anywhere to name.
     let mut accessors: Vec<RustAccessor> = accessors;
     let mut reflected = Vec::new();
-    for schema in &class.metadata.reflected_api_schemas {
-        // TODO: reflect a schema another library declares. Its properties are
-        // not in this model, so only what this run generates is reflected; a
-        // caller reaches the rest by applying that schema to the prim.
-        let Some(other) = model.classes.iter().find(|other| &other.identifier == schema) else {
+    for reflection in &reflections {
+        let Reflection::Taken { schema, properties, .. } = reflection else {
             continue;
+        };
+        let origin = schema.origin.describe();
+        let elsewhere;
+        let (theirs, home) = match inventory.get(&schema.identifier) {
+            Some(theirs) => (theirs, None),
+            None if schema.library == model.name => {
+                return Err(class.violation(Violation::Ungenerated {
+                    class: schema.identifier.clone(),
+                }));
+            }
+            None => {
+                let home = reached(class, placed, &schema.library, &schema.identifier)?;
+                elsewhere = ClassNames::of(schema, Some(&home));
+                (&elsewhere, Some(home))
+            }
         };
 
-        // A reflected accessor is the reflecting class's own, so it goes
-        // wherever the rest of them go: nothing here marks it apart.
-        let origin = other.origin.describe();
-        let Some(theirs) = inventory.get(&other.identifier) else {
-            continue;
-        };
-        let reflected_links = class_symbols(other, inventory, library);
-        accessors.extend(
-            theirs
-                .accessors
+        let links = class_symbols(iter::once(theirs), library);
+        let taken = theirs.accessors.iter().filter(|accessor| {
+            properties
                 .iter()
-                .map(|accessor| lower_accessor(other, accessor, by_value, &reflected_links))
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-        reflected.push(Reflected {
-            accessor: identifier(&names::snake_case(&other.metadata.class_name), &origin)?,
-            view: identifier(&other.metadata.class_name, &origin)?,
+                .any(|property| property.name == accessor.property.name)
         });
-    }
-    if !reflected.is_empty() {
-        check_reflected(class, &accessors, &reflected)?;
+        for accessor in taken {
+            accessors.push(lower_accessor(schema, accessor, by_value, &links)?);
+        }
+
+        let view = identifier(&schema.metadata.class_name, &origin)?;
+        reflected.push(Reflected {
+            accessor: identifier(&names::snake_case(&schema.metadata.class_name), &origin)?,
+            view: match &home {
+                Some(home) => syn::parse_quote! { #home::#view },
+                None => syn::parse_quote! { #view },
+            },
+        });
     }
 
     let origin = class.origin.describe();
@@ -720,7 +751,7 @@ fn lower_accessor(
     symbols: &doc::Symbols<'_>,
 ) -> Result<RustAccessor, Error> {
     let property = accessor.property;
-    let kind = match property.spec_type {
+    let kind = match property.shape.spec_type {
         sdf::SpecType::Relationship => PropertyKind::Relationship,
         _ => PropertyKind::Attribute {
             type_constant: value_type(property)?,
@@ -736,9 +767,9 @@ fn lower_accessor(
         token: constant_of(by_value, &property.schematics_name),
         instanced: class.kind.is_multiple_apply_api_schema(),
         kind,
-        custom: property.is_custom(),
-        uniform: property.variability() == sdf::Variability::Uniform
-            && property.spec_type != sdf::SpecType::Relationship,
+        custom: property.shape.custom,
+        uniform: property.shape.variability == sdf::Variability::Uniform
+            && property.shape.spec_type != sdf::SpecType::Relationship,
         documentation: documentation(property, symbols),
     })
 }
@@ -751,41 +782,39 @@ fn lower_accessor(
 fn offers(class: &Class, property: &Property) -> bool {
     class.kind.is_applied_api_schema() || !shadows_an_ancestor(class, property)
 }
-/// Where each other library's views live, as the Rust path that reaches them.
+/// Reads the path of every placed library the stack holds, keeping a spelling
+/// Rust cannot read as it was given.
 ///
-/// The configuration says so as text, and text is read once here rather than at
-/// every base that needs it. Only a library this one inherits from is read: the
-/// configuration names every library a consumer has, whether or not this one
-/// reaches for it, so a path nothing here reads is none of this library's
-/// business. A spelling Rust cannot read is reported against the class that
-/// reached for it, a library that was never placed at all being what
-/// [`Violation::UnknownLibrary`] is for.
-fn extern_paths<'a>(model: &Library, externs: &'a Externs) -> Result<BTreeMap<&'a str, syn::Path>, Error> {
-    let mut paths = BTreeMap::new();
-    for class in &model.classes {
-        for base in &class.bases {
-            let Some(library) = &base.library else {
-                continue;
-            };
-            let Some(text) = externs.get_key_value(library) else {
-                continue;
-            };
-            let (library, text) = text;
-            if paths.contains_key(library.as_str()) {
-                continue;
-            }
-
-            let path = syn::parse_str(text).map_err(|_| {
-                class.violation(Violation::UnreadableLibraryPath {
-                    library: library.clone(),
-                    path: text.clone(),
-                })
-            })?;
-            paths.insert(library.as_str(), path);
-        }
-    }
-    Ok(paths)
+/// The configuration says so as text, read once here before any class asks for
+/// a path. The configuration names every library a consumer has, so one outside
+/// this stack is none of this library's business, and an unreadable spelling is
+/// reported only where a base or a reflected schema reaches for that library,
+/// against the class reaching, by [`reached`]; a documentation link reaches for
+/// nothing and simply goes unwritten.
+fn placed<'a>(externs: &'a Externs, model: &Library) -> Placed<'a> {
+    externs
+        .iter()
+        .filter(|(library, _)| model.foreign.iter().any(|foreign| &foreign.library == *library))
+        .map(|(library, text)| (library.as_str(), syn::parse_str(text).map_err(|_| text.as_str())))
+        .collect()
 }
+
+/// The path to `library`'s views, which `class` reaches for to name `named`
+/// there: a base it derives from, or a schema it reflects.
+fn reached(class: &Class, placed: &Placed<'_>, library: &str, named: &tf::Token) -> Result<syn::Path, Error> {
+    match placed.get(library) {
+        Some(Ok(path)) => Ok(path.clone()),
+        Some(Err(text)) => Err(class.violation(Violation::UnreadableLibraryPath {
+            library: library.to_owned(),
+            path: (*text).to_owned(),
+        })),
+        None => Err(class.violation(Violation::UnknownLibrary {
+            library: library.to_owned(),
+            class: named.clone(),
+        })),
+    }
+}
+
 /// The `sdf::ValueTypeName` constant an attribute is declared with.
 ///
 /// A legacy spelling the core reads but names no constant for — `Transform`,
@@ -859,6 +888,13 @@ fn named(api_name: Option<&str>, spec_type: sdf::SpecType) -> Option<Accessor> {
     })
 }
 
+impl Accessor {
+    /// Every method name the pair mints.
+    fn methods(self) -> [String; 3] {
+        [self.getter, self.creator, self.builder]
+    }
+}
+
 /// Every method name a view reaches a property by, readers and authors alike.
 ///
 /// One pair per class along the chain that named it: each emits its own
@@ -869,8 +905,28 @@ fn offered(property: &Property) -> impl Iterator<Item = String> {
     property
         .sites
         .iter()
-        .filter_map(|site| named(site.api_name.as_deref(), property.spec_type))
-        .flat_map(|accessor| [accessor.getter, accessor.creator, accessor.builder])
+        .filter_map(|site| named(site.api_name.as_deref(), property.shape.spec_type))
+        .flat_map(Accessor::methods)
+}
+
+/// Every method name the schemas a class takes mint on it — each taken
+/// property's accessors, and the method that views the prim through the schema
+/// — each with the schema it came from.
+fn reflected_methods<'r>(reflections: &'r [Reflection<'r>]) -> impl Iterator<Item = (String, &'r tf::Token)> + 'r {
+    reflections
+        .iter()
+        .filter_map(|reflection| match reflection {
+            Reflection::Taken { schema, properties, .. } => Some((schema, properties)),
+            _ => None,
+        })
+        .flat_map(|(schema, properties)| {
+            properties
+                .iter()
+                .filter_map(|property| named(property.api_name(), property.shape.spec_type))
+                .flat_map(Accessor::methods)
+                .chain(iter::once(names::snake_case(&schema.metadata.class_name)))
+                .map(move |method| (method, &schema.identifier))
+        })
 }
 
 /// Whether a redeclaration would offer a method an ancestor's trait already
@@ -882,56 +938,32 @@ fn offered(property: &Property) -> impl Iterator<Item = String> {
 /// a class between them renamed it the same way — which is why every ancestor
 /// site is compared and not only the one that introduced the property.
 fn shadows_an_ancestor(class: &Class, property: &Property) -> bool {
-    let Some(mine) = named(property.api_name(), property.spec_type) else {
+    let Some(mine) = named(property.api_name(), property.shape.spec_type) else {
         return false;
     };
     property
         .sites
         .iter()
         .filter(|site| site.class != class.identifier)
-        .filter_map(|site| named(site.api_name.as_deref(), property.spec_type))
+        .filter_map(|site| named(site.api_name.as_deref(), property.shape.spec_type))
         .any(|theirs| theirs.getter == mine.getter)
 }
 
-/// A reflected accessor landing on a name the class already offers.
-///
-/// The check [`check_methods`] runs is over what a class declares; what it
-/// reflects arrives from another class, so the merged set is checked here. The
-/// schemas name where each name came from: the class's own declaration, or the
-/// schema it reflects.
-fn check_reflected(class: &Class, accessors: &[RustAccessor], reflected: &[Reflected]) -> Result<(), Error> {
-    // Everything the chain already offers, which is what `check_methods`
-    // walked: a reflected name collides with an inherited one as surely as
-    // with one the class declares itself.
-    let mut seen: BTreeSet<String> = class
-        .properties
-        .iter()
-        .filter(|property| !property.is_local)
-        .flat_map(offered)
-        .collect();
-
-    for accessor in accessors {
-        for method in [&accessor.getter, &accessor.creator] {
-            if !seen.insert(method.to_string()) {
-                let schemas = reflected.iter().map(|r| r.view.to_string()).collect::<Vec<_>>();
-                return Err(class.violation(Violation::MethodCollision {
-                    method: method.to_string(),
-                    first: class.identifier.clone(),
-                    second: tf::Token::from(schemas.join(", ")),
-                }));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Two properties reaching one method name, counting every ancestor's.
+/// Two properties reaching one method name, counting every ancestor's and every
+/// schema the class or an ancestor reflects.
 ///
 /// A view's methods arrive through a chain of traits, and two supertraits
 /// offering one method make every call ambiguous — as do two methods of one name
 /// in a single trait. Readers and authors share the namespace, so a property
-/// whose reader is called `create_size_attr` collides with `size`'s author.
-fn check_methods(class: &Class) -> Result<(), Error> {
+/// whose reader is called `create_size_attr` collides with `size`'s author. A
+/// reflected schema's accessors land among the class's own, as does the method
+/// that views the prim through it, so they are held to the same rule with the
+/// schema named as the second party; what an ancestor this library holds
+/// reflects arrives through its trait, so those names are taken first.
+// TODO: a base another library declares is not held here, so a collision with
+// what it reflects goes unseen, as its accessors go unlinked in
+// `class_symbols`.
+fn check_methods(class: &Class, model: &Library, reflections: &[Reflection<'_>]) -> Result<(), Error> {
     let mut seen: BTreeMap<String, &tf::Token> = BTreeMap::new();
     for property in &class.properties {
         for method in offered(property) {
@@ -946,6 +978,31 @@ fn check_methods(class: &Class) -> Result<(), Error> {
             }
         }
     }
+
+    for base in &class.bases {
+        let Some(ancestor) = model.find(&base.identifier) else {
+            continue;
+        };
+        let theirs = ancestor.reflections(model);
+        for (method, _) in reflected_methods(&theirs) {
+            if let Some(first) = seen.insert(method.clone(), &ancestor.identifier) {
+                return Err(class.violation(Violation::MethodCollision {
+                    method,
+                    first: first.clone(),
+                    second: ancestor.identifier.clone(),
+                }));
+            }
+        }
+    }
+    for (method, schema) in reflected_methods(reflections) {
+        if let Some(first) = seen.insert(method.clone(), schema) {
+            return Err(class.violation(Violation::MethodCollision {
+                method,
+                first: first.clone(),
+                second: schema.clone(),
+            }));
+        }
+    }
     Ok(())
 }
 
@@ -953,18 +1010,16 @@ fn check_methods(class: &Class) -> Result<(), Error> {
 ///
 /// Upstream's prose names upstream's API — `GetExtentAttr()`, `UsdGeomMesh` —
 /// and the reader of the generated crate has neither. What this library emits
-/// for those is known from the [`Inventory`], so the two are paired and the
-/// documentation reads as links to the Rust that answers.
+/// for those is known from the [`Inventory`], and where another library's
+/// classes live from what the configuration placed, so the two are paired and
+/// the documentation reads as links to the Rust that answers.
 ///
-/// This is the half that holds for the whole library: the classes it declares,
-/// under both spellings upstream writes them, and the accessors that one class
-/// alone declares. A name several classes declare is left to
-/// [`class_symbols`], which answers it against the class being documented.
-///
-/// TODO: a class of another library is named here as plainly as one of this
-/// one, and goes unlinked. `Externs` holds where those libraries' views live,
-/// so their classes could be paired too.
-fn library_symbols(inventory: &Inventory<'_>) -> doc::Symbols<'static> {
+/// This is the half that holds for the whole library: the classes it declares
+/// and the classes other libraries in the stack declare, under both spellings
+/// upstream writes them, and the accessors that one class alone declares. A
+/// name several classes declare is left to [`class_symbols`], which answers it
+/// against the class being documented.
+fn library_symbols(inventory: &Inventory<'_>, model: &Library, placed: &Placed<'_>) -> doc::Symbols<'static> {
     let mut symbols = doc::Symbols::default();
 
     // A name is paired only where one class declares it; `None` marks one that
@@ -984,14 +1039,9 @@ fn library_symbols(inventory: &Inventory<'_>) -> doc::Symbols<'static> {
         }
     }
 
-    // Upstream names a class by its library and its class name; the same class
-    // is that class name alone here. Both spellings appear in its prose, the
-    // bare one far more often.
-    //
-    // TODO: the prefix is `libraryPrefix` where a library declares one, which
-    // `load` drops for want of a reader. This is the fallback upstream applies
-    // without it (`usdGenSchema._GetLibPrefix`), so a library declaring one
-    // would be paired under the wrong spelling.
+    // Upstream names a class by its library's prefix and its class name; the
+    // same class is that class name alone here. Both spellings appear in its
+    // prose, the bare one far more often.
     for class in inventory.values() {
         // A view is named where the documentation is, so its own name reaches
         // it and the link needs no path.
@@ -999,34 +1049,67 @@ fn library_symbols(inventory: &Inventory<'_>) -> doc::Symbols<'static> {
         let link = doc::link(view, None);
 
         symbols.insert(class.qualified.clone(), link.clone());
-
-        // The bare name is paired only where it is a coined one, which an
-        // interior capital is what makes it: upstream writes `PointInstancer`
-        // meaning the schema, but `Curves` for a RIB statement and for what
-        // Maya calls a NURBS curve, and a word that is ordinary English is
-        // ordinary English as often as it is a class.
-        if view.chars().skip(1).any(char::is_uppercase) {
+        if coined(view) {
             symbols.insert(view.clone(), link);
+        }
+    }
+
+    // A class of another library is named the same way, and reaches its view
+    // where the configuration placed the library; one whose library was not
+    // placed, or not readably, is left as it was written. Its bare name is
+    // paired only where it names one class across the stack: a class of this
+    // library keeps the name, having been paired first, and a name two foreign
+    // libraries share — the core's `ModelAPI` and `usdGeom`'s `GeomModelAPI`,
+    // which takes the class name `ModelAPI` — names neither.
+    let mut shared: BTreeMap<&str, usize> = BTreeMap::new();
+    for foreign in &model.foreign {
+        *shared.entry(foreign.class_name.as_str()).or_default() += 1;
+    }
+    for foreign in &model.foreign {
+        let Some(Ok(home)) = placed.get(foreign.library.as_str()) else {
+            continue;
+        };
+        let link = doc::link(&foreign.class_name, Some(&super::within(home, &foreign.class_name)));
+
+        symbols.insert(foreign.upstream_name.clone(), link.clone());
+        if coined(&foreign.class_name) && shared[foreign.class_name.as_str()] == 1 {
+            symbols.insert(foreign.class_name.clone(), link);
         }
     }
     symbols
 }
 
-/// What those names point at when the documentation is `class`'s own.
+/// Whether a class name is a coined one, which an interior capital is what
+/// makes it: upstream writes `PointInstancer` meaning the schema, but `Curves`
+/// for a RIB statement and for what Maya calls a NURBS curve, and a word that
+/// is ordinary English is ordinary English as often as it is a class. Only a
+/// coined name is paired bare.
+fn coined(name: &str) -> bool {
+    name.chars().skip(1).any(char::is_uppercase)
+}
+
+/// What those names point at when the documentation is one class's own, given
+/// the classes whose accessors answer for it, nearest first.
 ///
 /// A method name alone is ambiguous across a library: four of `usdGeom`'s
 /// shapes declare a `radius`. Documentation on a class means that class's
-/// property, so its own chain answers first and nearest wins; what is left
-/// falls through to the library, which pairs only unambiguous names.
+/// property, so the `owners` answer first and nearest wins; what is left falls
+/// through to the library, which pairs only unambiguous names.
 // TODO(perf): every class re-pairs the names its chain declares, which
 // `library_symbols` has already read once from the same inventory. The pairs are
 // a pure function of the class, so they could be built per class in one pass, or
 // built in parallel.
-fn class_symbols<'a>(class: &Class, inventory: &Inventory<'_>, library: &'a doc::Symbols<'a>) -> doc::Symbols<'a> {
+// TODO: a base another library declares is not among the owners, the inventory
+// holding only this library's classes, so its accessors go unlinked in a
+// descendant's prose. Pairing them needs that class's property api names and
+// the shadowing `offers` applies over its chain, which means resolving every
+// base the way `Library::reflected` resolves a reflected schema.
+fn class_symbols<'a, 'i>(
+    owners: impl Iterator<Item = &'i ClassNames<'i>>,
+    library: &'a doc::Symbols<'a>,
+) -> doc::Symbols<'a> {
     let mut symbols = doc::Symbols::layered(library);
-    let chain = iter::once(&class.identifier).chain(class.bases.iter().map(|base| &base.identifier));
-
-    for owner in chain.filter_map(|owner| inventory.get(owner)) {
+    for owner in owners {
         for (cpp, markdown) in owner.links() {
             symbols.insert(cpp, markdown);
         }
@@ -1046,37 +1129,26 @@ fn trait_name(class_name: &str) -> String {
 
 /// The trait a base contributes to a view that derives from it, or `None` where
 /// the base is one of the roots, which have no accessors and are named directly.
-fn base_trait(
-    class: &Class,
-    base: &Base,
-    model: &Library,
-    externs: &BTreeMap<&str, syn::Path>,
-) -> Result<Option<syn::Path>, Error> {
+fn base_trait(class: &Class, base: &Base, model: &Library, placed: &Placed<'_>) -> Result<Option<syn::Path>, Error> {
     if is_root(&base.identifier) {
         return Ok(None);
     }
 
     let origin = class.origin.describe();
     let inherited = identifier(&trait_name(&base.class_name), &origin)?;
-    let Some(library) = &base.library else {
+    if base.library == model.name {
         // A base of this library that this run does not generate — one a
         // sublayer declares without a `/GLOBAL` of its own — has no trait for a
         // view to derive from, so naming it would name nothing.
-        let generated = model.classes.iter().any(|other| other.identifier == base.identifier);
-        return match generated {
+        return match base.generated {
             true => Ok(Some(syn::parse_quote! { #inherited })),
-            false => Err(class.violation(Violation::UngeneratedBase {
-                base: base.identifier.clone(),
+            false => Err(class.violation(Violation::Ungenerated {
+                class: base.identifier.clone(),
             })),
         };
-    };
+    }
 
-    let Some(path) = externs.get(library.as_str()) else {
-        return Err(class.violation(Violation::UnknownLibrary {
-            library: library.clone(),
-            base: base.identifier.clone(),
-        }));
-    };
+    let path = reached(class, placed, &base.library, &base.identifier)?;
     Ok(Some(syn::parse_quote! { #path::#inherited }))
 }
 
@@ -1176,14 +1248,16 @@ fn declaration(property: &Property) -> String {
 /// trust is spelled the way every USD file spells it.
 fn declared_as(property: &Property) -> String {
     let mut text = String::new();
-    if property.is_custom() {
+    if property.shape.custom {
         text.push_str("custom ");
     }
-    if property.variability() == sdf::Variability::Uniform && property.spec_type != sdf::SpecType::Relationship {
+    if property.shape.variability == sdf::Variability::Uniform
+        && property.shape.spec_type != sdf::SpecType::Relationship
+    {
         text.push_str("uniform ");
     }
 
-    if property.spec_type == sdf::SpecType::Relationship {
+    if property.shape.spec_type == sdf::SpecType::Relationship {
         text.push_str("rel ");
     } else {
         let spelling = property

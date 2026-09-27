@@ -6,7 +6,7 @@
 //! cannot come to different conclusions about one field — and so a schema is
 //! read once however many files it produces.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use openusd::{sdf, tf, usd};
@@ -53,6 +53,13 @@ pub struct Library {
     /// a library that declares its own `libraryName` and generates its own
     /// views; anything else is reported as an ungenerated base.
     pub classes: Vec<Class>,
+    /// Classes a class here reflects that this run does not generate, resolved
+    /// from the same stage so their accessors can be emitted as the reflecting
+    /// class's own. Not registered or written to the schematics.
+    pub reflected: Vec<Class>,
+    /// Every class another library in the stack declares, known by name, for
+    /// documentation to link where prose names one.
+    pub foreign: Vec<ForeignClass>,
     /// Where every layer read was found, for a build script to watch.
     pub source_layers: Vec<PathBuf>,
     /// The tokens the library asks for outright, beyond what its schemas imply.
@@ -69,6 +76,12 @@ pub struct Class {
     pub family: tf::Token,
     /// The version its identifier's suffix names; 0 when it has none.
     pub version: u32,
+    /// The `libraryName` of the layer declaring it: this library's for a class
+    /// it generates, another's for one it holds to reflect.
+    pub library: String,
+    /// What upstream calls the class: its library's prefix and its class name,
+    /// as in `UsdGeomMesh`, which is how upstream's documentation names it.
+    pub upstream_name: String,
     /// What kind of schema it is, which decides what the emitter writes and
     /// what the manifest records.
     pub kind: usd::SchemaKind,
@@ -127,15 +140,61 @@ pub struct Class {
 pub struct Base {
     /// The identifier it is registered under.
     pub identifier: tf::Token,
-    /// The library declaring it, when that is not the library being generated.
-    /// Its views live in another crate or module, reached through the
-    /// `extern_library` mapping.
-    pub library: Option<String>,
+    /// The `libraryName` of the layer declaring it. Where that is another
+    /// library's, its views live in another crate or module, reached through
+    /// the `extern_library` mapping.
+    pub library: String,
+    /// Whether the root layer declares it, and so whether this run generates a
+    /// view of it.
+    pub generated: bool,
+    /// The API schemas it names in `reflectedAPISchemas`, whose accessors a
+    /// descendant reaches through its trait.
+    pub reflected_api_schemas: Vec<tf::Token>,
     /// The class name it declares (`className`), defaulting to its identifier
     /// in proper case. What a generator makes of it is the generator's own.
     pub class_name: String,
     /// What kind of schema it is, classified against what stands behind it.
     pub kind: usd::SchemaKind,
+}
+
+/// A class of another library in the stack, known by name: what it is called
+/// there and by upstream, for documentation to reach it by.
+#[derive(Debug)]
+pub struct ForeignClass {
+    /// The library declaring it.
+    pub library: String,
+    /// The class name it declares (`className`), defaulting to its identifier
+    /// in proper case, which is what its view is called in its own module.
+    pub class_name: String,
+    /// What upstream calls it: its library's prefix and that class name.
+    pub upstream_name: String,
+}
+
+/// One API schema a class names in `reflectedAPISchemas`, and what comes of
+/// it, in the order upstream asks: whether it can be reflected at all, then
+/// whether the class applies it.
+#[derive(Debug)]
+pub enum Reflection<'a> {
+    /// A single-apply schema the class applies, whose properties it takes as
+    /// its own and whose view is one method away.
+    Taken {
+        /// The schema reflected.
+        schema: &'a Class,
+        /// Its properties this class takes: every one that no earlier reflected
+        /// schema already declared under the same name.
+        properties: Vec<&'a Property>,
+        /// Its properties an earlier reflected schema already declared, each
+        /// with that schema, whose property keeps the name.
+        shadowed: Vec<(&'a Property, &'a tf::Token)>,
+    },
+    /// A schema that is not single-apply, which has no one set of properties
+    /// to take: a multiple-apply schema's belong to whatever instance it is
+    /// applied under, and a non-applied schema is never applied at all. Set
+    /// aside, as upstream sets it aside.
+    NotSingleApply(&'a Class),
+    /// A single-apply schema the class does not apply, so its properties are
+    /// not every prim's to read.
+    NotApplied(&'a Class),
 }
 
 /// A class's `customData`, with what the registry reads kept apart from what
@@ -183,14 +242,16 @@ pub struct Property {
     /// The name the schematics records. For a multiple-apply schema this is
     /// the template `prefix:__INSTANCE_NAME__:name`.
     pub schematics_name: tf::Token,
-    /// Whether it is an attribute or a relationship.
-    pub spec_type: sdf::SpecType,
+    /// What it is at this class, as composition settled it: an attribute or a
+    /// relationship, of what type, variability and `custom`.
+    pub shape: Shape,
     /// Every class declaring it, nearest first: this class where it redeclares
     /// the property, then each ancestor that declared it.
     ///
     /// The composed result cannot say which class asked for what, and two
     /// questions need to know. The strongest site decides what the property is,
-    /// and a rule about a redeclaration compares that against the weaker ones.
+    /// and a rule about a redeclaration compares its shape against the weaker
+    /// sites'.
     pub sites: Vec<Site>,
     /// Whether this class declares it in its own layer, which a redeclaration
     /// does as much as a first declaration.
@@ -214,6 +275,9 @@ pub struct Site {
     pub class: tf::Token,
     /// Whether that declaration asked for `apiSchemaOverride`.
     pub is_override: bool,
+    /// What the property is at that class, as composition settled it there,
+    /// which is what a class redeclaring it further down is held to.
+    pub shape: Shape,
     /// The accessor name that declaration asked for, or `None` where it asked
     /// for none.
     ///
@@ -224,6 +288,27 @@ pub struct Site {
     pub api_name: Option<String>,
     /// Where it was written.
     pub origin: Origin,
+}
+
+/// What a property is at one class, apart from its value: the fields an
+/// accessor's creator authors, and so the ones a redeclaration may not change.
+///
+/// What composes at the class is what a stage sees and a creator authors, so
+/// the shape is read there: a class that redeclares an inherited uniform
+/// property without spelling `uniform` again composes to uniform through the
+/// class it inherits from, and is uniform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shape {
+    /// Whether it is an attribute or a relationship.
+    pub spec_type: sdf::SpecType,
+    /// An attribute's `typeName` as the schema spells it, before anything looks
+    /// it up. `None` for a relationship, and for an attribute holding no token.
+    pub type_name: Option<tf::Token>,
+    /// Whether the property may only be authored at the default time, which
+    /// USD leaves varying unless a schema says otherwise.
+    pub variability: sdf::Variability,
+    /// Whether the schema declared it `custom`, which its creator authors.
+    pub custom: bool,
 }
 
 /// A property's `customData`, which steers its accessor and nothing else.
@@ -245,11 +330,71 @@ pub struct Origin {
     pub path: sdf::Path,
 }
 
+impl Library {
+    /// Every class this library holds: the ones it generates, then the ones it
+    /// holds to reflect.
+    pub fn held(&self) -> impl Iterator<Item = &Class> {
+        self.classes.iter().chain(&self.reflected)
+    }
+
+    /// The class `identifier` names, among the ones this library holds.
+    pub fn find(&self, identifier: &tf::Token) -> Option<&Class> {
+        self.held().find(|class| &class.identifier == identifier)
+    }
+}
+
 impl Class {
     /// The properties this class declares itself, in schematics order,
     /// including any it redeclares.
     pub fn local_properties(&self) -> impl Iterator<Item = &Property> {
         self.properties.iter().filter(|property| property.is_local)
+    }
+
+    /// What comes of each API schema this class names in
+    /// `reflectedAPISchemas`, in that order.
+    ///
+    /// A name the library does not hold is left out, which resolving reports.
+    /// A name listed twice is one schema, and one an ancestor lists is left to
+    /// the ancestor, whichever library declares it: what the ancestor takes
+    /// arrives through its trait, and taking it again here would offer every
+    /// accessor twice, while what the ancestor sets aside would be set aside
+    /// here for the same reason. Where two taken schemas declare one property
+    /// name, the first keeps it and the later one's is recorded as shadowed,
+    /// which is the order upstream generates in.
+    pub fn reflections<'a>(&self, library: &'a Library) -> Vec<Reflection<'a>> {
+        let inherited: HashSet<&tf::Token> = self.bases.iter().flat_map(|base| &base.reflected_api_schemas).collect();
+        let mut named: HashSet<&tf::Token> = HashSet::new();
+        let mut taken: HashMap<&'a tf::Token, &'a tf::Token> = HashMap::new();
+        self.metadata
+            .reflected_api_schemas
+            .iter()
+            .filter(|name| named.insert(*name) && !inherited.contains(*name))
+            .filter_map(|name| library.find(name))
+            .map(|schema| {
+                if schema.kind != usd::SchemaKind::SingleApplyApi {
+                    return Reflection::NotSingleApply(schema);
+                }
+                if !self.applied_api_schemas.contains(&schema.identifier) {
+                    return Reflection::NotApplied(schema);
+                }
+
+                let mut properties = Vec::new();
+                let mut shadowed = Vec::new();
+                for property in schema.local_properties() {
+                    if let Some(first) = taken.get(&property.name) {
+                        shadowed.push((property, *first));
+                    } else {
+                        taken.insert(&property.name, &schema.identifier);
+                        properties.push(property);
+                    }
+                }
+                Reflection::Taken {
+                    schema,
+                    properties,
+                    shadowed,
+                }
+            })
+            .collect()
     }
 
     /// The properties this schema declares only to override a built-in API
@@ -260,16 +405,6 @@ impl Class {
 }
 
 impl Property {
-    /// One authored field, decoded. `None` when it is unauthored or holds
-    /// another type.
-    ///
-    /// The defaults the accessors below apply are the ones `sdf` applies to
-    /// the same fields on a property spec; this reads them off the composed
-    /// map instead, which is where the schematics writer needs them.
-    fn field<T: TryFrom<sdf::Value>>(&self, key: sdf::FieldKey) -> Option<T> {
-        self.fields.get(key.as_str())?.clone().get()
-    }
-
     /// An attribute's declared type. `None` for a relationship, and for an
     /// attribute whose `typeName` names no registered type — which validation
     /// rejects, since an accessor would have no type to read. Unlike every
@@ -277,27 +412,7 @@ impl Property {
     /// `ValueTypeName::find`, so an unregistered spelling stays visible rather
     /// than becoming an unregistered type name.
     pub fn type_name(&self) -> Option<sdf::ValueTypeName> {
-        sdf::ValueTypeName::find(self.declared_type_name()?)
-    }
-
-    /// An attribute's `typeName` as the schema spells it, before anything looks
-    /// it up. `None` for a relationship, and for one holding no token.
-    pub fn declared_type_name(&self) -> Option<&str> {
-        self.fields
-            .get(sdf::FieldKey::TypeName.as_str())
-            .and_then(sdf::Value::try_as_token_ref)
-            .map(tf::Token::as_str)
-    }
-
-    /// Whether the property may only be authored at the default time, which
-    /// USD leaves varying unless a schema says otherwise.
-    pub fn variability(&self) -> sdf::Variability {
-        self.field(sdf::FieldKey::Variability).unwrap_or_default()
-    }
-
-    /// Whether the schema declared it `custom`, which its creator authors.
-    pub fn is_custom(&self) -> bool {
-        self.field(sdf::FieldKey::Custom).unwrap_or(false)
+        sdf::ValueTypeName::find(self.shape.type_name.as_ref()?)
     }
 
     /// The fallback a stage resolves when nothing is authored.

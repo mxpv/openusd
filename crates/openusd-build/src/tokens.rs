@@ -40,11 +40,16 @@ impl Library {
     /// Sorted by identifier, case-insensitively but stably, with the schema
     /// identifiers last: those name the schemas themselves rather than anything
     /// inside one, and reading them as a group is what a user wants.
+    ///
+    /// A schema held to reflect contributes its tokens as a generated class
+    /// does, which is how upstream gathers them too: the accessors a class
+    /// takes from it are emitted here, and name their properties by constants
+    /// of this library.
     pub fn tokens(&self) -> Result<Vec<Token>, Error> {
         let mut properties = Gathered::default();
         let mut identifiers = Gathered::default();
 
-        for class in &self.classes {
+        for class in self.held() {
             identifiers.add_schema(class)?;
             properties.add_class(class, self)?;
         }
@@ -144,7 +149,7 @@ impl Gathered {
         let mut attributes: Vec<&Property> = class
             .properties
             .iter()
-            .filter(|property| property.spec_type == sdf::SpecType::Attribute)
+            .filter(|property| property.shape.spec_type == sdf::SpecType::Attribute)
             .collect();
         attributes.sort_by_cached_key(|property| property.name.as_str().to_lowercase());
 
@@ -179,7 +184,7 @@ impl Gathered {
         }
 
         for property in &class.properties {
-            if property.spec_type == sdf::SpecType::Relationship {
+            if property.shape.spec_type == sdf::SpecType::Relationship {
                 self.insert(
                     property_id(property),
                     property.schematics_name.as_str().to_owned(),
@@ -293,6 +298,19 @@ mod tests {
                 .expect("gathers")
         });
         &ONCE
+    }
+
+    /// A schema another library declares contributes its tokens once a class
+    /// here reflects it: its property names, for the accessors taken from it,
+    /// and its own identifier.
+    #[test]
+    fn reflected_tokens_gathered() {
+        let tokens = corpus();
+        let has = |id: &str| tokens.iter().any(|token| token.id == id);
+
+        assert!(has("testAttrExternal"), "a property of the reflected schema");
+        assert!(has("testRelExternal"), "and its relationship");
+        assert!(has("TestReflectedExternalAPI"), "and the schema identifier itself");
     }
 
     /// The schema identifiers come last, as a group a reader can take in at

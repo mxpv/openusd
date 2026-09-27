@@ -794,6 +794,33 @@ fn imageable_token_round_trip() {
     );
 }
 
+/// The purpose visibilities share one enum with no `Default`, since guide
+/// falls back to `invisible` where proxy and render fall back to `inherited`;
+/// a model's draw mode and card geometry each carry their own fallback.
+#[test]
+fn model_token_round_trip() {
+    assert_eq!(geom::PurposeVisibility::Visible.as_token(), "visible");
+    assert_eq!(
+        geom::PurposeVisibility::from_token("inherited"),
+        Some(geom::PurposeVisibility::Inherited)
+    );
+    assert_eq!(
+        geom::PurposeVisibility::from_token("invisible"),
+        Some(geom::PurposeVisibility::Invisible)
+    );
+    assert_eq!(geom::PurposeVisibility::from_token("bogus"), None);
+
+    assert_eq!(geom::DrawMode::default(), geom::DrawMode::Inherited);
+    assert_eq!(geom::DrawMode::Cards.as_token(), "cards");
+    assert_eq!(geom::DrawMode::from_token("default"), Some(geom::DrawMode::Default));
+    assert_eq!(geom::DrawMode::from_token("bogus"), None);
+
+    assert_eq!(geom::CardGeometry::default(), geom::CardGeometry::Cross);
+    assert_eq!(geom::CardGeometry::FromTexture.as_token(), "fromTexture");
+    assert_eq!(geom::CardGeometry::from_token("box"), Some(geom::CardGeometry::Box));
+    assert_eq!(geom::CardGeometry::from_token("bogus"), None);
+}
+
 /// An in-memory stage carrying the schema data, which is what makes a prim its
 /// type and resolves the fallbacks its schema declares.
 fn memory() -> Result<Stage> {

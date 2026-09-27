@@ -290,9 +290,13 @@ impl Builder {
     ///
     /// `library` is the `libraryName` that library's `schema.usda` declares and
     /// `rust_path` the module path its views are reachable at, as in
-    /// `("usdGeom", "openusd_schemas::geom")`. A class inheriting from a
-    /// library this run does not generate needs it declared here. Keyed by
-    /// library name, so declaring one twice keeps the last.
+    /// `("usdGeom", "openusd_schemas::geom")`. A class inheriting from, or
+    /// reflecting, a schema of a library this run does not generate needs it
+    /// declared here; a class of a declared library that a schema's prose names
+    /// is linked to where it lives, and one of an undeclared library is left as
+    /// prose. The path is to the library's views, so a library generated for
+    /// its schema data alone has nothing to declare. Keyed by library name, so
+    /// declaring one twice keeps the last.
     #[must_use]
     pub fn extern_library(mut self, library: impl Into<String>, rust_path: impl Into<String>) -> Self {
         self.extern_libraries.insert(library.into(), rust_path.into());
@@ -521,6 +525,39 @@ mod tests {
         configure().read(&dir.join("schema.usda")).map(|(library, _)| library)
     }
 
+    /// A schema library called `library`: the roots, and whatever `classes`
+    /// declare.
+    pub(crate) fn schema(library: &str, classes: &str) -> String {
+        format!(
+            r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {{
+        string libraryName = "{library}"
+    }}
+)
+{{
+}}
+
+class "Typed" {{}}
+
+class "APISchemaBase" {{}}
+
+{classes}
+"#
+        )
+    }
+
+    /// A single-apply API schema for a class to reflect, declaring `dup` among
+    /// its properties for a second reflected schema to collide with.
+    pub(crate) const TAG_API: &str = r#"class "TagAPI" (
+    inherits = </APISchemaBase>
+    customData = { token apiSchemaType = "singleApply" }
+) {
+    string tag = ""
+    int dup = 0
+}"#;
+
     /// An API schema whose name breaks the suffix convention, which is a
     /// warning rather than a rule: the registry never reads the spelling.
     const MISSING_SUFFIX: &str = r#"#usda 1.0
@@ -581,10 +618,13 @@ class "MissingSuffix" (
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("nested/generated");
 
+        // The corpus reflects a schema of its `usd` sublayer library, whose
+        // views the generated code has to be able to name.
         let schema = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/testUsdGenSchema/schema.usda");
         configure()
             .out_dir(&out)
             .search_path(schema.parent().expect("a parent"))
+            .extern_library("usd", "::openusd::usd")
             .schema(&schema)
             .generate()
             .expect("generates");

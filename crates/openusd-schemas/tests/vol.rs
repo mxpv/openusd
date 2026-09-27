@@ -124,6 +124,20 @@ fn splat_prefers_authored_precision() -> Result<()> {
     Ok(())
 }
 
+/// An applied schema that reflects another offers the view through it as a
+/// prim type does: the position attribute API is one method from the base API
+/// its data comes from, over the same prim.
+#[test]
+fn attribute_api_reflects_base() -> Result<()> {
+    let stage = memory()?;
+    let splat = vol::ParticleField3DGaussianSplat::define(&stage, "/Splat")?;
+    let positions = vol::ParticleFieldPositionAttributeAPI::apply(&splat)?;
+
+    let base: vol::ParticleFieldPositionBaseAPI = positions.particle_field_position_base_api();
+    assert_eq!(base.path(), splat.path());
+    Ok(())
+}
+
 /// The earliest time sample is what decides it, so a splat animated from an
 /// empty first sample still reads as half-precision.
 #[test]

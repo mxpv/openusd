@@ -9,18 +9,13 @@
 //!
 //! Anything a schema author would want to know that does not make the output
 //! wrong is a warning instead, returned for a build script to print.
-// TODO: two rules are missing, both comparing names nothing has minted yet. A
-// redeclaration that changes a property's type, variability or `custom` flag
-// needs each declaring site rather than the composed result the model carries.
-// The collisions between Rust identifiers — two tokens reaching one constant,
-// two properties reaching one method — belong with the stage that mints them.
 
 use std::collections::HashMap;
 
 use openusd::{sdf, tf, usd};
 
 use crate::error::Error;
-use crate::model::{API_SCHEMA_BASE, Class, Library, Property, SCHEMA_BASE};
+use crate::model::{API_SCHEMA_BASE, Class, Library, Property, Reflection, SCHEMA_BASE, Shape};
 
 /// A rule a schema broke.
 ///
@@ -195,6 +190,28 @@ pub enum Violation {
         class: tf::Token,
     },
 
+    /// A redeclaration that changes what a property is, rather than what it
+    /// falls back to.
+    ///
+    /// An accessor is generated where a property is introduced and every class
+    /// below reaches that one, so its creator authors the type, variability and
+    /// `custom` composed there. A redeclaration changing any of them would have
+    /// that creator author a property the redeclaring class's own definition
+    /// contradicts. A fallback is not on the list: changing one is what a
+    /// redeclaration is for.
+    #[error("`{property}` is {} on `{class}`", redeclared_as(.ours, .theirs))]
+    IncompatibleRedeclaration {
+        /// The property.
+        property: tf::Token,
+        /// The ancestor it disagrees with.
+        class: tf::Token,
+        /// What the property is at the ancestor. Boxed with `ours`, so the
+        /// error a build stops on stays as small as every other.
+        theirs: Box<Shape>,
+        /// What this class made it.
+        ours: Box<Shape>,
+    },
+
     /// Two token sources reaching one identifier with different values, where
     /// one constant would have to hold both strings.
     #[error("token `{id}` would hold both \"{first}\" and \"{second}\"")]
@@ -242,22 +259,46 @@ pub enum Violation {
         name: String,
     },
 
-    /// A base this run does not generate and that belongs to no other library,
-    /// so no view of it exists for a descendant to derive from.
-    #[error("`{base}` is inherited from but not generated; declare it in the root layer or in a library of its own")]
-    UngeneratedBase {
-        /// The base that has no views.
-        base: tf::Token,
+    /// A class this run does not generate and that belongs to no other library,
+    /// so no view of it exists for a descendant to derive from or for a class
+    /// to reflect.
+    #[error(
+        "`{class}` is inherited from or reflected but not generated; declare it in the root layer or in a library of its own"
+    )]
+    Ungenerated {
+        /// The class that has no views.
+        class: tf::Token,
     },
 
-    /// A base in a library this run does not generate and was not told where to
-    /// find, so its views cannot be named.
-    #[error("`{base}` belongs to the {library} library; name where its views live with Builder::extern_library")]
+    /// A reflected API schema no layer in the stack declares.
+    #[error("reflects `{schema}`, which no layer declares")]
+    UnknownReflectedSchema {
+        /// The name that could not be found.
+        schema: tf::Token,
+    },
+
+    /// A reflected API schema the class does not apply.
+    ///
+    /// Reflecting says every prim of this type carries the schema's properties,
+    /// which only applying the schema makes true; a reflected accessor would
+    /// otherwise reach a property the prim's definition does not have. A
+    /// multiple-apply class records its applied schemas as instance-name
+    /// templates, which no reflected name matches, so it cannot reflect.
+    #[error("`{schema}` is reflected but not applied; add it to `prepend apiSchemas`")]
+    ReflectedNotApplied {
+        /// The schema reflected without being applied.
+        schema: tf::Token,
+    },
+
+    /// A class in a library this run does not generate and was not told where
+    /// to find, so its views cannot be named: a base to derive from, or a
+    /// schema to reflect.
+    #[error("`{class}` belongs to the {library} library; name where its views live with Builder::extern_library")]
     UnknownLibrary {
-        /// The library declaring the base.
+        /// The library declaring the class.
         library: String,
-        /// The base that could not be reached.
-        base: tf::Token,
+        /// The class that could not be reached.
+        class: tf::Token,
     },
 
     /// A library was told where its views live, but not in a spelling Rust can
@@ -307,6 +348,7 @@ pub fn check(library: &Library) -> Result<Vec<String>, Error> {
         check_inheritance(class)?;
         check_fields(class)?;
         check_properties(class)?;
+        check_reflection(class, library, &mut warnings)?;
         warnings.extend(conventions(class));
     }
 
@@ -499,7 +541,7 @@ fn check_properties(class: &Class) -> Result<(), Error> {
             return Err(property.violation(Violation::DisallowedField { field: field.clone() }));
         }
 
-        if property.spec_type == sdf::SpecType::Attribute && property.type_name().is_none() {
+        if property.shape.spec_type == sdf::SpecType::Attribute && property.type_name().is_none() {
             let declared = property
                 .fields
                 .get(sdf::FieldKey::TypeName.as_str())
@@ -533,8 +575,65 @@ fn check_properties(class: &Class) -> Result<(), Error> {
                 },
             });
         }
+
+        // A redeclaration may change what the property falls back to and
+        // nothing else: the accessor a caller reaches is the introducing
+        // class's, whose creator authors the shape composed there. Reported
+        // against this class's own declaration, which is the one to fix.
+        if let Some((mine, weaker)) = property.sites.split_first()
+            && mine.class == class.identifier
+            && let Some(site) = weaker.iter().find(|site| site.shape != mine.shape)
+        {
+            return Err(Error::Definition {
+                origin: mine.origin.describe(),
+                violation: Violation::IncompatibleRedeclaration {
+                    property: property.name.clone(),
+                    class: site.class.clone(),
+                    theirs: Box::new(site.shape.clone()),
+                    ours: Box::new(mine.shape.clone()),
+                },
+            });
+        }
     }
 
+    Ok(())
+}
+
+/// What comes of the API schemas a class names to reflect: what a schema
+/// author should know about the ones set aside, and the one that is wrong.
+///
+/// The model decides each schema's fate ([`Class::reflections`]); this only
+/// phrases it. A schema set aside is a warning, as upstream prints and goes on,
+/// and the corpus relies on that: it reflects a multiple-apply schema it
+/// applies under an instance name.
+fn check_reflection(class: &Class, library: &Library, warnings: &mut Vec<String>) -> Result<(), Error> {
+    for reflection in class.reflections(library) {
+        match reflection {
+            Reflection::Taken { schema, shadowed, .. } => {
+                for (property, first) in shadowed {
+                    warnings.push(format!(
+                        "{}: `{}` of `{}` is not reflected; `{first}` already declares it",
+                        class.origin.describe(),
+                        property.name,
+                        schema.identifier
+                    ));
+                }
+            }
+            Reflection::NotSingleApply(schema) => warnings.push(format!(
+                "{}: `{}` is a {} schema, so it is not reflected; only a single-apply API schema can be",
+                class.origin.describe(),
+                schema.identifier,
+                kind_name(schema.kind)
+            )),
+            // Reflecting says every prim of this type carries the schema's
+            // properties, which only applying the schema makes true.
+            Reflection::NotApplied(schema) => {
+                return Err(class.violation(Violation::ReflectedNotApplied {
+                    schema: schema.identifier.clone(),
+                }));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -582,6 +681,45 @@ fn disallowed_field<'a>(fields: impl IntoIterator<Item = &'a String>) -> Option<
         .find(|field| !input.contains(&field.as_str()) && usd::SchemaRegistry::is_disallowed_field(field))
 }
 
+/// How a redeclaration reads in its diagnostic: the first thing `ours` and
+/// `theirs` disagree on, this class's reading first, as in "`double` here and
+/// `int`".
+fn redeclared_as(ours: &Shape, theirs: &Shape) -> String {
+    spelled(ours)
+        .into_iter()
+        .zip(spelled(theirs))
+        .find(|(ours, theirs)| ours != theirs)
+        .map_or_else(
+            || "as it was".to_owned(),
+            |(ours, theirs)| format!("{ours} here and {theirs}"),
+        )
+}
+
+/// Each thing a redeclaration is held to, as a diagnostic reads it.
+fn spelled(shape: &Shape) -> [String; 4] {
+    [
+        match shape.spec_type {
+            sdf::SpecType::Relationship => "a relationship",
+            _ => "an attribute",
+        }
+        .to_owned(),
+        shape
+            .type_name
+            .as_ref()
+            .map_or_else(|| "of no type".to_owned(), |name| format!("`{name}`")),
+        match shape.variability {
+            sdf::Variability::Uniform => "uniform",
+            sdf::Variability::Varying => "varying",
+        }
+        .to_owned(),
+        match shape.custom {
+            true => "custom",
+            false => "not custom",
+        }
+        .to_owned(),
+    ]
+}
+
 /// How a schema kind reads in a diagnostic.
 fn kind_name(kind: usd::SchemaKind) -> &'static str {
     match kind {
@@ -617,7 +755,7 @@ impl Property {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{read_fixture, read_source};
+    use crate::tests::{TAG_API, read_fixture, read_source, schema};
 
     /// The rule a fixture is rejected for.
     fn violation(name: &str) -> Violation {
@@ -917,6 +1055,338 @@ class "Derived" (
             let names: Vec<&str> = class.override_properties().map(|p| p.name.as_str()).collect();
             assert_eq!(names, vec!["plain"], "{identifier}");
         }
+    }
+
+    /// A base declaring one property, and a class deriving from it that
+    /// redeclares the same property.
+    fn redeclaring(base: &str, derived: &str) -> String {
+        schema(
+            "testRedeclare",
+            &format!(
+                r#"class "Base" (
+    inherits = </Typed>
+) {{
+    {base}
+}}
+
+class "Derived" (
+    inherits = </Base>
+) {{
+    {derived}
+}}"#
+            ),
+        )
+    }
+
+    /// What a redeclaration was refused for: the ancestor, what the property is
+    /// there, and what this class made it.
+    fn incompatible(base: &str, derived: &str) -> (String, Shape, Shape) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match read_source(dir.path(), &redeclaring(base, derived)).expect_err("the redeclaration changes the property")
+        {
+            Error::Definition {
+                origin,
+                violation:
+                    Violation::IncompatibleRedeclaration {
+                        class, theirs, ours, ..
+                    },
+            } => {
+                assert!(
+                    origin.ends_with("/Derived.plain"),
+                    "reported against the redeclaration: {origin}"
+                );
+                (class.to_string(), *theirs, *ours)
+            }
+            other => panic!("{other}"),
+        }
+    }
+
+    /// A redeclaration that changes the type, which the introducing class's
+    /// creator would go on authoring as it was.
+    #[test]
+    fn redeclared_type_changes() {
+        let (class, theirs, ours) = incompatible("int plain = 1", "double plain = 2");
+        assert_eq!(class, "Base");
+        assert_eq!(theirs.type_name, Some(tf::Token::new("int")));
+        assert_eq!(ours.type_name, Some(tf::Token::new("double")));
+    }
+
+    /// Spelling `uniform` on a property the base left varying changes what
+    /// composes, and so is refused.
+    #[test]
+    fn redeclared_adds_uniform() {
+        let (_, theirs, ours) = incompatible(r#"token plain = "a""#, r#"uniform token plain = "b""#);
+        assert_eq!(theirs.variability, sdf::Variability::Varying);
+        assert_eq!(ours.variability, sdf::Variability::Uniform);
+    }
+
+    /// So does making an inherited property `custom`.
+    #[test]
+    fn redeclared_adds_custom() {
+        let (_, theirs, ours) = incompatible("int plain = 1", "custom int plain = 2");
+        assert!(!theirs.custom);
+        assert!(ours.custom);
+    }
+
+    /// The diagnostic spells the first thing the two shapes disagree on, this
+    /// class's reading first.
+    #[test]
+    fn redeclared_spelled() {
+        let base = Shape {
+            spec_type: sdf::SpecType::Attribute,
+            type_name: Some(tf::Token::new("int")),
+            variability: sdf::Variability::Varying,
+            custom: false,
+        };
+        let typed = Shape {
+            type_name: Some(tf::Token::new("double")),
+            ..base.clone()
+        };
+        let uniform = Shape {
+            variability: sdf::Variability::Uniform,
+            ..base.clone()
+        };
+        let custom = Shape {
+            custom: true,
+            ..base.clone()
+        };
+        let related = Shape {
+            spec_type: sdf::SpecType::Relationship,
+            type_name: None,
+            ..base.clone()
+        };
+
+        assert_eq!(redeclared_as(&typed, &base), "`double` here and `int`");
+        assert_eq!(redeclared_as(&uniform, &base), "uniform here and varying");
+        assert_eq!(redeclared_as(&custom, &base), "custom here and not custom");
+        assert_eq!(redeclared_as(&related, &base), "a relationship here and an attribute");
+    }
+
+    /// Redeclaring an attribute as a relationship never reaches the rule:
+    /// composition refuses a property whose specs disagree on what kind it is
+    /// before anything is resolved from the stack.
+    #[test]
+    fn redeclared_as_rel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = read_source(dir.path(), &redeclaring("int plain = 1", "rel plain"))
+            .expect_err("the specs disagree on what the property is");
+        assert!(
+            matches!(&error, Error::Composition { diagnostic, .. } if diagnostic.contains("inconsistent spec types")),
+            "{error}"
+        );
+    }
+
+    /// A different accessor name does not excuse the change: the ancestor's
+    /// creator is still reachable on the derived view.
+    #[test]
+    fn redeclared_renamed_rejected() {
+        let (_, theirs, ours) = incompatible(
+            "int plain = 1",
+            r#"double plain = 2 (
+        customData = { string apiName = "other" }
+    )"#,
+        );
+        assert_eq!(theirs.type_name, Some(tf::Token::new("int")));
+        assert_eq!(ours.type_name, Some(tf::Token::new("double")));
+    }
+
+    /// Changing the fallback is what a redeclaration is for.
+    #[test]
+    fn redeclared_fallback_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        read_source(
+            dir.path(),
+            &redeclaring("double3 plain = (1, 1, 1)", "double3 plain = (2, 2, 2)"),
+        )
+        .expect("a fallback may change");
+    }
+
+    /// A redeclaration that leaves `uniform` unspelled composes to uniform
+    /// through the base, so the property is what it was and is accepted (see
+    /// [`Shape`]).
+    #[test]
+    fn redeclared_omits_uniform() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let library = read_source(
+            dir.path(),
+            &redeclaring(r#"uniform token plain = "a""#, r#"token plain = "b""#),
+        )
+        .expect("omitting the keyword changes nothing");
+
+        let derived = library
+            .classes
+            .iter()
+            .find(|class| class.identifier.as_str() == "Derived")
+            .expect("the derived class");
+        let plain = derived
+            .local_properties()
+            .find(|property| property.name.as_str() == "plain")
+            .expect("the redeclared property");
+        assert_eq!(plain.shape.variability, sdf::Variability::Uniform);
+    }
+
+    /// A library of the roots and whatever `classes` declare.
+    fn reflecting(classes: &str) -> String {
+        schema("testReflect", classes)
+    }
+
+    /// Reflecting a name nothing declares is a mistake the stack reports, not
+    /// a schema quietly left out.
+    #[test]
+    fn reflected_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = read_source(
+            dir.path(),
+            &reflecting(
+                r#"class "Thing" (
+    inherits = </Typed>
+    customData = { token[] reflectedAPISchemas = ["NowhereAPI"] }
+) {}"#,
+            ),
+        )
+        .expect_err("nothing declares it");
+
+        match error {
+            Error::Definition {
+                violation: Violation::UnknownReflectedSchema { schema },
+                ..
+            } => assert_eq!(schema.as_str(), "NowhereAPI"),
+            other => panic!("{other}"),
+        }
+    }
+
+    /// Reflecting promises the schema's properties on every prim of the type,
+    /// which only applying the schema keeps.
+    #[test]
+    fn reflected_not_applied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = read_source(
+            dir.path(),
+            &reflecting(&format!(
+                r#"{TAG_API}
+
+class "Thing" (
+    inherits = </Typed>
+    customData = {{ token[] reflectedAPISchemas = ["TagAPI"] }}
+) {{}}"#
+            )),
+        )
+        .expect_err("the schema is not applied");
+
+        match error {
+            Error::Definition {
+                violation: Violation::ReflectedNotApplied { schema },
+                ..
+            } => assert_eq!(schema.as_str(), "TagAPI"),
+            other => panic!("{other}"),
+        }
+    }
+
+    /// A multiple-apply schema has no one set of properties to take, so it is
+    /// set aside with a word rather than refused: the corpus does exactly
+    /// this, applying it under an instance name.
+    #[test]
+    fn reflected_multi_apply_warns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let library = read_source(
+            dir.path(),
+            &reflecting(
+                r#"class "MultiAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        token apiSchemaType = "multipleApply"
+        token propertyNamespacePrefix = "multi"
+    }
+) {
+    int depth = 0
+}
+
+class "Thing" (
+    inherits = </Typed>
+    prepend apiSchemas = ["MultiAPI:foo"]
+    customData = { token[] reflectedAPISchemas = ["MultiAPI"] }
+) {}"#,
+            ),
+        )
+        .expect("set aside, not refused");
+        let warnings = check(&library).expect("set aside, not refused");
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("`MultiAPI` is a multiple-apply API schema, so it is not reflected")),
+            "{warnings:?}"
+        );
+        let thing = library.find(&tf::Token::new("Thing")).expect("the class");
+        assert!(matches!(
+            thing.reflections(&library).as_slice(),
+            [Reflection::NotSingleApply(schema)] if schema.identifier.as_str() == "MultiAPI"
+        ));
+    }
+
+    /// Two reflected schemas declaring one name: the first keeps it, the
+    /// second's is set aside with a word, and the class takes the rest.
+    #[test]
+    fn reflected_duplicate_warns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let library = read_source(
+            dir.path(),
+            &reflecting(&format!(
+                r#"{TAG_API}
+
+class "LabelAPI" (
+    inherits = </APISchemaBase>
+    customData = {{ token apiSchemaType = "singleApply" }}
+) {{
+    string label = ""
+    int dup = 0
+}}
+
+class "Thing" (
+    inherits = </Typed>
+    prepend apiSchemas = ["TagAPI", "LabelAPI"]
+    customData = {{ token[] reflectedAPISchemas = ["TagAPI", "LabelAPI"] }}
+) {{}}"#
+            )),
+        )
+        .expect("the first keeps the name");
+        let warnings = check(&library).expect("the first keeps the name");
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("`dup` of `LabelAPI` is not reflected; `TagAPI` already declares it")),
+            "{warnings:?}"
+        );
+
+        // Each schema, with the names taken from it and the ones set aside.
+        let thing = library.find(&tf::Token::new("Thing")).expect("the class");
+        let taken: Vec<String> = thing
+            .reflections(&library)
+            .iter()
+            .map(|reflection| match reflection {
+                Reflection::Taken {
+                    schema,
+                    properties,
+                    shadowed,
+                } => {
+                    let names: Vec<&str> = properties.iter().map(|p| p.name.as_str()).collect();
+                    let shadowed: Vec<String> = shadowed
+                        .iter()
+                        .map(|(p, first)| format!("{} by {first}", p.name))
+                        .collect();
+                    format!("{} takes {names:?}, shadowed {shadowed:?}", schema.identifier)
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            taken,
+            vec![
+                r#"TagAPI takes ["tag", "dup"], shadowed []"#,
+                r#"LabelAPI takes ["label"], shadowed ["dup by TagAPI"]"#,
+            ]
+        );
     }
 
     /// A `typeName` reaches the schematics, so it has to be the schema's own.

@@ -45,7 +45,8 @@ pub fn configured() -> openusd_build::Builder {
         let family = library.trim_start_matches("usd").to_lowercase();
         builder = builder.extern_library(*library, format!("crate::{family}"));
     }
-    builder
+    // The core family's views live in `openusd` itself.
+    builder.extern_library("usd", "::openusd::usd")
 }
 
 /// Compares generated text against the file that records it, or rewrites that

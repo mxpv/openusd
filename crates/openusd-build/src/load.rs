@@ -16,6 +16,7 @@ use openusd::{ar, sdf, tf, usd};
 use crate::Builder;
 use crate::error::Error;
 use crate::model::Origin;
+use crate::names;
 
 /// The `/GLOBAL` prim every schema library configures itself through.
 const GLOBAL: &str = "/GLOBAL";
@@ -46,6 +47,10 @@ pub struct Declaration {
     pub name: tf::Token,
     /// The library whose `/GLOBAL` covers the layer declaring it.
     pub library: String,
+    /// The prefix upstream puts before that library's class names: its
+    /// `libraryPrefix` where its `/GLOBAL` declares one, else its name in
+    /// proper case (`usdGenSchema._GetLibPrefix`).
+    pub prefix: String,
     /// Whether the root layer declares it, and so whether this run generates
     /// it. A class from a sublayer can be inherited from but is never
     /// regenerated.
@@ -133,11 +138,11 @@ pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
 
     // A layer with no `/GLOBAL` of its own belongs to whichever library
     // sublayered it; only its class prims matter.
-    let libraries: HashMap<&String, &String> = globals
+    let owners: HashMap<&String, Owner<'_>> = globals
         .iter()
-        .filter_map(|(identifier, global)| Some((*identifier, global.library.as_ref()?)))
+        .filter_map(|(identifier, global)| Some((*identifier, global.owner()?)))
         .collect();
-    let library = libraries.get(&root).ok_or_else(|| Error::NoLibraryName {
+    let root_owner = owners.get(&root).ok_or_else(|| Error::NoLibraryName {
         schema: schema.to_path_buf(),
     })?;
 
@@ -146,14 +151,13 @@ pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
         let Some(layer) = stage.layer(identifier) else {
             continue;
         };
-        let owner = libraries.get(identifier).unwrap_or(library);
+        let owner = owners.get(identifier).unwrap_or(root_owner);
         declarations.extend(read_classes(&layer, identifier, owner, **identifier == root));
     }
 
-    let library = (*library).clone();
     Ok(Source {
         stage,
-        library,
+        library: root_owner.library.to_owned(),
         use_literal_identifiers,
         skip_code_generation,
         declarations,
@@ -177,9 +181,31 @@ pub struct DeclaredToken {
 /// What one layer's `/GLOBAL` prim configures.
 struct Global {
     library: Option<String>,
+    /// The `libraryPrefix` it declares, where it declares one.
+    prefix: Option<String>,
     use_literal_identifiers: bool,
     skip_code_generation: bool,
     tokens: Vec<DeclaredToken>,
+}
+
+/// The library a layer's classes belong to: its name, and the prefix upstream
+/// puts before its class names.
+struct Owner<'a> {
+    library: &'a str,
+    prefix: String,
+}
+
+impl Global {
+    /// The library this `/GLOBAL` names, where it names one, with the prefix
+    /// upstream gives its classes: `libraryPrefix` where declared, else the
+    /// name in proper case (`usdGenSchema._GetLibPrefix`).
+    fn owner(&self) -> Option<Owner<'_>> {
+        let library = self.library.as_deref()?;
+        Some(Owner {
+            library,
+            prefix: self.prefix.clone().unwrap_or_else(|| names::proper_case(library)),
+        })
+    }
 }
 
 /// A resolved path as a build script reports it.
@@ -198,8 +224,9 @@ fn watched_path(resolved: &str) -> PathBuf {
 /// Reads a layer's `/GLOBAL` prim.
 ///
 /// The keys that only mean something to the C++ build (`libraryPath`,
-/// `libraryPrefix`, `tokensPrefix`, `useExportAPI`) are ignored: there is no
-/// C++ build here to name.
+/// `tokensPrefix`, `useExportAPI`) are ignored: there is no C++ build here to
+/// name. `libraryPrefix` is read, since it is also how upstream's documentation
+/// spells the library's classes, which the generated documentation links.
 fn read_global(layer: &sdf::Layer) -> Global {
     let custom_data = layer
         .prim(GLOBAL)
@@ -210,6 +237,7 @@ fn read_global(layer: &sdf::Layer) -> Global {
 
     Global {
         library: custom_data.string("libraryName"),
+        prefix: custom_data.string("libraryPrefix"),
         use_literal_identifiers: custom_data.flag("useLiteralIdentifier").unwrap_or(true),
         skip_code_generation: custom_data.flag("skipCodeGeneration").unwrap_or(false),
         tokens: custom_data.token_declarations("libraryTokens"),
@@ -217,7 +245,7 @@ fn read_global(layer: &sdf::Layer) -> Global {
 }
 
 /// Reads every class prim one layer declares, in `primChildren` order.
-fn read_classes(layer: &sdf::Layer, identifier: &str, library: &str, generated: bool) -> Vec<Declaration> {
+fn read_classes(layer: &sdf::Layer, identifier: &str, owner: &Owner<'_>, generated: bool) -> Vec<Declaration> {
     let Some(root) = layer.pseudo_root() else {
         return Vec::new();
     };
@@ -238,7 +266,8 @@ fn read_classes(layer: &sdf::Layer, identifier: &str, library: &str, generated: 
             };
             Some(Declaration {
                 name,
-                library: library.to_owned(),
+                library: owner.library.to_owned(),
+                prefix: owner.prefix.clone(),
                 generated,
                 bases: inherit_names(&prim),
                 custom_data: CustomData::read(prim.get::<sdf::Value>(sdf::FieldKey::CustomData)),

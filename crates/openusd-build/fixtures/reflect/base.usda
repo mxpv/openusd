@@ -1,0 +1,35 @@
+#usda 1.0
+(
+    """The library a schema is reflected from: the roots, and one single-apply
+    API schema another library's classes take the accessors of. Declared here
+    so the fixture needs nothing outside its own directory."""
+)
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testElsewhere"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "APISchemaBase" {}
+
+class "ThingAPI" (
+    inherits = </APISchemaBase>
+    doc = "Marks a prim as a thing, which has a weight and belongs to someone."
+    customData = {
+        token apiSchemaType = "singleApply"
+    }
+)
+{
+    double weight = 1 (
+        doc = "How heavy the thing is."
+    )
+
+    rel owner (
+        doc = "Whom the thing belongs to."
+    )
+}

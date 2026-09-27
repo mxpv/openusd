@@ -96,7 +96,7 @@ impl<'a> Lists<'a> {
             property_fields: class
                 .properties
                 .iter()
-                .map(|property| fields(&property.fields, property.spec_type))
+                .map(|property| fields(&property.fields, property.shape.spec_type))
                 .collect(),
         }
     }
@@ -144,23 +144,23 @@ fn declare<'a>(class: &'a Class, lists: &'a Lists<'a>, nested: &'a Nested<'a>) -
 /// multiple-apply schema is the template name.
 fn declare_property<'a>(property: &'a Property, fields: &'a [usd::Field<'a>]) -> usd::PropertyDecl<'a> {
     let name = property.schematics_name.as_str();
-    let decl = if property.spec_type == sdf::SpecType::Relationship {
+    let decl = if property.shape.spec_type == sdf::SpecType::Relationship {
         usd::PropertyDecl::relationship(name)
     } else {
         // Validation rejects an attribute whose `typeName` names no registered
         // type, so the spelling is there. Were it not, the empty one it stands
         // in for names no type either, and registering the declaration says so.
-        usd::PropertyDecl::attribute(name, property.declared_type_name().unwrap_or_default())
+        usd::PropertyDecl::attribute(name, property.shape.type_name.as_ref().map_or("", tf::Token::as_str))
     };
 
     // Said outright rather than left to whichever way the constructor leans,
     // so the two kinds of property keep the variability the schema authored.
     let decl = decl.fields(fields);
-    let decl = match property.variability() {
+    let decl = match property.shape.variability {
         sdf::Variability::Uniform => decl.uniform(),
         sdf::Variability::Varying => decl.varying(),
     };
-    if property.is_custom() { decl.custom() } else { decl }
+    if property.shape.custom { decl.custom() } else { decl }
 }
 
 /// The properties a class restates only to change what a built-in API schema

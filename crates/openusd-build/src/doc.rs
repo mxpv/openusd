@@ -632,10 +632,9 @@ fn is_url(word: &str) -> bool {
 /// Whether a word reads as code: a path, an underscored or parenthesized name,
 /// or one with an inner capital.
 // TODO: a word's shape is a guess at what it means, and the guess is what
-// answers for every name [`Symbols`] does not hold — a token, a class of a
-// library this run does not generate, and prose such as `OpenUSD` or
-// `RenderMan`, which is backticked as though it were code. Holding those too
-// would leave this for words that name nothing at all.
+// answers for every name [`Symbols`] does not hold — a token, and prose such
+// as `OpenUSD` or `RenderMan`, which is backticked as though it were code.
+// Holding those too would leave this for words that name nothing at all.
 fn reads_as_code(word: &str) -> bool {
     if word.len() < 2 {
         return false;

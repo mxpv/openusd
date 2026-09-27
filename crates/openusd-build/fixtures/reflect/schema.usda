@@ -1,0 +1,48 @@
+#usda 1.0
+(
+    """A library reflecting a schema another library declares, in both shapes
+    a class can: a prim type, whose accessors live on a trait, and an applied
+    API schema, whose accessors are inherent to its view. The generated files
+    are compiled into `tests/reflect.rs`, so a path that does not resolve or a
+    method on the wrong item fails there rather than in a consumer's build."""
+    subLayers = [
+        @base.usda@
+    ]
+)
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testHere"
+    }
+)
+{
+}
+
+class Crate "Crate" (
+    inherits = </Typed>
+    prepend apiSchemas = ["ThingAPI"]
+    doc = "A box, which is a thing: every crate has a weight and an owner."
+    customData = {
+        token[] reflectedAPISchemas = ["ThingAPI"]
+    }
+)
+{
+    double volume = 1 (
+        doc = "How much the crate holds."
+    )
+}
+
+class "BadgeAPI" (
+    inherits = </APISchemaBase>
+    prepend apiSchemas = ["ThingAPI"]
+    doc = "Labels a prim, and makes it a thing while it is at it."
+    customData = {
+        token apiSchemaType = "singleApply"
+        token[] reflectedAPISchemas = ["ThingAPI"]
+    }
+)
+{
+    string badge = "" (
+        doc = "What the label says."
+    )
+}
