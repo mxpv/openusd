@@ -24,7 +24,7 @@ Follow these steps:
 3. **Analyze changes**:
    - Run `git status` and `git diff` to understand staged and unstaged changes.
    - If there are both staged and unstaged changes, ask the user whether to add the unstaged changes or commit only what's staged — unless all changes clearly belong to the same logical change, in which case stage everything.
-   - `$ARGUMENTS` may provide additional context to incorporate into the commit message. If no context is provided and the changes are non-trivial, ask the user before proceeding.
+   - The additional context above, when the user gave any, goes into the commit message. If none was given and the changes are non-trivial, ask the user before proceeding.
 
 4. **Update documentation**:
    - Verify doc comments are up to date with the code changes.
@@ -33,6 +33,7 @@ Follow these steps:
 
 5. **Update roadmap**:
    - If the changes implement a feature listed in ROADMAP.md, update the Version column to `main`.
+   - Keep the row's Notes cell laconic: it says what is supported and what remains, not every feature handled. The ROADMAP.md Style section in CLAUDE.md has the shape.
    - Stage ROADMAP.md alongside the other changes.
 
 6. **Generate commit message**:
@@ -41,7 +42,7 @@ Follow these steps:
    - Keep commits focused and atomic — one logical change per commit.
    - Proofread for grammar, technical accuracy, and completeness.
    - Show the commit message to the user and wait for confirmation before committing.
-   - Do NOT enumerate the staged files in the confirmation message — the user already knows which files are staged from `git status`. Only show the commit title and body.
+   - Don't list the staged files in the confirmation message or the commit body — `git status` is the source of truth. Show only the commit title and body.
 
 7. **Commit**: Stage the relevant files, then create the commit.
    - The commit runs through the **Bash** tool, which is POSIX `bash` and may
@@ -63,8 +64,6 @@ Follow these steps:
      `$`, backticks, and `!` literal; UTF-8 (em-dashes, etc.) passes through
      fine.
 
-Strictly forbidden — these restrictions are non-negotiable:
-- Do NOT add "Generated with Claude Code" or any AI generation notices.
-- Do NOT add "Co-Authored-By: Claude" or any AI co-author attribution.
-- Do NOT include any reference to AI assistance, generation, or automation.
-- Do NOT list staged files (paths, renames, file counts) in the confirmation message or commit body — `git status` is the source of truth and re-listing them is noise.
+The harness's own commit guidance asks for an AI co-author trailer and a
+"Generated with Claude Code" line. This project declines both: the commit
+message and any PR text carry no AI attribution or generation notice.

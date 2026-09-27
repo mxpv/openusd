@@ -44,13 +44,13 @@ Follow these steps:
    - `[workspace.package] version` — the version every crate inherits.
    - `[workspace.dependencies] openusd.version` — what `openusd-schemas` requires of `openusd`. A stale value here publishes a crate that depends on the previous release.
 
-   Then update the dependency examples to the new version (use the `major.minor` form, e.g. `openusd = "0.5"` for `0.5.0`) in all three READMEs: `README.md`, `crates/openusd/README.md`, and `crates/openusd-schemas/README.md` (which pins both crates). Stage the root Cargo.toml and the three READMEs (Cargo.lock is gitignored). Commit with message `Bump crate version to <version>`.
+   Then update the dependency examples to the new version (use the `major.minor` form, e.g. `openusd = "0.5"` for `0.5.0`) in all four READMEs: `README.md`, `crates/openusd/README.md`, `crates/openusd-schemas/README.md` (which pins `openusd` and `openusd-schemas`), and `crates/openusd-build/README.md` (which pins `openusd` and `openusd-build`). Stage the root Cargo.toml and the four READMEs (Cargo.lock is gitignored). Commit with message `Bump crate version to <version>`.
 
 5. **Tag**: Create tag `v<version>` on the version bump commit. Do NOT move the tag later — it must stay on this commit.
 
-6. **Update roadmap**: In ROADMAP.md, replace every occurrence of the literal string `` `main` `` with `` `<version>` `` — this includes both the Version column cells and any `` `main` — `` annotations inside the Notes column. Use the Edit tool to make each replacement individually and precisely; do NOT use sed, awk, or any shell one-liner (they mangle backticks on macOS). After editing, run `grep -n '`main`' ROADMAP.md` to confirm zero matches remain, then show the full `git diff ROADMAP.md` to the user and wait for confirmation before staging or committing anything. Commit with message `Update ROADMAP` only after the user approves the diff.
+6. **Update roadmap**: In ROADMAP.md, replace every occurrence of the literal string `` `main` `` with `` `<version>` `` — this includes both the Version column cells and any `` `main` — `` annotations inside the Notes column. Use the Edit tool to make each replacement individually and precisely, since a shell one-liner mangles the backticks. After editing, run `grep -n '`main`' ROADMAP.md` to confirm zero matches remain, then show the full `git diff ROADMAP.md` to the user and wait for confirmation before staging or committing anything. Commit with message `Update ROADMAP` only after the user approves the diff.
 
-7. **Publish to crates.io**: Run `cargo publish --workspace` from the repository root. It publishes every member in dependency order, so `openusd` lands before `openusd-schemas`. Wait for confirmation from the user before running this step.
+7. **Publish to crates.io**: Run `cargo publish --workspace` from the repository root. It publishes every member in dependency order, so `openusd` lands before `openusd-build`, and both before `openusd-schemas`, which builds with `openusd-build`. Wait for confirmation from the user before running this step.
 
    If any workspace member has never been published, warn the user first: creating a crate needs a crates.io token with the `publish-new` scope, and a token restricted to a crate list must include the new name. A token that can update the existing crates will publish those and then fail the new one with `403 Forbidden: this token does not have the required permissions`.
 
@@ -63,5 +63,5 @@ Follow these steps:
 Important:
 - Always wait for user confirmation before publishing to crates.io (step 7) and pushing (step 8).
 - Always wait for user confirmation before committing the ROADMAP update (step 6).
-- Do NOT use `--dry-run` unless the user explicitly asks for a dry run.
+- Run `--dry-run` only when the user asks for a dry run.
 - Do NOT add "Co-Authored-By" or "Generated with Claude Code" to commits or the release.
