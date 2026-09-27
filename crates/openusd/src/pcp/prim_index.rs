@@ -1459,7 +1459,10 @@ pub(crate) mod tests {
     /// the layer set composition would have loaded on demand had it been driven
     /// through a stage.
     fn load_layers(path: &str) -> Result<Vec<sdf::Layer>> {
-        Ok(sdf::LayerRegistry::default().collect_with_arcs(path)?)
+        Ok(sdf::layer_registry::tests::collect_with_arcs(
+            &sdf::LayerRegistry::default(),
+            path,
+        )?)
     }
 
     /// Builds a prim index for a given path string.

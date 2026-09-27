@@ -611,52 +611,57 @@ impl LayerRegistry {
     }
 }
 
-/// Test-only full-closure loading, used by the `pcp` composition tests to build
-/// a fully-resolved layer graph without the stage's on-demand load loop. Eager
-/// arc following lives only here, off the production path.
 #[cfg(test)]
-impl LayerRegistry {
+pub(crate) mod tests {
+    use super::*;
+    use crate::Result;
+    use crate::sdf::FileFormatCaps;
+
     /// Opens a root layer and the full transitive closure of its sublayers,
     /// references, and payloads — the layer set a fully-composed (and fully-
     /// traversed) stage would have loaded on demand.
-    pub(crate) fn collect_with_arcs(&self, root_path: &str) -> Result<Vec<sdf::Layer>, LoadError> {
+    ///
+    /// The `pcp` composition tests build a fully-resolved layer graph from this
+    /// without the stage's on-demand load loop; eager arc following lives only
+    /// here, off the production path.
+    pub(crate) fn collect_with_arcs(registry: &LayerRegistry, root_path: &str) -> Result<Vec<sdf::Layer>, LoadError> {
         let mut layers = Vec::new();
         let mut visited = HashSet::new();
-        self.collect_with_arcs_in(root_path, None, &HashMap::new(), &mut layers, &mut visited)?;
+        collect_with_arcs_in(registry, root_path, None, &HashMap::new(), &mut layers, &mut visited)?;
         layers.reverse();
         Ok(layers)
     }
 
     fn collect_with_arcs_in(
-        &self,
+        registry: &LayerRegistry,
         asset_path: &str,
         anchor: Option<&ar::ResolvedPath>,
         ancestor_expr_vars: &HashMap<String, sdf::Value>,
         layers: &mut Vec<sdf::Layer>,
         visited: &mut HashSet<String>,
     ) -> Result<(), LoadError> {
-        let identifier = self.create_identifier(asset_path, anchor);
+        let identifier = registry.create_identifier(asset_path, anchor);
         if identifier.is_empty() || visited.contains(&identifier) {
             return Ok(());
         }
-        let Some(resolved) = self.resolve_layer(&identifier) else {
+        let Some(resolved) = registry.resolve_layer(&identifier) else {
             return Ok(());
         };
         visited.insert(identifier.clone());
-        let data = self.read(&resolved)?;
+        let data = registry.read(&resolved)?;
         // Resolve this layer's arc/sublayer paths against its stack context (root
         // own overlaid by the inherited overrides). This eager test closure loads a
         // superset of what any one stack references; the `LayerGraph` re-derives the
         // actual per-stack membership with the same stack-level context, so a layer
         // reached here that no stack includes is simply an unused node.
         let stack_vars = expr::stack_expression_variables(data.as_ref(), ancestor_expr_vars)?;
-        for dep in Self::arc_dependencies(data.as_ref())? {
+        for dep in arc_dependencies(data.as_ref())? {
             // An unevaluable dependency loads nothing, mirroring the graph's
             // drop-the-edge handling.
             let Some(dep_asset) = expr::evaluate_string(&dep, &stack_vars).value else {
                 continue;
             };
-            self.collect_with_arcs_in(&dep_asset, Some(&resolved), &stack_vars, layers, visited)?;
+            collect_with_arcs_in(registry, &dep_asset, Some(&resolved), &stack_vars, layers, visited)?;
         }
         layers.push(sdf::Layer::new_resolved(identifier, &resolved, data));
         Ok(())
@@ -664,7 +669,7 @@ impl LayerRegistry {
 
     /// Every sublayer, reference, and payload asset path authored in a layer.
     fn arc_dependencies(data: &dyn sdf::AbstractData) -> Result<Vec<String>, sdf::DataError> {
-        let mut deps = Self::sublayer_paths(data);
+        let mut deps = LayerRegistry::sublayer_paths(data);
         let mut queue = vec![sdf::Path::abs_root()];
         while let Some(path) = queue.pop() {
             if !data.has_spec(&path) {
@@ -726,13 +731,6 @@ impl LayerRegistry {
         }
         Ok(deps)
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Result;
-    use crate::sdf::FileFormatCaps;
 
     const VENDOR_COMPOSITION: &str = concat!(
         env!("CARGO_WORKSPACE_DIR"),

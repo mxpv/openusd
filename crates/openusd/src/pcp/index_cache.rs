@@ -3384,7 +3384,7 @@ mod tests {
     /// layers are still opened lazily by the cache).
     fn collected_stack(path: &str) -> (LayerGraph, IndexCache) {
         let registry = sdf::LayerRegistry::default();
-        let layers = registry.collect_with_arcs(path).expect("collect layers");
+        let layers = sdf::layer_registry::tests::collect_with_arcs(&registry, path).expect("collect layers");
         let graph = LayerGraph::from_layers(layers, 0, registry);
         (graph, fresh_cache())
     }
