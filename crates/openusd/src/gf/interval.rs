@@ -62,8 +62,7 @@ impl Interval {
 
     /// Whether nothing lies in the interval: its bounds cross, meet at an end
     /// that is open, or are not numbers at all. C++ `GfInterval::IsEmpty`
-    /// reports an interval with a NaN bound as holding something, which
-    /// [`contains`](Self::contains) would then deny for every value.
+    /// reports an interval with a NaN bound as nonempty.
     pub const fn is_empty(&self) -> bool {
         !(self.min < self.max || (self.min == self.max && self.min_closed && self.max_closed))
     }

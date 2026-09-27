@@ -28,6 +28,7 @@ Follow these steps:
 
 4. **Update documentation**:
    - Verify doc comments are up to date with the code changes.
+   - Run the `writing-review` skill in its bounded mode over the comments and docs the diff touches, and apply what it finds.
    - If the changes affect module structure or public API, update the Architecture section in CLAUDE.md.
    - Stage any doc changes alongside the code changes.
 
@@ -37,8 +38,7 @@ Follow these steps:
    - Stage ROADMAP.md alongside the other changes.
 
 6. **Generate commit message**:
-   - Follow the 50/72 rule: subject line 50 characters or less, body wrapped at 72 characters.
-   - Include a brief body (1-3 sentences) summarizing changes when needed.
+   - Draft the message, then revise it with the `writing-review` skill's commit-message rules (`references/commit-messages.md`): an imperative subject of 50 characters or fewer, a body wrapped at 72 only for what the subject and diff cannot say, present tense, no phantom history, and nothing about test status or the review.
    - Keep commits focused and atomic — one logical change per commit.
    - Proofread for grammar, technical accuracy, and completeness.
    - Show the commit message to the user and wait for confirmation before committing.

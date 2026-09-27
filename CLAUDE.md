@@ -220,7 +220,9 @@ When implementing a new feature from the spec:
   functions, then the `#[cfg(test)] mod tests`. Don't open a file with a small
   private helper.
 - Code requires documentation
-- Proof read and reword docs and/or comments as needed
+- Proof read and reword docs and/or comments as needed. The `writing-review`
+  skill is the revision pass for comments, docs, and commit messages; run it
+  before handing any of them over
 - Do not use `**bold** — description` pattern in doc comments or bullet lists;
   use plain text or link directly to the item instead
 - A doc comment documents only its own item. Don't describe another type,
