@@ -386,14 +386,9 @@ mod tests {
         Ok(())
     }
 
-    /// An instance proxy inherits purpose visibility from its instance.
-    // TODO: C++ also checks that the prototype's own `child` does not inherit
-    // it. That needs the core stage to give a prototype root empty type info
-    // and a dummy prim index for value, metadata and property reads, while
-    // its children keep composing from the source index (C++
-    // `_ComposePrimTypeInfoImpl`, `Usd_PrimData::GetPrimIndex` /
-    // `GetSourcePrimIndex`). This stage composes `/__Prototype_N` like the
-    // instance, so it still carries `VisibilityAPI` and `visible`.
+    /// An instance proxy inherits purpose visibility from its instance, while
+    /// the prototype's own `child` does not: the prototype root reads no
+    /// opinions, so nothing above that child authors one.
     #[test]
     fn purpose_vis_instancing() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
@@ -417,7 +412,17 @@ mod tests {
         assert!(child.prim().is_instance_proxy()?);
         assert_eq!(effective(&child, Purpose::Guide)?, PurposeVisibility::Visible);
 
+        // Before the instance authors anything, the source's `visible` still
+        // reaches the proxy, and only an empty prototype root keeps it from
+        // the prototype's own child.
         let instance = Imageable::get(&stage, "/instance")?.expect("Imageable");
+        let prototype = instance.prim().prototype()?.expect("a prototype");
+        let prototype_child = Imageable::get(&stage, prototype.append_path("child")?)?.expect("Imageable");
+        assert_eq!(
+            effective(&prototype_child, Purpose::Guide)?,
+            PurposeVisibility::Invisible
+        );
+
         instance
             .purpose_visibility_attr(Purpose::Guide)?
             .expect("guideVisibility")
