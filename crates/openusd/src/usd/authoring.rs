@@ -432,7 +432,7 @@ pub(super) fn plan_property_spec(
     }
 
     let strongest = stage
-        .masked(path, |graph, cache| cache.property_stack(graph, path, None))?
+        .masked_opinions(path, |graph, cache| cache.property_stack(graph, path, None))?
         .into_iter()
         .next();
     if let Some(site) = strongest {

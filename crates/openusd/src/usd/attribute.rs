@@ -527,7 +527,7 @@ impl Attribute {
     /// authoring paths that dedup against the composed list.
     fn connections_composed(&self) -> Result<Vec<sdf::Path>, pcp::QueryError> {
         self.stage
-            .masked(&self.path, |g, cache| cache.connection_paths(g, &self.path))
+            .masked_opinions(&self.path, |g, cache| cache.connection_paths(g, &self.path))
     }
 
     /// Composes this attribute's connection paths together with the paths its
@@ -535,7 +535,7 @@ impl Attribute {
     /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). Both are
     /// empty when the owning prim is outside the population mask.
     pub fn compute_connections(&self) -> Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
-        Ok(self.stage.masked(&self.path, |g, cache| {
+        Ok(self.stage.masked_opinions(&self.path, |g, cache| {
             cache.compute_attribute_connection_paths(g, &self.path)
         })?)
     }

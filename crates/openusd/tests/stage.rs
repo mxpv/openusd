@@ -4625,9 +4625,11 @@ fn traversal_instance_proxies() -> Result<()> {
     Ok(())
 }
 
-/// A property authored at an instance root is local to the instance and
-/// does not leak onto the shared prototype root (spec 11.3.3): the prototype
-/// composes only the referenced opinions.
+/// A property authored at an instance root is local to the instance (spec
+/// 11.3.3). The instance keeps it, and the prototype root reads no opinions
+/// at all, since C++ reads a prototype root through an empty prim index. That
+/// the shared index drops the override is checked at the cache
+/// (`root_inerts_instance_overrides`).
 #[test]
 fn prototype_root_drops_instance_overrides() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_root_override.usda"))?;
@@ -4646,28 +4648,22 @@ fn prototype_root_drops_instance_overrides() -> Result<()> {
         Some(sdf::Value::Double(42.0))
     );
 
-    // The shared prototype root drops them: the overridden property falls
-    // back to the referenced value and the instance-only property is gone.
     let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
-    assert_eq!(
-        stage
-            .attribute(proto.append_property("shared")?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0))
-    );
-    assert_eq!(
-        stage
-            .attribute(proto.append_property("rootOnly")?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        None
-    );
+    for name in ["shared", "rootOnly"] {
+        assert_eq!(
+            stage
+                .attribute(proto.append_property(name)?)?
+                .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+            None,
+            "{name}"
+        );
+    }
     Ok(())
 }
 
 /// The prototype namespace is addressable without ever touching an instance:
 /// stage population registers every prototype the first time a
-/// `/__Prototype_N` path is queried, so the root composes its shared content
-/// straight away (spec 11.3.3).
+/// `/__Prototype_N` path is queried (spec 11.3.3).
 #[test]
 fn prototype_survives_early_query() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_root_override.usda"))?;
@@ -4676,12 +4672,9 @@ fn prototype_survives_early_query() -> Result<()> {
     // prototype path comes from the stage, since its number depends on nothing
     // a caller can predict.
     let proto = first_prototype(&stage)?;
-    assert_eq!(
-        stage
-            .attribute(proto.append_property("shared")?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0))
-    );
+    let root = stage.prim(proto.clone())?;
+    assert!(root.is_valid()?);
+    assert!(root.is_prototype()?);
 
     // Reaching the same prototype through its instance agrees.
     assert_eq!(stage.prim("/A")?.prototype()?, Some(proto));
@@ -4746,13 +4739,14 @@ fn query_heals_materialization() -> Result<()> {
 }
 
 /// A property authored inside a variant selected on an instance is shared
-/// content (the selection defines the prototype) and must resolve on the
-/// materialized prototype root (spec 11.3.3).
+/// content (the selection defines the prototype), so the instance resolves
+/// it (spec 11.3.3). The prototype root reads no opinions; that the shared
+/// index keeps the variant opinion is checked at the cache
+/// (`root_keeps_variant_opinions`).
 #[test]
 fn prototype_root_keeps_variant_opinions() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_variant_root.usda"))?;
 
-    // The instance resolves the variant-authored property.
     assert_eq!(
         stage
             .attribute("/A.picked")?
@@ -4760,23 +4754,21 @@ fn prototype_root_keeps_variant_opinions() -> Result<()> {
         Some(sdf::Value::Double(5.0))
     );
 
-    // So must the prototype root: the variant opinion lives at the instance's
-    // own namespace (/A{v=x}), and rebasing must not move the spec lookup off
-    // it.
     let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
     assert_eq!(
         stage
             .attribute(proto.append_property("picked")?)?
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(5.0))
+        None
     );
     Ok(())
 }
 
 /// A relationship/connection target authored at a prototype's root resolves
-/// into the prototype namespace on the materialized prototype root, and into
-/// each instance's namespace on the instances (spec 11.3.3 + 12.4). Exercises
-/// the root rebase (`rebase_root`) of the prototype-root map.
+/// into each instance's namespace on the instances (spec 11.3.3 + 12.4). The
+/// prototype root reads no opinions, so it has no targets; the root rebase
+/// (`rebase_root`) that translates them into the prototype namespace is
+/// checked at the cache (`root_target_remap`).
 #[test]
 fn prototype_root_target_remap() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_root_target.usda"))?;
@@ -4795,17 +4787,215 @@ fn prototype_root_target_remap() -> Result<()> {
         vec![sdf::path("/B/Target")?]
     );
 
-    // On the materialized prototype root they resolve into the prototype
-    // namespace, not the canonical instance's.
     let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
+    assert!(rel_targets(&stage, &proto.append_property("myrel")?)?.is_empty());
+    assert!(connections(&stage, &proto.append_property("inputs:in")?)?.is_empty());
+    Ok(())
+}
+
+/// A prototype root is valid and keeps its children, but reads no opinions
+/// (spec 11.3.3): C++ gives it the empty prim type info and reads it through
+/// an empty prim index, and hard-codes it as a defined model group. Every
+/// opinion in the fixture is authored on the referenced source, so each one
+/// is shared content the source index composes and the root still drops.
+#[test]
+fn prototype_root_empty() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_root_empty.usda"))?;
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
+    let root = stage.prim(proto.clone())?;
+
+    assert!(root.is_valid()?);
+    assert_eq!(root.type_name()?, None);
+    assert!(root.api_schemas()?.is_empty());
+    assert!(root.property_names()?.is_empty());
+    assert_eq!(root.specifier()?, Some(sdf::Specifier::Def));
+    assert!(root.is_defined()?);
+    assert!(root.is_model()?);
+    assert!(root.is_group()?);
+    assert!(!root.is_component()?);
+
+    // Its properties: no declaration, value, samples, spec or target.
+    let animated = root.attribute("animated");
+    assert_eq!(animated.type_name()?, None);
+    assert!(!animated.has_authored_value()?);
+    assert!(!animated.resolve_info()?.has_authored_value());
+    assert_eq!(animated.get::<sdf::Value>()?, None);
+    assert_eq!(animated.time_samples()?, None);
+    assert!(!animated.value_might_be_time_varying()?);
+    assert!(animated.property_stack()?.is_empty());
+    let myrel = root.relationship("myrel");
+    assert!(!myrel.has_authored_targets()?);
+    assert!(myrel.targets()?.is_empty());
+    assert!(myrel.property_stack()?.is_empty());
+    let input = root.attribute("inputs:in");
+    assert!(!input.has_authored_connections()?);
+    assert!(input.connections()?.is_empty());
+
+    // The prim itself: no stack, selection, arc or index.
+    assert!(root.prim_stack()?.is_empty());
+    assert!(root.variant_sets().get_all_variant_selections()?.is_empty());
+    assert!(!root.has_composition_arc()?);
+    assert!(root.prim_index().graph()?.is_empty());
+    assert_eq!(root.prim_index().child_names()?, (Vec::new(), Vec::new()));
+
+    // The children still come from the source index, and compose normally.
+    assert_eq!(child_names(&stage, proto.clone())?, vec!["Child".to_string()]);
+    let child_path = proto.append_path("Child")?;
+    let child = stage.prim(child_path.clone())?;
+    assert_eq!(child.type_name()?.as_deref(), Some("Scope"));
+    assert_eq!(child.attribute("size").get::<f64>()?, Some(3.0));
+    assert!(child.is_defined()?);
+
+    // Forwarding does not follow the root's hidden relationship: C++ finds no
+    // relationship there, so the target stays as the path it names. Through
+    // the instance, the same chain forwards to the root's target.
+    let to_root = child_path.append_property("toRoot")?;
+    assert_eq!(fwd_targets(&stage, &to_root)?, vec![proto.append_property("myrel")?]);
     assert_eq!(
-        rel_targets(&stage, &proto.append_property("myrel")?)?,
-        vec![proto.append_path("Target")?]
+        fwd_targets(&stage, &sdf::path("/A/Child.toRoot")?)?,
+        vec![sdf::path("/A/Child")?]
     );
-    assert_eq!(
-        connections(&stage, &proto.append_property("inputs:in")?)?,
-        vec![proto.append_property("outputs:out")?]
-    );
+    Ok(())
+}
+
+/// A prototype root is active and loaded whatever its source index says, as
+/// C++ `Usd_PrimData` sets it (spec 11.3.3). The instance overrides a
+/// referenced `active = false`, and that override is instance-local, so the
+/// source index reads `false`; the prototype and its child are still there.
+#[test]
+fn prototype_root_active() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_inactive_source.usda"))?;
+    assert!(stage.prim("/A")?.is_active()?);
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
+    let root = stage.prim(proto.clone())?;
+
+    assert!(root.is_active()?);
+    assert!(root.is_loaded()?);
+    assert_eq!(child_names(&stage, proto.clone())?, vec!["Child".to_string()]);
+    let child = stage.prim(proto.append_path("Child")?)?;
+    assert!(child.is_active()?);
+    assert_eq!(child.attribute("size").get::<f64>()?, Some(3.0));
+    Ok(())
+}
+
+/// A prototype root is defined and not abstract whatever its source authors,
+/// as C++ `Usd_PrimData` sets it, and its children inherit that (spec
+/// 11.3.3).
+#[test]
+fn prototype_root_defined() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    for specifier in ["over", "class"] {
+        let root = dir.path().join(format!("{specifier}.usda"));
+        fs::write(
+            &root,
+            format!(
+                r#"#usda 1.0
+{specifier} "Source"
+{{
+    def Scope "Child"
+    {{
+    }}
+}}
+
+def "A" (
+    instanceable = true
+    references = </Source>
+)
+{{
+}}
+"#
+            ),
+        )?;
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
+        let root = stage.prim(proto.clone())?;
+
+        assert_eq!(root.specifier()?, Some(sdf::Specifier::Def), "{specifier}");
+        assert!(root.is_defined()?, "{specifier}");
+        assert!(!root.is_abstract()?, "{specifier}");
+        let child = stage.prim(proto.append_path("Child")?)?;
+        assert!(child.is_defined()?, "{specifier}");
+        assert!(!child.is_abstract()?, "{specifier}");
+    }
+    Ok(())
+}
+
+/// A prototype root is a model group, so a `component` under it is a model
+/// whatever the root's source authors (C++ `Usd_PrimData` consults a prim's
+/// kind only under a group parent).
+#[test]
+fn prototype_child_model() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def Scope "Source"
+{
+    def Scope "Child" (
+        kind = "component"
+    )
+    {
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Source>
+)
+{
+}
+"#,
+    )?;
+    let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+    let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
+
+    let child = stage.prim(proto.append_path("Child")?)?;
+    assert!(child.is_model()?);
+    assert!(child.is_component()?);
+    // In the instance's own namespace the chain of models breaks at /A.
+    assert!(!stage.prim("/A/Child")?.is_model()?);
+    Ok(())
+}
+
+/// A prim the population mask excludes answers no composition arcs, without
+/// composing it or loading the layer it references.
+#[test]
+fn masked_arc_unloaded() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let referenced = dir.path().join("ref.usda");
+    fs::write(&referenced, "#usda 1.0\ndef Scope \"Ref\"\n{\n}\n")?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def Scope "Masked" (
+    references = @./ref.usda@</Ref>
+)
+{
+}
+
+def Scope "Kept"
+{
+}
+"#,
+    )?;
+    let root = root.to_str().expect("utf-8 temp path");
+    let loads_ref = |stage: &Stage| {
+        stage
+            .layer_identifiers()
+            .iter()
+            .any(|id| FsPath::new(id).ends_with("ref.usda"))
+    };
+
+    let stage = Stage::builder().mask(StagePopulationMask::new(["/Kept"])?).open(root)?;
+    assert!(!stage.prim("/Masked")?.has_composition_arc()?);
+    assert!(!loads_ref(&stage), "ref.usda is not loaded");
+
+    // Unmasked, the same prim reports its reference.
+    let stage = Stage::open(root)?;
+    assert!(stage.prim("/Masked")?.has_composition_arc()?);
+    assert!(loads_ref(&stage), "ref.usda is loaded");
     Ok(())
 }
 

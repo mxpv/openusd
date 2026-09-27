@@ -1,0 +1,27 @@
+#usda 1.0
+(
+    doc = """A prototype root is active whatever its source index says, as C++
+    Usd_PrimData sets it (spec 11.3.3).
+
+    /Source is authored inactive, and /A references it and overrides that
+    with active = true. The override is an instance-local opinion, so the
+    prototype's source index reads the referenced active = false."""
+)
+
+def Scope "Source" (
+    active = false
+)
+{
+    def Scope "Child"
+    {
+        double size = 3.0
+    }
+}
+
+def Scope "A" (
+    active = true
+    instanceable = true
+    references = </Source>
+)
+{
+}

@@ -560,7 +560,7 @@ impl Prim {
     /// tier, for the type resolution that folds the failure into its own error.
     pub(crate) fn authored_api_schemas_composed(&self) -> Result<Vec<Token>, pcp::QueryError> {
         self.stage
-            .masked(&self.path, |g, cache| cache.api_schemas(g, &self.path))
+            .masked_opinions(&self.path, |g, cache| cache.api_schemas(g, &self.path))
     }
 
     /// `true` when this prim's type is `schema`, or derives from it. Mirrors
@@ -817,7 +817,7 @@ impl Prim {
     pub fn has_composition_arc(&self) -> Result<bool> {
         Ok(self
             .stage
-            .masked(&self.path, |g, cache| cache.has_composition_arc(g, &self.path))?)
+            .masked_opinions(&self.path, |g, cache| cache.has_composition_arc(g, &self.path))?)
     }
 
     /// `true` if this prim is an instance (spec 11.3.3): `instanceable` resolves
@@ -926,9 +926,15 @@ impl Prim {
     /// The model-hierarchy `kind` for the prim — `Some("group" | "assembly" |
     /// "component")` when the prim and all ancestors form a contiguous model
     /// hierarchy, else `None`.
+    ///
+    /// A prototype root is a group whatever it authors, as C++ `Usd_PrimData`
+    /// sets it, so the walk from one of its descendants ends there.
     fn model_kind(&self) -> Result<Option<&'static str>> {
         if self.path == sdf::Path::abs_root() || !self.stage.has_spec(&self.path)? {
             return Ok(None);
+        }
+        if self.stage.cache().is_prototype(&self.path) {
+            return Ok(Some("group"));
         }
         let leaf = match self.kind()?.as_deref() {
             Some("group") => "group",
@@ -940,6 +946,9 @@ impl Prim {
             return Ok(Some(leaf));
         };
         for ancestor in parent.ancestors_below_root() {
+            if self.stage.cache().is_prototype(&ancestor) {
+                break;
+            }
             let kind = self
                 .stage
                 .field::<sdf::Value>(&ancestor, sdf::FieldKey::Kind)?
@@ -955,7 +964,7 @@ impl Prim {
     /// each with the cumulative layer offset that reaches it. Mirrors C++
     /// `UsdPrim::GetPrimStack`.
     pub fn prim_stack(&self) -> Result<Vec<SpecSite>> {
-        Ok(self.stage.with_cache(|g, c| c.prim_stack(g, &self.path))?)
+        Ok(self.stage.opinions(&self.path, |g, c| c.prim_stack(g, &self.path))?)
     }
 
     /// Returns a handle to this prim's composition index (C++
@@ -1041,7 +1050,7 @@ impl Prim {
     pub fn authored_property_names(&self) -> Result<Vec<Token>> {
         Ok(self
             .stage
-            .masked(&self.path, |g, cache| cache.prim_properties(g, &self.path))?)
+            .masked_opinions(&self.path, |g, cache| cache.prim_properties(g, &self.path))?)
     }
 
     /// Returns handles to the composed attributes of this prim. Mirrors C++
@@ -1227,7 +1236,8 @@ impl PrimIndexRef {
     /// [`graph`](Self::graph) at the composition tier, for the namespace
     /// editor's validation walks.
     pub(crate) fn graph_composed(&self) -> Result<pcp::PrimIndex, pcp::QueryError> {
-        self.stage.with_cache(|g, c| Ok(c.index(g, &self.path)?.clone()))
+        self.stage
+            .opinions(&self.path, |g, c| Ok(c.index(g, &self.path)?.clone()))
     }
 
     /// Composes this prim's child names together with the names prohibited at it
@@ -1237,7 +1247,7 @@ impl PrimIndexRef {
     pub fn child_names(&self) -> Result<(Vec<Token>, Vec<Token>)> {
         Ok(self
             .stage
-            .with_cache(|g, c| c.compute_prim_child_names(g, &self.path))?)
+            .opinions(&self.path, |g, c| c.compute_prim_child_names(g, &self.path))?)
     }
 }
 
@@ -1269,7 +1279,9 @@ impl VariantSets {
     /// selections — authored, fallback, or default — read from the variant
     /// selection sites that actually contribute to the prim.
     pub fn get_all_variant_selections(&self) -> Result<Vec<(String, String)>> {
-        Ok(self.stage.with_cache(|g, c| c.variant_selections(g, &self.prim))?)
+        Ok(self
+            .stage
+            .opinions(&self.prim, |g, c| c.variant_selections(g, &self.prim))?)
     }
 }
 

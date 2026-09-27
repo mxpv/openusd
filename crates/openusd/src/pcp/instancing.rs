@@ -637,7 +637,9 @@ impl IndexCache {
 
     /// Returns `true` if `path` is a `/__Prototype_N` root.
     pub(crate) fn is_prototype(&self, path: &Path) -> bool {
-        self.prototypes.is_root(path)
+        // The syntactic test keeps the registry lookup off every ordinary
+        // path, which the stage's opinion reads ask about on each query.
+        is_prototype_namespace(path) && self.prototypes.is_root(path)
     }
 
     /// Returns `true` if `path` is inside a registered prototype's namespace —

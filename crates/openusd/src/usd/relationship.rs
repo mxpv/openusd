@@ -279,7 +279,7 @@ impl Relationship {
     pub fn targets(&self) -> Result<Vec<sdf::Path>> {
         Ok(self
             .stage
-            .masked(&self.path, |g, cache| cache.relationship_targets(g, &self.path))?)
+            .masked_opinions(&self.path, |g, cache| cache.relationship_targets(g, &self.path))?)
     }
 
     /// Composes this relationship's target paths together with the paths its
@@ -288,7 +288,7 @@ impl Relationship {
     /// targets match [`Relationship::targets`]; both are empty when the
     /// owning prim is outside the population mask.
     pub fn compute_targets(&self) -> Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
-        Ok(self.stage.masked(&self.path, |g, cache| {
+        Ok(self.stage.masked_opinions(&self.path, |g, cache| {
             cache.compute_relationship_target_paths(g, &self.path)
         })?)
     }
@@ -303,7 +303,7 @@ impl Relationship {
     /// raw [`Self::targets`]. Mirrors C++
     /// `UsdRelationship::GetForwardedTargets`.
     pub fn forwarded_targets(&self) -> Result<Vec<sdf::Path>> {
-        Ok(self.stage.masked(&self.path, |g, cache| {
+        Ok(self.stage.masked_opinions(&self.path, |g, cache| {
             cache.forwarded_relationship_targets(g, &self.path)
         })?)
     }

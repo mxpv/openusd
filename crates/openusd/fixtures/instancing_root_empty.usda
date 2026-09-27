@@ -1,0 +1,56 @@
+#usda 1.0
+(
+    doc = """A prototype root reads no opinions (C++ reads it through an empty
+    prim index), while its source index keeps them (spec 11.3.3).
+
+    /A is instanceable and references /Source, which authors every kind of
+    opinion a prim can carry: a type, an applied API schema, an animated
+    attribute, a relationship and a connection, a variant selection, and a
+    reference arc of its own. Its child's relationship targets the root's
+    relationship, so forwarding reaches a root property. /A authors nothing
+    beyond the arc, so every
+    opinion the prototype's source index composes is shared content rather
+    than an instance-local opinion prototype construction already inerts."""
+)
+
+def Scope "Other"
+{
+    double other = 2.0
+}
+
+def Scope "Source" (
+    prepend apiSchemas = ["ExampleAPI"]
+    references = </Other>
+    variants = {
+        string v = "x"
+    }
+    prepend variantSets = "v"
+)
+{
+    double animated.timeSamples = {
+        0: 1.0,
+        10: 2.0,
+    }
+    rel myrel = </Source/Child>
+    color3f outputs:out
+    color3f inputs:in.connect = </Source.outputs:out>
+
+    variantSet "v" = {
+        "x" {
+            double picked = 5.0
+        }
+    }
+
+    def Scope "Child"
+    {
+        double size = 3.0
+        rel toRoot = </Source.myrel>
+    }
+}
+
+def "A" (
+    instanceable = true
+    references = </Source>
+)
+{
+}

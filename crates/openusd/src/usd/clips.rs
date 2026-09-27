@@ -47,7 +47,7 @@ impl ClipsAPI {
         let path = self.path().clone();
         Ok(self
             .stage()
-            .masked(&path, |g, cache| cache.clip_sets_list_op(g, &path))?)
+            .masked_opinions(&path, |g, cache| cache.clip_sets_list_op(g, &path))?)
     }
 
     /// Author the `clipSets` strength-ordering list-op (C++
@@ -276,7 +276,7 @@ impl ClipsAPI {
     /// ```
     pub fn generate_clip_manifest(&self, clip_set: &str, write_blocks_for_missing: bool) -> Result<Option<sdf::Layer>> {
         let path = self.path().clone();
-        Ok(self.stage().masked(&path, |g, cache| {
+        Ok(self.stage().masked_opinions(&path, |g, cache| {
             cache.generate_clip_manifest(g, &path, clip_set, write_blocks_for_missing)
         })?)
     }

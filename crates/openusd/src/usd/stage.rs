@@ -803,6 +803,29 @@ pub struct StageInner {
     prim_types: RefCell<PrimTypeMemo>,
 }
 
+/// Which of a prim's composed answers a stage query reads. C++ keeps a
+/// prim's source index (`Usd_PrimData::GetSourcePrimIndex`) apart from the
+/// index its opinions are read through (`GetPrimIndex`), and the two differ
+/// only for a prototype root, whose opinions read empty.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reads {
+    /// Children, validity, flags and instancing, from the source index.
+    Source,
+    /// Values, metadata, properties and stacks, which a prototype root lacks.
+    Opinions,
+}
+
+impl Reads {
+    /// What a spec query at `path` reads: a property is one of its prim's
+    /// opinions, and the prim's own spec is part of its source.
+    fn spec_of(path: &sdf::Path) -> Self {
+        match path.is_property_path() {
+            true => Reads::Opinions,
+            false => Reads::Source,
+        }
+    }
+}
+
 /// Per-prim schema type handles, valid as of one pair of composition epochs.
 ///
 /// This is the stage-local half of prim type resolution: the registry caches
@@ -2595,7 +2618,7 @@ impl Stage {
     /// need the stage's [`InterpolationType`] applied to a specific time.
     pub fn time_samples(&self, attr_path: impl sdf::IntoPath) -> Result<Option<sdf::TimeSampleMap>> {
         let attr_path = &sdf::try_into_path(attr_path)?;
-        Ok(self.masked(attr_path, |g, c| c.time_samples(g, attr_path))?)
+        Ok(self.masked_opinions(attr_path, |g, c| c.time_samples(g, attr_path))?)
     }
 
     /// Returns the sample times of whichever source value resolution answers
@@ -2606,14 +2629,14 @@ impl Stage {
     /// source's map: a winning value-clip set contributes its times here.
     pub fn time_sample_times(&self, attr_path: impl sdf::IntoPath) -> Result<Option<Vec<f64>>> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        Ok(self.masked(&attr_path, |g, c| c.time_sample_times(g, &attr_path))?)
+        Ok(self.masked_opinions(&attr_path, |g, c| c.time_sample_times(g, &attr_path))?)
     }
 
     /// Returns the number of composed `timeSamples` for an attribute, zero when
     /// none are authored. Resolves the count without cloning the sample values.
     pub fn num_time_samples(&self, attr_path: impl sdf::IntoPath) -> Result<usize> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        Ok(self.masked(&attr_path, |g, c| c.num_time_samples(g, &attr_path))?)
+        Ok(self.masked_opinions(&attr_path, |g, c| c.num_time_samples(g, &attr_path))?)
     }
 
     /// Whether an attribute's value may vary over time, the introspection behind
@@ -2624,7 +2647,7 @@ impl Stage {
     /// even where the discrete sample count collapses to one (spec 12.3.4).
     pub fn value_might_be_time_varying(&self, attr_path: impl sdf::IntoPath) -> Result<bool> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        Ok(self.masked(&attr_path, |g, c| c.value_might_be_time_varying(g, &attr_path))?)
+        Ok(self.masked_opinions(&attr_path, |g, c| c.value_might_be_time_varying(g, &attr_path))?)
     }
 
     /// Evaluate an attribute's value at `time`, or at the default time when it
@@ -2646,7 +2669,7 @@ impl Stage {
         let attr_path = sdf::try_into_path(attr_path)?;
         let interp_type = self.interpolation_type.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        Ok(self.masked(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp))?)
+        Ok(self.masked_opinions(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp))?)
     }
 
     /// Resolves the cacheable value source for an attribute, the source half of
@@ -2657,7 +2680,7 @@ impl Stage {
     /// `None` with no stamp when the attribute's prim is outside the population
     /// mask.
     pub(crate) fn resolve_value_source(&self, attr_path: &sdf::Path) -> Result<pcp::StampedValueSource> {
-        Ok(self.masked(attr_path, |g, c| c.resolve_value_source(g, attr_path))?)
+        Ok(self.masked_opinions(attr_path, |g, c| c.resolve_value_source(g, attr_path))?)
     }
 
     /// Every spec contributing to the property at `path`, strongest first, with
@@ -2665,7 +2688,7 @@ impl Stage {
     /// [`Attribute::property_stack`](super::Attribute::property_stack) and
     /// [`property_stack_at`](super::Attribute::property_stack_at).
     pub(crate) fn property_stack(&self, path: &sdf::Path, time: Option<f64>) -> Result<Vec<super::SpecSite>> {
-        Ok(self.masked(path, |g, c| c.property_stack(g, path, time))?)
+        Ok(self.masked_opinions(path, |g, c| c.property_stack(g, path, time))?)
     }
 
     /// Resolves where an attribute's value comes from, without producing the
@@ -2676,7 +2699,7 @@ impl Stage {
         // decides which samples answer exactly as the value read does.
         let interp_type = self.interpolation_type.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        Ok(self.masked(attr_path, |g, c| c.resolve_info(g, &stage_id, attr_path, mode, &interp))?)
+        Ok(self.masked_opinions(attr_path, |g, c| c.resolve_info(g, &stage_id, attr_path, mode, &interp))?)
     }
 
     /// The epochs a memoized prim type stays valid under, read together from
@@ -2829,14 +2852,15 @@ impl Stage {
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
+    /// A property is one of the prim's opinions, so a prototype root has none.
     pub(crate) fn has_spec(&self, path: &sdf::Path) -> Result<bool, pcp::QueryError> {
-        self.masked(path, |g, c| c.has_spec(g, path))
+        self.query_at(path, true, Reads::spec_of(path), |g, c| c.has_spec(g, path))
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
     pub(crate) fn spec_type(&self, path: impl sdf::IntoPath) -> Result<Option<sdf::SpecType>, pcp::QueryError> {
         let path = sdf::try_into_path(path)?;
-        self.masked(&path, |g, c| c.spec_type(g, &path))
+        self.query_at(&path, true, Reads::spec_of(&path), |g, c| c.spec_type(g, &path))
     }
 
     /// Resolves a composed field value by walking the prim index from strongest
@@ -2854,6 +2878,10 @@ impl Stage {
     /// with spec 12.2's field-class rules — list-op folding, dictionary
     /// merging, path-expression `%_` composition,
     /// `specifier`/`variability`/`custom` — applied where they hold.
+    /// A prototype root reads no field but `specifier`, which is `def` (C++
+    /// reads the root through an empty prim index, and `_GetPrimSpecifierImpl`
+    /// answers `def` for it).
+    ///
     /// `None` if no layer provides a value. A [`sdf::Value::ValueBlock`]
     /// blocks the opinions weaker than it: the composed result is whatever
     /// the stronger opinions alone produce, or `None` when the block is the
@@ -2872,7 +2900,13 @@ impl Stage {
         T::Error: Into<pcp::QueryError>,
     {
         let path = sdf::try_into_path(path)?;
-        let raw = self.masked(&path, |g, c| c.resolve_field(g, &path, field.as_ref()))?;
+        let field = field.as_ref();
+        let mut raw = self.masked_opinions(&path, |g, c| c.resolve_field(g, &path, field))?;
+        // A prototype root reads no opinions, but is always defined (C++
+        // `_GetPrimSpecifierImpl`).
+        if raw.is_none() && field == sdf::FieldKey::Specifier.as_str() && self.cache().is_prototype(&path) {
+            raw = Some(sdf::Value::Specifier(sdf::Specifier::Def));
+        }
         super::decode_value(raw)
     }
 
@@ -2885,6 +2919,43 @@ impl Stage {
     pub(crate) fn masked<T: Default>(
         &self,
         path: &sdf::Path,
+        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+    ) -> Result<T, pcp::QueryError> {
+        self.query_at(path, true, Reads::Source, query)
+    }
+
+    /// Runs a query that reads a prim's opinions, under the population mask
+    /// like [`Self::masked`]. A prototype root answers `T::default()`. C++
+    /// reads its opinions through an empty prim index
+    /// (`Usd_PrimData::GetPrimIndex`), while its children, validity and flags
+    /// come from the index the cache composed for it.
+    pub(crate) fn masked_opinions<T: Default>(
+        &self,
+        path: &sdf::Path,
+        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+    ) -> Result<T, pcp::QueryError> {
+        self.query_at(path, true, Reads::Opinions, query)
+    }
+
+    /// [`Self::masked_opinions`] outside the population mask, for the reads
+    /// that answer for a masked-out prim too.
+    pub(crate) fn opinions<T: Default>(
+        &self,
+        path: &sdf::Path,
+        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+    ) -> Result<T, pcp::QueryError> {
+        self.query_at(path, false, Reads::Opinions, query)
+    }
+
+    /// The runner behind [`Self::masked`], [`Self::masked_opinions`] and
+    /// [`Self::opinions`]: answers `T::default()` without running `query`
+    /// when `masked` is set and the mask excludes the path's prim, or when
+    /// `reads` is [`Reads::Opinions`] and that prim is a prototype root.
+    fn query_at<T: Default>(
+        &self,
+        path: &sdf::Path,
+        masked: bool,
+        reads: Reads,
         mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
     ) -> Result<T, pcp::QueryError> {
         let prim = path.prim_path();
@@ -2893,11 +2964,8 @@ impl Stage {
         // is itself a composed walk.
         self.resolve_prototype_path(&prim)?;
         self.with_cache(move |g, c| {
-            if c.mask_includes(&prim) {
-                query(g, c)
-            } else {
-                Ok(T::default())
-            }
+            let hidden = (masked && !c.mask_includes(&prim)) || (reads == Reads::Opinions && c.is_prototype(&prim));
+            if hidden { Ok(T::default()) } else { query(g, c) }
         })
     }
 
@@ -6186,6 +6254,27 @@ def "T" {
             stage.batch_edit(&[root.as_str(), root.as_str()], |_| Ok(())),
             Err(StageAuthoringError::DuplicateLayer { .. })
         ));
+        Ok(())
+    }
+
+    /// A prototype root is a prim with no properties: its own spec answers,
+    /// and each property's does not, while its child's property still does.
+    #[test]
+    fn prototype_root_specs() -> Result<()> {
+        let stage = Stage::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/instancing_root_empty.usda"
+        ))?;
+        let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
+
+        assert!(stage.has_spec(&proto)?);
+        assert_eq!(stage.spec_type(proto.clone())?, Some(sdf::SpecType::Prim));
+        let animated = proto.append_property("animated")?;
+        assert!(!stage.has_spec(&animated)?);
+        assert_eq!(stage.spec_type(animated)?, None);
+        let size = proto.append_path("Child")?.append_property("size")?;
+        assert!(stage.has_spec(&size)?);
+        assert_eq!(stage.spec_type(size)?, Some(sdf::SpecType::Attribute));
         Ok(())
     }
 }

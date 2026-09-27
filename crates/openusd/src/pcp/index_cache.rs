@@ -2018,7 +2018,8 @@ impl IndexCache {
     /// Whether `path` and every ancestor below the pseudo-root carry a defining
     /// specifier — `def` or `class` (C++ `UsdPrim::IsDefined`). An `over`, a
     /// missing specifier opinion, and a prim with no composed spec are all
-    /// undefined.
+    /// undefined. A prototype root is defined whatever its source index says,
+    /// as C++ `Usd_PrimData` sets it.
     ///
     /// The specifier twin of [`Self::is_active`], and resolved the same way:
     /// one cache borrow for the whole ancestor chain, rather than a stage
@@ -2031,6 +2032,9 @@ impl IndexCache {
             return Ok(false);
         }
         for ancestor in path.ancestors_below_root() {
+            if self.is_prototype(&ancestor) {
+                break;
+            }
             let specifier = self
                 .resolve_field(graph, &ancestor, FieldKey::Specifier.as_str())?
                 .map(sdf::Specifier::try_from)
@@ -2052,7 +2056,14 @@ impl IndexCache {
 
     /// [`active_locally`](Self::active_locally) for a path already redirected
     /// onto the index that composes it, for a caller holding that redirection.
+    ///
+    /// A prototype root is active whatever its source index says, as C++
+    /// `Usd_PrimData` sets it: the instance-local opinion that activated the
+    /// instance is inert in the prototype, so the source can read `false`.
     pub(super) fn active_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        if self.is_prototype(path) {
+            return Ok(true);
+        }
         match self.resolve_field_at(graph, path, FieldKey::Active.as_str())? {
             Some(value) => Ok(bool::try_from(value)?),
             None => Ok(true),
@@ -2376,8 +2387,11 @@ impl IndexCache {
         while let Some(target) = stack.pop() {
             // Only property targets can be relationships; a prim-path target is
             // always terminal. Classify property targets by composed spec type.
-            let is_relationship =
-                target.is_property_path() && matches!(self.spec_type(graph, &target)?, Some(SpecType::Relationship));
+            // A prototype root has no properties at the stage tier (C++ reads it
+            // through an empty prim index), so a target on one is terminal too.
+            let is_relationship = target.is_property_path()
+                && !self.is_prototype(&target.prim_path())
+                && matches!(self.spec_type(graph, &target)?, Some(SpecType::Relationship));
             if is_relationship {
                 // Don't follow a relationship the mask excludes; a masked-out
                 // prim contributes no composed targets.
@@ -5541,6 +5555,118 @@ def "Anchor" (inherits = </Rig>) {}
             cache.value_at(&graph, &sdf::path("/World/Place.bodyAttr")?, Some(0.0), &interp)?,
             Some(Value::Double(4.0)),
         );
+        Ok(())
+    }
+
+    /// The single-layer stack of the fixture `name`, and the prototype its
+    /// instance `/A` registers.
+    fn prototype_of_a(name: &str) -> Result<(LayerGraph, IndexCache, Path)> {
+        let (graph, mut cache) = single_layer_stack(&format!("{}/fixtures/{name}", manifest_dir()));
+        let proto = cache
+            .prototype_of(&graph, &sdf::path("/A")?)?
+            .expect("A is an instance");
+        Ok((graph, cache, proto))
+    }
+
+    /// A property authored at an instance root is local to the instance, so
+    /// the prototype's index composes only the referenced value (spec 11.3.3).
+    /// The stage reads a prototype root through an empty index; this is the
+    /// source index its children deepen.
+    #[test]
+    fn root_inerts_instance_overrides() -> Result<()> {
+        let (graph, mut cache, proto) = prototype_of_a("instancing_root_override.usda")?;
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        let value = |cache: &mut IndexCache, name: &str| -> Result<Option<Value>> {
+            Ok(cache.value_at(&graph, &proto.append_property(name)?, Some(0.0), &interp)?)
+        };
+        assert_eq!(value(&mut cache, "shared")?, Some(Value::Double(1.0)));
+        assert_eq!(value(&mut cache, "rootOnly")?, None);
+        Ok(())
+    }
+
+    /// A variant selected on an instance defines its prototype, so the
+    /// prototype's index keeps the opinion authored inside it: rebasing the
+    /// root must not move the spec lookup off `/A{v=x}` (spec 11.3.3).
+    #[test]
+    fn root_keeps_variant_opinions() -> Result<()> {
+        let (graph, mut cache, proto) = prototype_of_a("instancing_variant_root.usda")?;
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        assert_eq!(
+            cache.value_at(&graph, &proto.append_property("picked")?, Some(0.0), &interp)?,
+            Some(Value::Double(5.0))
+        );
+        Ok(())
+    }
+
+    /// Targets authored at a prototype's source root translate into the
+    /// prototype namespace through the root rebase (`rebase_root`), not into
+    /// the canonical instance's (spec 11.3.3 + 12.4).
+    #[test]
+    fn root_target_remap() -> Result<()> {
+        let (graph, mut cache, proto) = prototype_of_a("instancing_root_target.usda")?;
+
+        assert_eq!(
+            cache.relationship_targets(&graph, &proto.append_property("myrel")?)?,
+            vec![proto.append_path("Target")?]
+        );
+        assert_eq!(
+            cache.connection_paths(&graph, &proto.append_property("inputs:in")?)?,
+            vec![proto.append_property("outputs:out")?]
+        );
+        Ok(())
+    }
+
+    /// Every opinion authored on a prototype's referenced source is in the
+    /// prototype's index, the one the stage reads as empty for the root (spec
+    /// 11.3.3).
+    #[test]
+    fn root_source_opinions() -> Result<()> {
+        let (graph, mut cache, proto) = prototype_of_a("instancing_root_empty.usda")?;
+
+        assert_eq!(
+            cache.resolve_field(&graph, &proto, FieldKey::TypeName.as_str())?,
+            Some(Value::Token("Scope".into()))
+        );
+        assert_eq!(cache.api_schemas(&graph, &proto)?, vec![Token::from("ExampleAPI")]);
+        assert_eq!(
+            cache
+                .time_samples(&graph, &proto.append_property("animated")?)?
+                .map(|samples| samples.len()),
+            Some(2)
+        );
+        assert_eq!(
+            cache.relationship_targets(&graph, &proto.append_property("myrel")?)?,
+            vec![proto.append_path("Child")?]
+        );
+        assert_eq!(
+            cache.connection_paths(&graph, &proto.append_property("inputs:in")?)?,
+            vec![proto.append_property("outputs:out")?]
+        );
+        assert_eq!(
+            cache.variant_selections(&graph, &proto)?,
+            vec![("v".to_string(), "x".to_string())]
+        );
+        assert!(!cache.prim_stack(&graph, &proto)?.is_empty());
+        assert!(cache.has_composition_arc(&graph, &proto)?);
+        Ok(())
+    }
+
+    /// A prototype root is active and populated whatever its source says: the
+    /// instance's `active = true` is instance-local, so the source index still
+    /// reads the referenced `false` (spec 11.3.3).
+    #[test]
+    fn root_active_over_source() -> Result<()> {
+        let (graph, mut cache, proto) = prototype_of_a("instancing_inactive_source.usda")?;
+
+        assert_eq!(
+            cache.resolve_field(&graph, &proto, FieldKey::Active.as_str())?,
+            Some(Value::Bool(false)),
+            "the source keeps the referenced opinion"
+        );
+        assert!(cache.is_active(&graph, &proto)?);
+        assert!(cache.is_populated(&graph, &proto.append_path("Child")?)?);
         Ok(())
     }
 
