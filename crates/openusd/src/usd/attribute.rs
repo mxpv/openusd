@@ -8,6 +8,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use super::authoring::PropertySpecKind;
@@ -988,12 +989,39 @@ impl Attribute {
     /// The interval is inclusive at both ends. For samples authored at
     /// `{0, 5, 10}`, `time_samples_in_interval(2.0..=8.0)` returns `[5.0]`,
     /// while `time_samples_in_interval(0.0..=5.0)` returns `[0.0, 5.0]`.
-    pub fn time_samples_in_interval(&self, interval: std::ops::RangeInclusive<f64>) -> Result<Vec<f64>> {
+    pub fn time_samples_in_interval(&self, interval: RangeInclusive<f64>) -> Result<Vec<f64>> {
         Ok(self
             .time_sample_times()?
             .into_iter()
             .filter(|t| interval.contains(t))
             .collect())
+    }
+
+    /// The authored sample times of every attribute in `attributes`, as one
+    /// ascending list without repeats. Mirrors C++
+    /// `UsdAttribute::GetUnionedTimeSamples`.
+    ///
+    /// These are the times a consumer sampling several attributes together
+    /// steps through — the components of a joint transform, the ops of a
+    /// transform stack. The attributes may belong to different stages.
+    pub fn unioned_time_samples(attributes: &[Attribute]) -> Result<Vec<f64>> {
+        Self::unioned_time_samples_in_interval(attributes, f64::NEG_INFINITY..=f64::INFINITY)
+    }
+
+    /// The authored sample times of every attribute in `attributes` within the
+    /// closed interval `interval`, as one ascending list without repeats.
+    /// Mirrors C++ `UsdAttribute::GetUnionedTimeSamplesInInterval`.
+    pub fn unioned_time_samples_in_interval(
+        attributes: &[Attribute],
+        interval: RangeInclusive<f64>,
+    ) -> Result<Vec<f64>> {
+        let mut times = Vec::new();
+        for attribute in attributes {
+            times.extend(attribute.time_samples_in_interval(interval.clone())?);
+        }
+        times.sort_by(|a, b| sdf::compare_sample_times(*a, *b));
+        times.dedup_by(|a, b| sdf::compare_sample_times(*a, *b).is_eq());
+        Ok(times)
     }
 
     /// The number of authored time samples, zero when none. Mirrors C++
@@ -1266,6 +1294,11 @@ impl AttributeQuery {
 
     /// The authored sample times in ascending order, or empty when none are
     /// authored. Mirrors C++ `UsdAttributeQuery::GetTimeSamples`.
+    // TODO(perf): walks the attribute's sources again on every call. The
+    // cached source already knows where the samples are, so it could answer
+    // the times itself, as C++ `UsdAttributeQuery::GetTimeSamples` does from
+    // its resolve info; that is what would let a consumer holding a query per
+    // attribute enumerate sample times without a walk per attribute per call.
     pub fn time_sample_times(&self) -> Result<Vec<f64>> {
         self.attr.time_sample_times()
     }
@@ -1407,6 +1440,31 @@ mod tests {
 
     fn stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
+    }
+
+    /// Several attributes' sample times read as one list, each time once, in
+    /// order, with an attribute holding no samples adding nothing.
+    #[test]
+    fn unioned_time_samples() -> Result<()> {
+        let stage = stage()?;
+        let a = stage
+            .create_attribute("/P.a", "double")?
+            .set_at(1.0_f64, TimeCode::new(0.0))?
+            .set_at(2.0_f64, TimeCode::new(10.0))?;
+        let b = stage
+            .create_attribute("/P.b", "double")?
+            .set_at(3.0_f64, TimeCode::new(5.0))?
+            .set_at(4.0_f64, TimeCode::new(10.0))?;
+        let unsampled = stage.create_attribute("/P.c", "double")?.set(5.0_f64)?;
+
+        let attributes = [b, unsampled, a];
+        assert_eq!(Attribute::unioned_time_samples(&attributes)?, vec![0.0, 5.0, 10.0]);
+        assert_eq!(
+            Attribute::unioned_time_samples_in_interval(&attributes, 4.0..=10.0)?,
+            vec![5.0, 10.0]
+        );
+        assert!(Attribute::unioned_time_samples(&[])?.is_empty());
+        Ok(())
     }
 
     /// A stage whose prims resolve against the shared test schema family, on

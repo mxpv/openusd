@@ -1120,6 +1120,23 @@ impl FromValueCast for Vec<gf::Vec3f> {
     }
 }
 
+impl FromValueCast for Vec<gf::Quatf> {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        match value {
+            Value::QuatfVec(v) => Ok(v),
+            Value::QuatdVec(v) => Ok(v
+                .into_iter()
+                .map(|d| gf::quatf(d.w as f32, d.x as f32, d.y as f32, d.z as f32))
+                .collect()),
+            Value::QuathVec(v) => Ok(v
+                .into_iter()
+                .map(|h| gf::quatf(f32::from(h.w), f32::from(h.x), f32::from(h.y), f32::from(h.z)))
+                .collect()),
+            other => Err(CastError::mismatch::<Vec<gf::Quatf>>((&other).into())),
+        }
+    }
+}
+
 /// Applies `stronger over weaker` dictionary composition in place
 /// (C++ `VtDictionaryOverRecursive`).
 ///
@@ -1419,6 +1436,23 @@ mod tests {
         // [f64; 4] from a quaternion is (w, x, y, z).
         let q = gf::quatf(1.0, 2.0, 3.0, 4.0);
         assert_eq!(Value::Quatf(q).cast::<[f64; 4]>().unwrap(), [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn cast_quat_array_precision() {
+        // A quaternion array reads as Vec<Quatf> from either other precision,
+        // component order kept, and a non-quaternion array does not.
+        let doubles = vec![gf::quatd(1.0, 2.0, 3.0, 4.0)];
+        assert_eq!(
+            Value::QuatdVec(doubles).cast::<Vec<gf::Quatf>>().unwrap(),
+            vec![gf::quatf(1.0, 2.0, 3.0, 4.0)]
+        );
+        let halves = vec![gf::quath(gf::f16::ONE, gf::f16::ZERO, gf::f16::ZERO, gf::f16::ZERO)];
+        assert_eq!(
+            Value::QuathVec(halves).cast::<Vec<gf::Quatf>>().unwrap(),
+            vec![gf::quatf(1.0, 0.0, 0.0, 0.0)]
+        );
+        assert!(Value::FloatVec(vec![1.0]).cast::<Vec<gf::Quatf>>().is_err());
     }
 
     #[test]

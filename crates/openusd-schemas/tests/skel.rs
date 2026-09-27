@@ -299,23 +299,44 @@ fn anim_mapper_remap_with_missing_joints() {
     assert_eq!(out, vec![20, -1, 10]);
 }
 
+/// The query over the fixture's animation.
+fn anim_query(stage: &Stage) -> Result<SkelAnimQuery> {
+    let anim = Animation::get(stage, "/World/Character/Anim")?.expect("Animation");
+    Ok(SkelAnimQuery::new(anim)?.expect("joints and blend shapes"))
+}
+
 #[test]
 fn skel_anim_query_orderings() -> Result<()> {
     let stage = open()?;
-    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.expect("Animation");
-    assert_eq!(q.prim_path(), "/World/Character/Anim");
+    let q = anim_query(&stage)?;
+    assert_eq!(q.animation().path().as_str(), "/World/Character/Anim");
     assert_eq!(q.joint_order(), &["Root", "Root/Hip", "Root/Hip/Knee"]);
     assert_eq!(q.blend_shape_order(), &["smile"]);
-    assert!(q.joint_transforms_might_be_time_varying());
-    assert!(q.blend_shape_weights_might_be_time_varying());
+    assert!(q.joint_transforms_might_be_time_varying()?);
+    assert!(q.blend_shape_weights_might_be_time_varying()?);
+    Ok(())
+}
+
+/// The times an animation is authored at: the joint transform samples are the
+/// union over translations, rotations and the unauthored scales, and the
+/// blend-shape weights have their own.
+#[test]
+fn skel_anim_query_time_samples() -> Result<()> {
+    let stage = open()?;
+    let q = anim_query(&stage)?;
+
+    assert_eq!(q.joint_transform_time_samples()?, vec![0.0, 10.0]);
+    assert_eq!(q.joint_transform_time_samples_in_interval(0.0..=5.0)?, vec![0.0]);
+    assert_eq!(q.blend_shape_weight_time_samples()?, vec![0.0, 10.0]);
+    assert_eq!(q.blend_shape_weight_time_samples_in_interval(5.0..=10.0)?, vec![10.0]);
     Ok(())
 }
 
 #[test]
 fn skel_anim_query_components_at_start_frame() -> Result<()> {
     let stage = open()?;
-    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.unwrap();
-    let (t, r, s) = q.compute_joint_local_transform_components(&stage, 0.0)?;
+    let q = anim_query(&stage)?;
+    let (t, r, s) = q.compute_joint_local_transform_components(0.0)?;
     // Authored at t=0: hip is at (0, 1, 0), all rotations identity, scales
     // unauthored so they default to unit.
     assert_eq!(t[1], Vec3f { x: 0.0, y: 1.0, z: 0.0 });
@@ -327,8 +348,8 @@ fn skel_anim_query_components_at_start_frame() -> Result<()> {
 #[test]
 fn skel_anim_query_components_lerp_at_midframe() -> Result<()> {
     let stage = open()?;
-    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.unwrap();
-    let (t, r, _) = q.compute_joint_local_transform_components(&stage, 5.0)?;
+    let q = anim_query(&stage)?;
+    let (t, r, _) = q.compute_joint_local_transform_components(5.0)?;
     // Hip translation lerps from (0,1,0) at t=0 to (0,1.5,0) at t=10.
     assert!((t[1].y - 1.25).abs() < 1e-5, "hip y at t=5: got {}", t[1].y);
     // Hip rotation slerps from identity to ~45° about +Z; at t=5 ~22.5°.
@@ -342,22 +363,22 @@ fn skel_anim_query_components_lerp_at_midframe() -> Result<()> {
 #[test]
 fn skel_anim_query_blend_shape_weights_lerp() -> Result<()> {
     let stage = open()?;
-    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.unwrap();
-    assert_eq!(q.compute_blend_shape_weights(&stage, 0.0)?, vec![0.0]);
-    let w_mid = q.compute_blend_shape_weights(&stage, 5.0)?;
+    let q = anim_query(&stage)?;
+    assert_eq!(q.compute_blend_shape_weights(0.0)?, vec![0.0]);
+    let w_mid = q.compute_blend_shape_weights(5.0)?;
     assert!((w_mid[0] - 0.5).abs() < 1e-5, "midpoint weight: {}", w_mid[0]);
-    assert_eq!(q.compute_blend_shape_weights(&stage, 10.0)?, vec![1.0]);
+    assert_eq!(q.compute_blend_shape_weights(10.0)?, vec![1.0]);
     Ok(())
 }
 
 #[test]
 fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> {
     let stage = open()?;
-    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.unwrap();
+    let q = anim_query(&stage)?;
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
     let resolver = SkeletonResolver::from_skeleton(&skl)?;
 
-    let locals = q.compute_joint_local_transforms(&stage, 0.0)?;
+    let locals = q.compute_joint_local_transforms(0.0)?;
     assert_eq!(locals.len(), 3);
     // Hip's local at t=0 carries the (0,1,0) translation (row-major [12..15]).
     assert_eq!(locals[1].0[12..15], [0.0, 1.0, 0.0]);
@@ -368,11 +389,13 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
     Ok(())
 }
 
+/// An animation naming neither joints nor blend shapes has nothing to
+/// animate, so no query is built over it.
 #[test]
-fn skel_anim_query_returns_none_on_non_skel_animation() -> Result<()> {
-    let stage = open()?;
-    // /World is an Xform, not a Animation.
-    assert!(SkelAnimQuery::new(&stage, sdf::path("/World")?)?.is_none());
+fn skel_anim_query_none_when_empty() -> Result<()> {
+    let stage = memory()?;
+    let empty = Animation::define(&stage, "/Empty")?;
+    assert!(SkelAnimQuery::new(empty)?.is_none());
     Ok(())
 }
 
