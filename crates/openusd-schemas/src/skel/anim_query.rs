@@ -20,8 +20,6 @@
 // `openusd::usd::AttributeQuery`s the same way once that type is `Clone`
 // and `Debug`, and answers sample times from its cached source.
 
-use std::ops::RangeInclusive;
-
 use openusd::Result;
 
 use openusd::gf;
@@ -146,9 +144,9 @@ impl SkelAnimQuery {
         Attribute::unioned_time_samples(&self.joint_transform_attributes())
     }
 
-    /// The joint transform sample times within the closed `interval`.
-    /// Mirrors Pixar's `GetJointTransformTimeSamplesInInterval`.
-    pub fn joint_transform_time_samples_in_interval(&self, interval: RangeInclusive<f64>) -> Result<Vec<f64>> {
+    /// The joint transform sample times within `interval`. Mirrors Pixar's
+    /// `GetJointTransformTimeSamplesInInterval`.
+    pub fn joint_transform_time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
         Attribute::unioned_time_samples_in_interval(&self.joint_transform_attributes(), interval)
     }
 
@@ -158,9 +156,9 @@ impl SkelAnimQuery {
         self.anim.blend_shape_weights_attr().time_sample_times()
     }
 
-    /// The blend-shape weight sample times within the closed `interval`.
-    /// Mirrors Pixar's `GetBlendShapeWeightTimeSamplesInInterval`.
-    pub fn blend_shape_weight_time_samples_in_interval(&self, interval: RangeInclusive<f64>) -> Result<Vec<f64>> {
+    /// The blend-shape weight sample times within `interval`. Mirrors Pixar's
+    /// `GetBlendShapeWeightTimeSamplesInInterval`.
+    pub fn blend_shape_weight_time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
         self.anim.blend_shape_weights_attr().time_samples_in_interval(interval)
     }
 

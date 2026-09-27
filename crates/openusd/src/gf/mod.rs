@@ -1,4 +1,5 @@
-//! Graphics foundations — linear algebra types used by the schema layer.
+//! Graphics foundations — the value types beneath the schema layer: linear
+//! algebra, and the [`Interval`] a time-sample query is asked over.
 //!
 //! Mirrors Pixar's `Gf` namespace.
 //!
@@ -29,11 +30,13 @@
 //! Quaternion layout — `(w, x, y, z)` with `w` the real (scalar) part,
 //! matching `GfQuatf`'s constructor order.
 
+mod interval;
 mod matrix;
 mod quat;
 mod vec;
 
 pub use half::f16;
+pub use interval::Interval;
 pub use matrix::{Mat2d, Mat3d, Matrix4d};
 pub use quat::{Quatd, Quatf, Quath};
 pub use vec::{Vec2d, Vec2f, Vec2h, Vec2i, Vec3d, Vec3f, Vec3h, Vec3i, Vec4d, Vec4f, Vec4h, Vec4i};

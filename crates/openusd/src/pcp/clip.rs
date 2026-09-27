@@ -413,19 +413,22 @@ impl ClipSet {
         let mut out: Vec<f64> = Vec::new();
         for (k, &(start, clip_index)) in self.active.iter().enumerate() {
             let samples = per_clip.get(clip_index).map_or(&[][..], Vec::as_slice);
-            let end = self.active.get(k + 1).map(|next| next.0);
-            // The first entry is active from negative infinity; later entries
-            // start at `start`.
-            let lower = (k > 0).then_some(start);
-            let in_interval = |t: f64| lower.is_none_or(|l| t >= l) && end.is_none_or(|e| t < e);
+            // An entry is active from its start up to the next entry's; the
+            // first is active from negative infinity, the last onwards.
+            let active = gf::Interval::new(
+                if k > 0 { start } else { f64::NEG_INFINITY },
+                self.active.get(k + 1).map_or(f64::INFINITY, |next| next.0),
+                true,
+                false,
+            );
 
             out.push(start);
-            out.extend(self.times.iter().map(|knot| knot.x).filter(|&x| in_interval(x)));
+            out.extend(self.times.iter().map(|knot| knot.x).filter(|&x| active.contains(x)));
             for &clip_time in samples {
                 out.extend(
                     self.stage_times_for_clip_time(clip_time)
                         .into_iter()
-                        .filter(|&t| in_interval(t)),
+                        .filter(|&t| active.contains(t)),
                 );
             }
         }

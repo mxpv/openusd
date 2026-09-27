@@ -8,7 +8,6 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use super::authoring::PropertySpecKind;
@@ -17,6 +16,7 @@ use super::{
     TypeConflict, authoring, interp,
 };
 use crate::Result;
+use crate::gf;
 use crate::pcp;
 use crate::pcp::AttributeValueSource;
 use crate::sdf;
@@ -983,18 +983,26 @@ impl Attribute {
         Ok(self.stage.time_sample_times(&self.path)?.unwrap_or_default())
     }
 
-    /// The authored sample times within the closed interval `interval`, in
-    /// ascending order. Mirrors C++ `UsdAttribute::GetTimeSamplesInInterval`.
+    /// The authored sample times within `interval`, in ascending order.
+    /// Mirrors C++ `UsdAttribute::GetTimeSamplesInInterval`.
     ///
-    /// The interval is inclusive at both ends. For samples authored at
+    /// Each end of the interval is closed or open as the [`gf::Interval`]
+    /// says, and a range converts into one: for samples authored at
     /// `{0, 5, 10}`, `time_samples_in_interval(2.0..=8.0)` returns `[5.0]`,
-    /// while `time_samples_in_interval(0.0..=5.0)` returns `[0.0, 5.0]`.
-    pub fn time_samples_in_interval(&self, interval: RangeInclusive<f64>) -> Result<Vec<f64>> {
-        Ok(self
-            .time_sample_times()?
-            .into_iter()
-            .filter(|t| interval.contains(t))
-            .collect())
+    /// `time_samples_in_interval(0.0..=5.0)` returns `[0.0, 5.0]`, and
+    /// `time_samples_in_interval(0.0..5.0)` returns `[0.0]`.
+    ///
+    /// TODO(perf): the interval is applied after every sample time has been
+    /// resolved. C++ `_SamplesInIntervalResolver` clips each contributing
+    /// source to the interval, mapped through that source's layer offset,
+    /// before gathering, and stops the walk once a source holds the sample
+    /// bracketing the interval's start; carrying the interval into
+    /// `IndexCache::time_sample_times` would do the same here.
+    pub fn time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+        let interval = interval.into();
+        let mut times = self.time_sample_times()?;
+        times.retain(|t| interval.contains(*t));
+        Ok(times)
     }
 
     /// The authored sample times of every attribute in `attributes`, as one
@@ -1008,16 +1016,17 @@ impl Attribute {
         Self::unioned_time_samples_in_interval(attributes, f64::NEG_INFINITY..=f64::INFINITY)
     }
 
-    /// The authored sample times of every attribute in `attributes` within the
-    /// closed interval `interval`, as one ascending list without repeats.
-    /// Mirrors C++ `UsdAttribute::GetUnionedTimeSamplesInInterval`.
+    /// The authored sample times of every attribute in `attributes` within
+    /// `interval`, as one ascending list without repeats. Mirrors C++
+    /// `UsdAttribute::GetUnionedTimeSamplesInInterval`.
     pub fn unioned_time_samples_in_interval(
         attributes: &[Attribute],
-        interval: RangeInclusive<f64>,
+        interval: impl Into<gf::Interval>,
     ) -> Result<Vec<f64>> {
+        let interval = interval.into();
         let mut times = Vec::new();
         for attribute in attributes {
-            times.extend(attribute.time_samples_in_interval(interval.clone())?);
+            times.extend(attribute.time_samples_in_interval(interval)?);
         }
         times.sort_by(|a, b| sdf::compare_sample_times(*a, *b));
         times.dedup_by(|a, b| sdf::compare_sample_times(*a, *b).is_eq());
@@ -1463,6 +1472,14 @@ mod tests {
             Attribute::unioned_time_samples_in_interval(&attributes, 4.0..=10.0)?,
             vec![5.0, 10.0]
         );
+        // An open end leaves out a sample sitting exactly on it, and an empty
+        // interval holds no sample at all.
+        assert_eq!(
+            Attribute::unioned_time_samples_in_interval(&attributes, 0.0..10.0)?,
+            vec![0.0, 5.0]
+        );
+        assert!(Attribute::unioned_time_samples_in_interval(&attributes, 5.0..5.0)?.is_empty());
+        assert!(Attribute::unioned_time_samples_in_interval(&attributes, 10.0..=0.0)?.is_empty());
         assert!(Attribute::unioned_time_samples(&[])?.is_empty());
         Ok(())
     }

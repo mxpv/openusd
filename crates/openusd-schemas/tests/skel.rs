@@ -327,6 +327,7 @@ fn skel_anim_query_time_samples() -> Result<()> {
 
     assert_eq!(q.joint_transform_time_samples()?, vec![0.0, 10.0]);
     assert_eq!(q.joint_transform_time_samples_in_interval(0.0..=5.0)?, vec![0.0]);
+    assert_eq!(q.joint_transform_time_samples_in_interval(0.0..10.0)?, vec![0.0]);
     assert_eq!(q.blend_shape_weight_time_samples()?, vec![0.0, 10.0]);
     assert_eq!(q.blend_shape_weight_time_samples_in_interval(5.0..=10.0)?, vec![10.0]);
     Ok(())

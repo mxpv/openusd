@@ -34,7 +34,7 @@ The core crate mirrors the C++ OpenUSD SDK's module layout. The bullets below ar
 
 - **`openusd-schemas`** - A separate crate (`crates/openusd-schemas`), not a module of the core: domain schemas layered on `sdf` / `usd`, not part of the AOUSD core spec. It depends on `openusd`, so the core must never reference it. Feature-gated per family (`geom`, `lux`, `media`, `physics`, `proc`, `render`, `semantics`, `shade`, `skel`, `ui`, `vol`; some enable `geom` transitively). See the table in its `lib.rs`.
 
-- **`gf/`** - Graphics Foundations (C++ `Gf`): `bytemuck::Pod` vector / quaternion / matrix types for bulk binary serialization, row-major / row-vector convention, each bridging to `sdf::Value` via `From` / `TryFrom`. See `gf/mod.rs` for the conventions.
+- **`gf/`** - Graphics Foundations (C++ `Gf`): `bytemuck::Pod` vector / quaternion / matrix types for bulk binary serialization, row-major / row-vector convention, each bridging to `sdf::Value` via `From` / `TryFrom`; and `gf::Interval` (C++ `GfInterval`), the open-or-closed-ended span a time-sample query is asked over. See `gf/mod.rs` for the conventions.
 
 ## Development Commands
 

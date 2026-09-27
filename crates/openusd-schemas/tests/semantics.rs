@@ -1,6 +1,7 @@
 //! Integration test for the UsdSemantics schema views against a fixture.
 
 use openusd::Result;
+use openusd::gf;
 use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::{Prim, Stage, TimeCode};
@@ -167,6 +168,11 @@ fn query_refuses_nothing_to_read() {
     assert!(LabelsQuery::at("", None).is_err());
     assert!(LabelsQuery::over("", 0.0..=1.0).is_err());
     assert!(LabelsQuery::over("category", 5.0..=1.0).is_err());
+    // Bounds that meet at an open end hold no time either, nor does one that
+    // is not a number.
+    assert!(LabelsQuery::over("category", 1.0..1.0).is_err());
+    assert!(LabelsQuery::over("category", 1.0..=f64::NAN).is_err());
+    assert!(LabelsQuery::over("category", 1.0..=1.0).is_ok());
 }
 
 /// A chair on an in-memory stage whose labels change over time.
@@ -210,6 +216,18 @@ fn labels_over_interval() -> Result<(), SchemaError> {
     // the prim is labelled throughout it even though no sample lies inside.
     let between = LabelsQuery::over("category", 5.0..=8.0)?;
     assert_eq!(between.direct_labels(&chair)?, tokens(&["wip"]));
+
+    // An open end leaves out the sample sitting on it, where a closed one
+    // reads it.
+    let up_to = LabelsQuery::over("category", 1.0..10.0)?;
+    assert_eq!(up_to.direct_labels(&chair)?, tokens(&["wip"]));
+    let through = LabelsQuery::over("category", 1.0..=10.0)?;
+    assert_eq!(through.direct_labels(&chair)?, tokens(&["approved", "final", "wip"]));
+
+    // An open start still reads the value held at it, being what the prim is
+    // labelled just inside the interval.
+    let after_first = LabelsQuery::over("category", gf::Interval::new(1.0, 5.0, false, true))?;
+    assert_eq!(after_first.direct_labels(&chair)?, tokens(&["wip"]));
     Ok(())
 }
 
@@ -247,7 +265,7 @@ fn labels_before_first_sample() -> Result<(), SchemaError> {
 
     // An unbounded start holds no sample of its own, so it reaches back to the
     // earliest one authored.
-    let before = LabelsQuery::over("category", f64::NEG_INFINITY..=0.5)?;
+    let before = LabelsQuery::over("category", ..=0.5)?;
     assert_eq!(before.direct_labels(&chair)?, tokens(&["wip"]));
     Ok(())
 }

@@ -2,9 +2,9 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::ops::RangeInclusive;
 
 use openusd::Result;
+use openusd::gf;
 use openusd::sdf;
 use openusd::tf;
 use openusd::usd::{Prim, TimeCode};
@@ -34,13 +34,13 @@ pub struct LabelsQuery {
 }
 
 /// The time a [`LabelsQuery`] reads labels at.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum QueryTime {
     /// One time code, or the default value where `None`.
     At(Option<TimeCode>),
-    /// Every time sample in a closed interval, together with the value held at
-    /// its start.
-    Over(RangeInclusive<f64>),
+    /// Every time sample in an interval, together with the value held at its
+    /// start.
+    Over(gf::Interval),
 }
 
 impl LabelsQuery {
@@ -50,16 +50,17 @@ impl LabelsQuery {
         LabelsQuery::new(taxonomy.into(), QueryTime::At(time.into()))
     }
 
-    /// A query for `taxonomy` over a closed interval, answering with every
-    /// label carried at any time sample in it.
+    /// A query for `taxonomy` over an interval, answering with every label
+    /// carried at any time sample in it.
     ///
     /// The interval's start is read as well, so a value held there from an
-    /// earlier sample counts as much as the samples inside it.
-    ///
-    /// A start of negative infinity reaches the earliest sample authored. C++
-    /// reaches it for positive infinity too, since `GfInterval::IsMinFinite`
-    /// rejects both, where a start above every sample holds the last one here.
-    pub fn over(taxonomy: impl Into<tf::Token>, interval: RangeInclusive<f64>) -> Result<Self, SchemaError> {
+    /// earlier sample counts as much as the samples inside it. A start below
+    /// every sample reaches the earliest one authored, and a start above every
+    /// sample reads what is held after the last, which is what the prim is
+    /// labelled from then on; C++ treats a start at either infinity as the
+    /// earliest time. An empty interval names nothing to read and is refused.
+    pub fn over(taxonomy: impl Into<tf::Token>, interval: impl Into<gf::Interval>) -> Result<Self, SchemaError> {
+        let interval = interval.into();
         if interval.is_empty() {
             return Err(SchemaError::EmptyInterval);
         }
@@ -72,8 +73,8 @@ impl LabelsQuery {
     }
 
     /// The time this query reads labels at.
-    pub fn time(&self) -> &QueryTime {
-        &self.time
+    pub fn time(&self) -> QueryTime {
+        self.time
     }
 
     /// The labels authored on `prim` itself under this taxonomy, sorted and
@@ -172,9 +173,9 @@ impl LabelsQuery {
     /// The labels `view` holds at this query's time.
     fn read(&self, view: &LabelsAPI) -> Result<BTreeSet<tf::Token>> {
         let labels = view.labels_attr();
-        match &self.time {
+        match self.time {
             QueryTime::At(time) => Ok(labels
-                .get_at::<Vec<tf::Token>>(*time)?
+                .get_at::<Vec<tf::Token>>(time)?
                 .unwrap_or_default()
                 .into_iter()
                 .collect()),
@@ -184,17 +185,16 @@ impl LabelsQuery {
                 // should answer beside `time_samples_in_interval`, along with
                 // the trailing bracketing sample that an interpolating value
                 // type needs and a held one does not.
-                let mut times = labels.time_samples_in_interval(interval.clone())?;
+                let mut times = labels.time_samples_in_interval(interval)?;
 
                 // A value is held from the sample before it, so the interval's
-                // start carries one as much as the samples inside it do. A
-                // start below every sample reaches the earliest one authored,
-                // and an attribute with no samples at all answers there with
-                // its default or its schema fallback.
-                let start = match interval.start() == &f64::NEG_INFINITY {
-                    true => TimeCode::EARLIEST.value(),
-                    false => *interval.start(),
-                };
+                // start carries one as much as the samples inside it do,
+                // whether or not the start itself lies in the interval. No
+                // read names a time before the earliest, so an unbounded
+                // start clamps up to it and reaches the first sample authored;
+                // an attribute with no samples at all answers there with its
+                // default or its schema fallback.
+                let start = interval.min().max(TimeCode::EARLIEST.value());
                 if times.first() != Some(&start) {
                     times.push(start);
                 }
