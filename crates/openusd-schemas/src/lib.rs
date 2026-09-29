@@ -278,9 +278,29 @@ pub fn schema_registry() -> Arc<SchemaRegistry> {
         .clone()
 }
 
+/// `attr`'s value at `time`, where `None` is the default time, when some layer
+/// authors one, and `None` where the value would be the schema's fallback.
+///
+/// A fallback is not an opinion anyone stated, so the computations that
+/// inherit a value from an ancestor, or from a settings prim, look past it:
+/// C++ checks `HasAuthoredValue` before `Get` for exactly this.
+#[cfg(any(feature = "geom", feature = "render"))]
+pub(crate) fn authored_at<T>(attr: &usd::Attribute, time: Option<usd::TimeCode>) -> openusd::Result<Option<T>>
+where
+    T: sdf::FromValue,
+    T::Error: Into<openusd::Error>,
+{
+    match attr.has_authored_value()? {
+        true => attr.get_at(time),
+        false => Ok(None),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    use std::fs;
 
     use openusd::Result;
     use openusd::usd::Stage;
@@ -295,5 +315,23 @@ pub(crate) mod tests {
     )]
     pub(crate) fn stage(name: &str) -> Result<Stage> {
         Stage::builder().schema_registry(schema_registry()).in_memory(name)
+    }
+
+    /// A stage opened from `usda` text written to a fresh directory, carrying
+    /// every enabled family's schema data. For a scene the stage-tier setters
+    /// refuse to author, such as a value of another type than its schema
+    /// declares.
+    #[allow(
+        dead_code,
+        reason = "which families' tests reach for it depends on the features enabled"
+    )]
+    pub(crate) fn from_usda(usda: &str) -> Result<(tempfile::TempDir, Stage)> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scene.usda");
+        fs::write(&path, usda)?;
+        let stage = Stage::builder()
+            .schema_registry(schema_registry())
+            .open(path.to_str().expect("utf-8 temp path"))?;
+        Ok((dir, stage))
     }
 }

@@ -1,12 +1,12 @@
 //! What `UsdGeomImageable` answers beyond its own properties.
 
 use openusd::Result;
-use openusd::sdf;
 use openusd::tf;
 use openusd::usd;
 
-use super::tokens;
 use super::{Imageable, ImageableSchema, Purpose, PurposeVisibility, Visibility, VisibilityAPI};
+use super::{nearest, tokens};
+use crate::authored_at;
 
 /// The questions `visibility` and `purpose` are actually asked, all of which
 /// are answered by walking namespace rather than by reading one prim.
@@ -25,7 +25,7 @@ pub trait ImageableExt: ImageableSchema {
     /// not, lets the walk continue.
     fn compute_visibility(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Visibility> {
         let time = time.into();
-        let invisible = walk_imageable(self.stage(), self.path(), |ip| {
+        let invisible = nearest(self.stage(), self.path(), Imageable::from_prim, |ip| {
             let token = ip.visibility_attr().get_at::<tf::Token>(time)?;
             Ok((token.as_deref() == Some(tokens::INVISIBLE)).then_some(Visibility::Invisible))
         })?;
@@ -80,10 +80,10 @@ pub trait ImageableExt: ImageableSchema {
         if purpose == Purpose::Default {
             return Ok(PurposeVisibility::Visible);
         }
-        let authored = walk_imageable(self.stage(), self.path(), |ip| {
+        let authored = nearest(self.stage(), self.path(), Imageable::from_prim, |ip| {
             match ip.purpose_visibility_attr(purpose)? {
-                Some(attr) if attr.has_authored_value()? => attr.get_at::<PurposeVisibility>(time),
-                _ => Ok(None),
+                Some(attr) => authored_at::<PurposeVisibility>(&attr, time),
+                None => Ok(None),
             }
         })?;
         Ok(authored.unwrap_or(match purpose {
@@ -100,48 +100,22 @@ pub trait ImageableExt: ImageableSchema {
     /// authored-but-unrecognized token stops the walk and resolves to
     /// [`Purpose::Default`].
     fn compute_purpose(&self) -> Result<Purpose> {
-        let decode = |attr: usd::Attribute| -> Result<Option<Purpose>> {
-            Ok(attr
-                .get::<tf::Token>()?
-                .map(|t| Purpose::from_token(t).unwrap_or_default()))
-        };
-        let authored = walk_imageable(self.stage(), self.path(), |ip| {
-            let attr = ip.purpose_attr();
-            match attr.has_authored_value()? {
-                true => decode(attr),
-                false => Ok(None),
-            }
+        let decode = |token: tf::Token| Purpose::from_token(token).unwrap_or_default();
+        let authored = nearest(self.stage(), self.path(), Imageable::from_prim, |ip| {
+            authored_at::<tf::Token>(&ip.purpose_attr(), None)
         })?;
-        if let Some(purpose) = authored {
-            return Ok(purpose);
+        if let Some(token) = authored {
+            return Ok(decode(token));
         }
         let fallback = match Imageable::from_prim(self.prim().clone())? {
-            Some(ip) => decode(ip.purpose_attr())?,
+            Some(ip) => ip.purpose_attr().get::<tf::Token>()?,
             None => None,
         };
-        Ok(fallback.unwrap_or_default())
+        Ok(fallback.map(decode).unwrap_or_default())
     }
 }
 
 impl<T: ImageableSchema> ImageableExt for T {}
-
-/// Visit `path` and then each of its ancestors below the pseudo-root, calling
-/// `visit` on those that are `Imageable`, and return the first `Some` it
-/// answers.
-fn walk_imageable<T>(
-    stage: &usd::Stage,
-    path: &sdf::Path,
-    mut visit: impl FnMut(&Imageable) -> Result<Option<T>>,
-) -> Result<Option<T>> {
-    for path in path.ancestors_below_root() {
-        if let Some(ip) = Imageable::from_prim(stage.prim(path)?)?
-            && let Some(found) = visit(&ip)?
-        {
-            return Ok(Some(found));
-        }
-    }
-    Ok(None)
-}
 
 #[cfg(test)]
 mod tests {

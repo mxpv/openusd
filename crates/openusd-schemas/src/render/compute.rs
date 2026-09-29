@@ -22,6 +22,7 @@ use super::{
     AspectRatioConformPolicy, Product, ProductSchema, ProductType, Settings, SettingsBaseSchema, SettingsSchema,
     SourceType, Var, VarSchema,
 };
+use crate::authored_at;
 
 /// Compute the [`RenderSpec`](super::spec::RenderSpec) for the `Settings`
 /// prim at `settings_prim`. Returns `None` when the prim is not a
@@ -147,14 +148,14 @@ impl ResolvedBase {
         Ok(Self {
             resolution: read_int2(&view.resolution_attr())?.unwrap_or(fallback.resolution),
             pixel_aspect_ratio: read_f32(&view.pixel_aspect_ratio_attr())?.unwrap_or(fallback.pixel_aspect_ratio),
-            aspect_ratio_conform_policy: authored(&view.aspect_ratio_conform_policy_attr())?
+            aspect_ratio_conform_policy: authored_at::<Value>(&view.aspect_ratio_conform_policy_attr(), None)?
                 .and_then(|value| AspectRatioConformPolicy::try_from(value).ok())
                 .unwrap_or(fallback.aspect_ratio_conform_policy),
             data_window_ndc: read_float4(&view.data_window_ndc_attr())?.unwrap_or(fallback.data_window_ndc),
-            disable_motion_blur: authored(&view.disable_motion_blur_attr())?
+            disable_motion_blur: authored_at::<Value>(&view.disable_motion_blur_attr(), None)?
                 .and_then(|value| value.try_as_bool())
                 .unwrap_or(fallback.disable_motion_blur),
-            disable_depth_of_field: authored(&view.disable_depth_of_field_attr())?
+            disable_depth_of_field: authored_at::<Value>(&view.disable_depth_of_field_attr(), None)?
                 .and_then(|value| value.try_as_bool())
                 .unwrap_or(fallback.disable_depth_of_field),
             camera: read_rel_first_target(&view.camera_rel())?.or_else(|| fallback.camera.clone()),
@@ -249,21 +250,8 @@ fn f64_to_f32(d: f64) -> f32 {
     d.clamp(f32::MIN as f64, f32::MAX as f64) as f32
 }
 
-/// The attribute's value where the prim itself authors one, and `None` where
-/// what it would answer is the schema's fallback.
-///
-/// What a render product inherits from its settings prim is what it does not
-/// say for itself, and a schema fallback is not the product saying anything
-/// (C++ passes `getDefaultValue = false` for exactly this).
-fn authored(attr: &Attribute) -> Result<Option<Value>> {
-    match attr.has_authored_value()? {
-        true => attr.get::<Value>(),
-        false => Ok(None),
-    }
-}
-
 fn read_f32(attr: &Attribute) -> Result<Option<f32>> {
-    Ok(match authored(attr)? {
+    Ok(match authored_at::<Value>(attr, None)? {
         Some(Value::Float(f)) => Some(f),
         Some(Value::Double(d)) => Some(f64_to_f32(d)),
         Some(Value::Half(h)) => Some(h.to_f32()),
@@ -272,11 +260,13 @@ fn read_f32(attr: &Attribute) -> Result<Option<f32>> {
 }
 
 fn read_int2(attr: &Attribute) -> Result<Option<[i32; 2]>> {
-    Ok(authored(attr)?.and_then(|v| v.try_as_vec_2i()).map(|v| [v.x, v.y]))
+    Ok(authored_at::<Value>(attr, None)?
+        .and_then(|v| v.try_as_vec_2i())
+        .map(|v| [v.x, v.y]))
 }
 
 fn read_float4(attr: &Attribute) -> Result<Option<[f32; 4]>> {
-    Ok(match authored(attr)? {
+    Ok(match authored_at::<Value>(attr, None)? {
         Some(Value::Vec4f(v)) => Some([v.x, v.y, v.z, v.w]),
         Some(Value::Vec4d(v)) => Some([f64_to_f32(v.x), f64_to_f32(v.y), f64_to_f32(v.z), f64_to_f32(v.w)]),
         _ => None,

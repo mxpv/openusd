@@ -74,7 +74,9 @@
 //! [`ImageableExt::compute_effective_visibility`] and
 //! [`ImageableExt::compute_purpose`] resolve the effective value by walking
 //! imageable ancestors. A purpose visibility counts only where
-//! [`VisibilityAPI`] is applied.
+//! [`VisibilityAPI`] is applied. The motion settings
+//! ([`MotionAPI::compute_motion_blur_scale`] and its siblings) are inherited
+//! the same way, from the nearest prim that applies [`MotionAPI`].
 //!
 //! # Primvars
 //!
@@ -90,8 +92,12 @@
 openusd::include_schema!("usdGeom");
 
 mod imageable;
+mod motion_api;
 mod visibility_api;
 mod xformable;
+
+use openusd::Result;
+use openusd::{sdf, usd};
 
 // The enums still written by hand name the generated constants directly.
 use tokens::*;
@@ -191,6 +197,26 @@ impl CurveBasis {
 // Bidirectional `From`/`TryFrom<Value>` for each token enum, so they pass
 // straight to `Attribute::set` / `get::<Enum>()`. See the macro's own docs.
 openusd::sdf::impl_token_value!(Interpolation, CurveBasis);
+
+/// Visit the prim at `path` and then each of its ancestors below the
+/// pseudo-root, seen through `view`, and return the first `Some` that `visit`
+/// answers for a prim `view` sees. The walk the inherited `UsdGeom` queries
+/// share, each with the schema whose opinions it reads.
+fn nearest<V, T>(
+    stage: &usd::Stage,
+    path: &sdf::Path,
+    view: impl Fn(usd::Prim) -> Result<Option<V>>,
+    mut visit: impl FnMut(&V) -> Result<Option<T>>,
+) -> Result<Option<T>> {
+    for path in path.ancestors_below_root() {
+        if let Some(viewed) = view(stage.prim(path)?)?
+            && let Some(found) = visit(&viewed)?
+        {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
 
 #[cfg(test)]
 mod tests {
