@@ -1,11 +1,13 @@
 //! What `UsdGeomImageable` answers beyond its own properties.
 
 use openusd::Result;
+use openusd::gf;
 use openusd::tf;
 use openusd::usd;
 
-use super::{Imageable, ImageableSchema, Purpose, PurposeVisibility, Visibility, VisibilityAPI};
+use super::{Imageable, ImageableSchema, Purpose, PurposeVisibility, Visibility, VisibilityAPI, XformCache};
 use super::{nearest, tokens};
+use crate::SchemaError;
 use crate::authored_at;
 
 /// The questions `visibility` and `purpose` are actually asked, all of which
@@ -112,6 +114,30 @@ pub trait ImageableExt: ImageableSchema {
             None => None,
         };
         Ok(fallback.map(decode).unwrap_or_default())
+    }
+
+    /// This prim's local-to-world transform at `time`, where `None` is the
+    /// default time (C++ `ComputeLocalToWorldTransform`).
+    ///
+    /// Each call evaluates every ancestor afresh; for several prims, or one
+    /// prim at several times, query an [`XformCache`] instead.
+    fn compute_local_to_world_transform(
+        &self,
+        time: impl Into<Option<usd::TimeCode>>,
+    ) -> Result<gf::Matrix4d, SchemaError> {
+        XformCache::new(time).local_to_world_transform(self.prim())
+    }
+
+    /// The local-to-world transform of this prim's parent at `time`, where
+    /// `None` is the default time (C++ `ComputeParentToWorldTransform`).
+    ///
+    /// Each call evaluates every ancestor afresh; for several prims, or one
+    /// prim at several times, query an [`XformCache`] instead.
+    fn compute_parent_to_world_transform(
+        &self,
+        time: impl Into<Option<usd::TimeCode>>,
+    ) -> Result<gf::Matrix4d, SchemaError> {
+        XformCache::new(time).parent_to_world_transform(self.prim())
     }
 }
 

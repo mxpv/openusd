@@ -100,16 +100,6 @@ pub enum SchemaError {
         op: String,
     },
 
-    /// `!resetXformStack!` appears past the front of `xformOpOrder`, where it
-    /// no longer means anything.
-    #[error("xformOpOrder on `{prim}`: `!resetXformStack!` is only valid at index 0, found at index {index}")]
-    InvalidOpOrder {
-        /// The prim whose order is malformed.
-        prim: sdf::Path,
-        /// Where the reset token was found.
-        index: usize,
-    },
-
     /// A shading connection chain exceeds the resolver's depth bound,
     /// indicating a cycle or a pathologically deep graph.
     #[error("connection chain at {attribute} is deeper than {max} hops")]

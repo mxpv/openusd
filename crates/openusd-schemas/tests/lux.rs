@@ -367,7 +367,7 @@ fn light_filter_is_typed_xformable() -> Result<()> {
     LightFilter::define(&stage, "/Filter")?;
     let f = LightFilter::get(&stage, "/Filter")?.expect("LightFilter");
     // Inherited Xformable accessor is available on the handle.
-    assert!(f.xform_op_order()?.is_none());
+    assert!(f.xform_op_order()?.is_empty());
     assert!(LightFilter::get(&stage, "/Missing")?.is_none());
     Ok(())
 }

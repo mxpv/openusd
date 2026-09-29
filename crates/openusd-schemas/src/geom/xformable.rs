@@ -3,11 +3,12 @@
 //! An `Xformable` prim carries its local transform as an ordered stack of
 //! `xformOp:*` attributes named by `xformOpOrder`: the first entry is the
 //! most local (innermost in the matrix product), the last outermost. Two
-//! sentinels are honored — `!invert!<op>` inverts an op's value, and a
-//! leading `!resetXformStack!` opts the prim out of inheriting its parent
-//! transform (surfaced via [`XformableExt::resets_xform_stack`]). Per-op values
-//! flow through [`openusd::usd::Attribute::get`], so time-sampled ops
-//! interpolate per AOUSD §12.5.
+//! sentinels are honored — `!invert!<op>` inverts an op's value, and
+//! `!resetXformStack!` opts the prim out of inheriting its parent transform
+//! and discards the ops listed before it (surfaced via
+//! [`XformableExt::resets_xform_stack`]). Per-op values flow through
+//! [`openusd::usd::AttributeQuery::get_at`]. Time-sampled ops interpolate per
+//! AOUSD §12.5.
 
 use openusd::Result;
 
@@ -16,14 +17,10 @@ use crate::SchemaError;
 use openusd::gf;
 use openusd::sdf;
 use openusd::tf;
-use openusd::usd::{Prim, TimeCode};
+use openusd::usd;
 
-use super::XformableSchema;
-use super::tokens;
-
-const TOKEN_INVERT_PREFIX: &str = "!invert!";
-const TOKEN_RESET_XFORM_STACK: &str = "!resetXformStack!";
-const NS_XFORM_OP: &str = "xformOp:";
+use super::xform_op::{NS_XFORM_OP, TOKEN_INVERT_PREFIX, TOKEN_RESET_XFORM_STACK};
+use super::{XformOp, XformOpKind, Xformable, XformableSchema};
 
 /// The precision an xform op's value is authored at (C++
 /// `UsdGeomXformOp::Precision`).
@@ -47,59 +44,80 @@ pub enum XformOpPrecision {
 /// A prim that carries a transform stack (C++ `UsdGeomXformable`). Inherits
 /// [`XformableSchema`].
 ///
-/// Reader methods compose the authored `xformOp:*` stack; the `set_*` setters
-/// author one op and append it to `xformOpOrder`, so successive calls build
-/// the canonical T·R·S ordering. Setters consume `self` and return it, so
-/// they chain (`xform.set_translate(t)?.set_rotate_y(d)?`).
+/// Reader methods compose the `xformOp:*` stack `xformOpOrder` names; the
+/// `set_*` setters author one op and append it to `xformOpOrder`, so
+/// successive calls build the canonical T·R·S ordering. Setters consume
+/// `self` and return it, so they chain
+/// (`xform.set_translate(t)?.set_rotate_y(d)?`).
 pub trait XformableExt: XformableSchema {
-    /// The authored `xformOpOrder` token list, flattening any list-op
-    /// authoring. `None` when unauthored (C++ `GetXformOpOrderAttr().Get`).
-    fn xform_op_order(&self) -> Result<Option<Vec<String>>> {
-        let attr = self.prim().path().append_property(tokens::XFORM_OP_ORDER)?;
-        Ok(match self.prim().stage().field::<sdf::Value>(attr, "default")? {
-            Some(sdf::Value::TokenVec(v)) => Some(v.into_iter().map(Into::into).collect()),
-            Some(sdf::Value::StringVec(v)) => Some(v),
-            Some(sdf::Value::TokenListOp(op)) => Some(op.flatten().into_iter().map(Into::into).collect()),
-            Some(sdf::Value::StringListOp(op)) => Some(op.flatten()),
-            _ => None,
-        })
+    /// The composed `xformOpOrder` tokens, empty when neither a layer nor the
+    /// schema supplies one (C++ `GetXformOpOrderAttr().Get`).
+    fn xform_op_order(&self) -> Result<Vec<tf::Token>> {
+        Ok(self.xform_op_order_attr().get::<Vec<tf::Token>>()?.unwrap_or_default())
     }
 
-    /// `true` when the prim lists `!resetXformStack!` as the first entry of
-    /// `xformOpOrder`, opting out of inheriting its parent transform
-    /// (C++ `GetResetXformStack`).
-    fn resets_xform_stack(&self) -> Result<bool> {
-        Ok(matches!(
-            self.xform_op_order()?.as_deref().and_then(|s| s.first()),
-            Some(s) if s == TOKEN_RESET_XFORM_STACK
-        ))
-    }
-
-    /// Compose `xformOpOrder` into a single local-to-parent 4×4 matrix at
-    /// `time`. [`gf::Matrix4d::IDENTITY`] when no stack is authored. Mirrors C++
-    /// `ComputeLocalToParentTransform`.
-    fn local_to_parent_transform(&self, time: impl Into<TimeCode>) -> Result<gf::Matrix4d, SchemaError> {
-        let time = time.into();
-        let Some(order) = self.xform_op_order()? else {
-            return Ok(gf::Matrix4d::IDENTITY);
-        };
-        let mut m = gf::Matrix4d::IDENTITY;
-        for (i, op_name) in order.iter().enumerate() {
-            if op_name == TOKEN_RESET_XFORM_STACK {
-                if i == 0 {
-                    continue;
-                }
-                return Err(SchemaError::InvalidOpOrder {
-                    prim: self.prim().path().clone(),
-                    index: i,
-                });
+    /// The ops that make up the local transform, outermost first, and whether
+    /// the stack resets its parent's transform (C++ `GetOrderedXformOps`).
+    ///
+    /// A `!resetXformStack!` entry sets the flag and discards every op listed
+    /// before it. An entry naming no attribute on the prim is skipped.
+    fn ordered_xform_ops(&self) -> Result<(Vec<XformOp>, bool)> {
+        let prim = self.prim();
+        let mut ops = Vec::new();
+        let mut resets = false;
+        for entry in self.xform_op_order()? {
+            if entry == TOKEN_RESET_XFORM_STACK {
+                resets = true;
+                ops.clear();
+                continue;
             }
-            // Row-vector convention: the last listed op is most local
-            // (applied first to a point), so each new op is prepended,
-            // growing the cumulative matrix on the left.
-            m = build_op_matrix(self.prim(), op_name, time)? * m;
+            let (inverse, name) = match entry.strip_prefix(TOKEN_INVERT_PREFIX) {
+                Some(name) => (true, name),
+                None => (false, entry.as_str()),
+            };
+            let attr = prim.attribute(name);
+            if attr.is_defined()? {
+                ops.push(XformOp::new(&attr, inverse));
+            }
         }
-        Ok(m)
+        Ok((ops, resets))
+    }
+
+    /// `true` when `xformOpOrder` lists `!resetXformStack!`, opting the prim
+    /// out of inheriting its parent transform (C++ `GetResetXformStack`).
+    fn resets_xform_stack(&self) -> Result<bool> {
+        Ok(self
+            .xform_op_order()?
+            .iter()
+            .any(|entry| entry == TOKEN_RESET_XFORM_STACK))
+    }
+
+    /// Compose the stack into a single local-to-parent 4×4 matrix at `time`,
+    /// where `None` is the default time (C++ `GetLocalTransformation`).
+    /// [`gf::Matrix4d::IDENTITY`] when no stack is authored. An op directly
+    /// beside its own inverse is skipped along with it.
+    fn local_transformation(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Matrix4d, SchemaError> {
+        XformQuery::new(self)?.local_transformation(time)
+    }
+
+    /// `true` when an op of the stack might have a different value at another
+    /// time (C++ `UsdGeomXformable::TransformMightBeTimeVarying`). Unlike
+    /// [`XformQuery::transform_might_be_time_varying`], it does not first ask
+    /// whether the ops have an effect, as the two C++ methods differ.
+    fn transform_might_be_time_varying(&self) -> Result<bool> {
+        XformQuery::new(self)?.ops_might_be_time_varying()
+    }
+
+    /// Every time at which an op of the stack authors a sample, ascending
+    /// (C++ `GetTimeSamples`).
+    fn time_samples(&self) -> Result<Vec<f64>> {
+        self.time_samples_in_interval(..)
+    }
+
+    /// The times within `interval` at which an op of the stack authors a
+    /// sample, ascending (C++ `GetTimeSamplesInInterval`).
+    fn time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+        XformQuery::new(self)?.time_samples_in_interval(interval)
     }
 
     /// Replace `xformOpOrder` with `order` verbatim (C++
@@ -220,65 +238,129 @@ pub trait XformableExt: XformableSchema {
     }
 }
 
-/// Build the 4×4 contribution of a single xformOp (possibly `!invert!`-ed).
-fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Matrix4d, SchemaError> {
-    let (inverted, base) = match op_name.strip_prefix(TOKEN_INVERT_PREFIX) {
-        Some(stripped) => (true, stripped),
-        None => (false, op_name),
-    };
+/// Every [`XformableSchema`] carries the transform stack, so a view has these
+/// wherever the generated accessors are.
+impl<T: XformableSchema> XformableExt for T {}
 
-    let attr = prim.path().append_property(base)?;
-    let Some(raw) = prim.stage().attribute(attr)?.get_at::<sdf::Value>(time)? else {
-        return Ok(gf::Matrix4d::IDENTITY);
-    };
+/// One prim's ordered ops, read once so the local transform can be evaluated
+/// at many times without re-reading `xformOpOrder` (C++
+/// `UsdGeomXformable::XformQuery`).
+///
+/// Each op reads its value through a [`usd::AttributeQuery`], which resolves
+/// the value source once and revalidates it against later edits.
+/// The op list and reset flag are fixed when the query is built: after an
+/// edit to `xformOpOrder`, or to which op attributes exist, build a new one.
+///
+/// The [`Default`] query has no ops and does not reset the stack, which is
+/// what a prim that is not `Xformable` contributes.
+#[derive(Clone, Default)]
+pub struct XformQuery {
+    ops: Vec<XformOp>,
+    resets_xform_stack: bool,
+}
 
-    let kind = op_kind(base);
+impl XformQuery {
+    /// The query over `xformable`'s ordered ops.
+    pub fn new(xformable: &(impl XformableExt + ?Sized)) -> Result<Self> {
+        let (ops, resets_xform_stack) = xformable.ordered_xform_ops()?;
+        Ok(Self {
+            ops,
+            resets_xform_stack,
+        })
+    }
 
-    let m = match kind {
-        "translate" => gf::Matrix4d::translation(value_to_vec3_f64(&raw).unwrap_or([0.0, 0.0, 0.0])),
-        "translateX" => gf::Matrix4d::translation([value_to_scalar_f64(&raw).unwrap_or(0.0), 0.0, 0.0]),
-        "translateY" => gf::Matrix4d::translation([0.0, value_to_scalar_f64(&raw).unwrap_or(0.0), 0.0]),
-        "translateZ" => gf::Matrix4d::translation([0.0, 0.0, value_to_scalar_f64(&raw).unwrap_or(0.0)]),
-        "scale" => gf::Matrix4d::scale(value_to_vec3_f64(&raw).unwrap_or([1.0, 1.0, 1.0])),
-        "scaleX" => gf::Matrix4d::scale([value_to_scalar_f64(&raw).unwrap_or(1.0), 1.0, 1.0]),
-        "scaleY" => gf::Matrix4d::scale([1.0, value_to_scalar_f64(&raw).unwrap_or(1.0), 1.0]),
-        "scaleZ" => gf::Matrix4d::scale([1.0, 1.0, value_to_scalar_f64(&raw).unwrap_or(1.0)]),
-        "orient" => gf::Matrix4d::from_quat(value_to_quat_wxyz(&raw).unwrap_or([1.0, 0.0, 0.0, 0.0])),
-        // Rotation ops stay in f64 end-to-end; xformOp:rotate* may be authored
-        // as `float` or `double` per the precision system, and reading via f32
-        // would truncate the double-authored case before the trig math runs.
-        "rotateX" => gf::Matrix4d::rotation_x(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
-        "rotateY" => gf::Matrix4d::rotation_y(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
-        "rotateZ" => gf::Matrix4d::rotation_z(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
-        "rotateXYZ" | "rotateYXZ" | "rotateZXY" | "rotateXZY" | "rotateYZX" | "rotateZYX" => {
-            let v = value_to_vec3_f64(&raw).unwrap_or([0.0, 0.0, 0.0]);
-            let rx = gf::Matrix4d::rotation_x(v[0].to_radians());
-            let ry = gf::Matrix4d::rotation_y(v[1].to_radians());
-            let rz = gf::Matrix4d::rotation_z(v[2].to_radians());
-            // Apply axes in the order spelled by `kind` (row-vector product).
-            match kind {
-                "rotateXYZ" => rx * ry * rz,
-                "rotateYXZ" => ry * rx * rz,
-                "rotateZXY" => rz * rx * ry,
-                "rotateXZY" => rx * rz * ry,
-                "rotateYZX" => ry * rz * rx,
-                "rotateZYX" => rz * ry * rx,
-                _ => unreachable!("kind guard above"),
+    /// The query over `prim` when it is `Xformable`, and the empty
+    /// [`Default`] query when it is not.
+    pub fn for_prim(prim: &usd::Prim) -> Result<Self> {
+        match Xformable::from_prim(prim.clone())? {
+            Some(xformable) => Self::new(&xformable),
+            None => Ok(Self::default()),
+        }
+    }
+
+    /// The local transform at `time`, where `None` is the default time (C++
+    /// `GetLocalTransformation`). Identity for an empty stack.
+    ///
+    /// An op directly beside its own inverse is skipped along with it. A
+    /// singular `transform` paired with its inverse therefore still evaluates.
+    pub fn local_transformation(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Matrix4d, SchemaError> {
+        let time = time.into();
+        let mut m = gf::Matrix4d::IDENTITY;
+        // Row-vector convention: the last listed op is most local and applies
+        // first to a point. The walk runs from the back and grows the product
+        // on the right.
+        let mut rev = self.ops.iter().rev().peekable();
+        while let Some(op) = rev.next() {
+            if rev.peek().is_some_and(|next| op.cancels(next)) {
+                rev.next();
+                continue;
+            }
+            m = m * op.op_transform(time)?;
+        }
+        Ok(m)
+    }
+
+    /// `true` when the stack resets its parent's transform (C++
+    /// `GetResetXformStack`).
+    pub fn resets_xform_stack(&self) -> bool {
+        self.resets_xform_stack
+    }
+
+    /// `true` when the ops might affect the transform: false for an empty
+    /// stack or a lone op beside its own inverse, true for a stack that
+    /// resets (C++ `TransformMightHaveEffect`). It recognizes only those
+    /// forms and does not inspect the matrices.
+    pub fn transform_might_have_effect(&self) -> bool {
+        if self.resets_xform_stack {
+            return true;
+        }
+        match self.ops.as_slice() {
+            [] => false,
+            [first, second] => !first.cancels(second),
+            _ => true,
+        }
+    }
+
+    /// `true` when the stack lists at least one op (C++
+    /// `HasNonEmptyXformOpOrder`).
+    pub fn has_non_empty_xform_op_order(&self) -> bool {
+        !self.ops.is_empty()
+    }
+
+    /// `true` when the transform might differ between times: the ops have
+    /// an effect and one of them might vary (C++
+    /// `TransformMightBeTimeVarying`).
+    pub fn transform_might_be_time_varying(&self) -> Result<bool> {
+        Ok(self.transform_might_have_effect() && self.ops_might_be_time_varying()?)
+    }
+
+    /// Every time at which an op authors a sample, ascending (C++
+    /// `GetTimeSamples`).
+    pub fn time_samples(&self) -> Result<Vec<f64>> {
+        self.time_samples_in_interval(..)
+    }
+
+    /// The times within `interval` at which an op authors a sample, ascending
+    /// (C++ `GetTimeSamplesInInterval`).
+    pub fn time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+        let attrs: Vec<usd::Attribute> = self.ops.iter().map(|op| op.attribute().clone()).collect();
+        usd::Attribute::unioned_time_samples_in_interval(&attrs, interval)
+    }
+
+    /// `true` when the attribute named `name` is one of the ops (C++
+    /// `IsAttributeIncludedInLocalTransform`).
+    pub fn is_attribute_included_in_local_transform(&self, name: &str) -> bool {
+        self.ops.iter().any(|op| op.name() == name)
+    }
+
+    /// `true` when any op might vary over time.
+    fn ops_might_be_time_varying(&self) -> Result<bool> {
+        for op in &self.ops {
+            if op.might_be_time_varying()? {
+                return Ok(true);
             }
         }
-        "transform" => match raw {
-            sdf::Value::Matrix4d(m) => m,
-            _ => gf::Matrix4d::IDENTITY,
-        },
-        _ => gf::Matrix4d::IDENTITY,
-    };
-
-    if inverted {
-        m.inverse().ok_or_else(|| SchemaError::SingularTransform {
-            op: op_name.to_string(),
-        })
-    } else {
-        Ok(m)
+        Ok(false)
     }
 }
 
@@ -296,15 +378,21 @@ fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Mat
 /// it. The declaration is read as the raw spelling it was authored with, so
 /// one the type table does not know is refused by the conversion rather than
 /// mistaken for an op nothing declares.
-fn author_xform_op(prim: &Prim, op: &str, precision: XformOpPrecision, value: sdf::Value) -> Result<(), SchemaError> {
-    let fallback = op_value_type(op, precision)?;
+fn author_xform_op(
+    prim: &usd::Prim,
+    op: &str,
+    precision: XformOpPrecision,
+    value: sdf::Value,
+) -> Result<(), SchemaError> {
     let name = op_attr_name(op);
+    let token = name.split(':').nth(1).unwrap_or_default();
+    let kind = XformOpKind::from_token(token).ok_or_else(|| SchemaError::UnknownXformOp { op: token.to_string() })?;
     let declared = match prim
         .attribute(name.as_str())
         .get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?
     {
         Some(token) => sdf::ValueTypeName::from(token),
-        None => fallback,
+        None => kind.value_type(precision),
     };
     let value = declared.coerce(value)?;
     prim.attribute_builder(name, declared)
@@ -324,103 +412,21 @@ fn op_attr_name(op: &str) -> String {
     }
 }
 
-/// The op token of `name`, without the `xformOp:` prefix and without the
-/// `:suffix` that names one instance of the op rather than a kind of its own.
-fn op_kind(name: &str) -> &str {
-    let after_ns = name.strip_prefix(NS_XFORM_OP).unwrap_or(name);
-    after_ns.split(':').next().unwrap_or(after_ns)
-}
-
-/// The value type `op` holds at `precision` (C++
-/// `UsdGeomXformOp::GetValueTypeName`); a token naming no op kind has none.
-// TODO: the op vocabulary is spelled here and again in `build_op_matrix`.
-// C++ parses the token into one `XformOp::Type` that every switch keys off;
-// an `XformOpKind` enum parsed once — taking the `!invert!` and
-// `!resetXformStack!` sentinels with it, which have no authoring spelling
-// today — would replace both string matches.
-fn op_value_type(op: &str, precision: XformOpPrecision) -> Result<sdf::ValueTypeName, SchemaError> {
-    use XformOpPrecision as P;
-
-    Ok(match op_kind(op) {
-        // A matrix has only the one precision in Sdf, which C++ reports when
-        // another is asked for and this crate accepts silently.
-        "transform" => sdf::ValueTypeName::MATRIX4D,
-        "orient" => match precision {
-            P::Double => sdf::ValueTypeName::QUATD,
-            P::Float => sdf::ValueTypeName::QUATF,
-            P::Half => sdf::ValueTypeName::QUATH,
-        },
-        "translateX" | "translateY" | "translateZ" | "scaleX" | "scaleY" | "scaleZ" | "rotateX" | "rotateY"
-        | "rotateZ" => match precision {
-            P::Double => sdf::ValueTypeName::DOUBLE,
-            P::Float => sdf::ValueTypeName::FLOAT,
-            P::Half => sdf::ValueTypeName::HALF,
-        },
-        "translate" | "scale" | "rotateXYZ" | "rotateXZY" | "rotateYXZ" | "rotateYZX" | "rotateZXY" | "rotateZYX" => {
-            match precision {
-                P::Double => sdf::ValueTypeName::DOUBLE3,
-                P::Float => sdf::ValueTypeName::FLOAT3,
-                P::Half => sdf::ValueTypeName::HALF3,
-            }
-        }
-        other => {
-            return Err(SchemaError::UnknownXformOp { op: other.to_string() });
-        }
-    })
-}
-
 /// Append `op` to `xformOpOrder`, de-duplicating re-authored ops.
-fn append_op(prim: &Prim, op: &str) -> Result<()> {
-    prim.append_to_uniform_token_array(tokens::XFORM_OP_ORDER, op_attr_name(op))?;
+fn append_op(prim: &usd::Prim, op: &str) -> Result<()> {
+    prim.append_to_uniform_token_array(super::tokens::XFORM_OP_ORDER, op_attr_name(op))?;
     Ok(())
 }
 
-fn value_to_scalar_f64(v: &sdf::Value) -> Option<f64> {
-    match v {
-        sdf::Value::Double(d) => Some(*d),
-        sdf::Value::Float(f) => Some(*f as f64),
-        sdf::Value::Half(h) => Some(h.to_f32() as f64),
-        sdf::Value::Int(i) => Some(*i as f64),
-        sdf::Value::Int64(i) => Some(*i as f64),
-        _ => None,
-    }
-}
-
-fn value_to_vec3_f64(v: &sdf::Value) -> Option<[f64; 3]> {
-    match v {
-        sdf::Value::Vec3d(a) => Some(<[f64; 3]>::from(*a)),
-        sdf::Value::Vec3f(a) => Some([a.x as f64, a.y as f64, a.z as f64]),
-        sdf::Value::Vec3h(a) => Some([a.x.to_f32() as f64, a.y.to_f32() as f64, a.z.to_f32() as f64]),
-        _ => None,
-    }
-}
-
-fn value_to_quat_wxyz(v: &sdf::Value) -> Option<[f64; 4]> {
-    match v {
-        sdf::Value::Quatd(q) => Some(<[f64; 4]>::from(*q)),
-        sdf::Value::Quatf(q) => Some([q.w as f64, q.x as f64, q.y as f64, q.z as f64]),
-        sdf::Value::Quath(q) => Some([
-            q.w.to_f32() as f64,
-            q.x.to_f32() as f64,
-            q.y.to_f32() as f64,
-            q.z.to_f32() as f64,
-        ]),
-        _ => None,
-    }
-}
-
-/// Every [`XformableSchema`] carries the transform stack, so a view has these
-/// wherever the generated accessors are.
-impl<T: XformableSchema> XformableExt for T {}
-
 #[cfg(test)]
 mod tests {
-    use super::{XformOpPrecision, XformableExt};
+    use super::{XformOpPrecision, XformQuery, XformableExt};
     use crate::SchemaError;
-    use crate::geom::Xform;
+    use crate::geom::{Xform, XformOp};
     use openusd::Result;
     use openusd::gf;
     use openusd::sdf;
+    use openusd::usd;
 
     /// An asset that declares an op at another precision keeps it: the
     /// setter converts the value rather than failing on the mismatch.
@@ -494,7 +500,7 @@ mod tests {
             stage.attribute("/X.xformOp:translate:pivot")?.type_name()?,
             Some(sdf::ValueTypeName::FLOAT3)
         );
-        assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate:pivot".to_string()]));
+        assert_eq!(x.xform_op_order()?, vec!["xformOp:translate:pivot"]);
         Ok(())
     }
 
@@ -513,7 +519,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("{op} was accepted"));
             assert!(matches!(error, SchemaError::UnknownXformOp { .. }), "{op}: {error:?}");
         }
-        assert_eq!(x.xform_op_order()?, None, "nothing was appended to the stack");
+        assert_eq!(
+            x.xform_op_order()?,
+            Vec::<openusd::tf::Token>::new(),
+            "nothing was appended to the stack"
+        );
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:bogusOp", sdf::FieldKey::Default)?,
             None,
@@ -551,7 +561,7 @@ mod tests {
             None,
             "no value was authored"
         );
-        assert_eq!(x.xform_op_order()?, None);
+        assert_eq!(x.xform_op_order()?, Vec::<openusd::tf::Token>::new());
         Ok(())
     }
 
@@ -575,7 +585,7 @@ mod tests {
             None,
             "no declaration was left behind"
         );
-        assert_eq!(x.xform_op_order()?, None);
+        assert_eq!(x.xform_op_order()?, Vec::<openusd::tf::Token>::new());
 
         // So the op takes the precision the next write asks for.
         x.set_xform_op("scale", XformOpPrecision::Double, gf::vec3f(2.0, 2.0, 2.0))?;
@@ -596,7 +606,7 @@ mod tests {
             XformOpPrecision::Double,
             gf::vec3d(1.0, 2.0, 3.0),
         )?;
-        assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate".to_string()]));
+        assert_eq!(x.xform_op_order()?, vec!["xformOp:translate"]);
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
             Some(sdf::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
@@ -608,7 +618,7 @@ mod tests {
     fn translate_appears_in_order() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?.set_translate(gf::vec3d(1.0, 2.0, 3.0))?;
-        assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate".to_string()]));
+        assert_eq!(x.xform_op_order()?, vec!["xformOp:translate"]);
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
             Some(sdf::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
@@ -625,11 +635,7 @@ mod tests {
             .set_scale(gf::vec3f(2.0, 2.0, 2.0))?;
         assert_eq!(
             x.xform_op_order()?,
-            Some(vec![
-                "xformOp:translate".to_string(),
-                "xformOp:rotateY".to_string(),
-                "xformOp:scale".to_string(),
-            ])
+            vec!["xformOp:translate", "xformOp:rotateY", "xformOp:scale"]
         );
         Ok(())
     }
@@ -640,7 +646,7 @@ mod tests {
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(3.0, 5.0, 7.0))?
             .set_rotate_z(90.0)?;
-        let m = x.local_to_parent_transform(0.0)?;
+        let m = x.local_transformation(None)?;
         assert_eq!([m.0[12], m.0[13], m.0[14]], [3.0, 5.0, 7.0]);
         Ok(())
     }
@@ -651,7 +657,7 @@ mod tests {
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(1.0, 0.0, 0.0))?
             .set_translate(gf::vec3d(2.0, 0.0, 0.0))?;
-        assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate".to_string()]));
+        assert_eq!(x.xform_op_order()?, vec!["xformOp:translate"]);
         Ok(())
     }
 
@@ -691,6 +697,233 @@ mod tests {
             Some(sdf::Value::Matrix4d(v)) => assert_eq!(v[12], 5.0),
             other => panic!("expected gf::Matrix4d, got {other:?}"),
         }
+        Ok(())
+    }
+
+    /// Every entry of `got` is within rounding of `want`.
+    fn assert_close(got: gf::Matrix4d, want: gf::Matrix4d) {
+        for (g, w) in got.0.iter().zip(want.0) {
+            assert!((g - w).abs() < 1e-9, "{got:?} != {want:?}");
+        }
+    }
+
+    /// Each op directly beside its own inverse cancels out (C++
+    /// `test_InverseOps`), suffixed ops included.
+    #[test]
+    fn inverse_ops_cancel() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?
+            .set_translate(gf::vec3d(20.0, 30.0, 40.0))?
+            .set_scale(gf::vec3f(2.0, 3.0, 4.0))?
+            .set_rotate_x(30.0)?
+            .set_xform_op("rotateXYZ:first", XformOpPrecision::Float, gf::vec3f(10.0, 20.0, 30.0))?
+            .set_xform_op("rotateZYX:last", XformOpPrecision::Float, gf::vec3f(30.0, 60.0, 45.0))?;
+        let mut order = Vec::new();
+        for op in x.xform_op_order()? {
+            order.push(op.to_string());
+            order.push(format!("!invert!{op}"));
+        }
+        let x = x.set_xform_op_order(order)?;
+        assert_close(x.local_transformation(None)?, gf::Matrix4d::IDENTITY);
+        Ok(())
+    }
+
+    /// A singular `transform` beside its own inverse is skipped with it, but
+    /// with an op between them the inverse has to be taken, and fails (C++
+    /// `test_SingularTransformOp`).
+    #[test]
+    fn singular_pair_skipped() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let singular = gf::Matrix4d([
+            32.0, 8.0, 11.0, 17.0, //
+            8.0, 20.0, 17.0, 23.0, //
+            11.0, 17.0, 14.0, 26.0, //
+            17.0, 23.0, 26.0, 2.0,
+        ]);
+        let x = Xform::define(&stage, "/X")?
+            .set_transform(singular)?
+            .set_translate(gf::vec3d(1.0, 1.0, 1.0))?
+            .set_xform_op_order(["xformOp:transform", "xformOp:translate", "!invert!xformOp:transform"])?;
+        let error = x.local_transformation(None).expect_err("the lone inverse is singular");
+        assert!(matches!(error, SchemaError::SingularTransform { .. }), "{error:?}");
+
+        let x = x.set_xform_op_order(["xformOp:transform", "!invert!xformOp:transform"])?;
+        assert_eq!(x.local_transformation(None)?, gf::Matrix4d::IDENTITY);
+        Ok(())
+    }
+
+    /// An entry naming no attribute is skipped, and the rest of the stack
+    /// still evaluates (C++ `test_Bug109853`).
+    #[test]
+    fn missing_op_skipped() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?
+            .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
+            .set_xform_op_order(["xformOp:transform", "xformOp:translate"])?;
+        let (ops, resets) = x.ordered_xform_ops()?;
+        let names: Vec<_> = ops.iter().map(XformOp::op_name).collect();
+        assert_eq!(names, vec!["xformOp:translate"]);
+        assert!(!resets);
+        assert_eq!(
+            x.local_transformation(None)?,
+            gf::Matrix4d::translation([1.0, 2.0, 3.0])
+        );
+        Ok(())
+    }
+
+    /// A reset past the front of the stack discards the ops listed before
+    /// it, and still resets the parent transform.
+    #[test]
+    fn mid_stack_reset() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?
+            .set_translate(gf::vec3d(1.0, 0.0, 0.0))?
+            .set_xform_op("translate:after", XformOpPrecision::Double, gf::vec3d(0.0, 2.0, 0.0))?
+            .set_xform_op_order(["xformOp:translate", "!resetXformStack!", "xformOp:translate:after"])?;
+        assert!(x.resets_xform_stack()?);
+        let (ops, resets) = x.ordered_xform_ops()?;
+        assert!(resets);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            x.local_transformation(None)?,
+            gf::Matrix4d::translation([0.0, 2.0, 0.0])
+        );
+        Ok(())
+    }
+
+    /// Only the ops after the last reset count toward time variation (C++
+    /// `test_MightBeTimeVarying`).
+    #[test]
+    fn might_be_time_varying() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+        assert!(!x.transform_might_be_time_varying()?);
+
+        let x = x.set_translate(gf::vec3d(10.0, 20.0, 30.0))?;
+        let op = stage.attribute("/X.xformOp:translate")?;
+        assert!(!x.transform_might_be_time_varying()?);
+
+        let op = op.set_at(gf::vec3d(20.0, 40.0, 60.0), usd::TimeCode::new(1.0))?;
+        assert!(!x.transform_might_be_time_varying()?, "one sample does not vary");
+        assert_eq!(x.time_samples()?, vec![1.0]);
+
+        op.set_at(gf::vec3d(30.0, 60.0, 90.0), usd::TimeCode::new(2.0))?;
+        assert!(x.transform_might_be_time_varying()?);
+        assert!(XformQuery::new(&x)?.transform_might_be_time_varying()?);
+        assert_eq!(x.time_samples()?, vec![1.0, 2.0]);
+
+        let x = x.set_xform_op_order(["xformOp:translate", "!resetXformStack!"])?;
+        assert!(!x.transform_might_be_time_varying()?);
+        assert!(x.time_samples()?.is_empty());
+
+        let x = x.set_xform_op_order(["!resetXformStack!", "xformOp:translate"])?;
+        assert!(x.transform_might_be_time_varying()?);
+        assert_eq!(x.time_samples()?, vec![1.0, 2.0]);
+        Ok(())
+    }
+
+    /// The stack's samples are the union of its ops' (C++
+    /// `test_GetTimeSamples`).
+    #[test]
+    fn time_samples_union() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?
+            .set_translate(gf::vec3d(0.0, 0.0, 0.0))?
+            .set_scale(gf::vec3f(1.0, 1.0, 1.0))?;
+        assert!(x.time_samples()?.is_empty());
+
+        stage
+            .attribute("/X.xformOp:translate")?
+            .set_at(gf::vec3d(10.0, 20.0, 30.0), usd::TimeCode::new(1.0))?
+            .set_at(gf::vec3d(10.0, 20.0, 30.0), usd::TimeCode::new(3.0))?;
+        stage
+            .attribute("/X.xformOp:scale")?
+            .set_at(gf::vec3f(1.0, 2.0, 3.0), usd::TimeCode::new(2.0))?
+            .set_at(gf::vec3f(1.0, 2.0, 3.0), usd::TimeCode::new(4.0))?;
+
+        assert_eq!(x.time_samples()?, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(x.time_samples_in_interval(1.5..=3.2)?, vec![2.0, 3.0]);
+        let query = XformQuery::new(&x)?;
+        assert_eq!(query.time_samples()?, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(query.time_samples_in_interval(1.5..=3.2)?, vec![2.0, 3.0]);
+        Ok(())
+    }
+
+    /// A query answers what the prim does, and names the attributes it reads.
+    #[test]
+    fn query_matches_prim() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?
+            .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
+            .set_rotate_z(90.0)?;
+        let query = XformQuery::new(&x)?;
+        assert_eq!(query.local_transformation(None)?, x.local_transformation(None)?);
+        assert!(!query.resets_xform_stack());
+        assert!(query.has_non_empty_xform_op_order());
+        assert!(query.transform_might_have_effect());
+        assert!(query.is_attribute_included_in_local_transform("xformOp:rotateZ"));
+        assert!(!query.is_attribute_included_in_local_transform("xformOp:scale"));
+
+        // An op beside its own inverse has no effect; an empty stack neither.
+        let x = x.set_xform_op_order(["xformOp:translate", "!invert!xformOp:translate"])?;
+        assert!(!XformQuery::new(&x)?.transform_might_have_effect());
+        let empty = XformQuery::for_prim(&stage.define_prim("/Untyped")?)?;
+        assert!(!empty.has_non_empty_xform_op_order());
+        assert!(!empty.transform_might_have_effect());
+        assert_eq!(empty.local_transformation(None)?, gf::Matrix4d::IDENTITY);
+        Ok(())
+    }
+
+    /// A schema's fallback `xformOpOrder` is the stack when no layer authors
+    /// one.
+    #[test]
+    fn fallback_op_order() -> Result<(), SchemaError> {
+        let layer = |text: &str| sdf::Layer::from_bytes("pivot", text.as_bytes().to_vec()).expect("the layer parses");
+        let manifest = layer(
+            r#"#usda 1.0
+
+def "PivotXform"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Xform"]
+}
+"#,
+        );
+        let schematics = layer(
+            r#"#usda 1.0
+
+class PivotXform "PivotXform"
+{
+    uniform token[] xformOpOrder = ["!resetXformStack!", "xformOp:translate"]
+}
+"#,
+        );
+        let registry = crate::ALL
+            .iter()
+            .fold(usd::SchemaRegistry::builder(), |builder, family| {
+                builder.register(family)
+            })
+            .family(usd::FamilySource {
+                name: "pivot",
+                manifest: &manifest,
+                schematics: &schematics,
+            })
+            .build()
+            .expect("registry builds");
+        let stage = usd::Stage::builder().schema_registry(registry).in_memory("anon.usda")?;
+        stage.define_prim("/P")?.set_type_name("PivotXform")?;
+        stage
+            .create_attribute("/P.xformOp:translate", sdf::ValueTypeName::DOUBLE3)?
+            .set(gf::vec3d(1.0, 2.0, 3.0))?;
+
+        let x = crate::geom::Xformable::get(&stage, "/P")?.expect("a PivotXform is Xformable");
+        assert_eq!(x.xform_op_order()?, vec!["!resetXformStack!", "xformOp:translate"]);
+        assert!(x.resets_xform_stack()?);
+        assert_eq!(x.ordered_xform_ops()?.0.len(), 1);
+        assert_eq!(
+            x.local_transformation(None)?,
+            gf::Matrix4d::translation([1.0, 2.0, 3.0])
+        );
         Ok(())
     }
 }

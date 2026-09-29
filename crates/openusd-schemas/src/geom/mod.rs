@@ -78,6 +78,16 @@
 //! ([`MotionAPI::compute_motion_blur_scale`] and its siblings) are inherited
 //! the same way, from the nearest prim that applies [`MotionAPI`].
 //!
+//! # Transforms
+//!
+//! An `Xformable` prim's local transform is its `xformOpOrder` stack, read
+//! through [`XformableExt`] one prim at a time or through an [`XformQuery`]
+//! that keeps the ordered ops for evaluation at many times. [`XformCache`]
+//! accumulates those local transforms into world-space ones across the
+//! hierarchy at one time, reusing each ancestor's answer;
+//! [`ImageableExt::compute_local_to_world_transform`] answers once, without
+//! a cache.
+//!
 //! # Primvars
 //!
 //! Primvar attributes (`primvars:*`, plus the primvar-like `normals` /
@@ -94,6 +104,8 @@ openusd::include_schema!("usdGeom");
 mod imageable;
 mod motion_api;
 mod visibility_api;
+mod xform_cache;
+mod xform_op;
 mod xformable;
 
 use openusd::Result;
@@ -103,7 +115,9 @@ use openusd::{sdf, usd};
 use tokens::*;
 
 pub use imageable::ImageableExt;
-pub use xformable::{XformOpPrecision, XformableExt};
+pub use xform_cache::XformCache;
+pub use xform_op::{XformOp, XformOpKind};
+pub use xformable::{XformOpPrecision, XformQuery, XformableExt};
 
 /// The namespace a primvar is authored under: a primvar named `st` is the
 /// attribute `primvars:st`.

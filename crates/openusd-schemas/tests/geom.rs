@@ -6,7 +6,7 @@ use openusd::Result;
 use openusd::gf::{Matrix4d, Vec3f};
 use openusd::sdf;
 use openusd::tf::Token;
-use openusd::usd::{Attribute, SchemaBase, Stage};
+use openusd::usd::{Attribute, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{
     self, Axis, BasisCurves, BasisCurvesSchema, BoundableSchema, Camera, CameraSchema, Capsule, CapsuleSchema, Cone,
@@ -211,16 +211,16 @@ fn abstract_view_takes_ext() -> Result<()> {
 #[test]
 fn xform_op_order_returns_authored_stack() -> Result<()> {
     let stage = open()?;
-    let order = xform(&stage, "/World/TRS")?.xform_op_order()?.expect("authored");
+    let order = xform(&stage, "/World/TRS")?.xform_op_order()?;
     assert_eq!(order, vec!["xformOp:translate", "xformOp:rotateY", "xformOp:scale"]);
     Ok(())
 }
 
 #[test]
-fn xform_op_order_none_when_unauthored() -> Result<()> {
+fn xform_op_order_empty_when_unauthored() -> Result<()> {
     let stage = open()?;
     // `/World` is an Xform with no authored stack.
-    assert!(xform(&stage, "/World")?.xform_op_order()?.is_none());
+    assert!(xform(&stage, "/World")?.xform_op_order()?.is_empty());
     Ok(())
 }
 
@@ -235,7 +235,7 @@ fn resets_xform_stack_detects_sentinel() -> Result<()> {
 #[test]
 fn unauthored_xform_is_identity() -> Result<(), SchemaError> {
     let stage = open()?;
-    let m = xform(&stage, "/World")?.local_to_parent_transform(0.0)?;
+    let m = xform(&stage, "/World")?.local_transformation(None)?;
     assert_eq!(m, Matrix4d::IDENTITY);
     Ok(())
 }
@@ -243,7 +243,7 @@ fn unauthored_xform_is_identity() -> Result<(), SchemaError> {
 #[test]
 fn matrix_op_round_trips_to_authored_matrix() -> Result<(), SchemaError> {
     let stage = open()?;
-    let m = xform(&stage, "/World/MatrixOp")?.local_to_parent_transform(0.0)?;
+    let m = xform(&stage, "/World/MatrixOp")?.local_transformation(None)?;
     assert_eq!(m.0[12..15], [5.0, 6.0, 7.0]);
     Ok(())
 }
@@ -252,7 +252,7 @@ fn matrix_op_round_trips_to_authored_matrix() -> Result<(), SchemaError> {
 fn invert_prefix_inverts_the_op() -> Result<(), SchemaError> {
     let stage = open()?;
     // Authored translate (4, 0, 0), then !invert! it → translation row (-4, 0, 0).
-    let m = xform(&stage, "/World/Inverted")?.local_to_parent_transform(0.0)?;
+    let m = xform(&stage, "/World/Inverted")?.local_transformation(None)?;
     assert_eq!(m.0[12..15], [-4.0, 0.0, 0.0]);
     Ok(())
 }
@@ -264,7 +264,7 @@ fn rotate_xyz_matches_pixar_composition() -> Result<(), SchemaError> {
     // first to v). Test rotateXYZ(0, 90°, 0) on +X: Ry(90°) takes
     // +X to -Z.
     let stage = open()?;
-    let m = xform(&stage, "/World/EulerXYZ")?.local_to_parent_transform(0.0)?;
+    let m = xform(&stage, "/World/EulerXYZ")?.local_transformation(None)?;
     let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
     assert!(p.x.abs() < 1e-5, "x: {}", p.x);
     assert!(p.y.abs() < 1e-5, "y: {}", p.y);
@@ -282,7 +282,7 @@ fn trs_stack_composes_in_authored_order() -> Result<(), SchemaError> {
     //   1. scale by 2: (1, 0, 0) → (2, 0, 0)
     //   2. rotate by 90° about Y: (2, 0, 0) → (0, 0, -2)
     //   3. translate by (1, 2, 3): (0, 0, -2) → (1, 2, 1)
-    let m = xform(&stage, "/World/TRS")?.local_to_parent_transform(0.0)?;
+    let m = xform(&stage, "/World/TRS")?.local_transformation(None)?;
     let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
     assert!((p.x - 1.0).abs() < 1e-4, "x: {}", p.x);
     assert!((p.y - 2.0).abs() < 1e-4, "y: {}", p.y);
@@ -294,19 +294,136 @@ fn trs_stack_composes_in_authored_order() -> Result<(), SchemaError> {
 fn xform_double_precision() -> Result<(), SchemaError> {
     let stage = open()?;
 
-    let translate = xform(&stage, "/World/DoubleTranslate")?.local_to_parent_transform(0.0)?;
+    let translate = xform(&stage, "/World/DoubleTranslate")?.local_transformation(None)?;
     assert_eq!(translate[12], 16_777_217.0);
 
-    let scale = xform(&stage, "/World/DoubleScale")?.local_to_parent_transform(0.0)?;
+    let scale = xform(&stage, "/World/DoubleScale")?.local_transformation(None)?;
     assert_eq!(scale[0], 16_777_217.0);
 
-    let scalar = xform(&stage, "/World/DoubleScalarOps")?.local_to_parent_transform(0.0)?;
+    let scalar = xform(&stage, "/World/DoubleScalarOps")?.local_transformation(None)?;
     assert_eq!(scalar[12], 16_777_217.0);
     assert_eq!(scalar[5], 16_777_217.0);
 
-    let orient = xform(&stage, "/World/DoubleOrient")?.local_to_parent_transform(0.0)?;
+    let orient = xform(&stage, "/World/DoubleOrient")?.local_transformation(None)?;
     assert!(orient[0].abs() < 1e-12, "x axis scale term: {}", orient[0]);
 
+    Ok(())
+}
+
+// XformCache
+
+/// The `testUsdGeomXformCache` scene: `/RootPrim` (Xform) over a `Scope`,
+/// over `Foo`, `Foo/Bar` (which resets the stack) and `Foo/Bar/Baz`, plus
+/// `Scope/Bar`. Every Xform carries one `transform` op of `step` by default,
+/// and its square and cube at `1 + shift` and `2 + shift`.
+fn xform_cache_stage(shift: f64) -> Result<Stage, SchemaError> {
+    let stage = Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .in_memory("anon.usda")?;
+    Scope::define(&stage, "/RootPrim/Scope")?;
+    let step = xform_step();
+    for path in [
+        "/RootPrim",
+        "/RootPrim/Scope/Foo",
+        "/RootPrim/Scope/Foo/Bar",
+        "/RootPrim/Scope/Foo/Bar/Baz",
+        "/RootPrim/Scope/Bar",
+    ] {
+        Xform::define(&stage, path)?.set_transform(step)?;
+        stage
+            .attribute(format!("{path}.xformOp:transform"))?
+            .set_at(step * step, TimeCode::new(1.0 + shift))?
+            .set_at(step * step * step, TimeCode::new(2.0 + shift))?;
+    }
+    xform(&stage, "/RootPrim/Scope/Foo/Bar")?.set_xform_op_order(["!resetXformStack!", "xformOp:transform"])?;
+    Ok(stage)
+}
+
+fn xform_step() -> Matrix4d {
+    Matrix4d::translation([10.0, 20.0, 30.0])
+}
+
+/// Checks every query of the C++ test against `stage`, whose transforms are
+/// `x` at the cache's time.
+fn verify_xform_cache(stage: &Stage, cache: &mut geom::XformCache, x: Matrix4d) -> Result<(), SchemaError> {
+    let prim = |path: &str| stage.prim(path);
+    let (root, scope_foo, bar_under_foo, deepest, scope_bar) = (
+        prim("/RootPrim")?,
+        prim("/RootPrim/Scope/Foo")?,
+        prim("/RootPrim/Scope/Foo/Bar")?,
+        prim("/RootPrim/Scope/Foo/Bar/Baz")?,
+        prim("/RootPrim/Scope/Bar")?,
+    );
+    let pseudo_root = prim("/")?;
+
+    // The pseudo-root has no transform.
+    assert_eq!(cache.local_to_world_transform(&pseudo_root)?, Matrix4d::IDENTITY);
+    assert!(!cache.transform_might_be_time_varying(&pseudo_root)?);
+    assert!(!cache.resets_xform_stack(&pseudo_root)?);
+
+    // The Scope passes `/RootPrim` through; `Foo/Bar` starts over.
+    for (p, world, parent, resets) in [
+        (&root, x, Matrix4d::IDENTITY, false),
+        (&scope_foo, x * x, x, false),
+        (&bar_under_foo, x, x * x, true),
+        (&deepest, x * x, x, false),
+        (&scope_bar, x * x, x, false),
+    ] {
+        assert_eq!(cache.local_to_world_transform(p)?, world, "{}", p.path());
+        assert_eq!(cache.parent_to_world_transform(p)?, parent, "{}", p.path());
+        assert!(cache.transform_might_be_time_varying(p)?, "{}", p.path());
+        assert_eq!(cache.resets_xform_stack(p)?, resets, "{}", p.path());
+    }
+    assert_eq!(cache.parent_to_world_transform(&pseudo_root)?, Matrix4d::IDENTITY);
+
+    assert_eq!(cache.compute_relative_transform(&root, &pseudo_root)?, (x, false));
+    assert_eq!(cache.compute_relative_transform(&scope_foo, &root)?, (x, false));
+    assert_eq!(cache.compute_relative_transform(&bar_under_foo, &root)?, (x, true));
+    assert_eq!(cache.compute_relative_transform(&deepest, &root)?, (x * x, true));
+    assert_eq!(cache.compute_relative_transform(&scope_bar, &root)?, (x, false));
+    Ok(())
+}
+
+/// A port of C++ `testUsdGeomXformCache`: one cache across times, after a
+/// clear, and across two stages with the same paths.
+#[test]
+fn xform_cache_parity() -> Result<(), SchemaError> {
+    let stage = xform_cache_stage(0.0)?;
+    let step = xform_step();
+
+    let mut cache = geom::XformCache::default();
+    verify_xform_cache(&stage, &mut cache, step)?;
+
+    cache.set_time(TimeCode::new(1.0));
+    verify_xform_cache(&stage, &mut cache, step * step)?;
+
+    let mut cache = geom::XformCache::new(TimeCode::new(2.0));
+    verify_xform_cache(&stage, &mut cache, step * step * step)?;
+
+    cache.clear();
+    verify_xform_cache(&stage, &mut cache, step * step * step)?;
+
+    cache.set_time(None);
+    verify_xform_cache(&stage, &mut cache, step)?;
+
+    // The same paths on a stage whose samples sit one frame later answer
+    // for that stage.
+    cache.set_time(TimeCode::new(2.0));
+    verify_xform_cache(&stage, &mut cache, step * step * step)?;
+    let shifted = xform_cache_stage(1.0)?;
+    verify_xform_cache(&shifted, &mut cache, step * step)?;
+    verify_xform_cache(&stage, &mut cache, step * step * step)?;
+    Ok(())
+}
+
+/// The Imageable conveniences answer as a cache does.
+#[test]
+fn imageable_world_transform() -> Result<(), SchemaError> {
+    let stage = xform_cache_stage(0.0)?;
+    let step = xform_step();
+    let baz = xform(&stage, "/RootPrim/Scope/Foo/Bar/Baz")?;
+    assert_eq!(baz.compute_local_to_world_transform(None)?, step * step);
+    assert_eq!(baz.compute_parent_to_world_transform(TimeCode::new(1.0))?, step * step);
     Ok(())
 }
 
