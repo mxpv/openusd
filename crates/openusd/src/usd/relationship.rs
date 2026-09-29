@@ -120,7 +120,10 @@ impl<'a> RelationshipBuilder<'a> {
 /// and a relationship is always uniform — or by a [`RelationshipBuilder`]
 /// where it is declared as something else. The fluent setters below edit a
 /// relationship that already exists.
-#[derive(Clone, Debug)]
+///
+/// Two handles are equal when they name the same path on the same stage
+/// instance, as C++ `UsdRelationship`s compare.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Relationship {
     stage: Stage,
     path: sdf::Path,

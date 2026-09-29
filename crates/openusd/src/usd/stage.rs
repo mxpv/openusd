@@ -40,6 +40,7 @@
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::mem;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -925,12 +926,23 @@ impl Stage {
     pub(crate) fn process_pending(&self) {
         self.composition.process_pending(self);
     }
+}
 
-    /// Whether `self` and `other` are the same stage instance — handle
-    /// identity, like C++ `UsdStage` pointer equality — as opposed to two
-    /// stages that merely compose the same content.
-    pub fn ptr_eq(&self, other: &Stage) -> bool {
+/// Two handles are equal when they share one stage instance, as C++
+/// `UsdStageRefPtr`s compare by pointer. Two stages that compose the same
+/// content are still different stages.
+impl PartialEq for Stage {
+    fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Stage {}
+
+/// Hashes the stage instance, consistent with its [`PartialEq`].
+impl Hash for Stage {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.0).hash(state);
     }
 }
 

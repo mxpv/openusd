@@ -46,3 +46,7 @@ doc-valid-idents = [
     "UsdVol",
     "..",
 ]
+
+# A `Stage` hashes and compares by handle identity, never by the composed state
+# its cells guard, so a `Stage` (or a `Prim` holding one) is a sound map key.
+ignore-interior-mutability = ["openusd::usd::Stage"]

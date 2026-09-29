@@ -53,7 +53,12 @@ enum PropertySource {
 }
 
 /// Stage-composed prim handle. Mirrors C++ `UsdPrim`.
-#[derive(Clone, Debug)]
+///
+/// Two handles are equal when they name the same path on the same stage
+/// instance, as C++ `UsdPrim`s compare, so a prim works as a key across
+/// stages. An instance proxy is its own path in the instance's namespace, so
+/// the proxies of one prototype prim are distinct keys.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Prim {
     stage: Stage,
     path: sdf::Path,
@@ -70,6 +75,13 @@ impl Prim {
     /// Composed namespace path of the prim.
     pub fn path(&self) -> &sdf::Path {
         &self.path
+    }
+
+    /// The prim's namespace parent on the same stage, or `None` for the
+    /// pseudo-root. Mirrors C++ `UsdPrim::GetParent`. The parent of an
+    /// instance proxy is the next prim up in the instance's namespace.
+    pub fn parent(&self) -> Option<Prim> {
+        self.path.parent().map(|path| Prim::new(&self.stage, path))
     }
 
     /// The stage this handle is anchored to.
@@ -1287,7 +1299,7 @@ impl VariantSets {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use crate::Result;
@@ -1306,6 +1318,39 @@ mod tests {
         Stage::builder()
             .schema_registry(SchemaRegistry::test_registry())
             .in_memory("anon.usda")
+    }
+
+    /// A prim is its stage instance and path: the same path on another stage
+    /// is a different prim, and two handles to one prim are one key.
+    #[test]
+    fn prim_identity() -> Result<()> {
+        let (one, other) = (stage()?, stage()?);
+        one.define_prim("/A")?;
+        other.define_prim("/A")?;
+
+        assert_eq!(one.prim("/A")?, one.prim("/A")?);
+        assert_ne!(one.prim("/A")?, other.prim("/A")?, "same path, different stage");
+        assert_ne!(one.prim("/A")?, one.prim("/B")?);
+
+        let keys: HashSet<_> = [one.prim("/A")?, one.prim("/A")?, other.prim("/A")?]
+            .into_iter()
+            .collect();
+        assert_eq!(keys.len(), 2);
+        Ok(())
+    }
+
+    /// A prim's parent is the next prim up on the same stage, up to the
+    /// pseudo-root, which has none.
+    #[test]
+    fn prim_parent() -> Result<()> {
+        let stage = stage()?;
+        let child = stage.define_prim("/A/B")?;
+        let parent = child.parent().expect("/A/B has a parent");
+        assert_eq!(parent, stage.prim("/A")?);
+        let root = parent.parent().expect("/A has the pseudo-root");
+        assert!(root.path().is_abs_root());
+        assert_eq!(root.parent(), None);
+        Ok(())
     }
 
     #[test]

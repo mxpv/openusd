@@ -122,12 +122,7 @@ macro_rules! impl_shading_attribute {
             /// prefix (C++ `UsdShadeInput::IsInput` /
             /// `UsdShadeOutput::IsOutput`).
             pub fn from_attribute(attribute: $crate::openusd::usd::Attribute) -> Option<Self> {
-                let namespaced = attribute
-                    .path()
-                    .split_property()?
-                    .1
-                    .strip_prefix($prefix)
-                    .is_some();
+                let namespaced = attribute.name().starts_with($prefix);
                 namespaced.then_some(Self { attribute })
             }
 
@@ -145,10 +140,7 @@ macro_rules! impl_shading_attribute {
             /// when the handle addresses no property — what a base name USD
             /// rejects leaves behind.
             pub fn full_name(&self) -> &str {
-                self.attribute
-                    .path()
-                    .split_property()
-                    .map_or("", |(_, name)| name)
+                self.attribute.name()
             }
 
             /// The base name, with this view's namespace prefix stripped

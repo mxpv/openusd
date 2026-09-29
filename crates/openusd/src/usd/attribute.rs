@@ -153,7 +153,10 @@ impl<'a> AttributeBuilder<'a> {
 /// Authored through [`Stage::create_attribute`] / [`Prim::create_attribute`],
 /// or through an [`AttributeBuilder`] where it is declared as something other
 /// than the defaults; the setters below edit an attribute that already exists.
-#[derive(Clone, Debug)]
+///
+/// Two handles are equal when they name the same path on the same stage
+/// instance, as C++ `UsdAttribute`s compare.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Attribute {
     stage: Stage,
     path: sdf::Path,
@@ -170,6 +173,13 @@ impl Attribute {
     /// Composed namespace path of the attribute (e.g. `/World/Mesh.points`).
     pub fn path(&self) -> &sdf::Path {
         &self.path
+    }
+
+    /// The attribute's name within its prim, namespaces included (e.g.
+    /// `inputs:diffuseColor`), or `""` when the handle addresses no property. Mirrors
+    /// C++ `UsdObject::GetName`.
+    pub fn name(&self) -> &str {
+        self.path.split_property().map_or("", |(_, name)| name)
     }
 
     /// The stage this handle is anchored to.
@@ -1486,6 +1496,17 @@ mod tests {
 
     fn stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
+    }
+
+    /// An attribute's name is its property name, namespaces included, and
+    /// two handles to one attribute are equal.
+    #[test]
+    fn attribute_name() -> Result<()> {
+        let stage = stage()?;
+        let attr = stage.create_attribute("/A.inputs:diffuseColor", "color3f")?;
+        assert_eq!(attr.name(), "inputs:diffuseColor");
+        assert_eq!(attr, stage.attribute("/A.inputs:diffuseColor")?);
+        Ok(())
     }
 
     /// Several attributes' sample times read as one list, each time once, in

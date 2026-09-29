@@ -265,7 +265,7 @@ fn same_input(left: &Input, right: &Input) -> bool {
 /// Whether `input` denotes the attribute at `path` on the stage instance
 /// `stage`.
 fn input_matches(input: &Input, stage: &usd::Stage, path: &sdf::Path) -> bool {
-    input.attribute().stage().ptr_eq(stage) && input.path() == path
+    input.attribute().stage() == stage && input.path() == path
 }
 
 #[cfg(test)]
