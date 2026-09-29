@@ -65,7 +65,7 @@ pub use spec::{
     RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
 pub use unit::{Unit, UnitCategory};
-pub use value::{CastError, FromValueCast, Value, ValueKind, dictionary_over};
+pub use value::{CastError, FromValue, FromValueCast, Value, ValueKind, dictionary_over};
 pub use value_type::{Dimensions, Role, ValueTypeError, ValueTypeName};
 
 #[repr(i32)]

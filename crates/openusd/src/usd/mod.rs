@@ -103,3 +103,15 @@ where
 {
     value.map(T::try_from).transpose().map_err(Into::into)
 }
+
+/// Decodes an attribute's resolved value to `T` as C++ `UsdAttribute::Get<T>`
+/// reads it: a value of a kind `T` does not accept is no value, since the
+/// typed read fails there without an error, while a failure to convert a
+/// value of an accepted kind is still an error.
+pub(crate) fn decode_accepted<T>(value: Option<sdf::Value>) -> Result<Option<T>>
+where
+    T: sdf::FromValue,
+    T::Error: Into<crate::Error>,
+{
+    decode_value(value.filter(|value| T::accepts_kind(sdf::ValueKind::from(value))))
+}

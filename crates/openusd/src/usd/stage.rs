@@ -2661,15 +2661,24 @@ impl Stage {
     /// clips (§12.3.4) sit between the root layer stack's own opinions and
     /// anything reached across an arc.
     ///
-    /// Returns `Ok(None)` when the attribute is unauthored, when the
-    /// authored value is a [`sdf::Value::ValueBlock`] / [`sdf::Value::None`]
-    /// (the spec sentinels for "no value"), or when the queried prim
-    /// is excluded by the stage's population mask.
-    pub(crate) fn resolve_at(&self, attr_path: impl sdf::IntoPath, time: Option<f64>) -> Result<Option<sdf::Value>> {
+    /// Answers [`pcp::TimedValue::Fallback`] when the attribute is
+    /// unauthored, its `default` is blocked, or the queried prim is excluded
+    /// by the stage's population mask, and [`pcp::TimedValue::NoValue`] when
+    /// a blocked sample or a clip answers at `time` without a value.
+    ///
+    /// `accepts` makes it a typed read, which at the default time passes over
+    /// a `default` of a kind the requested type does not accept
+    /// ([`pcp::IndexCache::value_at`]).
+    pub(crate) fn resolve_at(
+        &self,
+        attr_path: impl sdf::IntoPath,
+        time: Option<f64>,
+        accepts: Option<fn(sdf::ValueKind) -> bool>,
+    ) -> Result<pcp::TimedValue> {
         let attr_path = sdf::try_into_path(attr_path)?;
         let interp_type = self.interpolation_type.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        Ok(self.masked_opinions(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp))?)
+        Ok(self.masked_opinions(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp, accepts))?)
     }
 
     /// Resolves the cacheable value source for an attribute, the source half of

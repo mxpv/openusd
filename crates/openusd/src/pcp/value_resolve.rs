@@ -13,6 +13,8 @@
 
 use std::borrow::Cow;
 
+use strum::EnumTryAs;
+
 use crate::sdf;
 
 use super::QueryError;
@@ -132,6 +134,26 @@ impl<'a> SampleField<'a> {
             _ => Self::Unusable,
         }
     }
+}
+
+/// What an attribute's authored opinions resolve to at one time, the answer
+/// of [`IndexCache::value_at`](super::IndexCache::value_at), named for what
+/// `usd` does with it: the schema fallback is the tier it adds under these,
+/// and it answers only [`TimedValue::Fallback`].
+#[derive(Debug, Default, Clone, PartialEq, EnumTryAs)]
+pub(crate) enum TimedValue {
+    /// The value the authored sources composed, which may still be open to a
+    /// weaker one.
+    Value(sdf::Value),
+    /// A time-varying source answers at this time without supplying a value:
+    /// a blocked sample, or a clip set that owns the property. C++
+    /// `UsdAttribute::Get` fails there, and the fallback does not answer.
+    NoValue,
+    /// No authored source supplies a value, because the attribute is
+    /// unauthored or masked out, or its `default` is blocked, so the schema
+    /// fallback answers.
+    #[default]
+    Fallback,
 }
 
 /// Whether the source that answered the walk supplied a value there.

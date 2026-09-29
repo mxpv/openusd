@@ -570,155 +570,148 @@ impl Value {
 }
 
 // Exact extraction: owned conversions that move data out of `Value` without
-// cloning, each requiring the exact held variant. They delegate to the
-// strum-generated `try_as_*()` methods (from the `EnumTryAs` derive);
-// cross-type coercion (`token` → `string`, numeric and vector precision) is
-// the separate, opt-in `Value::cast` tier.
+// cloning, each requiring the exact held variant, which is also the one kind
+// the type's `FromValue` accepts. Cross-type coercion (`token` → `string`,
+// numeric and vector precision) is the separate, opt-in `Value::cast` tier.
 
 macro_rules! impl_try_from_value {
     // Exact: unwrap the matching variant.
-    ($target:ty, $method:ident, $label:literal) => {
-        impl TryFrom<Value> for $target {
-            type Error = CastError;
-
-            fn try_from(value: Value) -> Result<Self, Self::Error> {
-                let tag: &'static str = (&value).into();
-                value.$method().ok_or(CastError::TypeMismatch {
-                    target: $label,
-                    actual: tag,
-                })
-            }
-        }
+    ($target:ty, $kind:ident, $label:literal) => {
+        impl_try_from_value!($target, $kind, $label, |v| v);
     };
     // Unwrap the matching variant, then convert each element via `Into` — used
     // by the `gf`-vector-array conversions (`Vec<Vec3f>` → `Vec<[f32; 3]>`).
-    ($target:ty, $method:ident, $label:literal, map_into) => {
-        impl_try_from_value!($target, $method, $label, |v| v
+    ($target:ty, $kind:ident, $label:literal, map_into) => {
+        impl_try_from_value!($target, $kind, $label, |v: Vec<_>| v
             .into_iter()
             .map(Into::into)
             .collect());
     };
     // Unwrap the matching variant, then map it through `$transform` — used by
     // the `gf`-vector-to-fixed-array conversions (`Vec3f` → `[f32; 3]`).
-    ($target:ty, $method:ident, $label:literal, $transform:expr) => {
+    ($target:ty, $kind:ident, $label:literal, $transform:expr) => {
         impl TryFrom<Value> for $target {
             type Error = CastError;
 
             fn try_from(value: Value) -> Result<Self, Self::Error> {
-                let tag: &'static str = (&value).into();
-                value.$method().map($transform).ok_or(CastError::TypeMismatch {
-                    target: $label,
-                    actual: tag,
-                })
+                match value {
+                    Value::$kind(v) => Ok(($transform)(v)),
+                    other => Err(CastError::TypeMismatch {
+                        target: $label,
+                        actual: (&other).into(),
+                    }),
+                }
+            }
+        }
+
+        impl FromValue for $target {
+            fn accepts_kind(kind: ValueKind) -> bool {
+                kind == ValueKind::$kind
             }
         }
     };
 }
 
-impl_try_from_value!(bool, try_as_bool, "Bool");
-impl_try_from_value!(i32, try_as_int, "Int");
-impl_try_from_value!(u32, try_as_uint, "Uint");
-impl_try_from_value!(i64, try_as_int_64, "Int64");
-impl_try_from_value!(u64, try_as_uint_64, "Uint64");
-impl_try_from_value!(f32, try_as_float, "Float");
-impl_try_from_value!(f64, try_as_double, "Double");
-impl_try_from_value!(u8, try_as_uchar, "Uchar");
-impl_try_from_value!(f16, try_as_half, "Half");
-impl_try_from_value!(TimeCode, try_as_time_code, "TimeCode");
-impl_try_from_value!(super::PathExpression, try_as_path_expression, "PathExpression");
-impl_try_from_value!(Specifier, try_as_specifier, "Specifier");
-impl_try_from_value!(Variability, try_as_variability, "Variability");
-impl_try_from_value!(ReferenceListOp, try_as_reference_list_op, "ReferenceListOp");
-impl_try_from_value!(PayloadListOp, try_as_payload_list_op, "PayloadListOp");
-impl_try_from_value!(PathListOp, try_as_path_list_op, "PathListOp");
+impl_try_from_value!(bool, Bool, "Bool");
+impl_try_from_value!(i32, Int, "Int");
+impl_try_from_value!(u32, Uint, "Uint");
+impl_try_from_value!(i64, Int64, "Int64");
+impl_try_from_value!(u64, Uint64, "Uint64");
+impl_try_from_value!(f32, Float, "Float");
+impl_try_from_value!(f64, Double, "Double");
+impl_try_from_value!(u8, Uchar, "Uchar");
+impl_try_from_value!(f16, Half, "Half");
+impl_try_from_value!(TimeCode, TimeCode, "TimeCode");
+impl_try_from_value!(super::PathExpression, PathExpression, "PathExpression");
+impl_try_from_value!(Specifier, Specifier, "Specifier");
+impl_try_from_value!(Variability, Variability, "Variability");
+impl_try_from_value!(ReferenceListOp, ReferenceListOp, "ReferenceListOp");
+impl_try_from_value!(PayloadListOp, PayloadListOp, "PayloadListOp");
+impl_try_from_value!(PathListOp, PathListOp, "PathListOp");
 
 // gf scalar types — trivially unwrap the matching variant.
-impl_try_from_value!(gf::Vec2f, try_as_vec_2f, "gf::Vec2f");
-impl_try_from_value!(gf::Vec2d, try_as_vec_2d, "gf::Vec2d");
-impl_try_from_value!(gf::Vec2i, try_as_vec_2i, "gf::Vec2i");
-impl_try_from_value!(gf::Vec2h, try_as_vec_2h, "gf::Vec2h");
-impl_try_from_value!(gf::Vec3f, try_as_vec_3f, "gf::Vec3f");
-impl_try_from_value!(gf::Vec3d, try_as_vec_3d, "gf::Vec3d");
-impl_try_from_value!(gf::Vec3i, try_as_vec_3i, "gf::Vec3i");
-impl_try_from_value!(gf::Vec3h, try_as_vec_3h, "gf::Vec3h");
-impl_try_from_value!(gf::Vec4f, try_as_vec_4f, "gf::Vec4f");
-impl_try_from_value!(gf::Vec4d, try_as_vec_4d, "gf::Vec4d");
-impl_try_from_value!(gf::Vec4i, try_as_vec_4i, "gf::Vec4i");
-impl_try_from_value!(gf::Vec4h, try_as_vec_4h, "gf::Vec4h");
-impl_try_from_value!(gf::Quatf, try_as_quatf, "gf::Quatf");
-impl_try_from_value!(gf::Quatd, try_as_quatd, "gf::Quatd");
-impl_try_from_value!(gf::Quath, try_as_quath, "gf::Quath");
-impl_try_from_value!(gf::Mat2d, try_as_matrix_2d, "gf::Mat2d");
-impl_try_from_value!(gf::Mat3d, try_as_matrix_3d, "gf::Mat3d");
-impl_try_from_value!(gf::Matrix4d, try_as_matrix_4d, "gf::Matrix4d");
+impl_try_from_value!(gf::Vec2f, Vec2f, "gf::Vec2f");
+impl_try_from_value!(gf::Vec2d, Vec2d, "gf::Vec2d");
+impl_try_from_value!(gf::Vec2i, Vec2i, "gf::Vec2i");
+impl_try_from_value!(gf::Vec2h, Vec2h, "gf::Vec2h");
+impl_try_from_value!(gf::Vec3f, Vec3f, "gf::Vec3f");
+impl_try_from_value!(gf::Vec3d, Vec3d, "gf::Vec3d");
+impl_try_from_value!(gf::Vec3i, Vec3i, "gf::Vec3i");
+impl_try_from_value!(gf::Vec3h, Vec3h, "gf::Vec3h");
+impl_try_from_value!(gf::Vec4f, Vec4f, "gf::Vec4f");
+impl_try_from_value!(gf::Vec4d, Vec4d, "gf::Vec4d");
+impl_try_from_value!(gf::Vec4i, Vec4i, "gf::Vec4i");
+impl_try_from_value!(gf::Vec4h, Vec4h, "gf::Vec4h");
+impl_try_from_value!(gf::Quatf, Quatf, "gf::Quatf");
+impl_try_from_value!(gf::Quatd, Quatd, "gf::Quatd");
+impl_try_from_value!(gf::Quath, Quath, "gf::Quath");
+impl_try_from_value!(gf::Mat2d, Matrix2d, "gf::Mat2d");
+impl_try_from_value!(gf::Mat3d, Matrix3d, "gf::Mat3d");
+impl_try_from_value!(gf::Matrix4d, Matrix4d, "gf::Matrix4d");
 
 // gf array types.
-impl_try_from_value!(Vec<gf::Vec2f>, try_as_vec_2f_vec, "Vec2fVec");
-impl_try_from_value!(Vec<gf::Vec2d>, try_as_vec_2d_vec, "Vec2dVec");
-impl_try_from_value!(Vec<gf::Vec2i>, try_as_vec_2i_vec, "Vec2iVec");
-impl_try_from_value!(Vec<gf::Vec2h>, try_as_vec_2h_vec, "Vec2hVec");
-impl_try_from_value!(Vec<gf::Vec3f>, try_as_vec_3f_vec, "Vec3fVec");
-impl_try_from_value!(Vec<gf::Vec3d>, try_as_vec_3d_vec, "Vec3dVec");
-impl_try_from_value!(Vec<gf::Vec3i>, try_as_vec_3i_vec, "Vec3iVec");
-impl_try_from_value!(Vec<gf::Vec3h>, try_as_vec_3h_vec, "Vec3hVec");
-impl_try_from_value!(Vec<gf::Vec4f>, try_as_vec_4f_vec, "Vec4fVec");
-impl_try_from_value!(Vec<gf::Vec4d>, try_as_vec_4d_vec, "Vec4dVec");
-impl_try_from_value!(Vec<gf::Vec4i>, try_as_vec_4i_vec, "Vec4iVec");
-impl_try_from_value!(Vec<gf::Vec4h>, try_as_vec_4h_vec, "Vec4hVec");
-impl_try_from_value!(Vec<gf::Quatf>, try_as_quatf_vec, "QuatfVec");
-impl_try_from_value!(Vec<gf::Quatd>, try_as_quatd_vec, "QuatdVec");
-impl_try_from_value!(Vec<gf::Quath>, try_as_quath_vec, "QuathVec");
-impl_try_from_value!(Vec<gf::Mat2d>, try_as_matrix_2d_vec, "Matrix2dVec");
-impl_try_from_value!(Vec<gf::Mat3d>, try_as_matrix_3d_vec, "Matrix3dVec");
-impl_try_from_value!(Vec<gf::Matrix4d>, try_as_matrix_4d_vec, "Matrix4dVec");
+impl_try_from_value!(Vec<gf::Vec2f>, Vec2fVec, "Vec2fVec");
+impl_try_from_value!(Vec<gf::Vec2d>, Vec2dVec, "Vec2dVec");
+impl_try_from_value!(Vec<gf::Vec2i>, Vec2iVec, "Vec2iVec");
+impl_try_from_value!(Vec<gf::Vec2h>, Vec2hVec, "Vec2hVec");
+impl_try_from_value!(Vec<gf::Vec3f>, Vec3fVec, "Vec3fVec");
+impl_try_from_value!(Vec<gf::Vec3d>, Vec3dVec, "Vec3dVec");
+impl_try_from_value!(Vec<gf::Vec3i>, Vec3iVec, "Vec3iVec");
+impl_try_from_value!(Vec<gf::Vec3h>, Vec3hVec, "Vec3hVec");
+impl_try_from_value!(Vec<gf::Vec4f>, Vec4fVec, "Vec4fVec");
+impl_try_from_value!(Vec<gf::Vec4d>, Vec4dVec, "Vec4dVec");
+impl_try_from_value!(Vec<gf::Vec4i>, Vec4iVec, "Vec4iVec");
+impl_try_from_value!(Vec<gf::Vec4h>, Vec4hVec, "Vec4hVec");
+impl_try_from_value!(Vec<gf::Quatf>, QuatfVec, "QuatfVec");
+impl_try_from_value!(Vec<gf::Quatd>, QuatdVec, "QuatdVec");
+impl_try_from_value!(Vec<gf::Quath>, QuathVec, "QuathVec");
+impl_try_from_value!(Vec<gf::Mat2d>, Matrix2dVec, "Matrix2dVec");
+impl_try_from_value!(Vec<gf::Mat3d>, Matrix3dVec, "Matrix3dVec");
+impl_try_from_value!(Vec<gf::Matrix4d>, Matrix4dVec, "Matrix4dVec");
 
 // Single-variant string and asset extraction. Coercing `token` → `string`
 // is [`Value::cast`]'s job.
-impl_try_from_value!(String, try_as_string, "String");
-impl_try_from_value!(Token, try_as_token, "Token");
-impl_try_from_value!(Vec<Token>, try_as_token_vec, "TokenVec");
-impl_try_from_value!(Vec<String>, try_as_string_vec, "StringVec");
-impl_try_from_value!(AssetPath, try_as_asset_path, "AssetPath");
-impl_try_from_value!(Vec<AssetPath>, try_as_asset_path_vec, "AssetPathVec");
+impl_try_from_value!(String, String, "String");
+impl_try_from_value!(Token, Token, "Token");
+impl_try_from_value!(Vec<Token>, TokenVec, "TokenVec");
+impl_try_from_value!(Vec<String>, StringVec, "StringVec");
+impl_try_from_value!(AssetPath, AssetPath, "AssetPath");
+impl_try_from_value!(Vec<AssetPath>, AssetPathVec, "AssetPathVec");
 
 // List ops, relocations, time samples, and layer offsets — composite payloads
 // read through the typed spec accessors.
-impl_try_from_value!(TokenListOp, try_as_token_list_op, "TokenListOp");
-impl_try_from_value!(RelocateList, try_as_relocates, "Relocates");
-impl_try_from_value!(TimeSampleMap, try_as_time_samples, "TimeSamples");
-impl_try_from_value!(Vec<LayerOffset>, try_as_layer_offset_vec, "LayerOffsetVec");
+impl_try_from_value!(TokenListOp, TokenListOp, "TokenListOp");
+impl_try_from_value!(RelocateList, Relocates, "Relocates");
+impl_try_from_value!(TimeSampleMap, TimeSamples, "TimeSamples");
+impl_try_from_value!(Vec<LayerOffset>, LayerOffsetVec, "LayerOffsetVec");
 
 // Exact scalar arrays (`float[]`, `int[]`, …). Flattening a single vector
 // into a scalar array is a coercion, so it lives in [`Value::cast`].
-impl_try_from_value!(Vec<bool>, try_as_bool_vec, "BoolVec");
-impl_try_from_value!(Vec<u8>, try_as_uchar_vec, "UcharVec");
-impl_try_from_value!(Vec<i32>, try_as_int_vec, "IntVec");
-impl_try_from_value!(Vec<u32>, try_as_uint_vec, "UintVec");
-impl_try_from_value!(Vec<i64>, try_as_int_64_vec, "Int64Vec");
-impl_try_from_value!(Vec<u64>, try_as_uint_64_vec, "Uint64Vec");
-impl_try_from_value!(Vec<f16>, try_as_half_vec, "HalfVec");
-impl_try_from_value!(Vec<f32>, try_as_float_vec, "FloatVec");
-impl_try_from_value!(Vec<f64>, try_as_double_vec, "DoubleVec");
-impl_try_from_value!(Vec<TimeCode>, try_as_time_code_vec, "TimeCodeVec");
-impl_try_from_value!(
-    Vec<super::PathExpression>,
-    try_as_path_expression_vec,
-    "PathExpressionVec"
-);
+impl_try_from_value!(Vec<bool>, BoolVec, "BoolVec");
+impl_try_from_value!(Vec<u8>, UcharVec, "UcharVec");
+impl_try_from_value!(Vec<i32>, IntVec, "IntVec");
+impl_try_from_value!(Vec<u32>, UintVec, "UintVec");
+impl_try_from_value!(Vec<i64>, Int64Vec, "Int64Vec");
+impl_try_from_value!(Vec<u64>, Uint64Vec, "Uint64Vec");
+impl_try_from_value!(Vec<f16>, HalfVec, "HalfVec");
+impl_try_from_value!(Vec<f32>, FloatVec, "FloatVec");
+impl_try_from_value!(Vec<f64>, DoubleVec, "DoubleVec");
+impl_try_from_value!(Vec<TimeCode>, TimeCodeVec, "TimeCodeVec");
+impl_try_from_value!(Vec<super::PathExpression>, PathExpressionVec, "PathExpressionVec");
 
 // `gf` vector/quaternion variants as fixed-size arrays, via the type's `Into`.
 // Coercing across element precisions is [`Value::cast`]'s job.
-impl_try_from_value!([f32; 2], try_as_vec_2f, "gf::Vec2f", Into::into);
-impl_try_from_value!([f32; 3], try_as_vec_3f, "gf::Vec3f", Into::into);
-impl_try_from_value!([f32; 4], try_as_vec_4f, "gf::Vec4f", Into::into);
-impl_try_from_value!([f64; 2], try_as_vec_2d, "gf::Vec2d", Into::into);
-impl_try_from_value!([f64; 3], try_as_vec_3d, "gf::Vec3d", Into::into);
-impl_try_from_value!([f64; 4], try_as_vec_4d, "gf::Vec4d", Into::into);
+impl_try_from_value!([f32; 2], Vec2f, "gf::Vec2f", Into::into);
+impl_try_from_value!([f32; 3], Vec3f, "gf::Vec3f", Into::into);
+impl_try_from_value!([f32; 4], Vec4f, "gf::Vec4f", Into::into);
+impl_try_from_value!([f64; 2], Vec2d, "gf::Vec2d", Into::into);
+impl_try_from_value!([f64; 3], Vec3d, "gf::Vec3d", Into::into);
+impl_try_from_value!([f64; 4], Vec4d, "gf::Vec4d", Into::into);
 
 // `gf` vector arrays as arrays of fixed-size arrays.
-impl_try_from_value!(Vec<[f32; 2]>, try_as_vec_2f_vec, "Vec2fVec", map_into);
-impl_try_from_value!(Vec<[f32; 3]>, try_as_vec_3f_vec, "Vec3fVec", map_into);
-impl_try_from_value!(Vec<[f32; 4]>, try_as_vec_4f_vec, "Vec4fVec", map_into);
+impl_try_from_value!(Vec<[f32; 2]>, Vec2fVec, "Vec2fVec", map_into);
+impl_try_from_value!(Vec<[f32; 3]>, Vec3fVec, "Vec3fVec", map_into);
+impl_try_from_value!(Vec<[f32; 4]>, Vec4fVec, "Vec4fVec", map_into);
 
 /// Convert from `&str` to `Value`.
 ///
@@ -873,6 +866,34 @@ impl Value {
 pub trait FromValueCast: Sized {
     /// Coerces `value` to `Self`, or reports why it cannot.
     fn cast_from(value: Value) -> Result<Self, CastError>;
+}
+
+/// A type an attribute value decodes into exactly, the counterpart of
+/// [`FromValueCast`]'s coercions.
+///
+/// A typed attribute read ([`Attribute::get_at`](crate::usd::Attribute::get_at))
+/// asks [`accepts_kind`](Self::accepts_kind) to choose among opinions before
+/// converting anything. At the default time an opinion of a kind the type
+/// does not accept is passed over, as C++ `UsdAttribute::Get<T>` passes over
+/// a value it does not hold, and a winning value of such a kind reads as no
+/// value. Conversion, with any validation `try_from` does, runs only on the
+/// value that won.
+///
+/// The crate's own decode types implement it, as do token enums through
+/// [`impl_token_value!`](crate::sdf::impl_token_value). A downstream type
+/// implements it next to its `TryFrom<Value>`.
+pub trait FromValue: TryFrom<Value> {
+    /// Whether this type accepts a value stored as `kind`.
+    ///
+    /// Conversion may still reject the value's contents.
+    fn accepts_kind(kind: ValueKind) -> bool;
+}
+
+/// A raw value accepts every kind.
+impl FromValue for Value {
+    fn accepts_kind(_kind: ValueKind) -> bool {
+        true
+    }
 }
 
 /// Error returned by [`Value::cast`] and the exact-variant `TryFrom<Value>`

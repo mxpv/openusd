@@ -211,9 +211,9 @@ fn group_at(stage: &Stage, path: &Path) -> Result<Option<CollisionGroup>> {
 /// The name `group` merges under, or `None` where it merges with nothing.
 ///
 /// What decides it is whether anything *authors* the property, not whether a
-/// value comes back: a spec that only declares `mergeGroup`, and one that
-/// blocks it, both merge the group under the empty name, as C++ does. A value
-/// of the wrong type is an error rather than a group quietly left unmerged.
+/// value comes back: a spec that only declares `mergeGroup`, one that blocks
+/// it, and one holding a value of the wrong type all merge the group under the
+/// empty name, as C++ does.
 fn merge_group_name(group: &CollisionGroup) -> Result<Option<String>> {
     let name = group.merge_group_name_attr();
     if name.property_stack()?.is_empty() {
@@ -227,7 +227,7 @@ fn merge_group_name(group: &CollisionGroup) -> Result<Option<String>> {
 ///
 /// Unlike the merge name, a value is what decides this: an unauthored flag, a
 /// declaration with no value and a blocked one all leave filtering the usual
-/// way round. A value of the wrong type is an error.
+/// way round, as does a value of the wrong type.
 fn inverts_filtering(group: &CollisionGroup) -> Result<bool> {
     Ok(group.invert_filtered_groups_attr().get::<bool>()?.unwrap_or(false))
 }

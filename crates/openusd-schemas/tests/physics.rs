@@ -510,20 +510,37 @@ fn inversion_missing_values() -> Result<()> {
     Ok(())
 }
 
-/// A value of the wrong type is an error, not a group quietly left unmerged.
-/// A stage carrying a recoverable composition diagnostic still computes.
+/// A merge name of the wrong type reads as no value, so the group merges
+/// under the empty name, as C++'s unchecked `Get` leaves it. A stage carrying a
+/// recoverable composition diagnostic still computes.
 #[test]
-fn malformed_merge_name_errors() -> Result<()> {
+fn malformed_merge_name_empty() -> Result<()> {
     let stage = from_usda(
         r#"#usda 1.0
 
-def PhysicsCollisionGroup "Group"
+def PhysicsCollisionGroup "A"
 {
     uniform token physics:mergeGroup = "wrongType"
+    rel physics:filteredGroups = </C>
+}
+
+def PhysicsCollisionGroup "B"
+{
+    string physics:mergeGroup = ""
+}
+
+def PhysicsCollisionGroup "C"
+{
 }
 "#,
     )?;
-    assert!(physics::compute_collision_group_table(&stage).is_err());
+    let table = physics::compute_collision_group_table(&stage)?;
+    let [a, b, c] = ["/A", "/B", "/C"].map(|p| sdf::path(p).expect("valid path"));
+    assert!(table.is_collision_enabled(&a, &b));
+    assert!(
+        !table.is_collision_enabled(&b, &c),
+        "b merged with a under the empty name"
+    );
 
     let stage = from_usda(
         r#"#usda 1.0

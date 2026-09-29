@@ -16,7 +16,9 @@
 /// (`attr.set(Axis::X)?`); [`TryFrom`] decodes one, so
 /// [`Attribute::get`](crate::usd::Attribute::get) extracts it
 /// (`attr.get::<Axis>()?`). These attributes are `token`-valued, so only a
-/// `Value::Token` decodes; anything else is a
+/// `Value::Token` decodes. The enum's [`FromValue`](crate::sdf::FromValue)
+/// accepts that kind alone, so a typed read of any other kind is no value. A
+/// token the enum does not spell, or a direct `try_from` of another kind, is a
 /// [`CastError::TypeMismatch`](crate::sdf::CastError::TypeMismatch) naming the
 /// enum.
 ///
@@ -91,6 +93,12 @@ macro_rules! impl_token_value {
                     target: ::std::stringify!($ty),
                     actual: ::std::convert::Into::into(&value),
                 })
+            }
+        }
+
+        impl $crate::sdf::FromValue for $ty {
+            fn accepts_kind(kind: $crate::sdf::ValueKind) -> bool {
+                kind == $crate::sdf::ValueKind::Token
             }
         }
     )+};

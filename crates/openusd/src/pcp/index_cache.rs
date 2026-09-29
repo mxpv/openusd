@@ -41,7 +41,7 @@ use super::prim_resolve::{
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::value_resolve::{
     self, ClipProbe, OpinionResolver, OpinionSite, Resolution, ResolveMode, ResolveNode, ResolveSourceKind,
-    ResolvedSite, SampleField, SelectedSite, Step, ValueState, Withheld,
+    ResolvedSite, SampleField, SelectedSite, Step, TimedValue, ValueState, Withheld,
 };
 use super::{
     CompositionDiagnostic, IncompleteClipManifest, LayerId, MapFunction, QueryError, StackIdentity, VariantFallbackMap,
@@ -450,6 +450,12 @@ struct ValueAtResolver<'a> {
     /// composed value. `None` where it holds no asset path, and where a value
     /// clip answered first, since the clip tier anchors its own values.
     anchor: Option<SelectedSite>,
+    /// Whether a time-varying source answered without a value. It decides
+    /// the answer only where nothing stronger composed one.
+    withheld: bool,
+    /// The kinds a typed read accepts. At the default time an initial
+    /// `default` of any other kind is passed over. `None` for an untyped read.
+    accepts: Option<fn(sdf::ValueKind) -> bool>,
 }
 
 impl ValueAtResolver<'_> {
@@ -475,15 +481,33 @@ impl OpinionResolver for ValueAtResolver<'_> {
         let Some(time) = self.time else {
             return Step::Continue;
         };
-        let Some(value) = site.offset.sample_in_stage_time(samples, time, self.interp) else {
+        let Some(value) = site
+            .offset
+            .sample_in_stage_time(samples, time, self.interp)
+            .and_then(block_to_none)
+        else {
             // The map answers the walk by being here, but supplies no value at
             // this time, so nothing weaker is read either.
+            self.withheld = true;
             return Step::Stop;
         };
         self.fold(value, site, true)
     }
 
     fn on_default(&mut self, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
+        // At the default time a typed read passes over an opinion of a kind it
+        // does not accept and reads on, as C++ `UsdAttribute::Get<T>` does. Only
+        // the initial value is chosen this way. A value that composes is kept
+        // whatever its kind, and once composition has started every weaker
+        // input goes to the composer, which may turn it into the composed kind.
+        if self.time.is_none()
+            && self.composing.is_empty()
+            && let Some(accepts) = self.accepts
+            && !accepts(sdf::ValueKind::from(value.as_ref()))
+            && !composes_over_weaker(&value)
+        {
+            return Step::Continue;
+        }
         let mut value = value.into_owned();
         // The opinion is authored in the layer's own time frame, so a time code
         // in it reaches the stage through that layer's offset (spec 12.3.2.1).
@@ -512,7 +536,8 @@ impl OpinionResolver for ValueAtResolver<'_> {
         }
         // A set that owns the property answers even where it supplies no value,
         // so nothing weaker contributes.
-        let Some(value) = answer.into_value() else {
+        let Some(value) = answer.into_value().and_then(block_to_none) else {
+            self.withheld = true;
             return Ok(Step::Stop);
         };
         // The clip tier resolves the assets in what it hands back, so the
@@ -1474,30 +1499,49 @@ impl IndexCache {
     /// A value that composes comes back with its composition still open: the
     /// layer stack is the weakest tier `pcp` has, and `usd` closes what it
     /// composed over the schema fallback
-    /// ([`prim_resolve::close_composition`]).
+    /// ([`prim_resolve::close_composition`]). A time-varying source that
+    /// answers without a value is [`TimedValue::NoValue`], which the fallback
+    /// does not answer.
+    ///
+    /// `accepts` makes it a typed read (C++ `UsdAttribute::Get<T>`): at the
+    /// default time an initial `default` of a kind it rejects is passed over
+    /// for a weaker one. The chosen value is finalized at its own site, and
+    /// whether the type accepts its kind is the decoder's to check.
     pub(crate) fn value_at(
         &mut self,
         graph: &LayerGraph,
         attr_path: &Path,
         time: Option<f64>,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>, QueryError> {
+        accepts: Option<fn(sdf::ValueKind) -> bool>,
+    ) -> Result<TimedValue, QueryError> {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
-            return Ok(None);
+            return Ok(TimedValue::Fallback);
         };
         let mut resolver = ValueAtResolver {
             time,
             interp,
             composing: Composing::new(),
             anchor: None,
+            withheld: false,
+            accepts,
         };
         self.resolve_property(graph, &prim, &suffix, ResolveMode::at(time), &mut resolver)?;
-        let ValueAtResolver { composing, anchor, .. } = resolver;
+        let ValueAtResolver {
+            composing,
+            anchor,
+            withheld,
+            ..
+        } = resolver;
         let value = match &anchor {
             Some(anchor) => self.resolve_asset_at(graph, composing.into_open(), anchor),
             None => composing.into_open(),
         };
-        Ok(value.and_then(block_to_none))
+        Ok(match value {
+            Some(value) => TimedValue::Value(value),
+            None if withheld => TimedValue::NoValue,
+            None => TimedValue::Fallback,
+        })
     }
 
     /// Resolves the cacheable value source for an attribute (the source half of
@@ -2259,7 +2303,7 @@ impl IndexCache {
             .as_ref()
             .filter(|value| value.is_asset_valued())
             .map(|_| AssetSite::in_graph(graph, site.layer_stack, site.layer, &site.query_path));
-        self.resolve_asset_values(graph, value, asset_site.as_ref())
+        value.map(|value| self.resolve_asset_values(graph, value, asset_site.as_ref()))
     }
 
     /// Fills the resolved path on any `asset` / `asset[]` value just resolved,
@@ -2286,7 +2330,7 @@ impl IndexCache {
             .filter(|value| value.is_asset_valued())
             .and_then(|_| self.store.index_at(prim_path))
             .and_then(|index| index.strongest_opinion(field, graph, prop_suffix));
-        self.resolve_asset_values(graph, value, site.as_ref())
+        value.map(|value| self.resolve_asset_values(graph, value, site.as_ref()))
     }
 
     /// Fills the evaluated and resolved paths on an `asset` value authored at
@@ -2300,16 +2344,11 @@ impl IndexCache {
     /// [`AttributeValueSource::TimeSamples`] through the stage. A clip resolves
     /// against its own layer inside the clip cache instead, and merges its
     /// diagnostics here through [`Self::record_clip_diagnostics`].
-    pub(crate) fn resolve_asset_values(
-        &mut self,
-        graph: &LayerGraph,
-        value: Option<Value>,
-        site: Option<&AssetSite>,
-    ) -> Option<Value> {
+    pub(crate) fn resolve_asset_values(&mut self, graph: &LayerGraph, value: Value, site: Option<&AssetSite>) -> Value {
         let mut errors = Diagnostics::default();
-        let resolved = asset_resolve::resolve_values(graph, value?, site, &mut errors);
+        let resolved = asset_resolve::resolve_values(graph, value, site, &mut errors);
         self.query_diagnostics.extend(errors);
-        Some(resolved)
+        resolved
     }
 
     /// Returns the composed `apiSchemas` list for a prim: the items of the
@@ -3518,15 +3557,10 @@ def "Unrelated"
     /// not-yet-interned stack, so mint and retry until a pass demands nothing
     /// new (the fixtures load every layer up front, so a demand only ever needs
     /// interning).
-    fn settled_value_at(
-        graph: &mut LayerGraph,
-        cache: &mut IndexCache,
-        path: &Path,
-        time: f64,
-    ) -> Result<Option<Value>> {
+    fn settled_value_at(graph: &mut LayerGraph, cache: &mut IndexCache, path: &Path, time: f64) -> Result<TimedValue> {
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         loop {
-            let value = cache.value_at(graph, path, Some(time), &interp)?;
+            let value = cache.value_at(graph, path, Some(time), &interp, None)?;
             let mut pending = Vec::new();
             cache.swap_pending_loads(&mut pending);
             if !graph.intern_demanded(&pending) {
@@ -3992,7 +4026,7 @@ def \"Model\"
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         cache.ensure_index(&graph, &sdf::path("/Inst")?)?;
         // Reading through the proxy mints and materializes the prototype.
-        cache.value_at(&graph, &sdf::path("/Inst/Scope.x")?, Some(0.0), &interp)?;
+        cache.value_at(&graph, &sdf::path("/Inst/Scope.x")?, Some(0.0), &interp, None)?;
 
         let scope = sdf::path("/__Prototype_0/Scope")?;
         let index = cache.cached(&scope);
@@ -4228,8 +4262,8 @@ def "A" (
         cache.ensure_index(&graph, &a)?;
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A.marker")?, Some(0.0), &interp)?,
-            Some(Value::String("ok".to_string())),
+            cache.value_at(&graph, &sdf::path("/A.marker")?, Some(0.0), &interp, None)?,
+            TimedValue::Value(Value::String("ok".to_string())),
             "the prim's local opinion survives the broken expression arc"
         );
         assert!(
@@ -4262,7 +4296,7 @@ def "A" (
         let (mut graph, mut cache) = in_memory_stack(text);
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/A.marker")?, 0.0)?,
-            Some(Value::String("ok".to_string())),
+            TimedValue::Value(Value::String("ok".to_string())),
             "the prim's local opinion survives the failed selection expression"
         );
         assert!(
@@ -4318,7 +4352,7 @@ def "T" (
         let mut cache = fresh_cache();
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.x")?, 0.0)?,
-            Some(Value::Double(1.0)),
+            TimedValue::Value(Value::Double(1.0)),
             "the referencing site's evaluated selection picks {{v=hi}} in the target"
         );
         Ok(())
@@ -4457,7 +4491,7 @@ def "Anchor" (inherits = </Rig>) {}
         let (mut graph, mut cache) = collected_stack(&root);
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.source")?, 0.0)?,
-            Some(Value::String("right".to_string())),
+            TimedValue::Value(Value::String("right".to_string())),
             "the referencing layer's TARGET override resolves the nested reference to right.usda"
         );
         Ok(())
@@ -4475,7 +4509,7 @@ def "Anchor" (inherits = </Rig>) {}
         let (mut graph, mut cache) = collected_stack(&root);
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/Model.source")?, 0.0)?,
-            Some(Value::String("right".to_string())),
+            TimedValue::Value(Value::String("right".to_string())),
             "the outer layer's TARGET override resolves Sub's ancestral reference to right.usda \
              even though it composes inside the sub-root target's nested sub-build"
         );
@@ -4502,7 +4536,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(1.0)),
+            TimedValue::Value(Value::Double(1.0)),
             "the PICK-valued reference resolves to a.usda"
         );
 
@@ -4515,7 +4549,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(2.0)),
+            TimedValue::Value(Value::Double(2.0)),
             "editing PICK re-resolves the reference to b.usda and recomposes the cached index"
         );
         Ok(())
@@ -4583,7 +4617,7 @@ def "Anchor" (inherits = </Rig>) {}
         let y = sdf::path("/User.y")?;
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(1.0))
+            TimedValue::Value(Value::Double(1.0))
         );
 
         edit_default_prim(&mut graph, &mut cache, target, Some("Second"))?;
@@ -4591,7 +4625,7 @@ def "Anchor" (inherits = </Rig>) {}
         assert!(!cache.is_indexed(&sdf::path("/User")?), "the consumer is evicted");
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(2.0)),
+            TimedValue::Value(Value::Double(2.0)),
             "the reference recomposes against the new default"
         );
         Ok(())
@@ -4624,12 +4658,12 @@ def "Anchor" (inherits = </Rig>) {}
         let y = sdf::path("/User.y")?;
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(1.0))
+            TimedValue::Value(Value::Double(1.0))
         );
 
         edit_default_prim(&mut graph, &mut cache, target, None)?;
 
-        assert_eq!(settled_value_at(&mut graph, &mut cache, &y, 0.0)?, None);
+        assert_eq!(settled_value_at(&mut graph, &mut cache, &y, 0.0)?, TimedValue::Fallback);
         assert!(
             cache
                 .composition_errors()
@@ -4649,7 +4683,7 @@ def "Anchor" (inherits = </Rig>) {}
         let y = sdf::path("/User.y")?;
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            None,
+            TimedValue::Fallback,
             "no default to resolve"
         );
 
@@ -4657,7 +4691,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(1.0)),
+            TimedValue::Value(Value::Double(1.0)),
             "authoring the default recomposes the arc that had none"
         );
         Ok(())
@@ -4711,7 +4745,7 @@ def "Anchor" (inherits = </Rig>) {}
         let child_y = sdf::path("/User/Child.y")?;
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &child_y, 0.0)?,
-            Some(Value::Double(1.0))
+            TimedValue::Value(Value::Double(1.0))
         );
         assert!(
             cache
@@ -4725,7 +4759,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &child_y, 0.0)?,
-            Some(Value::Double(2.0))
+            TimedValue::Value(Value::Double(2.0))
         );
         Ok(())
     }
@@ -4780,7 +4814,7 @@ def "Anchor" (inherits = </Rig>) {}
         let y = sdf::path("/User.y")?;
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(1.0))
+            TimedValue::Value(Value::Double(1.0))
         );
         assert!(
             cache
@@ -4794,7 +4828,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(2.0)),
+            TimedValue::Value(Value::Double(2.0)),
             "a consultation two arcs deep still recomposes"
         );
         Ok(())
@@ -4816,7 +4850,7 @@ def "Anchor" (inherits = </Rig>) {}
         let target = graph.id_of("t.usda").expect("the target layer is interned");
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/A.y")?, 0.0)?,
-            Some(Value::Double(1.0))
+            TimedValue::Value(Value::Double(1.0))
         );
         // Materializing the shared prototype is what clones the canonical
         // instance's index; a value read alone leaves the registry cold.
@@ -4833,7 +4867,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &sdf::path("/A.y")?, 0.0)?,
-            Some(Value::Double(2.0)),
+            TimedValue::Value(Value::Double(2.0)),
             "the shared prototype recomposes"
         );
         Ok(())
@@ -4880,7 +4914,7 @@ def "Anchor" (inherits = </Rig>) {}
         let y = sdf::path("/User.y")?;
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(1.0)),
+            TimedValue::Value(Value::Double(1.0)),
             "the internal reference resolves through the root layer's default"
         );
 
@@ -4891,14 +4925,14 @@ def "Anchor" (inherits = </Rig>) {}
         );
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(1.0)),
+            TimedValue::Value(Value::Double(1.0)),
             "and the composition is unchanged"
         );
 
         edit_default_prim(&mut graph, &mut cache, root_id, Some("Second"))?;
         assert_eq!(
             settled_value_at(&mut graph, &mut cache, &y, 0.0)?,
-            Some(Value::Double(2.0)),
+            TimedValue::Value(Value::Double(2.0)),
             "editing the layer actually consulted recomposes"
         );
         Ok(())
@@ -4920,7 +4954,9 @@ def "Anchor" (inherits = </Rig>) {}
         );
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
         let mut cache = fresh_cache();
-        let value = settled_value_at(&mut graph, &mut cache, &sdf::path("/M.tex")?, 0.0)?.expect("tex resolves");
+        let value = settled_value_at(&mut graph, &mut cache, &sdf::path("/M.tex")?, 0.0)?
+            .try_as_value()
+            .expect("tex resolves");
         let asset = value.try_as_asset_path().expect("attribute is asset-typed");
         assert_eq!(
             asset.evaluated_path(),
@@ -5027,10 +5063,10 @@ def "Anchor" (inherits = </Rig>) {}
             |samples: &sdf::TimeSampleMap, t: f64| samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone());
 
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &interp)
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &interp, None)
         };
-        assert_eq!(size(&mut cache, 1.0)?, Some(sdf::Value::Float(10.0)));
-        assert_eq!(size(&mut cache, 2.0)?, Some(sdf::Value::Float(20.0)));
+        assert_eq!(size(&mut cache, 1.0)?, TimedValue::Value(sdf::Value::Float(10.0)));
+        assert_eq!(size(&mut cache, 2.0)?, TimedValue::Value(sdf::Value::Float(20.0)));
         Ok(())
     }
 
@@ -5042,10 +5078,10 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/clip_template_offset/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact)
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact, None)
         };
-        assert_eq!(size(&mut cache, 11.0)?, Some(Value::Float(10.0)));
-        assert_eq!(size(&mut cache, 12.0)?, Some(Value::Float(20.0)));
+        assert_eq!(size(&mut cache, 11.0)?, TimedValue::Value(Value::Float(10.0)));
+        assert_eq!(size(&mut cache, 12.0)?, TimedValue::Value(Value::Float(20.0)));
         Ok(())
     }
 
@@ -5058,9 +5094,9 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/clip_asset_anchor/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact)
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact, None)
         };
-        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(42.0)));
+        assert_eq!(size(&mut cache, 0.0)?, TimedValue::Value(Value::Float(42.0)));
         Ok(())
     }
 
@@ -5099,10 +5135,10 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/clip_missing_default/root.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact)
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact, None)
         };
-        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(5.0)));
-        assert_eq!(size(&mut cache, 10.0)?, Some(Value::Float(99.0)));
+        assert_eq!(size(&mut cache, 0.0)?, TimedValue::Value(Value::Float(5.0)));
+        assert_eq!(size(&mut cache, 10.0)?, TimedValue::Value(Value::Float(99.0)));
         Ok(())
     }
 
@@ -5115,10 +5151,10 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/clip_missing_block/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact)
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact, None)
         };
-        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(5.0)));
-        assert_eq!(size(&mut cache, 10.0)?, None);
+        assert_eq!(size(&mut cache, 0.0)?, TimedValue::Value(Value::Float(5.0)));
+        assert_eq!(size(&mut cache, 10.0)?, TimedValue::NoValue);
         Ok(())
     }
 
@@ -5160,8 +5196,8 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = collected_stack(&root);
 
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Model.size")?, Some(5.0), &lerp)?,
-            Some(Value::Float(50.0))
+            cache.value_at(&graph, &sdf::path("/Model.size")?, Some(5.0), &lerp, None)?,
+            TimedValue::Value(Value::Float(50.0))
         );
         assert!(matches!(
             cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?.source,
@@ -5199,11 +5235,12 @@ def "Anchor" (inherits = </Rig>) {}
     fn interpolate_missing_clip_values_across_clips() -> Result<()> {
         let root = format!("{}/fixtures/clip_missing_interp/root.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
-        let size =
-            |cache: &mut IndexCache, t: f64| cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &lerp);
-        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Float(0.0)));
-        assert_eq!(size(&mut cache, 15.0)?, Some(Value::Float(75.0)));
-        assert_eq!(size(&mut cache, 20.0)?, Some(Value::Float(100.0)));
+        let size = |cache: &mut IndexCache, t: f64| {
+            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &lerp, None)
+        };
+        assert_eq!(size(&mut cache, 0.0)?, TimedValue::Value(Value::Float(0.0)));
+        assert_eq!(size(&mut cache, 15.0)?, TimedValue::Value(Value::Float(75.0)));
+        assert_eq!(size(&mut cache, 20.0)?, TimedValue::Value(Value::Float(100.0)));
         Ok(())
     }
 
@@ -5218,10 +5255,20 @@ def "Anchor" (inherits = </Rig>) {}
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
         // Query /A first so it mints /__Prototype_0 for its key.
-        let size = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp);
-        assert_eq!(size(&mut cache, "/A/Child.size")?, Some(sdf::Value::Double(5.0)));
-        assert_eq!(size(&mut cache, "/B/Child.size")?, Some(sdf::Value::Double(5.0)));
-        assert_eq!(size(&mut cache, "/C/Child.size")?, Some(sdf::Value::Double(9.0)));
+        let size =
+            |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, None);
+        assert_eq!(
+            size(&mut cache, "/A/Child.size")?,
+            TimedValue::Value(sdf::Value::Double(5.0))
+        );
+        assert_eq!(
+            size(&mut cache, "/B/Child.size")?,
+            TimedValue::Value(sdf::Value::Double(5.0))
+        );
+        assert_eq!(
+            size(&mut cache, "/C/Child.size")?,
+            TimedValue::Value(sdf::Value::Double(9.0))
+        );
 
         // /A and /B share /__Prototype_0; /C uses /__Prototype_1. The shared
         // subtree composes once in each prototype namespace, and no instance's
@@ -5244,12 +5291,19 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/instancing_deep.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
-        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp);
+        let v =
+            |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, None);
 
         // Reading the deep value walks the proxy ancestors (/A/Mid, /B/Mid),
         // testing each for instance-ness.
-        assert_eq!(v(&mut cache, "/A/Mid/Leaf.v")?, Some(sdf::Value::Double(1.0)));
-        assert_eq!(v(&mut cache, "/B/Mid/Leaf.v")?, Some(sdf::Value::Double(1.0)));
+        assert_eq!(
+            v(&mut cache, "/A/Mid/Leaf.v")?,
+            TimedValue::Value(sdf::Value::Double(1.0))
+        );
+        assert_eq!(
+            v(&mut cache, "/B/Mid/Leaf.v")?,
+            TimedValue::Value(sdf::Value::Double(1.0))
+        );
 
         // The shared subtree composes once, under the prototype namespace.
         assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Mid")?));
@@ -5271,15 +5325,19 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/instancing_nested_in_prototype.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
-        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp);
+        let v =
+            |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, None);
 
         // /A mints /__Prototype_0 (for /Outer); the nested instance mints
         // /__Prototype_1 (for /Inner). Both the outer proxy and the
         // prototype-namespace path resolve the nested leaf.
-        assert_eq!(v(&mut cache, "/A/Nested/Leaf.v")?, Some(sdf::Value::Double(3.0)));
+        assert_eq!(
+            v(&mut cache, "/A/Nested/Leaf.v")?,
+            TimedValue::Value(sdf::Value::Double(3.0))
+        );
         assert_eq!(
             v(&mut cache, "/__Prototype_0/Nested/Leaf.v")?,
-            Some(sdf::Value::Double(3.0))
+            TimedValue::Value(sdf::Value::Double(3.0))
         );
 
         // Both redirect to the nested prototype; neither the prototype-namespace
@@ -5348,8 +5406,8 @@ def "Anchor" (inherits = </Rig>) {}
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp)?,
-            Some(Value::Double(1.0))
+            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp, None)?,
+            TimedValue::Value(Value::Double(1.0))
         );
         assert_eq!(cache.prototypes().len(), 3, "one prototype per nesting level");
 
@@ -5363,8 +5421,8 @@ def "Anchor" (inherits = </Rig>) {}
         // The chain re-registers from scratch and resolves again, so the drop
         // left behind no stale index, redirection, or key.
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp)?,
-            Some(Value::Double(1.0))
+            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp, None)?,
+            TimedValue::Value(Value::Double(1.0))
         );
         assert_eq!(cache.prototypes().len(), 3);
         Ok(())
@@ -5380,7 +5438,7 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
-        cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp)?;
+        cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp, None)?;
         let registered = cache.prototypes();
         assert_eq!(registered.len(), 3, "one prototype per nesting level");
 
@@ -5407,8 +5465,8 @@ def "Anchor" (inherits = </Rig>) {}
         // /__Prototype_1 for /Library/Inner, and the outer proxy's descendant
         // stands in for a prim there.
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A/Nested/Leaf.v")?, Some(0.0), &interp)?,
-            Some(Value::Double(3.0))
+            cache.value_at(&graph, &sdf::path("/A/Nested/Leaf.v")?, Some(0.0), &interp, None)?,
+            TimedValue::Value(Value::Double(3.0))
         );
         assert_eq!(
             cache.prim_in_prototype(&graph, &sdf::path("/A/Nested/Leaf")?)?,
@@ -5458,13 +5516,19 @@ def "Anchor" (inherits = </Rig>) {}
         // The nested reference's opinions resolve on the shared descendant.
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/World/Inst/OtherChild.size")?, Some(0.0), &interp)?,
-            Some(Value::Double(7.0)),
+            cache.value_at(
+                &graph,
+                &sdf::path("/World/Inst/OtherChild.size")?,
+                Some(0.0),
+                &interp,
+                None
+            )?,
+            TimedValue::Value(Value::Double(7.0)),
             "nested-reference descendant value survives in the shared subtree"
         );
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/World/Inst.otherAttr")?, Some(0.0), &interp)?,
-            Some(Value::Double(5.0)),
+            cache.value_at(&graph, &sdf::path("/World/Inst.otherAttr")?, Some(0.0), &interp, None)?,
+            TimedValue::Value(Value::Double(5.0)),
             "nested-reference attribute survives on the instance root"
         );
         Ok(())
@@ -5495,8 +5559,14 @@ def "Anchor" (inherits = </Rig>) {}
         // referenced subtree is there rather than an empty root.
         assert_eq!(cache.prim_children(&graph, &proto)?, vec![Token::from("ProtoChild")]);
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/__Prototype_0.protoAttr")?, Some(0.0), &interp)?,
-            Some(Value::Double(3.0)),
+            cache.value_at(
+                &graph,
+                &sdf::path("/__Prototype_0.protoAttr")?,
+                Some(0.0),
+                &interp,
+                None
+            )?,
+            TimedValue::Value(Value::Double(3.0)),
         );
 
         // And the nested instance's own namespace serves that shared content.
@@ -5505,8 +5575,14 @@ def "Anchor" (inherits = </Rig>) {}
             vec![Token::from("ProtoChild")]
         );
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Deep/G/A/ProtoChild.size")?, Some(0.0), &interp)?,
-            Some(Value::Double(7.0)),
+            cache.value_at(
+                &graph,
+                &sdf::path("/Deep/G/A/ProtoChild.size")?,
+                Some(0.0),
+                &interp,
+                None
+            )?,
+            TimedValue::Value(Value::Double(7.0)),
         );
         Ok(())
     }
@@ -5548,12 +5624,12 @@ def "Anchor" (inherits = </Rig>) {}
         // Its content composes in place rather than redirecting back through it.
         assert_eq!(cache.prim_children(&graph, &proto)?, vec![Token::from("BodyChild")]);
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/__Prototype_0.bodyAttr")?, Some(0.0), &interp)?,
-            Some(Value::Double(4.0)),
+            cache.value_at(&graph, &sdf::path("/__Prototype_0.bodyAttr")?, Some(0.0), &interp, None)?,
+            TimedValue::Value(Value::Double(4.0)),
         );
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/World/Place.bodyAttr")?, Some(0.0), &interp)?,
-            Some(Value::Double(4.0)),
+            cache.value_at(&graph, &sdf::path("/World/Place.bodyAttr")?, Some(0.0), &interp, None)?,
+            TimedValue::Value(Value::Double(4.0)),
         );
         Ok(())
     }
@@ -5577,11 +5653,11 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache, proto) = prototype_of_a("instancing_root_override.usda")?;
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
-        let value = |cache: &mut IndexCache, name: &str| -> Result<Option<Value>> {
-            Ok(cache.value_at(&graph, &proto.append_property(name)?, Some(0.0), &interp)?)
+        let value = |cache: &mut IndexCache, name: &str| -> Result<TimedValue> {
+            Ok(cache.value_at(&graph, &proto.append_property(name)?, Some(0.0), &interp, None)?)
         };
-        assert_eq!(value(&mut cache, "shared")?, Some(Value::Double(1.0)));
-        assert_eq!(value(&mut cache, "rootOnly")?, None);
+        assert_eq!(value(&mut cache, "shared")?, TimedValue::Value(Value::Double(1.0)));
+        assert_eq!(value(&mut cache, "rootOnly")?, TimedValue::Fallback);
         Ok(())
     }
 
@@ -5594,8 +5670,8 @@ def "Anchor" (inherits = </Rig>) {}
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
         assert_eq!(
-            cache.value_at(&graph, &proto.append_property("picked")?, Some(0.0), &interp)?,
-            Some(Value::Double(5.0))
+            cache.value_at(&graph, &proto.append_property("picked")?, Some(0.0), &interp, None)?,
+            TimedValue::Value(Value::Double(5.0))
         );
         Ok(())
     }
@@ -6568,8 +6644,8 @@ def "Anchor" (inherits = </Rig>) {}
         let mut cache = fresh_cache();
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Inst.e")?, Some(0.0), &interp)?,
-            Some(Value::PathExpression(sdf::PathExpression::parse(
+            cache.value_at(&graph, &sdf::path("/Inst.e")?, Some(0.0), &interp, None)?,
+            TimedValue::Value(Value::PathExpression(sdf::PathExpression::parse(
                 "/local// /Inst/child//"
             )))
         );

@@ -678,13 +678,12 @@ impl Attribute {
     /// Composed default value decoded to `T`. The convenience spelling of
     /// `get_at(None)`; mirrors C++ `UsdAttribute::Get`.
     ///
-    /// `T` is any type implementing `TryFrom<sdf::Value>` — a scalar
-    /// (`get::<f32>()`), an array (`get::<Vec<f32>>()`), or [`sdf::Value`]
-    /// itself (`get::<sdf::Value>()`) for the raw value. A type mismatch
-    /// against the authored value surfaces as an `Err`, not `None`.
+    /// `T` is any [`sdf::FromValue`]: a scalar (`get::<f32>()`), an array
+    /// (`get::<Vec<f32>>()`), a token enum, or [`sdf::Value`] itself
+    /// (`get::<sdf::Value>()`) for the raw value.
     pub fn get<T>(&self) -> Result<Option<T>>
     where
-        T: TryFrom<sdf::Value>,
+        T: sdf::FromValue,
         T::Error: Into<crate::Error>,
     {
         self.get_at(None)
@@ -700,16 +699,22 @@ impl Attribute {
     /// When no layer authors a value, the attribute's schema supplies its
     /// fallback; [`resolve_info`](Self::resolve_info) reports which answered.
     ///
+    /// The read is typed as C++'s is, and never casts. At the default time an
+    /// opinion of a kind `T` does not accept is passed over for a weaker one,
+    /// and then for the fallback. At a numeric time the strongest source
+    /// answers whatever its kind. Either way, a winning value of a kind `T`
+    /// does not accept reads as `None`, and failing to convert a value of a
+    /// kind it accepts is an error.
+    ///
     /// [`InterpolationType`]: super::InterpolationType
     pub fn get_at<T>(&self, time: impl Into<Option<super::TimeCode>>) -> Result<Option<T>>
     where
-        T: TryFrom<sdf::Value>,
+        T: sdf::FromValue,
         T::Error: Into<crate::Error>,
     {
-        let value = self
-            .stage
-            .resolve_at(&self.path, time.into().map(|time| time.value()))?;
-        super::decode_value(self.finish_composition(value)?)
+        let time = time.into().map(|time| time.value());
+        let value = self.stage.resolve_at(&self.path, time, Some(T::accepts_kind))?;
+        super::decode_accepted(self.finish_composition(value)?)
     }
 
     /// Closes what the authored sources composed against the schema tier,
@@ -724,10 +729,15 @@ impl Attribute {
     /// opinion answers then resolves to the empty expression rather than
     /// leaving a `%_` in a resolved value — including one the fallback itself
     /// holds.
-    fn finish_composition(&self, value: Option<sdf::Value>) -> Result<Option<sdf::Value>> {
+    ///
+    /// A value withheld at the queried time, such as a blocked sample, is no
+    /// value at all: C++ `UsdAttribute::Get` fails there rather than reading
+    /// the fallback.
+    fn finish_composition(&self, value: pcp::TimedValue) -> Result<Option<sdf::Value>> {
         let mut composing = match value {
-            Some(value) => pcp::Composing::resumed(value),
-            None => pcp::Composing::new(),
+            pcp::TimedValue::Value(value) => pcp::Composing::resumed(value),
+            pcp::TimedValue::NoValue => return Ok(None),
+            pcp::TimedValue::Fallback => pcp::Composing::new(),
         };
         if (composing.is_empty() || composing.is_open())
             && let Some(fallback) = self.fallback_value()?
@@ -1272,7 +1282,7 @@ impl AttributeQuery {
     /// `get_at(None)`; mirrors C++ `UsdAttributeQuery::Get()`.
     pub fn get<T>(&self) -> Result<Option<T>>
     where
-        T: TryFrom<sdf::Value>,
+        T: sdf::FromValue,
         T::Error: Into<crate::Error>,
     {
         self.get_at(None)
@@ -1286,19 +1296,18 @@ impl AttributeQuery {
     /// sample under the stage's [`InterpolationType`](super::InterpolationType).
     /// A timed read reuses the cached value source; the default read delegates
     /// to the attribute, since a `default` opinion is resolved from a separate
-    /// field.
+    /// field. Both are typed as [`Attribute::get_at`] is.
     pub fn get_at<T>(&self, time: impl Into<Option<TimeCode>>) -> Result<Option<T>>
     where
-        T: TryFrom<sdf::Value>,
+        T: sdf::FromValue,
         T::Error: Into<crate::Error>,
     {
-        let value = match time.into() {
+        match time.into() {
             // The untimed read goes through the attribute, which resolves the
             // `default` field and the schema fallback behind it.
-            None => self.attr.get_at::<sdf::Value>(None)?,
-            Some(time) => self.attr.finish_composition(self.value_at(time.value())?)?,
-        };
-        super::decode_value(value)
+            None => self.attr.get_at::<T>(None),
+            Some(time) => super::decode_accepted(self.attr.finish_composition(self.value_at(time.value())?)?),
+        }
     }
 
     /// `true` when more than one time sample is authored — the cached-source
@@ -1321,7 +1330,7 @@ impl AttributeQuery {
 
     /// Resolves the value at stage `time` through the cached source, rebuilding
     /// it when the stamp it was resolved under no longer holds.
-    fn value_at(&self, time: f64) -> Result<Option<sdf::Value>> {
+    fn value_at(&self, time: f64) -> Result<pcp::TimedValue> {
         let stage = self.attr.stage();
         // Settle before the memo is borrowed, not while: draining commits queued
         // edits and fires the stage sinks, and a sink that reads this very query
@@ -1359,27 +1368,35 @@ impl AttributeQuery {
     }
 
     /// Evaluates an already-resolved value source at stage `time`.
-    fn evaluate(&self, source: &AttributeValueSource, time: f64) -> Result<Option<sdf::Value>> {
+    fn evaluate(&self, source: &AttributeValueSource, time: f64) -> Result<pcp::TimedValue> {
         let stage = self.attr.stage();
         match source {
-            AttributeValueSource::Static(value) => Ok(value.clone()),
+            AttributeValueSource::Static(value) => Ok(match value {
+                Some(value) => pcp::TimedValue::Value(value.clone()),
+                None => pcp::TimedValue::Fallback,
+            }),
             AttributeValueSource::TimeSamples { samples, offset, site } => {
-                let value = offset.sample_in_stage_time(samples, time, |map, layer_time| {
+                // The map answers even where its sample is blocked, so a missing
+                // value is withheld, not unauthored.
+                let Some(value) = offset.sample_in_stage_time(samples, time, |map, layer_time| {
                     interp::evaluate(map, layer_time, stage.interpolation_type())
-                });
+                }) else {
+                    return Ok(pcp::TimedValue::NoValue);
+                };
                 // Only the interpolated result is anchored and evaluated, not
                 // the held map: resolving every sample here would report a
                 // malformed expression authored at a time this read never
                 // selected. A non-asset value skips the cache borrow entirely,
                 // which is what keeps an ordinary animated read off this path.
-                if !value.as_ref().is_some_and(sdf::Value::is_asset_valued) {
-                    return Ok(value);
+                if !value.is_asset_valued() {
+                    return Ok(pcp::TimedValue::Value(value));
                 }
                 // `with_cache` takes an `FnMut`, so the closure cannot consume
                 // `value`.
-                Ok(stage.with_cache(|g, c| Ok(c.resolve_asset_values(g, value.clone(), Some(site))))?)
+                let resolved = stage.with_cache(|g, c| Ok(c.resolve_asset_values(g, value.clone(), Some(site))))?;
+                Ok(pcp::TimedValue::Value(resolved))
             }
-            AttributeValueSource::PerTime => stage.resolve_at(self.attr.path(), Some(time)),
+            AttributeValueSource::PerTime => stage.resolve_at(self.attr.path(), Some(time), None),
         }
     }
 }
@@ -1417,9 +1434,15 @@ mod tests {
 
         fn try_from(value: sdf::Value) -> std::result::Result<Self, Self::Error> {
             match value {
-                sdf::Value::Double(v) => Ok(Meters(v)),
+                sdf::Value::Double(v) if v >= 0.0 => Ok(Meters(v)),
                 _ => Err(NotALength),
             }
+        }
+    }
+
+    impl sdf::FromValue for Meters {
+        fn accepts_kind(kind: sdf::ValueKind) -> bool {
+            kind == sdf::ValueKind::Double
         }
     }
 
@@ -1437,19 +1460,26 @@ mod tests {
 
         assert_eq!(stage.attribute("/P.depth")?.get::<Meters>()?, Some(Meters(2.5)));
 
+        // A kind the type does not accept is no value, as a typed C++ read
+        // fails there, without asking the converter.
         stage.create_attribute("/P.name", "string")?.set("x".to_string())?;
-        let error = stage.attribute("/P.name")?.get::<Meters>().expect_err("not a double");
+        assert_eq!(stage.attribute("/P.name")?.get::<Meters>()?, None);
+
+        // An accepted kind the converter rejects is its error.
+        stage.create_attribute("/P.depth", "double")?.set(-1.0_f64)?;
+        let error = stage.attribute("/P.depth")?.get::<Meters>().expect_err("negative");
         assert!(matches!(error, crate::Error::Convert(_)), "got: {error}");
         Ok(())
     }
     use std::borrow::Cow;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::fs;
+    use std::path::Path as FsPath;
     use std::rc::Rc;
 
     use crate::usd::{
-        Attribute, AttributeQuery, CommittedChange, EditTarget, EditTargetArc, ResolveInfoSource, Stage,
+        Attribute, AttributeQuery, CommittedChange, EditTarget, EditTargetArc, ExpansionRule, ResolveInfoSource, Stage,
         StageAuthoringError, TimeCode, TypeConflict,
     };
     use crate::{gf, sdf, tf};
@@ -1608,6 +1638,31 @@ mod tests {
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
         assert_eq!(intensity.get::<f32>()?, Some(50000.0));
         assert_eq!(intensity.resolve_info()?.source(), ResolveInfoSource::Fallback);
+        Ok(())
+    }
+
+    /// A blocked sample withholds the value at its time, and the schema
+    /// fallback does not answer it: C++ `UsdAttribute::Get` fails there. The
+    /// samples do not answer the default time, which reads the fallback. A
+    /// blocked `default` falls back (`blocked_falls_back_to_schema`).
+    #[test]
+    fn blocked_sample_no_fallback() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        stage
+            .create_attribute("/Sun.inputs:intensity", "float")?
+            .set_at(2.0_f32, TimeCode::new(1.0))?
+            .set_at(sdf::Value::ValueBlock, TimeCode::new(2.0))?
+            .set_at(4.0_f32, TimeCode::new(3.0))?;
+
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
+        let query = AttributeQuery::new(&intensity);
+        for (time, expected) in [(1.0, Some(2.0)), (2.0, None), (3.0, Some(4.0))] {
+            let time = TimeCode::new(time);
+            assert_eq!(intensity.get_at::<f32>(time)?, expected, "{time:?}");
+            assert_eq!(query.get_at::<f32>(time)?, expected, "query at {time:?}");
+        }
+        assert_eq!(intensity.get::<f32>()?, Some(50000.0));
         Ok(())
     }
 
@@ -3716,6 +3771,277 @@ class Marker "Marker"
             expr_field(&stage, &layer_id, "/Source.expr", "default"),
             "%:lights /Source/Child",
             "a named reference keeps its empty path"
+        );
+        Ok(())
+    }
+
+    /// A stage over `files`, each a path relative to a fresh directory and its
+    /// contents, opened at `root.usda` against the test schema family. A
+    /// `.usda` file's contents are written after the `#usda` header.
+    fn scene(files: &[(&str, &str)]) -> Result<(tempfile::TempDir, Stage)> {
+        let dir = tempfile::tempdir()?;
+        for (name, contents) in files {
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            match path.extension().is_some_and(|ext| ext == "usda") {
+                true => fs::write(&path, format!("#usda 1.0\n{contents}\n"))?,
+                false => fs::write(&path, contents)?,
+            }
+        }
+        let stage = Stage::builder()
+            .schema_registry(SchemaRegistry::test_registry())
+            .open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        Ok((dir, stage))
+    }
+
+    /// A [`scene`] whose root only sublayers `layers`, strongest first.
+    fn layered(layers: &[(&str, &str)]) -> Result<(tempfile::TempDir, Stage)> {
+        let subs: Vec<String> = layers.iter().map(|(name, _)| format!("@{name}@")).collect();
+        let root = format!("(\n    subLayers = [{}]\n)", subs.join(", "));
+        let mut files = vec![("root.usda", root.as_str())];
+        files.extend_from_slice(layers);
+        scene(&files)
+    }
+
+    const SUN_FLOAT: &str = "def DistantLight \"Sun\"\n{\n    float inputs:intensity = 3\n}";
+    const SUN_DOUBLE: &str = "over \"Sun\"\n{\n    double inputs:intensity = 2\n}";
+
+    /// At the default time a typed read passes over a stronger opinion of a
+    /// kind it does not accept and takes the weaker one it does, as C++
+    /// `UsdAttribute::Get<float>` does (confirmed in OpenUSD 26.08). The raw
+    /// read still takes the strongest opinion.
+    #[test]
+    fn typed_skips_mismatch() -> Result<()> {
+        let (_dir, stage) = layered(&[("strong.usda", SUN_DOUBLE), ("weak.usda", SUN_FLOAT)])?;
+        let attr = stage.attribute("/Sun.inputs:intensity")?;
+
+        assert_eq!(attr.get::<f32>()?, Some(3.0));
+        assert_eq!(attr.get::<f64>()?, Some(2.0));
+        assert_eq!(attr.get::<sdf::Value>()?, Some(sdf::Value::Double(2.0)));
+        assert_eq!(AttributeQuery::new(&attr).get::<f32>()?, Some(3.0));
+        Ok(())
+    }
+
+    /// With no opinion of an accepted kind the fallback answers, and a fallback
+    /// of another kind reads as no value. A block reached after a skipped
+    /// opinion ends the walk at the fallback (confirmed in OpenUSD 26.08).
+    #[test]
+    fn typed_falls_back() -> Result<()> {
+        let sun = "def DistantLight \"Sun\"\n{\n}";
+        let (_dir, stage) = layered(&[("strong.usda", SUN_DOUBLE), ("weak.usda", sun)])?;
+        let attr = stage.attribute("/Sun.inputs:intensity")?;
+        assert_eq!(attr.get::<f32>()?, Some(50000.0));
+        assert_eq!(attr.get::<i32>()?, None);
+
+        let blocked = "over \"Sun\"\n{\n    float inputs:intensity = None\n}";
+        let (_dir, stage) = layered(&[
+            ("strong.usda", SUN_DOUBLE),
+            ("blocked.usda", blocked),
+            ("weak.usda", SUN_FLOAT),
+        ])?;
+        let attr = stage.attribute("/Sun.inputs:intensity")?;
+        assert_eq!(attr.get::<f32>()?, Some(50000.0));
+        Ok(())
+    }
+
+    /// At a numeric time the strongest source answers whatever its kind, and a
+    /// kind the type does not accept reads as no value with no retry, as C++'s
+    /// typed store fails after an untyped pick. That differs from the default
+    /// time on purpose. The fallback, where nothing is authored, is typed too.
+    #[test]
+    fn typed_numeric_no_retry() -> Result<()> {
+        let at = TimeCode::new(1.0);
+        let samples = |ty: &str, value: &str| {
+            format!("over \"Sun\"\n{{\n    {ty} inputs:intensity.timeSamples = {{ 1: {value} }}\n}}")
+        };
+        let (_dir, stage) = layered(&[
+            ("strong.usda", &samples("double", "2")),
+            (
+                "weak.usda",
+                "def DistantLight \"Sun\"\n{\n    float inputs:intensity.timeSamples = { 1: 3 }\n}",
+            ),
+        ])?;
+        let attr = stage.attribute("/Sun.inputs:intensity")?;
+        let query = AttributeQuery::new(&attr);
+        assert_eq!(attr.get_at::<f32>(at)?, None);
+        assert_eq!(attr.get_at::<f64>(at)?, Some(2.0));
+        assert_eq!(query.get_at::<f32>(at)?, None);
+        assert_eq!(query.get_at::<f64>(at)?, Some(2.0));
+
+        let (_dir, stage) = layered(&[("strong.usda", SUN_DOUBLE), ("weak.usda", SUN_FLOAT)])?;
+        let attr = stage.attribute("/Sun.inputs:intensity")?;
+        assert_eq!(attr.get_at::<f32>(at)?, None, "the double default answers the time");
+        assert_eq!(attr.get::<f32>()?, Some(3.0), "the default time skips it");
+        assert_eq!(AttributeQuery::new(&attr).get_at::<f32>(at)?, None);
+
+        let (_dir, stage) = layered(&[("weak.usda", "def DistantLight \"Sun\"\n{\n}")])?;
+        let attr = stage.attribute("/Sun.inputs:intensity")?;
+        assert_eq!(attr.get_at::<f32>(at)?, Some(50000.0));
+        assert_eq!(attr.get_at::<i32>(at)?, None);
+        assert_eq!(AttributeQuery::new(&attr).get_at::<i32>(at)?, None);
+        Ok(())
+    }
+
+    /// A token enum given a token it does not spell accepts the kind, so the
+    /// failed conversion is an error, as C++ `Get<TfToken>` would succeed.
+    #[test]
+    fn unknown_token_errors() -> Result<()> {
+        let stage = stage()?;
+        stage
+            .create_attribute("/P.rule", "token")?
+            .set(tf::Token::from("bogus"))?;
+        assert!(stage.attribute("/P.rule")?.get::<ExpansionRule>().is_err());
+        Ok(())
+    }
+
+    /// Once a path expression is composing, a weaker `string` or `token` is its
+    /// input, which the composer turns into an expression. The typed read
+    /// keeps it rather than passing it over for its kind.
+    #[test]
+    fn open_expr_over_string() -> Result<()> {
+        for weak in ["string e = \"/Target\"", "token e = \"/Target\""] {
+            let (_dir, stage) = layered(&[
+                ("strong.usda", "def \"P\"\n{\n    pathExpression e = \"/A %_\"\n}"),
+                ("weak.usda", &format!("def \"P\"\n{{\n    {weak}\n}}")),
+            ])?;
+            let attr = stage.attribute("/P.e")?;
+            let untyped = attr.get::<sdf::Value>()?.expect("the expression composes");
+            let typed = attr.get::<sdf::PathExpression>()?.expect("the expression composes");
+            assert_eq!(sdf::Value::PathExpression(typed.clone()), untyped, "{weak}");
+            assert!(typed.to_string().contains("/Target"), "{weak}: {typed}");
+        }
+        Ok(())
+    }
+
+    /// The value a typed read returns is finalized at the site of the opinion
+    /// that won, never a skipped one: a relative `asset` resolves against the
+    /// referenced layer that authored it, with or without a stronger opinion
+    /// of another kind passed over.
+    #[test]
+    fn typed_asset_anchor() -> Result<()> {
+        for strong in ["", "double tex = 1"] {
+            let root = format!("def \"M\" (\n    references = @./sub/ref.usda@</Src>\n)\n{{\n    {strong}\n}}");
+            let (_dir, stage) = scene(&[
+                ("root.usda", &root),
+                ("sub/ref.usda", "def \"Src\"\n{\n    asset tex = @./tex.png@\n}"),
+                ("sub/tex.png", ""),
+            ])?;
+            let asset = stage
+                .attribute("/M.tex")?
+                .get::<sdf::AssetPath>()?
+                .expect("tex resolves");
+            let resolved = asset.resolved_path().expect("tex.png exists");
+            assert!(FsPath::new(resolved).ends_with("sub/tex.png"), "{strong:?}: {resolved}");
+        }
+        Ok(())
+    }
+
+    /// An asset expression in the winning opinion is evaluated with the
+    /// stage's expression variables, with or without a stronger opinion of
+    /// another kind passed over.
+    #[test]
+    fn typed_asset_expr() -> Result<()> {
+        for strong in ["", "double tex = 1"] {
+            let root = format!(
+                "(\n    expressionVariables = {{\n        string DIR = \"textures\"\n    }}\n    subLayers = [@weak.usda@]\n)\ndef \"M\"\n{{\n    {strong}\n}}"
+            );
+            let (_dir, stage) = scene(&[
+                ("root.usda", &root),
+                ("weak.usda", "def \"M\"\n{\n    asset tex = @`\"${DIR}/tex.png\"`@\n}"),
+            ])?;
+            let asset = stage
+                .attribute("/M.tex")?
+                .get::<sdf::AssetPath>()?
+                .expect("tex resolves");
+            assert_eq!(asset.evaluated_path(), Some("textures/tex.png"), "{strong:?}");
+        }
+        Ok(())
+    }
+
+    /// A `timecode` reads through the layer offset of the sublayer that
+    /// authored it, with or without a stronger opinion of another kind passed
+    /// over.
+    #[test]
+    fn typed_timecode_offset() -> Result<()> {
+        for strong in ["", "double t = 1"] {
+            let root = format!(
+                "(\n    subLayers = [@weak.usda@ (offset = 10; scale = 2)]\n)\ndef \"P\"\n{{\n    {strong}\n}}"
+            );
+            let (_dir, stage) = scene(&[
+                ("root.usda", &root),
+                ("weak.usda", "def \"P\"\n{\n    timecode t = 5\n}"),
+            ])?;
+            assert_eq!(
+                stage.attribute("/P.t")?.get::<sdf::TimeCode>()?,
+                Some(sdf::TimeCode(20.0)),
+                "{strong:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A downstream value type that records every value its conversion sees.
+    #[derive(Debug)]
+    struct Recorded;
+
+    thread_local! {
+        static SEEN: RefCell<Vec<sdf::Value>> = const { RefCell::new(Vec::new()) };
+    }
+
+    impl TryFrom<sdf::Value> for Recorded {
+        type Error = NotALength;
+
+        fn try_from(value: sdf::Value) -> std::result::Result<Self, Self::Error> {
+            SEEN.with(|seen| seen.borrow_mut().push(value));
+            Ok(Recorded)
+        }
+    }
+
+    impl sdf::FromValue for Recorded {
+        fn accepts_kind(kind: sdf::ValueKind) -> bool {
+            kind == sdf::ValueKind::AssetPath
+        }
+    }
+
+    /// Choosing the opinion asks only the kind, so the converter runs once, on
+    /// the finalized value that won, and never on the skipped one or a stand-in.
+    #[test]
+    fn converter_sees_finalized() -> Result<()> {
+        let (_dir, stage) = scene(&[
+            (
+                "root.usda",
+                "(
+    subLayers = [@weak.usda@]
+)
+def \"M\"
+{
+    double tex = 1
+}",
+            ),
+            (
+                "weak.usda",
+                "def \"M\"
+{
+    asset tex = @./tex.png@
+}",
+            ),
+            ("tex.png", ""),
+        ])?;
+        let attr = stage.attribute("/M.tex")?;
+
+        SEEN.with(|seen| seen.borrow_mut().clear());
+        attr.get::<Recorded>()?.expect("the type accepts the asset's kind");
+        let seen = SEEN.with(|seen| seen.take());
+        let finalized = attr.get::<sdf::Value>()?;
+        assert_eq!(seen.len(), 1, "one conversion: {seen:?}");
+        let asset = seen[0].clone().try_as_asset_path().expect("the winning asset");
+        assert!(asset.resolved_path().is_some(), "resolved before conversion: {asset:?}");
+        assert_ne!(
+            finalized,
+            Some(seen[0].clone()),
+            "the raw read keeps the stronger double"
         );
         Ok(())
     }

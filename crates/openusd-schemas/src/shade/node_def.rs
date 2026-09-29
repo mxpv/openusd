@@ -262,7 +262,7 @@ impl Shader {
 /// requested attribute is not defined.
 fn source_value<T>(prim: &usd::Prim, attr: &SourceAttr, source_type: &str) -> Result<Option<T>>
 where
-    T: TryFrom<sdf::Value>,
+    T: sdf::FromValue,
     T::Error: Into<openusd::Error>,
 {
     if implementation_source(prim)? != attr.implementation {
