@@ -34,6 +34,10 @@ macro_rules! corrupt {
     };
 }
 
+/// Largest single LZ4-decompressed block the reader allocates (4 GiB).
+/// (Saturates on 32-bit targets.)
+const MAX_DECOMPRESSED_BYTES: usize = if usize::BITS > 32 { 4 << 30 } else { usize::MAX };
+
 // Maximum supported USDC crate version.
 // See USD Core Specification v1.0.1 §16.3.8.2 for version history:
 //   0.10.0 — Path Expression value types
@@ -46,6 +50,8 @@ const SW_VERSION: Version = version(0, 12, 0);
 pub struct CrateFile<R> {
     /// File reader.
     reader: R,
+    /// Length of the whole file: what bounds every count read from it.
+    file_length: usize,
 
     /// File header.
     pub bootstrap: Bootstrap,
@@ -84,9 +90,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     /// Read structural sections of a crate file.
     pub fn open(mut reader: R) -> Result<Self, ReadError> {
         let bootstrap = Self::read_header(&mut reader)?;
+        let here = reader.stream_position()?;
+        let file_length = reader.seek(io::SeekFrom::End(0))? as usize;
+        reader.seek(io::SeekFrom::Start(here))?;
 
         let mut file = CrateFile {
             reader,
+            file_length,
             bootstrap,
             sections: Vec::new(),
             tokens: Vec::new(),
@@ -212,7 +222,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let count = self.reader.read_count()?;
 
         self.tokens = if file_ver < version(0, 4, 0) {
-            todo!("Support TOKENS reader for < 0.4.0 files");
+            return Err(ReadError::unsupported("Support TOKENS reader for < 0.4.0 files"));
         } else {
             let uncompressed_size = self.reader.read_count()?;
             let mut buffer = self.read_compressed(uncompressed_size)?;
@@ -289,7 +299,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let file_ver = self.version();
 
         self.fields = if file_ver < version(0, 4, 0) {
-            todo!("Support FIELDS reader before < 0.4.0")
+            return Err(ReadError::unsupported("Support FIELDS reader before < 0.4.0"));
         } else {
             let field_count = self.reader.read_count()?;
 
@@ -305,7 +315,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 .map(|(index, value)| Field::new(*index, *value))
                 .collect();
 
-            debug_assert_eq!(fields.len(), field_count);
+            corrupt!(fields.len() == field_count);
 
             fields
         };
@@ -323,7 +333,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let file_ver = self.version();
 
         self.fieldsets = if file_ver < version(0, 4, 0) {
-            todo!("Support FIELDSETS reader for < 0.4.0 files");
+            return Err(ReadError::unsupported("Support FIELDSETS reader for < 0.4.0 files"));
         } else {
             let count = self.reader.read_count()?;
 
@@ -336,7 +346,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 .map(|i| if i == INVALID_INDEX { None } else { Some(i as usize) })
                 .collect::<Vec<_>>();
 
-            debug_assert_eq!(sets.len(), count);
+            corrupt!(sets.len() == count);
 
             sets
         };
@@ -354,12 +364,17 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let file_ver = self.version();
 
         if file_ver == version(0, 0, 1) {
-            todo!("Support PATHS reader for == 0.0.1 files");
+            return Err(ReadError::unsupported("Support PATHS reader for == 0.0.1 files"));
         } else if file_ver < version(0, 4, 0) {
-            todo!("Support PATHS reader for < 0.4.0 files");
+            return Err(ReadError::unsupported("Support PATHS reader for < 0.4.0 files"));
         } else {
             // Read # of paths.
             let path_count = self.reader.read_count()?;
+            corrupt!(
+                path_count <= self.file_length,
+                "path count {path_count} is larger than a {}-byte file can hold",
+                self.file_length
+            );
             self.paths = vec![sdf::Path::default(); path_count];
 
             self.read_compressed_paths()?;
@@ -376,13 +391,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         // Read compressed data.
 
         let path_indexes = self.read_encoded_ints::<u32>(count)?;
-        debug_assert_eq!(path_indexes.len(), count);
+        corrupt!(path_indexes.len() == count);
 
         let element_token_indexes = self.read_encoded_ints::<i32>(count)?;
-        debug_assert_eq!(element_token_indexes.len(), count);
+        corrupt!(element_token_indexes.len() == count);
 
         let jumps = self.read_encoded_ints::<i32>(count)?;
-        debug_assert_eq!(jumps.len(), count);
+        corrupt!(jumps.len() == count);
 
         self.build_compressed_paths(&path_indexes, &element_token_indexes, &jumps)?;
 
@@ -492,9 +507,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let file_ver = self.version();
 
         self.specs = if file_ver == version(0, 0, 1) {
-            todo!("Support SPECS reader for == 0.0.1 files");
+            return Err(ReadError::unsupported("Support SPECS reader for == 0.0.1 files"));
         } else if file_ver < version(0, 4, 0) {
-            todo!("Support SPECS reader for < 0.4.0 files");
+            return Err(ReadError::unsupported("Support SPECS reader for < 0.4.0 files"));
         } else {
             // Version 0.4.0 specs are compressed
 
@@ -592,11 +607,25 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     ) -> Result<Vec<T>, ReadError> {
         // Read data to memory.
         let compressed_size = self.reader.read_count()?;
+        corrupt!(
+            compressed_size <= self.file_length,
+            "compressed size {compressed_size} is larger than the {}-byte file",
+            self.file_length
+        );
         let mut input = vec![0_u8; compressed_size];
         self.reader.read_exact(&mut input)?;
 
-        // Decompress to output buffer.
-        let mut output = vec![T::default(); estimated_count];
+        // Decompress to a buffer no larger than LZ4 can expand this input
+        // (`estimated_count` is an upper bound from the file, not a size).
+        // A single decoded value over MAX_DECOMPRESSED_BYTES is refused like
+        // the other suspiciously large counts: LZ4 alone would allow 255x a
+        // compressed block that may be most of the file.
+        let most = compressed_size
+            .saturating_mul(255)
+            .saturating_add(64)
+            .min(MAX_DECOMPRESSED_BYTES)
+            / mem::size_of::<T>().max(1);
+        let mut output = vec![T::default(); estimated_count.min(most)];
         let actual_size = decompress_lz4(&input, cast_slice_mut(&mut output))?;
 
         let actual_count = actual_size / mem::size_of::<T>();
@@ -618,7 +647,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let buffer = self.read_compressed::<u8>(estimated_size)?;
 
         let ints = coding::decode_ints(buffer.as_slice(), count)?;
-        debug_assert_eq!(ints.len(), count);
+        corrupt!(ints.len() == count);
 
         Ok(ints)
     }
@@ -627,7 +656,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
     // Implements various logic and compatibility checks to figure out the array length and whether it's compressed.
     fn unpack_array_len(&mut self, value: ValueRep, kind: ArrayKind) -> Result<(usize, bool), ReadError> {
-        debug_assert!(!value.is_inlined());
+        corrupt!(!value.is_inlined());
 
         // Empty array.
         if value.payload() == 0 {
@@ -661,7 +690,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             ArrayKind::Other => {
                 // Fallback to uncompressed.
                 // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1868
-                debug_assert!(!value.is_compressed());
+                corrupt!(!value.is_compressed());
                 compressed = false;
             }
         }
@@ -729,7 +758,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                     let mut output = vec![T::zero(); count];
                     for (i, index) in indexes.into_iter().enumerate() {
-                        output[i] = lut[index as usize];
+                        output[i] = *lut.get(index as usize).ok_or_else(|| {
+                            ReadError::corrupt(format!("lookup index {index} is outside a {}-entry table", lut.len()))
+                        })?;
                     }
 
                     output
@@ -954,7 +985,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     /// the on-disk element — safe for all gf vec types since they are
     /// `#[repr(C)]` and `bytemuck::Pod`.
     fn read_gf_array<U: Default + NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>, ReadError> {
-        debug_assert!(value.is_array() && !value.is_compressed());
+        corrupt!(value.is_array() && !value.is_compressed());
         let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
         if count == 0 {
             return Ok(Vec::default());
@@ -966,8 +997,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         &mut self,
         value: ValueRep,
     ) -> Result<Vec<[T; N]>, ReadError> {
-        debug_assert!(value.is_array());
-        debug_assert!(!value.is_compressed());
+        corrupt!(value.is_array());
+        corrupt!(!value.is_compressed());
 
         let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
 
@@ -1282,7 +1313,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 let list = self.read_list_op(value, |file: &mut Self| {
                     let count = file.reader.read_count()?;
-                    let mut vec = Vec::with_capacity(count);
+                    let mut vec = Vec::with_capacity(count.min(1024));
 
                     for _ in 0..count {
                         let reference = file.read_reference()?;
@@ -1384,7 +1415,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::PayloadListOp => {
                 let list = self.read_list_op(value, |file: &mut Self| {
                     let count = file.reader.read_count()?;
-                    let mut vec = Vec::with_capacity(count);
+                    let mut vec = Vec::with_capacity(count.min(1024));
                     for _ in 0..count {
                         let payload = file.read_payload()?;
                         vec.push(payload);
@@ -1404,7 +1435,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 self.set_position(value.payload())?;
 
                 let count = self.reader.read_count()?;
-                let mut map = HashMap::with_capacity(count);
+                let mut map = HashMap::with_capacity(count.min(1024));
 
                 for _ in 0..count {
                     let key = self.read_string()?;
@@ -1448,7 +1479,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 corrupt!(count == times.len(), "Invalid time samples count");
 
                 let value_reps = self.reader.read_vec::<ValueRep>(count)?;
-                debug_assert_eq!(value_reps.len(), count);
+                corrupt!(value_reps.len() == count);
 
                 let samples = times
                     .into_iter()
@@ -1523,7 +1554,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 corrupt!(!value.is_inlined());
                 self.set_position(value.payload())?;
                 let count = self.reader.read_count()?;
-                let mut pairs = Vec::with_capacity(count);
+                let mut pairs = Vec::with_capacity(count.min(1024));
                 for _ in 0..count {
                     let src_idx: u32 = self.reader.read_pod()?;
                     let tgt_idx: u32 = self.reader.read_pod()?;
@@ -1606,7 +1637,7 @@ fn decompress_lz4(mut input: &[u8], output: &mut [u8]) -> Result<usize, ReadErro
         // Decompress chunk by chunk.
         // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/base/tf/fastCompression.cpp#L125
 
-        todo!("Support lz4 chunked decompression")
+        Err(ReadError::unsupported("Support lz4 chunked decompression"))
     }
 }
 
@@ -1644,9 +1675,21 @@ impl<R: io::Read> ReadExt for R {
             return Ok(Vec::new());
         }
 
+        // Read what the stream really holds before trusting `count`: a
+        // truncated or lying file fails here instead of allocating first.
+        let bytes = count
+            .checked_mul(mem::size_of::<T>())
+            .ok_or_else(|| ReadError::corrupt(format!("vector of {count} elements overflows")))?;
+        let mut raw = Vec::new();
+        io::Read::read_to_end(&mut io::Read::take(&mut *self, bytes as u64), &mut raw).ctx("vec")?;
+        if raw.len() != bytes {
+            return Err(ReadError::corrupt(format!(
+                "vec: {} of {bytes} bytes before the end",
+                raw.len()
+            )));
+        }
         let mut vec = vec![T::default(); count];
-        self.read_exact(cast_slice_mut(&mut vec)).ctx("vec")?;
-
+        cast_slice_mut(&mut vec).copy_from_slice(&raw);
         Ok(vec)
     }
 }
