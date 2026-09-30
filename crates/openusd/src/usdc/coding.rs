@@ -19,7 +19,9 @@ pub fn encoded_buffer_size<T: PrimInt>(count: usize) -> usize {
         0
     } else {
         let sz = mem::size_of::<T>();
-        sz + (count * 2).div_ceil(8) + (sz * count)
+        // Saturating: a count from a damaged file must not overflow here.
+        sz.saturating_add(count.saturating_mul(2).div_ceil(8))
+            .saturating_add(sz.saturating_mul(count))
     }
 }
 
@@ -45,15 +47,22 @@ where
         codes_reader.read_pod::<i32>()? as i64
     };
 
-    let num_code_bytes = (count * 2).div_ceil(8);
+    let num_code_bytes = count
+        .checked_mul(2)
+        .ok_or_else(|| ReadError::corrupt(format!("integer count {count} overflows")))?
+        .div_ceil(8);
 
     let mut ints_reader = {
         let offset = mem::size_of::<T>() + num_code_bytes;
-        io::Cursor::new(&data[offset..])
+        let rest = data
+            .get(offset..)
+            .ok_or_else(|| ReadError::corrupt(format!("{count} integers need more than {} bytes", data.len())))?;
+        io::Cursor::new(rest)
     };
 
     let mut prev = 0_i64;
-    let mut output = Vec::with_capacity(count);
+    // Every integer takes at least two bits of `data`.
+    let mut output = Vec::with_capacity(count.min(data.len().saturating_mul(4)));
 
     for _ in 0..num_code_bytes {
         // Code byte stores integer types for the next 4 integers.
