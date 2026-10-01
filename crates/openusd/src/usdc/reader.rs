@@ -370,23 +370,21 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         } else {
             // Read # of paths.
             let path_count = self.reader.read_count()?;
-            corrupt!(
-                path_count <= self.file_length,
-                "path count {path_count} is larger than a {}-byte file can hold",
-                self.file_length
-            );
-            self.paths = vec![sdf::Path::default(); path_count];
-
-            self.read_compressed_paths()?;
+            self.read_compressed_paths(path_count)?;
         };
 
         Ok(())
     }
 
     /// Read compressed paths.
-    fn read_compressed_paths(&mut self) -> Result<(), ReadError> {
+    fn read_compressed_paths(&mut self, path_count: usize) -> Result<(), ReadError> {
         // Read number of encoded paths.
         let count: usize = self.reader.read_count()?;
+        // The table interns unique paths; only the empty path has no encoding.
+        corrupt!(
+            path_count.checked_sub(count).is_some_and(|empty| empty <= 1),
+            "path table has {path_count} slots for {count} encoded paths"
+        );
 
         // Read compressed data.
 
@@ -398,6 +396,18 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         let jumps = self.read_encoded_ints::<i32>(count)?;
         corrupt!(jumps.len() == count);
+
+        for &index in &path_indexes {
+            corrupt!(
+                (index as usize) < path_count,
+                "path index {index} exceeds {path_count} slots"
+            );
+        }
+        // Allocate slots after all three encoded tables have been decoded.
+        self.paths
+            .try_reserve_exact(path_count)
+            .map_err(|error| ReadError::corrupt(format!("cannot allocate {path_count} path slots: {error}")))?;
+        self.paths.resize(path_count, sdf::Path::default());
 
         self.build_compressed_paths(&path_indexes, &element_token_indexes, &jumps)?;
 
@@ -1698,7 +1708,75 @@ impl<R: io::Read> ReadExt for R {
 mod tests {
     use super::*;
     use crate::Result;
+    use crate::usdc;
     use std::fs;
+
+    /// A relationship with a deeply nested target compresses to fewer bytes
+    /// than the number of entries in its path table.
+    fn compact_paths() -> Result<(Vec<u8>, sdf::Path)> {
+        let mut target = sdf::Path::abs_root();
+        for _ in 0..1000 {
+            target = target.append_path("X")?;
+        }
+        let mut data = sdf::Data::new();
+        data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot)
+            .add("primChildren", sdf::Value::token_vec(["P"]));
+        let prim = data.create_spec(sdf::Path::new("/P")?, sdf::SpecType::Prim);
+        prim.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
+        prim.add("propertyChildren", sdf::Value::token_vec(["link"]));
+        data.create_spec(sdf::Path::new("/P.link")?, sdf::SpecType::Relationship)
+            .add(
+                "targetPaths",
+                sdf::Value::PathListOp(sdf::PathListOp::explicit([target.clone()])),
+            );
+        let mut output = io::Cursor::new(Vec::new());
+        usdc::CrateWriter::write(&data, &mut output)?;
+        Ok((output.into_inner(), target))
+    }
+
+    #[test]
+    fn compact_paths_roundtrip() -> Result<()> {
+        let (bytes, target) = compact_paths()?;
+        let size = bytes.len();
+        let mut file = CrateFile::open(io::Cursor::new(bytes))?;
+        assert!(file.paths.len() > size, "more path entries than file bytes");
+        let value = file
+            .fields
+            .iter()
+            .find(|field| file.tokens[field.token_index] == "targetPaths")
+            .expect("relationship targets")
+            .value_rep;
+        let targets = file.value(value)?.try_as_path_list_op().expect("path list");
+        assert_eq!(targets.explicit_items, vec![target]);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_path_slot() -> Result<()> {
+        let (mut bytes, _) = compact_paths()?;
+        let file = CrateFile::open(io::Cursor::new(bytes.clone()))?;
+        let start = file.find_section(Section::PATHS).expect("paths section").start as usize;
+        let count = file.paths.len();
+        bytes[start..start + 8].copy_from_slice(&((count + 1) as u64).to_le_bytes());
+        let decoded = CrateFile::open(io::Cursor::new(bytes))?;
+        assert_eq!(decoded.paths.len(), count + 1);
+        assert!(decoded.paths[count].is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_path_counts() -> Result<()> {
+        let (bytes, _) = compact_paths()?;
+        let file = CrateFile::open(io::Cursor::new(bytes.clone()))?;
+        let start = file.find_section(Section::PATHS).expect("paths section").start as usize;
+        for count in [0, file.paths.len() as u64 + 2, u64::MAX] {
+            let mut damaged = bytes.clone();
+            damaged[start..start + 8].copy_from_slice(&count.to_le_bytes());
+            let error = CrateFile::open(io::Cursor::new(damaged)).expect_err("invalid slot count");
+            assert!(format!("{error:?}").contains("path table has"), "{error:?}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn integer_compressed_float_fixture_uses_i_encoding() -> Result<()> {
