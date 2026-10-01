@@ -7,7 +7,7 @@ use openusd::Result;
 use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::{CollectionAPI, SchemaBase, Stage};
-use openusd_schemas::geom::XformableExt;
+use openusd_schemas::geom::XformableSchema;
 use openusd_schemas::lux::{
     BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
     DistantLightSchema, DomeLight, DomeLight_1, DomeLight_1Schema, DomeLightSchema, GeometryLight, GeometryLightSchema,
@@ -41,11 +41,11 @@ fn distant_light_inputs_and_angle() -> Result<()> {
     let sun = DistantLight::get(&stage, sdf::path("/World/Sun")?)?.expect("DistantLight");
     // `get::<T>()` decodes straight to the Rust type instead of matching on
     // `sdf::Value`.
-    assert_eq!(sun.intensity_attr().get::<f32>()?, Some(12000.0));
-    assert_eq!(sun.exposure_attr().get::<f32>()?, Some(1.5));
+    assert_eq!(sun.intensity()?, Some(12000.0));
+    assert_eq!(sun.exposure()?, Some(1.5));
     assert_eq!(sun.color_attr().get::<[f32; 3]>()?, Some([1.0, 0.95, 0.85]));
-    assert_eq!(sun.enable_color_temperature_attr().get::<bool>()?, Some(true));
-    assert_eq!(sun.color_temperature_attr().get::<f32>()?, Some(5500.0));
+    assert_eq!(sun.enable_color_temperature()?, Some(true));
+    assert_eq!(sun.color_temperature()?, Some(5500.0));
     // `get::<sdf::Value>()` still yields the raw value when that's wanted.
     assert_eq!(sun.angle_attr().get::<sdf::Value>()?, Some(sdf::Value::Float(0.53)));
     Ok(())
@@ -336,7 +336,7 @@ fn light_links_include_root() -> Result<()> {
 
     for name in ["lightLink", "shadowLink"] {
         let linking = CollectionAPI::from_prim_unchecked(light.prim().clone(), name);
-        assert!(linking.include_root()?, "{name} includes the pseudo-root");
+        assert_eq!(linking.include_root()?, Some(true), "{name} includes the pseudo-root");
         assert!(
             linking
                 .compute_membership_query()?
@@ -367,7 +367,7 @@ fn light_filter_is_typed_xformable() -> Result<()> {
     LightFilter::define(&stage, "/Filter")?;
     let f = LightFilter::get(&stage, "/Filter")?.expect("LightFilter");
     // Inherited Xformable accessor is available on the handle.
-    assert!(f.xform_op_order()?.is_empty());
+    assert!(f.xform_op_order()?.is_none());
     assert!(LightFilter::get(&stage, "/Missing")?.is_none());
     Ok(())
 }

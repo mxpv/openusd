@@ -229,7 +229,7 @@ fn merge_group_name(group: &CollisionGroup) -> Result<Option<String>> {
 /// declaration with no value and a blocked one all leave filtering the usual
 /// way round, as does a value of the wrong type.
 fn inverts_filtering(group: &CollisionGroup) -> Result<bool> {
-    Ok(group.invert_filtered_groups_attr().get::<bool>()?.unwrap_or(false))
+    Ok(group.invert_filtered_groups()?.unwrap_or(false))
 }
 
 /// How many unordered pairs `len` groups have, each group's pair with itself

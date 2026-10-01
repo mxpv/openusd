@@ -7,6 +7,16 @@ Each `<library>/schema.usda` is copied from
 `usdGenSchema` reads, and this crate's `build.rs` generates its views from
 them through `openusd-build`.
 
+Beside the families that register metadata fields, `<library>/plugInfo.json`
+is copied from the same commit, where it lives at
+`pxr/usd/<library>/plugInfo.json`. `build.rs` reads the `SdfMetadata` block of
+each, which is where upstream declares those fields.
+
+`usdShaders/shaderDefs.usda` is copied from the same commit, where it lives at
+`pxr/usd/plugin/usdShaders/shaders/shaderDefs.usda`. It defines the shader
+nodes `UsdPreviewSurface`, `UsdUVTexture` and their companions, which `build.rs`
+generates the `shade::nodes` views of.
+
 `usd/schema.usda` is here because every other file sublayers it: it declares
 `Typed`, `APISchemaBase` and the core API schemas the domain families inherit
 from. This crate generates nothing from it: the core crate carries the `usd`

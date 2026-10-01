@@ -62,10 +62,7 @@ fn field3d_asset_and_type_gate() -> Result<()> {
     a.create_field_purpose_attr()?.set(sdf::Value::token("motion"))?;
 
     let a = Field3DAsset::get(&stage, "/V/vel")?.expect("Field3DAsset");
-    assert_eq!(
-        a.vector_data_role_hint_attr().get::<VectorDataRoleHint>()?,
-        Some(VectorDataRoleHint::Vector)
-    );
+    assert_eq!(a.vector_data_role_hint()?, Some(VectorDataRoleHint::Vector));
     assert_eq!(a.field_purpose_attr().get::<Token>()?.as_deref(), Some("motion"));
 
     // Cross-type gating: an OpenVDBAsset view rejects a Field3DAsset.
@@ -87,11 +84,8 @@ fn openvdb_asset_roundtrip() -> Result<()> {
 
     let a = OpenVDBAsset::get(&stage, "/V/density")?.expect("OpenVDBAsset");
     assert_eq!(a.field_name_attr().get::<Token>()?.as_deref(), Some("density"));
-    assert_eq!(a.field_index_attr().get::<i32>()?, Some(0));
-    assert_eq!(
-        a.vector_data_role_hint_attr().get::<VectorDataRoleHint>()?,
-        Some(VectorDataRoleHint::NoRole)
-    );
+    assert_eq!(a.field_index()?, Some(0));
+    assert_eq!(a.vector_data_role_hint()?, Some(VectorDataRoleHint::NoRole));
     assert_eq!(a.field_class_attr().get::<Token>()?.as_deref(), Some("fogVolume"));
     Ok(())
 }

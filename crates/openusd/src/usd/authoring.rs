@@ -478,6 +478,28 @@ pub(super) fn schema_definition(
     Ok(Some((stage.prim_type_info_composed(prim)?, tf::Token::from(name))))
 }
 
+/// The field `key` the declaring schema gives the property at `path`, or
+/// `None` where no schema declares the property or the field (C++
+/// `UsdStage::_GetSchemaAttribute` and its relationship counterpart).
+///
+/// Everything a schema states about a property — its type, its variability,
+/// its display metadata — lives on the same declaration, whether or not any
+/// layer authors a spec, so this is what a property's generic metadata read
+/// falls back to where nothing authors the field.
+pub(super) fn schema_property_field(
+    stage: &Stage,
+    path: &sdf::Path,
+    key: &str,
+) -> Result<Option<sdf::Value>, pcp::QueryError> {
+    let Some((info, name)) = schema_definition(stage, path)? else {
+        return Ok(None);
+    };
+    Ok(info
+        .prim_definition()
+        .property(&name)
+        .and_then(|property| property.field(key).cloned()))
+}
+
 /// Run `f` on the `kind` spec at `path` on the edit-target layer, or return
 /// [`sdf::AuthoringError::InvalidPath`] when no such spec exists. `get` is the
 /// spec view's constructor (e.g. `sdf::PrimSpecMut::get`). The shared body of

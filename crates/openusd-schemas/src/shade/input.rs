@@ -28,7 +28,7 @@ impl Input {
     pub fn connectability(&self) -> Result<Connectability> {
         Ok(self
             .attribute
-            .get_metadata::<Connectability>(super::CONNECTABILITY)?
+            .get_metadata::<Connectability>(super::tokens::CONNECTABILITY)?
             .unwrap_or_default())
     }
 
@@ -36,7 +36,9 @@ impl Input {
     /// (C++ `UsdShadeInput::SetConnectability`).
     pub fn set_connectability(self, connectability: Connectability) -> Result<Self, usd::StageAuthoringError> {
         Ok(Self {
-            attribute: self.attribute.set_metadata(super::CONNECTABILITY, connectability)?,
+            attribute: self
+                .attribute
+                .set_metadata(super::tokens::CONNECTABILITY, connectability)?,
         })
     }
 }

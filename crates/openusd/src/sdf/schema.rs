@@ -218,10 +218,15 @@ impl ChildrenKey {
 /// That is why this reaches past the families `openusd-schemas` implements,
 /// to `usdImaging` and `execIr`.
 ///
-/// TODO: let a schema family register its own fields, so one defined outside
-/// this crate is registered too, and carry the spec types each applies to
-/// (C++ `appliesTo`) so a field can be rejected where it does not belong.
-/// Until then this is the set the families shipped with USD declare.
+/// A schema family declares its fields with its schemas
+/// ([`MetadataDecl`](crate::usd::MetadataDecl)), and `openusd-schemas` checks
+/// what it registers against this table.
+///
+/// TODO: have the layer readers consult a registry's fields rather than this
+/// table, so a field a family defined outside this crate is registered too,
+/// and a field authored on a spec it does not apply to (C++ `appliesTo`) is
+/// rejected. A layer is read with no registry in hand today, which is why the
+/// set the families shipped with USD declare is spelled out here.
 const SCHEMA_METADATA: [(&str, &str); 22] = [
     ("bindMaterialAs", "token"),
     ("connectability", "token"),

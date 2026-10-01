@@ -47,8 +47,8 @@ impl SkelAnimQuery {
     /// joints nor blend shapes are authored on it, there being nothing to
     /// animate.
     pub fn new(anim: Animation) -> Result<Option<Self>> {
-        let joints = anim.joints()?;
-        let blend_shapes = anim.blend_shapes()?;
+        let joints = anim.joint_paths()?;
+        let blend_shapes: Vec<String> = anim.blend_shapes_attr().cast()?.unwrap_or_default();
         if joints.is_empty() && blend_shapes.is_empty() {
             return Ok(None);
         }

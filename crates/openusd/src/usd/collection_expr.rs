@@ -171,7 +171,7 @@ struct Resolved {
 }
 
 fn resolve_impl(collection: &CollectionAPI, state: &mut ResolveState) -> Result<Resolved> {
-    let Some(expression) = collection.membership_expression()? else {
+    let Some(expression) = super::collection::membership_expression(collection)? else {
         return Ok(Resolved {
             expression: sdf::PathExpression::nothing(),
             cacheable: true,

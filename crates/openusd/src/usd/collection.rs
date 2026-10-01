@@ -36,12 +36,12 @@ use crate::usd::{Attribute, Prim, PrimPredicate, SchemaBase, Stage};
 use super::collection_expr::{CollectionEvaluator, CollectionSearcher, resolve_complete_membership_expression};
 use super::{CollectionAPI, CollectionMode, ExpansionRule, tokens};
 
-/// A collection read as values rather than as properties: the composed
-/// opinions with the prim definition's fallbacks behind them, the membership
-/// they resolve to, and authoring that keeps edits minimal.
+/// A collection read as values rather than as properties: the membership its
+/// opinions resolve to, and authoring that keeps edits minimal.
 ///
-/// The generated accessors (`expansion_rule_attr`, `includes_rel`, …) hand
-/// back the property itself; these read and write what it holds.
+/// The generated accessors hand back each property (`expansion_rule_attr`,
+/// `includes_rel`, …) and read its value (`expansion_rule`, `include_root`,
+/// …); these read the targets and resolve what they all say together.
 impl CollectionAPI {
     /// The `<prim>.collection:<name>` property path — the collection's
     /// identity, used as a target when one collection includes another.
@@ -49,17 +49,6 @@ impl CollectionAPI {
         Ok(self
             .path()
             .append_property(format!("{}:{}", tokens::COLLECTION, self.name()))?)
-    }
-
-    /// `expansionRule` — defaults to [`ExpansionRule::ExpandPrims`].
-    pub fn expansion_rule(&self) -> Result<ExpansionRule> {
-        composed_or_default(&self.expansion_rule_attr())
-    }
-
-    /// `includeRoot` — whether the pseudo-root `</>` counts as included.
-    /// Defaults to `false`.
-    pub fn include_root(&self) -> Result<bool> {
-        composed_or_default(&self.include_root_attr())
     }
 
     /// The authored `includes` relationship targets.
@@ -72,19 +61,6 @@ impl CollectionAPI {
         self.excludes_rel().targets()
     }
 
-    /// The composed `membershipExpression`, if there is one. Composition
-    /// already substituted `%_` chains and mapped the expression across arcs;
-    /// a string- or token-typed opinion parses leniently.
-    pub fn membership_expression(&self) -> Result<Option<sdf::PathExpression>> {
-        Ok(composed(&self.membership_expression_attr())?.and_then(Value::into_path_expression))
-    }
-
-    /// The membership language governing this collection — defaults to
-    /// [`CollectionMode::Automatic`].
-    pub fn mode(&self) -> Result<CollectionMode> {
-        composed_or_default(&self.mode_attr())
-    }
-
     /// Resolve this collection's authored opinions into a
     /// [`MembershipQuery`] (spec §15.2). Outside [`CollectionMode::Expression`],
     /// the relationship opinions build the rule map: `includeRoot` and each
@@ -95,11 +71,14 @@ impl CollectionAPI {
     /// [`CollectionMode::Relationship`], the resolved membership expression
     /// compiles into the query's evaluator; at query time a non-empty rule
     /// map wins.
+    ///
+    /// A value the schema does not recognise, or one of the wrong kind, reads
+    /// as the property's default, and the query still resolves.
     pub fn compute_membership_query(&self) -> Result<MembershipQuery> {
-        let mode = self.mode()?;
+        let mode: CollectionMode = composed_or_default(&self.mode_attr())?;
         let mut query = MembershipQuery {
             rule_map: PathExpansionRuleMap::new(),
-            top_expansion_rule: self.expansion_rule()?,
+            top_expansion_rule: composed_or_default(&self.expansion_rule_attr())?,
             evaluator: None,
         };
         if mode != CollectionMode::Expression {
@@ -214,23 +193,21 @@ impl CollectionAPI {
     /// expression.
     pub fn has_no_included_paths(&self) -> Result<bool> {
         Ok(self.includes()?.is_empty()
-            && !self.include_root()?
+            && !composed_or_default::<bool>(&self.include_root_attr())?
             && (!self.excludes()?.is_empty()
-                || self
-                    .membership_expression()?
-                    .is_none_or(|expression| expression.is_empty())))
+                || membership_expression(self)?.is_none_or(|expression| expression.is_empty())))
     }
 
     fn build_into(&self, map: &mut PathExpansionRuleMap, visited: &mut HashSet<Path>) -> Result<()> {
         // TODO(perf): each (possibly nested) invocation re-reads expansionRule,
         // includeRoot, includes and excludes from the stage as separate field
         // lookups; snapshot a collection's authored opinions once per build.
-        let rule = self.expansion_rule()?;
+        let rule: ExpansionRule = composed_or_default(&self.expansion_rule_attr())?;
         let path_rule = PathRule::from_expansion(rule);
 
         // `includeRoot` injects the pseudo-root as a top-level include
         // (no effect under `explicitOnly`).
-        if self.include_root()? && rule != ExpansionRule::ExplicitOnly {
+        if composed_or_default::<bool>(&self.include_root_attr())? && rule != ExpansionRule::ExplicitOnly {
             map.insert(Path::abs_root(), path_rule);
         }
 
@@ -676,6 +653,14 @@ fn composed(attr: &Attribute) -> Result<Option<Value>> {
     attr.get::<Value>()
 }
 
+/// `collection`'s composed `membershipExpression`, if there is one, as
+/// membership resolution reads it. Composition already substituted `%_`
+/// chains and mapped the expression across arcs; a string- or token-typed
+/// opinion parses leniently, and one of another kind reads as none.
+pub(super) fn membership_expression(collection: &CollectionAPI) -> Result<Option<sdf::PathExpression>> {
+    Ok(composed(&collection.membership_expression_attr())?.and_then(Value::into_path_expression))
+}
+
 /// The composed value of `attr` as a `T`, or `T::default()` where there is
 /// none and where what is there is a value `T` does not accept. A failed read
 /// propagates.
@@ -797,15 +782,15 @@ mod tests {
         coll.prim()
             .author_relationship_targets("collection:render:includes", [sdf::path("/W/A")?])?;
 
-        assert_eq!(coll.expansion_rule()?, ExpansionRule::ExplicitOnly);
-        assert!(coll.include_root()?);
+        assert_eq!(coll.expansion_rule()?, Some(ExpansionRule::ExplicitOnly));
+        assert_eq!(coll.include_root()?, Some(true));
         assert_eq!(coll.includes()?, vec![sdf::path("/W/A")?]);
         assert!(coll.excludes()?.is_empty());
 
         // Unauthored collection falls back to spec defaults.
         let bare = author_collection(&stage, "/X", "c")?;
-        assert_eq!(bare.expansion_rule()?, ExpansionRule::ExpandPrims);
-        assert!(!bare.include_root()?);
+        assert_eq!(bare.expansion_rule()?, Some(ExpansionRule::ExpandPrims));
+        assert_eq!(bare.include_root()?, None, "includeRoot declares no fallback");
         Ok(())
     }
 
@@ -822,7 +807,7 @@ mod tests {
         let prim = stage.define_prim("/Light")?.apply_api("LightAPI")?;
         let coll = CollectionAPI::from_prim_unchecked(prim, "lightLink");
 
-        assert!(coll.include_root()?, "the definition declares includeRoot");
+        assert_eq!(coll.include_root()?, Some(true), "the definition declares includeRoot");
         assert!(!coll.has_no_included_paths()?);
         assert!(
             coll.compute_membership_query()?
@@ -832,14 +817,14 @@ mod tests {
 
         // An authored opinion still wins over the definition.
         coll.set_include_root(false)?;
-        assert!(!coll.include_root()?);
+        assert_eq!(coll.include_root()?, Some(false));
         assert!(coll.has_no_included_paths()?);
         Ok(())
     }
 
     /// A value the schema does not recognise, or one of the wrong kind, reads
-    /// back as the reader's fallback rather than as an error. Each attribute is
-    /// authored properly first, so a spec exists whose `default` is then
+    /// as the property's default when membership is resolved. Each attribute
+    /// is authored properly first, so a spec exists whose `default` is then
     /// overwritten raw — past the type checks authoring would apply.
     #[test]
     fn lenient_reads_fall_back() -> Result<()> {
@@ -864,18 +849,22 @@ mod tests {
         // A token the schema does not allow.
         overwrite(coll.expansion_rule_attr(), Value::token("bogus"))?;
         overwrite(coll.mode_attr(), Value::token("bogus"))?;
-        assert_eq!(coll.expansion_rule()?, ExpansionRule::ExpandPrims);
-        assert_eq!(coll.mode()?, CollectionMode::Automatic);
+        let query = coll.compute_membership_query()?;
+        assert_eq!(query.top_expansion_rule, ExpansionRule::ExpandPrims);
+        assert!(
+            query.evaluator.is_some(),
+            "an automatic collection reads its expression"
+        );
 
         // A value of the wrong kind altogether.
         overwrite(coll.expansion_rule_attr(), Value::Int(3))?;
         overwrite(coll.mode_attr(), Value::Int(3))?;
         overwrite(coll.include_root_attr(), Value::Int(1))?;
         overwrite(coll.membership_expression_attr(), Value::Int(3))?;
-        assert_eq!(coll.expansion_rule()?, ExpansionRule::ExpandPrims);
-        assert_eq!(coll.mode()?, CollectionMode::Automatic);
-        assert!(!coll.include_root()?);
-        assert_eq!(coll.membership_expression()?, None);
+        let query = coll.compute_membership_query()?;
+        assert_eq!(query.top_expansion_rule, ExpansionRule::ExpandPrims);
+        assert_eq!(membership_expression(&coll)?, None);
+        assert!(coll.has_no_included_paths()?, "includeRoot reads as off");
         Ok(())
     }
 
@@ -1285,7 +1274,7 @@ mod tests {
         let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
         coll.set_include_root(true)?;
         coll.exclude_path(Path::abs_root())?;
-        assert!(!coll.include_root()?);
+        assert_ne!(coll.include_root()?, Some(true));
         Ok(())
     }
 

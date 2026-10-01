@@ -47,7 +47,9 @@ mod error;
 mod decl;
 mod emit;
 mod load;
+mod plug_info;
 mod resolve;
+mod shader_defs;
 mod tokens;
 mod validate;
 
@@ -60,6 +62,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 
 use openusd::usd;
 
@@ -92,6 +95,8 @@ pub struct Output {
     /// The model everything above was generated from, and what
     /// [`with_family`](Self::with_family) lends its declarations out of.
     library: model::Library,
+    /// The schema it was generated from, as configured.
+    schema: PathBuf,
 }
 
 impl Output {
@@ -128,6 +133,24 @@ impl Output {
     /// ```
     pub fn with_family<R>(&self, f: impl FnOnce(&usd::SchemaFamily<'_>) -> R) -> R {
         decl::with_family(&self.library, f)
+    }
+}
+
+/// What generating one shader-node library produced.
+#[derive(Debug)]
+pub struct NodeOutput {
+    /// The generated file: the node views and the tokens naming their ids,
+    /// inputs and outputs.
+    pub rust: String,
+    /// Where every layer the definitions composed from was found.
+    layers: Vec<PathBuf>,
+}
+
+impl NodeOutput {
+    /// Where every layer the definitions composed from was found, which is
+    /// what a build script watches.
+    pub fn layers(&self) -> &[PathBuf] {
+        &self.layers
     }
 }
 
@@ -242,6 +265,8 @@ pub fn configure() -> Builder {
         extern_libraries: BTreeMap::new(),
         schemas: Vec::new(),
         token_enums: Vec::new(),
+        plug_infos: Vec::new(),
+        shader_defs: Vec::new(),
     }
 }
 
@@ -258,6 +283,11 @@ pub struct Builder {
     schemas: Vec<(PathBuf, Views)>,
     /// The enums to generate over token properties, in the order declared.
     token_enums: Vec<TokenEnum>,
+    /// The `plugInfo.json` files declaring libraries' metadata fields.
+    plug_infos: Vec<PathBuf>,
+    /// The shader-definition layers to generate node views of, each with the
+    /// library name its file is written under.
+    shader_defs: Vec<(String, PathBuf)>,
 }
 
 impl Builder {
@@ -269,6 +299,37 @@ impl Builder {
     #[must_use]
     pub fn out_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.out_dir = Some(dir.into());
+        self
+    }
+
+    /// Reads the metadata fields a `plugInfo.json` declares in each plugin's
+    /// `SdfMetadata` block, the way C++ registers them.
+    ///
+    /// Each plugin's fields belong to the library whose `libraryName` is the
+    /// plugin's `Name`: they are registered with that library's schemas,
+    /// named in its `tokens`, and read and written through extension traits
+    /// on the handles they apply to (`AttributeMetadata` and its siblings).
+    /// A plugin naming no configured library is an error when
+    /// [`generate`](Self::generate) runs.
+    #[must_use]
+    pub fn plug_info(mut self, path: impl Into<PathBuf>) -> Self {
+        self.plug_infos.push(path.into());
+        self
+    }
+
+    /// Generates a view of each shader node the layer at `path` defines, as
+    /// `usdShaders`'s `shaderDefs.usda` defines `UsdPreviewSurface` and its
+    /// companions.
+    ///
+    /// Each `def Shader` prim authoring an `info:id` is a node, and its view
+    /// wraps the `usdShade` library's `Shader` view, so that library must be
+    /// placed with [`extern_library`](Self::extern_library). The file is
+    /// written as `<library>.rs` and included with
+    /// [`openusd::include_schema!`](openusd::include_schema) like a schema
+    /// library's.
+    #[must_use]
+    pub fn shader_defs(mut self, library: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        self.shader_defs.push((library.into(), path.into()));
         self
     }
 
@@ -361,8 +422,12 @@ impl Builder {
     /// `skipCodeGeneration` writes that file too, carrying its tokens and its
     /// schema data without the views — the data is what a registry is built
     /// from, so a library declining an API still has to ship it.
+    ///
+    /// Two schemas declaring the same `libraryName` would write one file, and
+    /// are refused before anything is written. A file already holding what
+    /// this run generates is left untouched, its modification time with it.
     pub fn generate(self) -> Result<(), Error> {
-        if self.schemas.is_empty() {
+        if self.schemas.is_empty() && self.shader_defs.is_empty() {
             return Ok(());
         }
 
@@ -377,9 +442,9 @@ impl Builder {
 
         // Every library is generated before any of them is written, so a
         // schema this run refuses leaves the last run's output alone rather
-        // than half of it replaced. A write that fails part-way still leaves
-        // what it wrote: recovering that would need each file written beside
-        // its destination and renamed onto it.
+        // than half of it replaced. Each file is then replaced whole (`write`),
+        // so a run failing part-way leaves every library as one run or the
+        // other wrote it.
         //
         // TODO(rayon): a library is an independent stage open, composition and
         // emission over `&self`, so the families of `openusd-schemas` could
@@ -387,10 +452,11 @@ impl Builder {
         // `sdf::Value`s read from a stage that is neither `Send` nor `Sync`, so
         // a parallel version has to finish with each library inside the worker
         // and return the generated text alone.
+        let plugins = self.plugins()?;
         let outputs = self
             .schemas
             .iter()
-            .map(|(schema, views)| self.build(schema, *views))
+            .map(|(schema, views)| self.build(schema, *views, &plugins))
             .collect::<Result<Vec<_>, Error>>()?;
 
         // A library this run builds, or one declared so a view can name it: an
@@ -413,6 +479,58 @@ impl Builder {
                     library: declared.library.clone(),
                 },
             });
+        }
+
+        // Every plugin a `plugInfo.json` declares fields for is one of the
+        // libraries built here, and a field belongs to one library only.
+        for plugin in &plugins {
+            if !outputs.iter().any(|output| output.library_name() == plugin.name) {
+                return Err(Error::UnknownPlugin {
+                    plugin: plugin.name.clone(),
+                    path: plugin.path.clone(),
+                });
+            }
+        }
+        let mut declared: BTreeMap<&str, &str> = BTreeMap::new();
+        for output in &outputs {
+            for field in &output.library.metadata {
+                if let Some(first) = declared.insert(field.name.as_str(), output.library_name()) {
+                    return Err(Error::DuplicateMetadataField {
+                        field: field.name.to_string(),
+                        first: first.to_owned(),
+                        second: output.library_name().to_owned(),
+                    });
+                }
+            }
+        }
+
+        let nodes = self
+            .shader_defs
+            .iter()
+            .map(|(library, path)| Ok((library.as_str(), path.as_path(), self.build_shader_defs(library, path)?)))
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        // One file per library name, so two libraries of one name would write
+        // the same file.
+        let mut destinations: BTreeMap<&str, &Path> = BTreeMap::new();
+        let named = outputs
+            .iter()
+            .map(|output| (output.library_name(), output.schema.as_path()))
+            .chain(nodes.iter().map(|(library, path, _)| (*library, *path)));
+        for (library, source) in named {
+            if let Some(first) = destinations.insert(library, source) {
+                return Err(Error::DuplicateLibrary {
+                    library: library.to_owned(),
+                    first: first.to_path_buf(),
+                    second: source.to_path_buf(),
+                });
+            }
+        }
+        for (library, _, output) in &nodes {
+            write(&out_dir.join(format!("{library}.rs")), &output.rust)?;
+            for layer in output.layers() {
+                println!("cargo:rerun-if-changed={}", layer.display());
+            }
         }
 
         for output in &outputs {
@@ -443,12 +561,43 @@ impl Builder {
     /// A schema asking for `skipCodeGeneration` gets no views whatever `views`
     /// says.
     pub fn build_library(&self, schema: impl AsRef<Path>, views: Views) -> Result<Output, Error> {
-        self.build(schema.as_ref(), views)
+        self.build(schema.as_ref(), views, &self.plugins()?)
+    }
+
+    /// Every plugin the configured `plugInfo.json` files declare, each file
+    /// read once.
+    fn plugins(&self) -> Result<Vec<plug_info::Plugin>, Error> {
+        let mut plugins = Vec::new();
+        for path in &self.plug_infos {
+            plugins.extend(plug_info::read(path)?);
+        }
+        Ok(plugins)
+    }
+
+    /// Generates the views of the shader nodes the layer at `path` defines,
+    /// writing nothing: the file [`generate`](Self::generate) writes for a
+    /// library [`shader_defs`](Self::shader_defs) named.
+    pub fn build_shader_defs(&self, library: &str, path: impl AsRef<Path>) -> Result<NodeOutput, Error> {
+        let path = path.as_ref();
+        let shade = self.extern_libraries.get("usdShade").ok_or_else(|| Error::ShaderDefs {
+            path: path.to_path_buf(),
+            cause: "a node's view wraps `usdShade`'s `Shader`, and no extern_library places usdShade".to_owned(),
+        })?;
+        let shade: syn::Path = syn::parse_str(shade).map_err(|_| Error::ShaderDefs {
+            path: path.to_path_buf(),
+            cause: format!("usdShade is placed at `{shade}`, which is not a Rust path"),
+        })?;
+        let library = shader_defs::read(self, library, path)?;
+        let rust = emit::nodes(&library, &shade)?;
+        Ok(NodeOutput {
+            rust,
+            layers: library.layers,
+        })
     }
 
     /// Reads, checks and generates one library.
-    fn build(&self, schema: &Path, views: Views) -> Result<Output, Error> {
-        let (library, warnings) = self.read(schema)?;
+    fn build(&self, schema: &Path, views: Views, plugins: &[plug_info::Plugin]) -> Result<Output, Error> {
+        let (library, warnings) = self.read(schema, plugins)?;
         // Named by file rather than by path: the header reaches whatever the
         // consumer generates into, and an absolute path would differ on every
         // machine that built it.
@@ -470,6 +619,7 @@ impl Builder {
             views: views == Views::Generate,
             warnings,
             library,
+            schema: schema.to_path_buf(),
         })
     }
 
@@ -481,9 +631,16 @@ impl Builder {
     /// answers, and [`validate`] checks the rules. What validation finds that
     /// does not make the output wrong travels back beside the model, so a
     /// caller reading the result in memory sees it as well as a build log does.
-    fn read(&self, schema: &Path) -> Result<(Library, Vec<String>), Error> {
+    fn read(&self, schema: &Path, plugins: &[plug_info::Plugin]) -> Result<(Library, Vec<String>), Error> {
         let source = load::open(self, schema)?;
-        let library = resolve::library(&source)?;
+        let mut library = resolve::library(&source)?;
+
+        // A plugin's fields are the library's it is named after; the file is
+        // watched like any layer the library read.
+        for plugin in plugins.iter().filter(|plugin| plugin.name == library.name) {
+            library.metadata.extend(plugin.fields.iter().cloned());
+            library.source_layers.push(plugin.path.clone());
+        }
 
         // Prim indices are built on demand, so a diagnostic a class's own
         // composition raises exists only once resolve has read that class.
@@ -496,11 +653,37 @@ impl Builder {
 }
 
 /// Writes one generated file, naming the path in anything that goes wrong.
+///
+/// A file already holding `contents` is left untouched, so whatever watches
+/// its modification time — rustc's incremental cache, an editor — sees
+/// nothing change when the same text is regenerated. Anything else is written
+/// beside the destination and renamed onto it, which replaces the file whole:
+/// an interrupted run leaves the previous file or the new one, never a
+/// truncated one.
 fn write(path: &Path, contents: &str) -> Result<(), Error> {
-    fs::write(path, contents).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
+    if fs::read(path).is_ok_and(|current| current == contents.as_bytes()) {
+        return Ok(());
+    }
+
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(format!(".tmp-{}", process::id()));
+    let staged = PathBuf::from(staged);
+    let written = fs::write(&staged, contents).map_err(|source| Error::Io {
+        path: staged.clone(),
         source,
-    })
+    });
+    let replaced = written.and_then(|()| {
+        fs::rename(&staged, path).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    });
+    if replaced.is_err() {
+        // Nothing to report beyond the failure itself, which is the one a
+        // contributor needs; a stale staging file only costs disk space.
+        let _ = fs::remove_file(&staged);
+    }
+    replaced
 }
 
 #[cfg(test)]
@@ -508,13 +691,17 @@ mod tests {
 
     use super::*;
 
+    use std::time::{Duration, SystemTime};
+
+    use openusd::sdf;
+
     /// Resolves one file of the vendored upstream corpus, which every module's
     /// tests read.
     pub(crate) fn read_fixture(name: &str) -> Result<Library, Error> {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/testUsdGenSchema");
         configure()
             .search_path(&dir)
-            .read(&dir.join(name))
+            .read(&dir.join(name), &[])
             .map(|(library, _)| library)
     }
 
@@ -522,7 +709,9 @@ mod tests {
     /// corpus does not reach.
     pub(crate) fn read_source(dir: &Path, source: &str) -> Result<Library, Error> {
         fs::write(dir.join("schema.usda"), source).expect("writes the schema");
-        configure().read(&dir.join("schema.usda")).map(|(library, _)| library)
+        configure()
+            .read(&dir.join("schema.usda"), &[])
+            .map(|(library, _)| library)
     }
 
     /// A schema library called `library`: the roots, and whatever `classes`
@@ -630,6 +819,310 @@ class "MissingSuffix" (
             .expect("generates");
 
         assert!(out.is_dir(), "the output directory is created if it is missing");
+    }
+
+    /// `MISSING_SUFFIX` written to `dir`, and the library it declares.
+    fn missing_suffix(dir: &Path) -> PathBuf {
+        let path = dir.join("schema.usda");
+        fs::write(&path, MISSING_SUFFIX).expect("writes the schema");
+        path
+    }
+
+    /// What `generate` writes is what `build_library` hands back, with no
+    /// staging file left beside it.
+    #[test]
+    fn generated_file_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = missing_suffix(dir.path());
+        let out = dir.path().join("generated");
+
+        configure().out_dir(&out).schema(&schema).generate().expect("generates");
+
+        let expected = configure()
+            .build_library(&schema, Views::Generate)
+            .expect("builds")
+            .rust;
+        let written = fs::read_to_string(out.join("testWarn.rs")).expect("reads the output");
+        assert_eq!(written, expected);
+        let names: Vec<_> = fs::read_dir(&out)
+            .expect("lists the output")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(names, vec!["testWarn.rs"], "nothing else is left behind");
+    }
+
+    /// Regenerating the same text leaves the file as it was, modification
+    /// time included; different text replaces it.
+    #[test]
+    fn unchanged_file_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = missing_suffix(dir.path());
+        let out = dir.path().join("generated");
+        let file = out.join("testWarn.rs");
+        let generate = || configure().out_dir(&out).schema(&schema).generate();
+
+        generate().expect("generates");
+        let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .and_then(|written| written.set_modified(long_ago))
+            .expect("backdates the output");
+
+        generate().expect("regenerates");
+        let modified = || {
+            fs::metadata(&file)
+                .and_then(|meta| meta.modified())
+                .expect("reads mtime")
+        };
+        assert_eq!(modified(), long_ago, "the same text is not written again");
+
+        let changed = MISSING_SUFFIX.replace(
+            "class \"MissingSuffix\" (",
+            "class \"MissingSuffix\" (\n    doc = \"Changed.\"",
+        );
+        fs::write(&schema, changed).expect("edits the schema");
+        generate().expect("regenerates");
+        assert_ne!(modified(), long_ago, "different text replaces the file");
+        assert!(fs::read_to_string(&file).expect("reads").contains("Changed."));
+    }
+
+    /// Two schemas declaring one `libraryName` would write one file, so the
+    /// run refuses before writing either.
+    #[test]
+    fn duplicate_library_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let [first, second] = ["a", "b"].map(|name| {
+            let own = dir.path().join(name);
+            fs::create_dir(&own).expect("creates a schema directory");
+            missing_suffix(&own)
+        });
+        let out = dir.path().join("generated");
+
+        let error = configure()
+            .out_dir(&out)
+            .schema(&first)
+            .schema(&second)
+            .generate()
+            .expect_err("both declare testWarn");
+
+        match error {
+            Error::DuplicateLibrary {
+                library,
+                first: named_first,
+                second: named_second,
+            } => {
+                assert_eq!(library, "testWarn");
+                assert_eq!((named_first, named_second), (first, second));
+            }
+            other => panic!("{other}"),
+        }
+        assert!(!out.join("testWarn.rs").exists(), "nothing is written");
+    }
+
+    /// A `plugInfo.json` declaring `field` for the plugin `plugin`, written
+    /// to `dir`.
+    fn plug_info(dir: &Path, plugin: &str, field: &str) -> PathBuf {
+        let path = dir.join(format!("{plugin}-{field}.json"));
+        let text = format!(
+            r#"{{"Plugins": [{{"Name": "{plugin}", "Info": {{"SdfMetadata": {{"{field}": {{"type": "token"}}}}}}}}]}}"#
+        );
+        fs::write(&path, text).expect("writes the plugInfo");
+        path
+    }
+
+    /// A plugin named after no library this run builds declares fields that
+    /// would reach nothing, so generation stops.
+    #[test]
+    fn unknown_plugin_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = missing_suffix(dir.path());
+        let info = plug_info(dir.path(), "testElsewhere", "role");
+
+        let error = configure()
+            .out_dir(dir.path().join("generated"))
+            .schema(&schema)
+            .plug_info(&info)
+            .generate()
+            .expect_err("no library is called testElsewhere");
+        assert!(
+            matches!(&error, Error::UnknownPlugin { plugin, path } if plugin == "testElsewhere" && path == &info),
+            "{error}"
+        );
+    }
+
+    /// A plugin's fields reach the library named after it: its schema data
+    /// registers them, and the file is watched with the layers it read.
+    #[test]
+    fn plugin_fields_reach_library() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = missing_suffix(dir.path());
+        let info = plug_info(dir.path(), "testWarn", "role");
+
+        let output = configure()
+            .plug_info(&info)
+            .build_library(&schema, Views::Generate)
+            .expect("builds");
+        assert!(output.layers().contains(&info), "{:?}", output.layers());
+        let names: Vec<String> = output.with_family(|family| {
+            family
+                .declared_metadata()
+                .iter()
+                .map(|field| field.name().to_owned())
+                .collect()
+        });
+        assert_eq!(names, vec!["role"]);
+    }
+
+    /// A list default is written into the declaration table as the value it
+    /// decodes to, array and tuple alike.
+    #[test]
+    fn list_defaults_emitted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = missing_suffix(dir.path());
+        let info = dir.path().join("plugInfo.json");
+        fs::write(
+            &info,
+            r#"{"Plugins": [{"Name": "testWarn", "Info": {"SdfMetadata": {
+                "weights": {"type": "double[]", "default": [0.0, 1.0], "appliesTo": "layers"},
+                "up": {"type": "float3", "default": [0, 1, 0], "appliesTo": "layers"}
+            }}}]}"#,
+        )
+        .expect("writes the plugInfo");
+
+        let output = configure()
+            .plug_info(&info)
+            .build_library(&schema, Views::Generate)
+            .expect("builds");
+        let fallbacks: Vec<Option<sdf::Value>> = output.with_family(|family| {
+            family
+                .declared_metadata()
+                .iter()
+                .map(usd::MetadataDecl::declared_fallback)
+                .collect()
+        });
+        assert!(
+            fallbacks.contains(&Some(sdf::Value::DoubleVec(vec![0.0, 1.0]))),
+            "{fallbacks:?}"
+        );
+        assert!(output.rust.contains(".fallback(||"), "{}", output.rust);
+    }
+
+    /// One field declared by two libraries would be refused by the registry,
+    /// so generation refuses it first.
+    #[test]
+    fn duplicate_field_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = missing_suffix(dir.path());
+        let second_dir = dir.path().join("other");
+        fs::create_dir(&second_dir).expect("creates a schema directory");
+        let second = second_dir.join("schema.usda");
+        fs::write(&second, MISSING_SUFFIX.replace("testWarn", "testOther")).expect("writes the schema");
+
+        let error = configure()
+            .out_dir(dir.path().join("generated"))
+            .schema(&first)
+            .schema(&second)
+            .plug_info(plug_info(dir.path(), "testWarn", "role"))
+            .plug_info(plug_info(dir.path(), "testOther", "role"))
+            .generate()
+            .expect_err("both declare role");
+        assert!(
+            matches!(&error, Error::DuplicateMetadataField { field, .. } if field == "role"),
+            "{error}"
+        );
+    }
+
+    /// Every layer a node library composes from is watched, a sublayer
+    /// included, so an edit to any of them regenerates.
+    #[test]
+    fn shader_def_sublayers_watched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("base.usda");
+        fs::write(
+            &base,
+            "#usda 1.0\n\ndef Shader \"UsdBase\"\n{\n    uniform token info:id = \"UsdBase\"\n}\n",
+        )
+        .expect("writes the sublayer");
+        let root = dir.path().join("shaderDefs.usda");
+        fs::write(&root, "#usda 1.0\n(\n    subLayers = [@./base.usda@]\n)\n").expect("writes the root");
+
+        let output = configure()
+            .extern_library("usdShade", "crate::shade")
+            .build_shader_defs("testNodes", &root)
+            .expect("generates");
+        let watched: Vec<_> = output
+            .layers()
+            .iter()
+            .map(|layer| layer.file_name().expect("a file").to_owned())
+            .collect();
+        assert_eq!(watched, vec!["shaderDefs.usda", "base.usda"]);
+        assert!(output.rust.contains("pub struct Base("), "{}", output.rust);
+    }
+
+    /// A node taking its ports from a referenced layer watches that layer
+    /// too, since the generated interface is read from it.
+    #[test]
+    fn shader_def_references_watched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("base.usda"),
+            "#usda 1.0\n\ndef Shader \"Base\"\n{\n    float inputs:gain = 1\n}\n",
+        )
+        .expect("writes the referenced layer");
+        let root = dir.path().join("shaderDefs.usda");
+        fs::write(
+            &root,
+            "#usda 1.0\n\ndef Shader \"UsdGain\" (\n    references = @./base.usda@</Base>\n)\n{\n    uniform token info:id = \"UsdGain\"\n}\n",
+        )
+        .expect("writes the root");
+
+        let output = configure()
+            .extern_library("usdShade", "crate::shade")
+            .build_shader_defs("testNodes", &root)
+            .expect("generates");
+        assert!(output.rust.contains("pub fn gain_input("), "{}", output.rust);
+        let watched: Vec<_> = output
+            .layers()
+            .iter()
+            .map(|layer| layer.file_name().expect("a file").to_owned())
+            .collect();
+        assert_eq!(watched, vec!["shaderDefs.usda", "base.usda"]);
+    }
+
+    /// A node referencing a layer that is not there fails generation rather
+    /// than emitting the interface without what the layer would have given it.
+    #[test]
+    fn shader_def_missing_reference_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("shaderDefs.usda");
+        fs::write(
+            &root,
+            "#usda 1.0\n\ndef Shader \"UsdGain\" (\n    references = @./missing.usda@</Base>\n)\n{\n    uniform token info:id = \"UsdGain\"\n}\n",
+        )
+        .expect("writes the root");
+
+        let error = configure()
+            .extern_library("usdShade", "crate::shade")
+            .build_shader_defs("testNodes", &root)
+            .expect_err("the reference resolves to nothing");
+        assert!(matches!(error, Error::Composition { .. }), "{error}");
+    }
+
+    /// A run configuring only shader definitions still generates them.
+    #[test]
+    fn shader_defs_alone_generated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("generated");
+        let defs = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/nodes/shaderDefs.usda");
+
+        configure()
+            .out_dir(&out)
+            .extern_library("usdShade", "crate::shade")
+            .shader_defs("tinyNodes", &defs)
+            .generate()
+            .expect("generates");
+        assert!(out.join("tinyNodes.rs").is_file(), "the node library is written");
     }
 
     /// With schemas to build and nowhere to put them, generation stops rather

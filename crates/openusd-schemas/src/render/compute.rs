@@ -19,8 +19,7 @@ use openusd::usd::{Attribute, Relationship, Stage};
 use super::conform::apply_aspect_ratio_policy;
 use super::spec::{Product as SpecProduct, RenderSpec, Var as SpecVar};
 use super::{
-    AspectRatioConformPolicy, Product, ProductSchema, ProductType, Settings, SettingsBaseSchema, SettingsSchema,
-    SourceType, Var, VarSchema,
+    AspectRatioConformPolicy, Product, ProductSchema, Settings, SettingsBaseSchema, SettingsSchema, Var, VarSchema,
 };
 use crate::authored_at;
 
@@ -83,7 +82,7 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&s
 
         products.push(SpecProduct {
             render_product_path: product_path.as_str().to_string(),
-            product_type: product.product_type_attr().get::<ProductType>()?.unwrap_or_default(),
+            product_type: product.product_type()?.unwrap_or_default(),
             name: product.product_name_attr().cast::<String>()?.unwrap_or_default(),
             camera_path: base.camera,
             disable_motion_blur: base.disable_motion_blur,
@@ -221,8 +220,8 @@ fn collect_var_indices(
                 .data_type_attr()
                 .cast::<String>()?
                 .unwrap_or_else(|| sdf::ValueTypeName::COLOR3F.as_str().to_string()),
-            source_name: var.source_name_attr().get::<String>()?.unwrap_or_default(),
-            source_type: var.source_type_attr().get::<SourceType>()?.unwrap_or_default(),
+            source_name: var.source_name()?.unwrap_or_default(),
+            source_type: var.source_type()?.unwrap_or_default(),
             namespaced_settings: compute_namespaced_settings(stage, &var_path, namespaces)?,
         });
         let i = render_vars.len() - 1;
@@ -288,6 +287,7 @@ fn read_rel_first_target(rel: &Relationship) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::{ProductType, SourceType};
 
     use openusd::Result;
     use openusd::gf;

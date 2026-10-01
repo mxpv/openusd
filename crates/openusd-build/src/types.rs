@@ -15,11 +15,12 @@ use openusd::sdf;
 /// Paths are spelled the way generated code spells them: in full, since the
 /// generated file is included bare into a consumer's module and carries no
 /// `use` block of its own.
-pub fn rust_type(kind: sdf::ValueKind) -> Option<String> {
-    if let Some(element) = kind.element_kind() {
-        return Some(format!("Vec<{}>", scalar_type(element)?));
-    }
-    scalar_type(kind).map(str::to_owned)
+pub fn rust_type(kind: sdf::ValueKind) -> Option<syn::Type> {
+    let spelled = match kind.element_kind() {
+        Some(element) => format!("::std::vec::Vec<{}>", scalar_type(element)?),
+        None => scalar_type(kind)?.to_owned(),
+    };
+    Some(syn::parse_str(&spelled).expect("every spelling below is a Rust type"))
 }
 
 /// The Rust type one scalar value reads back as. A role does not change it: a
@@ -39,7 +40,7 @@ fn scalar_type(kind: sdf::ValueKind) -> Option<&'static str> {
         sdf::ValueKind::Half => "::openusd::gf::f16",
         sdf::ValueKind::Float => "f32",
         sdf::ValueKind::Double => "f64",
-        sdf::ValueKind::String => "String",
+        sdf::ValueKind::String => "::std::string::String",
         sdf::ValueKind::Token => "::openusd::tf::Token",
         sdf::ValueKind::AssetPath => "::openusd::sdf::AssetPath",
         sdf::ValueKind::TimeCode => "::openusd::sdf::TimeCode",
@@ -76,6 +77,13 @@ fn scalar_type(kind: sdf::ValueKind) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    use quote::ToTokens;
+
+    /// `kind`'s Rust type as source text, spaces removed.
+    fn spelled(kind: sdf::ValueKind) -> Option<String> {
+        rust_type(kind).map(|ty| ty.to_token_stream().to_string().replace(' ', ""))
+    }
+
     /// Every type an attribute can be declared with has a Rust type to read
     /// it back as, and an array reads back as a `Vec` of its element's.
     #[test]
@@ -92,14 +100,14 @@ mod tests {
             );
         }
 
-        assert_eq!(rust_type(sdf::ValueKind::Float).as_deref(), Some("f32"));
+        assert_eq!(spelled(sdf::ValueKind::Float).as_deref(), Some("f32"));
         assert_eq!(
-            rust_type(sdf::ValueKind::Vec3fVec).as_deref(),
-            Some("Vec<::openusd::gf::Vec3f>")
+            spelled(sdf::ValueKind::Vec3fVec).as_deref(),
+            Some("::std::vec::Vec<::openusd::gf::Vec3f>")
         );
         assert_eq!(
-            rust_type(sdf::ValueKind::TokenVec).as_deref(),
-            Some("Vec<::openusd::tf::Token>")
+            spelled(sdf::ValueKind::TokenVec).as_deref(),
+            Some("::std::vec::Vec<::openusd::tf::Token>")
         );
     }
 
@@ -110,7 +118,7 @@ mod tests {
         for spelling in ["float3", "point3f", "normal3f", "vector3f", "color3f"] {
             let kind = sdf::ValueTypeName::find(spelling).and_then(|type_name| type_name.kind());
             assert_eq!(
-                kind.and_then(rust_type).as_deref(),
+                kind.and_then(spelled).as_deref(),
                 Some("::openusd::gf::Vec3f"),
                 "{spelling}"
             );
@@ -120,6 +128,6 @@ mod tests {
     /// `opaque` carries no value, so it has no type to read.
     #[test]
     fn opaque_has_no_type() {
-        assert_eq!(rust_type(sdf::ValueKind::Opaque), None);
+        assert!(rust_type(sdf::ValueKind::Opaque).is_none());
     }
 }

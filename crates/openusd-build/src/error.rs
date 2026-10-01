@@ -206,6 +206,74 @@ pub enum Error {
         cause: String,
     },
 
+    /// Two schemas declare the same `libraryName`, so both would be written to
+    /// one `<library>.rs` and the second would silently replace the first.
+    #[error("{first} and {second} both declare libraryName `{library}`, so both would write {library}.rs")]
+    DuplicateLibrary {
+        /// The library name they share.
+        library: String,
+        /// The schema configured first.
+        first: PathBuf,
+        /// The schema configured second.
+        second: PathBuf,
+    },
+
+    /// A shader-definition layer does not declare its nodes in a form this
+    /// crate generates views of.
+    #[error("invalid shader definitions {path}: {cause}")]
+    ShaderDefs {
+        /// The layer.
+        path: PathBuf,
+        /// What is wrong with it.
+        cause: String,
+    },
+
+    /// A `plugInfo.json` does not declare its metadata fields in a form this
+    /// crate reads.
+    #[error("invalid plugInfo {path}: {cause}")]
+    PlugInfo {
+        /// The file.
+        path: PathBuf,
+        /// What is wrong with it.
+        cause: String,
+    },
+
+    /// A `plugInfo.json` declares fields for a plugin no configured schema
+    /// declares as its `libraryName`, so they would reach no library.
+    #[error("{path} declares metadata for plugin `{plugin}`, which no configured schema library is called")]
+    UnknownPlugin {
+        /// The plugin name.
+        plugin: String,
+        /// The file declaring it.
+        path: PathBuf,
+    },
+
+    /// Two libraries declare one metadata field, so the registry would refuse
+    /// the second.
+    #[error("metadata field `{field}` is declared by both {first} and {second}")]
+    DuplicateMetadataField {
+        /// The field.
+        field: String,
+        /// The library declaring it first.
+        first: String,
+        /// The library declaring it again.
+        second: String,
+    },
+
+    /// Two of a library's metadata fields would be read or written by one
+    /// method of the trait they share.
+    #[error("metadata fields `{first}` and `{second}` of {library} both need a method called `{method}`")]
+    MetadataMethodCollision {
+        /// The library declaring them.
+        library: String,
+        /// The method both need.
+        method: String,
+        /// The field named first.
+        first: String,
+        /// The field named second.
+        second: String,
+    },
+
     /// A file or directory could not be read, written or created.
     #[error("cannot access {path}")]
     Io {
@@ -253,10 +321,10 @@ impl From<openusd::sdf::EditError> for Error {
     }
 }
 
-/// Writing a generated layer out as text, which is how both reach the files a
-/// consumer's build script leaves behind. Written out for the reason above.
-impl From<openusd::sdf::ExportError> for Error {
-    fn from(source: openusd::sdf::ExportError) -> Self {
+/// A composed query a reader asks of a stage. Written out for the reason
+/// above.
+impl From<openusd::pcp::QueryError> for Error {
+    fn from(source: openusd::pcp::QueryError) -> Self {
         Error::Core(source.into())
     }
 }

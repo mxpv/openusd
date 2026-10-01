@@ -36,6 +36,8 @@
 //! what it needs into the registry's own storage, so a family built on the
 //! stack may be dropped as soon as it is registered.
 
+use bitflags::bitflags;
+
 use crate::sdf;
 
 use super::SchemaKind;
@@ -55,6 +57,46 @@ pub type InstanceRestriction<'a> = (&'a str, &'a [&'a str]);
 pub struct SchemaFamily<'a> {
     pub(super) name: &'a str,
     pub(super) schemas: &'a [SchemaDecl<'a>],
+    pub(super) metadata: &'a [MetadataDecl<'a>],
+}
+
+/// One metadata field a family registers, as a plugin's `plugInfo.json`
+/// declares it in its `SdfMetadata` block: its name, the value type it holds,
+/// the specs it may be authored on, and what a stage reads where nothing
+/// authors it.
+///
+/// ```
+/// use openusd::sdf;
+/// use openusd::usd::{MetadataDecl, MetadataTargets};
+///
+/// const CONNECTABILITY: MetadataDecl<'_> = MetadataDecl::new("connectability", "token")
+///     .applies_to(MetadataTargets::ATTRIBUTES)
+///     .fallback(|| sdf::Value::token("full"));
+/// # let _ = CONNECTABILITY;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct MetadataDecl<'a> {
+    pub(super) name: &'a str,
+    pub(super) type_name: &'a str,
+    pub(super) applies_to: MetadataTargets,
+    fallback: Option<FieldValue<'a>>,
+}
+
+bitflags! {
+    /// The specs a metadata field may be authored on (C++ `appliesTo`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct MetadataTargets: u8 {
+        /// A layer, whose fields a stage reads as its own metadata.
+        const LAYERS = 1;
+        /// A prim.
+        const PRIMS = 1 << 1;
+        /// An attribute.
+        const ATTRIBUTES = 1 << 2;
+        /// A relationship.
+        const RELATIONSHIPS = 1 << 3;
+        /// Either kind of property.
+        const PROPERTIES = Self::ATTRIBUTES.bits() | Self::RELATIONSHIPS.bits();
+    }
 }
 
 /// One schema: how it applies, what it derives from, and what a prim of it has
@@ -134,9 +176,24 @@ enum FieldValue<'a> {
 }
 
 impl<'a> SchemaFamily<'a> {
-    /// A family called `name` declaring `schemas`.
+    /// A family called `name` declaring `schemas`, and no metadata fields.
     pub const fn new(name: &'a str, schemas: &'a [SchemaDecl<'a>]) -> Self {
-        Self { name, schemas }
+        Self {
+            name,
+            schemas,
+            metadata: &[],
+        }
+    }
+
+    /// The metadata fields the family registers beside its schemas.
+    pub const fn metadata(mut self, fields: &'a [MetadataDecl<'a>]) -> Self {
+        self.metadata = fields;
+        self
+    }
+
+    /// What [`metadata`](Self::metadata) declared.
+    pub const fn declared_metadata(&self) -> &'a [MetadataDecl<'a>] {
+        self.metadata
     }
 
     /// The family name every schema in it belongs to.
@@ -147,6 +204,58 @@ impl<'a> SchemaFamily<'a> {
     /// The schemas it declares.
     pub const fn schemas(&self) -> &'a [SchemaDecl<'a>] {
         self.schemas
+    }
+}
+
+impl<'a> MetadataDecl<'a> {
+    /// A field called `name` holding values of the type `type_name` spells,
+    /// authorable on every kind of spec, with no fallback.
+    pub const fn new(name: &'a str, type_name: &'a str) -> Self {
+        Self {
+            name,
+            type_name,
+            applies_to: MetadataTargets::all(),
+            fallback: None,
+        }
+    }
+
+    /// The specs the field may be authored on.
+    pub const fn applies_to(mut self, targets: MetadataTargets) -> Self {
+        self.applies_to = targets;
+        self
+    }
+
+    /// What a stage reads for the field where no layer authors it, built when
+    /// the family is registered.
+    pub const fn fallback(mut self, value: fn() -> sdf::Value) -> Self {
+        self.fallback = Some(FieldValue::Built(value));
+        self
+    }
+
+    /// As [`fallback`](Self::fallback), from a value the caller already holds.
+    pub const fn fallback_borrowed(mut self, value: &'a sdf::Value) -> Self {
+        self.fallback = Some(FieldValue::Ref(value));
+        self
+    }
+
+    /// The field's name.
+    pub const fn name(&self) -> &'a str {
+        self.name
+    }
+
+    /// The value type's spelling, as [`new`](Self::new) was given it.
+    pub const fn declared_type_name(&self) -> &'a str {
+        self.type_name
+    }
+
+    /// What [`applies_to`](Self::applies_to) declared.
+    pub const fn declared_applies_to(&self) -> MetadataTargets {
+        self.applies_to
+    }
+
+    /// What [`fallback`](Self::fallback) declared, built afresh.
+    pub fn declared_fallback(&self) -> Option<sdf::Value> {
+        self.fallback.map(|value| value.to_value())
     }
 }
 
@@ -483,7 +592,14 @@ impl<'a> Field<'a> {
     /// Which constructor wrote it is not recorded: the value is the whole of
     /// what a field means, and its own type says which shape it took.
     pub fn value(&self) -> sdf::Value {
-        match self.value {
+        self.value.to_value()
+    }
+}
+
+impl FieldValue<'_> {
+    /// The value this spelling stands for.
+    fn to_value(self) -> sdf::Value {
+        match self {
             FieldValue::Str(text) => sdf::Value::String(text.to_owned()),
             FieldValue::Strings(texts) => sdf::Value::StringVec(texts.iter().map(|text| (*text).to_owned()).collect()),
             FieldValue::Token(token) => sdf::Value::token(token),

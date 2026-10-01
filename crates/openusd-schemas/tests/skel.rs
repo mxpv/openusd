@@ -9,8 +9,9 @@ use openusd::sdf::{self, Value};
 use openusd::usd::{PrimPredicate, SchemaBase, Stage};
 use openusd_schemas::geom::BoundableSchema;
 use openusd_schemas::skel::{
-    AnimMapper, Animation, BindingAPI, BlendShape, InfluenceInterpolation, NO_PARENT, Root, SkelAnimQuery, Skeleton,
-    SkeletonResolver, SkeletonSchema, SkinningMethod, SkinningResolver, Topology, discover_bindings,
+    AnimMapper, Animation, BindingAPI, BlendShape, BlendShapeSchema, InfluenceInterpolation, NO_PARENT, Root,
+    SkelAnimQuery, Skeleton, SkeletonResolver, SkeletonSchema, SkinningMethod, SkinningResolver, Topology,
+    discover_bindings,
 };
 
 const FIXTURE: &str = "fixtures/usdSkel_scene.usda";
@@ -71,10 +72,10 @@ fn reads_skel_root_extent() -> Result<()> {
 fn reads_skeleton_joints_and_transforms() -> Result<()> {
     let stage = open()?;
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.expect("Skeleton");
-    assert_eq!(skl.joints()?, vec!["Root", "Root/Hip", "Root/Hip/Knee"]);
-    let bind = skl.bind_transforms()?;
+    assert_eq!(skl.joint_paths()?, vec!["Root", "Root/Hip", "Root/Hip/Knee"]);
+    let bind = skl.bind_transforms()?.expect("authored");
     assert_eq!(bind.len(), 3);
-    assert_eq!(skl.rest_transforms()?.len(), 3);
+    assert_eq!(skl.rest_transforms()?.expect("authored").len(), 3);
 
     // bindTransforms world-space: Hip is at (0, 1, 0), Knee at (0, 2, 0).
     assert_eq!(bind[1].0[12..16], [0.0, 1.0, 0.0, 1.0]);
@@ -92,7 +93,10 @@ fn maps_anim_joints_to_skeleton_indices() -> Result<()> {
     let stage = open()?;
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
     let anim = Animation::get(&stage, "/World/Character/Anim")?.unwrap();
-    assert_eq!(skl.map_anim_joints(&anim.joints()?)?, vec![Some(0), Some(1), Some(2)]);
+    assert_eq!(
+        skl.map_anim_joints(&anim.joint_paths()?)?,
+        vec![Some(0), Some(1), Some(2)]
+    );
     Ok(())
 }
 
@@ -102,10 +106,10 @@ fn reads_blend_shape_with_inbetween() -> Result<()> {
     let bs = BlendShape::get(&stage, "/World/Character/Smile")?.expect("BlendShape");
     assert_eq!(
         bs.offsets()?,
-        vec![Vec3f { x: 0.0, y: 0.1, z: 0.0 }, Vec3f { x: 0.0, y: 0.1, z: 0.0 }]
+        Some(vec![Vec3f { x: 0.0, y: 0.1, z: 0.0 }, Vec3f { x: 0.0, y: 0.1, z: 0.0 }])
     );
-    assert_eq!(bs.normal_offsets()?.len(), 2);
-    assert_eq!(bs.point_indices()?, vec![0, 1]);
+    assert_eq!(bs.normal_offsets()?.map(|offsets| offsets.len()), Some(2));
+    assert_eq!(bs.point_indices()?, Some(vec![0, 1]));
 
     let inbetweens = bs.inbetweens()?;
     assert_eq!(inbetweens.len(), 1);
@@ -141,14 +145,14 @@ fn reads_skel_binding_on_mesh() -> Result<()> {
     assert!(bind.animation_source()?.is_none());
 
     assert_eq!(bind.joint_subset()?, vec!["Root/Hip", "Root/Hip/Knee"]);
-    assert_eq!(bind.joint_indices()?, vec![0, 0, 1, 1]);
-    assert_eq!(bind.joint_weights()?, vec![1.0, 1.0, 1.0, 1.0]);
+    assert_eq!(bind.joint_indices()?, Some(vec![0, 0, 1, 1]));
+    assert_eq!(bind.joint_weights()?, Some(vec![1.0, 1.0, 1.0, 1.0]));
     assert_eq!(bind.elements_per_element()?, 1);
     assert_eq!(bind.interpolation()?, InfluenceInterpolation::Vertex);
-    assert_eq!(bind.blend_shapes()?, vec!["smile"]);
+    assert_eq!(bind.blend_shapes()?.expect("authored"), vec!["smile"]);
     assert_eq!(bind.blend_shape_targets()?, vec![sdf::path("/World/Character/Smile")?]);
     assert!(bind.geom_bind_transform()?.is_some());
-    assert_eq!(bind.skinning_method()?, SkinningMethod::ClassicLinear);
+    assert_eq!(bind.skinning_method()?, Some(SkinningMethod::ClassicLinear));
     Ok(())
 }
 
@@ -221,7 +225,7 @@ fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<()> {
     let stage = open()?;
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
     let binding = BindingAPI::get(&stage, "/World/Character/Body")?.unwrap();
-    let resolver = SkinningResolver::from_binding(&binding, &skl.joints()?)?;
+    let resolver = SkinningResolver::from_binding(&binding, &skl.joint_paths()?)?;
 
     assert!(!resolver.is_rigidly_deformed());
     assert!(resolver.has_joint_influences());
@@ -244,7 +248,7 @@ fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(
     let stage = open()?;
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
     let binding = BindingAPI::get(&stage, "/World/Character/Body")?.unwrap();
-    let resolver = SkinningResolver::from_binding(&binding, &skl.joints()?)?;
+    let resolver = SkinningResolver::from_binding(&binding, &skl.joint_paths()?)?;
 
     let pts = [
         Vec3f {
@@ -435,7 +439,7 @@ fn skeleton_roundtrip_and_topology() -> Result<()> {
     ]))?;
 
     let skel = Skeleton::get(&stage, "/Rig")?.expect("Skeleton");
-    assert_eq!(skel.joints()?, vec!["Root", "Root/Hip", "Root/Hip/Knee"]);
+    assert_eq!(skel.joint_paths()?, vec!["Root", "Root/Hip", "Root/Hip/Knee"]);
     assert_eq!(skel.joint_parent_indices()?, vec![None, Some(0), Some(1)]);
     assert_eq!(skel.joint_short_names()?, vec!["Root", "Hip", "Knee"]);
     assert_eq!(skel.map_anim_joints(&["Root/Hip".to_string()])?, vec![Some(1)]);

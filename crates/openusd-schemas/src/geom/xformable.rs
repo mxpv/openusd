@@ -50,12 +50,6 @@ pub enum XformOpPrecision {
 /// `self` and return it, so they chain
 /// (`xform.set_translate(t)?.set_rotate_y(d)?`).
 pub trait XformableExt: XformableSchema {
-    /// The composed `xformOpOrder` tokens, empty when neither a layer nor the
-    /// schema supplies one (C++ `GetXformOpOrderAttr().Get`).
-    fn xform_op_order(&self) -> Result<Vec<tf::Token>> {
-        Ok(self.xform_op_order_attr().get::<Vec<tf::Token>>()?.unwrap_or_default())
-    }
-
     /// The ops that make up the local transform, outermost first, and whether
     /// the stack resets its parent's transform (C++ `GetOrderedXformOps`).
     ///
@@ -65,7 +59,7 @@ pub trait XformableExt: XformableSchema {
         let prim = self.prim();
         let mut ops = Vec::new();
         let mut resets = false;
-        for entry in self.xform_op_order()? {
+        for entry in self.xform_op_order()?.unwrap_or_default() {
             if entry == TOKEN_RESET_XFORM_STACK {
                 resets = true;
                 ops.clear();
@@ -88,8 +82,7 @@ pub trait XformableExt: XformableSchema {
     fn resets_xform_stack(&self) -> Result<bool> {
         Ok(self
             .xform_op_order()?
-            .iter()
-            .any(|entry| entry == TOKEN_RESET_XFORM_STACK))
+            .is_some_and(|order| order.iter().any(|entry| entry == TOKEN_RESET_XFORM_STACK)))
     }
 
     /// Compose the stack into a single local-to-parent 4×4 matrix at `time`,
@@ -136,7 +129,7 @@ pub trait XformableExt: XformableSchema {
 
     /// Author `xformOp:<op>` at `precision` and append it to the stack (C++
     /// `UsdGeomXformable::AddXformOp`). `op` is the op token, with or without
-    /// the `xformOp:` prefix that [`xform_op_order`](Self::xform_op_order)
+    /// the `xformOp:` prefix that [`xform_op_order`](XformableSchema::xform_op_order)
     /// hands back, and may carry a `:suffix` naming one instance of it
     /// (`"translate:pivot"`), which the per-op setters below have no
     /// spelling for.
@@ -422,6 +415,7 @@ fn append_op(prim: &usd::Prim, op: &str) -> Result<()> {
 mod tests {
     use super::{XformOpPrecision, XformQuery, XformableExt};
     use crate::SchemaError;
+    use crate::geom::XformableSchema;
     use crate::geom::{Xform, XformOp};
     use openusd::Result;
     use openusd::gf;
@@ -500,7 +494,7 @@ mod tests {
             stage.attribute("/X.xformOp:translate:pivot")?.type_name()?,
             Some(sdf::ValueTypeName::FLOAT3)
         );
-        assert_eq!(x.xform_op_order()?, vec!["xformOp:translate:pivot"]);
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate:pivot"]);
         Ok(())
     }
 
@@ -519,11 +513,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{op} was accepted"));
             assert!(matches!(error, SchemaError::UnknownXformOp { .. }), "{op}: {error:?}");
         }
-        assert_eq!(
-            x.xform_op_order()?,
-            Vec::<openusd::tf::Token>::new(),
-            "nothing was appended to the stack"
-        );
+        assert_eq!(x.xform_op_order()?, None, "nothing was appended to the stack");
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:bogusOp", sdf::FieldKey::Default)?,
             None,
@@ -561,7 +551,7 @@ mod tests {
             None,
             "no value was authored"
         );
-        assert_eq!(x.xform_op_order()?, Vec::<openusd::tf::Token>::new());
+        assert_eq!(x.xform_op_order()?, None);
         Ok(())
     }
 
@@ -585,7 +575,7 @@ mod tests {
             None,
             "no declaration was left behind"
         );
-        assert_eq!(x.xform_op_order()?, Vec::<openusd::tf::Token>::new());
+        assert_eq!(x.xform_op_order()?, None);
 
         // So the op takes the precision the next write asks for.
         x.set_xform_op("scale", XformOpPrecision::Double, gf::vec3f(2.0, 2.0, 2.0))?;
@@ -606,7 +596,7 @@ mod tests {
             XformOpPrecision::Double,
             gf::vec3d(1.0, 2.0, 3.0),
         )?;
-        assert_eq!(x.xform_op_order()?, vec!["xformOp:translate"]);
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
             Some(sdf::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
@@ -618,7 +608,7 @@ mod tests {
     fn translate_appears_in_order() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let x = Xform::define(&stage, "/X")?.set_translate(gf::vec3d(1.0, 2.0, 3.0))?;
-        assert_eq!(x.xform_op_order()?, vec!["xformOp:translate"]);
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
             Some(sdf::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
@@ -634,7 +624,7 @@ mod tests {
             .set_rotate_y(90.0)?
             .set_scale(gf::vec3f(2.0, 2.0, 2.0))?;
         assert_eq!(
-            x.xform_op_order()?,
+            x.xform_op_order()?.expect("authored"),
             vec!["xformOp:translate", "xformOp:rotateY", "xformOp:scale"]
         );
         Ok(())
@@ -657,7 +647,7 @@ mod tests {
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(1.0, 0.0, 0.0))?
             .set_translate(gf::vec3d(2.0, 0.0, 0.0))?;
-        assert_eq!(x.xform_op_order()?, vec!["xformOp:translate"]);
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
         Ok(())
     }
 
@@ -719,7 +709,7 @@ mod tests {
             .set_xform_op("rotateXYZ:first", XformOpPrecision::Float, gf::vec3f(10.0, 20.0, 30.0))?
             .set_xform_op("rotateZYX:last", XformOpPrecision::Float, gf::vec3f(30.0, 60.0, 45.0))?;
         let mut order = Vec::new();
-        for op in x.xform_op_order()? {
+        for op in x.xform_op_order()?.unwrap_or_default() {
             order.push(op.to_string());
             order.push(format!("!invert!{op}"));
         }
@@ -917,7 +907,10 @@ class PivotXform "PivotXform"
             .set(gf::vec3d(1.0, 2.0, 3.0))?;
 
         let x = crate::geom::Xformable::get(&stage, "/P")?.expect("a PivotXform is Xformable");
-        assert_eq!(x.xform_op_order()?, vec!["!resetXformStack!", "xformOp:translate"]);
+        assert_eq!(
+            x.xform_op_order()?.expect("authored"),
+            vec!["!resetXformStack!", "xformOp:translate"]
+        );
         assert!(x.resets_xform_stack()?);
         assert_eq!(x.ordered_xform_ops()?.0.len(), 1);
         assert_eq!(

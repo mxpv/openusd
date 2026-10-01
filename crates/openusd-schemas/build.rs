@@ -7,7 +7,7 @@
 //! all.
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 include!("families.rs");
 
@@ -18,7 +18,16 @@ fn main() {
     for &(family, library) in FAMILIES {
         if env::var_os(format!("CARGO_FEATURE_{}", family.to_uppercase())).is_some() {
             builder = builder.schema(schemas.join(library).join("schema.usda"));
+            if let Some(plug_info) = plug_info(schemas, library) {
+                builder = builder.plug_info(plug_info);
+            }
         }
+    }
+
+    // The shader nodes `usdShaders` defines are shading's own vocabulary, and
+    // their views wrap `usdShade`'s `Shader`.
+    if env::var_os("CARGO_FEATURE_SHADE").is_some() {
+        builder = builder.shader_defs("usdShaders", schemas.join("usdShaders").join("shaderDefs.usda"));
     }
 
     if let Err(error) = builder.generate() {

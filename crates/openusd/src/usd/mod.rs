@@ -47,10 +47,12 @@ pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
 pub use relationship::{Relationship, RelationshipBuilder};
 pub use resolve_info::{ResolveInfo, ResolveInfoSource};
 pub use schema::{APISchemaBase, SchemaBase, SchemaKind, Typed};
-pub use schema_decl::{Field, InstanceRestriction, PropertyDecl, SchemaDecl, SchemaFamily};
+pub use schema_decl::{
+    Field, InstanceRestriction, MetadataDecl, MetadataTargets, PropertyDecl, SchemaDecl, SchemaFamily,
+};
 pub use schema_registry::{
-    ApplyApiError, FamilySource, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError, Schematics,
-    VersionFilter,
+    ApplyApiError, FamilySource, MetadataField, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError,
+    Schematics, VersionFilter,
 };
 pub use sink::{CommittedChange, PendingChange, Provenance, StageSink, StageSinkId};
 pub use stage::{

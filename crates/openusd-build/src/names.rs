@@ -157,6 +157,26 @@ pub fn token_id(name: &str, literal_identifiers: bool) -> String {
     id
 }
 
+/// A name as a method with nothing after it: [`snake_case`], with a trailing
+/// underscore where that spells one of Rust's keywords, as [`token_id`] escapes
+/// a reserved word. A property `type` is read by `type_()`.
+pub fn method_name(name: &str) -> String {
+    let mut method = snake_case(name);
+    if KEYWORDS.contains(&method.as_str()) {
+        method.push('_');
+    }
+    method
+}
+
+/// Rust's keywords, strict and reserved, in every edition: a method cannot be
+/// called any of them.
+const KEYWORDS: &[&str] = &[
+    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate", "do", "dyn", "else",
+    "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "macro", "match", "mod",
+    "move", "mut", "override", "priv", "pub", "ref", "return", "self", "static", "struct", "super", "trait", "true",
+    "try", "type", "typeof", "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
+];
+
 /// A name made into a token identifier (C++ `_MakeValidToken`).
 ///
 /// A leading digit takes an underscore rather than losing the digit, which is
@@ -271,9 +291,9 @@ pub fn screaming_snake(id: &str) -> String {
 /// (`drawMode`), or at one that opens a word inside a run of them
 /// (`NDCWindow`). An underscore already in the name is a break, and never
 /// doubles, so `default_` stays one word.
-// TODO: a method name minted here is not checked against Rust's keywords. The
-// emitter suffixes every accessor (`_attr`, `_rel`), which keeps its output
-// clear of them; a bare method name would need the escape `token_id` applies.
+///
+/// A name used as a method on its own, with no suffix to keep it clear of
+/// Rust's keywords, goes through [`method_name`].
 pub fn snake_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);
     let mut previous: Option<char> = None;

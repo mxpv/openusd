@@ -35,8 +35,8 @@ use quote::quote;
 use super::{ident, items};
 
 use super::lower::{
-    AccessorTrait, Constant, Instancing, PropertyKind, Reflected, RustAccessor, RustClass, RustEnum, RustLibrary,
-    kind_constant, schema_root,
+    AccessorTrait, Constant, Instancing, MetadataAccessor, MetadataTrait, PropertyKind, Reflected, RustAccessor,
+    RustClass, RustEnum, RustLibrary, TypedRead, kind_constant, schema_root,
 };
 use crate::doc;
 
@@ -44,18 +44,7 @@ use crate::doc;
 /// registers them, and a trait and a view per schema.
 pub fn library(library: &RustLibrary, declarations: &TokenStream) -> TokenStream {
     let name = library.library.as_str();
-    let constants = library.tokens.iter().map(|constant| {
-        let Constant {
-            name,
-            value,
-            documentation,
-        } = constant;
-        let documentation = documentation.lines().map(|line| format!(" {line}"));
-        quote! {
-            #(#[doc = #documentation])*
-            pub const #name: &str = #value;
-        }
-    });
+    let tokens = tokens_module(&library.tokens);
     let classes = library.classes.iter().map(|class| {
         let accessors = accessor_trait(class);
         let view = view(class);
@@ -66,19 +55,12 @@ pub fn library(library: &RustLibrary, declarations: &TokenStream) -> TokenStream
     });
 
     let enums = library.enums.iter().map(token_enum);
+    let metadata = library.metadata.iter().map(metadata_trait);
 
-    let tokens = ident(items::TOKENS);
     let library_name = ident(items::LIBRARY_NAME);
 
     quote! {
-        /// The strings these schemas name things by.
-        ///
-        /// A token's value is what a stage actually reads; the constant is a
-        /// name for it, so an application can say what it means instead of
-        /// retyping a string.
-        pub mod #tokens {
-            #(#constants)*
-        }
+        #tokens
 
         #(#enums)*
 
@@ -87,6 +69,119 @@ pub fn library(library: &RustLibrary, declarations: &TokenStream) -> TokenStream
 
         #declarations
         #(#classes)*
+        #(#metadata)*
+    }
+}
+
+/// The module holding a library's token constants.
+pub(super) fn tokens_module(constants: &[Constant]) -> TokenStream {
+    let constants = constants.iter().map(|constant| {
+        let Constant {
+            name,
+            value,
+            documentation,
+        } = constant;
+        let documentation = super::doc_lines(documentation);
+        quote! {
+            #(#[doc = #documentation])*
+            pub const #name: &str = #value;
+        }
+    });
+    let tokens = ident(items::TOKENS);
+    quote! {
+        /// The strings this library names things by.
+        ///
+        /// A token's value is what a stage actually reads; the constant is a
+        /// name for it, so an application can say what it means instead of
+        /// retyping a string.
+        pub mod #tokens {
+            #(#constants)*
+        }
+    }
+}
+
+/// One metadata trait and its implementation.
+///
+/// A field's reader and writer are the handle's own generic metadata calls,
+/// named for the field and typed as it is declared, so a caller neither
+/// spells the key nor restates the type. A stage reads its layers' metadata,
+/// with the field's registered default behind them.
+fn metadata_trait(generated: &MetadataTrait) -> TokenStream {
+    let MetadataTrait {
+        name,
+        documentation,
+        handle,
+        stage,
+        fields,
+    } = generated;
+    let documentation = super::doc_lines(documentation);
+
+    let (declarations, bodies): (Vec<TokenStream>, Vec<TokenStream>) = fields
+        .iter()
+        .map(|field| {
+            let MetadataAccessor {
+                getter,
+                setter,
+                token,
+                rust_type,
+                documentation,
+            } = field;
+            let documentation = super::doc_lines(documentation);
+            let read = quote! { fn #getter(&self) -> ::openusd::Result<::std::option::Option<#rust_type>> };
+            let write: Vec<TokenStream> = setter
+                .iter()
+                .map(|setter| {
+                    quote! {
+                        fn #setter(self, value: #rust_type) -> ::std::result::Result<Self, ::openusd::usd::StageAuthoringError>
+                    }
+                })
+                .collect();
+            let declaration = quote! {
+                #(#[doc = #documentation])*
+                #read;
+
+                #(
+                    /// Authors the field on the edit target, and returns the
+                    /// handle.
+                    #write
+                    where
+                        Self: ::std::marker::Sized;
+                )*
+            };
+            let reads = if *stage {
+                quote! {
+                    self.stage_metadata(#token)?
+                        .map(<#rust_type as ::std::convert::TryFrom<::openusd::sdf::Value>>::try_from)
+                        .transpose()
+                        .map_err(::std::convert::Into::into)
+                }
+            } else {
+                quote! { self.get_metadata::<#rust_type>(#token) }
+            };
+            let body = quote! {
+                #read {
+                    #reads
+                }
+
+                #(
+                    #write {
+                        self.set_metadata(#token, value)
+                    }
+                )*
+            };
+            (declaration, body)
+        })
+        .unzip();
+
+    quote! {
+        #(#[doc = #documentation])*
+        pub trait #name {
+            #(#declarations)*
+        }
+
+        impl #name for #handle {
+            #(#bodies)*
+        }
     }
 }
 
@@ -102,8 +197,9 @@ fn token_enum(generated: &RustEnum) -> TokenStream {
         documentation,
         variants,
         default,
+        ..
     } = generated;
-    let documentation = documentation.lines().map(|line| format!(" {line}"));
+    let documentation = super::doc_lines(documentation);
 
     let declared = variants.iter().map(|variant| {
         let name = &variant.name;
@@ -284,7 +380,7 @@ fn reflected_method(reflected: &Reflected, inherent: bool) -> TokenStream {
         "Views the prim through {}, whose properties this schema carries.",
         linked(view)
     ));
-    let documentation = documentation.lines().map(|line| format!(" {line}"));
+    let documentation = super::doc_lines(&documentation);
     let (visibility, prim) = reach(inherent);
 
     quote! {
@@ -685,7 +781,7 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
             quote! { ::openusd::usd::RelationshipBuilder<'static> },
             quote! { #prim.relationship_builder(#token) #custom },
         ),
-        PropertyKind::Attribute { type_constant } => (
+        PropertyKind::Attribute { type_constant, .. } => (
             quote! { ::openusd::usd::Attribute },
             quote! { attribute },
             quote! { ::openusd::usd::AttributeBuilder<'static> },
@@ -693,7 +789,7 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
         ),
     };
 
-    let documentation = documentation.lines().map(|line| format!(" {line}"));
+    let documentation = super::doc_lines(documentation);
     let read = if accessor.custom_get {
         TokenStream::new()
     } else {
@@ -705,8 +801,40 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
         }
     };
 
+    // The typed reads decode the value as the type the property is declared
+    // with, so a caller does not restate it; the attribute stays one call away
+    // for a read of any other type.
+    let typed = accessor.typed.as_ref().map(|TypedRead { value, value_at, ty }| {
+        let at = value_at.as_ref().map(|value_at| {
+            quote! {
+                /// The property's value at `time`, where `None` is the
+                /// default time, as the type it is declared with: what a
+                /// layer authors there, else the fallback the schema
+                /// declares.
+                #visibility fn #value_at(
+                    &self,
+                    time: impl ::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,
+                ) -> ::openusd::Result<::std::option::Option<#ty>> {
+                    self.#getter().get_at::<#ty>(time)
+                }
+            }
+        });
+        quote! {
+            /// The property's value at the default time, as the type it is
+            /// declared with: what a layer authors, else the fallback the
+            /// schema declares.
+            #visibility fn #value(&self) -> ::openusd::Result<::std::option::Option<#ty>> {
+                self.#getter().get::<#ty>()
+            }
+
+            #at
+        }
+    });
+
     quote! {
         #read
+
+        #typed
 
         /// The property's declaration, unauthored. Give it a value and
         /// `build` it to author both as one edit; `build` it alone for the

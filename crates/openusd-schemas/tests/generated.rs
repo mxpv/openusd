@@ -115,7 +115,11 @@ fn tables_match_their_schemas() {
 
     for compiled in openusd_schemas::ALL {
         let library = compiled.name();
-        let output = configured(&schemas())
+        let mut builder = configured(&schemas());
+        if let Some(plug_info) = plug_info(&schemas(), library) {
+            builder = builder.plug_info(plug_info);
+        }
+        let output = builder
             .build_library(schemas().join(library).join("schema.usda"), openusd_build::Views::Skip)
             .unwrap_or_else(|error| panic!("{library}: {error}"));
 
@@ -148,6 +152,24 @@ fn tables_match_their_schemas() {
             described(&from_tables, identifier),
             described(&from_source, identifier),
             "{identifier} differs"
+        );
+    }
+}
+
+/// Every metadata field a family registers is one the layer readers already
+/// know, with the same type: they register fields from a table of their own,
+/// before any registry exists, so a field missing there would read as text a
+/// family's accessor could never decode.
+#[test]
+fn metadata_fields_known_to_readers() {
+    for field in openusd_schemas::schema_registry().metadata_fields() {
+        let known = sdf::schema_field_type(field.name().as_str())
+            .unwrap_or_else(|| panic!("{} is not in the core field table", field.name()));
+        assert_eq!(
+            &known,
+            field.type_name(),
+            "{} is declared with another type",
+            field.name()
         );
     }
 }

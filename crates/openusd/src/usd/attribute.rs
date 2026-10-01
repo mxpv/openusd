@@ -639,7 +639,9 @@ impl Attribute {
     /// [`type_name`](Self::type_name), [`role`](Self::role) and the value
     /// checks; it never feeds spec creation.
     fn declared_type_token(&self) -> Result<Option<tf::Token>, pcp::QueryError> {
-        if let Some(declared) = self.definition_field(sdf::FieldKey::TypeName)? {
+        if let Some(declared) =
+            authoring::schema_property_field(&self.stage, &self.path, sdf::FieldKey::TypeName.as_str())?
+        {
             return Ok(declared.try_as_token());
         }
         Ok(self
@@ -783,23 +785,6 @@ impl Attribute {
             return Ok(Some(value));
         }
         Ok(Some(self.stage.resolve_schema_asset(property.fallback_source(), value)))
-    }
-
-    /// Reads one field from the schema declaration of this attribute, if a
-    /// schema declares it (C++ `UsdStage::_GetSchemaAttribute`).
-    ///
-    /// This is the metadata counterpart of
-    /// [`fallback_value`](Self::fallback_value): everything a schema states
-    /// about a property — its type, its variability, its display metadata —
-    /// lives on the same declaration, whether or not any layer authors a spec.
-    fn definition_field(&self, field: impl AsRef<str>) -> Result<Option<sdf::Value>, pcp::QueryError> {
-        let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
-            return Ok(None);
-        };
-        let Some(property) = info.prim_definition().property(&name) else {
-            return Ok(None);
-        };
-        Ok(property.field(field).cloned())
     }
 
     /// Whether the declaring schema supplies a value to fall back on.
@@ -961,7 +946,7 @@ impl Attribute {
         }
         // Schema metadata parses untyped, so a declaration may hold a variant
         // the caller did not ask for; that is "not declared", not an error.
-        Ok(self.definition_field(key)?.and_then(|value| T::try_from(value).ok()))
+        Ok(authoring::schema_property_field(&self.stage, &self.path, key)?.and_then(|value| T::try_from(value).ok()))
     }
 
     /// The value of a field whose resolution is not plain composition, or

@@ -37,9 +37,9 @@
 //! node.create_pos_attr().unwrap().set(gf::vec2f(12.0, 34.0)).unwrap();
 //! node.create_expansion_state_attr().unwrap().set(ExpansionState::Minimized).unwrap();
 //!
-//! assert_eq!(node.pos_attr().get::<gf::Vec2f>().unwrap(), Some(gf::vec2f(12.0, 34.0)));
+//! assert_eq!(node.pos().unwrap(), Some(gf::vec2f(12.0, 34.0)));
 //! assert_eq!(
-//!     node.expansion_state_attr().get::<ExpansionState>().unwrap(),
+//!     node.expansion_state().unwrap(),
 //!     Some(ExpansionState::Minimized),
 //! );
 //! ```

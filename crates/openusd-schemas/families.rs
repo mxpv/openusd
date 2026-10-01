@@ -6,7 +6,8 @@
 // configures the generator has to be the same on both sides — a test
 // comparing against a differently-configured generator would be comparing the
 // wrong thing — and one copy is how that is guaranteed. Both includers carry
-// `use std::path::Path`, which is what `configured` names its argument by.
+// `use std::path::{Path, PathBuf}`, which is what the functions below name
+// their arguments and results by.
 
 /// Each family as the Cargo feature that enables it and the library its
 /// definitions declare.
@@ -29,6 +30,13 @@ const FAMILIES: &[(&str, &str)] = &[
     ("ui", "usdUI"),
     ("vol", "usdVol"),
 ];
+
+/// The `plugInfo.json` vendored beside `library`'s definitions, which declares
+/// the metadata fields it registers. Only the families upstream declares
+/// fields for vendor one.
+fn plug_info(schemas: &Path, library: &str) -> Option<PathBuf> {
+    Some(schemas.join(library).join("plugInfo.json")).filter(|path| path.exists())
+}
 
 /// A generator that resolves every family, whether or not this build generates
 /// it, with `schemas` as the directory their sublayers resolve through.

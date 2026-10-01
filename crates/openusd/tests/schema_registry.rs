@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use openusd::usd::{
-    FamilySource, Field, PropertyDecl, SchemaDecl, SchemaFamily, SchemaKind, SchemaRegistry, SchemaRegistryBuilder,
-    SchemaRegistryError,
+    FamilySource, Field, MetadataDecl, MetadataTargets, PropertyDecl, SchemaDecl, SchemaFamily, SchemaKind,
+    SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError,
 };
 use openusd::{sdf, tf};
 
@@ -48,6 +48,84 @@ def "Widget"
     assert!(registry.schema_info(&tf::Token::new("CollectionAPI")).is_some());
     assert!(registry.is_a(&tf::Token::new("Widget"), &tf::Token::new("Typed")));
     assert!(registry.is_a(&tf::Token::new("Widget"), &tf::Token::new("SchemaBase")));
+}
+
+/// A family's metadata fields register with it, each with its type, the specs
+/// it applies to and the fallback a stage reads.
+#[test]
+fn metadata_fields_registered() {
+    static FIELDS: &SchemaFamily<'_> = &SchemaFamily::new("fields", &[]).metadata(&[
+        MetadataDecl::new("role", "token")
+            .applies_to(MetadataTargets::ATTRIBUTES)
+            .fallback(|| sdf::Value::token("plain")),
+        MetadataDecl::new("hints", "dictionary"),
+    ]);
+    let registry = SchemaRegistry::builder().register(FIELDS).build().expect("registers");
+
+    let role = registry.metadata_field(&tf::Token::new("role")).expect("registered");
+    assert_eq!(role.type_name(), &sdf::ValueTypeName::TOKEN);
+    assert_eq!(role.applies_to(), MetadataTargets::ATTRIBUTES);
+    assert_eq!(role.fallback(), Some(&sdf::Value::token("plain")));
+    assert_eq!(role.family().as_str(), "fields");
+
+    let hints = registry.metadata_field(&tf::Token::new("hints")).expect("registered");
+    assert_eq!(
+        hints.applies_to(),
+        MetadataTargets::all(),
+        "no targets named is every spec"
+    );
+    assert_eq!(hints.fallback(), None);
+    assert_eq!(registry.metadata_fields().count(), 2);
+}
+
+/// A stage reads a registered field's fallback as its own metadata where no
+/// layer authors the field, as C++ falls back to `SdfSchema::GetFallback`.
+#[test]
+fn stage_metadata_falls_back() {
+    static FIELDS: &SchemaFamily<'_> = &SchemaFamily::new("units", &[]).metadata(&[
+        MetadataDecl::new("unitsPerMeter", "double")
+            .applies_to(MetadataTargets::LAYERS)
+            .fallback(|| sdf::Value::Double(100.0)),
+        MetadataDecl::new("role", "token")
+            .applies_to(MetadataTargets::ATTRIBUTES)
+            .fallback(|| sdf::Value::token("plain")),
+    ]);
+    let registry = SchemaRegistry::builder().register(FIELDS).build().expect("registers");
+    let stage = openusd::usd::Stage::builder()
+        .schema_registry(registry)
+        .in_memory("anon.usda")
+        .expect("a stage");
+
+    assert_eq!(
+        stage.stage_metadata("unitsPerMeter").expect("reads"),
+        Some(sdf::Value::Double(100.0))
+    );
+    assert_eq!(stage.stage_metadata("unregistered").expect("reads"), None);
+    assert_eq!(
+        stage.stage_metadata("role").expect("reads"),
+        None,
+        "a field that does not apply to layers is no stage metadata"
+    );
+}
+
+/// Two families declaring one field is refused: which declaration would give
+/// its type and fallback would depend on registration order.
+#[test]
+fn duplicate_metadata_field_refused() {
+    static FIRST: &SchemaFamily<'_> = &SchemaFamily::new("first", &[]).metadata(&[MetadataDecl::new("role", "token")]);
+    static SECOND: &SchemaFamily<'_> =
+        &SchemaFamily::new("second", &[]).metadata(&[MetadataDecl::new("role", "string")]);
+
+    let error = SchemaRegistry::builder()
+        .register(FIRST)
+        .register(SECOND)
+        .build()
+        .expect_err("role is declared twice");
+    assert!(
+        matches!(&error, SchemaRegistryError::DuplicateMetadataField { field, first, second }
+            if field.as_str() == "role" && first.as_str() == "first" && second.as_str() == "second"),
+        "{error}"
+    );
 }
 
 /// Redeclaring one of the core schemas is the ordinary duplicate error, not a

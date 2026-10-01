@@ -36,7 +36,7 @@ use crate::sdf::AbstractData;
 use crate::{ar, pcp, sdf, tf};
 
 use super::prim_definition::{self, FamilyVersions};
-use super::schema_decl::{Field, PropertyKind, SchemaDecl, SchemaFamily};
+use super::schema_decl::{Field, MetadataTargets, PropertyKind, SchemaDecl, SchemaFamily};
 use super::{PrimDefinition, PrimTypeId, PrimTypeInfo, SchemaKind};
 
 /// The registered schemas of a process or a stage (C++ `UsdSchemaRegistry`).
@@ -74,6 +74,48 @@ pub struct SchemaRegistry {
     // TODO(perf): shard this if the single lock ever shows up under contention,
     // and reclaim entries — today they live as long as the registry does.
     type_infos: RwLock<HashMap<PrimTypeId, Arc<PrimTypeInfo>>>,
+    /// The metadata fields the registered families declare, by name.
+    metadata: HashMap<tf::Token, MetadataField>,
+}
+
+/// One metadata field a registered family declares (C++
+/// `SdfSchemaBase::FieldDefinition` for a plugin field).
+#[derive(Debug, Clone)]
+pub struct MetadataField {
+    name: tf::Token,
+    type_name: sdf::ValueTypeName,
+    applies_to: MetadataTargets,
+    fallback: Option<sdf::Value>,
+    family: tf::Token,
+}
+
+impl MetadataField {
+    /// The field's name, which is the key it is authored under.
+    pub fn name(&self) -> &tf::Token {
+        &self.name
+    }
+
+    /// The value type the field holds, as its declaration spells it. A
+    /// spelling the value-type table does not know — `dictionary`, the
+    /// list-op types — answers no [`kind`](sdf::ValueTypeName::kind).
+    pub fn type_name(&self) -> &sdf::ValueTypeName {
+        &self.type_name
+    }
+
+    /// The specs the field may be authored on.
+    pub fn applies_to(&self) -> MetadataTargets {
+        self.applies_to
+    }
+
+    /// What a stage reads for the field where no layer authors it.
+    pub fn fallback(&self) -> Option<&sdf::Value> {
+        self.fallback.as_ref()
+    }
+
+    /// The family that declared it.
+    pub fn family(&self) -> &tf::Token {
+        &self.family
+    }
 }
 
 /// What is known about one registered schema, independent of its properties
@@ -166,6 +208,8 @@ pub struct SchemaRegistryBuilder {
     /// Once set, later registrations are skipped so the error a caller sees is
     /// the one that started it.
     error: Option<SchemaRegistryError>,
+    /// The metadata fields declared so far, by name.
+    metadata: HashMap<tf::Token, MetadataField>,
 }
 
 /// Which versions of a schema family a query accepts (C++
@@ -253,6 +297,18 @@ pub enum SchemaRegistryError {
     DuplicateFamily {
         /// The repeated family.
         family: tf::Token,
+    },
+
+    /// Two families declare the same metadata field, so which declaration a
+    /// field's type and fallback come from would depend on registration order.
+    #[error("Metadata field {field} is declared by both {first} and {second}")]
+    DuplicateMetadataField {
+        /// The field declared twice.
+        field: tf::Token,
+        /// The family that declared it first.
+        first: tf::Token,
+        /// The family that declared it again.
+        second: tf::Token,
     },
 
     /// A declaration authors a field the registry derives from the declaration
@@ -422,6 +478,18 @@ impl SchemaRegistry {
     /// error; [`SchemaRegistryBuilder::empty`] starts from nothing instead.
     pub fn builder() -> SchemaRegistryBuilder {
         SchemaRegistryBuilder::default()
+    }
+
+    /// The metadata field `name` a registered family declares (C++
+    /// `SdfSchemaBase::GetFieldDefinition` for a plugin field).
+    pub fn metadata_field(&self, name: &tf::Token) -> Option<&MetadataField> {
+        self.metadata.get(name)
+    }
+
+    /// Every metadata field the registered families declare, in no particular
+    /// order.
+    pub fn metadata_fields(&self) -> impl Iterator<Item = &MetadataField> {
+        self.metadata.values()
     }
 
     /// Looks up a schema by identifier (C++ `FindSchemaInfo`).
@@ -1231,6 +1299,7 @@ impl SchemaRegistryBuilder {
             families: HashSet::new(),
             extra_auto_apply: HashMap::new(),
             error: None,
+            metadata: HashMap::new(),
         }
     }
 
@@ -1279,6 +1348,23 @@ impl SchemaRegistryBuilder {
             let identifier = tf::Token::from(decl.identifier);
             let info = schema_info(decl, &identifier);
             self.register_schema(identifier, info, &schematics)?;
+        }
+        for decl in family.metadata {
+            let field = MetadataField {
+                name: tf::Token::from(decl.name),
+                type_name: sdf::ValueTypeName::from(decl.type_name),
+                applies_to: decl.applies_to,
+                fallback: decl.declared_fallback(),
+                family: name.clone(),
+            };
+            if let Some(first) = self.metadata.get(&field.name) {
+                return Err(SchemaRegistryError::DuplicateMetadataField {
+                    field: field.name,
+                    first: first.family.clone(),
+                    second: name,
+                });
+            }
+            self.metadata.insert(field.name.clone(), field);
         }
         Ok(())
     }
@@ -1505,6 +1591,7 @@ impl SchemaRegistryBuilder {
                 empty_def,
             )),
             type_infos: RwLock::default(),
+            metadata: self.metadata,
         }))
     }
 

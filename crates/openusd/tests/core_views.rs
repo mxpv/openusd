@@ -34,7 +34,7 @@ fn color_space_applies() {
         "/World.colorSpace:name"
     );
     assert_eq!(
-        found.color_space_name_attr().get::<tf::Token>().expect("a read"),
+        found.color_space_name().expect("a read"),
         Some(tf::Token::from("lin_rec709_scene"))
     );
 }
@@ -59,7 +59,7 @@ fn color_space_definition_instances() {
     let found = ColorSpaceDefinitionAPI::get_instance(&prim, "custom")
         .expect("a read")
         .expect("applied");
-    assert_eq!(found.gamma_attr().get::<f32>().expect("a read"), Some(2.2));
+    assert_eq!(found.gamma().expect("a read"), Some(2.2));
 
     let mut names: Vec<String> = ColorSpaceDefinitionAPI::get_all(&prim)
         .expect("a read")

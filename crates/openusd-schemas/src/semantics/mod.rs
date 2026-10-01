@@ -32,7 +32,7 @@
 //! category.create_labels_attr().unwrap().set(vec![tf::Token::new("furniture")]).unwrap();
 //!
 //! assert_eq!(
-//!     category.labels_attr().get::<Vec<tf::Token>>().unwrap(),
+//!     category.labels().unwrap(),
 //!     Some(vec![tf::Token::new("furniture")]),
 //! );
 //! ```

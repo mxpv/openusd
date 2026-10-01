@@ -35,8 +35,6 @@ pub struct Source {
     pub skip_code_generation: bool,
     /// Every class any layer declares, in root-layer declaration order first.
     pub declarations: Vec<Declaration>,
-    /// Where every layer read was found, for a build script to watch.
-    pub source_layers: Vec<PathBuf>,
     /// The `libraryTokens` the root layer's `/GLOBAL` declares.
     pub tokens: Vec<DeclaredToken>,
 }
@@ -89,13 +87,15 @@ pub struct PropertyDeclaration {
     pub origin: Origin,
 }
 
-/// Opens `schema` and reads every declaration its layers carry.
+/// Opens the layer at `path` as a stage, its sublayers resolving through the
+/// builder's search paths, and reports the first diagnostic composing it
+/// raised.
 ///
 /// The stage is built on a registry that knows nothing, so a class prim named
 /// `Sphere` cannot pick up built-ins from a registry that already knows
 /// `Sphere` — what C++ reaches for `USD_DISABLE_PRIM_DEFINITIONS_FOR_USDGENSCHEMA`
 /// to get.
-pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
+pub fn open_stage(builder: &Builder, path: &Path) -> Result<usd::Stage, Error> {
     let resolver = ar::DefaultResolver::with_search_paths(builder.search_paths.clone());
     let registry = usd::SchemaRegistryBuilder::empty()
         .build()
@@ -104,26 +104,44 @@ pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
     let stage = usd::Stage::builder()
         .resolver(resolver)
         .schema_registry(registry)
-        .open(&schema.to_string_lossy())?;
+        .open(&path.to_string_lossy())?;
 
-    if let Some(error) = Error::composition(schema, &stage) {
-        return Err(error);
+    match Error::composition(path, &stage) {
+        Some(error) => Err(error),
+        None => Ok(stage),
     }
+}
+
+/// Where every layer `stage` has loaded was found, root first: what a build
+/// script watches so an edit to any of them regenerates.
+///
+/// A layer across a reference or payload loads when a prim reaching it is
+/// composed, so this is asked once the reader has composed what it reads. A
+/// layer reached through a search path is watched where it was found, not by
+/// the relative path it was asked for by. An anonymous layer was read from
+/// nowhere and so is watched nowhere.
+pub fn watched_layers(stage: &usd::Stage) -> Vec<PathBuf> {
+    let root = stage.root_layer().identifier.clone();
+    let identifiers = stage.layer_identifiers();
+    iter::once(&root)
+        .chain(identifiers.iter().filter(|id| **id != root))
+        .filter_map(|identifier| stage.layer(identifier)?.resolved_path().map(watched_path))
+        .collect()
+}
+
+/// Opens `schema` and reads every declaration its layers carry.
+pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
+    let stage = open_stage(builder, schema)?;
 
     let identifiers = stage.layer_stack();
     let root = stage.root_layer().identifier.clone();
 
     // The root layer first, so what this run generates leads the list.
     let mut globals = Vec::new();
-    let mut source_layers = Vec::new();
     for identifier in iter::once(&root).chain(identifiers.iter().filter(|id| **id != root)) {
         let Some(layer) = stage.layer(identifier) else {
             continue;
         };
-        // What a build script watches is where the layer was found, which for
-        // one reached through a search path is not what it was asked for by.
-        // An anonymous layer was read from nowhere and so is watched nowhere.
-        source_layers.extend(layer.resolved_path().map(watched_path));
         globals.push((identifier, read_global(&layer)));
     }
 
@@ -161,7 +179,6 @@ pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
         use_literal_identifiers,
         skip_code_generation,
         declarations,
-        source_layers,
         tokens,
     })
 }

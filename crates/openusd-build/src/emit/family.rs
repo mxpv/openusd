@@ -28,6 +28,12 @@ use crate::error::Error;
 /// `static` can hold because a non-capturing closure is a function pointer.
 pub(super) fn declarations(family: &usd::SchemaFamily<'_>) -> Result<TokenStream, Error> {
     let schemas = family.schemas().iter().map(schema).collect::<Result<Vec<_>, Error>>()?;
+    let metadata = family
+        .declared_metadata()
+        .iter()
+        .map(|decl| metadata(family.name(), decl))
+        .collect::<Result<Vec<_>, Error>>()?;
+    let metadata = (!metadata.is_empty()).then(|| quote! { .metadata(&[#(#metadata),*]) });
     let schemas_const = ident(items::SCHEMAS);
     let library_name = ident(items::LIBRARY_NAME);
 
@@ -41,7 +47,7 @@ pub(super) fn declarations(family: &usd::SchemaFamily<'_>) -> Result<TokenStream
         /// without it knows nothing about them, so the typed constructors
         /// answer `None`.
         pub const #schemas_const: &::openusd::usd::SchemaFamily<'static> =
-            &::openusd::usd::SchemaFamily::new(#library_name, &[#(#schemas),*]);
+            &::openusd::usd::SchemaFamily::new(#library_name, &[#(#schemas),*]) #metadata;
     })
 }
 
@@ -95,6 +101,41 @@ fn schema(decl: &usd::SchemaDecl<'_>) -> Result<TokenStream, Error> {
             #fallbacks
             #properties
             #fields
+    })
+}
+
+/// One metadata field the library registers.
+fn metadata(library: &str, decl: &usd::MetadataDecl<'_>) -> Result<TokenStream, Error> {
+    let name = decl.name();
+    let type_name = decl.declared_type_name();
+
+    // Every spec is what a declaration applies to until it says otherwise.
+    let targets = decl.declared_applies_to();
+    let applies_to = (targets != usd::MetadataTargets::all()).then(|| {
+        let flags = targets.iter_names().map(|(flag, _)| {
+            let flag = ident(flag);
+            quote! { ::openusd::usd::MetadataTargets::#flag }
+        });
+        let targets = flags
+            .reduce(|all, flag| quote! { #all.union(#flag) })
+            .unwrap_or_else(|| quote! { ::openusd::usd::MetadataTargets::empty() });
+        quote! { .applies_to(#targets) }
+    });
+
+    let fallback = match decl.declared_fallback() {
+        Some(value) => {
+            let built = value::value_expr(&value).map_err(|kind| Error::UnwritableValue {
+                schema: library.to_owned(),
+                field: name.to_owned(),
+                kind: kind.into(),
+            })?;
+            Some(quote! { .fallback(|| #built) })
+        }
+        None => None,
+    };
+
+    Ok(quote! {
+        ::openusd::usd::MetadataDecl::new(#name, #type_name) #applies_to #fallback
     })
 }
 

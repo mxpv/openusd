@@ -35,10 +35,10 @@ fn spatial_audio_from_fixture() -> Result<()> {
         Some(PlaybackMode::LoopFromStart)
     );
     // startTime / endTime are `timecode`-valued.
-    assert_eq!(a.start_time_attr().get::<sdf::TimeCode>()?, Some(sdf::TimeCode(24.0)));
-    assert_eq!(a.end_time_attr().get::<sdf::TimeCode>()?, Some(sdf::TimeCode(48.0)));
-    assert_eq!(a.media_offset_attr().get::<f64>()?, Some(2.5));
-    assert_eq!(a.gain_attr().get::<f64>()?, Some(0.5));
+    assert_eq!(a.start_time()?, Some(sdf::TimeCode(24.0)));
+    assert_eq!(a.end_time()?, Some(sdf::TimeCode(48.0)));
+    assert_eq!(a.media_offset()?, Some(2.5));
+    assert_eq!(a.gain()?, Some(0.5));
 
     // A non-SpatialAudio prim reads back as None.
     assert!(SpatialAudio::get(&stage, sdf::path("/World")?)?.is_none());

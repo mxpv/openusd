@@ -103,9 +103,9 @@ mod tests {
             a.file_path_attr().get::<sdf::Value>()?,
             Some(sdf::Value::AssetPath("./ambient.wav".into()))
         );
-        assert_eq!(a.start_time_attr().get::<sdf::TimeCode>()?, Some(sdf::TimeCode(24.0)));
-        assert_eq!(a.media_offset_attr().get::<f64>()?, Some(2.5));
-        assert_eq!(a.gain_attr().get::<f64>()?, Some(0.5));
+        assert_eq!(a.start_time()?, Some(sdf::TimeCode(24.0)));
+        assert_eq!(a.media_offset()?, Some(2.5));
+        assert_eq!(a.gain()?, Some(0.5));
         assert!(SpatialAudio::get(&stage, "/Missing")?.is_none());
         Ok(())
     }

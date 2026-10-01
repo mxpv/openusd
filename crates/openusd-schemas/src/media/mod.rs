@@ -46,7 +46,7 @@
 //!
 //! // Read it back through a typed view.
 //! let audio = SpatialAudio::get(&stage, "/World/Ambient").unwrap().expect("SpatialAudio");
-//! assert_eq!(audio.start_time_attr().get::<sdf::TimeCode>().unwrap(), Some(sdf::TimeCode(24.0)));
+//! assert_eq!(audio.start_time().unwrap(), Some(sdf::TimeCode(24.0)));
 //! let mode = audio
 //!     .aural_mode_attr()
 //!     .get::<sdf::Value>().unwrap()

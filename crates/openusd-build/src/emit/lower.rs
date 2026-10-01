@@ -18,7 +18,7 @@ use openusd::{sdf, tf, usd, usda};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 
-use crate::model::{API_SCHEMA_BASE, Base, Class, Library, Property, Reflection, TYPED, is_root};
+use crate::model::{API_SCHEMA_BASE, Base, Class, Library, Property, Reflection, Shape, TYPED, is_root};
 use crate::validate::Violation;
 use crate::{Externs, TokenEnum, doc, error::Error, error::TokenEnumError, names, types};
 
@@ -33,6 +33,39 @@ pub struct RustLibrary {
     pub enums: Vec<RustEnum>,
     /// The schemas, in the order the root layer declares them.
     pub classes: Vec<RustClass>,
+    /// One trait per kind of handle the library's metadata fields apply to.
+    pub metadata: Vec<MetadataTrait>,
+}
+
+/// The metadata fields a library registers for one kind of handle, read and
+/// written through a trait that handle implements.
+pub struct MetadataTrait {
+    /// What the trait is called.
+    pub name: Ident,
+    /// What it is for.
+    pub documentation: String,
+    /// The handle it is implemented for.
+    pub handle: syn::Path,
+    /// Whether it reads a stage's metadata, which the stage resolves from its
+    /// layers with the field's registered default behind them.
+    pub stage: bool,
+    /// Its fields, in the order the library declares them.
+    pub fields: Vec<MetadataAccessor>,
+}
+
+/// One metadata field's reader and writer.
+pub struct MetadataAccessor {
+    /// The method reading it.
+    pub getter: Ident,
+    /// The method authoring it, where the handle authors metadata: every
+    /// handle but the stage.
+    pub setter: Option<Ident>,
+    /// The constant naming the field.
+    pub token: TokenStream,
+    /// The type its value reads back as.
+    pub rust_type: syn::Type,
+    /// The documentation above the reader.
+    pub documentation: String,
 }
 
 /// One enum over a token property's `allowedTokens`.
@@ -45,6 +78,8 @@ pub struct RustEnum {
     pub variants: Vec<RustVariant>,
     /// The variant `Default` returns, where one was asked for.
     pub default: Option<Ident>,
+    /// The class and property it was built from, which read back as it.
+    pub source: (String, String),
 }
 
 /// One value a token enum admits.
@@ -142,6 +177,10 @@ pub struct RustAccessor {
     /// The method handing back its declaration unauthored, for a caller
     /// writing a value in the same edit.
     pub builder: Ident,
+    /// The methods reading its value as the type it is declared with, where
+    /// they are emitted: for an attribute of a type that holds a value, whose
+    /// reader the library does not write by hand.
+    pub typed: Option<TypedRead>,
     /// Whether the library writes the reader by hand, so only the creator is
     /// emitted and the reader's name is left reserved.
     pub custom_get: bool,
@@ -160,6 +199,17 @@ pub struct RustAccessor {
     pub uniform: bool,
     /// The documentation above the reader.
     pub documentation: String,
+}
+
+/// An attribute's value, read as the type it is declared with.
+pub struct TypedRead {
+    /// The method reading it at the default time.
+    pub value: Ident,
+    /// The method reading it at a given time, for an attribute that is not
+    /// uniform and so may hold samples.
+    pub value_at: Option<Ident>,
+    /// The type it reads back as.
+    pub ty: syn::Type,
 }
 
 /// What a property is, which decides what its accessors return and how its
@@ -184,6 +234,10 @@ pub enum PropertyKind {
 /// them out twice is how documentation comes to name a method that was never
 /// emitted.
 type Inventory<'a> = BTreeMap<&'a tf::Token, ClassNames<'a>>;
+
+/// The token enum each configured property reads back as, by the class and
+/// property that sourced it.
+type Sourced<'a> = BTreeMap<(&'a str, &'a str), &'a Ident>;
 
 /// Where each placed library's views live, by library: the Rust path that
 /// reaches them, or the spelling the configuration gave that does not read as
@@ -218,6 +272,10 @@ struct AccessorNames<'a> {
     creator: String,
     /// The method handing back its declaration unauthored.
     builder: String,
+    /// The methods reading its value at the default time and at a given time,
+    /// where the property has them.
+    value: Option<String>,
+    value_at: Option<String>,
     /// What upstream calls the pair, less the `Get` or `Create` it opens with:
     /// `ExtentAttr` for `GetExtentAttr()`.
     cpp: String,
@@ -257,7 +315,7 @@ impl<'a> ClassNames<'a> {
             .local_properties()
             .filter(|property| offers(class, property))
             .filter_map(|property| {
-                let accessor = named(property.api_name(), property.shape.spec_type)?;
+                let accessor = named(property.api_name(), &property.shape)?;
                 let suffix = match property.shape.spec_type {
                     sdf::SpecType::Relationship => "Rel",
                     _ => "Attr",
@@ -268,6 +326,8 @@ impl<'a> ClassNames<'a> {
                     getter: accessor.getter,
                     creator: accessor.creator,
                     builder: accessor.builder,
+                    value: accessor.value,
+                    value_at: accessor.value_at,
                 })
             })
             .collect();
@@ -312,6 +372,12 @@ pub fn library(model: &Library, externs: &Externs, enums: &[TokenEnum]) -> Resul
     let tokens = constants(model)?;
     let by_value = by_value(&tokens);
     let enums = lower_enums(model, enums, &by_value)?;
+    // The property each enum was built from reads back as that enum, the
+    // configuration having said its tokens are those values.
+    let sourced: Sourced<'_> = enums
+        .iter()
+        .map(|lowered| ((lowered.source.0.as_str(), lowered.source.1.as_str()), &lowered.name))
+        .collect();
 
     // Every name the library mints, settled before anything is checked or
     // lowered against it, and one symbol table built from it.
@@ -323,15 +389,129 @@ pub fn library(model: &Library, externs: &Externs, enums: &[TokenEnum]) -> Resul
         .classes
         .iter()
         .filter(|class| !is_root(&class.identifier))
-        .map(|class| lower_class(class, model, &placed, &by_value, &inventory, &library))
+        .map(|class| lower_class(class, model, &placed, &by_value, &sourced, &inventory, &library))
         .collect::<Result<_, _>>()?;
+    let metadata = lower_metadata(model, &by_value)?;
 
     Ok(RustLibrary {
         library: model.name.clone(),
         tokens,
         enums,
         classes,
+        metadata,
     })
+}
+
+/// The traits reading and writing the library's metadata fields, one per kind
+/// of handle a field applies to, in the order prims, attributes,
+/// relationships, stage.
+fn lower_metadata(model: &Library, by_value: &BTreeMap<&str, &Ident>) -> Result<Vec<MetadataTrait>, Error> {
+    let kinds = [
+        (
+            usd::MetadataTargets::PRIMS,
+            super::items::PRIM_METADATA,
+            "prims",
+            "Prim",
+        ),
+        (
+            usd::MetadataTargets::ATTRIBUTES,
+            super::items::ATTRIBUTE_METADATA,
+            "attributes",
+            "Attribute",
+        ),
+        (
+            usd::MetadataTargets::RELATIONSHIPS,
+            super::items::RELATIONSHIP_METADATA,
+            "relationships",
+            "Relationship",
+        ),
+        (
+            usd::MetadataTargets::LAYERS,
+            super::items::STAGE_METADATA,
+            "a stage",
+            "Stage",
+        ),
+    ];
+    let mut traits = Vec::new();
+    for (target, name, what, handle) in kinds {
+        let stage = target == usd::MetadataTargets::LAYERS;
+        let mut methods: BTreeMap<String, &tf::Token> = BTreeMap::new();
+        let mut fields = Vec::new();
+        for field in model
+            .metadata
+            .iter()
+            .filter(|field| field.applies_to.intersects(target))
+        {
+            let origin = format!("the {} metadata field `{}`", model.name, field.name);
+            let getter = names::method_name(field.name.as_str());
+            // A stage's metadata is its layers', authored on a layer rather
+            // than through the stage, so its trait reads only.
+            let setter = (!stage).then(|| format!("set_{}", names::snake_case(field.name.as_str())));
+            for method in iter::once(&getter).chain(&setter) {
+                if let Some(first) = methods.insert(method.clone(), &field.name) {
+                    return Err(Error::MetadataMethodCollision {
+                        library: model.name.clone(),
+                        method: method.clone(),
+                        first: first.to_string(),
+                        second: field.name.to_string(),
+                    });
+                }
+            }
+
+            let mut documentation = match &field.documentation {
+                Some(text) => format!("{}\n\n", doc::to_markdown(text, &doc::Symbols::default())),
+                None => String::new(),
+            };
+            documentation.push_str(&doc::wrap(&format!(
+                "The `{}` metadata field, declared `{}`.",
+                field.name,
+                field.type_name.as_str()
+            )));
+            if let Some(value) = &field.fallback
+                && let Ok(text) = usda::TextWriter::value_to_string(value)
+            {
+                // A stage falls back to the declared default; a prim or a
+                // property falls back only to what its schema declares, as C++
+                // `GetMetadata` does, and leaves the default to the caller.
+                let fallback = match stage {
+                    true => format!("Where no layer authors it, the stage reads `{text}`."),
+                    false => format!(
+                        "Its declared default, `{text}`, is not applied: like C++ `GetMetadata`, this reads what \
+                         a layer authors or the schema declares, and `None` otherwise."
+                    ),
+                };
+                documentation.push_str(&format!("\n\n{}", doc::wrap(&fallback)));
+            }
+
+            fields.push(MetadataAccessor {
+                getter: identifier(&getter, &origin)?,
+                setter: setter.map(|setter| identifier(&setter, &origin)).transpose()?,
+                token: constant_of(by_value, &field.name),
+                rust_type: field
+                    .type_name
+                    .kind()
+                    .and_then(types::rust_type)
+                    .unwrap_or_else(|| syn::parse_quote! { ::openusd::sdf::Value }),
+                documentation,
+            });
+        }
+        if fields.is_empty() {
+            continue;
+        }
+
+        let handle = Ident::new(handle, Span::call_site());
+        traits.push(MetadataTrait {
+            name: Ident::new(name, Span::call_site()),
+            documentation: doc::wrap(&format!(
+                "The metadata fields the `{}` library registers for {what}.",
+                model.name
+            )),
+            handle: syn::parse_quote! { ::openusd::usd::#handle },
+            stage,
+            fields,
+        });
+    }
+    Ok(traits)
 }
 
 /// The tokens alone, for a library that gets no views.
@@ -348,12 +528,13 @@ pub fn tokens(model: &Library, enums: &[TokenEnum]) -> Result<RustLibrary, Error
         tokens,
         enums,
         classes: Vec::new(),
+        metadata: Vec::new(),
     })
 }
 
 /// The constant each token value is emitted as, which is how a lowered value
 /// names the constant that holds it.
-fn by_value(tokens: &[Constant]) -> BTreeMap<&str, &Ident> {
+pub(super) fn by_value(tokens: &[Constant]) -> BTreeMap<&str, &Ident> {
     tokens
         .iter()
         .map(|constant| (constant.value.as_str(), &constant.name))
@@ -458,6 +639,7 @@ fn lower_enum(
     }
 
     Ok(RustEnum {
+        source: (class_name.to_owned(), property_name.to_owned()),
         name: Ident::new(&declared.name, Span::call_site()),
         documentation: enum_documentation(class_name, property_name, property),
         variants,
@@ -611,6 +793,7 @@ fn lower_class(
     model: &Library,
     placed: &Placed<'_>,
     by_value: &BTreeMap<&str, &Ident>,
+    sourced: &Sourced<'_>,
     inventory: &Inventory<'_>,
     library: &doc::Symbols<'_>,
 ) -> Result<RustClass, Error> {
@@ -628,14 +811,28 @@ fn lower_class(
         }
     }
     // Documentation on a class means that class's property, so its own chain
-    // answers first and nearest wins.
+    // answers first and nearest wins. An ancestor of another library is named
+    // through the module its views live in, where the configuration placed it.
+    let elsewhere: BTreeMap<&tf::Token, ClassNames<'_>> = class
+        .bases
+        .iter()
+        .filter(|base| base.library != model.name)
+        .filter_map(|base| {
+            let Some(Ok(home)) = placed.get(base.library.as_str()) else {
+                return None;
+            };
+            let ancestor = model.find(&base.identifier)?;
+            Some((&base.identifier, ClassNames::of(ancestor, Some(home))))
+        })
+        .collect();
     let chain = iter::once(&class.identifier).chain(class.bases.iter().map(|base| &base.identifier));
-    let links = class_symbols(chain.filter_map(|owner| inventory.get(owner)), library);
+    let owners = chain.filter_map(|owner| inventory.get(owner).or_else(|| elsewhere.get(owner)));
+    let links = class_symbols(owners, library);
     let mine = inventory.get(&class.identifier).expect("a class of this library");
     let accessors = mine
         .accessors
         .iter()
-        .map(|accessor| lower_accessor(class, accessor, by_value, &links))
+        .map(|accessor| lower_accessor(class, accessor, by_value, sourced, &links))
         .collect::<Result<_, _>>()?;
 
     // Each base contributes the trait a view derives its accessors from, the
@@ -691,7 +888,7 @@ fn lower_class(
                 .any(|property| property.name == accessor.property.name)
         });
         for accessor in taken {
-            accessors.push(lower_accessor(schema, accessor, by_value, &links)?);
+            accessors.push(lower_accessor(schema, accessor, by_value, sourced, &links)?);
         }
 
         let view = identifier(&schema.metadata.class_name, &origin)?;
@@ -748,9 +945,11 @@ fn lower_accessor(
     class: &Class,
     accessor: &AccessorNames<'_>,
     by_value: &BTreeMap<&str, &Ident>,
+    sourced: &Sourced<'_>,
     symbols: &doc::Symbols<'_>,
 ) -> Result<RustAccessor, Error> {
     let property = accessor.property;
+    let origin = property.origin.describe();
     let kind = match property.shape.spec_type {
         sdf::SpecType::Relationship => PropertyKind::Relationship,
         _ => PropertyKind::Attribute {
@@ -758,11 +957,32 @@ fn lower_accessor(
         },
     };
 
-    let origin = property.origin.describe();
+    // A typed read is a reader too, so a library writing the reader by hand
+    // writes that as well; a type holding no value has nothing to read.
+    let ty = match sourced.get(&(class.identifier.as_str(), property.name.as_str())) {
+        Some(name) => Some(syn::parse_quote! { #name }),
+        None => property
+            .type_name()
+            .and_then(|name| name.kind())
+            .and_then(types::rust_type),
+    };
+    let typed = match (&accessor.value, ty) {
+        (Some(value), Some(ty)) if !property.api.custom_get => Some(TypedRead {
+            value: identifier(value, &origin)?,
+            value_at: accessor
+                .value_at
+                .as_deref()
+                .map(|value_at| identifier(value_at, &origin))
+                .transpose()?,
+            ty,
+        }),
+        _ => None,
+    };
     Ok(RustAccessor {
         getter: identifier(&accessor.getter, &origin)?,
         creator: identifier(&accessor.creator, &origin)?,
         builder: identifier(&accessor.builder, &origin)?,
+        typed,
         custom_get: property.api.custom_get,
         token: constant_of(by_value, &property.schematics_name),
         instanced: class.kind.is_multiple_apply_api_schema(),
@@ -839,7 +1059,7 @@ fn value_type(property: &Property) -> Result<syn::Path, Error> {
 /// Every property name and every schema identifier reached the token set, so a
 /// value that did not is one nothing declared: it is named by its own string,
 /// which is still what the schematics recorded.
-fn constant_of(by_value: &BTreeMap<&str, &Ident>, value: &tf::Token) -> TokenStream {
+pub(super) fn constant_of(by_value: &BTreeMap<&str, &Ident>, value: &tf::Token) -> TokenStream {
     if let Some(name) = by_value.get(value.as_str()) {
         let tokens = super::ident(super::items::TOKENS);
         return quote! { #tokens::#name };
@@ -854,7 +1074,7 @@ fn constant_of(by_value: &BTreeMap<&str, &Ident>, value: &tf::Token) -> TokenStr
 /// `apiName`, and a name Rust would not take — one that is no identifier at
 /// all, or a word Rust has reserved — has to be reported against the schema
 /// that wrote it rather than left to panic where it is written out.
-fn identifier(name: &str, origin: &str) -> Result<Ident, Error> {
+pub(super) fn identifier(name: &str, origin: &str) -> Result<Ident, Error> {
     if !names::is_rust_identifier(name) {
         return Err(Error::Definition {
             origin: origin.to_owned(),
@@ -869,29 +1089,47 @@ struct Accessor {
     getter: String,
     creator: String,
     builder: String,
+    value: Option<String>,
+    value_at: Option<String>,
 }
 
-/// The methods an accessor of `api_name` contributes to a property of
-/// `spec_type`.
-fn named(api_name: Option<&str>, spec_type: sdf::SpecType) -> Option<Accessor> {
-    let suffix = match spec_type {
+/// The methods an accessor of `api_name` contributes to a property of `shape`.
+///
+/// An attribute is also read by value, at the default time and, unless it is
+/// uniform and so holds no samples, at a given time. Those names are minted
+/// whatever the attribute's type, so which names a property takes does not
+/// hang on whether its type holds a value. A value read that would take a name
+/// every view already has is not minted: the view's own method keeps the name,
+/// as C++ keeps `GetName` beside a `name` property's `GetNameAttr`, and the
+/// property is read through its attribute.
+fn named(api_name: Option<&str>, shape: &Shape) -> Option<Accessor> {
+    let api_name = api_name?;
+    let suffix = match shape.spec_type {
         sdf::SpecType::Relationship => "rel",
         _ => "attr",
     };
     // The suffix is what keeps a method clear of a Rust keyword, so no escaping
     // rule is needed on top of it.
-    let getter = format!("{}_{suffix}", names::snake_case(api_name?));
+    let snake = names::snake_case(api_name);
+    let getter = format!("{snake}_{suffix}");
+    let value = names::method_name(api_name);
+    let attribute = shape.spec_type != sdf::SpecType::Relationship && !VIEW_METHODS.contains(&value.as_str());
     Some(Accessor {
         creator: format!("create_{getter}"),
         builder: format!("{getter}_builder"),
         getter,
+        value: attribute.then_some(value),
+        value_at: (attribute && shape.variability != sdf::Variability::Uniform).then(|| format!("{snake}_at")),
     })
 }
 
 impl Accessor {
-    /// Every method name the pair mints.
-    fn methods(self) -> [String; 3] {
+    /// Every method name the accessor mints.
+    fn methods(self) -> impl Iterator<Item = String> {
         [self.getter, self.creator, self.builder]
+            .into_iter()
+            .chain(self.value)
+            .chain(self.value_at)
     }
 }
 
@@ -905,7 +1143,7 @@ fn offered(property: &Property) -> impl Iterator<Item = String> {
     property
         .sites
         .iter()
-        .filter_map(|site| named(site.api_name.as_deref(), property.shape.spec_type))
+        .filter_map(|site| named(site.api_name.as_deref(), &property.shape))
         .flat_map(Accessor::methods)
 }
 
@@ -922,7 +1160,7 @@ fn reflected_methods<'r>(reflections: &'r [Reflection<'r>]) -> impl Iterator<Ite
         .flat_map(|(schema, properties)| {
             properties
                 .iter()
-                .filter_map(|property| named(property.api_name(), property.shape.spec_type))
+                .filter_map(|property| named(property.api_name(), &property.shape))
                 .flat_map(Accessor::methods)
                 .chain(iter::once(names::snake_case(&schema.metadata.class_name)))
                 .map(move |method| (method, &schema.identifier))
@@ -938,14 +1176,14 @@ fn reflected_methods<'r>(reflections: &'r [Reflection<'r>]) -> impl Iterator<Ite
 /// a class between them renamed it the same way — which is why every ancestor
 /// site is compared and not only the one that introduced the property.
 fn shadows_an_ancestor(class: &Class, property: &Property) -> bool {
-    let Some(mine) = named(property.api_name(), property.shape.spec_type) else {
+    let Some(mine) = named(property.api_name(), &property.shape) else {
         return false;
     };
     property
         .sites
         .iter()
         .filter(|site| site.class != class.identifier)
-        .filter_map(|site| named(site.api_name.as_deref(), property.shape.spec_type))
+        .filter_map(|site| named(site.api_name.as_deref(), &property.shape))
         .any(|theirs| theirs.getter == mine.getter)
 }
 
@@ -960,9 +1198,6 @@ fn shadows_an_ancestor(class: &Class, property: &Property) -> bool {
 /// that views the prim through it, so they are held to the same rule with the
 /// schema named as the second party; what an ancestor this library holds
 /// reflects arrives through its trait, so those names are taken first.
-// TODO: a base another library declares is not held here, so a collision with
-// what it reflects goes unseen, as its accessors go unlinked in
-// `class_symbols`.
 fn check_methods(class: &Class, model: &Library, reflections: &[Reflection<'_>]) -> Result<(), Error> {
     let mut seen: BTreeMap<String, &tf::Token> = BTreeMap::new();
     for property in &class.properties {
@@ -1099,11 +1334,6 @@ fn coined(name: &str) -> bool {
 // `library_symbols` has already read once from the same inventory. The pairs are
 // a pure function of the class, so they could be built per class in one pass, or
 // built in parallel.
-// TODO: a base another library declares is not among the owners, the inventory
-// holding only this library's classes, so its accessors go unlinked in a
-// descendant's prose. Pairing them needs that class's property api names and
-// the shadowing `offers` applies over its chain, which means resolving every
-// base the way `Library::reflected` resolves a reflected schema.
 fn class_symbols<'a, 'i>(
     owners: impl Iterator<Item = &'i ClassNames<'i>>,
     library: &'a doc::Symbols<'a>,
@@ -1151,6 +1381,34 @@ fn base_trait(class: &Class, base: &Base, model: &Library, placed: &Placed<'_>) 
     let path = reached(class, placed, &base.library, &base.identifier)?;
     Ok(Some(syn::parse_quote! { #path::#inherited }))
 }
+
+/// The names every view has before any property gives it one: the methods of
+/// `usd::SchemaBase`, which every view implements, and the functions the
+/// emitter writes on a view itself — its constructors, and a multiple-apply
+/// view's instance `name` and lookups. A second method of one of these names
+/// is a duplicate definition where it lands on the view, and an ambiguous call
+/// where it lands on a trait a caller has in scope.
+const VIEW_METHODS: &[&str] = &[
+    "prim",
+    "path",
+    "stage",
+    "is_concrete",
+    "is_typed",
+    "is_api_schema",
+    "is_applied_api_schema",
+    "is_multiple_apply_api_schema",
+    "from_prim",
+    "from_prim_unchecked",
+    "get",
+    "define",
+    "apply",
+    "can_apply",
+    "name",
+    "get_all",
+    "get_instance",
+    "instance_at_path",
+    "is_schema_property_base_name",
+];
 
 /// The root trait a view answers to: a prim type and a base of prim types are
 /// typed schemas, and everything else here is something applied to a prim.
@@ -1216,29 +1474,27 @@ fn documentation(property: &Property, symbols: &doc::Symbols<'_>) -> String {
 fn declaration(property: &Property) -> String {
     let mut text = format!("Declared `{}`.", declared_as(property));
 
-    let allowed = property.allowed_tokens();
-    if !allowed.is_empty() {
-        // An allowed value can be the empty string, which upstream
-        // `usdRender` writes; an empty code span is no spelling of it, so it
-        // reads as the two quotes a schema author would write.
-        let listed: Vec<String> = allowed
-            .iter()
-            .map(|token| match token.as_str().is_empty() {
-                true => "`\"\"`".to_owned(),
-                false => format!("`{token}`"),
-            })
-            .collect();
-        text.push_str(&format!(" One of {}.", listed.join(", ")));
-    }
-
-    let rust = property
-        .type_name()
-        .and_then(|name| name.kind())
-        .and_then(types::rust_type);
-    if let Some(rust) = rust {
-        text.push_str(&format!(" Read it with `get::<{rust}>()`."));
-    }
+    text.push_str(&allowed_values(&property.allowed_tokens()));
     text
+}
+
+/// The sentence listing the values a property admits, with its leading space,
+/// or nothing where it admits any.
+pub(super) fn allowed_values(allowed: &[tf::Token]) -> String {
+    if allowed.is_empty() {
+        return String::new();
+    }
+    // An allowed value can be the empty string, which upstream `usdRender`
+    // writes; an empty code span is no spelling of it, so it reads as the two
+    // quotes a schema author would write.
+    let listed: Vec<String> = allowed
+        .iter()
+        .map(|token| match token.as_str().is_empty() {
+            true => "`\"\"`".to_owned(),
+            false => format!("`{token}`"),
+        })
+        .collect();
+    format!(" One of {}.", listed.join(", "))
 }
 
 /// The property's declaration as USD writes one, e.g. `uniform token mode = "a"`.

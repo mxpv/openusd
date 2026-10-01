@@ -16,6 +16,7 @@
 mod emitter;
 mod family;
 mod lower;
+mod nodes;
 mod value;
 
 use proc_macro2::{Ident, Span, TokenStream};
@@ -24,6 +25,8 @@ use crate::Views;
 use crate::decl;
 use crate::model::Library;
 use crate::{Externs, TokenEnum, error::Error};
+
+pub use nodes::nodes;
 
 /// One library's generated file, `schema` naming what it came from.
 ///
@@ -60,9 +63,29 @@ pub(super) mod items {
     pub const LIBRARY_NAME: &str = "LIBRARY_NAME";
     /// The constant holding the declarations a registry takes.
     pub const SCHEMAS: &str = "SCHEMAS";
+    /// The traits reading and writing a library's metadata fields, one per
+    /// kind of handle.
+    pub const PRIM_METADATA: &str = "PrimMetadata";
+    pub const ATTRIBUTE_METADATA: &str = "AttributeMetadata";
+    pub const RELATIONSHIP_METADATA: &str = "RelationshipMetadata";
+    pub const STAGE_METADATA: &str = "StageMetadata";
 
     /// All of them, for the collision check.
-    pub const ALL: [&str; 3] = [TOKENS, LIBRARY_NAME, SCHEMAS];
+    pub const ALL: [&str; 7] = [
+        TOKENS,
+        LIBRARY_NAME,
+        SCHEMAS,
+        PRIM_METADATA,
+        ATTRIBUTE_METADATA,
+        RELATIONSHIP_METADATA,
+        STAGE_METADATA,
+    ];
+}
+
+/// A doc comment's text as one `#[doc]` value per line, each opening with the
+/// space a `///` comment has after it.
+fn doc_lines(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.lines().map(|line| format!(" {line}"))
 }
 
 /// One generated item, by the name it is written under.
@@ -332,7 +355,7 @@ class Box "Box" (
             let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/values");
             let library = configure()
                 .search_path(&dir)
-                .read(&dir.join("schema.usda"))
+                .read(&dir.join("schema.usda"), &[])
                 .map(|(library, _)| library)
                 .expect("the values fixture resolves");
             emit(&library, &Externs::new(), "schema.usda", Views::Generate, &[]).expect("emits")
@@ -729,6 +752,91 @@ class "Held" (
         assert!(!text.contains("fn hidden"), "{text}");
     }
 
+    /// An attribute is read by value as the type it is declared with, at the
+    /// default time and at a given one.
+    #[test]
+    fn typed_read_emitted() {
+        let text = packed_accessors();
+        assert!(
+            text.contains(
+                "fnradius(&self)->::openusd::Result<::std::option::Option<f64>>{self.radius_attr().get::<f64>()}"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "fnradius_at(&self,time:impl::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,)->::openusd::Result<::std::option::Option<f64>>{self.radius_attr().get_at::<f64>(time)}"
+            ),
+            "{text}"
+        );
+    }
+
+    /// A uniform attribute holds no samples, so it is read at the default time
+    /// alone; a relationship holds no value, so it is read by neither.
+    #[test]
+    fn uniform_read_untimed() {
+        let text = packed_accessors();
+        assert!(
+            text.contains("fnmode(&self)->::openusd::Result<::std::option::Option<::openusd::tf::Token>>"),
+            "{text}"
+        );
+        assert!(!text.contains("fnmode_at("), "{text}");
+        assert!(!text.contains("fntarget(") && !text.contains("fntarget_at("), "{text}");
+    }
+
+    /// A property whose value read would take a name every view already has
+    /// from `usd::SchemaBase` gets none, the view's own method keeping the
+    /// name; its attribute still reads it.
+    #[test]
+    fn root_method_kept() {
+        let text = packed(&emitted(&schema(
+            "testRoot",
+            r#"class "Thing" (
+    inherits = </Typed>
+) {
+    string path = ""
+}"#,
+        )));
+        assert!(!text.contains("fnpath(") && !text.contains("fnpath_at("), "{text}");
+        assert!(text.contains("fnpath_attr(&self)"), "{text}");
+    }
+
+    /// An applied API schema's accessors land on its view beside the
+    /// constructors, so a property whose value read would be called `get`
+    /// gets none, and the constructor keeps the name.
+    #[test]
+    fn constructor_name_kept() {
+        let text = packed(&emitted(&schema(
+            "testCtor",
+            r#"class "GetAPI" (
+    inherits = </APISchemaBase>
+    customData = { token apiSchemaType = "singleApply" }
+) {
+    string get = ""
+}"#,
+        )));
+        assert_eq!(text.matches("pubfnget(").count(), 1, "the constructor alone: {text}");
+        assert!(!text.contains("fnget_at("), "{text}");
+        assert!(text.contains("fnget_attr(&self)"), "{text}");
+    }
+
+    /// A typed read named by a Rust keyword takes a trailing underscore.
+    #[test]
+    fn keyword_read_escaped() {
+        let text = emitted(&schema(
+            "testKeyword",
+            r#"class "Thing" (
+    inherits = </Typed>
+) {
+    token type = "a"
+}"#,
+        ));
+        let text = packed(&text);
+        assert!(text.contains("fntype_(&self)"), "{text}");
+        assert!(text.contains("fntype_at(&self"), "{text}");
+        assert!(text.contains("fntype_attr(&self)"), "{text}");
+    }
+
     /// The documentation says what the property is, beyond what the schema
     /// wrote about it, and the declaration is the one `sdf` would write.
     #[test]
@@ -736,7 +844,6 @@ class "Held" (
         let text = accessors();
         assert!(text.contains("The radius."), "{text}");
         assert!(text.contains("Declared `double radius = 1.0`."), "{text}");
-        assert!(text.contains("Read it with `get::<f64>()`"), "{text}");
         assert!(
             text.contains("Declared `uniform token mode = \"a\"`. One of `a`, `b`."),
             "{text}"
@@ -1061,7 +1168,7 @@ def "GLOBAL" (
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/reflect");
         configure()
             .search_path(&dir)
-            .read(&dir.join("schema.usda"))
+            .read(&dir.join("schema.usda"), &[])
             .map(|(library, _)| library)
             .expect("the reflect fixture resolves")
     }
@@ -1298,12 +1405,9 @@ class "Thing" (
         assert_eq!(thing.matches("fn tag_attr(").count(), 1, "{thing}");
     }
 
-    /// An ancestor another library declares is read the same way: what it
-    /// reflects arrives through its trait, so a descendant here listing the same
-    /// schema reflects nothing of it.
-    #[test]
-    fn reflected_by_foreign_ancestor() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    /// A library here sublayering `testElsewhere`, whose `Base` reflects
+    /// `TagAPI` and declares a `label` of its own, with `classes` declared here.
+    fn below_foreign_base(dir: &Path, classes: &str) -> Library {
         let base = schema(
             "testElsewhere",
             &format!(
@@ -1314,24 +1418,49 @@ class "Base" (
     prepend apiSchemas = ["TagAPI"]
     customData = {{ token[] reflectedAPISchemas = ["TagAPI"] }}
 ) {{
+    string label = ""
 }}"#
             ),
         );
-        let model = stacked(
-            dir.path(),
+        stacked(
+            dir,
             &[("base.usda", base.as_str())],
-            &sublayering(
-                &["base.usda"],
-                r#"class "Derived" (
+            &sublayering(&["base.usda"], classes),
+        )
+    }
+
+    /// Where `testElsewhere`'s views are placed.
+    fn elsewhere_placed() -> Externs {
+        Externs::from([("testElsewhere".to_owned(), "crate::elsewhere".to_owned())])
+    }
+
+    /// The collision `emit` reports for `model`, as `(method, first, second)`.
+    fn collision(model: &Library, externs: &Externs) -> (String, String, String) {
+        match emit(model, externs, "schema.usda", Views::Generate, &[]) {
+            Err(Error::Definition {
+                violation: Violation::MethodCollision { method, first, second },
+                ..
+            }) => (method, first.to_string(), second.to_string()),
+            other => panic!("{:?}", other.map(|_| "emitted")),
+        }
+    }
+
+    /// An ancestor another library declares is read the same way: what it
+    /// reflects arrives through its trait, so a descendant here listing the same
+    /// schema reflects nothing of it.
+    #[test]
+    fn reflected_by_foreign_ancestor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = below_foreign_base(
+            dir.path(),
+            r#"class "Derived" (
     inherits = </Base>
     customData = { token[] reflectedAPISchemas = ["TagAPI"] }
 ) {
 }"#,
-            ),
         );
-        let externs = Externs::from([("testElsewhere".to_owned(), "crate::elsewhere".to_owned())]);
 
-        let rust = emit(&model, &externs, "schema.usda", Views::Generate, &[]).expect("emits");
+        let rust = emit(&model, &elsewhere_placed(), "schema.usda", Views::Generate, &[]).expect("emits");
         let derived = trait_body(&rust, "DerivedSchema");
         assert!(
             derived.starts_with("pub trait DerivedSchema: crate::elsewhere::BaseSchema"),
@@ -1340,6 +1469,110 @@ class "Base" (
         assert!(
             !derived.contains("fn tag_attr(") && !derived.contains("fn tag_api("),
             "{derived}"
+        );
+    }
+
+    /// What an ancestor of another library reflects takes its method names as
+    /// surely as one of this library's does, so a property here offering the
+    /// same accessor is reported as a collision when the library is built.
+    #[test]
+    fn reflected_by_foreign_ancestor_collides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = below_foreign_base(
+            dir.path(),
+            r#"class "Derived" (
+    inherits = </Base>
+) {
+    string tag = "own"
+}"#,
+        );
+
+        let inherited: Vec<&str> = model.inherited.iter().map(|class| class.identifier.as_str()).collect();
+        assert_eq!(
+            inherited,
+            vec!["Base", "TagAPI"],
+            "the ancestor and what it reflects are held"
+        );
+        let (method, first, second) = collision(&model, &elsewhere_placed());
+        assert_eq!(
+            (method.as_str(), first.as_str(), second.as_str()),
+            ("tag_attr", "tag", "Base")
+        );
+    }
+
+    /// A schema a descendant reflects is held to the names its foreign
+    /// ancestor's reflected schema already takes.
+    #[test]
+    fn foreign_reflections_collide() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = below_foreign_base(
+            dir.path(),
+            r#"class "LabelAPI" (
+    inherits = </APISchemaBase>
+    customData = { token apiSchemaType = "singleApply" }
+) {
+    string tag = ""
+}
+
+class "Derived" (
+    inherits = </Base>
+    prepend apiSchemas = ["LabelAPI"]
+    customData = { token[] reflectedAPISchemas = ["LabelAPI"] }
+) {
+}"#,
+        );
+
+        let (method, first, second) = collision(&model, &elsewhere_placed());
+        assert_eq!(
+            (method.as_str(), first.as_str(), second.as_str()),
+            ("tag_attr", "Base", "LabelAPI")
+        );
+    }
+
+    /// A foreign grandparent's reflections reach a class through its parent
+    /// here, so they are checked there too.
+    #[test]
+    fn foreign_grandparent_collides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = below_foreign_base(
+            dir.path(),
+            r#"class "Middle" (
+    inherits = </Base>
+) {
+}
+
+class "Derived" (
+    inherits = </Middle>
+) {
+    string tag = "own"
+}"#,
+        );
+
+        let (method, first, second) = collision(&model, &elsewhere_placed());
+        assert_eq!(
+            (method.as_str(), first.as_str(), second.as_str()),
+            ("tag_attr", "tag", "Base")
+        );
+    }
+
+    /// Prose on a class names an accessor its foreign ancestor declares, and
+    /// links to it through the module that ancestor's views were placed at.
+    #[test]
+    fn foreign_ancestor_accessor_linked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = below_foreign_base(
+            dir.path(),
+            r#"class "Derived" (
+    doc = "See GetLabelAttr()."
+    inherits = </Base>
+) {
+}"#,
+        );
+
+        let rust = emit(&model, &elsewhere_placed(), "schema.usda", Views::Generate, &[]).expect("emits");
+        assert!(
+            rust.contains("[`label_attr`](crate::elsewhere::BaseSchema::label_attr)"),
+            "{rust}"
         );
     }
 

@@ -17,12 +17,12 @@ use openusd::Result;
 
 use openusd::gf;
 
-use super::Skeleton;
 use super::skinning::{
     compute_inverse_bind_transforms, compute_skinning_transforms as math_skin_xforms, joint_local_to_skel_space,
     joint_skel_to_world,
 };
 use super::topology::Topology;
+use super::{Skeleton, SkeletonSchema};
 
 /// Resolved, time-independent view of one `Skeleton` prim.
 ///
@@ -43,9 +43,9 @@ impl SkeletonResolver {
     /// Joints with a singular bind transform fall back to the identity inverse
     /// — same as Pixar's reference implementation.
     pub fn from_skeleton(skeleton: &Skeleton) -> Result<Self> {
-        let joints = skeleton.joints()?;
-        let bind_transforms = skeleton.bind_transforms()?;
-        let rest_transforms = skeleton.rest_transforms()?;
+        let joints = skeleton.joint_paths()?;
+        let bind_transforms = skeleton.bind_transforms()?.unwrap_or_default();
+        let rest_transforms = skeleton.rest_transforms()?.unwrap_or_default();
         let topology = Topology::from_joint_paths(&joints);
         let inverse_bind_transforms = compute_inverse_bind_transforms(&bind_transforms);
         Ok(Self {

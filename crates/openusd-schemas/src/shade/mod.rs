@@ -65,6 +65,8 @@
 
 openusd::include_schema!("usdShade");
 
+pub mod nodes;
+
 mod binding;
 mod connectable;
 mod input;
@@ -88,25 +90,9 @@ pub use node_def::{
     SdrMetadata,
 };
 pub use output::Output;
-pub use preview::{
-    Channel, PS_CLEARCOAT, PS_CLEARCOAT_ROUGHNESS, PS_DIFFUSE_COLOR, PS_DISPLACEMENT, PS_EMISSIVE_COLOR, PS_IOR,
-    PS_METALLIC, PS_NORMAL, PS_OCCLUSION, PS_OPACITY, PS_OPACITY_THRESHOLD, PS_ROUGHNESS, PS_SPECULAR_COLOR,
-    PS_USE_SPECULAR_WORKFLOW, PVR_OUT_RESULT, PVR_VARNAME, ReadPreviewSurface, SHADER_ID_PREVIEW_SURFACE,
-    SHADER_ID_PRIMVAR_READER_FLOAT2, SHADER_ID_UV_TEXTURE, TEX_BIAS, TEX_FALLBACK, TEX_FILE, TEX_OUT_A, TEX_OUT_B,
-    TEX_OUT_G, TEX_OUT_R, TEX_OUT_RGB, TEX_SCALE, TEX_SOURCE_COLOR_SPACE, TEX_ST, TEX_WRAP_S, TEX_WRAP_T,
-    read_preview_surface,
-};
+pub use preview::{Channel, ReadPreviewSurface, read_preview_surface};
 pub use traits::Connectable;
 pub use utils::ProducerFilter;
-
-/// Whether a shading attribute accepts a connection, and from where. It is a
-/// key of the property's own metadata rather than a property, so no schema
-/// declares it.
-pub const CONNECTABILITY: &str = "connectability";
-
-/// The renderer-specific type a shading attribute stands for, likewise
-/// property metadata rather than a property.
-pub const RENDER_TYPE: &str = "renderType";
 
 use tokens::*;
 
@@ -199,7 +185,7 @@ macro_rules! impl_shading_attribute {
 
             /// The renderer-specific `renderType` hint, when authored.
             pub fn render_type(&self) -> $crate::openusd::Result<Option<$crate::openusd::tf::Token>> {
-                self.attribute.get_metadata($crate::shade::RENDER_TYPE)
+                $crate::shade::AttributeMetadata::render_type(&self.attribute)
             }
 
             /// Author this attribute's renderer-specific `renderType` hint.
@@ -208,10 +194,7 @@ macro_rules! impl_shading_attribute {
                 render_type: impl Into<$crate::openusd::tf::Token>,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
                 Ok(Self {
-                    attribute: self.attribute.set_metadata(
-                        $crate::shade::RENDER_TYPE,
-                        $crate::openusd::sdf::Value::Token(render_type.into()),
-                    )?,
+                    attribute: $crate::shade::AttributeMetadata::set_render_type(self.attribute, render_type.into())?,
                 })
             }
 

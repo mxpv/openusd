@@ -213,6 +213,23 @@ impl Relationship {
         self.edit(|spec| Ok(spec.set_target_paths(targets)?))
     }
 
+    /// Composed value of a generic metadata field on the relationship decoded
+    /// to `T`, falling back to what the relationship's schema declares.
+    /// Mirrors C++ `UsdObject::GetMetadata(name, &value)`; the read
+    /// counterpart of [`set_metadata`](Self::set_metadata).
+    pub fn get_metadata<T>(&self, key: &str) -> Result<Option<T>>
+    where
+        T: TryFrom<sdf::Value>,
+        T::Error: Into<crate::Error>,
+    {
+        if let Some(authored) = self.stage.field::<sdf::Value>(&self.path, key)? {
+            return super::decode_value(Some(authored));
+        }
+        // Schema metadata parses untyped, so a declaration may hold a variant
+        // the caller did not ask for; that is "not declared", not an error.
+        Ok(authoring::schema_property_field(&self.stage, &self.path, key)?.and_then(|value| T::try_from(value).ok()))
+    }
+
     /// Author a generic metadata field on the relationship spec.
     /// Sibling of [`Attribute::set_metadata`]; used for relationship
     /// metadata the dedicated setters don't cover, e.g. UsdShade's

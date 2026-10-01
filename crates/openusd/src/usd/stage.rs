@@ -2546,13 +2546,24 @@ impl Stage {
     }
 
     /// Returns composed pseudo-root stage metadata, honoring a session-layer
-    /// opinion over the root layer (C++ `UsdStage::GetMetadata`).
+    /// opinion over the root layer, and falling back to the default a
+    /// registered family declares for a field that applies to layers where no
+    /// layer authors it
+    /// (C++ `UsdStage::GetMetadata`, with `SdfSchema::GetFallback` behind it).
     ///
     /// Distinct from [`Stage::field`] on [`sdf::Path::abs_root`], which reads
     /// root-layer-only metadata for the spec 12.2.7 fields like `defaultPrim`.
     /// Returns the raw [`sdf::Value`]; the caller coerces it.
     pub fn stage_metadata(&self, field: impl AsRef<str>) -> Result<Option<sdf::Value>> {
-        Ok(self.with_cache(|g, _| Ok(g.stage_metadata(field.as_ref())?))?)
+        let field = field.as_ref();
+        if let Some(authored) = self.with_cache(|g, _| Ok(g.stage_metadata(field)?))? {
+            return Ok(Some(authored));
+        }
+        Ok(self
+            .schema_registry()
+            .metadata_field(&Token::from(field))
+            .filter(|declared| declared.applies_to().contains(super::MetadataTargets::LAYERS))
+            .and_then(|declared| declared.fallback().cloned()))
     }
 
     /// The stage's `startTimeCode`, or `0.0` when unauthored. The session

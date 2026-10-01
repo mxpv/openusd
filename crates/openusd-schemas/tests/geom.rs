@@ -15,7 +15,7 @@ use openusd_schemas::geom::{
     Mesh, MeshSchema, NurbsCurves, NurbsCurvesSchema, NurbsPatch, NurbsPatchSchema, PatchForm, Plane, PlaneSchema,
     PointBasedSchema, PointInstancer, PointInstancerSchema, Points, PointsSchema, Projection, Purpose, Scope, Sphere,
     SphereSchema, StereoRole, SubdivisionScheme, Subset, SubsetSchema, TetMesh, TetMeshSchema, Visibility, Xform,
-    XformableExt,
+    XformableExt, XformableSchema,
 };
 
 const FIXTURE: &str = "fixtures/usdGeom_scene.usda";
@@ -211,7 +211,7 @@ fn abstract_view_takes_ext() -> Result<()> {
 #[test]
 fn xform_op_order_returns_authored_stack() -> Result<()> {
     let stage = open()?;
-    let order = xform(&stage, "/World/TRS")?.xform_op_order()?;
+    let order = xform(&stage, "/World/TRS")?.xform_op_order()?.expect("authored");
     assert_eq!(order, vec!["xformOp:translate", "xformOp:rotateY", "xformOp:scale"]);
     Ok(())
 }
@@ -220,7 +220,7 @@ fn xform_op_order_returns_authored_stack() -> Result<()> {
 fn xform_op_order_empty_when_unauthored() -> Result<()> {
     let stage = open()?;
     // `/World` is an Xform with no authored stack.
-    assert!(xform(&stage, "/World")?.xform_op_order()?.is_empty());
+    assert!(xform(&stage, "/World")?.xform_op_order()?.is_none());
     Ok(())
 }
 
@@ -307,6 +307,36 @@ fn xform_double_precision() -> Result<(), SchemaError> {
     let orient = xform(&stage, "/World/DoubleOrient")?.local_transformation(None)?;
     assert!(orient[0].abs() < 1e-12, "x axis scale term: {}", orient[0]);
 
+    Ok(())
+}
+
+// Metadata fields
+
+/// The fields `usdGeom` registers read and write through the traits generated
+/// for them, typed as they are declared; a stage's own falls back to the
+/// declared default where no layer authors it.
+#[test]
+fn metadata_traits() -> Result<()> {
+    use openusd_schemas::geom::{AttributeMetadata, StageMetadata};
+
+    let stage = Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .in_memory("anon.usda")?;
+    assert_eq!(stage.meters_per_unit()?, Some(0.01));
+    assert_eq!(stage.up_axis()?, Some(Token::new("Y")));
+
+    let mesh = Mesh::define(&stage, "/Mesh")?;
+    let normals = mesh.create_normals_attr()?;
+    assert_eq!(
+        normals.interpolation()?,
+        None,
+        "a property falls back to its definition only"
+    );
+    let normals = normals
+        .set_interpolation(Token::new("faceVarying"))?
+        .set_element_size(3)?;
+    assert_eq!(normals.interpolation()?, Some(Token::new("faceVarying")));
+    assert_eq!(normals.element_size()?, Some(3));
     Ok(())
 }
 

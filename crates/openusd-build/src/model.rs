@@ -57,6 +57,11 @@ pub struct Library {
     /// from the same stage so their accessors can be emitted as the reflecting
     /// class's own. Not registered or written to the schematics.
     pub reflected: Vec<Class>,
+    /// Classes another library declares that a class here inherits from, and
+    /// the schemas those reflect, resolved from the same stage. Their accessors
+    /// reach a view through its supertraits, so the checks and documentation
+    /// of a descendant need them; nothing is emitted from them here.
+    pub inherited: Vec<Class>,
     /// Every class another library in the stack declares, known by name, for
     /// documentation to link where prose names one.
     pub foreign: Vec<ForeignClass>,
@@ -64,6 +69,25 @@ pub struct Library {
     pub source_layers: Vec<PathBuf>,
     /// The tokens the library asks for outright, beyond what its schemas imply.
     pub declared_tokens: Vec<DeclaredToken>,
+    /// The metadata fields its `plugInfo.json` registers.
+    pub metadata: Vec<MetadataField>,
+}
+
+/// One metadata field a library registers, as its `plugInfo.json` declares it.
+#[derive(Debug, Clone)]
+pub struct MetadataField {
+    /// The key it is authored under.
+    pub name: tf::Token,
+    /// The value type, under the spelling the declaration gave it. A
+    /// metadata-only spelling — `dictionary`, the list-op types — answers no
+    /// kind.
+    pub type_name: sdf::ValueTypeName,
+    /// The specs it may be authored on.
+    pub applies_to: usd::MetadataTargets,
+    /// What a stage reads where no layer authors it, converted to the type.
+    pub fallback: Option<sdf::Value>,
+    /// What the declaration says the field is for.
+    pub documentation: Option<String>,
 }
 
 /// One schema: a class prim in the root layer, and everything generation needs
@@ -331,10 +355,16 @@ pub struct Origin {
 }
 
 impl Library {
-    /// Every class this library holds: the ones it generates, then the ones it
-    /// holds to reflect.
-    pub fn held(&self) -> impl Iterator<Item = &Class> {
+    /// Every class whose accessors this library emits: the ones it generates,
+    /// then the ones it holds to reflect.
+    pub fn emitted(&self) -> impl Iterator<Item = &Class> {
         self.classes.iter().chain(&self.reflected)
+    }
+
+    /// Every class this library holds: the ones it emits accessors for, then
+    /// the ones another library declares that its classes inherit from.
+    pub fn held(&self) -> impl Iterator<Item = &Class> {
+        self.emitted().chain(&self.inherited)
     }
 
     /// The class `identifier` names, among the ones this library holds.
@@ -426,19 +456,8 @@ impl Property {
     /// Read as tokens or as strings: `allowedTokens` is `token[]` in the schema
     /// SDF declares, but the text parser types the metadata it does not know
     /// from the values it sees, so a list of quoted names arrives as strings.
-    ///
-    /// TODO: type it in the parser instead, which would let this be one read.
     pub fn allowed_tokens(&self) -> Vec<tf::Token> {
-        let Some(value) = self.fields.get(sdf::FieldKey::AllowedTokens.as_str()) else {
-            return Vec::new();
-        };
-        if let Some(tokens) = value.try_as_token_vec_ref() {
-            return tokens.clone();
-        }
-        value
-            .try_as_string_vec_ref()
-            .map(|strings| strings.iter().map(|text| tf::Token::from(text.as_str())).collect())
-            .unwrap_or_default()
+        allowed_tokens(self.fields.get(sdf::FieldKey::AllowedTokens.as_str()))
     }
 
     /// The property's own documentation, as the schema wrote it.
@@ -498,5 +517,17 @@ pub fn is_root(name: &tf::Token) -> bool {
     matches!(name.as_str(), TYPED | API_SCHEMA_BASE | SCHEMA_BASE) || {
         let (family, _) = usd::SchemaRegistry::parse_schema_family_and_version(name);
         matches!(family.as_str(), TYPED | API_SCHEMA_BASE | SCHEMA_BASE)
+    }
+}
+
+/// An `allowedTokens` value as the tokens it lists. A layer read with no schema
+/// to type the field holds a list of quoted names as strings.
+///
+/// TODO: type it in the parser instead, which would let this be one read.
+pub fn allowed_tokens(value: Option<&sdf::Value>) -> Vec<tf::Token> {
+    match value {
+        Some(sdf::Value::TokenVec(tokens)) => tokens.clone(),
+        Some(sdf::Value::StringVec(texts)) => texts.iter().map(|text| tf::Token::from(text.as_str())).collect(),
+        _ => Vec::new(),
     }
 }

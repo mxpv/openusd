@@ -15,52 +15,9 @@ use crate::SchemaError;
 
 use openusd::{gf, sdf, usd};
 
+use super::nodes::{PreviewSurface, UVTexture};
 use super::tokens::*;
-use super::{Connectable, Input, Material, ProducerFilter, Shader};
-
-// The names below belong to shader nodes, not to schemas, so no `schema.usda`
-// declares them and the generated `tokens` module carries none of them. A
-// caller reading or authoring this shading model needs them all the same.
-
-// The canonical UsdPreviewSurface shader ids.
-pub const SHADER_ID_PREVIEW_SURFACE: &str = "UsdPreviewSurface";
-pub const SHADER_ID_UV_TEXTURE: &str = "UsdUVTexture";
-pub const SHADER_ID_PRIMVAR_READER_FLOAT2: &str = "UsdPrimvarReader_float2";
-
-// UsdPreviewSurface inputs (`inputs:<name>`).
-pub const PS_DIFFUSE_COLOR: &str = "diffuseColor";
-pub const PS_EMISSIVE_COLOR: &str = "emissiveColor";
-pub const PS_METALLIC: &str = "metallic";
-pub const PS_ROUGHNESS: &str = "roughness";
-pub const PS_CLEARCOAT: &str = "clearcoat";
-pub const PS_CLEARCOAT_ROUGHNESS: &str = "clearcoatRoughness";
-pub const PS_OPACITY: &str = "opacity";
-pub const PS_OPACITY_THRESHOLD: &str = "opacityThreshold";
-pub const PS_IOR: &str = "ior";
-pub const PS_NORMAL: &str = "normal";
-pub const PS_DISPLACEMENT: &str = "displacement";
-pub const PS_OCCLUSION: &str = "occlusion";
-pub const PS_SPECULAR_COLOR: &str = "specularColor";
-pub const PS_USE_SPECULAR_WORKFLOW: &str = "useSpecularWorkflow";
-
-// UsdUVTexture inputs / outputs.
-pub const TEX_FILE: &str = "file";
-pub const TEX_ST: &str = "st";
-pub const TEX_WRAP_S: &str = "wrapS";
-pub const TEX_WRAP_T: &str = "wrapT";
-pub const TEX_FALLBACK: &str = "fallback";
-pub const TEX_SCALE: &str = "scale";
-pub const TEX_BIAS: &str = "bias";
-pub const TEX_SOURCE_COLOR_SPACE: &str = "sourceColorSpace";
-pub const TEX_OUT_R: &str = "r";
-pub const TEX_OUT_G: &str = "g";
-pub const TEX_OUT_B: &str = "b";
-pub const TEX_OUT_A: &str = "a";
-pub const TEX_OUT_RGB: &str = "rgb";
-
-// UsdPrimvarReader inputs / outputs.
-pub const PVR_VARNAME: &str = "varname";
-pub const PVR_OUT_RESULT: &str = "result";
+use super::{Input, Material, ProducerFilter, Shader};
 
 /// One UsdPreviewSurface channel: either a constant value, a texture asset path
 /// (the input connects to a `UsdUVTexture`), or unauthored.
@@ -138,24 +95,24 @@ pub fn read_preview_surface(
     let Some(shader) = source.shader() else {
         return Ok(None);
     };
-    if shader.id()?.as_deref() != Some(SHADER_ID_PREVIEW_SURFACE) {
+    let Some(surface) = PreviewSurface::from_shader(shader.clone())? else {
         return Ok(None);
-    }
+    };
 
     Ok(Some(ReadPreviewSurface {
         shader: shader.path().as_str().to_string(),
-        diffuse_color: read_color_channel(shader, PS_DIFFUSE_COLOR)?,
-        emissive_color: read_color_channel(shader, PS_EMISSIVE_COLOR)?,
-        specular_color: read_color_channel(shader, PS_SPECULAR_COLOR)?,
-        metallic: read_scalar_channel(shader, PS_METALLIC)?,
-        roughness: read_scalar_channel(shader, PS_ROUGHNESS)?,
-        clearcoat: read_scalar_channel(shader, PS_CLEARCOAT)?,
-        clearcoat_roughness: read_scalar_channel(shader, PS_CLEARCOAT_ROUGHNESS)?,
-        opacity: read_scalar_channel(shader, PS_OPACITY)?,
-        opacity_threshold: read_scalar_channel(shader, PS_OPACITY_THRESHOLD)?,
-        ior: read_scalar_channel(shader, PS_IOR)?,
-        normal: read_color_channel(shader, PS_NORMAL)?,
-        occlusion: read_scalar_channel(shader, PS_OCCLUSION)?,
+        diffuse_color: read_color_channel(&surface.diffuse_color_input())?,
+        emissive_color: read_color_channel(&surface.emissive_color_input())?,
+        specular_color: read_color_channel(&surface.specular_color_input())?,
+        metallic: read_scalar_channel(&surface.metallic_input())?,
+        roughness: read_scalar_channel(&surface.roughness_input())?,
+        clearcoat: read_scalar_channel(&surface.clearcoat_input())?,
+        clearcoat_roughness: read_scalar_channel(&surface.clearcoat_roughness_input())?,
+        opacity: read_scalar_channel(&surface.opacity_input())?,
+        opacity_threshold: read_scalar_channel(&surface.opacity_threshold_input())?,
+        ior: read_scalar_channel(&surface.ior_input())?,
+        normal: read_color_channel(&surface.normal_input())?,
+        occlusion: read_scalar_channel(&surface.occlusion_input())?,
     }))
 }
 
@@ -180,27 +137,24 @@ fn resolve_surface_terminal(material: &Material) -> Result<Option<super::Resolve
     material.compute_surface_source(&contexts)
 }
 
-/// If `shader`'s `inputs:<base>` resolves to a `UsdUVTexture`, return that
-/// texture's `inputs:file` asset path.
+/// If `input` resolves to a `UsdUVTexture`, return that texture's
+/// `inputs:file` asset path.
 ///
 /// The input is resolved to the shader output that produces it, so a texture
 /// reached through a NodeGraph interface is found the same as one wired
 /// directly.
-fn connected_texture_file(shader: &Shader, base: &str) -> Result<Option<String>, SchemaError> {
-    let produced = shader
-        .input(base)
-        .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)?;
+fn connected_texture_file(input: &Input) -> Result<Option<String>, SchemaError> {
+    let produced = input.value_producing_attributes(ProducerFilter::ShaderOutputsOnly)?;
     let Some(source) = produced.first() else {
         return Ok(None);
     };
-    let stage = shader.stage();
-    let Some(tex) = Shader::get(stage, source.path().prim_path())? else {
+    let Some(shader) = Shader::get(input.attribute().stage(), source.path().prim_path())? else {
         return Ok(None);
     };
-    if tex.id()?.as_deref() != Some(SHADER_ID_UV_TEXTURE) {
+    let Some(texture) = UVTexture::from_shader(shader)? else {
         return Ok(None);
-    }
-    resolve_asset_value(&tex.input(TEX_FILE))
+    };
+    resolve_asset_value(&texture.file_input())
 }
 
 /// Resolve an `asset`-typed input to its authored path. When the input is
@@ -223,11 +177,13 @@ fn resolve_asset_value(input: &Input) -> Result<Option<String>, SchemaError> {
         .map(str::to_owned))
 }
 
-fn read_color_channel(shader: &Shader, base: &str) -> Result<Channel<gf::Vec3f>, SchemaError> {
-    if let Some(file) = connected_texture_file(shader, base)? {
+/// A colour channel: the texture feeding `input`, else the value the shader
+/// authors on it, widened to `f32` components.
+fn read_color_channel(input: &Input) -> Result<Channel<gf::Vec3f>, SchemaError> {
+    if let Some(file) = connected_texture_file(input)? {
         return Ok(Channel::Texture(file));
     }
-    Ok(match shader.input(base).get::<sdf::Value>()? {
+    Ok(match input.get::<sdf::Value>()? {
         Some(sdf::Value::Vec3f(v)) => Channel::Value(v),
         Some(sdf::Value::Vec3d(v)) => Channel::Value(gf::vec3f(v.x as f32, v.y as f32, v.z as f32)),
         Some(sdf::Value::Vec3h(v)) => Channel::Value(gf::vec3f(v.x.to_f32(), v.y.to_f32(), v.z.to_f32())),
@@ -235,11 +191,13 @@ fn read_color_channel(shader: &Shader, base: &str) -> Result<Channel<gf::Vec3f>,
     })
 }
 
-fn read_scalar_channel(shader: &Shader, base: &str) -> Result<Channel<f32>, SchemaError> {
-    if let Some(file) = connected_texture_file(shader, base)? {
+/// A scalar channel: the texture feeding `input`, else the value the shader
+/// authors on it, as `f32`.
+fn read_scalar_channel(input: &Input) -> Result<Channel<f32>, SchemaError> {
+    if let Some(file) = connected_texture_file(input)? {
         return Ok(Channel::Texture(file));
     }
-    Ok(match shader.input(base).get::<sdf::Value>()? {
+    Ok(match input.get::<sdf::Value>()? {
         Some(sdf::Value::Float(f)) => Channel::Value(f),
         Some(sdf::Value::Double(d)) => Channel::Value(d as f32),
         Some(sdf::Value::Half(h)) => Channel::Value(h.to_f32()),
@@ -251,6 +209,7 @@ fn read_scalar_channel(shader: &Shader, base: &str) -> Result<Channel<f32>, Sche
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shade::Connectable;
 
     use openusd::Result;
 

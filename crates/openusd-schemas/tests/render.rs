@@ -41,7 +41,7 @@ fn reads_render_settings() -> Result<()> {
         Some(openusd::gf::vec2i(1920, 1080))
     );
     assert_eq!(
-        s.aspect_ratio_conform_policy_attr().get::<AspectRatioConformPolicy>()?,
+        s.aspect_ratio_conform_policy()?,
         Some(AspectRatioConformPolicy::ExpandAperture)
     );
     assert_eq!(s.camera_rel().targets()?, vec![sdf::path("/World/Camera")?]);
@@ -64,7 +64,7 @@ fn reads_render_settings() -> Result<()> {
 fn reads_products_and_vars() -> Result<()> {
     let stage = open()?;
     let p = Product::get(&stage, "/Render/products/beauty")?.expect("Product");
-    assert_eq!(p.product_type_attr().get::<ProductType>()?, Some(ProductType::Raster));
+    assert_eq!(p.product_type()?, Some(ProductType::Raster));
     assert_eq!(p.product_name_attr().get::<Token>()?.as_deref(), Some("beauty.exr"));
     // Product override of the settings 1920×1080.
     assert_eq!(
@@ -78,8 +78,8 @@ fn reads_products_and_vars() -> Result<()> {
 
     let color = Var::get(&stage, "/Render/vars/color")?.expect("Var");
     assert_eq!(color.data_type_attr().get::<Token>()?.as_deref(), Some("color3f"));
-    assert_eq!(color.source_type_attr().get::<SourceType>()?, Some(SourceType::Raw));
-    assert_eq!(color.source_name_attr().get::<String>()?.as_deref(), Some("Ci"));
+    assert_eq!(color.source_type()?, Some(SourceType::Raw));
+    assert_eq!(color.source_name()?.as_deref(), Some("Ci"));
     Ok(())
 }
 
@@ -161,7 +161,7 @@ fn render_product_roundtrip() -> Result<()> {
     p.create_ordered_vars_rel()?.add_target("/Render/Vars/color")?;
 
     let p = Product::get(&stage, "/Render/Products/beauty")?.expect("Product");
-    assert_eq!(p.product_type_attr().get::<ProductType>()?, Some(ProductType::Raster));
+    assert_eq!(p.product_type()?, Some(ProductType::Raster));
     assert_eq!(p.product_name_attr().get::<Token>()?.as_deref(), Some("beauty.exr"));
     assert_eq!(
         p.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
@@ -191,7 +191,7 @@ fn render_settings_roundtrip() -> Result<()> {
         Some(gf::vec2i(1280, 720))
     );
     assert_eq!(
-        s.aspect_ratio_conform_policy_attr().get::<AspectRatioConformPolicy>()?,
+        s.aspect_ratio_conform_policy()?,
         Some(AspectRatioConformPolicy::AdjustApertureWidth)
     );
     assert_eq!(s.camera_rel().targets()?, vec![sdf::path("/World/Cam")?]);
@@ -217,24 +217,25 @@ fn render_var_roundtrip() -> Result<()> {
 
     let v = Var::get(&stage, "/Render/Vars/N")?.expect("Var");
     assert_eq!(v.data_type_attr().get::<Token>()?.as_deref(), Some("normal3f"));
-    assert_eq!(v.source_name_attr().get::<String>()?.as_deref(), Some("Nworld"));
-    assert_eq!(v.source_type_attr().get::<SourceType>()?, Some(SourceType::Primvar));
+    assert_eq!(v.source_name()?.as_deref(), Some("Nworld"));
+    assert_eq!(v.source_type()?, Some(SourceType::Primvar));
     Ok(())
 }
 
 /// A pass carries four built-in collections, and the definition decides each
 /// one's `includeRoot` separately: visibility links everything until something
-/// says otherwise, while pruning and matteing start empty.
+/// says otherwise, while pruning and matteing declare no fallback and so start
+/// empty.
 #[test]
 fn pass_collections_include_root() -> Result<()> {
     let stage = memory()?;
     let pass = Pass::define(&stage, "/Render/Passes/beauty")?;
 
     for (name, root) in [
-        ("renderVisibility", true),
-        ("cameraVisibility", true),
-        ("prune", false),
-        ("matte", false),
+        ("renderVisibility", Some(true)),
+        ("cameraVisibility", Some(true)),
+        ("prune", None),
+        ("matte", None),
     ] {
         let collection = CollectionAPI::from_prim_unchecked(pass.prim().clone(), name);
         assert_eq!(collection.include_root()?, root, "{name} includeRoot");

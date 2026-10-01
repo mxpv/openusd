@@ -20,7 +20,7 @@ use std::iter;
 use openusd::{sdf, tf, usd};
 
 use crate::error::Error;
-use crate::load::{CustomData, Declaration, PropertyDeclaration, Source};
+use crate::load::{self, CustomData, Declaration, PropertyDeclaration, Source};
 use crate::model::{
     API_SCHEMA_OVERRIDE, Base, Class, ForeignClass, Library, Metadata, NON_APPLIED, Property, PropertyApi, SCHEMA_BASE,
     Shape, Site, TYPED, is_root,
@@ -78,6 +78,42 @@ pub fn library(source: &Source) -> Result<Library, Error> {
         }
     }
 
+    // What a class inherits from another library reaches its view through a
+    // supertrait, as does whatever that ancestor reflects, so a descendant's
+    // method names are checked against both. A schema reflected only there is
+    // resolved too; one naming nothing is the declaring library's to report.
+    let mut inherited: Vec<Class> = Vec::new();
+    let held = |name: &tf::Token, reflected: &[Class], inherited: &[Class]| {
+        classes
+            .iter()
+            .chain(reflected)
+            .chain(inherited)
+            .any(|class| &class.identifier == name)
+    };
+    for owner in &classes {
+        let foreign = owner
+            .bases
+            .iter()
+            .filter(|base| base.library != source.library && !is_root(&base.identifier));
+        for base in foreign {
+            if !held(&base.identifier, &reflected, &inherited) {
+                inherited.push(class(&flattened, &index, index[&base.identifier])?);
+            }
+        }
+    }
+    let mut next = 0;
+    while let Some(ancestor) = inherited.get(next) {
+        let schemas = ancestor.metadata.reflected_api_schemas.clone();
+        for schema in &schemas {
+            if let Some(declaration) = index.get(schema)
+                && !held(schema, &reflected, &inherited)
+            {
+                inherited.push(class(&flattened, &index, declaration)?);
+            }
+        }
+        next += 1;
+    }
+
     // Every class another library declares, by name, for documentation to link
     // where prose names one. A class of this library that only a sublayer
     // declares is not among them, having no view anywhere to link to.
@@ -98,9 +134,13 @@ pub fn library(source: &Source) -> Result<Library, Error> {
         skip_code_generation: source.skip_code_generation,
         classes,
         reflected,
+        inherited,
         foreign,
-        source_layers: source.source_layers.clone(),
+        // Asked after the flatten above, which composed every prim and so
+        // loaded every layer an arc reaches.
+        source_layers: load::watched_layers(&source.stage),
         declared_tokens: source.tokens.clone(),
+        metadata: Vec::new(),
     })
 }
 
@@ -791,7 +831,7 @@ class Child "Child" (
 
         let (library, _) = crate::configure()
             .search_path(dir.path())
-            .read(&schema)
+            .read(&schema, &[])
             .expect("the root's Base is the one that counts");
         let child = library
             .classes

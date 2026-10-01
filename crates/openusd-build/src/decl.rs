@@ -45,7 +45,20 @@ pub fn with_family<R>(library: &Library, f: impl FnOnce(&usd::SchemaFamily<'_>) 
         .map(|((class, lists), nested)| declare(class, lists, nested))
         .collect();
 
-    f(&usd::SchemaFamily::new(&library.name, &decls))
+    let metadata: Vec<usd::MetadataDecl<'_>> = library
+        .metadata
+        .iter()
+        .map(|field| {
+            let decl =
+                usd::MetadataDecl::new(field.name.as_str(), field.type_name.as_str()).applies_to(field.applies_to);
+            match &field.fallback {
+                Some(fallback) => decl.fallback_borrowed(fallback),
+                None => decl,
+            }
+        })
+        .collect();
+
+    f(&usd::SchemaFamily::new(&library.name, &decls).metadata(&metadata))
 }
 
 /// One class's name lists and field sets, owned so the declaration can borrow

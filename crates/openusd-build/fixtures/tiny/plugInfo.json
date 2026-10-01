@@ -1,0 +1,28 @@
+# The metadata fields the tiny library registers, one per kind of spec a field
+# can apply to, written the way upstream writes a plugInfo.json.
+{
+    "Plugins": [
+        {
+            "Info": {
+                "SdfMetadata": {
+                    "tinyHints": {
+                        "appliesTo": ["prims", "properties"],
+                        "documentation": "Free-form hints for a tiny editor.",
+                        "type": "dictionary"
+                    },
+                    "tinyRole": {
+                        "appliesTo": ["attributes"],
+                        "default": "plain",
+                        "type": "token"
+                    },
+                    "tinyUnits": {
+                        "appliesTo": "layers",
+                        "default": 1,
+                        "type": "double"
+                    }
+                }
+            },
+            "Name": "tiny"
+        }
+    ]
+}

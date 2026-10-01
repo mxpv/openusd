@@ -16,8 +16,8 @@
 
 use openusd::Result;
 
-use openusd::gf;
 use openusd::usd::SchemaBase;
+use openusd::{gf, sdf};
 
 use super::BindingAPI;
 use super::anim_mapper::AnimMapper;
@@ -63,10 +63,10 @@ impl SkinningResolver {
         };
         Ok(Self {
             prim: binding.path().as_str().to_string(),
-            joint_indices: binding.joint_indices()?,
-            joint_weights: binding.joint_weights()?,
+            joint_indices: binding.joint_indices()?.unwrap_or_default(),
+            joint_weights: joint_weights(binding)?,
             interpolation: binding.interpolation()?,
-            skinning_method: binding.skinning_method()?,
+            skinning_method: binding.skinning_method()?.unwrap_or_default(),
             elements_per_element: binding.elements_per_element()?,
             mapper,
             geom_bind_transform: binding.geom_bind_transform()?.unwrap_or(gf::Matrix4d::IDENTITY),
@@ -206,4 +206,14 @@ impl SkinningResolver {
             &mesh_xforms,
         )
     }
+}
+
+/// `binding`'s joint weights, empty when unauthored. The schema declares
+/// `float[]`, and weights authored as `double[]` are widened rather than lost.
+fn joint_weights(binding: &BindingAPI) -> Result<Vec<f32>> {
+    Ok(match binding.joint_weights_attr().get::<sdf::Value>()? {
+        Some(sdf::Value::FloatVec(weights)) => weights,
+        Some(sdf::Value::DoubleVec(weights)) => weights.into_iter().map(|weight| weight as f32).collect(),
+        _ => Vec::new(),
+    })
 }

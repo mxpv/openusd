@@ -49,12 +49,22 @@ impl Library {
         let mut properties = Gathered::default();
         let mut identifiers = Gathered::default();
 
-        for class in self.held() {
+        for class in self.emitted() {
             identifiers.add_schema(class)?;
             properties.add_class(class, self)?;
         }
         for declared in &self.declared_tokens {
             properties.declared(declared, &format!("a token of the {} library", self.name))?;
+        }
+        // A metadata field is authored under its name, which the traits
+        // reading it name by constant.
+        for field in &self.metadata {
+            let declared = DeclaredToken {
+                id: field.name.to_string(),
+                value: field.name.to_string(),
+                documentation: field.documentation.clone(),
+            };
+            properties.declared(&declared, &format!("a metadata field of the {} library", self.name))?;
         }
 
         // A property that happens to be named after a schema is the schema's

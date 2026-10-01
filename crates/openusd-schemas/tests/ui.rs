@@ -23,16 +23,10 @@ fn ui_from_fixture() -> Result<()> {
     let node = NodeGraphNodeAPI::get(&stage, "/Mat/Surface")?.expect("NodeGraphNodeAPI");
     assert_eq!(node.pos_attr().get::<[f32; 2]>()?, Some([12.0, 34.0]));
     assert_eq!(node.size_attr().get::<[f32; 2]>()?, Some([180.0, 90.0]));
-    assert_eq!(node.stacking_order_attr().get::<i32>()?, Some(3));
+    assert_eq!(node.stacking_order()?, Some(3));
     assert_eq!(node.display_color_attr().get::<[f32; 3]>()?, Some([0.2, 0.4, 0.8]));
-    assert_eq!(
-        node.expansion_state_attr().get::<ExpansionState>()?,
-        Some(ExpansionState::Minimized)
-    );
-    assert_eq!(
-        node.doc_uri_attr().get::<String>()?.as_deref(),
-        Some("https://example.com/node")
-    );
+    assert_eq!(node.expansion_state()?, Some(ExpansionState::Minimized));
+    assert_eq!(node.doc_uri()?.as_deref(), Some("https://example.com/node"));
 
     let backdrop = Backdrop::get(&stage, "/Mat/Note")?.expect("Backdrop");
     assert_eq!(
@@ -80,21 +74,15 @@ fn nodegraph_node_roundtrip() -> Result<()> {
     n.create_doc_uri_attr()?.set("https://example.com/node".to_string())?;
 
     let n = NodeGraphNodeAPI::get(&stage, "/Mat/Shader")?.expect("NodeGraphNodeAPI");
-    assert_eq!(n.pos_attr().get::<gf::Vec2f>()?, Some(gf::vec2f(12.0, 34.0)));
+    assert_eq!(n.pos()?, Some(gf::vec2f(12.0, 34.0)));
     assert_eq!(n.size_attr().get::<gf::Vec2f>()?, Some(gf::vec2f(180.0, 90.0)));
-    assert_eq!(n.stacking_order_attr().get::<i32>()?, Some(3));
+    assert_eq!(n.stacking_order()?, Some(3));
     assert_eq!(
         n.display_color_attr().get::<gf::Vec3f>()?,
         Some(gf::vec3f(0.2, 0.4, 0.8))
     );
-    assert_eq!(
-        n.expansion_state_attr().get::<ExpansionState>()?,
-        Some(ExpansionState::Minimized)
-    );
-    assert_eq!(
-        n.doc_uri_attr().get::<String>()?.as_deref(),
-        Some("https://example.com/node")
-    );
+    assert_eq!(n.expansion_state()?, Some(ExpansionState::Minimized));
+    assert_eq!(n.doc_uri()?.as_deref(), Some("https://example.com/node"));
     Ok(())
 }
 

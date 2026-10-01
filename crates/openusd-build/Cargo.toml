@@ -25,6 +25,10 @@ categories.workspace = true
 openusd.workspace = true
 thiserror.workspace = true
 
+# A library's metadata fields are declared where upstream declares them, in the
+# `SdfMetadata` block of its `plugInfo.json`.
+serde_json.workspace = true
+
 # The generated Rust is built as syntax rather than as text: `quote` writes it,
 # `syn` parses it back to catch anything malformed here rather than in a
 # consumer's build, and `prettyplease` lays it out without an external rustfmt.

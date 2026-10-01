@@ -24,6 +24,7 @@ fn tiny() -> PathBuf {
 #[test]
 fn tiny_library() {
     let output = openusd_build::configure()
+        .plug_info(tiny().join("plugInfo.json"))
         .build_library(tiny().join("schema.usda"), Views::Generate)
         .expect("the fixture generates");
 
