@@ -497,6 +497,28 @@ macro_rules! array_pairs {
                     _ => None,
                 }
             }
+
+            /// The attribute array made of this one's elements at `positions`,
+            /// in the order given, a position repeated as often as it is
+            /// named.
+            ///
+            /// `None` when this value is not an attribute array, or when a
+            /// position lies past its end.
+            ///
+            // TODO(perf): collecting through `Option` hides the iterator's
+            // length, so the output grows by doubling. A caller that knows
+            // every position is in range could gather into a vector sized
+            // up front.
+            pub fn gather(&self, positions: impl IntoIterator<Item = usize>) -> Option<Value> {
+                match self {
+                    $(Value::$array(items) => positions
+                        .into_iter()
+                        .map(|at| items.get(at).cloned())
+                        .collect::<Option<Vec<_>>>()
+                        .map(Value::$array),)*
+                    _ => None,
+                }
+            }
         }
     };
 }
@@ -908,6 +930,42 @@ mod tests {
 
     fn find(name: &str) -> ValueTypeName {
         ValueTypeName::find(name).unwrap_or_else(|| panic!("{name} is registered"))
+    }
+
+    /// Positions are read in the order given, and one named twice is read
+    /// twice.
+    #[test]
+    fn gather_repeats_elements() {
+        let values = Value::IntVec(vec![10, 20, 30]);
+        assert_eq!(values.gather([2, 0, 0, 1]), Some(Value::IntVec(vec![30, 10, 10, 20])));
+        assert_eq!(values.gather([]), Some(Value::IntVec(Vec::new())));
+    }
+
+    /// One position past the end fails the whole gather.
+    #[test]
+    fn gather_out_of_range() {
+        let values = Value::FloatVec(vec![1.0, 2.0]);
+        assert_eq!(values.gather([0, 2]), None);
+        assert_eq!(Value::FloatVec(Vec::new()).gather([0]), None);
+    }
+
+    /// A scalar holds no elements to gather, and neither does an array no
+    /// attribute holds.
+    #[test]
+    fn gather_non_array() {
+        assert_eq!(Value::Int(1).gather([0]), None);
+        assert_eq!(Value::PathVec(Vec::new()).gather([]), None);
+    }
+
+    /// Every attribute array kind gathers, and into an array of its own kind.
+    #[test]
+    fn gather_every_kind() {
+        let arrays: Vec<Value> = ValueKind::iter().filter_map(ValueKind::empty_array).collect();
+        assert_eq!(arrays.len(), 32);
+        for array in arrays {
+            let gathered = array.gather([]).expect("an attribute array gathers");
+            assert_eq!(ValueKind::from(&gathered), ValueKind::from(&array));
+        }
     }
 
     fn hash_of(name: &ValueTypeName) -> u64 {
