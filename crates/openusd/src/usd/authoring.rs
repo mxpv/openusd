@@ -95,6 +95,49 @@ impl StageEdit {
         self.stage.relationship_builder(path).in_batch(self)
     }
 
+    /// Queues several properties as one: all of what `f` builds joins the
+    /// transaction, or none of it does.
+    ///
+    /// `f` receives a batch of its own, on the edit target this one planned
+    /// against. When `f` succeeds its properties move into this batch
+    /// together, and when it fails they are dropped, so an operation made of
+    /// several properties leaves no part of itself queued behind an error the
+    /// caller goes on from. A property this batch already holds is
+    /// [`StageAuthoringError::DuplicateProperty`], and none of the group
+    /// joins.
+    ///
+    /// Nothing is written until the outermost batch commits, and reads inside
+    /// `f` see the stage as it stands.
+    pub fn group<T, E>(&self, f: impl FnOnce(&StageEdit) -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StageAuthoringError>,
+    {
+        let group = StageEdit {
+            stage: self.stage.clone(),
+            target: self.target.clone(),
+            queued: RefCell::new(Vec::new()),
+        };
+        let value = f(&group)?;
+        self.absorb(group.queued.into_inner())?;
+        Ok(value)
+    }
+
+    /// Queues `properties` together, or none of them where the batch already
+    /// holds one of their paths.
+    fn absorb(&self, properties: Vec<PlannedProperty>) -> Result<(), StageAuthoringError> {
+        let mut queued = self.queued.borrow_mut();
+        let repeated = properties
+            .iter()
+            .find(|property| queued.iter().any(|other| other.path == property.path));
+        if let Some(repeated) = repeated {
+            return Err(StageAuthoringError::DuplicateProperty {
+                path: repeated.path.clone(),
+            });
+        }
+        queued.extend(properties);
+        Ok(())
+    }
+
     /// Queues an already-planned property, and hands back where it will be
     /// authored for the builder to make its handle from.
     ///
@@ -185,6 +228,20 @@ impl<'a> PrimEdit<'a> {
     /// [`Prim::relationship_builder`] inside the transaction.
     pub fn relationship_builder(&self, name: impl Into<tf::Token>) -> RelationshipBuilder<'a> {
         self.prim.relationship_builder(name).in_batch(self.batch)
+    }
+
+    /// Queues several of the prim's properties as one: [`StageEdit::group`],
+    /// with `f` handed this prim inside the group.
+    pub fn group<T, E>(&self, f: impl FnOnce(&PrimEdit<'_>) -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StageAuthoringError>,
+    {
+        self.batch.group(|batch| {
+            f(&PrimEdit {
+                batch,
+                prim: self.prim.clone(),
+            })
+        })
     }
 }
 
@@ -905,6 +962,93 @@ mod tests {
             Err(CallerError::Stage(StageAuthoringError::EditTargetMoved))
         ));
         assert!(!prim.attribute("height").is_defined()?);
+        Ok(())
+    }
+
+    /// A group's properties join the batch they were grouped in, and commit
+    /// with it.
+    #[test]
+    fn group_joins_batch() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        stage.edit(|edit| {
+            let world = edit.prim("/World")?;
+            world.attribute_builder("radius", "double").set(1.0).build()?;
+            world.group(|group| {
+                group.attribute_builder("height", "double").set(2.0).build()?;
+                group.attribute_builder("width", "double").set(3.0).build()?;
+                Ok::<_, StageAuthoringError>(())
+            })?;
+            assert!(!prim.attribute("height").is_defined()?, "nothing is written yet");
+            Ok::<_, crate::Error>(())
+        })?;
+
+        for (name, value) in [("radius", 1.0), ("height", 2.0), ("width", 3.0)] {
+            assert_eq!(prim.attribute(name).get::<f64>()?, Some(value), "{name}");
+        }
+        Ok(())
+    }
+
+    /// A group that fails queues none of its properties, so a caller that
+    /// goes on from the error commits only what it queued itself.
+    #[test]
+    fn group_error_queues_nothing() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        stage.edit(|edit| {
+            let world = edit.prim("/World")?;
+            world.attribute_builder("radius", "double").set(1.0).build()?;
+            let failed = world.group(|group| {
+                group.attribute_builder("height", "double").set(2.0).build()?;
+                Err::<(), _>(CallerError::Refused)
+            });
+            assert!(matches!(failed, Err(CallerError::Refused)));
+            Ok::<_, StageAuthoringError>(())
+        })?;
+
+        assert!(prim.attribute("radius").is_defined()?);
+        assert!(!prim.attribute("height").is_defined()?);
+        Ok(())
+    }
+
+    /// A group naming a property the batch already holds joins it with none
+    /// of its properties, the ones that did not collide included.
+    #[test]
+    fn group_duplicate_absorbs_nothing() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        stage.edit(|edit| {
+            let world = edit.prim("/World")?;
+            world.attribute_builder("height", "double").set(2.0).build()?;
+            let failed = world.group(|group| {
+                group.attribute_builder("width", "double").set(3.0).build()?;
+                group.attribute_builder("height", "double").set(4.0).build()?;
+                Ok::<_, StageAuthoringError>(())
+            });
+            assert!(matches!(failed, Err(StageAuthoringError::DuplicateProperty { .. })));
+            Ok::<_, StageAuthoringError>(())
+        })?;
+
+        assert_eq!(prim.attribute("height").get::<f64>()?, Some(2.0));
+        assert!(!prim.attribute("width").is_defined()?);
+        Ok(())
+    }
+
+    /// A group plans against the target its batch opened on, so a target
+    /// moved under it is refused there as well.
+    #[test]
+    fn group_shares_target() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/World")?;
+        let variant = variant_target(&stage)?;
+        let failed = stage.edit(|edit| {
+            edit.group(|group| {
+                stage.set_edit_target(variant.clone())?;
+                group.attribute_builder("/World.height", "double").set(2.0).build()
+            })
+        });
+
+        assert!(matches!(failed, Err(StageAuthoringError::EditTargetMoved)));
         Ok(())
     }
 
