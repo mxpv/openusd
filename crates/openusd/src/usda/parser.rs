@@ -179,7 +179,7 @@ impl<'a> Parser<'a> {
                             .with_context(|| format!("Unable to parse value for {known_name}"))?;
                         root.add(known_name, value);
                     } else if sdf::is_registered_field(name) {
-                        let value = types::parse_untyped_value(&mut this.cursor)
+                        let value = parse_registered_metadata(&mut this.cursor, name)
                             .with_context(|| format!("Unable to parse pseudo root metadata value for {name}"))?;
                         root.add(name, value);
                     } else {
@@ -591,16 +591,8 @@ impl<'a> Parser<'a> {
             }
 
             ensure!(list_op.is_none(), "{name} metadata does not support list ops");
-            let value = types::parse_untyped_value(&mut this.cursor)
+            let value = parse_registered_metadata(&mut this.cursor, &name)
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
-
-            // An untyped parse reads a name as a string, so a field its schema
-            // declares as `token` is retagged to what was declared.
-            let declared = sdf::schema_field_type(&name).and_then(|ty| ty.kind());
-            let value = match (declared, value) {
-                (Some(sdf::ValueKind::Token), sdf::Value::String(s)) => sdf::Value::token(s),
-                (_, value) => value,
-            };
 
             // A display unit is one of the names a unit category uses. C++
             // rejects any other rather than carrying it, so a typo is caught
@@ -851,13 +843,26 @@ impl<'a> Parser<'a> {
             // A registered field none of the productions above claims.
             other => {
                 ensure!(list_op.is_none(), "{other} metadata does not support list ops");
-                let value = types::parse_untyped_value(&mut self.cursor)
+                let value = parse_registered_metadata(&mut self.cursor, other)
                     .with_context(|| format!("Unable to parse prim metadata value for {other}"))?;
                 spec.add(other, value);
             }
         }
 
         Ok(())
+    }
+}
+
+/// Parse the value of the registered metadata field `name`.
+///
+/// A field some schema declares with a value type is read as that type, as
+/// an attribute's value is: `elementSize` as an `int`, `irIsInvertible` as a
+/// `bool`, `payloadAssetDependencies` as an `asset[]`, empty or not. Every
+/// other registered field is read by the shape of its literal.
+fn parse_registered_metadata(cursor: &mut Cursor<'_>, name: &str) -> Result<sdf::Value, RawError> {
+    match sdf::schema_field_type(name).filter(|ty| ty.kind().is_some()) {
+        Some(ty) => types::parse_value(cursor, &ty),
+        None => types::parse_untyped_value(cursor),
     }
 }
 
@@ -1318,6 +1323,75 @@ def Mesh "M"
             .expect("interpolation metadata must be a token");
 
         assert_eq!(interpolation.as_str(), "faceVarying");
+    }
+
+    /// A metadata field a schema declares holds its value as the declared
+    /// type, on a property, a prim and the layer alike: an `int` is no
+    /// `int64`, a `float` no `double`, and a `double` written whole is one.
+    #[test]
+    fn schema_metadata_typed() {
+        let parser = Parser::new(
+            r#"#usda 1.0
+(
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Mesh "M"
+{
+    float[] primvars:w = [1] (
+        elementSize = 3
+        unauthoredValuesIndex = -1
+        weight = 0.5
+        irIsInvertible = true
+        payloadAssetDependencies = []
+    )
+    float[] primvars:v = [1] (
+        irIsInvertible = 0
+        payloadAssetDependencies = [@a.usd@, @b.usd@]
+        weight = 1
+    )
+}
+"#,
+        );
+        let data = parser.parse().unwrap();
+
+        let primvar = data.get(&sdf::path("/M.primvars:w").unwrap()).unwrap();
+        assert_eq!(primvar.get("elementSize"), Some(&sdf::Value::Int(3)));
+        assert_eq!(primvar.get("unauthoredValuesIndex"), Some(&sdf::Value::Int(-1)));
+        assert_eq!(primvar.get("weight"), Some(&sdf::Value::Float(0.5)));
+        assert_eq!(primvar.get("irIsInvertible"), Some(&sdf::Value::Bool(true)));
+        assert_eq!(
+            primvar.get("payloadAssetDependencies"),
+            Some(&sdf::Value::AssetPathVec(Vec::new()))
+        );
+
+        let other = data.get(&sdf::path("/M.primvars:v").unwrap()).unwrap();
+        assert_eq!(other.get("irIsInvertible"), Some(&sdf::Value::Bool(false)));
+        assert_eq!(other.get("weight"), Some(&sdf::Value::Float(1.0)));
+        let dependencies = other.get("payloadAssetDependencies").unwrap();
+        assert_eq!(dependencies.array_len(), Some(2));
+        assert!(dependencies.is_asset_valued());
+
+        let root = data.get(&sdf::Path::abs_root()).unwrap();
+        assert_eq!(root.get("metersPerUnit"), Some(&sdf::Value::Double(1.0)));
+        assert_eq!(root.get("upAxis"), Some(&sdf::Value::token("Y")));
+    }
+
+    /// A literal the declared type cannot hold fails the parse, naming the
+    /// field.
+    #[test]
+    fn schema_metadata_mistyped() {
+        for metadata in [
+            "elementSize = \"three\"",
+            "elementSize = 4294967296",
+            "interpolation = 3",
+        ] {
+            let text = format!("#usda 1.0\ndef \"M\"\n{{\n    float[] x = [1] (\n        {metadata}\n    )\n}}\n");
+            let error = Parser::new(&text).parse().expect_err(metadata);
+            let field = metadata.split(' ').next().unwrap();
+            assert!(error.to_string().contains(field), "{metadata}: {error}");
+        }
     }
 
     #[test]
