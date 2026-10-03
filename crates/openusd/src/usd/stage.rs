@@ -1474,6 +1474,11 @@ impl Stage {
     /// property has already resolved its spec path, its value and its sample
     /// time through the target it was planned against.
     ///
+    /// The error is the closure's own: any type a [`StageAuthoringError`]
+    /// converts into, so a caller layered on the stage reports its failures
+    /// through the same transaction. A closure that ends in a bare `Ok` names
+    /// the type, as `Ok::<_, StageAuthoringError>(..)`.
+    ///
     /// ```
     /// # use openusd::usd;
     /// # fn main() -> openusd::Result<()> {
@@ -1490,10 +1495,10 @@ impl Stage {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn edit<T>(
-        &self,
-        f: impl FnOnce(&super::StageEdit) -> Result<T, StageAuthoringError>,
-    ) -> Result<T, StageAuthoringError> {
+    pub fn edit<T, E>(&self, f: impl FnOnce(&super::StageEdit) -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StageAuthoringError>,
+    {
         let edit = super::StageEdit::new(self);
         let value = f(&edit)?;
         edit.commit()?;

@@ -729,7 +729,7 @@ mod tests {
                 .custom(false)
                 .set_targets(["/World"])
                 .build()?;
-            Ok((height, proxy))
+            Ok::<_, StageAuthoringError>((height, proxy))
         })?;
 
         assert_eq!(height.get::<f64>()?, Some(2.0));
@@ -855,11 +855,64 @@ mod tests {
         Ok(())
     }
 
+    /// A caller's own error, as a layer above the stage would carry one.
+    #[derive(Debug)]
+    enum CallerError {
+        Refused,
+        Stage(StageAuthoringError),
+    }
+
+    impl From<StageAuthoringError> for CallerError {
+        fn from(error: StageAuthoringError) -> Self {
+            Self::Stage(error)
+        }
+    }
+
+    /// The closure's own error comes back as it was, and nothing it queued is
+    /// written.
+    #[test]
+    fn edit_carries_caller_error() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        let failed = stage.edit(|edit| {
+            edit.prim("/World")
+                .map_err(StageAuthoringError::from)?
+                .attribute_builder("height", "double")
+                .set(2.0)
+                .build()?;
+            Err::<(), _>(CallerError::Refused)
+        });
+
+        assert!(matches!(failed, Err(CallerError::Refused)));
+        assert!(!prim.attribute("height").is_defined()?);
+        Ok(())
+    }
+
+    /// A failure at the commit reaches the caller in the caller's error type.
+    #[test]
+    fn commit_error_converts() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        let variant = variant_target(&stage)?;
+        let failed = stage.edit(|edit| {
+            edit.attribute_builder("/World.height", "double").set(2.0).build()?;
+            stage.set_edit_target(variant.clone())?;
+            Ok::<_, CallerError>(())
+        });
+
+        assert!(matches!(
+            failed,
+            Err(CallerError::Stage(StageAuthoringError::EditTargetMoved))
+        ));
+        assert!(!prim.attribute("height").is_defined()?);
+        Ok(())
+    }
+
     /// An empty batch is a no-op that still hands back the closure's value.
     #[test]
     fn empty_batch_authors_nothing() -> Result<()> {
         let stage = stage()?;
-        assert_eq!(stage.edit(|_| Ok(7))?, 7);
+        assert_eq!(stage.edit(|_| Ok::<_, StageAuthoringError>(7))?, 7);
         Ok(())
     }
 }
