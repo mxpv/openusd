@@ -12,6 +12,7 @@ use openusd::usd::{SchemaBase, Stage};
 
 use super::tokens;
 use super::{Animation, AnimationSchema, BindingAPI, BlendShape, InfluenceInterpolation, Skeleton, SkeletonSchema};
+use crate::geom::Primvar;
 
 /// The namespace an inbetween shape is authored under (C++'s own
 /// `inbetweensPrefix`), which names no property and so has no token. The
@@ -153,22 +154,14 @@ impl BindingAPI {
     }
 
     /// `elementSize` on the joint-influence primvars — the number of
-    /// `(joint, weight)` pairs per element; defaults to 1.
+    /// `(joint, weight)` pairs per element; 1 where none is authored.
     pub fn elements_per_element(&self) -> Result<i32> {
-        Ok(
-            match self
-                .joint_indices_attr()
-                .get_metadata::<Value>(crate::geom::tokens::ELEMENT_SIZE)?
-            {
-                Some(Value::Int(n)) => n,
-                Some(Value::Int64(n)) => n as i32,
-                _ => 1,
-            },
-        )
+        Primvar::new(self.joint_indices_attr()).element_size()
     }
 
-    /// Authored `interpolation` on the joint-influence primvars; defaults to
-    /// [`InfluenceInterpolation::Vertex`].
+    /// `interpolation` on the joint-influence primvars, which is
+    /// [`InfluenceInterpolation::Constant`] where none is authored, as it is
+    /// for every primvar.
     pub fn interpolation(&self) -> Result<InfluenceInterpolation> {
         Ok(self
             .joint_indices_attr()
@@ -235,9 +228,27 @@ mod tests {
         );
         assert_eq!(body.joint_indices()?, Some(vec![0, 1]));
         assert_eq!(body.joint_weights()?, Some(vec![1.0, 1.0]));
-        assert_eq!(body.elements_per_element()?, 1);
-        assert_eq!(body.interpolation()?, InfluenceInterpolation::Vertex);
         assert_eq!(body.skinning_method()?, Some(SkinningMethod::ClassicLinear));
+        Ok(())
+    }
+
+    /// The joint influences are primvars, so with nothing authored they are
+    /// constant and one value per element, and the authored metadata reads
+    /// back.
+    #[test]
+    fn unauthored_interpolation_constant() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/Body")?;
+        let body = BindingAPI::apply(&stage.prim("/Body")?)?;
+        let indices = body.create_joint_indices_attr()?.set(Value::IntVec(vec![0, 1]))?;
+        assert_eq!(body.interpolation()?, InfluenceInterpolation::Constant);
+        assert_eq!(body.elements_per_element()?, 1);
+
+        indices
+            .set_metadata(crate::geom::tokens::INTERPOLATION, InfluenceInterpolation::Vertex)?
+            .set_metadata(crate::geom::tokens::ELEMENT_SIZE, Value::Int(2))?;
+        assert_eq!(body.interpolation()?, InfluenceInterpolation::Vertex);
+        assert_eq!(body.elements_per_element()?, 2);
         Ok(())
     }
 

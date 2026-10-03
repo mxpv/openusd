@@ -72,14 +72,13 @@ pub use skeleton_query::SkeletonResolver;
 pub use skinning_query::SkinningResolver;
 pub use topology::{NO_PARENT, Topology, TopologyError};
 
-/// Authored `interpolation` on the joint-influence primvars. `Constant`
-/// encodes rigid skinning (one set of weights for the whole prim); `Vertex` is
-/// per-point weights — the unauthored default and the only interpolation that
-/// generally makes sense for per-vertex influence lists.
+/// The `interpolation` of the joint-influence primvars. `Constant` encodes
+/// rigid skinning, one set of weights for the whole prim, and is what a
+/// primvar with no authored interpolation has; `Vertex` is per-point weights.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InfluenceInterpolation {
-    Constant,
     #[default]
+    Constant,
     Vertex,
 }
 
