@@ -276,9 +276,9 @@ pub(super) fn is_container(prim: &usd::Prim) -> Result<bool> {
 /// and the interface-consumer walk.
 pub(super) fn authored_inputs(prim: &usd::Prim) -> Result<Vec<Input>> {
     Ok(prim
-        .authored_attributes()?
+        .authored_attributes_in_namespace(INPUTS)?
         .into_iter()
-        .filter_map(Input::from_attribute)
+        .map(Input::new)
         .collect())
 }
 

@@ -55,9 +55,9 @@ pub trait Connectable: SchemaBase {
     fn outputs(&self) -> Result<Vec<Output>> {
         Ok(self
             .prim()
-            .authored_attributes()?
+            .authored_attributes_in_namespace(super::tokens::OUTPUTS)?
             .into_iter()
-            .filter_map(Output::from_attribute)
+            .map(Output::new)
             .collect())
     }
 }

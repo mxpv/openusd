@@ -417,9 +417,9 @@ mod pcp_txt {
             }
 
             // The dump mirrors the pcp tier, which composes `propertyChildren`
-            // without applying `propertyOrder`; the usd tier's
-            // `property_names` does apply it.
-            let properties = prim.authored_property_names().unwrap();
+            // without applying `propertyOrder`; the usd tier's property
+            // listings do apply it.
+            let properties = prim.prim_index().property_names().unwrap();
             if !properties.is_empty() {
                 let _ = writeln!(out, "Property names:");
                 let _ = writeln!(out, "     {}", name_list(&properties));
@@ -1185,22 +1185,24 @@ mod reorder {
     fn property_order_ignored_when_composing_names() {
         // Composing `propertyChildren` across layers ignores `reorder
         // properties` (C++ `_ComposePrimPropertyNames` passes no order field in
-        // USD mode), so the authored set comes back in authoring order.
+        // USD mode), so the prim index names them in authoring order.
         let stage = open_fixture();
-        let props = stage.prim("/Props").unwrap().authored_property_names().unwrap();
+        let props = stage.prim("/Props").unwrap().prim_index().property_names().unwrap();
         assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["x", "y", "z"]);
     }
 
     #[test]
     fn property_order_applied_when_reporting_names() {
-        // Reporting a prim's properties does apply the composed `propertyOrder`
-        // (C++ `UsdPrim::GetPropertyNames` sorts the union, then calls
-        // `ApplyPropertyOrder`), so the fixture's `reorder properties = [y, x]`
-        // puts `y` first and `x` last, with unlisted `z` trailing the entry it
-        // followed.
+        // Reporting a prim's properties, all of them or only the authored ones,
+        // does apply the composed `propertyOrder` (C++ `UsdPrim::GetPropertyNames`
+        // and `GetAuthoredPropertyNames` call `ApplyPropertyOrder`), so the
+        // fixture's `reorder properties = [y, x]` puts `y` first and `x` last,
+        // with unlisted `z` trailing the entry it followed.
         let stage = open_fixture();
-        let props = stage.prim("/Props").unwrap().property_names().unwrap();
-        assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["y", "z", "x"]);
+        let prim = stage.prim("/Props").unwrap();
+        for props in [prim.property_names().unwrap(), prim.authored_property_names().unwrap()] {
+            assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["y", "z", "x"]);
+        }
     }
 }
 

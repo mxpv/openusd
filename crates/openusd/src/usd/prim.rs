@@ -1031,7 +1031,7 @@ impl Prim {
     /// name came from. Use [`authored_property_names`](Self::authored_property_names)
     /// to scan only what layers actually author.
     pub fn property_names(&self) -> Result<Vec<Token>> {
-        let mut names = self.authored_property_names()?;
+        let mut names = self.authored_names_unordered()?;
 
         // A schema-declared property is part of the prim's surface whether or
         // not a layer authors a spec for it, since it still resolves a type and
@@ -1044,42 +1044,80 @@ impl Prim {
             names.sort_by(|a, b| sdf::element_cmp(a, b));
         }
 
-        if let Some(order) = self
-            .stage
-            .field::<sdf::Value>(&self.path, sdf::FieldKey::PropertyOrder)?
-            .and_then(sdf::Value::try_as_token_vec)
-        {
-            sdf::apply_ordering(&mut names, &order);
-        }
+        self.apply_property_order(&mut names)?;
         Ok(names)
     }
 
     /// Returns the property names layers author on this prim, in composed
-    /// order. Mirrors C++ `UsdPrim::GetAuthoredPropertyNames`.
+    /// order and then reordered by the prim's composed `propertyOrder`.
+    /// Mirrors C++ `UsdPrim::GetAuthoredPropertyNames`, which sorts the names
+    /// into dictionary order before applying `propertyOrder`; these keep the
+    /// order composition folds them in (see [`sdf::element_cmp`]).
     ///
     /// This is the set to scan when the question is "what did someone write?" —
     /// enumerating a schema's declarations would answer a different one.
     pub fn authored_property_names(&self) -> Result<Vec<Token>> {
+        let mut names = self.authored_names_unordered()?;
+        self.apply_property_order(&mut names)?;
+        Ok(names)
+    }
+
+    /// The property names layers author on this prim, in composed order, with
+    /// the prim's `propertyOrder` yet to be applied.
+    fn authored_names_unordered(&self) -> Result<Vec<Token>> {
         Ok(self
             .stage
             .masked_opinions(&self.path, |g, cache| cache.prim_properties(g, &self.path))?)
     }
 
+    /// Reorders `names` by the prim's composed `propertyOrder`, where it
+    /// authors one (C++ `UsdPrim::ApplyPropertyOrder`).
+    fn apply_property_order(&self, names: &mut Vec<Token>) -> Result<()> {
+        if let Some(order) = self
+            .stage
+            .field::<sdf::Value>(&self.path, sdf::FieldKey::PropertyOrder)?
+            .and_then(sdf::Value::try_as_token_vec)
+        {
+            sdf::apply_ordering(names, &order);
+        }
+        Ok(())
+    }
+
     /// Returns handles to the composed attributes of this prim. Mirrors C++
     /// `UsdPrim::GetAttributes`.
     pub fn attributes(&self) -> Result<Vec<Attribute>> {
-        Ok(self
-            .properties_of_type(PropertySource::Composed, sdf::SpecType::Attribute)?
-            .into_iter()
-            .map(|path| Attribute::new(&self.stage, path))
-            .collect())
+        self.attributes_in_namespace("")
     }
 
     /// Returns handles to the attributes layers author on this prim. Mirrors
     /// C++ `UsdPrim::GetAuthoredAttributes`.
     pub fn authored_attributes(&self) -> Result<Vec<Attribute>> {
+        self.authored_attributes_in_namespace("")
+    }
+
+    /// Returns handles to the composed attributes of this prim whose names sit
+    /// under `namespace`, in the order [`attributes`](Self::attributes) lists
+    /// them. The attribute half of C++ `UsdPrim::GetPropertiesInNamespace`.
+    ///
+    /// `namespace` is one or more `:`-joined identifiers, with or without a
+    /// trailing `:`: both `"primvars"` and `"primvars:"` list `primvars:st`,
+    /// and neither lists an attribute named `primvars` or `primvarsFoo`. An
+    /// empty namespace lists every attribute.
+    pub fn attributes_in_namespace(&self, namespace: &str) -> Result<Vec<Attribute>> {
         Ok(self
-            .properties_of_type(PropertySource::Authored, sdf::SpecType::Attribute)?
+            .properties_of_type(PropertySource::Composed, sdf::SpecType::Attribute, namespace)?
+            .into_iter()
+            .map(|path| Attribute::new(&self.stage, path))
+            .collect())
+    }
+
+    /// Returns handles to the attributes layers author on this prim under
+    /// `namespace`, read as [`attributes_in_namespace`](Self::attributes_in_namespace)
+    /// reads it. The attribute half of C++
+    /// `UsdPrim::GetAuthoredPropertiesInNamespace`.
+    pub fn authored_attributes_in_namespace(&self, namespace: &str) -> Result<Vec<Attribute>> {
+        Ok(self
+            .properties_of_type(PropertySource::Authored, sdf::SpecType::Attribute, namespace)?
             .into_iter()
             .map(|path| Attribute::new(&self.stage, path))
             .collect())
@@ -1089,7 +1127,7 @@ impl Prim {
     /// `UsdPrim::GetRelationships`.
     pub fn relationships(&self) -> Result<Vec<Relationship>> {
         Ok(self
-            .properties_of_type(PropertySource::Composed, sdf::SpecType::Relationship)?
+            .properties_of_type(PropertySource::Composed, sdf::SpecType::Relationship, "")?
             .into_iter()
             .map(|path| Relationship::new(&self.stage, path))
             .collect())
@@ -1099,7 +1137,7 @@ impl Prim {
     /// C++ `UsdPrim::GetAuthoredRelationships`.
     pub fn authored_relationships(&self) -> Result<Vec<Relationship>> {
         Ok(self
-            .properties_of_type(PropertySource::Authored, sdf::SpecType::Relationship)?
+            .properties_of_type(PropertySource::Authored, sdf::SpecType::Relationship, "")?
             .into_iter()
             .map(|path| Relationship::new(&self.stage, path))
             .collect())
@@ -1129,13 +1167,18 @@ impl Prim {
         })
     }
 
-    /// The property paths of `source` whose spec type matches `ty`, in composed
-    /// order.
-    fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType) -> Result<Vec<sdf::Path>> {
-        let names = match source {
+    /// The property paths of `source` under `namespace` whose spec type
+    /// matches `ty`, in composed order.
+    ///
+    /// The namespace narrows the ordered names, so a property keeps the place
+    /// the whole list gave it, and only the names it leaves are asked for
+    /// their spec type.
+    fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType, namespace: &str) -> Result<Vec<sdf::Path>> {
+        let mut names = match source {
             PropertySource::Composed => self.property_names()?,
             PropertySource::Authored => self.authored_property_names()?,
         };
+        names.retain(|name| in_namespace(name, namespace));
         let info = self.prim_type_info()?;
         let definition = info.prim_definition();
 
@@ -1209,6 +1252,18 @@ fn payload_has_target(payload: &sdf::Payload) -> bool {
     !payload.asset_path.is_empty() || !payload.prim_path.is_empty()
 }
 
+/// Whether the property `name` sits under `namespace`: the name continues past
+/// the namespace, and the namespace ends at one of the name's `:` delimiters
+/// (C++ `UsdPrim::_GetPropertiesInNamespace`). A trailing `:` on the namespace
+/// is that delimiter, and an empty namespace holds every name.
+fn in_namespace(name: &str, namespace: &str) -> bool {
+    if namespace.is_empty() {
+        return true;
+    }
+    let terminator = namespace.len() - usize::from(namespace.ends_with(':'));
+    name.starts_with(namespace) && name.as_bytes().get(terminator) == Some(&b':')
+}
+
 /// A handle to a single prim's composition index, the analog of C++
 /// `PcpPrimIndex` reached via `UsdPrim::GetPrimIndex`.
 ///
@@ -1260,6 +1315,17 @@ impl PrimIndexRef {
         Ok(self
             .stage
             .opinions(&self.path, |g, c| c.compute_prim_child_names(g, &self.path))?)
+    }
+
+    /// Composes the names of the properties this prim's layers author, in the
+    /// order composition folds them (C++
+    /// `PcpPrimIndex::ComputePrimPropertyNames`). The prim's `propertyOrder`
+    /// plays no part in composing them; [`Prim::authored_property_names`]
+    /// applies it.
+    pub fn property_names(&self) -> Result<Vec<Token>> {
+        Ok(self
+            .stage
+            .opinions(&self.path, |g, c| c.prim_properties(g, &self.path))?)
     }
 }
 
@@ -2254,6 +2320,112 @@ mod tests {
         let stage = stage()?;
         stage.prim("/Absent")?.clear_metadata("documentation")?;
         assert!(!stage.prim("/Absent")?.is_defined()?);
+        Ok(())
+    }
+
+    /// `prim`'s attribute names, in the order the handles came back.
+    fn names(attributes: &[super::Attribute]) -> Vec<&str> {
+        attributes.iter().map(super::Attribute::name).collect()
+    }
+
+    /// A prim holding attributes in and around the `primvars` namespace, and
+    /// a relationship inside it.
+    fn namespaced() -> Result<super::Prim> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/Mesh")?;
+        for name in [
+            "primvars:st",
+            "points",
+            "primvars:skel:weights",
+            "primvarsFoo",
+            "primvars",
+        ] {
+            prim.create_attribute(name, "float")?;
+        }
+        prim.create_relationship("primvars:link")?;
+        Ok(prim)
+    }
+
+    /// A namespace lists the attributes under it, however deep, and none of
+    /// the relationships.
+    #[test]
+    fn namespace_filters_attributes() -> Result<()> {
+        let prim = namespaced()?;
+        let expected = ["primvars:st", "primvars:skel:weights"];
+        assert_eq!(names(&prim.attributes_in_namespace("primvars")?), expected);
+        assert_eq!(names(&prim.authored_attributes_in_namespace("primvars:")?), expected);
+        assert_eq!(
+            names(&prim.attributes_in_namespace("primvars:skel")?),
+            ["primvars:skel:weights"]
+        );
+        Ok(())
+    }
+
+    /// The namespace ends at a `:` of the name: a name that merely starts
+    /// with its spelling, or is its spelling, sits outside it.
+    #[test]
+    fn namespace_needs_delimiter() {
+        assert!(super::in_namespace("primvars:st", "primvars"));
+        assert!(super::in_namespace("primvars:st", "primvars:"));
+        assert!(!super::in_namespace("primvarsFoo", "primvars"));
+        assert!(!super::in_namespace("primvars", "primvars"));
+        assert!(!super::in_namespace("primvars", "primvars:"));
+        assert!(!super::in_namespace("primvars:st", "primvars:s"));
+        assert!(!super::in_namespace("st", "primvars"));
+    }
+
+    /// An empty namespace is every attribute.
+    #[test]
+    fn empty_namespace_all() -> Result<()> {
+        let prim = namespaced()?;
+        assert_eq!(prim.attributes_in_namespace("")?, prim.attributes()?);
+        assert_eq!(prim.attributes()?.len(), 5);
+        Ok(())
+    }
+
+    /// The names layers author follow `propertyOrder` exactly as the composed
+    /// names do.
+    #[test]
+    fn authored_names_apply_order() -> Result<()> {
+        let prim = namespaced()?;
+        let authored = [
+            "primvars:st",
+            "points",
+            "primvars:skel:weights",
+            "primvarsFoo",
+            "primvars",
+        ];
+        let before: Vec<Token> = authored.into_iter().chain(["primvars:link"]).map(Token::from).collect();
+        assert_eq!(prim.authored_property_names()?, before);
+
+        let order = vec![Token::from("primvars:skel:weights"), Token::from("points")];
+        let prim = prim.set_metadata("propertyOrder", sdf::Value::TokenVec(order))?;
+        // Each ordered name moves with the names that followed it, and the
+        // names ahead of the first ordered one stay where they were.
+        let expected: Vec<Token> = [
+            "primvars:st",
+            "primvars:skel:weights",
+            "primvarsFoo",
+            "primvars",
+            "primvars:link",
+            "points",
+        ]
+        .into_iter()
+        .map(Token::from)
+        .collect();
+        assert_eq!(prim.authored_property_names()?, expected);
+        assert_eq!(prim.property_names()?, expected);
+        Ok(())
+    }
+
+    /// A namespace keeps the order the whole property list has.
+    #[test]
+    fn namespace_keeps_property_order() -> Result<()> {
+        let order = vec![Token::from("primvars:skel:weights"), Token::from("primvars:st")];
+        let prim = namespaced()?.set_metadata("propertyOrder", sdf::Value::TokenVec(order))?;
+        let expected = ["primvars:skel:weights", "primvars:st"];
+        assert_eq!(names(&prim.attributes_in_namespace("primvars")?), expected);
+        assert_eq!(names(&prim.authored_attributes_in_namespace("primvars")?), expected);
         Ok(())
     }
 
