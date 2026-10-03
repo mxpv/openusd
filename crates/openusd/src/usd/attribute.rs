@@ -724,9 +724,22 @@ impl Attribute {
         T: sdf::FromValue,
         T::Error: Into<crate::Error>,
     {
+        super::decode_value(self.value_at::<T>(time)?)
+    }
+
+    /// The composed value at `time` that a read of `T` decodes, undecoded:
+    /// the opinion [`get_at`](Self::get_at) selects for `T`, and `None` where
+    /// that read finds no value of a kind `T` accepts.
+    ///
+    /// For a caller that transforms the value before decoding it, such as an
+    /// array that is reindexed, and has to transform the same opinion a typed
+    /// read would return.
+    pub fn value_at<T: sdf::FromValue>(&self, time: impl Into<Option<super::TimeCode>>) -> Result<Option<sdf::Value>> {
         let time = time.into().map(|time| time.value());
         let value = self.stage.resolve_at(&self.path, time, Some(T::accepts_kind))?;
-        super::decode_accepted(self.finish_composition(value)?)
+        Ok(self
+            .finish_composition(value)?
+            .filter(|value| T::accepts_kind(sdf::ValueKind::from(value))))
     }
 
     /// Closes what the authored sources composed against the schema tier,
@@ -825,6 +838,20 @@ impl Attribute {
     /// block is not a value, and neither is the schema fallback.
     pub fn has_authored_value(&self) -> Result<bool> {
         Ok(self.resolve_info()?.has_authored_value())
+    }
+
+    /// `true` when the attribute resolves a value from any source, the schema
+    /// fallback included (C++ `UsdAttribute::HasValue`). A block over an
+    /// attribute with no fallback leaves it with none.
+    pub fn has_value(&self) -> Result<bool> {
+        Ok(self.resolve_info()?.source() != ResolveInfoSource::None)
+    }
+
+    /// `true` when a layer authors the metadata field `key` on this attribute
+    /// (C++ `UsdObject::HasAuthoredMetadata`). What the attribute's schema
+    /// declares for the field is not an authored opinion.
+    pub fn has_authored_metadata(&self, key: &str) -> Result<bool> {
+        Ok(self.stage.field::<sdf::Value>(&self.path, key)?.is_some())
     }
 
     /// Where the value [`get`](Self::get) returns comes from, without producing
@@ -2668,6 +2695,53 @@ class Marker "Marker"
             StageAuthoringError::LocalTypeConflict(conflict) => *conflict,
             other => panic!("expected a local type conflict, got {other:?}"),
         }
+    }
+
+    /// A schema fallback is a value, and a name nothing declares has none.
+    #[test]
+    fn has_value_counts_fallback() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        let intensity = stage.attribute("/Sun.inputs:intensity")?;
+        assert!(intensity.has_value()?);
+        assert!(!intensity.has_authored_value()?);
+        assert!(!stage.attribute("/Sun.inputs:nope")?.has_value()?);
+        Ok(())
+    }
+
+    /// A block leaves an attribute without a fallback valueless, and one with
+    /// a fallback reading it.
+    #[test]
+    fn blocked_has_no_value() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let mine = stage.create_attribute("/Sun.mine", "double")?.set(1.0_f64)?;
+        assert!(mine.has_value()?);
+        assert!(!mine.block()?.has_value()?);
+
+        let intensity = stage.attribute("/Sun.inputs:intensity")?.block()?;
+        assert!(intensity.has_value()?);
+        assert!(!intensity.has_authored_value()?);
+        Ok(())
+    }
+
+    /// Only a layer's opinion is authored metadata: what the schema declares
+    /// for the field reads back, and is not authored.
+    #[test]
+    fn authored_metadata_only() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
+        assert!(rule.get_metadata::<sdf::Value>("allowedTokens")?.is_some());
+        assert!(!rule.has_authored_metadata("allowedTokens")?);
+
+        let mine = stage.create_attribute("/Sun.mine", "double")?;
+        assert!(!mine.has_authored_metadata("elementSize")?);
+        let mine = mine.set_metadata("elementSize", sdf::Value::Int(2))?;
+        assert!(mine.has_authored_metadata("elementSize")?);
+        Ok(())
     }
 
     #[test]

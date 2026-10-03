@@ -190,6 +190,20 @@ impl Relationship {
             .unwrap_or(false))
     }
 
+    /// `true` when a relationship is composed at this path — an authored spec,
+    /// or a declaration from the owning prim's schema. Mirrors C++
+    /// `UsdRelationship::IsDefined`.
+    ///
+    /// The composed spec answers first and a schema declaration answers for a
+    /// path no layer authors, so an attribute composed where a schema declares
+    /// a relationship is not one.
+    pub fn is_defined(&self) -> Result<bool> {
+        Ok(match self.stage.spec_type(&self.path)? {
+            Some(spec_type) => spec_type == sdf::SpecType::Relationship,
+            None => self.schema_declared()?,
+        })
+    }
+
     /// Whether a schema of the owning prim declares this relationship.
     fn schema_declared(&self) -> Result<bool, pcp::QueryError> {
         let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
@@ -541,6 +555,26 @@ mod tests {
 
         // /Geom is reached directly and again via /P.b; it appears once.
         assert_eq!(a.forwarded_targets()?, vec![sdf::path("/Geom")?]);
+        Ok(())
+    }
+
+    /// A relationship is defined by a spec of its kind or by the schema's
+    /// declaration, and an attribute at the path is not one.
+    #[test]
+    fn relationship_is_defined() -> Result<()> {
+        let stage = Stage::builder()
+            .schema_registry(crate::usd::SchemaRegistry::test_registry())
+            .in_memory("anon.usda")?;
+        let sun = stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+
+        assert!(sun.relationship("collection:lightLink:includes").is_defined()?);
+        assert!(!sun.relationship("nope").is_defined()?);
+        assert!(!sun.relationship("inputs:intensity").is_defined()?);
+
+        sun.create_relationship("authored")?;
+        assert!(sun.relationship("authored").is_defined()?);
+        sun.create_attribute("value", "double")?;
+        assert!(!sun.relationship("value").is_defined()?);
         Ok(())
     }
 
