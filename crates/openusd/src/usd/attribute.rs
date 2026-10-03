@@ -44,10 +44,21 @@ pub struct AttributeBuilder<'a> {
     type_name: sdf::ValueTypeName,
     variability: sdf::Variability,
     custom: bool,
-    /// The value to author in the same edit, and when it is for.
-    value: Option<(sdf::Value, Option<super::TimeCode>)>,
+    /// The value opinion to author in the same edit.
+    value: Option<BuilderValue>,
+    /// The metadata fields to author in the same edit, in the order given.
+    metadata: Vec<(&'static str, sdf::Value)>,
     /// The transaction to join, where the builder came from one.
     batch: Option<&'a StageEdit>,
+}
+
+/// The value opinion an [`AttributeBuilder`] authors with its attribute.
+#[derive(Debug)]
+enum BuilderValue {
+    /// A value, and when it is for.
+    Set(sdf::Value, Option<super::TimeCode>),
+    /// A block of every weaker value opinion.
+    Block,
 }
 
 impl<'a> AttributeBuilder<'a> {
@@ -60,6 +71,7 @@ impl<'a> AttributeBuilder<'a> {
             variability: sdf::Variability::Varying,
             custom: true,
             value: None,
+            metadata: Vec::new(),
             batch: None,
         }
     }
@@ -94,8 +106,64 @@ impl<'a> AttributeBuilder<'a> {
 
     /// The value to author at `time`, or the default where `time` is `None`.
     pub fn set_at(mut self, value: impl Into<sdf::Value>, time: impl Into<Option<super::TimeCode>>) -> Self {
-        self.value = Some((value.into(), time.into()));
+        self.value = Some(BuilderValue::Set(value.into(), time.into()));
         self
+    }
+
+    /// Blocks every weaker value opinion in the same edit, as
+    /// [`Attribute::block`] does: the edit target's own samples are erased and
+    /// its `default` becomes a value block. Replaces a value given through
+    /// [`set`](Self::set), which authoring a [`sdf::Value::ValueBlock`] does
+    /// not match, since that leaves the target's samples standing.
+    pub fn block(mut self) -> Self {
+        self.value = Some(BuilderValue::Block);
+        self
+    }
+
+    /// A metadata field to author in the same edit: [`Attribute::set_metadata`]
+    /// as part of the creating edit, on the same terms. A field with a
+    /// dedicated setter is refused at [`build`](Self::build).
+    pub fn metadata(mut self, key: &'static str, value: impl Into<sdf::Value>) -> Self {
+        match authoring::check_reserved(sdf::SpecType::Attribute, key) {
+            Ok(()) => self.metadata.push((key, value.into())),
+            // The first failure is the one `build` reports.
+            Err(err) if self.site.is_ok() => self.site = Err(err),
+            Err(_) => {}
+        }
+        self
+    }
+
+    /// The value type the attribute will have once built: the composed
+    /// declaration a value write is validated against.
+    ///
+    /// A schema that declares the attribute answers first, then the strongest
+    /// authored spec across the composed layers, and only for an attribute
+    /// nothing declares the type this builder was given. The edit target's own
+    /// spec takes no part: a weaker target holding `float[]` under a stronger
+    /// `float` reports `float`.
+    ///
+    /// `None` for a builder already holding a failure, such as a property path
+    /// that does not parse: it has no declaration to report, and
+    /// [`build`](Self::build) returns the failure.
+    ///
+    // TODO(perf): `build` resolves the same spec plan again. Keeping the plan
+    // this computed on the builder would let a caller that checks the type
+    // before building pay for it once.
+    pub fn declared_type(&self) -> Result<Option<sdf::ValueTypeName>, StageAuthoringError> {
+        let Ok((stage, path)) = &self.site else {
+            return Ok(None);
+        };
+        let ensure = authoring::plan_property_spec(stage, path, sdf::SpecType::Attribute, Some(self.declaration()))?;
+        Attribute::new(stage, path.clone()).composed_type(&ensure).map(Some)
+    }
+
+    /// What the attribute is declared as where it is new to the stage.
+    fn declaration(&self) -> authoring::PropertyDeclaration {
+        authoring::PropertyDeclaration::Attribute {
+            type_name: self.type_name.clone(),
+            variability: self.variability,
+            custom: self.custom,
+        }
     }
 
     /// Authors the attribute and hands back the handle that reads and edits
@@ -120,30 +188,38 @@ impl<'a> AttributeBuilder<'a> {
     /// Resolves everything the write depends on against composed state, so all
     /// the transaction has left to do is stamp the spec and write.
     fn plan(self) -> Result<authoring::PlannedProperty, StageAuthoringError> {
+        let declaration = self.declaration();
         let (stage, path) = self.site?;
-        let declaration = authoring::PropertyDeclaration::Attribute {
-            type_name: self.type_name,
-            variability: self.variability,
-            custom: self.custom,
-        };
+        let metadata = self
+            .metadata
+            .into_iter()
+            .map(|(key, value)| (key, stage.map_to_spec_value(&path, value)))
+            .collect();
 
-        let Some((value, time)) = self.value else {
-            let ensure = authoring::plan_property_spec(&stage, &path, sdf::SpecType::Attribute, Some(declaration))?;
-            return Ok(authoring::PlannedProperty::new(
-                stage,
-                path,
-                authoring::PropertyWrite::Attribute(ensure),
-            ));
-        };
-        // The value write stamps the spec itself, so declaring and setting is
+        // A value write stamps the spec itself, so declaring and setting is
         // the one edit rather than two.
         let attribute = Attribute::new(&stage, path);
-        let plan = attribute.plan_authoring(value, time, Some(declaration))?;
+        let value = match self.value {
+            None => authoring::AttributeWrite::Declare(authoring::plan_property_spec(
+                &stage,
+                &attribute.path,
+                sdf::SpecType::Attribute,
+                Some(declaration),
+            )?),
+            Some(BuilderValue::Set(value, time)) => {
+                let plan = attribute.plan_authoring(value, time, Some(declaration))?;
+                authoring::AttributeWrite::Set(Box::new(plan))
+            }
+            Some(BuilderValue::Block) => {
+                let plan = attribute.plan_authoring(sdf::Value::ValueBlock, None, Some(declaration))?;
+                authoring::AttributeWrite::Block(Box::new(plan))
+            }
+        };
         let Attribute { path, .. } = attribute;
         Ok(authoring::PlannedProperty::new(
             stage,
             path,
-            authoring::PropertyWrite::AttributeValue(plan),
+            authoring::PropertyWrite::Attribute { value, metadata },
         ))
     }
 }
@@ -264,12 +340,8 @@ impl Attribute {
     /// field is erased whole, without decoding samples the block discards.
     pub fn block(self) -> Result<Self, StageAuthoringError> {
         let plan = self.plan_authoring(sdf::Value::ValueBlock, None, None)?;
-        self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
-            let mut spec = plan.prepare(layer.data_mut(), &spec_path)?;
-            spec.erase(sdf::FieldKey::TimeSamples.as_str());
-            spec.set_default_raw(sdf::Value::ValueBlock);
-            Ok(())
-        })?;
+        self.stage
+            .with_target_layer_at(&self.path, |layer, spec_path| plan.block(layer.data_mut(), &spec_path))?;
         Ok(self)
     }
 
@@ -650,6 +722,19 @@ impl Attribute {
             .and_then(sdf::Value::try_as_token))
     }
 
+    /// The composed value type an attribute authored under `ensure` has: the
+    /// declaration the plan stamps, which composition already chose, or the
+    /// composed declaration where the edit target holds the spec and the plan
+    /// stamps nothing.
+    fn composed_type(&self, ensure: &authoring::EnsurePlan) -> Result<sdf::ValueTypeName, StageAuthoringError> {
+        match ensure.attribute_type() {
+            Some(declared) => Ok(declared.clone()),
+            None => Ok(sdf::ValueTypeName::from(
+                self.declared_type_token()?.ok_or(sdf::ValueTypeError::Empty)?,
+            )),
+        }
+    }
+
     /// The read phase of a value write (see [`AttributeAuthoringPlan`]): the
     /// value validated against the composed declaration, the spec plan, and
     /// the value and time mapped for the edit target. Runs outside any
@@ -670,10 +755,7 @@ impl Attribute {
         let effective = if value.is_value_block() {
             None
         } else {
-            let declared = match ensure.attribute_type() {
-                Some(declared) => declared.clone(),
-                None => sdf::ValueTypeName::from(self.declared_type_token()?.ok_or(sdf::ValueTypeError::Empty)?),
-            };
+            let declared = self.composed_type(&ensure)?;
             declared.validate(&value)?;
             Some(declared)
         };
@@ -1208,6 +1290,16 @@ impl AttributeAuthoringPlan {
             None => spec.set_default_raw(self.value),
             Some(time) => spec.set_time_sample_raw(time, self.value)?,
         }
+        Ok(())
+    }
+
+    /// The block, once [`prepare`](Self::prepare) has the spec: the
+    /// `timeSamples` field erased whole, without decoding the samples it
+    /// discards, and `default` made a value block.
+    pub(super) fn block(self, data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<(), StageAuthoringError> {
+        let mut spec = self.prepare(data, path)?;
+        spec.erase(sdf::FieldKey::TimeSamples.as_str());
+        spec.set_default_raw(sdf::Value::ValueBlock);
         Ok(())
     }
 }
@@ -2744,6 +2836,211 @@ class Marker "Marker"
         Ok(())
     }
 
+    /// A stage that counts the commits it makes.
+    fn counted(stage: &Stage) -> (Rc<Cell<usize>>, impl Sized) {
+        let commits = Rc::new(Cell::new(0));
+        let token = {
+            let commits = commits.clone();
+            stage.add_sink(move |_stage: &Stage, _change: &CommittedChange<'_>| commits.set(commits.get() + 1))
+        };
+        (commits, token)
+    }
+
+    /// The builder's metadata lands with the declaration and the value, as
+    /// the one edit.
+    #[test]
+    fn builder_stamps_metadata() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let (commits, _token) = counted(&stage);
+        let attr = stage
+            .attribute_builder("/A.x", "float[]")
+            .metadata("interpolation", sdf::Value::Token(tf::Token::from("vertex")))
+            .metadata("elementSize", sdf::Value::Int(2))
+            .set(sdf::Value::FloatVec(vec![1.0, 2.0]))
+            .build()?;
+
+        assert_eq!(commits.get(), 1);
+        assert_eq!(
+            attr.get_metadata::<tf::Token>("interpolation")?,
+            Some(tf::Token::from("vertex"))
+        );
+        assert_eq!(attr.get_metadata::<i32>("elementSize")?, Some(2));
+        assert_eq!(attr.get::<Vec<f32>>()?, Some(vec![1.0, 2.0]));
+        Ok(())
+    }
+
+    /// A field with a dedicated setter is refused, and nothing is authored.
+    #[test]
+    fn builder_metadata_reserved() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let error = stage
+            .attribute_builder("/A.x", "double")
+            .metadata("custom", sdf::Value::Bool(true))
+            .set(1.0_f64)
+            .build()
+            .expect_err("`custom` has its own setter");
+
+        assert!(matches!(error, StageAuthoringError::ReservedField { field: "custom" }));
+        assert!(!root_has_spec(&stage, "/A.x"));
+        Ok(())
+    }
+
+    /// A builder's block erases the target's own samples, as
+    /// `Attribute::block` does.
+    #[test]
+    fn builder_block_erases_samples() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        stage
+            .create_attribute("/A.x", "double")?
+            .set_at(1.0_f64, TimeCode::new(1.0))?;
+
+        let attr = stage.attribute_builder("/A.x", "double").block().build()?;
+        assert_eq!(root_field(&stage, "/A.x", "timeSamples"), None);
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        assert!(!attr.has_authored_value()?);
+        Ok(())
+    }
+
+    /// A value block given as the value is a `default` and nothing more: the
+    /// target's samples stand, and still answer.
+    #[test]
+    fn value_block_keeps_samples() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        stage
+            .create_attribute("/A.x", "double")?
+            .set_at(1.0_f64, TimeCode::new(1.0))?;
+
+        let attr = stage
+            .attribute_builder("/A.x", "double")
+            .set(sdf::Value::ValueBlock)
+            .build()?;
+        assert!(root_field(&stage, "/A.x", "timeSamples").is_some());
+        assert!(attr.has_authored_value()?);
+        Ok(())
+    }
+
+    /// Two attributes and their metadata commit as one edit of the layer.
+    #[test]
+    fn batch_metadata_one_edit() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let (commits, _token) = counted(&stage);
+        stage.edit(|edit| {
+            let prim = edit.prim("/A")?;
+            prim.attribute_builder("x", "float[]")
+                .metadata("elementSize", sdf::Value::Int(3))
+                .build()?;
+            prim.attribute_builder("x:indices", "int[]").block().build()?;
+            Ok::<_, StageAuthoringError>(())
+        })?;
+
+        assert_eq!(commits.get(), 1);
+        assert_eq!(stage.attribute("/A.x")?.get_metadata::<i32>("elementSize")?, Some(3));
+        assert!(stage.attribute("/A.x:indices")?.resolve_info()?.value_is_blocked());
+        Ok(())
+    }
+
+    /// A schema's declaration is the type, whatever the builder asks for.
+    #[test]
+    fn declared_type_schema_wins() -> Result<()> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        let builder = stage.attribute_builder("/Sun.inputs:intensity", "double[]");
+        assert_eq!(builder.declared_type()?, Some(sdf::ValueTypeName::FLOAT));
+        Ok(())
+    }
+
+    /// With no schema, the strongest authored spec declares the type.
+    #[test]
+    fn declared_type_strongest_spec() -> Result<()> {
+        let (_dir, stage) = stack("", "", "float x")?;
+        let builder = stage.attribute_builder("/A.x", "double[]");
+        assert_eq!(builder.declared_type()?, Some(sdf::ValueTypeName::FLOAT));
+        Ok(())
+    }
+
+    /// Only an attribute nothing declares takes the builder's own type.
+    #[test]
+    fn declared_type_requested_fallback() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let builder = stage.attribute_builder("/A.x", "double[]");
+        assert_eq!(builder.declared_type()?, Some(sdf::ValueTypeName::DOUBLE_ARRAY));
+        assert!(!root_has_spec(&stage, "/A.x"), "asking authors nothing");
+        Ok(())
+    }
+
+    /// A builder that cannot name its property has no declaration, and its
+    /// first failure is the one the build reports.
+    #[test]
+    fn declared_type_failed_site() -> Result<()> {
+        let stage = stage()?;
+        let builder = stage
+            .attribute_builder("not a path", "double")
+            .metadata("custom", sdf::Value::Bool(true));
+        assert_eq!(builder.declared_type()?, None);
+        assert!(matches!(builder.build(), Err(StageAuthoringError::Parse(_))));
+        Ok(())
+    }
+
+    /// The edit target's own spec does not pick the type: a stronger layer's
+    /// declaration is the composed one.
+    #[test]
+    fn declared_type_ignores_local() -> Result<()> {
+        let (_dir, stage) = stack("float x", "float[] x", "")?;
+        let builder = stage.attribute_builder("/A.x", "float[]");
+        assert_eq!(builder.declared_type()?, Some(sdf::ValueTypeName::FLOAT));
+        Ok(())
+    }
+
+    /// A stage whose root layer declares `/Sun.inputs:intensity` as a
+    /// `double`, where the schema declares a `float`.
+    fn mistyped_intensity() -> Result<Stage> {
+        let stage = schema_stage()?;
+        stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
+        root_edit(&stage, |e| {
+            sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Sun.inputs:intensity",
+                "double",
+                sdf::Variability::Varying,
+                false,
+            )?;
+            Ok(())
+        })?;
+        Ok(stage)
+    }
+
+    /// The schema's declaration is the type over the edit target's own spec
+    /// too.
+    #[test]
+    fn declared_type_schema_over_local() -> Result<()> {
+        let stage = mistyped_intensity()?;
+        let builder = stage.attribute_builder("/Sun.inputs:intensity", "double");
+        assert_eq!(builder.declared_type()?, Some(sdf::ValueTypeName::FLOAT));
+        Ok(())
+    }
+
+    /// The type a build reports is the composed one, and a value write still
+    /// requires the edit target's own declaration to agree with it.
+    #[test]
+    fn local_conflict_still_rejected() -> Result<()> {
+        let stage = mistyped_intensity()?;
+        let error = stage
+            .attribute_builder("/Sun.inputs:intensity", "double")
+            .set(1.0_f32)
+            .build()
+            .expect_err("the root declares a double");
+        let conflict = type_conflict(error);
+        assert_eq!(conflict.effective, tf::Token::from("float"));
+        assert_eq!(conflict.local, tf::Token::from("double"));
+        Ok(())
+    }
+
     #[test]
     fn set_mismatch_rejected() -> Result<()> {
         let stage = stage()?;
@@ -3386,11 +3683,7 @@ class Marker "Marker"
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         let path = "/Sun.inputs:intensity";
-        let commits = Rc::new(Cell::new(0));
-        let _token = {
-            let commits = commits.clone();
-            stage.add_sink(move |_stage: &Stage, _change: &CommittedChange<'_>| commits.set(commits.get() + 1))
-        };
+        let (commits, _token) = counted(&stage);
 
         // The mutation fails after the spec plan says to stamp one: nothing is
         // committed, so no spec and no notice survive.

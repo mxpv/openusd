@@ -207,16 +207,29 @@ pub(super) struct PlannedProperty {
 /// for it: all a [`PlannedProperty`] has left to do once the transaction opens.
 #[derive(Debug)]
 pub(super) enum PropertyWrite {
-    /// An attribute declared, and left at whatever value it has.
-    Attribute(EnsurePlan),
-    /// An attribute declared and given the value planned for it.
-    AttributeValue(AttributeAuthoringPlan),
+    /// An attribute declared, with the value opinion and the metadata fields
+    /// planned for it.
+    Attribute {
+        value: AttributeWrite,
+        metadata: Vec<(&'static str, sdf::Value)>,
+    },
     /// A relationship declared, and its targets replaced where the caller gave
     /// some.
     Relationship {
         ensure: EnsurePlan,
         targets: Option<Vec<sdf::Path>>,
     },
+}
+
+/// What an attribute's write does to its value.
+#[derive(Debug)]
+pub(super) enum AttributeWrite {
+    /// Declares the attribute, and leaves it at whatever value it has.
+    Declare(EnsurePlan),
+    /// Gives it the value planned for it.
+    Set(Box<AttributeAuthoringPlan>),
+    /// Blocks every weaker value opinion.
+    Block(Box<AttributeAuthoringPlan>),
 }
 
 impl PlannedProperty {
@@ -236,8 +249,22 @@ impl PlannedProperty {
 impl PropertyWrite {
     fn apply(self, data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<(), StageAuthoringError> {
         match self {
-            Self::Attribute(ensure) => apply_plan(data, path, Attribute::KIND, &ensure),
-            Self::AttributeValue(plan) => plan.write(data, path),
+            Self::Attribute { value, metadata } => {
+                match value {
+                    AttributeWrite::Declare(ensure) => apply_plan(data, path, Attribute::KIND, &ensure)?,
+                    AttributeWrite::Set(plan) => plan.write(data, path)?,
+                    AttributeWrite::Block(plan) => plan.block(data, path)?,
+                }
+                if metadata.is_empty() {
+                    return Ok(());
+                }
+                edit_spec(data, path.clone(), Attribute::KIND, Attribute::view, |spec| {
+                    for (key, value) in metadata {
+                        spec.set(key, value);
+                    }
+                    Ok(())
+                })
+            }
             Self::Relationship { ensure, targets } => {
                 apply_plan(data, path, Relationship::KIND, &ensure)?;
                 let Some(targets) = targets else {
