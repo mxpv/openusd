@@ -19,7 +19,7 @@
 //!
 //! | Feature | Module | Schemas | Beyond the views |
 //! |---------|--------|---------|------------------|
-//! | `geom`    | `geom`    | `UsdGeom`     | `ImageableExt` (visibility / purpose down namespace), `XformableExt` (the transform stack), the token enums |
+//! | `geom`    | `geom`    | `UsdGeom`     | `ImageableExt` (visibility / purpose down namespace), `XformableExt` (the transform stack), `Primvar` and the `PrimvarsAPI` queries (indexed values, inheritance down namespace), the token enums |
 //! | `lux`     | `lux`     | `UsdLux`      | the token enums; needs `geom` |
 //! | `media`   | `media`   | `UsdMedia`    | asset-preview thumbnails, which live in `assetInfo`; needs `geom` |
 //! | `physics` | `physics` | `UsdPhysics`  | the token enums; needs `geom` |
@@ -59,10 +59,12 @@
 //! reads the properties they all share. It defines nothing, no prim being of
 //! that type itself.
 
+use std::error::Error;
+use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use openusd::sdf;
 use openusd::usd::{self, SchemaRegistry};
+use openusd::{sdf, tf};
 
 // The macros below generate paths into the core crate. Reaching it through
 // `$crate::openusd` keeps them bound to this crate's dependency rather than
@@ -129,7 +131,88 @@ pub enum SchemaError {
         /// The rejected context string.
         context: String,
     },
+
+    /// A name that no primvar can have: one ending in `:indices`, which names
+    /// the indices attribute a primvar keeps beside it.
+    #[error("`{name}` is not a primvar name: `indices` is reserved for a primvar's indices attribute")]
+    InvalidPrimvarName {
+        /// The rejected name, as given.
+        name: String,
+    },
+
+    /// A primvar's element size counts the values that make up one element,
+    /// so it is at least one.
+    #[error("primvar {primvar} has element size {element_size}, which must be at least 1")]
+    InvalidElementSize {
+        /// The primvar's attribute path.
+        primvar: sdf::Path,
+        /// The rejected element size.
+        element_size: i32,
+    },
+
+    /// Only an array-valued primvar is indexed.
+    #[error("primvar {primvar} of type `{type_name}` is not an array, so it takes no indices")]
+    PrimvarNotArray {
+        /// The primvar's attribute path.
+        primvar: sdf::Path,
+        /// The type the primvar is declared as, empty where nothing declares
+        /// it.
+        type_name: tf::Token,
+    },
+
+    /// An indexed primvar whose indices read no value at the time asked for.
+    #[error("primvar {primvar} is indexed, but its indices hold no `int[]` value at the time read")]
+    PrimvarIndicesMissing {
+        /// The primvar's attribute path.
+        primvar: sdf::Path,
+    },
+
+    /// An indexed primvar whose indices reach outside its values.
+    #[error(transparent)]
+    PrimvarIndexOutOfRange(Box<PrimvarIndexError>),
+
+    /// Only a `string` or `string[]` primvar takes an id target.
+    #[error("primvar {primvar} of type `{type_name}` takes no id target: only a string or string[] primvar does")]
+    IdTargetType {
+        /// The primvar's attribute path.
+        primvar: sdf::Path,
+        /// The type the primvar is declared as, empty where nothing declares
+        /// it.
+        type_name: tf::Token,
+    },
 }
+
+/// The indices of an indexed primvar that reach outside its values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrimvarIndexError {
+    /// The primvar's attribute path.
+    pub primvar: sdf::Path,
+    /// How many of the indices are out of range.
+    pub invalid: usize,
+    /// How many values the primvar holds.
+    pub len: usize,
+    /// The primvar's element size: how many values each index selects.
+    pub element_size: usize,
+    /// The first out-of-range indices, at most five, each as its position in
+    /// the indices array and the index found there.
+    pub first: Vec<(usize, i32)>,
+}
+
+impl fmt::Display for PrimvarIndexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "primvar {} has {} indices outside its {} values at element size {}:",
+            self.primvar, self.invalid, self.len, self.element_size
+        )?;
+        for (position, index) in &self.first {
+            write!(f, " index {index} at position {position};")?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for PrimvarIndexError {}
 
 /// Stage-tier authoring failures route through [`SchemaError::Core`], so a
 /// schema authoring helper propagates them with one `?`.

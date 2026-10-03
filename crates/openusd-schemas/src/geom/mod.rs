@@ -90,19 +90,27 @@
 //!
 //! # Primvars
 //!
-//! Primvar attributes (`primvars:*`, plus the primvar-like `normals` /
-//! `widths`) are reached today through the raw [`openusd::usd::Attribute`]
-//! handles — their `interpolation` / `elementSize` / `<name>:indices`
-//! companion metadata is read via [`openusd::usd::Attribute::get_metadata`]. The
-//! convenience accessors (`Gprim::display_color_attr`, …) return the bare
-//! attribute. TODO: model `UsdGeomPrimvar` / `UsdGeomPrimvarsAPI` so primvars
-//! get a typed view that bundles values with interpolation and resolves
-//! indexed primvars, rather than callers reading the metadata by hand.
+//! A `primvars:*` attribute is read through [`Primvar`], which bundles its
+//! values with its `interpolation`, its `elementSize` and the
+//! `<name>:indices` attribute that may index them;
+//! [`Primvar::compute_flattened`] applies the indices. [`PrimvarsAPI`] views
+//! any prim: it creates, lists, blocks and removes the prim's primvars, and
+//! answers which ones reach it from its ancestors, since a constant primvar
+//! is inherited down namespace. [`PrimvarBuilder`] authors a primvar with its
+//! metadata and indices as one edit.
+//!
+//! The schema accessors that name a primvar (`Gprim::display_color_attr`, …)
+//! return the bare attribute, which [`Primvar::from_attribute`] wraps. The
+//! primvar-like `normals` and `widths` are plain attributes outside the
+//! namespace: they carry an `interpolation`, read through
+//! [`AttributeMetadata`], and take no indices.
 
 openusd::include_schema!("usdGeom");
 
 mod imageable;
 mod motion_api;
+mod primvar;
+mod primvars_api;
 mod visibility_api;
 mod xform_cache;
 mod xform_op;
@@ -115,6 +123,8 @@ use openusd::{sdf, usd};
 use tokens::*;
 
 pub use imageable::ImageableExt;
+pub use primvar::Primvar;
+pub use primvars_api::PrimvarBuilder;
 pub use xform_cache::XformCache;
 pub use xform_op::{XformOp, XformOpKind};
 pub use xformable::{XformOpPrecision, XformQuery, XformableExt};

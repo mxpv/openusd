@@ -3,7 +3,7 @@
 //! surface, the `Xformable` transform stack, and every concrete prim view.
 
 use openusd::Result;
-use openusd::gf::{Matrix4d, Vec3f};
+use openusd::gf::{Matrix4d, Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::{Attribute, SchemaBase, Stage, TimeCode};
@@ -13,9 +13,9 @@ use openusd_schemas::geom::{
     ConeSchema, Cube, CubeSchema, CurvesSchema, Cylinder, CylinderSchema, ElementType, Gprim, GprimSchema,
     HermiteCurves, HermiteCurvesSchema, Imageable, ImageableExt, ImageableSchema, InterpolateBoundary, Interpolation,
     Mesh, MeshSchema, NurbsCurves, NurbsCurvesSchema, NurbsPatch, NurbsPatchSchema, PatchForm, Plane, PlaneSchema,
-    PointBasedSchema, PointInstancer, PointInstancerSchema, Points, PointsSchema, Projection, Purpose, Scope, Sphere,
-    SphereSchema, StereoRole, SubdivisionScheme, Subset, SubsetSchema, TetMesh, TetMeshSchema, Visibility, Xform,
-    XformableExt, XformableSchema,
+    PointBasedSchema, PointInstancer, PointInstancerSchema, Points, PointsSchema, PrimvarsAPI, Projection, Purpose,
+    Scope, Sphere, SphereSchema, StereoRole, SubdivisionScheme, Subset, SubsetSchema, TetMesh, TetMeshSchema,
+    Visibility, Xform, XformableExt, XformableSchema,
 };
 
 const FIXTURE: &str = "fixtures/usdGeom_scene.usda";
@@ -672,8 +672,7 @@ fn mesh_normals_carry_interpolation() -> Result<()> {
 fn mesh_uvs_face_varying() -> Result<()> {
     let stage = open()?;
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
-    // `primvars:st` has no dedicated accessor — it is reached through the
-    // generic primvar namespace (UsdGeomPrimvarsAPI is not yet modeled).
+    // `primvars:st` is no schema property, so it has no accessor of its own.
     let st = m.attribute("primvars:st");
     assert_eq!(
         st.get::<sdf::Value>()?
@@ -1254,5 +1253,93 @@ fn sphere_roundtrip_and_chain() -> Result<()> {
     assert_eq!(sphere.compute_purpose()?, Purpose::Render);
     assert_eq!(sphere.double_sided_attr().get()?, Some(sdf::Value::Bool(true)));
     assert_eq!(Sphere::KIND, openusd::usd::SchemaKind::ConcreteTyped);
+    Ok(())
+}
+
+// Primvars, read from assets other tools authored.
+
+/// A stage over an asset of the USD working group's collection.
+fn vendor(asset: &str) -> Result<Stage> {
+    let path = format!("{}vendor/usd-wg-assets/{asset}", env!("CARGO_WORKSPACE_DIR"));
+    Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .open(&path)
+}
+
+fn primvars(stage: &Stage, path: &str) -> Result<PrimvarsAPI> {
+    Ok(PrimvarsAPI::from_prim_unchecked(stage.prim(path)?))
+}
+
+/// Indexed face-varying UVs flatten to one coordinate per face vertex, each
+/// the value its index names.
+#[test]
+fn mcusd_st_flattens() -> Result<(), SchemaError> {
+    let stage = vendor("full_assets/McUsd/McUsd.usda")?;
+    let mesh = Mesh::get(&stage, sdf::path("/McUsd/Geom/grass_block_top")?)?.expect("Mesh");
+    let st = primvars(&stage, "/McUsd/Geom/grass_block_top")?.primvar("st")?;
+    assert_eq!(st.interpolation()?, Interpolation::FaceVarying);
+    assert!(st.is_indexed()?);
+
+    let values = st.get_at::<Vec<Vec2f>>(None)?.expect("authored");
+    let indices = st.indices(None)?.expect("authored");
+    let flattened = st.compute_flattened::<Vec<Vec2f>>(None)?.expect("flattened");
+    assert_eq!(values.len(), 4);
+    let face_vertices: i32 = mesh
+        .face_vertex_counts_attr()
+        .get::<Vec<i32>>()?
+        .expect("authored")
+        .iter()
+        .sum();
+    assert_eq!(flattened.len(), usize::try_from(face_vertices).expect("a count"));
+    for (flat, index) in flattened.iter().zip(&indices) {
+        assert_eq!(*flat, values[usize::try_from(*index).expect("an index")]);
+    }
+    Ok(())
+}
+
+/// Indices authored as `None` are blocked, so the primvar is not indexed and
+/// flattens to its own values.
+#[test]
+fn teapot_indices_blocked() -> Result<(), SchemaError> {
+    let stage = vendor("full_assets/Teapot/geo/UtahTeapot.usd")?;
+    let teapot = primvars(&stage, "/UtahTeapot/Geometry")?;
+    for name in ["rest", "st"] {
+        let primvar = teapot.primvar(name)?;
+        assert!(primvar.indices_attr().is_defined()?, "{name}");
+        assert!(!primvar.is_indexed()?, "{name}");
+        assert_eq!(
+            primvar.compute_flattened::<sdf::Value>(None)?,
+            primvar.get_at::<sdf::Value>(None)?,
+            "{name}"
+        );
+    }
+    assert_eq!(teapot.primvar("st")?.interpolation()?, Interpolation::FaceVarying);
+    assert_eq!(teapot.primvar("rest")?.interpolation()?, Interpolation::Vertex);
+    Ok(())
+}
+
+/// Each interpolation reads back from the mesh that demonstrates it, with the
+/// value count the mesh's topology gives it.
+#[test]
+fn interpolation_doc_asset() -> Result<(), SchemaError> {
+    let stage = vendor("docs/PrimvarInterpolation/primvar_interpolation.usda")?;
+    let expected = [
+        ("constant", Interpolation::Constant, 1),
+        ("uniform", Interpolation::Uniform, 2),
+        ("varying", Interpolation::Varying, 6),
+        ("vertex", Interpolation::Vertex, 6),
+        ("faceVarying", Interpolation::FaceVarying, 8),
+    ];
+    for (name, interpolation, count) in expected {
+        let mesh = primvars(&stage, &format!("/World/{name}"))?;
+        let colors = mesh.primvars_with_authored_values()?;
+        assert_eq!(colors.len(), 1, "{name}");
+        let color = &colors[0];
+        assert_eq!(color.primvar_name(), "displayColor", "{name}");
+        assert_eq!(color.interpolation()?, interpolation, "{name}");
+        assert!(!color.is_indexed()?, "{name}");
+        let values = color.compute_flattened::<Vec<Vec3f>>(None)?.expect("authored");
+        assert_eq!(values.len(), count, "{name}");
+    }
     Ok(())
 }
