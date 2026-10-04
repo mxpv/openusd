@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::path::Path;
 
-use super::dependencies::{AssetRef, SourceLayer, root_identifier, visit_asset_paths};
+use super::dependencies::{AssetRef, SourceLayer, Visit, root_identifier, visit_asset_paths};
 use crate::sdf::{self, AbstractData};
 use crate::usd::Stage;
 use crate::{Error, Result, ar, pcp, usdz};
@@ -100,7 +100,7 @@ impl Package<'_> {
     fn write_layer(&mut self, index: usize, layer: &sdf::Layer) -> Result<()> {
         let anchor = layer.anchor_location();
         let location = self.entries[index].0.clone();
-        let edits = visit_asset_paths(layer.data(), layer.identifier(), |asset| {
+        let edits = visit_asset_paths(layer.data(), layer.identifier(), Visit::STRICT, |asset| {
             self.place(&asset, anchor.as_ref(), &location)
         })?;
         let bytes = if edits.is_empty() {
@@ -108,7 +108,10 @@ impl Package<'_> {
         } else {
             let mut data = sdf::Data::from_abstract(layer.data())?;
             for (path, field, value) in edits {
-                data.set_field(&path, &field, value);
+                match value {
+                    Some(value) => data.set_field(&path, &field, value),
+                    None => data.erase_field(&path, &field),
+                }
             }
             serialize(&data, &location)?
         };

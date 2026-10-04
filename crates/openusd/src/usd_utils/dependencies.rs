@@ -1,6 +1,6 @@
 //! Dependency discovery (C++ `UsdUtilsComputeAllDependencies`).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Deref;
 
 use super::DependencyError;
@@ -53,7 +53,7 @@ pub fn compute_all_dependencies(stage: &Stage, asset_path: &str) -> Result<Depen
             continue;
         };
         let anchor = layer.anchor_location();
-        visit_asset_paths(layer.data(), layer.identifier(), |asset| {
+        visit_asset_paths(layer.data(), layer.identifier(), Visit::STRICT, |asset| {
             if !asset.applied {
                 return Ok(None);
             }
@@ -113,29 +113,95 @@ impl Deref for SourceLayer<'_> {
     }
 }
 
+/// Rewrites every asset path `layer` authors with `modify`, as C++
+/// `UsdUtilsModifyAssetPaths` does: sublayers, reference and payload list-op
+/// items (deleted ones included), clip template paths, and asset values in
+/// fields, dictionaries, arrays and time samples, across every spec.
+/// Variable expressions and patterns reach `modify` as authored, and each
+/// distinct path reaches it once.
+///
+/// An empty result removes the path from the sublayers (with its layer
+/// offset), from reference and payload lists and, unless
+/// `keep_empty_paths_in_arrays`, from asset arrays, and clears an
+/// asset-valued field. C++ 25.05 drops every sublayer offset once a sublayer
+/// path changes; here the offsets stay with their sublayers.
+pub fn modify_asset_paths(
+    layer: &mut sdf::Layer,
+    mut modify: impl FnMut(&str) -> String,
+    keep_empty_paths_in_arrays: bool,
+) -> Result<()> {
+    let mode = Visit {
+        strict: false,
+        keep_empty_paths_in_arrays,
+    };
+    let mut modified = HashMap::new();
+    let edits = visit_asset_paths(layer.data(), layer.identifier(), mode, |asset| {
+        let path = modified
+            .entry(asset.path.to_owned())
+            .or_insert_with(|| modify(asset.path));
+        Ok((path != asset.path).then(|| path.clone()))
+    })?;
+    if edits.is_empty() {
+        return Ok(());
+    }
+    layer.edit(|edit| {
+        let data = edit.data_mut();
+        for (path, field, value) in edits {
+            match value {
+                Some(value) => data.set_field(&path, &field, value),
+                None => data.erase_field(&path, &field),
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// An asset path a layer authors, as [`visit_asset_paths`] reports it.
 pub(super) struct AssetRef<'a> {
     /// The authored path.
     pub path: &'a str,
-    /// Whether it names a layer: a sublayer, reference or payload, or an
-    /// asset value with a layer file extension.
+    /// Whether it names a layer: a sublayer, reference or payload, a clip
+    /// template, or an asset value with a layer file extension.
     pub layer: bool,
     /// Whether it adds an opinion: `false` for a deleted or reordered
     /// reference or payload list-op item.
     pub applied: bool,
 }
 
+/// How [`visit_asset_paths`] treats the paths it meets.
+#[derive(Clone, Copy)]
+pub(super) struct Visit {
+    /// Refuse the paths C++ expands before following (variable expressions,
+    /// UDIM and UV-tile patterns, clip templates) instead of visiting them.
+    pub strict: bool,
+    /// Keep an asset array entry `visit` empties instead of removing it.
+    pub keep_empty_paths_in_arrays: bool,
+}
+
+impl Visit {
+    /// The dependency walk's mode.
+    pub(super) const STRICT: Self = Self {
+        strict: true,
+        keep_empty_paths_in_arrays: true,
+    };
+}
+
+/// A field [`visit_asset_paths`] rewrote: its new value, or `None` to erase it.
+pub(super) type FieldEdit = (sdf::Path, String, Option<Value>);
+
 /// Calls `visit` with every asset path `data` authors, across every spec,
-/// variants included: sublayers, reference and payload list-op items, and
-/// asset values in fields, dictionaries, arrays and time samples. A path
-/// `visit` returns a replacement for is rewritten, and the rewritten fields
-/// are returned for the caller to apply to a copy. `layer` names the layer in
-/// errors.
+/// variants included: sublayers, reference and payload list-op items, clip
+/// template paths, and asset values in fields, dictionaries, arrays and time
+/// samples. A path `visit` returns a replacement for is rewritten, an emptied
+/// one removed as [`modify_asset_paths`] describes, and the rewritten fields
+/// are returned for the caller to apply. `layer` names the layer in errors.
 pub(super) fn visit_asset_paths(
     data: &dyn AbstractData,
     layer: &str,
+    mode: Visit,
     mut visit: impl FnMut(AssetRef<'_>) -> Result<Option<String>>,
-) -> Result<Vec<(sdf::Path, String, Value)>> {
+) -> Result<Vec<FieldEdit>> {
     let mut edits = Vec::new();
     let mut paths = data.spec_paths();
     paths.sort();
@@ -146,24 +212,38 @@ pub(super) fn visit_asset_paths(
             let mut value = data.get_field(&path, &field)?.into_owned();
             let mut walk = Walk {
                 layer,
+                mode,
                 visit: &mut visit,
                 changed: false,
             };
+            let mut erase = false;
             match &mut value {
                 Value::StringVec(sublayers) if field == FieldKey::SubLayers.as_str() => {
-                    for sublayer in sublayers {
-                        walk.path(sublayer, true, true)?;
+                    let removed = walk.sublayers(sublayers)?;
+                    let offsets = FieldKey::SubLayerOffsets.as_str();
+                    if !removed.is_empty()
+                        && let Ok(Value::LayerOffsetVec(all)) =
+                            data.get_field(&path, offsets).map(|value| value.into_owned())
+                    {
+                        let kept = all
+                            .into_iter()
+                            .enumerate()
+                            .filter(|(index, _)| !removed.contains(index))
+                            .map(|(_, offset)| offset)
+                            .collect();
+                        edits.push((path.clone(), offsets.to_owned(), Some(Value::LayerOffsetVec(kept))));
                     }
                 }
+                Value::AssetPath(asset) => erase = walk.asset(asset)?,
                 value => {
                     if field == FieldKey::Clips.as_str() {
-                        walk.reject_clip_templates(value)?;
+                        walk.clip_templates(value)?;
                     }
                     walk.value(value)?;
                 }
             }
             if walk.changed {
-                edits.push((path.clone(), field, value));
+                edits.push((path.clone(), field, (!erase).then_some(value)));
             }
         }
     }
@@ -173,73 +253,105 @@ pub(super) fn visit_asset_paths(
 /// One field's walk for [`visit_asset_paths`].
 struct Walk<'a, F> {
     layer: &'a str,
+    mode: Visit,
     visit: &'a mut F,
     changed: bool,
 }
 
 impl<F: FnMut(AssetRef<'_>) -> Result<Option<String>>> Walk<'_, F> {
-    fn path(&mut self, path: &mut String, layer: bool, applied: bool) -> Result<()> {
+    /// Visits one path, returning whether `visit` emptied it.
+    fn path(&mut self, path: &mut String, layer: bool, applied: bool) -> Result<bool> {
         if path.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
-        let kind = if sdf::expr::is_expression(path) {
-            Some("variable expression")
-        } else if path.contains("<UDIM>") || path.contains("<UVTILE>") {
-            Some("UDIM pattern")
-        } else {
-            None
-        };
-        if let Some(kind) = kind {
-            return Err(self.unsupported(kind, path));
+        if self.mode.strict {
+            let kind = if sdf::expr::is_expression(path) {
+                Some("variable expression")
+            } else if path.contains("<UDIM>") || path.contains("<UVTILE>") {
+                Some("UDIM pattern")
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                return Err(self.unsupported(kind, path));
+            }
         }
         let layer = layer || is_layer_path(path);
-        if let Some(rewritten) = (self.visit)(AssetRef { path, layer, applied })? {
-            *path = rewritten;
-            self.changed = true;
-        }
-        Ok(())
+        let Some(rewritten) = (self.visit)(AssetRef { path, layer, applied })? else {
+            return Ok(false);
+        };
+        *path = rewritten;
+        self.changed = true;
+        Ok(path.is_empty())
     }
 
-    fn asset(&mut self, asset: &mut sdf::AssetPath) -> Result<()> {
+    /// Visits the sublayers, removing the emptied ones and returning their
+    /// indices.
+    fn sublayers(&mut self, sublayers: &mut Vec<String>) -> Result<Vec<usize>> {
+        let mut removed = Vec::new();
+        for (index, sublayer) in sublayers.iter_mut().enumerate() {
+            if self.path(sublayer, true, true)? {
+                removed.push(index);
+            }
+        }
+        let mut index = 0;
+        sublayers.retain(|_| {
+            index += 1;
+            !removed.contains(&(index - 1))
+        });
+        Ok(removed)
+    }
+
+    /// Visits an asset value, returning whether `visit` emptied it.
+    fn asset(&mut self, asset: &mut sdf::AssetPath) -> Result<bool> {
         let mut path = asset.authored_path.clone();
-        self.path(&mut path, false, true)?;
+        let emptied = self.path(&mut path, false, true)?;
         if path != asset.authored_path {
             *asset = sdf::AssetPath::new(path);
         }
-        Ok(())
+        Ok(emptied)
     }
 
+    /// Visits every item of `op` with `item`, removing the ones it reports
+    /// emptied.
     fn list_op<T: Default + Clone + PartialEq>(
         &mut self,
         op: &mut sdf::ListOp<T>,
-        mut item: impl FnMut(&mut Self, &mut T, bool) -> Result<()>,
+        mut item: impl FnMut(&mut Self, &mut T, bool) -> Result<bool>,
     ) -> Result<()> {
-        let applied = [
-            &mut op.explicit_items,
-            &mut op.added_items,
-            &mut op.prepended_items,
-            &mut op.appended_items,
+        let lists = [
+            (&mut op.explicit_items, true),
+            (&mut op.added_items, true),
+            (&mut op.prepended_items, true),
+            (&mut op.appended_items, true),
+            (&mut op.deleted_items, false),
+            (&mut op.ordered_items, false),
         ];
-        for items in applied {
-            for entry in items {
-                item(self, entry, true)?;
+        for (items, applied) in lists {
+            let mut kept = Vec::with_capacity(items.len());
+            for mut entry in std::mem::take(items) {
+                if !item(self, &mut entry, applied)? {
+                    kept.push(entry);
+                }
             }
-        }
-        for items in [&mut op.deleted_items, &mut op.ordered_items] {
-            for entry in items {
-                item(self, entry, false)?;
-            }
+            *items = kept;
         }
         Ok(())
     }
 
     fn value(&mut self, value: &mut Value) -> Result<()> {
         match value {
-            Value::AssetPath(asset) => self.asset(asset)?,
+            Value::AssetPath(asset) => {
+                self.asset(asset)?;
+            }
             Value::AssetPathVec(assets) => {
-                for asset in assets {
-                    self.asset(asset)?;
+                let mut kept = Vec::with_capacity(assets.len());
+                for mut asset in std::mem::take(assets) {
+                    if !self.asset(&mut asset)? || self.mode.keep_empty_paths_in_arrays {
+                        kept.push(asset);
+                    }
                 }
+                *assets = kept;
             }
             Value::Dictionary(entries) | Value::UnregisteredDictionary(entries) => {
                 let mut keys: Vec<_> = entries.keys().cloned().collect();
@@ -261,7 +373,9 @@ impl<F: FnMut(AssetRef<'_>) -> Result<Option<String>>> Walk<'_, F> {
                 }
             }
             Value::ReferenceListOp(op) => self.list_op(op, |walk, reference, applied| {
-                walk.path(&mut reference.asset_path, true, applied)?;
+                if walk.path(&mut reference.asset_path, true, applied)? {
+                    return Ok(true);
+                }
                 let mut keys: Vec<_> = reference.custom_data.keys().cloned().collect();
                 keys.sort();
                 for key in keys {
@@ -269,27 +383,35 @@ impl<F: FnMut(AssetRef<'_>) -> Result<Option<String>>> Walk<'_, F> {
                         walk.value(entry)?;
                     }
                 }
-                Ok(())
+                Ok(false)
             })?,
             Value::PayloadListOp(op) => self.list_op(op, |walk, payload, applied| {
                 walk.path(&mut payload.asset_path, true, applied)
             })?,
-            Value::Payload(payload) => self.path(&mut payload.asset_path, true, true)?,
+            Value::Payload(payload) => {
+                self.path(&mut payload.asset_path, true, true)?;
+            }
             _ => {}
         }
         Ok(())
     }
 
-    /// Refuses a clip set that derives its clips from a template.
-    fn reject_clip_templates(&self, clips: &Value) -> Result<()> {
+    /// Visits each clip set's template path, which C++ expands into clip
+    /// paths, or refuses it when strict.
+    fn clip_templates(&mut self, clips: &mut Value) -> Result<()> {
         let Value::Dictionary(sets) = clips else {
             return Ok(());
         };
-        for set in sets.values() {
-            if let Value::Dictionary(set) = set
-                && let Some(Value::String(template)) = set.get(keys::TEMPLATE_ASSET_PATH)
+        let mut names: Vec<_> = sets.keys().cloned().collect();
+        names.sort();
+        for name in names {
+            if let Some(Value::Dictionary(set)) = sets.get_mut(&name)
+                && let Some(Value::String(template)) = set.get_mut(keys::TEMPLATE_ASSET_PATH)
             {
-                return Err(self.unsupported("clip template", template));
+                if self.mode.strict {
+                    return Err(self.unsupported("clip template", template));
+                }
+                self.path(template, true, true)?;
             }
         }
         Ok(())
@@ -517,6 +639,115 @@ def "N" (
                 matches!(&error, Error::Dependency(DependencyError::Unsupported { kind: k, .. }) if *k == kind),
                 "{error}"
             );
+        }
+        Ok(())
+    }
+
+    const MODIFY: &str = r#"#usda 1.0
+(
+    customLayerData = {
+        asset icon = @./meta.png@
+    }
+    subLayers = [
+        @./a.usda@ (offset = 1),
+        @./drop.usda@ (offset = 2),
+        @./b.usda@ (offset = 3)
+    ]
+)
+
+def "A" (
+    delete references = @./deleted.usda@
+    prepend references = [@./ref.usda@</A>, @./drop.usda@</A>]
+    prepend payload = @./pay.usda@</P>
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/A"
+            string templateAssetPath = "./clip.#.usda"
+        }
+    }
+)
+{
+    asset expression = @`"./${X}.png"`@
+    asset sampled.timeSamples = {
+        1: @./sample.png@,
+    }
+    asset single = @./drop.png@
+    asset[] textures = [@./tex.png@, @./drop.png@]
+}
+
+def "I" (
+    prepend references = </A>
+)
+{
+}
+"#;
+
+    /// The paths C++ 25.05 hands `UsdUtils.ModifyAssetPaths` on the same
+    /// layer, and the layer it leaves when the callback empties the `drop`
+    /// paths and moves the rest, except that the remaining sublayers keep
+    /// their offsets.
+    #[test]
+    fn modify_asset_paths_matches_cpp() -> Result<()> {
+        for keep_empty in [false, true] {
+            let mut layer = sdf::Layer::from_bytes("modify.usda", MODIFY.as_bytes().to_vec())?;
+            let mut seen = Vec::new();
+            let modify = |path: &str| {
+                seen.push(path.to_owned());
+                if path.contains("drop") {
+                    String::new()
+                } else {
+                    path.replacen("./", "./moved/", 1)
+                }
+            };
+            modify_asset_paths(&mut layer, modify, keep_empty)?;
+            seen.sort();
+            assert_eq!(
+                seen,
+                [
+                    "./a.usda",
+                    "./b.usda",
+                    "./clip.#.usda",
+                    "./clip.usda",
+                    "./deleted.usda",
+                    "./drop.png",
+                    "./drop.usda",
+                    "./manifest.usda",
+                    "./meta.png",
+                    "./pay.usda",
+                    "./ref.usda",
+                    "./sample.png",
+                    "./tex.png",
+                    "`\"./${X}.png\"`",
+                ]
+            );
+
+            let text = layer.export_to_string()?;
+            for path in [
+                "@./moved/a.usda@ (offset = 1.0",
+                "@./moved/b.usda@ (offset = 3.0",
+                "@./moved/meta.png@",
+                "@./moved/clip.usda@",
+                "@./moved/manifest.usda@",
+                "\"./moved/clip.#.usda\"",
+                "delete references = @./moved/deleted.usda@",
+                "prepend references = @./moved/ref.usda@</A>",
+                "prepend payload = @./moved/pay.usda@</P>",
+                "@./moved/sample.png@",
+                "@`\"./moved/${X}.png\"`@",
+                "prepend references = </A>",
+            ] {
+                assert!(text.contains(path), "{path} in {text}");
+            }
+            assert!(!text.contains("drop"), "{text}");
+            assert!(!text.contains("asset single ="), "{text}");
+            let textures = if keep_empty {
+                "[@./moved/tex.png@, @@]"
+            } else {
+                "[@./moved/tex.png@]"
+            };
+            assert!(text.contains(textures), "{text}");
         }
         Ok(())
     }
