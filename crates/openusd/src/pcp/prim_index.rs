@@ -2340,6 +2340,73 @@ def "Root" (
         Ok(())
     }
 
+    /// A reference or payload to a prim missing from its own layer reports an
+    /// unresolved prim path too, at the root or below a prim, as C++ does. A
+    /// target a variant supplies later is not missing.
+    #[test]
+    fn absent_internal_targets_report_reference_and_payload_errors() -> Result<()> {
+        let layer = parse_usda(
+            r#"#usda 1.0
+def Scope "Present" {
+    def Scope "Child" {}
+}
+def Scope "Varied" (
+    variants = { string v = "on" }
+    prepend variantSets = "v"
+) {
+    variantSet "v" = {
+        "on" {
+            def Scope "FromVariant" {}
+        }
+    }
+}
+def Scope "RootMissing" (references = </Absent>) {}
+def Scope "SubMissing" (references = </Present/Absent>) {}
+def Scope "PayloadMissing" (payload = </Absent>) {}
+def Scope "SubPresent" (references = </Present/Child>) {}
+def Scope "FromVariantRef" (references = </Varied/FromVariant>) {}
+"#,
+        );
+        let stack = LayerGraph::from_layers(
+            vec![sdf::Layer::new("root.usda", layer)],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let unresolved = |prim: &str| -> Result<Vec<(ArcType, String)>> {
+            let (_, errors, _, _) = PrimIndex::build_with_cache(
+                &Path::new(prim).unwrap(),
+                &stack,
+                &CompositionContext::default(),
+                &sdf::PathTable::new(),
+                true,
+            )?;
+            Ok(errors
+                .iter()
+                .filter_map(|error| match error {
+                    CompositionDiagnostic::UnresolvedPrimPath { arc, prim_path, .. } => {
+                        Some((*arc, prim_path.as_str().to_string()))
+                    }
+                    _ => None,
+                })
+                .collect())
+        };
+        assert_eq!(
+            unresolved("/RootMissing")?,
+            [(ArcType::Reference, "/Absent".to_string())]
+        );
+        assert_eq!(
+            unresolved("/SubMissing")?,
+            [(ArcType::Reference, "/Present/Absent".to_string())]
+        );
+        assert_eq!(
+            unresolved("/PayloadMissing")?,
+            [(ArcType::Payload, "/Absent".to_string())]
+        );
+        assert_eq!(unresolved("/SubPresent")?, []);
+        assert_eq!(unresolved("/FromVariantRef")?, []);
+        Ok(())
+    }
+
     /// A cyclic sub-root reference whose target composes *nothing* is reported
     /// as `UnresolvedPrimPath` on top of the `ArcCycle` (C++
     /// `PcpErrorUnresolvedPrimPath`). `/Outer` references back into `a.usd`, so
