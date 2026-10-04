@@ -343,7 +343,9 @@ impl LayerOffset {
 /// Unloaded payloads represent a boundary that lazy composition and
 /// system behaviors will not traverse across, providing a user-visible
 /// way to manage the working set of the scene.
-#[derive(Debug, Default, Clone, PartialEq)]
+///
+/// Equality treats an omitted layer offset as the identity offset.
+#[derive(Debug, Default, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Payload {
     /// The asset path to the external layer.
@@ -358,6 +360,14 @@ pub struct Payload {
         serde(rename = "layerOffset", skip_serializing_if = "Option::is_none")
     )]
     pub layer_offset: Option<LayerOffset>,
+}
+
+impl PartialEq for Payload {
+    fn eq(&self, other: &Self) -> bool {
+        self.asset_path == other.asset_path
+            && self.prim_path == other.prim_path
+            && self.layer_offset.unwrap_or_default() == other.layer_offset.unwrap_or_default()
+    }
 }
 
 /// Represents a reference and all its meta data.
@@ -466,7 +476,39 @@ pub type LayerData = Box<dyn AbstractData>;
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use super::*;
+
+    #[test]
+    fn payload_identity_equality() {
+        let omitted = Payload {
+            asset_path: "model.usda".into(),
+            prim_path: path("/Model").unwrap(),
+            layer_offset: None,
+        };
+        let identity = Payload {
+            layer_offset: Some(LayerOffset::IDENTITY),
+            ..omitted.clone()
+        };
+        assert_eq!(omitted, identity);
+        assert_eq!(identity, omitted);
+        assert_ne!(
+            omitted,
+            Payload {
+                layer_offset: Some(LayerOffset::new(1.0, 1.0)),
+                ..omitted.clone()
+            }
+        );
+        for (strong, weak) in [(identity.clone(), omitted.clone()), (omitted, identity)] {
+            assert!(
+                PayloadListOp::deleted([strong.clone()])
+                    .compose_over(slice::from_ref(&weak))
+                    .is_empty()
+            );
+            assert_eq!(PayloadListOp::prepended([strong]).compose_over(&[weak]).len(), 1);
+        }
+    }
 
     #[test]
     fn normalize_time_samples_order() {

@@ -205,6 +205,36 @@ fn identifier_by_leaf(stage: &Stage, leaf: &str) -> String {
 // --- Basic stage opening (vendor/usd-wg-assets) ---
 
 #[test]
+fn internal_target_root_diagnostic() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    fs::write(&session, "#usda 1.0\n")?;
+    for field in ["references", "payload"] {
+        for target in ["/Missing", "/Present/Missing"] {
+            fs::write(
+                &root,
+                format!("#usda 1.0\ndef \"Present\" {{}}\ndef \"Root\" ({field} = <{target}>) {{}}\n"),
+            )?;
+            let stage = Stage::builder()
+                .session_layer(session.to_str().unwrap())
+                .open(root.to_str().unwrap())?;
+            assert!(stage.prim("/Root")?.is_valid()?);
+            let errors = stage.composition_errors();
+            let target_layer = errors
+                .iter()
+                .find_map(|error| match error {
+                    pcp::CompositionDiagnostic::UnresolvedPrimPath { target_layer, .. } => Some(target_layer),
+                    _ => None,
+                })
+                .expect("missing target diagnostic");
+            assert_eq!(target_layer, stage.root_layer().identifier(), "{field} = <{target}>");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn missing_sublayer_retained() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
@@ -7986,6 +8016,46 @@ fn clip_asset(name: &str) -> String {
     )
 }
 
+#[test]
+fn clip_reads_needed_assets() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("manifest.usda"),
+        "#usda 1.0\ndef \"Model\" {\n float size\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("a.usda"),
+        "#usda 1.0\ndef \"Model\" {\n float size.timeSamples = {0: 1, 20: 3}\n}\n",
+    )?;
+    fs::write(dir.path().join("bad.usda"), "#usda 1.0\ndef !!!")?;
+    for active in ["[(0, 0), (10, 0)]", "[(0, 0), (100, 1)]"] {
+        fs::write(
+            dir.path().join("root.usda"),
+            format!(
+                r#"#usda 1.0
+def "Model" (
+    clips = {{
+        dictionary default = {{
+            asset[] assetPaths = [@a.usda@, @bad.usda@]
+            asset manifestAssetPath = @manifest.usda@
+            string primPath = "/Model"
+            double2[] active = {active}
+        }}
+    }}
+) {{
+    float size
+}}
+"#
+            ),
+        )?;
+        let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+        for (time, expected) in [(0.0, 1.0), (5.0, 1.5), (10.0, 2.0)] {
+            assert_eq!(value_f64(&stage, "/Model.size", time), Some(expected), "{active}");
+        }
+    }
+    Ok(())
+}
+
 fn value_f64(stage: &Stage, attr: &str, time: f64) -> Option<f64> {
     match stage
         .attribute(attr)
@@ -8138,6 +8208,8 @@ def "Model" (
         dir.path().join("manifest.usda"),
         "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 20: None }\n}\n",
     )?;
+    // The manifest excludes clipC even when opening that asset would fail.
+    fs::write(dir.path().join("clipC.usda"), "#usda 1.0\ndef !!!")?;
     let stage = Stage::open(&root)?;
     assert_eq!(value_f64(&stage, "/Model.size", 15.0), Some(150.0));
     assert_eq!(value_f64(&stage, "/Model.size", 20.0), Some(200.0));

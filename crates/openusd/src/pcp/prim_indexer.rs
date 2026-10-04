@@ -2823,7 +2823,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // Record the consultation before resolving it: whether or not the
             // layer names a prim, editing its `defaultPrim` must recompose this
             // index, and an unresolved default grafts no node to find it by.
-            let default_layer = self.default_prim_layer(target_stack);
+            let default_layer = self.target_root_layer(target_stack);
             if default_layer.is_valid() {
                 self.output.non_site_deps_mut().default_prim.push(default_layer);
             }
@@ -2908,7 +2908,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let unresolved = grafted.hit_cycle && !grafted.node.is_some_and(|g| self.subtree_has_specs(g));
             let diagnostic = CompositionDiagnostic::UnresolvedPrimPath {
                 arc,
-                target_layer: self.inputs.stack.layer(rep).identifier.clone(),
+                target_layer: self
+                    .inputs
+                    .stack
+                    .layer(self.target_root_layer(target_stack))
+                    .identifier
+                    .clone(),
                 prim_path: source.clone(),
                 introduced_by: self.introducing_layer(parent),
                 site_path: parent_path.clone(),
@@ -2931,7 +2936,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if empty && matches!(arc, ArcType::Reference | ArcType::Payload) {
             self.errors.report(CompositionDiagnostic::UnresolvedPrimPath {
                 arc,
-                target_layer: self.inputs.stack.layer(rep).identifier.clone(),
+                target_layer: self
+                    .inputs
+                    .stack
+                    .layer(self.target_root_layer(target_stack))
+                    .identifier
+                    .clone(),
                 prim_path: source.clone(),
                 introduced_by: self.introducing_layer(parent),
                 site_path: parent_path.clone(),
@@ -2950,8 +2960,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Ok(())
     }
 
-    /// The layer whose `defaultPrim` a reference or payload into `target_stack`
-    /// resolves through, or [`LayerId::INVALID`] for an empty stack.
+    /// The root layer of an arc's target stack, used for `defaultPrim`
+    /// resolution and target diagnostics, or [`LayerId::INVALID`] for an
+    /// empty stack.
     ///
     /// `defaultPrim` is root-layer metadata (spec 12.2.7) and does not compose
     /// with sublayers or session layers. The stage root layer stack carries its
@@ -2961,7 +2972,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     ///
     /// Returned rather than recomputed by each caller so the arc's dependency
     /// record, its diagnostic, and the value it reads all name the same layer.
-    fn default_prim_layer(&self, target_stack: LayerStackId) -> LayerId {
+    fn target_root_layer(&self, target_stack: LayerStackId) -> LayerId {
         (target_stack == LayerStackId::ROOT)
             .then(|| self.inputs.stack.root_id())
             .flatten()

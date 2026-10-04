@@ -84,24 +84,14 @@ pub(super) fn collect_payloads_in(
         nodes,
         FieldKey::Payload.as_str(),
         graph,
-        |v| {
-            let operation = match v {
-                Value::Payload(p) => Some(PayloadListOp {
-                    explicit: true,
-                    explicit_items: vec![p],
-                    ..Default::default()
-                }),
-                Value::PayloadListOp(op) => Some(op),
-                _ => None,
-            };
-            operation.map(|op| {
-                op.map(|mut payload| {
-                    if payload.layer_offset == Some(LayerOffset::default()) {
-                        payload.layer_offset = None;
-                    }
-                    payload
-                })
-            })
+        |v| match v {
+            Value::Payload(p) => Some(PayloadListOp {
+                explicit: true,
+                explicit_items: vec![p],
+                ..Default::default()
+            }),
+            Value::PayloadListOp(op) => Some(op),
+            _ => None,
         },
         // Fold the retiming only when it is not identity, so a payload with no
         // authored offset and no rate change keeps its `layer_offset` as `None`

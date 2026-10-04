@@ -411,32 +411,39 @@ impl ClipSet {
     /// with what is supplied at each.
     fn stage_sample_times(&self, per_clip: &[Vec<f64>]) -> Vec<f64> {
         let mut out: Vec<f64> = Vec::new();
-        for (k, &(start, clip_index)) in self.active.iter().enumerate() {
+        for (k, &(_, clip_index)) in self.active.iter().enumerate() {
             let samples = per_clip.get(clip_index).map_or(&[][..], Vec::as_slice);
-            // An entry is active from its start up to the next entry's; the
-            // first is active from negative infinity, the last onwards.
-            let active = gf::Interval::new(
-                if k > 0 { start } else { f64::NEG_INFINITY },
-                self.active.get(k + 1).map_or(f64::INFINITY, |next| next.0),
-                true,
-                false,
-            );
+            out.extend(self.window_sample_times(k, samples.iter().copied()));
+        }
+        out.sort_by(f64::total_cmp);
+        out.dedup();
+        out
+    }
 
-            out.push(start);
-            out.extend(self.times.iter().map(|knot| knot.x).filter(|&x| active.contains(x)));
-            for &clip_time in samples {
-                out.extend(
-                    self.stage_times_for_clip_time(clip_time)
-                        .into_iter()
-                        .filter(|&t| active.contains(t)),
-                );
-            }
+    /// Collects stage sample times within one scheduled activation window.
+    /// The next activation bounds the window and belongs to the next clip.
+    fn window_sample_times(&self, position: usize, samples: impl Iterator<Item = f64>) -> Vec<f64> {
+        let start = self.active[position].0;
+        // An entry is active from its start up to the next entry's; the
+        // first is active from negative infinity, the last onwards.
+        let active = gf::Interval::new(
+            if position > 0 { start } else { f64::NEG_INFINITY },
+            self.active.get(position + 1).map_or(f64::INFINITY, |next| next.0),
+            true,
+            false,
+        );
+        let mut out = vec![start];
+        out.extend(self.times.iter().map(|knot| knot.x).filter(|&x| active.contains(x)));
+        for clip_time in samples {
+            out.extend(
+                self.stage_times_for_clip_time(clip_time)
+                    .into_iter()
+                    .filter(|&t| active.contains(t)),
+            );
         }
         // Drop non-finite times before dedup: a clip may author a NaN time-
         // sample key, and `dedup` (PartialEq) would not collapse repeated NaNs.
         out.retain(|t| t.is_finite());
-        out.sort_by(f64::total_cmp);
-        out.dedup();
         out
     }
 
@@ -771,6 +778,9 @@ pub(crate) struct ClipQuery<'a> {
 }
 
 impl ClipCache {
+    /// Resolves a clip value using the active window's stage-time bracket.
+    /// Only a bracket at the next activation needs a value from another clip;
+    /// missing values use the manifest and neighboring contributing clips.
     pub(super) fn value_in_set(
         &mut self,
         graph: &LayerGraph,
@@ -785,16 +795,27 @@ impl ClipCache {
             return Ok(value);
         }
         let path = clip_attr_path(query, &resolved.set.clip_prim_path(query.anchor))?;
-        let Some(samples) = self.clip_set_participates(graph, diagnostics, resolved, query.anchor, &path)? else {
-            return Ok(value);
-        };
-        let times = resolved.set.stage_sample_times(
-            &samples
-                .per_clip
-                .iter()
-                .map(|clip| clip.iter().map(|(time, _)| *time).collect::<Vec<_>>())
-                .collect::<Vec<_>>(),
-        );
+        let set = &resolved.set;
+        let position = set
+            .active
+            .partition_point(|&(start, _)| start <= time)
+            .saturating_sub(1);
+        let (start, index) = set.active[position];
+        let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
+        let samples =
+            if set.interpolate_missing && self.manifest_blocks(graph, resolved, manifest.as_deref(), &path, start) {
+                Vec::new()
+            } else if let Some(asset) = set.asset_paths.get(index) {
+                self.clip_in_clip_samples(graph, asset.asset_path(), resolved.source.layer, &path)?
+            } else {
+                Vec::new()
+            };
+        let mut times = set.window_sample_times(position, samples.iter().map(|(time, _)| *time));
+        if let Some(&(next, _)) = set.active.get(position + 1) {
+            times.push(next);
+        }
+        times.sort_by(f64::total_cmp);
+        times.dedup();
         let upper = times.partition_point(|sample| *sample <= time);
         if upper == 0 || upper == times.len() || times[upper - 1] == time {
             return Ok(value);
