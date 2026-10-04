@@ -3213,6 +3213,31 @@ impl Stage {
         } else if mask.contains(PrimStatus::ABSTRACT) {
             status.set(PrimStatus::ABSTRACT, prim.is_abstract()?);
         }
+        Self::set_own_status(&prim, mask, &mut status)?;
+        Ok(status)
+    }
+
+    /// [`prim_status_masked`](Self::prim_status_masked) for a prim whose
+    /// parent resolved active, loaded, defined and not abstract. Those bits
+    /// then come from the prim's own opinions, with no walk up its ancestors,
+    /// as C++ `Usd_PrimData` composes a prim's flags from its parent's.
+    fn child_status_masked(&self, prim: &sdf::Path, mask: PrimStatus) -> Result<PrimStatus> {
+        let (active, defined, is_abstract) = self.masked(prim, |g, c| c.local_status(g, prim))?;
+        let prim = super::Prim::new(self, prim.clone());
+        let mut status = PrimStatus::empty();
+        status.set(PrimStatus::ACTIVE, active);
+        if mask.contains(PrimStatus::LOADED) {
+            status.set(PrimStatus::LOADED, prim.is_loaded_below_loaded(active)?);
+        }
+        status.set(PrimStatus::DEFINED, defined);
+        status.set(PrimStatus::ABSTRACT, is_abstract);
+        status &= mask;
+        Self::set_own_status(&prim, mask, &mut status)?;
+        Ok(status)
+    }
+
+    /// The status bits a prim's ancestors do not decide.
+    fn set_own_status(prim: &super::Prim, mask: PrimStatus, status: &mut PrimStatus) -> Result<()> {
         if mask.contains(PrimStatus::INSTANCE) {
             status.set(PrimStatus::INSTANCE, prim.is_instance()?);
         }
@@ -3222,7 +3247,7 @@ impl Stage {
         if mask.contains(PrimStatus::IN_PROTOTYPE) {
             status.set(PrimStatus::IN_PROTOTYPE, prim.is_in_prototype()?);
         }
-        Ok(status)
+        Ok(())
     }
 
     /// Borrows the stage's composition cache, first draining any pending layer
@@ -3416,18 +3441,26 @@ impl Stage {
     /// excludes those regions.
     pub fn traverse(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&sdf::Path)) -> Result<()> {
         let needed = predicate.consulted_bits();
-        let mut stack = vec![sdf::Path::abs_root()];
+        let inherited = PrimPredicate::INHERITED_REQUIRED.union(PrimPredicate::INHERITED_REJECTED);
+        let threads = needed.contains(inherited);
+        // Each prim carries the population epoch under which its parent
+        // resolved active, loaded, defined and not abstract, if it did. While
+        // the population is unchanged the prim then reads only its own
+        // opinions instead of walking its ancestors.
+        let mut stack = vec![(sdf::Path::abs_root(), None)];
 
-        while let Some(path) = stack.pop() {
+        while let Some((path, parent)) = stack.pop() {
+            let epoch = self.population_epoch();
+            let mut passed = threads.then_some(epoch);
             if path != sdf::Path::abs_root() {
-                // TODO(perf): each `prim_status_masked` call recomputes the
-                // inherited bits (active/loaded/defined/abstract/model) by
-                // walking this prim's ancestor chain to the root, and several
-                // predicates re-walk it for the same fields. Since traversal is
-                // top-down, the parent's resolved inherited status could be
-                // threaded down the stack so each prim only consults its own
-                // local opinion — turning the per-prim O(depth) walk into O(1).
-                let status = self.prim_status_masked(&path, needed)?;
+                let status = if parent == Some(epoch) {
+                    self.child_status_masked(&path, needed)?
+                } else {
+                    self.prim_status_masked(&path, needed)?
+                };
+                let default = status.contains(PrimPredicate::INHERITED_REQUIRED)
+                    && !status.intersects(PrimPredicate::INHERITED_REJECTED);
+                passed = passed.filter(|_| default && self.population_epoch() == epoch);
                 if predicate.matches(status) {
                     visitor(&path);
                 }
@@ -3445,7 +3478,7 @@ impl Stage {
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
                 if let Ok(child) = path.append_path(name.as_str()) {
-                    stack.push(child);
+                    stack.push((child, passed));
                 }
             }
         }

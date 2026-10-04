@@ -791,6 +791,15 @@ impl Prim {
         Ok(true)
     }
 
+    /// [`is_loaded_with_active`](Self::is_loaded_with_active) for a prim
+    /// whose parent is loaded, so only its own payload can leave it unloaded.
+    pub(crate) fn is_loaded_below_loaded(&self, active: bool) -> Result<bool> {
+        if !active || self.stage.cache().load_rules().is_empty() {
+            return Ok(active);
+        }
+        Ok(!has_payload(&self.stage, &self.path)? || self.stage.is_path_loaded(&self.path))
+    }
+
     /// Loads this prim's payload, its ancestors', and — under
     /// [`LoadPolicy::WithDescendants`] — every descendant's (C++
     /// `UsdPrim::Load`).

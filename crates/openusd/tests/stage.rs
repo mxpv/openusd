@@ -4932,6 +4932,116 @@ fn prototype_root_active() -> Result<()> {
     Ok(())
 }
 
+/// Traversal reads a prim's inherited status from its parent's, and visits
+/// exactly the prims whose own full status matches, in the same order: over
+/// inactive, `over` and `class` branches, an instance, deep nesting, and
+/// payloads with and without load rules.
+#[test]
+fn traversal_matches_prim_status() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("payload.usda"),
+        "#usda 1.0\ndef \"P\"\n{\n    def \"Inside\"\n    {\n        def \"More\"\n        {\n        }\n    }\n}\n",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "World"
+{
+    def "Active"
+    {
+        def "Leaf"
+        {
+        }
+    }
+    def "Off" (
+        active = false
+    )
+    {
+        def "Leaf"
+        {
+        }
+    }
+    over "Over"
+    {
+        def "Leaf"
+        {
+        }
+    }
+    class "Class"
+    {
+        def "Leaf"
+        {
+        }
+    }
+    def "Loaded" (
+        payload = @./payload.usda@</P>
+    )
+    {
+    }
+    def "Unloaded" (
+        payload = @./payload.usda@</P>
+    )
+    {
+    }
+    def "Inst" (
+        instanceable = true
+        references = </World/Active>
+    )
+    {
+    }
+    def "Deep"
+    {
+        over "A"
+        {
+            def "B"
+            {
+            }
+        }
+        def "C"
+        {
+            class "D"
+            {
+                def "E"
+                {
+                }
+            }
+        }
+    }
+}
+"#,
+    )?;
+    let root = root.to_str().expect("utf-8 temp path");
+    for load in [InitialLoadSet::LoadAll, InitialLoadSet::LoadNone] {
+        let stage = Stage::builder().load(load).open(root)?;
+        stage.prim("/World/Loaded")?.load(LoadPolicy::WithDescendants);
+        let mut all = Vec::new();
+        stage.traverse(PrimPredicate::ALL, |path| all.push(path.clone()))?;
+        for predicate in [PrimPredicate::DEFAULT, PrimPredicate::DEFAULT_PROXIES] {
+            let mut expected = Vec::new();
+            let mut instances: Vec<sdf::Path> = Vec::new();
+            for path in &all {
+                let below_instance = instances
+                    .iter()
+                    .any(|instance| path.has_prefix(instance) && path != instance);
+                let status = stage.prim_status(path.clone())?;
+                if status.contains(PrimStatus::INSTANCE) {
+                    instances.push(path.clone());
+                }
+                if predicate.matches(status) && (predicate == PrimPredicate::DEFAULT_PROXIES || !below_instance) {
+                    expected.push(path.clone());
+                }
+            }
+            let mut visited = Vec::new();
+            stage.traverse(predicate, |path| visited.push(path.clone()))?;
+            assert_eq!(visited, expected, "{load:?} {predicate:?}");
+            assert!(visited.len() > 5);
+        }
+    }
+    Ok(())
+}
+
 /// A prim sorts its properties into attributes and relationships by their
 /// composed spec, and a prototype root, which reads no opinions, has neither.
 #[test]
