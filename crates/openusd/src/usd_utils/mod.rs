@@ -1,11 +1,14 @@
 //! Utilities over layers and stages, the counterpart of C++ `UsdUtils`.
 //!
 //! [`compute_all_dependencies`] walks the layers and assets a layer reaches
-//! (C++ `UsdUtilsComputeAllDependencies`).
+//! (C++ `UsdUtilsComputeAllDependencies`), and [`create_new_usdz_package`]
+//! writes them into a USDZ package (C++ `UsdUtilsCreateNewUsdzPackage`).
 
 mod dependencies;
+mod package;
 
 pub use dependencies::{Dependencies, compute_all_dependencies};
+pub use package::create_new_usdz_package;
 
 /// An asset path the dependency walk cannot follow.
 #[derive(Debug, thiserror::Error)]

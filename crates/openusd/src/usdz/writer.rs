@@ -7,9 +7,9 @@
 //!
 //! The writer is intentionally bytes-in, bytes-out: callers serialize their
 //! layers (e.g. via [`crate::usdc::CrateWriter`] or [`crate::usda::TextWriter`])
-//! and hand the resulting bytes to [`ArchiveWriter::add_layer`]. Dependency
-//! resolution and asset discovery (the C++ `UsdUtilsCreateNewUsdzPackage`
-//! equivalent) are out of scope for v1.
+//! and hand the resulting bytes to [`ArchiveWriter::add_layer`]. Packaging a
+//! layer with its dependencies (the C++ `UsdUtilsCreateNewUsdzPackage`
+//! equivalent) is [`crate::usd_utils::create_new_usdz_package`].
 
 use std::fs;
 use std::io::{self, Seek, Write};
