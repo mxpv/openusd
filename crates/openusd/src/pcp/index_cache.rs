@@ -5206,6 +5206,50 @@ def "Anchor" (inherits = </Rig>) {}
         Ok(())
     }
 
+    /// Between two active clips a value interpolates across the activation, as
+    /// C++ does: samples 0:1/20:3 and 0:5/20:7 switching at 10 give 3.5 at 5.
+    #[test]
+    fn clip_switch_interpolates_activation_samples() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(
+            directory.path().join("root.usda"),
+            r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@a.usda@, @b.usda@]
+            double2[] active = [(0, 0), (10, 1)]
+            string primPath = "/Model"
+        }
+    }
+) {
+    float size
+}
+"#,
+        )?;
+        for (name, first, last) in [("a", 1, 3), ("b", 5, 7)] {
+            std::fs::write(
+                directory.path().join(format!("{name}.usda")),
+                format!("#usda 1.0\ndef \"Model\" {{\n    float size.timeSamples = {{0: {first}, 20: {last}}}\n}}\n"),
+            )?;
+        }
+        let (graph, mut cache) = collected_stack(directory.path().join("root.usda").to_str().unwrap());
+        for (time, expected) in [
+            (0.0, 1.0),
+            (5.0, 3.5),
+            (9.0, 5.5),
+            (10.0, 6.0),
+            (15.0, 6.5),
+            (20.0, 7.0),
+        ] {
+            assert_eq!(
+                cache.value_at(&graph, &sdf::path("/Model.size")?, Some(time), &lerp, None)?,
+                TimedValue::Value(Value::Float(expected))
+            );
+        }
+        Ok(())
+    }
+
     /// A participating clip set reports each clip's activation time. The held
     /// set contributes both activations and neither clip's samples — clip0's
     /// sole sample maps to stage 50, outside its `[0, 10)` window, and clip1

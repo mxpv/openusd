@@ -8167,19 +8167,18 @@ fn clip_time_samples_gathered() -> Result<()> {
     Ok(())
 }
 
-/// With `interpolateMissingClipValues`, the activation boundary of a declared
-/// but empty middle clip is a genuine value-change point — the active clip
-/// switches and the held value gives way to the cross-clip interpolation — so
-/// `time_sample_times` reports it, agreeing with `value_at` (spec 12.3.4.7).
+/// With `interpolateMissingClipValues`, `time_sample_times` reports the
+/// activation boundary of a declared but empty middle clip, and values
+/// interpolate across it (spec 12.3.4.7).
 #[test]
 fn clip_interpolate_missing_boundary_is_a_sample() -> Result<()> {
     let stage = Stage::open(&fixture_path("clip_missing_interp/root.usda"))?;
     let size = stage.attribute("/Model.size")?;
     // clipA@0, the empty-clip boundary at 10, and clipC@20.
     assert_eq!(size.time_sample_times()?, vec![0.0, 10.0, 20.0]);
-    // The reported boundary at 10 is real: the value jumps there (clipA holds
-    // 0 up to the switch, then the interpolated gap begins at 50).
-    assert_eq!(value_f64(&stage, "/Model.size", 9.999), Some(0.0));
+    // Values interpolate across the switch at 10, as C++ resolves them.
+    let before = value_f64(&stage, "/Model.size", 9.999).unwrap();
+    assert!((before - 49.995).abs() < 1e-4, "{before}");
     assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(50.0));
     Ok(())
 }
