@@ -93,18 +93,12 @@ pub(super) fn collect_payloads_in(
             Value::PayloadListOp(op) => Some(op),
             _ => None,
         },
-        // Fold the retiming only when it is not identity, so a payload with no
-        // authored offset and no rate change keeps its `layer_offset` as `None`
-        // (identity `Some` would change the serialized form without affecting
-        // composition). Applied after the list-op composes so payloads are deduped
-        // by authored value (see [`compose_list_op_in`]).
         |p: &mut Payload, sub, scale| {
             if scale != 1.0 {
-                let offset = p.layer_offset.unwrap_or_default();
-                p.layer_offset = Some(offset.concatenate(&sdf::LayerOffset::scale_only(scale)));
+                p.layer_offset = p.layer_offset.concatenate(&sdf::LayerOffset::scale_only(scale));
             }
             if !sub.is_identity() {
-                p.layer_offset = Some(sub.concatenate(&p.layer_offset.unwrap_or_default()));
+                p.layer_offset = sub.concatenate(&p.layer_offset);
             }
         },
         |p: &mut Payload, layer| {

@@ -1615,13 +1615,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 )?;
                 let arcs = payloads
                     .into_iter()
-                    .map(|p| {
-                        (
-                            p.asset_path,
-                            p.prim_path,
-                            p.layer_offset.unwrap_or_default().sanitized(),
-                        )
-                    })
+                    .map(|p| (p.asset_path, p.prim_path, p.layer_offset.sanitized()))
                     .collect::<Vec<_>>();
                 (ArcType::Payload, arcs)
             }
@@ -2816,6 +2810,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
             return Ok(());
         };
+        let target_root = self.target_root_layer(target_stack);
 
         // Resolve the source prim path, falling back to the target layer's
         // `defaultPrim` when the arc names no prim (C++ `_GetDefaultPrimPath`).
@@ -2823,15 +2818,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // Record the consultation before resolving it: whether or not the
             // layer names a prim, editing its `defaultPrim` must recompose this
             // index, and an unresolved default grafts no node to find it by.
-            let default_layer = self.target_root_layer(target_stack);
-            if default_layer.is_valid() {
-                self.output.non_site_deps_mut().default_prim.push(default_layer);
+            if target_root.is_valid() {
+                self.output.non_site_deps_mut().default_prim.push(target_root);
             }
-            let Some(p) = self.resolve_default_prim(default_layer)? else {
+            let Some(p) = self.resolve_default_prim(target_root)? else {
                 // An unusable target `defaultPrim` is recoverable: record it and
                 // skip the arc; the prim's other opinions still compose.
                 self.errors.report(CompositionDiagnostic::UnresolvedDefaultPrim {
-                    layer_id: self.inputs.stack.layer(default_layer).identifier.clone(),
+                    layer_id: self.inputs.stack.layer(target_root).identifier.clone(),
                     arc,
                     site_path: parent_path,
                 });
@@ -2854,9 +2848,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `[GroupRoot, GroupA, GroupB]` stack and drops only the closing `B → A`.
         if !self.arc_target_in_bounds(parent, target_stack, &source) {
             self.hit_cycle = true;
-            self.errors.report(CompositionDiagnostic::ArcCycle(
-                self.cycle_error(parent, arc, rep, source),
-            ));
+            self.errors.report(CompositionDiagnostic::ArcCycle(self.cycle_error(
+                parent,
+                arc,
+                target_root,
+                source,
+            )));
             return Ok(());
         }
         // Referencing a prim that is a relocation source — or a child of one — is
@@ -2868,7 +2865,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 site: parent_path.clone(),
                 site_layer: self.introducing_layer(parent),
                 target: source.clone(),
-                target_layer: self.inputs.stack.layer(rep).identifier.clone(),
+                target_layer: self.inputs.stack.layer(target_root).identifier.clone(),
                 reloc_source,
                 reloc_layer,
                 composing: self.site.path.clone(),
@@ -2906,18 +2903,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // whether it composes nothing at all is checked once every
             // composition task has run.
             let unresolved = grafted.hit_cycle && !grafted.node.is_some_and(|g| self.subtree_has_specs(g));
-            let diagnostic = CompositionDiagnostic::UnresolvedPrimPath {
-                arc,
-                target_layer: self
-                    .inputs
-                    .stack
-                    .layer(self.target_root_layer(target_stack))
-                    .identifier
-                    .clone(),
-                prim_path: source.clone(),
-                introduced_by: self.introducing_layer(parent),
-                site_path: parent_path.clone(),
-            };
+            let diagnostic = self.unresolved_prim_path(arc, target_root, &source, parent, &parent_path);
             if unresolved {
                 self.errors.report(diagnostic);
             } else {
@@ -2932,25 +2918,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // to such a prim, in another layer or the same one, is additionally an
         // unresolved-prim-path error (C++ `PcpErrorUnresolvedPrimPath`); the
         // node is still culled.
-        let empty = !self.stack_has_spec(target_stack, &source);
-        if empty && matches!(arc, ArcType::Reference | ArcType::Payload) {
-            self.errors.report(CompositionDiagnostic::UnresolvedPrimPath {
-                arc,
-                target_layer: self
-                    .inputs
-                    .stack
-                    .layer(self.target_root_layer(target_stack))
-                    .identifier
-                    .clone(),
-                prim_path: source.clone(),
-                introduced_by: self.introducing_layer(parent),
-                site_path: parent_path.clone(),
-            });
-        }
+        let missing = (!self.stack_has_spec(target_stack, &source))
+            .then(|| self.unresolved_prim_path(arc, target_root, &source, parent, &parent_path));
         let new_node = self
             .output
             .add_child(parent, target_stack, rep, source, arc, map, false);
-        if empty {
+        if let Some(diagnostic) = missing {
+            self.errors.report(diagnostic);
             self.cull_empty(new_node);
             return Ok(());
         }
@@ -2970,13 +2944,33 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// `target_stack[0]` would wrongly name — so for that stack the lookup uses
     /// the graph's root layer; any other stack's strongest member is its root.
     ///
-    /// Returned rather than recomputed by each caller so the arc's dependency
-    /// record, its diagnostic, and the value it reads all name the same layer.
+    /// Each arc computes it once and passes it to its dependency record, its
+    /// diagnostics, and its `defaultPrim` read, which all name the same layer.
     fn target_root_layer(&self, target_stack: LayerStackId) -> LayerId {
         (target_stack == LayerStackId::ROOT)
             .then(|| self.inputs.stack.root_id())
             .flatten()
             .unwrap_or_else(|| self.inputs.stack.layer_stack_root(target_stack))
+    }
+
+    /// The unresolved-prim-path diagnostic (C++ `PcpErrorUnresolvedPrimPath`)
+    /// for a reference or payload under `parent` whose `target` in the stack
+    /// rooted at `target_root` composes nothing.
+    fn unresolved_prim_path(
+        &self,
+        arc: ArcType,
+        target_root: LayerId,
+        target: &Path,
+        parent: NodeId,
+        parent_path: &Path,
+    ) -> CompositionDiagnostic {
+        CompositionDiagnostic::UnresolvedPrimPath {
+            arc,
+            target_layer: self.inputs.stack.layer(target_root).identifier.clone(),
+            prim_path: target.clone(),
+            introduced_by: self.introducing_layer(parent),
+            site_path: parent_path.clone(),
+        }
     }
 
     /// Resolves `layer`'s `defaultPrim` to the prim path an arc naming no target

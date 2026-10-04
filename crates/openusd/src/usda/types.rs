@@ -553,7 +553,7 @@ pub(super) fn parse_payload(cursor: &mut Cursor<'_>) -> Result<sdf::Payload, Raw
     if cursor.at_punctuation('(')? {
         let (offset, _custom_data) =
             parse_reference_layer_offset(cursor).context("Unable to parse payload layer offset")?;
-        payload.layer_offset = Some(offset);
+        payload.layer_offset = offset;
     }
 
     Ok(payload)

@@ -3414,6 +3414,7 @@ fn target_prim_inherits_class(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::Arc;
 
     use crate::Result;
@@ -5209,9 +5210,9 @@ def "Anchor" (inherits = </Rig>) {}
     /// Between two active clips a value interpolates across the activation, as
     /// C++ does: samples 0:1/20:3 and 0:5/20:7 switching at 10 give 3.5 at 5.
     #[test]
-    fn clip_switch_interpolates_activation_samples() -> Result<()> {
+    fn clip_switch_interpolates() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        std::fs::write(
+        fs::write(
             directory.path().join("root.usda"),
             r#"#usda 1.0
 def "Model" (
@@ -5228,7 +5229,7 @@ def "Model" (
 "#,
         )?;
         for (name, first, last) in [("a", 1, 3), ("b", 5, 7)] {
-            std::fs::write(
+            fs::write(
                 directory.path().join(format!("{name}.usda")),
                 format!("#usda 1.0\ndef \"Model\" {{\n    float size.timeSamples = {{0: {first}, 20: {last}}}\n}}\n"),
             )?;

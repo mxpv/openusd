@@ -894,15 +894,14 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let mut payload = sdf::Payload {
             asset_path,
             prim_path,
-            layer_offset: None,
+            layer_offset: sdf::LayerOffset::IDENTITY,
         };
 
         // Layer offsets were added to SdfPayload starting in 0.8.0. Files
         // before that cannot have them.
         // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1214C41-L1214C41
         if self.version() >= version(0, 8, 0) {
-            let layer_offset = self.reader.read_pod::<sdf::LayerOffset>()?;
-            payload.layer_offset = Some(layer_offset);
+            payload.layer_offset = self.reader.read_pod::<sdf::LayerOffset>()?;
         }
 
         Ok(payload)

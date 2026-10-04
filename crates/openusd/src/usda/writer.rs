@@ -662,15 +662,9 @@ impl<W: Write> Emitter<'_, W> {
             write_asset_path(&mut buf, path)?;
             self.out.write_all(buf.as_bytes())?;
 
-            if let Some(offset) = offsets.get(i)
-                && *offset != LayerOffset::default()
-            {
+            if let Some(offset) = offsets.get(i) {
                 let mut buf = String::new();
-                buf.push_str(" (offset = ");
-                format_double(&mut buf, offset.offset);
-                buf.push_str("; scale = ");
-                format_double(&mut buf, offset.scale);
-                buf.push(')');
+                write_arc_metadata(&mut buf, offset, &HashMap::new())?;
                 self.out.write_all(buf.as_bytes())?;
             }
         }
@@ -1388,27 +1382,7 @@ fn write_reference(s: &mut String, r: &Reference) -> Result<(), FormatError> {
     if !r.prim_path.is_empty() {
         write!(s, "<{}>", r.prim_path.as_str())?;
     }
-    // An identity offset is left out and custom data written when present, as
-    // C++ writes a reference.
-    let offset = r.layer_offset != LayerOffset::default();
-    if offset || !r.custom_data.is_empty() {
-        s.push_str(" (");
-        if offset {
-            s.push_str("offset = ");
-            format_double(s, r.layer_offset.offset);
-            s.push_str("; scale = ");
-            format_double(s, r.layer_offset.scale);
-        }
-        if !r.custom_data.is_empty() {
-            if offset {
-                s.push_str("; ");
-            }
-            s.push_str("customData = ");
-            format_dictionary(s, &r.custom_data)?;
-        }
-        s.push(')');
-    }
-    Ok(())
+    write_arc_metadata(s, &r.layer_offset, &r.custom_data)
 }
 
 fn write_payload(s: &mut String, p: &Payload) -> Result<(), FormatError> {
@@ -1418,14 +1392,32 @@ fn write_payload(s: &mut String, p: &Payload) -> Result<(), FormatError> {
     if !p.prim_path.is_empty() {
         write!(s, "<{}>", p.prim_path.as_str())?;
     }
-    if let Some(offset) = &p.layer_offset
-        && *offset != LayerOffset::default()
-    {
-        s.push_str(" (offset = ");
-        format_double(s, offset.offset);
-        s.push_str("; scale = ");
-        format_double(s, offset.scale);
-        s.push(')');
+    write_arc_metadata(s, &p.layer_offset, &HashMap::new())
+}
+
+/// Writes the parenthesized metadata after a sublayer, reference, or payload
+/// asset: the layer offset unless it is the identity, then any custom data.
+/// Writes nothing when neither is present.
+fn write_arc_metadata(
+    s: &mut String,
+    offset: &LayerOffset,
+    custom_data: &HashMap<String, Value>,
+) -> Result<(), FormatError> {
+    let mut parts = Vec::new();
+    if !offset.is_identity() {
+        let mut part = String::from("offset = ");
+        format_double(&mut part, offset.offset);
+        part.push_str("; scale = ");
+        format_double(&mut part, offset.scale);
+        parts.push(part);
+    }
+    if !custom_data.is_empty() {
+        let mut part = String::from("customData = ");
+        format_dictionary(&mut part, custom_data)?;
+        parts.push(part);
+    }
+    if !parts.is_empty() {
+        write!(s, " ({})", parts.join("; "))?;
     }
     Ok(())
 }

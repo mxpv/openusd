@@ -582,7 +582,7 @@ fn listops_values() {
     let expected = Payload {
         asset_path: "eggs.usda".into(),
         prim_path: sdf::Path::default(),
-        layer_offset: Some(LayerOffset::new(0.0, 1.0)),
+        layer_offset: LayerOffset::IDENTITY,
     };
     assert_eq!(payloads.appended_items[0], expected);
 

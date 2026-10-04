@@ -204,6 +204,9 @@ fn identifier_by_leaf(stage: &Stage, leaf: &str) -> String {
 
 // --- Basic stage opening (vendor/usd-wg-assets) ---
 
+/// A reference or payload to a prim missing from the stage's own root layer
+/// names that root layer as the target layer, not the session layer ahead of
+/// it in the root stack.
 #[test]
 fn internal_target_root_diagnostic() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -8016,6 +8019,9 @@ fn clip_asset(name: &str) -> String {
     )
 }
 
+/// A clip read opens only the clips it needs: an unparseable clip that is
+/// never active, or that activates past the queried times, leaves the value
+/// read from the other clip intact.
 #[test]
 fn clip_reads_needed_assets() -> Result<()> {
     let dir = tempfile::tempdir()?;
