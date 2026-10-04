@@ -202,6 +202,11 @@ impl LayerRegistry {
         self.resolver.resolve(identifier)
     }
 
+    /// Opens the asset at a [`resolve`](Self::resolve)d location for reading.
+    pub(crate) fn open_asset(&self, resolved: &ar::ResolvedPath) -> std::io::Result<Box<dyn ar::Asset>> {
+        self.resolver.open_asset(resolved)
+    }
+
     /// Resolves the layer the composition graph should open at `identifier`.
     ///
     /// This is [`resolve`](Self::resolve) deferred to the selected format's
