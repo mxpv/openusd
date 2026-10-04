@@ -5204,6 +5204,32 @@ def "T" {
         Ok(())
     }
 
+    /// An explicit identity payload offset matches an omitted one, as in C++,
+    /// so deleting `@content.usda@</Box> (offset = 0; scale = 1)` removes the
+    /// payload a weaker layer added without an offset.
+    #[test]
+    fn identity_payload_offset_matches_omitted() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        write("content.usda", "#usda 1.0\ndef \"Box\" {\n    def \"Child\" {}\n}\n")?;
+        write(
+            "weak.usda",
+            "#usda 1.0\ndef \"Root\" (\n    prepend payload = @content.usda@</Box>\n) {}\n",
+        )?;
+        write(
+            "root.usda",
+            "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\nover \"Root\" (\n    delete payload = @content.usda@</Box> (offset = 0; scale = 1)\n) {}\n",
+        )?;
+        let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+
+        assert!(stage.prim("/Root")?.is_defined()?);
+        assert!(
+            !stage.prim("/Root/Child")?.is_valid()?,
+            "the deleted payload contributes nothing"
+        );
+        Ok(())
+    }
+
     /// Muting a session layer suppresses its pseudo-root stage metadata too, so
     /// `startTimeCode` falls back to the root layer's opinion.
     #[test]
