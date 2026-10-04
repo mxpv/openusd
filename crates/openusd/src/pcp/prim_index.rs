@@ -2347,7 +2347,8 @@ def "Root" (
 
     /// A reference or payload to a prim missing from its own layer reports an
     /// unresolved prim path too, at the root or below a prim, as C++ does. A
-    /// target a variant supplies later is not missing.
+    /// target a variant supplies later is not missing, even when the reference
+    /// to it is composed inside another reference's target.
     #[test]
     fn absent_internal_target() -> Result<()> {
         let layer = parse_usda(
@@ -2370,6 +2371,12 @@ def Scope "SubMissing" (references = </Present/Absent>) {}
 def Scope "PayloadMissing" (payload = </Absent>) {}
 def Scope "SubPresent" (references = </Present/Child>) {}
 def Scope "FromVariantRef" (references = </Varied/FromVariant>) {}
+def Scope "Outer" {
+    def Scope "ToVariant" (references = </Varied/FromVariant>) {}
+    def Scope "ToAbsent" (references = </Absent>) {}
+}
+def Scope "NestedVariantRef" (references = </Outer/ToVariant>) {}
+def Scope "NestedMissing" (references = </Outer/ToAbsent>) {}
 "#,
         );
         let stack = one_layer_stack(layer);
@@ -2388,6 +2395,11 @@ def Scope "FromVariantRef" (references = </Varied/FromVariant>) {}
         );
         assert_eq!(unresolved("/SubPresent")?, []);
         assert_eq!(unresolved("/FromVariantRef")?, []);
+        assert_eq!(unresolved("/NestedVariantRef")?, []);
+        assert_eq!(
+            unresolved("/NestedMissing")?,
+            [(ArcType::Reference, "/Absent".to_string())]
+        );
         Ok(())
     }
 

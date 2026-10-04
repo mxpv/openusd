@@ -916,16 +916,20 @@ impl PrimIndexGraph {
     /// A node's path at the level where its arc was introduced (C++
     /// `PcpNode::GetPathAtIntroduction`): the node path with its
     /// [`depth_below_introduction`](Self::depth_below_introduction) trailing
-    /// elements stripped.
+    /// namespace levels stripped.
     pub(crate) fn path_at_introduction(&self, id: NodeId) -> Path {
-        let mut path = self.nodes[id.idx()].path.clone();
-        for _ in 0..self.depth_below_introduction(id) {
-            match path.parent() {
-                Some(parent) => path = parent,
-                None => break,
-            }
+        path_at_intro_depth(&self.nodes[id.idx()].path, self.depth_below_introduction(id))
+    }
+
+    /// The path of the site that introduced a node's arc (C++
+    /// `PcpNodeRef::GetIntroPath`): its parent's path at the level the arc was
+    /// introduced, or the absolute root for a node with no parent.
+    pub(crate) fn intro_path(&self, id: NodeId) -> Path {
+        let parent = self.parent_of(id);
+        if !parent.is_valid() {
+            return Path::abs_root();
         }
-        path
+        path_at_intro_depth(&self.nodes[parent.idx()].path, self.depth_below_introduction(id))
     }
 
     /// Whether two nodes carry the same site: same layer stack and path
@@ -1144,6 +1148,26 @@ impl std::ops::Deref for PrimIndexGraph {
     fn deref(&self) -> &[Node] {
         &self.nodes
     }
+}
+
+/// Strips `depth` namespace levels from `path` (C++ `_GetPathAtIntroDepth`).
+/// A variant selection is not a namespace level, so the selections above each
+/// stripped prim go with it, while those ancestral to the result stay.
+fn path_at_intro_depth(path: &Path, depth: u16) -> Path {
+    let mut path = path.clone();
+    for _ in 0..depth {
+        while path.is_prim_variant_selection_path() {
+            match path.parent() {
+                Some(parent) => path = parent,
+                None => return path,
+            }
+        }
+        match path.parent() {
+            Some(parent) => path = parent,
+            None => break,
+        }
+    }
+    path
 }
 
 #[cfg(test)]
