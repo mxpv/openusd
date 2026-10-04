@@ -1172,7 +1172,7 @@ impl Prim {
     ///
     /// The namespace narrows the ordered names, so a property keeps the place
     /// the whole list gave it, and only the names it leaves are asked for
-    /// their spec type.
+    /// their spec type, all under one cache borrow.
     fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType, namespace: &str) -> Result<Vec<sdf::Path>> {
         let mut names = match source {
             PropertySource::Composed => self.property_names()?,
@@ -1182,23 +1182,33 @@ impl Prim {
         let info = self.prim_type_info()?;
         let definition = info.prim_definition();
 
-        let mut paths = Vec::new();
-        for name in names {
-            let path = self.property_path(&name);
-            let spec_type = match (self.stage.spec_type(&path)?, source) {
-                (Some(spec_type), _) => Some(spec_type),
-                // A property the prim only inherits from its schema has no
-                // composed spec, so its kind comes from the declaration.
-                (None, PropertySource::Composed) => definition.property(&name).map(|property| property.spec_type()),
-                // Nothing a schema declares is authored, so a name with no
-                // composed spec belongs to neither kind.
-                (None, PropertySource::Authored) => None,
-            };
-            if spec_type == Some(ty) {
-                paths.push(path);
+        Ok(self.stage.masked(&self.path, |graph, cache| {
+            // A property is one of the prim's opinions, so a prototype root
+            // has none.
+            let opinions = !cache.is_prototype(&self.path);
+            let mut paths = Vec::new();
+            for name in &names {
+                let path = self.property_path(name);
+                let composed = if opinions && !path.is_empty() {
+                    cache.spec_type(graph, &path)?
+                } else {
+                    None
+                };
+                let spec_type = match (composed, source) {
+                    (Some(spec_type), _) => Some(spec_type),
+                    // A property the prim only inherits from its schema has no
+                    // composed spec, so its kind comes from the declaration.
+                    (None, PropertySource::Composed) => definition.property(name).map(|property| property.spec_type()),
+                    // Nothing a schema declares is authored, so a name with no
+                    // composed spec belongs to neither kind.
+                    (None, PropertySource::Authored) => None,
+                };
+                if spec_type == Some(ty) {
+                    paths.push(path);
+                }
             }
-        }
-        Ok(paths)
+            Ok(paths)
+        })?)
     }
 
     /// Property path for `name` under this prim. An invalid name yields the
