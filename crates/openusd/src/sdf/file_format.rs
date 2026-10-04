@@ -170,6 +170,13 @@ pub trait FileFormat: Sync {
     /// decode without a copy while bytes just read off disk move in.
     fn read_bytes(&self, bytes: Cow<'static, [u8]>, source_name: &str) -> Result<LayerData, FormatError>;
 
+    /// [`read_bytes`](Self::read_bytes) for bytes shared with an asset
+    /// ([`ar::Asset::shared_bytes`]). A format that decodes in place keeps
+    /// them; the default copies them into `read_bytes`.
+    fn read_shared_bytes(&self, bytes: std::sync::Arc<[u8]>, source_name: &str) -> Result<LayerData, FormatError> {
+        self.read_bytes(bytes.as_ref().to_vec().into(), source_name)
+    }
+
     /// Read a layer's data from `resolved`, opening the asset (and any
     /// sibling assets) through `resolver`.
     ///
@@ -177,7 +184,11 @@ pub trait FileFormat: Sync {
     /// [`read_bytes`](Self::read_bytes); one that reaches for sibling assets
     /// overrides this.
     fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData, FormatError> {
-        let bytes = resolver.open_asset(resolved)?.read_all()?;
+        let mut asset = resolver.open_asset(resolved)?;
+        if let Some(bytes) = asset.shared_bytes() {
+            return self.read_shared_bytes(bytes, &resolved.to_string());
+        }
+        let bytes = asset.read_all()?;
         self.read_bytes(bytes.into(), &resolved.to_string())
     }
 

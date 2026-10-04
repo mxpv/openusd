@@ -262,6 +262,20 @@ impl LayerRegistry {
             .read_bytes(bytes, source_name)
     }
 
+    /// [`read_bytes`](Self::read_bytes) for bytes shared with an asset, which
+    /// a format that decodes in place keeps rather than copies.
+    pub fn read_shared_bytes(
+        bytes: std::sync::Arc<[u8]>,
+        source_name: &str,
+    ) -> Result<sdf::LayerData, sdf::FormatError> {
+        DEFAULT_FORMATS
+            .iter()
+            .copied()
+            .find(|format| format.matches_content(&bytes))
+            .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))?
+            .read_shared_bytes(bytes, source_name)
+    }
+
     /// Find the format claiming `ext` (without the leading dot, case-insensitive),
     /// e.g. `"usda"` or `"usd"`. C++ `SdfFileFormat::FindByExtension`.
     pub fn find_by_extension(ext: &str) -> Option<&'static dyn sdf::FileFormat> {
@@ -489,11 +503,11 @@ impl LayerRegistry {
     fn read(&self, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData, LoadError> {
         let ext = resolved.extension();
         if ext.eq_ignore_ascii_case("usd") {
-            let bytes = self
-                .resolver
-                .open_asset(resolved)
-                .and_then(|mut asset| asset.read_all())
-                .map_err(sdf::FormatError::from)?;
+            let mut asset = self.resolver.open_asset(resolved).map_err(sdf::FormatError::from)?;
+            if let Some(bytes) = asset.shared_bytes() {
+                return Ok(Self::read_shared_bytes(bytes, &resolved.to_string())?);
+            }
+            let bytes = asset.read_all().map_err(sdf::FormatError::from)?;
             return Ok(Self::read_bytes(bytes.into(), &resolved.to_string())?);
         }
         Ok(Self::find_by_extension(&ext)

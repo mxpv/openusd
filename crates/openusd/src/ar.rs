@@ -107,6 +107,14 @@ pub trait Asset: Read + Seek + Send {
     /// Returns the total size of the asset in bytes.
     fn size(&self) -> io::Result<u64>;
 
+    /// The complete asset as bytes shared with the caller, whatever the
+    /// cursor position, for an asset already held in memory (C++
+    /// `ArAsset::GetBuffer`). A format that decodes in place keeps them
+    /// instead of copying; `None`, the default, has the asset read instead.
+    fn shared_bytes(&self) -> Option<std::sync::Arc<[u8]>> {
+        None
+    }
+
     /// Reads the entire asset into a byte buffer.
     fn read_all(&mut self) -> io::Result<Vec<u8>> {
         let size = self.size()? as usize;

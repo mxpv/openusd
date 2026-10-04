@@ -381,6 +381,16 @@ impl sdf::FileFormat for UsdcFileFormat {
         Ok(Box::new(data))
     }
 
+    fn read_shared_bytes(
+        &self,
+        bytes: std::sync::Arc<[u8]>,
+        _source_name: &str,
+    ) -> Result<sdf::LayerData, sdf::FormatError> {
+        let data =
+            CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
+        Ok(Box::new(data))
+    }
+
     fn matches_content(&self, prefix: &[u8]) -> bool {
         prefix.starts_with(MAGIC)
     }
@@ -399,7 +409,74 @@ const CRATE_PROPERTY_CHILDREN: &str = "properties";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Result;
+    use crate::sdf::FileFormat;
+    use crate::{Result, ar};
+    use std::sync::Arc;
+
+    /// An asset over shared bytes, as a resolver holding assets in memory
+    /// serves them.
+    struct SharedAsset(io::Cursor<Arc<[u8]>>);
+
+    impl io::Read for SharedAsset {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl io::Seek for SharedAsset {
+        fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+            self.0.seek(pos)
+        }
+    }
+
+    impl ar::Asset for SharedAsset {
+        fn size(&self) -> io::Result<u64> {
+            Ok(self.0.get_ref().len() as u64)
+        }
+
+        fn shared_bytes(&self) -> Option<Arc<[u8]>> {
+            Some(self.0.get_ref().clone())
+        }
+    }
+
+    struct SharedResolver(Arc<[u8]>);
+
+    impl ar::Resolver for SharedResolver {
+        fn create_identifier(&self, asset_path: &str, _anchor: Option<&ar::ResolvedPath>) -> String {
+            asset_path.to_string()
+        }
+
+        fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+            Some(ar::ResolvedPath::new(asset_path))
+        }
+
+        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+            Some(ar::ResolvedPath::new(asset_path))
+        }
+
+        fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+            Ok(Box::new(SharedAsset(io::Cursor::new(self.0.clone()))))
+        }
+    }
+
+    /// A crate layer read from an asset that shares its bytes decodes from
+    /// those bytes, holding a reference rather than a copy.
+    #[test]
+    fn shared_asset_bytes_are_kept() -> Result<()> {
+        let mut layer = sdf::Data::new();
+        layer.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+        let mut bytes = io::Cursor::new(Vec::new());
+        CrateWriter::write(&layer, &mut bytes)?;
+        let bytes: Arc<[u8]> = bytes.into_inner().into();
+
+        let resolver = SharedResolver(bytes.clone());
+        let data = UsdcFileFormat.read(&resolver, &ar::ResolvedPath::new("shared.usdc"))?;
+        assert!(data.has_spec(&sdf::Path::abs_root()));
+        assert_eq!(Arc::strong_count(&bytes), 3);
+        drop(data);
+        assert_eq!(Arc::strong_count(&bytes), 2);
+        Ok(())
+    }
 
     use crate::gf;
     use crate::gf::f16;
