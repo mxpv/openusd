@@ -44,13 +44,6 @@ pub enum ArchiveError {
     #[error("no USD layer found in USDZ archive")]
     NoDefaultLayer,
 
-    /// The entry is itself a package; nested packages are not supported.
-    #[error("Nested USDZ files are not yet supported: '{path}'")]
-    NestedPackage {
-        /// The nested package's entry path.
-        path: String,
-    },
-
     /// The writer refuses an unsafe or non-portable entry name.
     #[error("USDZ entry name {name:?} {reason}")]
     InvalidEntryName {
@@ -114,24 +107,6 @@ pub struct UsdzFileFormat;
 /// the first entry).
 const USDZ_LAYER_NAME: &str = "layer.usdc";
 
-impl UsdzFileFormat {
-    /// Refuses a package named inside another package.
-    ///
-    /// A package-relative path reaches this format only when its named entry is
-    /// itself a package — an ordinary inner layer dispatches to its own format
-    /// — and a nested package is unsupported. Only a resolved path can say
-    /// this, so it is asked of the asset being opened, never of the label
-    /// [`read_bytes`](sdf::FileFormat::read_bytes) carries.
-    fn refuse_nested_package(resolved: &str) -> Result<(), sdf::FormatError> {
-        match ar::split_package_relative_path_outer(resolved) {
-            Some((_, inner)) => Err(sdf::FormatError::Decode(Box::new(ArchiveError::NestedPackage {
-                path: inner,
-            }))),
-            None => Ok(()),
-        }
-    }
-}
-
 impl sdf::FileFormat for UsdzFileFormat {
     fn format_id(&self) -> tf::Token {
         tf::Token::new("usdz")
@@ -149,13 +124,10 @@ impl sdf::FileFormat for UsdzFileFormat {
     }
 
     fn resolve_layer(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
-        // An already package-relative path (`pkg.usdz[inner]`, including a nested
-        // `pkg.usdz[inner.usdz]`) already names its entry; only a bare package is
-        // anchored to its default — first — packaged layer.
+        // A package is anchored to its default (first) packaged layer. A package
+        // nested in another (`pkg.usdz[inner.usdz]`) is anchored inside the
+        // innermost bracket, `pkg.usdz[inner.usdz[first.usdc]]`.
         let package = resolved.to_string_lossy();
-        if ar::is_package_relative_path(&package) {
-            return Some(resolved.clone());
-        }
         // A package that cannot be opened, or that lists no default layer, falls
         // back to the bare package path so `read` surfaces the precise zip/parse
         // error, rather than being demoted to an unresolved (missing) asset.
@@ -170,7 +142,7 @@ impl sdf::FileFormat for UsdzFileFormat {
             .ok()
             .and_then(|a| a.first_layer_name())
         {
-            Some(first) => Some(ar::ResolvedPath::new(ar::join_package_relative_path(&package, &first))),
+            Some(first) => Some(ar::ResolvedPath::new(ar::nest_packaged_path(&package, &first))),
             None => Some(resolved.clone()),
         }
     }
@@ -180,11 +152,7 @@ impl sdf::FileFormat for UsdzFileFormat {
         resolver: &dyn ar::Resolver,
         resolved: &ar::ResolvedPath,
     ) -> Result<sdf::LayerData, sdf::FormatError> {
-        // Refused before the asset is opened: reading a whole package only to
-        // discard it is the expensive way to reach the same error.
         let source_name = resolved.to_string();
-        Self::refuse_nested_package(&source_name)?;
-
         let bytes = resolver.open_asset(resolved)?.read_all()?;
         self.read_bytes(bytes.into(), &source_name)
     }
@@ -326,6 +294,39 @@ mod tests {
             Some(sdf::Value::Int(42)),
             "reference to a layer inside the package should compose"
         );
+        Ok(())
+    }
+
+    /// A `.usdz` holding another `.usdz`, as C++ reads one: a reference to the
+    /// inner package composes its default layer, the nested package path
+    /// `outer.usdz[inner.usdz]` opens as a stage, and the raw archive reads the
+    /// nested entry's default layer.
+    #[test]
+    fn resolves_nested_package() -> Result<()> {
+        let mut inner = ArchiveWriter::new(Cursor::new(Vec::new()));
+        inner.add_layer("inner.usda", b"#usda 1.0\ndef \"Inner\" { custom int probe = 42 }\n")?;
+        let inner = inner.finish()?.into_inner();
+        let root = b"#usda 1.0\ndef \"World\" (prepend references = @./inner.usdz@</Inner>) {}\n";
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("outer.usdz");
+        let mut writer = ArchiveWriter::create(&path)?;
+        writer.add_layer("root.usda", root)?;
+        writer.add_layer("inner.usdz", &inner)?;
+        writer.finish()?;
+
+        let probe = |stage: &Stage, attr: &str| -> Result<Option<sdf::Value>> {
+            stage.attribute(attr)?.get_at::<sdf::Value>(TimeCode::new(0.0))
+        };
+        let stage = Stage::open(path.to_str().unwrap())?;
+        assert_eq!(probe(&stage, "/World.probe")?, Some(sdf::Value::Int(42)));
+
+        let nested = ar::join_package_relative_path(path.to_str().unwrap(), "inner.usdz");
+        let stage = Stage::open(&nested)?;
+        assert_eq!(probe(&stage, "/Inner.probe")?, Some(sdf::Value::Int(42)));
+
+        let data = Archive::open(&path)?.read("inner.usdz")?;
+        assert!(data.has_spec(&sdf::path("/Inner")?));
         Ok(())
     }
 }
