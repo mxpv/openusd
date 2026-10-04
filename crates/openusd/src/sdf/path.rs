@@ -40,9 +40,12 @@ pub fn try_into_path(path: impl IntoPath) -> Result<Path, PathParseError> {
 /// Parsing via [`Path::new`] (or [`FromStr`]) validates this grammar and
 /// rejects malformed text with a [`PathParseError`]. The empty path is not
 /// parseable; construct it with [`Path::default`].
+///
+/// Clones share the path's text rather than copying it, as C++ `SdfPath`
+/// copies share one pooled path node.
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Path {
-    path: String,
+    path: std::sync::Arc<String>,
 }
 
 impl fmt::Display for Path {
@@ -54,7 +57,7 @@ impl fmt::Display for Path {
 #[cfg(feature = "serde")]
 impl serde::Serialize for Path {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.path.serialize(serializer)
+        self.as_str().serialize(serializer)
     }
 }
 
@@ -94,7 +97,9 @@ impl FromStr for Path {
 
     fn from_str(s: &str) -> Result<Path, Self::Err> {
         Path::validate(s)?;
-        Ok(Path { path: s.to_string() })
+        Ok(Path {
+            path: s.to_owned().into(),
+        })
     }
 }
 
@@ -121,7 +126,9 @@ impl Path {
             path.is_empty() || Path::validate(path).is_ok(),
             "from_str_unchecked on invalid path {path:?}"
         );
-        Path { path: path.to_string() }
+        Path {
+            path: path.to_owned().into(),
+        }
     }
 
     #[inline]
@@ -132,7 +139,7 @@ impl Path {
     /// Returns `true` if this is the absolute root path `/` (pseudo-root).
     #[inline]
     pub fn is_abs_root(&self) -> bool {
-        self.path == "/"
+        self.as_str() == "/"
     }
 
     /// Whether this path's prim is a root prim — a direct child of the
@@ -162,7 +169,7 @@ impl Path {
         // The pseudo-root, the empty path, and the `.`/`..` relative anchors
         // cannot own properties; appending to them would build an unparseable
         // path like `/.foo`.
-        if self.is_empty() || self.is_abs_root() || self.path == "." || self.path.ends_with("..") {
+        if self.is_empty() || self.is_abs_root() || self.as_str() == "." || self.path.ends_with("..") {
             return Err(fail(0, "path cannot own properties"));
         }
         if !Path::is_valid_namespace_identifier(property) {
@@ -172,11 +179,11 @@ impl Path {
             ));
         }
 
-        let mut new_path = self.path.clone();
+        let mut new_path = self.path.to_string();
         new_path.push('.');
         new_path.push_str(property);
 
-        Ok(Path { path: new_path })
+        Ok(Path { path: new_path.into() })
     }
 
     /// Appends `path` (parsed if given as a string) under this path with a `/`
@@ -187,7 +194,7 @@ impl Path {
 
         if self.is_abs() && append.is_abs() {
             return Err(PathParseError {
-                input: append.path,
+                input: append.path.to_string(),
                 offset: 0,
                 reason: "cannot append an absolute path to an absolute path",
             });
@@ -195,7 +202,7 @@ impl Path {
 
         if self.is_property_path() {
             return Err(PathParseError {
-                input: self.path.clone(),
+                input: self.path.to_string(),
                 offset: self.path.rfind('.').unwrap_or(0),
                 reason: "cannot append a path to a property path",
             });
@@ -208,7 +215,7 @@ impl Path {
         // The reflexive base is the identity anchor: appending to `.` yields
         // the argument itself (C++ `SdfPath::AppendPath` on the reflexive
         // relative path).
-        if self.path == "." {
+        if self.as_str() == "." {
             return Ok(append);
         }
 
@@ -217,7 +224,7 @@ impl Path {
         // a valid path.
         if append.as_str().starts_with('.') {
             return Err(PathParseError {
-                input: append.path,
+                input: append.path.to_string(),
                 offset: 0,
                 reason: "cannot append a `.`-anchored path under a prim path",
             });
@@ -225,7 +232,7 @@ impl Path {
 
         // If base is slash only.
         // "/" + "foo/bar" => "/foo/bar"
-        let combined = if self.path.as_str() == "/" {
+        let combined = if self.as_str() == "/" {
             format!("/{}", append.path)
         } else if self.is_prim_variant_selection_path() {
             // A prim child attaches directly to a variant selection with no
@@ -235,7 +242,7 @@ impl Path {
             format!("{}/{}", self.path, append.path)
         };
 
-        Ok(Path { path: combined })
+        Ok(Path { path: combined.into() })
     }
 
     pub fn is_property_path(&self) -> bool {
@@ -278,13 +285,13 @@ impl Path {
     /// path.
     pub fn is_prim_path(&self) -> bool {
         // The relative anchors: `.`, and a `..(/..)*` run with nothing after it.
-        if self.path == "." || (!self.path.is_empty() && self.path.split('/').all(|seg| seg == "..")) {
+        if self.as_str() == "." || (!self.path.is_empty() && self.path.split('/').all(|seg| seg == "..")) {
             return true;
         }
         // Strip the anchor the grammar allows ahead of the prim chain, then ask
         // the prim-chain iterator what the last component was. A non-empty
         // remainder means a property tail the chain could not consume.
-        let mut rest = self.path.as_str();
+        let mut rest = self.as_str();
         if let Some(after) = rest.strip_prefix('/') {
             rest = after;
         } else {
@@ -476,7 +483,7 @@ impl Path {
     /// "/A{set=sel}"   -> Some(Variant { set: "set", selection: "sel" })
     /// ```
     pub fn last_element(&self) -> Option<PathElement<'_>> {
-        if self.path.is_empty() || self.path == "/" {
+        if self.path.is_empty() || self.as_str() == "/" {
             return None;
         }
         // A property's element is the whole property name (everything after
@@ -517,7 +524,7 @@ impl Path {
     /// ""            -> None
     /// ```
     pub fn parent(&self) -> Option<Path> {
-        if self.path.is_empty() || self.path == "/" {
+        if self.path.is_empty() || self.as_str() == "/" {
             return None;
         }
         // Drop a trailing `{set=sel}` variant selection.
@@ -622,7 +629,7 @@ impl Path {
     /// ""       -> None
     /// ```
     pub fn name(&self) -> Option<&str> {
-        if self.path.is_empty() || self.path == "/" {
+        if self.path.is_empty() || self.as_str() == "/" {
             return None;
         }
         // The final prim name begins after the rightmost `/` or `}` (a child of
@@ -633,7 +640,7 @@ impl Path {
         if start < self.path.len() {
             Some(&self.path[start..])
         } else {
-            Some(self.path.rsplit_once('/').map_or(self.path.as_str(), |(_, name)| name))
+            Some(self.path.rsplit_once('/').map_or(self.as_str(), |(_, name)| name))
         }
     }
 
@@ -702,7 +709,7 @@ impl Path {
             return self.clone();
         }
         let mut out = String::with_capacity(self.path.len());
-        let mut rest = self.path.as_str();
+        let mut rest = self.as_str();
         let mut depth = 0usize;
         let mut chars = rest.char_indices();
         // Splice out each depth-0 `{…}` span; bracketed spans pass through.
@@ -875,7 +882,7 @@ impl Path {
         if self.is_empty()
             || self.is_abs_root()
             || self.is_property_path()
-            || self.path == "."
+            || self.as_str() == "."
             || self.path.ends_with("..")
             || self.path.ends_with(']')
         {
@@ -1335,10 +1342,10 @@ impl TryFrom<&str> for Path {
 impl TryFrom<String> for Path {
     type Error = PathParseError;
 
-    /// Validates and reuses `value`'s allocation.
+    /// Validates `value` and shares its existing text allocation.
     fn try_from(value: String) -> Result<Path, PathParseError> {
         Path::validate(&value)?;
-        Ok(Path { path: value })
+        Ok(Path { path: value.into() })
     }
 }
 
@@ -1355,6 +1362,39 @@ mod tests {
     use crate::Result;
 
     use super::*;
+
+    #[test]
+    fn clones_share_text_and_derivations_preserve_original() {
+        let path = Path::new("/Root/Branch").unwrap();
+        let clone = path.clone();
+        assert!(std::sync::Arc::ptr_eq(&path.path, &clone.path));
+        assert_eq!(clone.append_property("size").unwrap().as_str(), "/Root/Branch.size");
+        assert_eq!(clone.append_path("Leaf").unwrap().as_str(), "/Root/Branch/Leaf");
+        assert_eq!(path.as_str(), "/Root/Branch");
+        let text = String::from("/Root/Branch");
+        let allocation = text.as_ptr();
+        let independent = Path::try_from(text).unwrap();
+        assert_eq!(independent.as_str().as_ptr(), allocation);
+        assert_eq!(path, independent);
+        let mut paths = std::collections::HashSet::new();
+        paths.insert(path);
+        assert!(paths.contains(&independent));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn shared_paths_preserve_string_serialization() {
+        for path in [
+            Path::default(),
+            Path::abs_root(),
+            Path::new("/Root.rel[/Target]").unwrap(),
+        ] {
+            let encoded = serde_json::to_string(&path).unwrap();
+            assert_eq!(encoded, serde_json::to_string(path.as_str()).unwrap());
+            assert_eq!(serde_json::from_str::<Path>(&encoded).unwrap(), path);
+        }
+        assert!(serde_json::from_str::<Path>("\"/invalid path\"").is_err());
+    }
 
     /// `is_prim_path` classifies by the path's final element, so every tail
     /// shape lands where C++ `SdfPath::IsPrimPath` puts it — including `.` and
@@ -1384,7 +1424,9 @@ mod tests {
     /// Builds a `Path` directly from `path`, skipping validation — for
     /// exercising lenient read-side behavior on malformed input.
     fn raw(path: &str) -> Path {
-        Path { path: path.to_string() }
+        Path {
+            path: path.to_owned().into(),
+        }
     }
 
     #[test]
@@ -1668,7 +1710,11 @@ mod tests {
 
     #[test]
     fn test_split_property() {
-        let split = |s: &str| raw(s).split_property().map(|(p, n)| (p.path, n.to_owned()));
+        let split = |s: &str| {
+            raw(s)
+                .split_property()
+                .map(|(p, n)| (p.as_str().to_owned(), n.to_owned()))
+        };
         let owned = |p: &str, n: &str| Some((p.to_owned(), n.to_owned()));
 
         assert_eq!(split("/World/Mesh.points"), owned("/World/Mesh", "points"));
