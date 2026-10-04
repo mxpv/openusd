@@ -3197,7 +3197,12 @@ impl Stage {
             status.set(PrimStatus::ACTIVE, prim.is_active()?);
         }
         if mask.contains(PrimStatus::LOADED) {
-            status.set(PrimStatus::LOADED, prim.is_loaded()?);
+            let loaded = if mask.contains(PrimStatus::ACTIVE) {
+                prim.is_loaded_with_active(status.contains(PrimStatus::ACTIVE))?
+            } else {
+                prim.is_loaded()?
+            };
+            status.set(PrimStatus::LOADED, loaded);
         }
         if mask.contains(PrimStatus::DEFINED) {
             status.set(PrimStatus::DEFINED, prim.is_defined()?);
