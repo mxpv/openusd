@@ -3129,7 +3129,7 @@ impl IndexCache {
     /// path in place would cache an empty index that a later mint would have to
     /// evict.
     pub(super) fn ensure_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<(), QueryError> {
-        if self.is_indexed(path) || self.in_unregistered_prototype(path) {
+        if path.is_empty() || self.is_indexed(path) || self.in_unregistered_prototype(path) {
             return Ok(());
         }
         // Composing a prim whose ancestor is still mid-build cannot seed from that
