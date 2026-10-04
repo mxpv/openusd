@@ -126,6 +126,17 @@ impl Asset for io::Cursor<Vec<u8>> {
     fn size(&self) -> io::Result<u64> {
         Ok(self.get_ref().len() as u64)
     }
+
+    /// A cursor still at its start hands its buffer over instead of copying
+    /// it, leaving itself empty.
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        if self.position() != 0 {
+            let mut buf = Vec::new();
+            self.read_to_end(&mut buf)?;
+            return Ok(buf);
+        }
+        Ok(std::mem::take(self.get_mut()))
+    }
 }
 
 /// Interface for resolving asset paths to physical locations.
@@ -1116,6 +1127,21 @@ mod tests {
 
         let result = asset.read_all().unwrap();
         assert_eq!(result, data);
+    }
+
+    /// A cursor at its start hands its buffer over; one already read into
+    /// returns the rest.
+    #[test]
+    fn cursor_asset_read_all_moves_buffer() {
+        let data = b"hello world".to_vec();
+        let pointer = data.as_ptr();
+        let mut asset = io::Cursor::new(data);
+        let moved = asset.read_all().unwrap();
+        assert_eq!(moved.as_ptr(), pointer);
+
+        let mut asset = io::Cursor::new(b"hello world".to_vec());
+        asset.seek(io::SeekFrom::Start(6)).unwrap();
+        assert_eq!(asset.read_all().unwrap(), b"world");
     }
 
     #[test]
