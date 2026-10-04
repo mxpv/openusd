@@ -312,15 +312,18 @@ impl ClipSet {
     /// entry for all later times. Returns `None` when no `active` entries are
     /// authored.
     pub(crate) fn active_entry(&self, stage_time: f64) -> Option<(f64, usize)> {
-        let mut chosen = *self.active.first()?;
-        for &entry in &self.active {
-            if entry.0 <= stage_time {
-                chosen = entry;
-            } else {
-                break;
-            }
-        }
-        Some(chosen)
+        self.active_position(stage_time).map(|position| self.active[position])
+    }
+
+    /// The position in [`Self::active`] of the entry [`Self::active_entry`]
+    /// selects at `stage_time`, or `None` when no `active` entries are
+    /// authored.
+    fn active_position(&self, stage_time: f64) -> Option<usize> {
+        (!self.active.is_empty()).then(|| {
+            self.active
+                .partition_point(|&(start, _)| start <= stage_time)
+                .saturating_sub(1)
+        })
     }
 
     /// Maps `stage_time` to clip time through the `times` timing curve
@@ -791,41 +794,38 @@ impl ClipCache {
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>, QueryError> {
         let value = self.value_at_active_clip(graph, diagnostics, resolved, query, time, interp)?;
-        if resolved.set.active.len() < 2 || value.as_ref().is_none_or(Value::is_asset_valued) {
+        let set = &resolved.set;
+        if set.active.len() < 2 || value.as_ref().is_none_or(Value::is_asset_valued) {
             return Ok(value);
         }
-        let path = clip_attr_path(query, &resolved.set.clip_prim_path(query.anchor))?;
-        let set = &resolved.set;
-        let position = set
-            .active
-            .partition_point(|&(start, _)| start <= time)
-            .saturating_sub(1);
+        let Some(position) = set.active_position(time) else {
+            return Ok(value);
+        };
         let (start, index) = set.active[position];
+        let path = clip_attr_path(query, &set.clip_prim_path(query.anchor))?;
         let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
-        let samples =
-            if set.interpolate_missing && self.manifest_blocks(graph, resolved, manifest.as_deref(), &path, start) {
-                Vec::new()
-            } else if let Some(asset) = set.asset_paths.get(index) {
-                self.clip_in_clip_samples(graph, asset.asset_path(), resolved.source.layer, &path)?
-            } else {
-                Vec::new()
-            };
-        let mut times = set.window_sample_times(position, samples.iter().map(|(time, _)| *time));
+        let samples = match set.asset_paths.get(index) {
+            Some(asset) if self.clip_contributes(graph, resolved, manifest.as_deref(), &path, start) => self
+                .clip_time_samples(graph, asset.asset_path(), resolved.source.layer, &path)?
+                .map(|(_, samples)| samples),
+            _ => None,
+        };
+        let samples = samples.iter().flatten().map(|(time, _)| *time);
+        let mut times = set.window_sample_times(position, samples);
         if let Some(&(next, _)) = set.active.get(position + 1) {
             times.push(next);
         }
         times.sort_by(f64::total_cmp);
         times.dedup();
-        let upper = times.partition_point(|sample| *sample <= time);
-        if upper == 0 || upper == times.len() || times[upper - 1] == time {
+        let next = times.partition_point(|sample| *sample <= time);
+        if next == 0 || next == times.len() || times[next - 1] == time {
             return Ok(value);
         }
-        let lower_time = times[upper - 1];
-        let upper_time = times[upper];
+        let lower_time = times[next - 1];
+        let upper_time = times[next];
         // A `times` jump discontinuity holds the earlier clip time up to the
         // jump, so the active clip answers on its own.
-        let jump = resolved
-            .set
+        let jump = set
             .times
             .windows(2)
             .any(|knots| knots[0].x == knots[1].x && knots[0].x > lower_time && knots[0].x <= upper_time);
@@ -899,8 +899,7 @@ impl ClipCache {
         // same terms as the gap search itself, which is what keeps the two
         // agreeing about what a clip contributes (C++
         // `Usd_ClipSet::_ClipContributesTimeSamples`).
-        let contributes = !set.interpolate_missing
-            || !self.manifest_blocks(graph, resolved, manifest.as_deref(), &clip_path, activation);
+        let contributes = self.clip_contributes(graph, resolved, manifest.as_deref(), &clip_path, activation);
         if contributes
             && let Some((clip_id, value)) =
                 self.clip_sample_at(graph, resolved, asset.asset_path(), &clip_path, clip_time, interp)?
@@ -988,8 +987,7 @@ impl ClipCache {
         // manifest block at its activation time states it carries no samples for
         // the attribute, and the value then comes from the manifest or from the
         // clips surrounding the gap, so the clip is not the spec to report.
-        let contributes = !set.interpolate_missing
-            || !self.manifest_blocks(graph, resolved, manifest.as_deref(), &clip_path, activation);
+        let contributes = self.clip_contributes(graph, resolved, manifest.as_deref(), &clip_path, activation);
         if contributes
             && let Some((clip_id, samples)) =
                 self.clip_time_samples(graph, asset.asset_path(), resolved.source.layer, &clip_path)?
@@ -1343,6 +1341,20 @@ impl ClipCache {
         })
     }
 
+    /// Whether the clip activating at `activation` may carry samples for
+    /// `clip_path`: always, unless `interpolateMissingClipValues` is on and
+    /// the manifest blocks the attribute there (see [`Self::manifest_blocks`]).
+    fn clip_contributes(
+        &self,
+        graph: &LayerGraph,
+        resolved: &ResolvedClipSet,
+        manifest: Option<&str>,
+        clip_path: &Path,
+        activation: f64,
+    ) -> bool {
+        !resolved.set.interpolate_missing || !self.manifest_blocks(graph, resolved, manifest, clip_path, activation)
+    }
+
     /// Loads a value-clip or manifest layer referenced by `asset_path`,
     /// anchored to the layer `anchor_layer` (the layer that authored the
     /// clip metadata), and returns the identifier it is cached under. Layers are
@@ -1484,7 +1496,7 @@ impl ClipCache {
     /// layer, with the identifier the clip resolved to, or `None` when the layer
     /// is unresolved or authors no samples there. The shared read behind
     /// [`Self::clip_sample_at`] (which interpolates) and
-    /// [`Self::clip_in_clip_times`] (which lists the times).
+    /// [`Self::clip_in_clip_samples`] (which lists the times).
     ///
     /// The identifier travels with the samples because resolving an `asset`
     /// value out of them anchors on that same clip, and re-deriving it would
@@ -1624,7 +1636,7 @@ impl ClipCache {
     ) -> Result<Option<Value>, QueryError> {
         let set = &resolved.set;
         // Position of the active clip among the `active` entries at `time`.
-        let active_pos = set.active.iter().rposition(|&(stage, _)| stage <= time).unwrap_or(0);
+        let active_pos = set.active_position(time).unwrap_or(0);
 
         // Forward: nearest later clip that contributes, anchored at its start.
         let mut upper = None;

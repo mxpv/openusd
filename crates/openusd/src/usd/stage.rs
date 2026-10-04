@@ -5187,7 +5187,7 @@ def "T" {
     /// An attribute query on the pseudo-root leaves no empty path in the index
     /// cache, so a later mute and unmute do not panic dropping it.
     #[test]
-    fn mute_after_pseudo_root_attribute_query() -> Result<()> {
+    fn mute_after_root_query() -> Result<()> {
         let stage = Stage::builder().make_stage(
             sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?,
             0,
@@ -5208,7 +5208,7 @@ def "T" {
     /// so deleting `@content.usda@</Box> (offset = 0; scale = 1)` removes the
     /// payload a weaker layer added without an offset.
     #[test]
-    fn identity_payload_offset_matches_omitted() -> Result<()> {
+    fn payload_identity_offset() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
         write("content.usda", "#usda 1.0\ndef \"Box\" {\n    def \"Child\" {}\n}\n")?;

@@ -779,11 +779,7 @@ mod tests {
         assert_eq!(payload.asset_path, "./payload.usda");
         assert_eq!(payload.prim_path, sdf::path("/MySphere")?);
 
-        assert!(payload.layer_offset.is_some());
-
-        let layer_offset = payload.layer_offset.unwrap();
-        assert_eq!(layer_offset.offset, 0.0);
-        assert_eq!(layer_offset.scale, 1.0);
+        assert_eq!(payload.layer_offset, sdf::LayerOffset::IDENTITY);
 
         let payload_list_op = data
             .get_field(&sdf::path("/MySphere2")?, "payload")?

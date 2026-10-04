@@ -990,8 +990,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.write_pod(&asset_idx)?;
         let prim_idx = self.intern_path(p.prim_path.clone());
         self.write_pod(&prim_idx)?;
-        let offset = p.layer_offset.unwrap_or_default();
-        self.write_pod(&offset)?;
+        self.write_pod(&p.layer_offset)?;
         Ok(())
     }
 

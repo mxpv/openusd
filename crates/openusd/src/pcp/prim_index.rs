@@ -1551,6 +1551,27 @@ pub(crate) mod tests {
         LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
     }
 
+    /// The arc and target path of each unresolved-prim-path diagnostic that
+    /// composing `prim` in `stack` reports.
+    fn unresolved_targets(stack: &LayerGraph, prim: &str) -> Result<Vec<(ArcType, String)>> {
+        let (_, errors, _, _) = PrimIndex::build_with_cache(
+            &Path::new(prim)?,
+            stack,
+            &CompositionContext::default(),
+            &sdf::PathTable::new(),
+            true,
+        )?;
+        Ok(errors
+            .iter()
+            .filter_map(|error| match error {
+                CompositionDiagnostic::UnresolvedPrimPath { arc, prim_path, .. } => {
+                    Some((*arc, prim_path.as_str().to_string()))
+                }
+                _ => None,
+            })
+            .collect())
+    }
+
     #[test]
     fn single_layer_root_node() -> Result<()> {
         let mut stack = load_stack(&composition_path("active.usda"))?;
@@ -2307,7 +2328,7 @@ def "Root" (
     /// the root or below a prim it does have, reports an unresolved prim path
     /// (C++ `PcpErrorUnresolvedPrimPath`).
     #[test]
-    fn absent_external_targets_report_reference_and_payload_errors() -> Result<()> {
+    fn absent_external_target() -> Result<()> {
         for (field, arc, target) in [
             ("references", ArcType::Reference, "/Absent"),
             ("payload", ArcType::Payload, "/Absent"),
@@ -2315,27 +2336,11 @@ def "Root" (
             ("payload", ArcType::Payload, "/Present/Absent"),
         ] {
             let root = parse_usda(&format!(
-                "#usda 1.0\ndef Scope \"Mounted\" ({field} = @model.usda@<{target}>) {{}}\n"
+                "#usda 1.0\ndef Scope \"Mounted\" ({field} = @ref.usd@<{target}>) {{}}\n"
             ));
             let model = parse_usda("#usda 1.0\ndef Scope \"Present\" {}\n");
-            let stack = LayerGraph::from_layers(
-                vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usda", model)],
-                0,
-                sdf::LayerRegistry::default(),
-            );
-            let (_, errors, _, _) = PrimIndex::build_with_cache(
-                &Path::new("/Mounted").unwrap(),
-                &stack,
-                &CompositionContext::default(),
-                &sdf::PathTable::new(),
-                true,
-            )?;
-            assert!(
-                errors.iter().any(|error| matches!(error,
-                CompositionDiagnostic::UnresolvedPrimPath { arc: actual, prim_path, .. }
-                    if *actual == arc && prim_path.as_str() == target)),
-                "{errors:?}"
-            );
+            let stack = two_layer_stack(root, model);
+            assert_eq!(unresolved_targets(&stack, "/Mounted")?, [(arc, target.to_string())]);
         }
         Ok(())
     }
@@ -2344,7 +2349,7 @@ def "Root" (
     /// unresolved prim path too, at the root or below a prim, as C++ does. A
     /// target a variant supplies later is not missing.
     #[test]
-    fn absent_internal_targets_report_reference_and_payload_errors() -> Result<()> {
+    fn absent_internal_target() -> Result<()> {
         let layer = parse_usda(
             r#"#usda 1.0
 def Scope "Present" {
@@ -2367,29 +2372,8 @@ def Scope "SubPresent" (references = </Present/Child>) {}
 def Scope "FromVariantRef" (references = </Varied/FromVariant>) {}
 "#,
         );
-        let stack = LayerGraph::from_layers(
-            vec![sdf::Layer::new("root.usda", layer)],
-            0,
-            sdf::LayerRegistry::default(),
-        );
-        let unresolved = |prim: &str| -> Result<Vec<(ArcType, String)>> {
-            let (_, errors, _, _) = PrimIndex::build_with_cache(
-                &Path::new(prim).unwrap(),
-                &stack,
-                &CompositionContext::default(),
-                &sdf::PathTable::new(),
-                true,
-            )?;
-            Ok(errors
-                .iter()
-                .filter_map(|error| match error {
-                    CompositionDiagnostic::UnresolvedPrimPath { arc, prim_path, .. } => {
-                        Some((*arc, prim_path.as_str().to_string()))
-                    }
-                    _ => None,
-                })
-                .collect())
-        };
+        let stack = one_layer_stack(layer);
+        let unresolved = |prim: &str| unresolved_targets(&stack, prim);
         assert_eq!(
             unresolved("/RootMissing")?,
             [(ArcType::Reference, "/Absent".to_string())]
