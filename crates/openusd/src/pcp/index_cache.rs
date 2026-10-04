@@ -2114,6 +2114,33 @@ impl IndexCache {
         Ok(false)
     }
 
+    /// [`Self::is_defined`] and [`Self::is_abstract`] together, from one walk
+    /// up the ancestor chain, for a caller asking both.
+    pub(crate) fn specifier_status(&mut self, graph: &LayerGraph, path: &Path) -> Result<(bool, bool), QueryError> {
+        if path.is_abs_root() {
+            return Ok((true, false));
+        }
+        if !self.has_spec(graph, path)? {
+            return Ok((false, false));
+        }
+        let (mut defined, mut is_abstract) = (true, false);
+        for ancestor in path.ancestors_below_root() {
+            if self.is_prototype(&ancestor) {
+                break;
+            }
+            let specifier = self
+                .resolve_field(graph, &ancestor, FieldKey::Specifier.as_str())?
+                .map(sdf::Specifier::try_from)
+                .transpose()?;
+            defined &= matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class));
+            is_abstract |= specifier == Some(sdf::Specifier::Class);
+            if !defined && is_abstract {
+                break;
+            }
+        }
+        Ok((defined, is_abstract))
+    }
+
     /// This prim's own composed `active` opinion, defaulting to `true`. The
     /// per-prim read [`Self::is_active`] walks and [`Self::is_populated`] takes
     /// for the prim it is deciding, its ancestors having been decided already.

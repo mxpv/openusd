@@ -4932,6 +4932,68 @@ fn prototype_root_active() -> Result<()> {
     Ok(())
 }
 
+/// The defined and abstract bits a prim status reads from one ancestor walk
+/// agree with `is_defined` and `is_abstract` asked one at a time, across
+/// `def`, `over` and `class` chains and an instance's prototype.
+#[test]
+fn prim_status_specifier_bits_match_queries() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+class "Class"
+{
+    def "Child"
+    {
+        over "Over"
+        {
+        }
+    }
+}
+
+over "Over"
+{
+    def "Child"
+    {
+    }
+}
+
+def "World"
+{
+    class "Nested"
+    {
+        def "Leaf"
+        {
+        }
+    }
+}
+
+def "A" (
+    instanceable = true
+    references = </Class>
+)
+{
+}
+"#,
+    )?;
+    let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+    let mut paths = Vec::new();
+    stage.traverse(PrimPredicate::ALL, |path| paths.push(path.clone()))?;
+    for prototype in stage.prototypes()? {
+        paths.push(prototype.append_path("Child")?);
+        paths.push(prototype);
+    }
+    assert!(paths.len() > 10);
+    for path in paths {
+        let prim = stage.prim(path.clone())?;
+        let status = stage.prim_status(path.clone())?;
+        assert_eq!(status.contains(PrimStatus::DEFINED), prim.is_defined()?, "{path}");
+        assert_eq!(status.contains(PrimStatus::ABSTRACT), prim.is_abstract()?, "{path}");
+    }
+    Ok(())
+}
+
 /// A prototype root is defined and not abstract whatever its source authors,
 /// as C++ `Usd_PrimData` sets it, and its children inherit that (spec
 /// 11.3.3).
