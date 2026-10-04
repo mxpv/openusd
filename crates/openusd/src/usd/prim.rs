@@ -820,15 +820,9 @@ impl Prim {
     /// `true` if the prim or any ancestor resolves to `class`. Mirrors C++
     /// `UsdPrim::IsAbstract`.
     pub fn is_abstract(&self) -> Result<bool> {
-        if self.path == sdf::Path::abs_root() || !self.stage.has_spec(&self.path)? {
-            return Ok(false);
-        }
-        for path in self.path.ancestors_below_root() {
-            if self.stage.field::<sdf::Specifier>(&path, sdf::FieldKey::Specifier)? == Some(sdf::Specifier::Class) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(self
+            .stage
+            .masked(&self.path, |g, cache| cache.is_abstract(g, &self.path))?)
     }
 
     /// `true` if the prim index contains at least one composition arc.
