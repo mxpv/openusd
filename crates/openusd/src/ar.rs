@@ -421,11 +421,8 @@ impl Resolver for DefaultResolver {
                 )
             })?;
 
-            let mut archive = open_package_archive(Path::new(&package))?;
-            let mut entry = archive.by_name(&inner).map_err(io::Error::other)?;
-
-            let mut buffer = Vec::new();
-            entry.read_to_end(&mut buffer)?;
+            let archive = open_package_archive(Path::new(&package))?;
+            let buffer = read_package_entry(archive, &inner)?;
 
             return Ok(Box::new(io::Cursor::new(buffer)));
         }
@@ -517,6 +514,29 @@ fn open_package_archive(package: &Path) -> io::Result<zip::ZipArchive<fs::File>>
     zip::ZipArchive::new(file).map_err(io::Error::other)
 }
 
+/// Reads the entry `inner` names from `archive`. A nested packaged path
+/// (`inner.usdz[deep.usd]`) reads the inner package from its entry and descends
+/// into it, one level per bracket, as C++ `ArPackageResolver` does for a
+/// package inside a package.
+fn read_package_entry<R: Read + io::Seek>(mut archive: zip::ZipArchive<R>, inner: &str) -> io::Result<Vec<u8>> {
+    let (name, nested) = match split_package_relative_path_outer(inner) {
+        Some((package, rest)) => (package, Some(rest)),
+        None => (inner.to_owned(), None),
+    };
+    let mut buffer = Vec::new();
+    archive
+        .by_name(&name)
+        .map_err(io::Error::other)?
+        .read_to_end(&mut buffer)?;
+    match nested {
+        Some(rest) => {
+            let archive = zip::ZipArchive::new(io::Cursor::new(buffer)).map_err(io::Error::other)?;
+            read_package_entry(archive, &rest)
+        }
+        None => Ok(buffer),
+    }
+}
+
 /// Whether `inner` should be treated as present in the package at `package`.
 ///
 /// Reading only the archive's central directory — not its entry data — a
@@ -527,8 +547,8 @@ fn open_package_archive(package: &Path) -> io::Result<zip::ZipArchive<fs::File>>
 /// error instead of a misleading "missing asset": a `package` that cannot be
 /// opened right now (a transient IO error or a corrupt archive — distinct from
 /// a genuinely absent entry), and a nested packaged path
-/// (`inner.usdz[deep.usd]`, which is not a flat entry name and whose support is
-/// decided when the inner package opens).
+/// (`inner.usdz[deep.usd]`, which is not a flat entry name and is checked when
+/// the inner package opens).
 ///
 /// TODO(perf): opens the package's central directory on every package-relative
 /// resolve (per in-package arc, re-run each composition pass). Cache parsed
@@ -664,7 +684,7 @@ fn join_packaged_path(dir: &str, rel: &str) -> String {
 /// `leaf` is nested into the innermost bracket so the result stays well-formed
 /// (`pkg[inner[leaf]]`) rather than gaining a stray second bracket pair
 /// (`pkg[inner][leaf]`), which no split or resolve step can interpret.
-fn nest_packaged_path(base: &str, leaf: &str) -> String {
+pub(crate) fn nest_packaged_path(base: &str, leaf: &str) -> String {
     match split_package_relative_path_outer(base) {
         Some((package, inner)) => join_package_relative_path(&package, &nest_packaged_path(&inner, leaf)),
         None => join_package_relative_path(base, leaf),

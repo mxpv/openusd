@@ -70,9 +70,8 @@ impl<R: Read + Seek> Archive<R> {
         self.read(&name)
     }
 
-    /// Read either a USDA or USDC file from the archive.
-    ///
-    /// NOTE: Nested USDZ files are not yet supported.
+    /// Read either a USDA or USDC file from the archive. A nested `.usdz`
+    /// entry reads that package's default (first) layer.
     pub fn read(&mut self, file_path: &str) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
         let mut file = self
             .archive
@@ -84,10 +83,9 @@ impl<R: Read + Seek> Archive<R> {
             .map_err(|e| ArchiveError::entry(file_path, e))?;
 
         if file_path.ends_with(".usdz") {
-            // TODO: Implement nested USDZ files support.
-            return Err(ArchiveError::NestedPackage {
-                path: file_path.to_owned(),
-            });
+            return Archive::from_reader(Cursor::new(buffer))
+                .and_then(|mut nested| nested.read_first_layer())
+                .map_err(|e| ArchiveError::entry(file_path, e));
         }
 
         // The named extension decides crate vs text; a format-agnostic `.usd`
