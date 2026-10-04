@@ -9,7 +9,7 @@
 use std::convert::Infallible;
 use std::{error, io, mem, result};
 
-use crate::{pcp, sdf, usd, usda, usdc, usdz};
+use crate::{pcp, sdf, usd, usd_utils, usda, usdc, usdz};
 
 /// Largest module error nested directly in [`enum@Error`]; anything bigger is
 /// boxed so the enum stays within the size the assertion below pins. The
@@ -101,6 +101,10 @@ pub enum Error {
     /// Registering schema families or building their definitions failed.
     #[error(transparent)]
     SchemaRegistry(#[from] usd::SchemaRegistryError),
+
+    /// Walking a layer's dependencies met a path it cannot follow.
+    #[error(transparent)]
+    Dependency(#[from] usd_utils::DependencyError),
 
     /// The stage root or session layer's asset path resolved to nothing.
     #[error("failed to resolve asset path: {0}")]
