@@ -2303,6 +2303,43 @@ def "Root" (
         Ok(())
     }
 
+    /// A reference or payload to a prim an external layer does not have, at
+    /// the root or below a prim it does have, reports an unresolved prim path
+    /// (C++ `PcpErrorUnresolvedPrimPath`).
+    #[test]
+    fn absent_external_targets_report_reference_and_payload_errors() -> Result<()> {
+        for (field, arc, target) in [
+            ("references", ArcType::Reference, "/Absent"),
+            ("payload", ArcType::Payload, "/Absent"),
+            ("references", ArcType::Reference, "/Present/Absent"),
+            ("payload", ArcType::Payload, "/Present/Absent"),
+        ] {
+            let root = parse_usda(&format!(
+                "#usda 1.0\ndef Scope \"Mounted\" ({field} = @model.usda@<{target}>) {{}}\n"
+            ));
+            let model = parse_usda("#usda 1.0\ndef Scope \"Present\" {}\n");
+            let stack = LayerGraph::from_layers(
+                vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usda", model)],
+                0,
+                sdf::LayerRegistry::default(),
+            );
+            let (_, errors, _, _) = PrimIndex::build_with_cache(
+                &Path::new("/Mounted").unwrap(),
+                &stack,
+                &CompositionContext::default(),
+                &sdf::PathTable::new(),
+                true,
+            )?;
+            assert!(
+                errors.iter().any(|error| matches!(error,
+                CompositionDiagnostic::UnresolvedPrimPath { arc: actual, prim_path, .. }
+                    if *actual == arc && prim_path.as_str() == target)),
+                "{errors:?}"
+            );
+        }
+        Ok(())
+    }
+
     /// A cyclic sub-root reference whose target composes *nothing* is reported
     /// as `UnresolvedPrimPath` on top of the `ArcCycle` (C++
     /// `PcpErrorUnresolvedPrimPath`). `/Outer` references back into `a.usd`, so
