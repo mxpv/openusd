@@ -327,6 +327,10 @@ struct VariantTask {
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum TaskKind {
+    /// Report a reference or payload node whose target composes no prim spec
+    /// (C++ `EvalUnresolvedPrimPathError`). It is the weakest task: every
+    /// source of opinions, variants included, is in the graph before it runs.
+    EvalUnresolvedPrimPath,
     /// A variant set whose fallback search also came up empty; a placeholder
     /// kept only so [`retry_variant_tasks`](Indexer::retry_variant_tasks) can
     /// re-promote it once a newly selected variant introduces opinions.
@@ -376,8 +380,8 @@ enum TaskKind {
 /// whether *that* sub-build hit an arc cycle.
 ///
 /// The flag answers for *this* sub-build alone, which is what a sub-root
-/// reference needs: it is unresolved only when composing its own target hit a
-/// cycle that left nothing behind.
+/// reference needs: when composing its own target hit a cycle and grafted no
+/// node, the arc reports the unresolved prim path itself.
 struct GraftOutcome {
     node: Option<NodeId>,
     hit_cycle: bool,
@@ -511,8 +515,6 @@ pub(crate) struct Indexer<'a, 'f> {
     /// relocation target) reports no error, so only entries whose node survives
     /// (is not culled) are kept — matching C++'s per-contributing-arc reporting.
     pending_relocation_diagnostics: Vec<(NodeId, CompositionDiagnostic)>,
-    /// Sub-root targets checked after all composition tasks finish.
-    pending_target_diagnostics: Vec<(Option<NodeId>, CompositionDiagnostic)>,
 }
 
 impl<'a, 'f> Indexer<'a, 'f> {
@@ -545,7 +547,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             pending_loads: Vec::new(),
             expr_var_deps: ExprVarDeps::default(),
             pending_relocation_diagnostics: Vec::new(),
-            pending_target_diagnostics: Vec::new(),
         }
     }
 
@@ -667,12 +668,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 }
                 // Placeholders kept only for `retry_variant_tasks`; nothing to do.
                 TaskKind::EvalNodeVariantNoneFound | TaskKind::EvalNodeAncestralVariantNoneFound => {}
-            }
-        }
-
-        for (node, error) in mem::take(&mut self.pending_target_diagnostics) {
-            if !node.is_some_and(|node| self.subtree_has_specs(node)) {
-                self.errors.report(error);
+                TaskKind::EvalUnresolvedPrimPath => self.eval_unresolved_prim_path(task.node),
             }
         }
 
@@ -708,10 +704,15 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     fn seed(&mut self, path: &Path) -> BuildResult<bool> {
         let parent = path.parent();
-        let needs_ancestor = matches!(&parent, Some(p) if p != &Path::abs_root());
+        // A variant selection path takes no ancestral opinions (C++
+        // `Pcp_BuildPrimIndex`): composing its parent prim evaluates the
+        // variant arc, which already accounts for them.
+        let needs_ancestor =
+            !path.is_prim_variant_selection_path() && matches!(&parent, Some(p) if p != &Path::abs_root());
 
         if !needs_ancestor {
-            // Root prim: synthetic inert root plus a local site scanning ambient.
+            // Root prim or variant selection: synthetic inert root plus a local
+            // site scanning ambient.
             self.output
                 .init_root(self.site.ambient, self.root_layer_id(), path.clone());
             self.add_local_root(path);
@@ -1162,6 +1163,49 @@ impl<'a, 'f> Indexer<'a, 'f> {
             self.tasks.push(Task::new(TaskKind::EvalNodeVariantSets, id));
             self.tasks.push(Task::new(TaskKind::EvalNodeAncestralVariantSets, id));
         }
+        self.enqueue_unresolved_checks(root);
+    }
+
+    /// Enqueues the unresolved-prim-path check for each reference or payload
+    /// node in `root`'s subtree. Only the top-level build checks (C++
+    /// `AddTasksForNode`'s `!previousFrame` gate). A nested build defers its
+    /// variants, and a target a variant supplies is still empty there. A
+    /// nested build's nodes are checked once the top-level build grafts them.
+    fn enqueue_unresolved_checks(&mut self, root: NodeId) {
+        if self.frame.is_some() {
+            return;
+        }
+        for id in self.subtree_nodes(root) {
+            if matches!(self.node(id).arc, ArcType::Reference | ArcType::Payload) {
+                self.tasks.push(Task::new(TaskKind::EvalUnresolvedPrimPath, id));
+            }
+        }
+    }
+
+    /// Reports `node`, a reference or payload node, as an unresolved prim path
+    /// when no node in its subtree has a prim spec at the level the arc was
+    /// introduced (C++ `_EvalUnresolvedPrimPathError` and
+    /// `_PrimSpecExistsUnderNodeAtIntroduction`).
+    fn eval_unresolved_prim_path(&mut self, node: NodeId) {
+        let exists = if self.output.depth_below_introduction(node) == 0 {
+            self.subtree_has_specs(node)
+        } else {
+            self.subtree_nodes(node)
+                .into_iter()
+                .any(|id| self.stack_has_spec(self.node(id).layer_stack_id(), &self.output.path_at_introduction(id)))
+        };
+        let Some(parent) = self.node(node).parent().filter(|_| !exists) else {
+            return;
+        };
+        let n = self.node(node);
+        let diagnostic = self.unresolved_prim_path(
+            n.arc,
+            self.target_root_layer(n.layer_stack_id()),
+            &self.output.path_at_introduction(node),
+            parent,
+            &self.output.intro_path(node),
+        );
+        self.errors.report(diagnostic);
     }
 
     /// Removes and returns the highest-priority open task (C++
@@ -2897,34 +2941,26 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if !source.is_root_prim() {
             let grafted =
                 self.compose_and_graft(&source, target_stack, self.frame_skip(), parent, arc, map, parent, 0)?;
-            // A target is unresolved at once when composing it hit a cycle (its own
-            // ancestral chain loops back) that left nothing. Otherwise it may be
-            // merely empty so far (e.g. a variant supplies its opinions later), so
-            // whether it composes nothing at all is checked once every
-            // composition task has run.
-            let unresolved = grafted.hit_cycle && !grafted.node.is_some_and(|g| self.subtree_has_specs(g));
-            let diagnostic = self.unresolved_prim_path(arc, target_root, &source, parent, &parent_path);
-            if unresolved {
+            // A grafted target is checked by the unresolved-prim-path task. One
+            // whose own ancestral chain closed a cycle grafts no node to check,
+            // so it is reported here.
+            if grafted.node.is_none() && grafted.hit_cycle {
+                let diagnostic = self.unresolved_prim_path(arc, target_root, &source, parent, &parent_path);
                 self.errors.report(diagnostic);
-            } else {
-                self.pending_target_diagnostics.push((grafted.node, diagnostic));
             }
             return Ok(());
         }
 
         // An arc target authoring no spec is kept as a culled node (C++
         // culling): visible to change tracking and dependency registration, but
-        // contributing no opinions to value resolution. A reference or payload
-        // to such a prim, in another layer or the same one, is additionally an
-        // unresolved-prim-path error (C++ `PcpErrorUnresolvedPrimPath`); the
-        // node is still culled.
-        let missing = (!self.stack_has_spec(target_stack, &source))
-            .then(|| self.unresolved_prim_path(arc, target_root, &source, parent, &parent_path));
+        // contributing no opinions to value resolution. The unresolved-prim-path
+        // task reports it.
+        let empty = !self.stack_has_spec(target_stack, &source);
         let new_node = self
             .output
             .add_child(parent, target_stack, rep, source, arc, map, false);
-        if let Some(diagnostic) = missing {
-            self.errors.report(diagnostic);
+        self.enqueue_unresolved_checks(new_node);
+        if empty {
             self.cull_empty(new_node);
             return Ok(());
         }
