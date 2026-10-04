@@ -4932,6 +4932,52 @@ fn prototype_root_active() -> Result<()> {
     Ok(())
 }
 
+/// A prim sorts its properties into attributes and relationships by their
+/// composed spec, and a prototype root, which reads no opinions, has neither.
+#[test]
+fn properties_sorted_by_spec_type() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "Source"
+{
+    double size = 1
+    rel target = </Source>
+}
+
+def "A" (
+    instanceable = true
+    references = </Source>
+)
+{
+}
+"#,
+    )?;
+    let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+    let names = |properties: Vec<sdf::Path>| -> Vec<String> {
+        properties
+            .iter()
+            .map(|path| path.as_str().rsplit_once('.').unwrap_or_default().1.to_owned())
+            .collect()
+    };
+    let source = stage.prim("/Source")?;
+    assert_eq!(
+        names(source.attributes()?.iter().map(|a| a.path().clone()).collect()),
+        ["size"]
+    );
+    assert_eq!(
+        names(source.relationships()?.iter().map(|r| r.path().clone()).collect()),
+        ["target"]
+    );
+
+    let prototype = stage.prim(stage.prim("/A")?.prototype()?.expect("A is an instance"))?;
+    assert!(prototype.attributes()?.is_empty());
+    assert!(prototype.relationships()?.is_empty());
+    Ok(())
+}
+
 /// The defined and abstract bits a prim status reads from one ancestor walk
 /// agree with `is_defined` and `is_abstract` asked one at a time, across
 /// `def`, `over` and `class` chains and an instance's prototype.
