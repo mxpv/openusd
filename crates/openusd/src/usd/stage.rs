@@ -3204,10 +3204,13 @@ impl Stage {
             };
             status.set(PrimStatus::LOADED, loaded);
         }
-        if mask.contains(PrimStatus::DEFINED) {
+        if mask.contains(PrimStatus::DEFINED | PrimStatus::ABSTRACT) {
+            let (defined, is_abstract) = self.masked(prim.path(), |g, c| c.specifier_status(g, prim.path()))?;
+            status.set(PrimStatus::DEFINED, defined);
+            status.set(PrimStatus::ABSTRACT, is_abstract);
+        } else if mask.contains(PrimStatus::DEFINED) {
             status.set(PrimStatus::DEFINED, prim.is_defined()?);
-        }
-        if mask.contains(PrimStatus::ABSTRACT) {
+        } else if mask.contains(PrimStatus::ABSTRACT) {
             status.set(PrimStatus::ABSTRACT, prim.is_abstract()?);
         }
         if mask.contains(PrimStatus::INSTANCE) {
