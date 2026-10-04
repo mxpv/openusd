@@ -3635,9 +3635,20 @@ impl StageBuilder {
         // a variable authored on the stage root layer (and a root sublayer one on the
         // session), and composition later resolves each `${VAR}` sublayer to the same
         // layer this collection opened.
-        let root_stack_vars = self.root_stack_expression_variables(root_path)?;
-        let session = self.collect_optional_session_layers(&root_stack_vars)?;
-        let root = self.collect_layers(root_path, &root_stack_vars)?;
+        let root_data = self.registry.prepare_root(root_path, None)?;
+        let session_data = self
+            .session_layer
+            .as_deref()
+            .map(|path| self.registry.prepare_root(path, None))
+            .transpose()?
+            .flatten();
+        let root_stack_vars =
+            self.root_stack_expression_variables(root_path, root_data.as_ref(), session_data.as_ref())?;
+        let session = match self.session_layer.as_deref() {
+            Some(path) => self.collect_prepared_layers(path, &root_stack_vars, session_data)?,
+            None => CollectedLayers::default(),
+        };
+        let root = self.collect_prepared_layers(root_path, &root_stack_vars, root_data)?;
         let session_layer_count = session.layers.len();
         let layers = session.layers.into_iter().chain(root.layers).collect();
         let diagnostics = session.diagnostics.into_iter().chain(root.diagnostics).collect();
@@ -3686,14 +3697,27 @@ impl StageBuilder {
     /// later, once the muted-aware graph exists (see
     /// [`StageBuilder::make_stage`](Self::make_stage)).
     fn collect_layers(&self, path: &str, ancestor_expr_vars: &HashMap<String, sdf::Value>) -> Result<CollectedLayers> {
+        self.collect_prepared_layers(path, ancestor_expr_vars, self.registry.prepare_root(path, None)?)
+    }
+
+    /// [`collect_layers`](Self::collect_layers) from the root layer at `path`
+    /// already read by [`LayerRegistry::prepare_root`].
+    fn collect_prepared_layers(
+        &self,
+        path: &str,
+        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        root: Option<sdf::layer_registry::PreparedLayer>,
+    ) -> Result<CollectedLayers> {
         let diagnostics = RefCell::new(pcp::Diagnostics::default());
         // `ancestor_expr_vars` are the expression variables the enclosing context
         // contributes: the session layers' composed set for the root stack, empty
         // for the session stack itself (nothing sublayers it).
         let layers = self
             .registry
-            .open_stack(
-                &self.registry.create_identifier(path, None),
+            .open_prepared_stack(
+                root.ok_or_else(|| sdf::LoadError::Unresolved {
+                    asset_path: path.to_owned(),
+                })?,
                 ancestor_expr_vars,
                 false,
                 &|error| {
@@ -3754,13 +3778,26 @@ impl StageBuilder {
     /// contributing none. Read shallowly from the two root layers — their sublayers
     /// contribute nothing — since it is the fixed context both the session region's
     /// and the root region's `${VAR}` sublayers resolve against.
-    fn root_stack_expression_variables(&self, root_path: &str) -> Result<HashMap<String, sdf::Value>> {
-        let mut vars = self.registry.own_expression_variables(root_path, None)?;
+    fn root_stack_expression_variables(
+        &self,
+        root_path: &str,
+        root: Option<&sdf::layer_registry::PreparedLayer>,
+        session: Option<&sdf::layer_registry::PreparedLayer>,
+    ) -> Result<HashMap<String, sdf::Value>> {
+        let mut vars = root
+            .map(|root| sdf::expr::read_expression_variables(root.data.as_ref()).map(|vars| vars.into_owned()))
+            .transpose()?
+            .unwrap_or_default();
         if let Some(session_path) = self.session_layer.as_deref() {
             let session_id = self.registry.create_identifier(session_path, None);
             let muted = !self.muted.is_empty() && self.canonical_muted_set(root_path).contains(&session_id);
             if !muted {
-                let session_own = self.registry.own_expression_variables(session_path, None)?;
+                let session_own = session
+                    .map(|session| {
+                        sdf::expr::read_expression_variables(session.data.as_ref()).map(|vars| vars.into_owned())
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
                 sdf::expr::compose_over(&mut vars, &session_own);
             }
         }

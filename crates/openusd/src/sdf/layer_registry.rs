@@ -148,6 +148,18 @@ pub struct LayerRegistry {
     resolver: Box<dyn ar::Resolver>,
 }
 
+/// A stack's root layer, read ahead of its stack by
+/// [`LayerRegistry::prepare_root`] and handed to
+/// [`LayerRegistry::open_prepared_stack`] so it is not read twice.
+pub(crate) struct PreparedLayer {
+    /// The layer's canonical identifier.
+    pub identifier: String,
+    /// Where the layer was found.
+    pub resolved: ar::ResolvedPath,
+    /// The layer's data.
+    pub data: sdf::LayerData,
+}
+
 impl Default for LayerRegistry {
     /// A registry over the filesystem [`DefaultResolver`](ar::DefaultResolver)
     /// and the built-in formats — what [`Stage::builder`](crate::usd::Stage)
@@ -341,30 +353,32 @@ impl LayerRegistry {
             .map(|(resolved, data)| sdf::Layer::new_resolved(identifier, &resolved, data)))
     }
 
-    /// The `expressionVariables` authored on the single layer at `asset_path`
-    /// (anchored against `anchor`), read without opening its sublayers — the shallow
-    /// read the stage root stack needs to compose its root and session layers' own
-    /// variables into one context before either region's sublayer subtree is
-    /// collected. An empty identifier yields an empty map; a resolve or read failure
-    /// propagates.
-    ///
-    /// TODO(perf): the layer read here is read again when its stack is collected;
-    /// the registry does not cache reads, so a root or session layer is parsed twice
-    /// at open.
-    pub(crate) fn own_expression_variables(
+    /// Reads the single layer at `asset_path` (anchored against `anchor`)
+    /// without opening its sublayers: the shallow read the stage root stack
+    /// needs to compose its root and session layers' own expression variables
+    /// into one context before either region's sublayer subtree is collected.
+    /// The read is then handed to
+    /// [`open_prepared_stack`](Self::open_prepared_stack), so the layer is
+    /// parsed once at open. An empty identifier yields `None`; a resolve or
+    /// read failure propagates.
+    pub(crate) fn prepare_root(
         &self,
         asset_path: &str,
         anchor: Option<&ar::ResolvedPath>,
-    ) -> Result<HashMap<String, sdf::Value>, LoadError> {
+    ) -> Result<Option<PreparedLayer>, LoadError> {
         let identifier = self.create_identifier(asset_path, anchor);
         if identifier.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(None);
         }
         let resolved = self.resolve_layer(&identifier).ok_or_else(|| LoadError::Unresolved {
             asset_path: asset_path.to_owned(),
         })?;
         let data = self.read(&resolved)?;
-        Ok(expr::read_expression_variables(data.as_ref())?.into_owned())
+        Ok(Some(PreparedLayer {
+            identifier,
+            resolved,
+            data,
+        }))
     }
 
     /// Opens the layer at `identifier` — a canonical identifier, as
@@ -412,9 +426,6 @@ impl LayerRegistry {
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
     ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
-        let mut layers = Vec::new();
-        let mut visited = HashSet::new();
-
         if identifier.is_empty() {
             return Ok(None);
         }
@@ -428,6 +439,36 @@ impl LayerRegistry {
             return Ok(None);
         };
         let data = self.read(&resolved)?;
+        self.open_prepared_stack(
+            PreparedLayer {
+                identifier,
+                resolved,
+                data,
+            },
+            ancestor_expr_vars,
+            reload,
+            on_error,
+            already_present,
+        )
+    }
+
+    /// [`open_stack`](Self::open_stack) from a root layer already read by
+    /// [`prepare_root`](Self::prepare_root).
+    pub(crate) fn open_prepared_stack(
+        &self,
+        root: PreparedLayer,
+        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        reload: bool,
+        on_error: &dyn Fn(Error) -> Result<(), Error>,
+        already_present: &dyn Fn(&str) -> bool,
+    ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
+        let PreparedLayer {
+            identifier,
+            resolved,
+            data,
+        } = root;
+        let mut layers = Vec::new();
+        let mut visited = HashSet::new();
         visited.insert(identifier.clone());
 
         // The whole stack resolves its `${VAR}` sublayers against one context (C++

@@ -3252,6 +3252,27 @@ fn lazy_reference_loads_on_demand() -> Result<()> {
     Ok(())
 }
 
+/// Opening a stage reads its root and session layers once each: the read that
+/// composes their expression variables is the one their stacks are built from.
+#[test]
+fn root_and_session_layers_read_once() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    std::fs::write(&root, "#usda 1.0\ndef \"World\" {}\n")?;
+    std::fs::write(&session, "#usda 1.0\n")?;
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    Stage::builder()
+        .resolver(RecordingResolver::new(opened.clone()))
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+
+    let opens = |name: &str| opened.borrow().iter().filter(|path| path.ends_with(name)).count();
+    assert_eq!(opens("root.usda"), 1);
+    assert_eq!(opens("session.usda"), 1);
+    Ok(())
+}
+
 /// A muted reference target contributes nothing and is never read from disk,
 /// even once composition reaches its arc, and surfaces a `MutedAssetPath`
 /// diagnostic.
