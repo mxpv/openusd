@@ -5184,6 +5184,26 @@ def "T" {
         Ok(())
     }
 
+    /// An attribute query on the pseudo-root leaves no empty path in the index
+    /// cache, so a later mute and unmute do not panic dropping it.
+    #[test]
+    fn mute_after_pseudo_root_attribute_query() -> Result<()> {
+        let stage = Stage::builder().make_stage(
+            sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?,
+            0,
+            pcp::Diagnostics::default(),
+        );
+        for name in ["purpose", "visibility"] {
+            assert!(stage.prim("/")?.attribute(name).get::<sdf::Value>()?.is_none());
+        }
+
+        stage.mute_layer("strong.usda");
+        assert_eq!(read_ax(&stage)?, Some(5.0));
+        stage.unmute_layer("strong.usda");
+        assert_eq!(read_ax(&stage)?, Some(9.0));
+        Ok(())
+    }
+
     /// Muting a session layer suppresses its pseudo-root stage metadata too, so
     /// `startTimeCode` falls back to the root layer's opinion.
     #[test]
