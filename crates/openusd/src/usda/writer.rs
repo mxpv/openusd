@@ -1388,11 +1388,24 @@ fn write_reference(s: &mut String, r: &Reference) -> Result<(), FormatError> {
     if !r.prim_path.is_empty() {
         write!(s, "<{}>", r.prim_path.as_str())?;
     }
-    if r.layer_offset != LayerOffset::default() {
-        s.push_str(" (offset = ");
-        format_double(s, r.layer_offset.offset);
-        s.push_str("; scale = ");
-        format_double(s, r.layer_offset.scale);
+    // An identity offset is left out and custom data written when present, as
+    // C++ writes a reference.
+    let offset = r.layer_offset != LayerOffset::default();
+    if offset || !r.custom_data.is_empty() {
+        s.push_str(" (");
+        if offset {
+            s.push_str("offset = ");
+            format_double(s, r.layer_offset.offset);
+            s.push_str("; scale = ");
+            format_double(s, r.layer_offset.scale);
+        }
+        if !r.custom_data.is_empty() {
+            if offset {
+                s.push_str("; ");
+            }
+            s.push_str("customData = ");
+            format_dictionary(s, &r.custom_data)?;
+        }
         s.push(')');
     }
     Ok(())
@@ -1581,6 +1594,51 @@ def "Mesh" (
                 "{unit}"
             );
         }
+    }
+
+    /// A reference's custom data survives a write and re-read, with and
+    /// without a layer offset, and an identity offset is left out as C++ does.
+    /// The source is what C++ 25.05 writes for these references.
+    #[test]
+    fn reference_custom_data_roundtrip() {
+        let source = r#"#usda 1.0
+
+over "R" (
+    prepend references = [
+        @./a.usda@ (
+            customData = {
+                string note = "only data"
+            }
+        ),
+        @./b.usda@ (offset = 5; scale = 2),
+        @./c.usda@</P> (
+            offset = 5
+            scale = 2
+            customData = {
+                int n = 1
+            }
+        )
+    ]
+)
+{
+}
+"#;
+        let data = usda::parse(source).expect("parses");
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+        assert!(!text.contains("offset = 0"), "identity offset written: {text}");
+        let reparsed = usda::parse(&text).unwrap_or_else(|e| panic!("re-parses: {e:#}\n{text}"));
+        let references = |data: &Data| match data.spec(&path("/R").unwrap()).expect("spec").get("references") {
+            Some(Value::ReferenceListOp(op)) => op.prepended_items.clone(),
+            other => panic!("references: {other:?}"),
+        };
+        let written = references(&reparsed);
+        assert_eq!(written, references(&data));
+        assert_eq!(
+            written[0].custom_data.get("note"),
+            Some(&Value::String("only data".into()))
+        );
+        assert_eq!(written[1].layer_offset, LayerOffset::new(5.0, 2.0));
+        assert_eq!(written[2].custom_data.get("n"), Some(&Value::Int(1)));
     }
 
     /// Variant-set names write as a name vector: one name bare, several
