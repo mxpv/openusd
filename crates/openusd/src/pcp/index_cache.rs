@@ -2141,6 +2141,30 @@ impl IndexCache {
         Ok((defined, is_abstract))
     }
 
+    /// The active, defined and abstract state of `path` from its own opinions
+    /// alone, for a prim whose parent resolved active, defined and not
+    /// abstract: below such a parent, [`Self::is_active`],
+    /// [`Self::is_defined`] and [`Self::is_abstract`] are each decided at the
+    /// prim itself.
+    pub(crate) fn local_status(&mut self, graph: &LayerGraph, path: &Path) -> Result<(bool, bool, bool), QueryError> {
+        if !self.has_spec(graph, path)? {
+            return Ok((false, false, false));
+        }
+        let active = self.active_locally(graph, path)?;
+        if self.is_prototype(path) {
+            return Ok((active, true, false));
+        }
+        let specifier = self
+            .resolve_field(graph, path, FieldKey::Specifier.as_str())?
+            .map(sdf::Specifier::try_from)
+            .transpose()?;
+        Ok((
+            active,
+            matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class)),
+            specifier == Some(sdf::Specifier::Class),
+        ))
+    }
+
     /// This prim's own composed `active` opinion, defaulting to `true`. The
     /// per-prim read [`Self::is_active`] walks and [`Self::is_populated`] takes
     /// for the prim it is deciding, its ancestors having been decided already.
