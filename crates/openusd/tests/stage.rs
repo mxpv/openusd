@@ -12277,3 +12277,49 @@ fn instancing_edits_refused() -> Result<()> {
     );
     Ok(())
 }
+
+/// Saving a layer rebinds it to the file it wrote without an edit: no stage
+/// or layer sink fires, and the composed values and status are as before.
+#[test]
+fn save_keeps_composed_values_quiet() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("scene.usdc");
+    sdf::Layer::from_bytes(
+        "scene",
+        b"#usda 1.0\ndef \"World\"\n{\n    float[] sizes = [1, 2, 3]\n}\n".as_slice(),
+    )?
+    .export(root.to_string_lossy())?;
+    let root = root.to_str().expect("utf-8 temp path");
+    let stage = Stage::open(root)?;
+    stage.edit(|edit| edit.attribute_builder("/World.answer", "int").set(42).build())?;
+    let sizes = stage.attribute("/World.sizes")?.get::<Vec<f32>>()?;
+    let answer = stage.attribute("/World.answer")?.get::<i32>()?;
+    let status = stage.prim_status("/World")?;
+
+    struct Counter(Rc<Cell<usize>>);
+    impl StageSink for Counter {
+        fn after_commit(&self, _: &Stage, _: &CommittedChange<'_>) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    let stage_fired = Rc::new(Cell::new(0));
+    stage.add_sink(Counter(stage_fired.clone()));
+    let layer_fired = Rc::new(Cell::new(0));
+    let identifier = stage.root_layer().identifier().to_owned();
+    {
+        let mut layer = stage.layer_mut(&identifier).expect("the root layer is live");
+        let fired = layer_fired.clone();
+        layer.add_sink(move |_: &str, _: &sdf::ChangeList| fired.set(fired.get() + 1));
+        layer.save()?;
+    }
+
+    assert_eq!(stage_fired.get(), 0, "a save is not a stage change");
+    assert_eq!(layer_fired.get(), 0, "a save is not a layer change");
+    assert_eq!(stage.attribute("/World.sizes")?.get::<Vec<f32>>()?, sizes);
+    assert_eq!(stage.attribute("/World.answer")?.get::<i32>()?, answer);
+    assert_eq!(stage.prim_status("/World")?, status);
+    let reopened = Stage::open(root)?;
+    assert_eq!(reopened.attribute("/World.answer")?.get::<i32>()?, Some(42));
+    assert_eq!(reopened.attribute("/World.sizes")?.get::<Vec<f32>>()?, sizes);
+    Ok(())
+}

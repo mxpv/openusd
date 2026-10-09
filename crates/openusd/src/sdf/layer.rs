@@ -44,7 +44,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::{self, Cursor};
-use std::path::Path as FsPath;
+use std::path::{Path as FsPath, PathBuf};
+use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{ar, sdf, tf};
@@ -360,14 +361,18 @@ impl Layer {
     /// `.usdz` writes an archive wrapping one crate-encoded layer. The reader
     /// auto-detects the format regardless of extension, so text written to a
     /// `.usd` path still reads back correctly.
+    ///
+    /// The file is written beside the destination and renamed over it once
+    /// complete, so the destination is never a half-written file and a file a
+    /// layer reads from is never written into. A destination this layer
+    /// itself reads from is written through [`save`](Self::save), which also
+    /// rebinds the layer to what it wrote.
     pub fn export(&self, filename: impl AsRef<str>) -> Result<(), ExportError> {
         let filename = filename.as_ref();
         let format = super::LayerRegistry::export_format(filename)?;
-        let mut file = fs::File::create(filename).map_err(|source| ExportError::Create {
-            filename: filename.to_owned(),
-            source,
-        })?;
-        Ok(format.write(self.data(), &mut file)?)
+        let mut temp = TempFile::create(filename)?;
+        format.write(self.data(), temp.file())?;
+        temp.persist()
     }
 
     /// Serialize this layer to a `usda` text string (C++ `ExportToString`).
@@ -391,7 +396,22 @@ impl Layer {
     /// identifier is a relative path or a non-filesystem asset identifier (e.g.
     /// `scheme://…`) have no persistent location here; save them with
     /// [`export`](Self::export) and an explicit destination instead.
-    pub fn save(&self) -> Result<(), ExportError> {
+    ///
+    /// A save is three steps, each leaving the layer whole if it fails. The
+    /// layer is serialized to a temporary file beside its own; a failure there
+    /// changes nothing. The layer then rebinds to that file's bytes, read back
+    /// through its format, dropping the bytes it read before, which releases
+    /// any view of its own file it held; a file that fails to parse leaves the
+    /// old bytes in place. Last the temporary file is renamed over the layer's
+    /// own, which replaces it atomically; a rename that fails (a file another
+    /// layer in this process still views on Windows, a destination that is no
+    /// longer a file) is [`ExportError::Replace`], the temporary file is
+    /// removed, and the layer keeps the rebound bytes, so its edits stay in
+    /// memory for a later save to retry. Rebinding is not an edit: no change
+    /// list is derived and no sink fires. The rebound bytes are a heap buffer
+    /// whatever the layer read from before; a layer that reads through a
+    /// mapping maps its file again on its next open through the resolver.
+    pub fn save(&mut self) -> Result<(), ExportError> {
         if self.is_anonymous() {
             return Err(ExportError::Anonymous {
                 identifier: self.identifier.clone(),
@@ -427,7 +447,13 @@ impl Layer {
         // extension, so a textual `.usd` layer is rewritten as binary. Once the
         // load path records the FileFormat a layer was read with (C++
         // `_fileFormat`), save should reuse it to preserve the original encoding.
-        self.export(&self.identifier)
+        let format = super::LayerRegistry::export_format(&self.identifier)?;
+        let mut temp = TempFile::create(&self.identifier)?;
+        format.write(self.data(), temp.file())?;
+        let bytes = temp.read()?;
+        let data = format.read_bytes(bytes.into(), &self.identifier)?;
+        self.data = CowData::new(data);
+        temp.persist()
     }
 }
 
@@ -492,6 +518,17 @@ pub enum ExportError {
     /// The destination file could not be created.
     #[error("failed to create {filename}")]
     Create {
+        /// The destination path.
+        filename: String,
+        /// The filesystem failure.
+        #[source]
+        source: io::Error,
+    },
+
+    /// The written file could not replace the destination, or be read back
+    /// for the layer to rebind to. The destination is as it was.
+    #[error("failed to replace {filename}")]
+    Replace {
         /// The destination path.
         filename: String,
         /// The filesystem failure.
@@ -1096,6 +1133,79 @@ impl Drop for GroupEditGuard<'_, '_> {
     }
 }
 
+/// Distinguishes the temporary files one process writes beside the same
+/// destination at once.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A file written beside its destination and renamed over it once complete,
+/// so the destination is never a half-written file and a file a layer reads
+/// from is never written into. Dropped without [`persist`](Self::persist),
+/// the file is removed.
+struct TempFile {
+    destination: String,
+    path: PathBuf,
+    /// Taken by [`persist`](Self::persist), so the handle is closed before
+    /// the rename.
+    file: Option<fs::File>,
+}
+
+impl TempFile {
+    /// Creates the file beside `destination`.
+    fn create(destination: &str) -> Result<Self, ExportError> {
+        let create = |source| ExportError::Create {
+            filename: destination.to_owned(),
+            source,
+        };
+        let target = FsPath::new(destination);
+        let name = target
+            .file_name()
+            .ok_or_else(|| create(io::Error::new(io::ErrorKind::InvalidInput, "no file name")))?;
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = target.with_file_name(format!(".{}.{}-{seq}.tmp", name.to_string_lossy(), process::id()));
+        let file = fs::File::create_new(&path).map_err(create)?;
+        Ok(TempFile {
+            destination: destination.to_owned(),
+            path,
+            file: Some(file),
+        })
+    }
+
+    /// The file, to write to.
+    fn file(&mut self) -> &mut fs::File {
+        self.file.as_mut().expect("the file is open until persisted")
+    }
+
+    /// Flushes what was written to storage and reads it back whole.
+    fn read(&mut self) -> Result<Vec<u8>, ExportError> {
+        self.file().sync_all().map_err(|source| self.replace(source))?;
+        fs::read(&self.path).map_err(|source| self.replace(source))
+    }
+
+    /// Flushes what was written to storage and renames the file over the
+    /// destination, the one step that replaces it.
+    fn persist(mut self) -> Result<(), ExportError> {
+        self.file().sync_all().map_err(|source| self.replace(source))?;
+        self.file = None;
+        fs::rename(&self.path, &self.destination).map_err(|source| self.replace(source))
+    }
+
+    /// The error a failure to replace the destination reports.
+    fn replace(&self, source: io::Error) -> ExportError {
+        ExportError::Replace {
+            filename: self.destination.clone(),
+            source,
+        }
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if self.file.is_some() || self.path.exists() {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1115,7 +1225,7 @@ mod tests {
 
         // The same file, spelled with a redundant directory step.
         let indirect = dir.path().join(".").join("scene.usda");
-        let layer = Layer::open(indirect.to_string_lossy())?;
+        let mut layer = Layer::open(indirect.to_string_lossy())?;
 
         assert_eq!(
             layer.identifier(),
@@ -1142,6 +1252,105 @@ mod tests {
     /// `new_anonymous` mints a unique `anon:<n>:<tag>` identifier each call, so
     /// two layers given the same tag never alias; `is_anonymous` recognizes them
     /// while a verbatim `new_in_memory` layer is not anonymous.
+    /// A crate layer written to `dir`: a prim with a kind-less spec and one
+    /// array attribute the layer decodes on demand.
+    fn crate_fixture(dir: &FsPath) -> Result<PathBuf> {
+        use crate::sdf::{self, SpecType};
+        let mut data = sdf::Data::new();
+        data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot)
+            .add("primChildren", sdf::Value::token_vec(["World"]));
+        let prim = data.create_spec(sdf::Path::new("/World")?, SpecType::Prim);
+        prim.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
+        prim.add("propertyChildren", sdf::Value::token_vec(["size"]));
+        data.create_spec(sdf::Path::new("/World.size")?, SpecType::Attribute)
+            .add("default", sdf::Value::FloatVec(vec![1.0; 64]));
+        let path = dir.join("scene.usdc");
+        sdf::Layer::new("scene", Box::new(data)).export(path.to_string_lossy())?;
+        Ok(path)
+    }
+
+    /// The `kind` a layer answers for `/World`.
+    fn world_kind(layer: &Layer) -> Option<Value> {
+        layer
+            .data()
+            .get_field(&Path::new("/World").unwrap(), "kind")
+            .ok()
+            .map(|value| value.into_owned())
+    }
+
+    /// Saving a crate layer over its own file keeps the edit and the fields
+    /// the layer decodes on demand, and leaves no temporary file behind.
+    #[test]
+    fn save_crate_over_itself() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = crate_fixture(dir.path())?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        edit_layer(&mut layer, |e| {
+            e.prim_mut("/World")
+                .unwrap()
+                .expect("the prim exists")
+                .set_kind("component");
+        });
+        layer.save()?;
+
+        let component = Some(Value::Token("component".into()));
+        assert_eq!(world_kind(&layer), component);
+        let size = layer
+            .data()
+            .get_field(&Path::new("/World.size")?, "default")
+            .expect("decoded on demand")
+            .into_owned();
+        assert_eq!(size, Value::FloatVec(vec![1.0; 64]));
+        assert_eq!(world_kind(&Layer::open(path.to_string_lossy())?), component);
+        assert_eq!(fs::read_dir(dir.path())?.count(), 1, "no temporary file remains");
+        Ok(())
+    }
+
+    /// A replacement that fails leaves the edit in the layer and no temporary
+    /// file behind, and the next save succeeds once the way is clear.
+    #[test]
+    fn save_replace_failure_keeps_edits() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = crate_fixture(dir.path())?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        edit_layer(&mut layer, |e| {
+            e.prim_mut("/World")
+                .unwrap()
+                .expect("the prim exists")
+                .set_kind("component");
+        });
+        // The destination becomes a directory, which the temporary file cannot
+        // be renamed over, after the file was written.
+        fs::remove_file(&path)?;
+        fs::create_dir(&path)?;
+        let error = layer.save().expect_err("the replacement fails");
+        assert!(matches!(error, ExportError::Replace { .. }), "{error:?}");
+        let component = Some(Value::Token("component".into()));
+        assert_eq!(world_kind(&layer), component, "the edit survives in memory");
+        assert_eq!(fs::read_dir(dir.path())?.count(), 1, "no temporary file remains");
+
+        fs::remove_dir(&path)?;
+        layer.save()?;
+        assert_eq!(world_kind(&Layer::open(path.to_string_lossy())?), component);
+        Ok(())
+    }
+
+    /// An export over an existing file leaves only that file behind, and one
+    /// that cannot create its temporary file leaves nothing.
+    #[test]
+    fn export_leaves_no_temp() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = crate_fixture(dir.path())?;
+        let layer = Layer::open(path.to_string_lossy())?;
+        layer.export(path.to_string_lossy())?;
+        assert_eq!(fs::read_dir(dir.path())?.count(), 1);
+        let missing = dir.path().join("missing").join("scene.usdc");
+        let error = layer.export(missing.to_string_lossy()).expect_err("no such directory");
+        assert!(matches!(error, ExportError::Create { .. }), "{error:?}");
+        assert_eq!(fs::read_dir(dir.path())?.count(), 1);
+        Ok(())
+    }
+
     #[test]
     fn anonymous_identifiers_unique() {
         let a = Layer::new_anonymous("scene.usda");
@@ -1600,7 +1809,7 @@ mod tests {
 
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("by-identifier.usda");
-        let layer = sdf::Layer::new(path.to_str().unwrap(), Box::new(data));
+        let mut layer = sdf::Layer::new(path.to_str().unwrap(), Box::new(data));
         layer.save()?;
 
         let bytes = std::fs::read(&path)?;
@@ -1613,7 +1822,7 @@ mod tests {
 
     #[test]
     fn save_rejects_anonymous() {
-        let layer = sdf::Layer::new_anonymous("scratch");
+        let mut layer = sdf::Layer::new_anonymous("scratch");
         let err = layer.save().unwrap_err();
         assert!(err.to_string().contains("anonymous"));
     }
@@ -1625,7 +1834,7 @@ mod tests {
         data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
         // A non-anonymous layer whose identifier is not an absolute file path
         // (a scheme-style asset identifier) cannot be saved to its identifier.
-        let layer = sdf::Layer::new("scheme://host/x.usda", Box::new(data));
+        let mut layer = sdf::Layer::new("scheme://host/x.usda", Box::new(data));
         let err = layer.save().unwrap_err();
         assert!(err.to_string().contains("absolute file path"));
     }
@@ -1639,7 +1848,7 @@ mod tests {
         // a package would discard its other assets, so save() must refuse it.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pkg.usdz");
-        let layer = sdf::Layer::new(path.to_str().unwrap(), Box::new(data));
+        let mut layer = sdf::Layer::new(path.to_str().unwrap(), Box::new(data));
         let err = layer.save().unwrap_err();
         assert!(err.to_string().contains("not editable"));
     }

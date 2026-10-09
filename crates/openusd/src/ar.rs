@@ -214,13 +214,14 @@ impl From<SharedBuffer> for AssetBuffer {
 
 /// A view of bytes a [`SharedSource`] holds: the range of the source it
 /// covers, which it never outgrows. A clone shares the source, and
-/// [`slice`](Self::slice) narrows the range without copying, so a package
-/// entry is a view of its package and a layer's bytes a view of its asset.
+/// [`slice`](Self::slice) narrows the range without copying. A package entry
+/// is therefore a view of its package, and a layer's bytes a view of its
+/// asset.
 ///
 /// A source's bytes have a fixed length and fixed contents for as long as
 /// any view of it lives. The sources are a sealed set that each guarantee
-/// that on their own, so the range recorded here stays within the source
-/// and a view never reads past it.
+/// that on their own, which keeps the range recorded here within the source
+/// and a view from ever reading past it.
 #[derive(Clone)]
 pub struct SharedBuffer {
     source: Arc<dyn SharedSource>,
@@ -274,8 +275,8 @@ impl fmt::Debug for SharedBuffer {
 }
 
 /// The backing a [`SharedBuffer`] views: bytes whose length and contents
-/// are fixed for as long as the source lives. Sealed, because that promise
-/// is what every view relies on; the sources are `&'static [u8]`, `Vec<u8>`
+/// are fixed for as long as the source lives. The trait is sealed since every
+/// view relies on that promise; the sources are `&'static [u8]`, `Vec<u8>`
 /// and `Arc<[u8]>`.
 pub trait SharedSource: sealed::Sealed + Send + Sync {
     /// The whole of the source's bytes.
