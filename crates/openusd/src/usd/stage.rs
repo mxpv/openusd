@@ -3864,11 +3864,12 @@ impl Stage {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::fs;
     use std::path::Path as FsPath;
 
     use super::*;
+    use crate::usd;
 
     /// Author through a layer's `edit` API and commit, for building test fixtures
     /// before they join a stage.
@@ -3879,6 +3880,12 @@ mod tests {
                 Ok(())
             })
             .expect("authored");
+    }
+
+    /// The value of the attribute at `path` at time 0, or `None` when it has
+    /// none.
+    pub(crate) fn attribute_value(stage: &Stage, path: &str) -> Option<sdf::Value> {
+        stage.attribute(path).unwrap().get_at(usd::TimeCode::new(0.0)).unwrap()
     }
 
     const VENDOR_COMPOSITION: &str = concat!(

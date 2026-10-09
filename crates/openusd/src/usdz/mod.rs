@@ -9,6 +9,7 @@ mod reader;
 mod writer;
 
 pub use reader::Archive;
+pub(crate) use reader::is_layer_name;
 pub use writer::ArchiveWriter;
 
 use std::borrow::Cow;

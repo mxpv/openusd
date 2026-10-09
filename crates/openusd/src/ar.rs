@@ -683,6 +683,16 @@ pub(crate) fn extension(path: &str) -> &str {
         .unwrap_or_default()
 }
 
+/// Splits `path` before its file name, read inside the innermost package
+/// bracket: `pkg.usdz[dir/a.usda]` gives `("pkg.usdz[dir/", "a.usda")`, and a
+/// plain path splits after its last separator.
+pub(crate) fn split_file_name(path: &str) -> (&str, &str) {
+    let span = innermost_span(path);
+    let inner = &path[span.clone()];
+    let name = inner.rfind(['/', '\\']).map_or(0, |i| i + 1);
+    (&path[..span.start + name], &inner[name..])
+}
+
 /// Joins a package-internal directory with a relative reference authored inside
 /// it, producing the entry name a packaged layer is stored under.
 ///
