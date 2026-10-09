@@ -351,26 +351,28 @@ impl LayerRegistry {
     /// into one context before either region's sublayer subtree is collected.
     /// The read is then handed to
     /// [`open_prepared_stack`](Self::open_prepared_stack), so the layer is
-    /// parsed once at open. An empty identifier yields `None`; a resolve or
-    /// read failure propagates.
+    /// parsed once at open. A path that does not resolve, the empty path
+    /// among them, is [`Unresolved`](LoadError::Unresolved); a read failure
+    /// propagates.
     pub(crate) fn prepare_root(
         &self,
         asset_path: &str,
         anchor: Option<&ar::ResolvedPath>,
-    ) -> Result<Option<PreparedLayer>, LoadError> {
+    ) -> Result<PreparedLayer, LoadError> {
         let identifier = self.create_identifier(asset_path, anchor);
-        if identifier.is_empty() {
-            return Ok(None);
-        }
-        let resolved = self.resolve_layer(&identifier).ok_or_else(|| LoadError::Unresolved {
+        let unresolved = || LoadError::Unresolved {
             asset_path: asset_path.to_owned(),
-        })?;
+        };
+        if identifier.is_empty() {
+            return Err(unresolved());
+        }
+        let resolved = self.resolve_layer(&identifier).ok_or_else(unresolved)?;
         let data = self.read(&resolved)?;
-        Ok(Some(PreparedLayer {
+        Ok(PreparedLayer {
             identifier,
             resolved,
             data,
-        }))
+        })
     }
 
     /// Opens the layer at `identifier` — a canonical identifier, as
@@ -402,6 +404,13 @@ impl LayerRegistry {
     /// against (C++ `PcpExpressionVariables`). Sublayers of the root contribute no
     /// variables, so the context is fixed for the whole walk.
     ///
+    /// With `reload`, an already-interned root and its already-present
+    /// sublayers are re-read and re-walked (but not re-emitted). A re-open
+    /// under a new expression-variable context then loads the `${VAR}`
+    /// sublayers that context resolves, including ones nested below a literal
+    /// sublayer, which a first, variable-free open left unresolved. The caller
+    /// only reloads for that case.
+    ///
     /// This is a pure loader: it reports every load failure raw (a missing or
     /// unreadable sublayer, at whatever site reaches it) and knows nothing of
     /// muting. Whether such a failure is a stage diagnostic depends on composition
@@ -422,11 +431,6 @@ impl LayerRegistry {
             return Ok(None);
         }
         let identifier = identifier.to_string();
-        // With `reload`, an already-interned root and its already-present sublayers
-        // are re-read and re-walked (but not re-emitted) so a re-open under a new
-        // expression-variable context loads the `${VAR}` sublayers the context now
-        // resolves — including ones nested below a literal sublayer — that a first,
-        // variable-free open left unresolved. The caller only reloads for that case.
         let Some(resolved) = self.resolve_layer(&identifier) else {
             return Ok(None);
         };
@@ -442,6 +446,7 @@ impl LayerRegistry {
             on_error,
             already_present,
         )
+        .map(Some)
     }
 
     /// [`open_stack`](Self::open_stack) from a root layer already read by
@@ -453,7 +458,7 @@ impl LayerRegistry {
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
-    ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
+    ) -> Result<Vec<sdf::Layer>, LoadError> {
         let PreparedLayer {
             identifier,
             resolved,
@@ -480,7 +485,7 @@ impl LayerRegistry {
             &mut visited,
             &mut layers,
         )?;
-        Ok(Some(layers))
+        Ok(layers)
     }
 
     /// Opens the layer at `identifier` — the canonical identifier a composed
