@@ -35,6 +35,44 @@ use crate::SchemaError;
 /// A prim that is not `Xformable` (a `Scope`, an untyped prim, the
 /// pseudo-root) contributes identity and passes its parent's transform
 /// through. A prim that does not exist on its stage answers identity.
+///
+/// # Example
+///
+/// ```
+/// use openusd::{gf, usd};
+/// use openusd_schemas::geom::{self, XformableExt};
+///
+/// let stage = usd::Stage::builder()
+///     .schema_registry(openusd_schemas::schema_registry())
+///     .in_memory("scene.usda")?;
+/// geom::Xform::define(&stage, "/World")?.set_translate(gf::vec3d(10.0, 0.0, 0.0))?;
+/// geom::Xform::define(&stage, "/World/Arm")?.set_translate(gf::vec3d(0.0, 5.0, 0.0))?;
+/// geom::Mesh::define(&stage, "/World/Arm/Hand")?.set_translate(gf::vec3d(0.0, 0.0, 1.0))?;
+/// let (world, arm, hand) = (
+///     stage.prim("/World")?,
+///     stage.prim("/World/Arm")?,
+///     stage.prim("/World/Arm/Hand")?,
+/// );
+///
+/// // Answering for the hand caches the matrix of each ancestor. The arm's
+/// // answer comes from the cache.
+/// let mut cache = geom::XformCache::default();
+/// let at = |x, y, z| gf::Matrix4d::translation([x, y, z]);
+/// assert_eq!(cache.local_to_world_transform(&hand)?, at(10.0, 5.0, 1.0));
+/// assert_eq!(cache.local_to_world_transform(&arm)?, at(10.0, 5.0, 0.0));
+/// assert_eq!(cache.parent_to_world_transform(&arm)?, at(10.0, 0.0, 0.0));
+///
+/// // The hand relative to the world prim leaves the world's own ops out.
+/// let (relative, resets) = cache.compute_relative_transform(&hand, &world)?;
+/// assert_eq!(relative, at(0.0, 5.0, 1.0));
+/// assert!(!resets);
+///
+/// // The cache does not observe the stage: clear it after an edit.
+/// stage.attribute("/World.xformOp:translate")?.set(gf::vec3d(20.0, 0.0, 0.0))?;
+/// cache.clear();
+/// assert_eq!(cache.local_to_world_transform(&hand)?, at(20.0, 5.0, 1.0));
+/// # Ok::<(), openusd_schemas::SchemaError>(())
+/// ```
 #[derive(Default)]
 pub struct XformCache {
     entries: HashMap<usd::Prim, Entry>,

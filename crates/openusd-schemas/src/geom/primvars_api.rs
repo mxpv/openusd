@@ -33,6 +33,75 @@ use crate::SchemaError;
 /// [`find_incrementally_inheritable_primvars`](Self::find_incrementally_inheritable_primvars)
 /// and resolve each prim against it with the `_from` queries. The queries
 /// that take no set walk every ancestor of the prim they are asked about.
+///
+/// # Example
+///
+/// ```
+/// use openusd::usd::{self, SchemaBase};
+/// use openusd::gf;
+/// use openusd_schemas::geom::{self, PrimvarsAPI};
+///
+/// let stage = usd::Stage::builder()
+///     .schema_registry(openusd_schemas::schema_registry())
+///     .in_memory("scene.usda")?;
+/// let set = geom::Xform::define(&stage, "/Set")?;
+/// let prop = geom::Mesh::define(&stage, "/Set/Prop")?;
+///
+/// // The set authors a constant primvar.
+/// PrimvarsAPI::from_prim_unchecked(set.prim().clone())
+///     .primvar_builder("tint", "color3f")
+///     .set(gf::vec3f(1.0, 0.5, 0.0))
+///     .build()?;
+///
+/// // The prop defines no `tint` of its own and inherits the set's.
+/// let prop = PrimvarsAPI::from_prim_unchecked(prop.prim().clone());
+/// assert!(!prop.has_primvar("tint")?);
+/// let tint = prop.find_primvar_with_inheritance("tint")?.expect("inherited");
+/// assert_eq!(tint.attribute().path().as_str(), "/Set.primvars:tint");
+/// assert_eq!(tint.get_at::<gf::Vec3f>(None)?, Some(gf::vec3f(1.0, 0.5, 0.0)));
+/// # Ok::<(), openusd_schemas::SchemaError>(())
+/// ```
+///
+/// A traversal that carries the inherited set down reads each prim's own
+/// primvars once:
+///
+/// ```
+/// use openusd::usd::{self, SchemaBase};
+/// use openusd_schemas::geom::{self, Primvar, PrimvarsAPI};
+///
+/// /// Records the primvars that apply to `prim` and to each prim beneath it.
+/// fn visit(prim: &usd::Prim, inherited: &[Primvar], found: &mut Vec<String>) -> openusd::Result<()> {
+///     let api = PrimvarsAPI::from_prim_unchecked(prim.clone());
+///     for primvar in api.find_primvars_with_inheritance_from(inherited)? {
+///         found.push(format!("{} <- {}", prim.path(), primvar.attribute().path()));
+///     }
+///     // `None` says this prim hands on exactly what reached it.
+///     let handed_down = api.find_incrementally_inheritable_primvars(inherited)?;
+///     let inherited = handed_down.as_deref().unwrap_or(inherited);
+///     for child in prim.children()? {
+///         visit(&child, inherited, found)?;
+///     }
+///     Ok(())
+/// }
+///
+/// let stage = usd::Stage::builder()
+///     .schema_registry(openusd_schemas::schema_registry())
+///     .in_memory("scene.usda")?;
+/// let set = geom::Xform::define(&stage, "/Set")?;
+/// geom::Mesh::define(&stage, "/Set/Prop")?;
+/// PrimvarsAPI::from_prim_unchecked(set.prim().clone())
+///     .primvar_builder("id", "int")
+///     .set(7)
+///     .build()?;
+///
+/// let mut found = Vec::new();
+/// visit(set.prim(), &[], &mut found)?;
+/// assert_eq!(
+///     found,
+///     ["/Set <- /Set.primvars:id", "/Set/Prop <- /Set.primvars:id"]
+/// );
+/// # Ok::<(), openusd_schemas::SchemaError>(())
+/// ```
 impl PrimvarsAPI {
     /// Author the primvar `name` as a `type_name` attribute holding no value
     /// (C++ `CreatePrimvar`). A primvar that already exists keeps the
@@ -269,6 +338,42 @@ impl PrimvarsAPI {
 /// it. A builder from [`PrimvarsAPI::primvar_builder`] commits on its own;
 /// one from [`in_edit`](Self::in_edit) joins that transaction instead, with
 /// the primvar and its indices queued together or not at all.
+///
+/// # Example
+///
+/// ```
+/// use openusd::usd::{self, SchemaBase};
+/// use openusd::{gf, sdf};
+/// use openusd_schemas::SchemaError;
+/// use openusd_schemas::geom::{self, Interpolation, PrimvarBuilder};
+///
+/// let stage = usd::Stage::builder()
+///     .schema_registry(openusd_schemas::schema_registry())
+///     .in_memory("scene.usda")?;
+/// let mesh = geom::Mesh::define(&stage, "/Mesh")?;
+///
+/// // Both primvars, with their metadata and indices, are one edit of the
+/// // layer.
+/// stage.edit(|edit| {
+///     let prim = edit.prim(mesh.path().clone())?;
+///     PrimvarBuilder::in_edit(&prim, "st", "texCoord2f[]")
+///         .interpolation(Interpolation::FaceVarying)
+///         .set(sdf::Value::Vec2fVec(vec![gf::vec2f(0.0, 0.0), gf::vec2f(1.0, 1.0)]))
+///         .indices(vec![0, 1, 0])
+///         .build()?;
+///     PrimvarBuilder::in_edit(&prim, "displayOpacity", "float[]")
+///         .set(sdf::Value::FloatVec(vec![0.5]))
+///         .build()?;
+///     Ok::<_, SchemaError>(())
+/// })?;
+///
+/// let primvars = geom::PrimvarsAPI::from_prim_unchecked(mesh.prim().clone());
+/// let st = primvars.primvar("st")?;
+/// assert_eq!(st.interpolation()?, Interpolation::FaceVarying);
+/// assert_eq!(st.indices(None)?, Some(vec![0, 1, 0]));
+/// assert!(primvars.has_primvar("displayOpacity")?);
+/// # Ok::<(), SchemaError>(())
+/// ```
 #[derive(Debug)]
 pub struct PrimvarBuilder<'a> {
     prim: usd::Prim,

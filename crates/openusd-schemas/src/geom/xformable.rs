@@ -49,6 +49,33 @@ pub enum XformOpPrecision {
 /// successive calls build the canonical T·R·S ordering. Setters consume
 /// `self` and return it, so they chain
 /// (`xform.set_translate(t)?.set_rotate_y(d)?`).
+///
+/// # Example
+///
+/// ```
+/// use openusd::{gf, usd};
+/// use openusd_schemas::geom::{self, XformableExt};
+///
+/// let stage = usd::Stage::builder()
+///     .schema_registry(openusd_schemas::schema_registry())
+///     .in_memory("scene.usda")?;
+/// let prop = geom::Xform::define(&stage, "/Prop")?
+///     .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
+///     .set_scale(gf::vec3f(2.0, 2.0, 2.0))?;
+///
+/// // Each setter appended its op to `xformOpOrder`.
+/// let (ops, resets) = prop.ordered_xform_ops()?;
+/// let names: Vec<&str> = ops.iter().map(geom::XformOp::name).collect();
+/// assert_eq!(names, ["xformOp:translate", "xformOp:scale"]);
+/// assert!(!resets);
+///
+/// // The last op listed applies to a point first: scale, then translate.
+/// assert_eq!(
+///     prop.local_transformation(None)?,
+///     gf::Matrix4d::scale([2.0, 2.0, 2.0]) * gf::Matrix4d::translation([1.0, 2.0, 3.0])
+/// );
+/// # Ok::<(), openusd_schemas::SchemaError>(())
+/// ```
 pub trait XformableExt: XformableSchema {
     /// The ops that make up the local transform, outermost first, and whether
     /// the stack resets its parent's transform (C++ `GetOrderedXformOps`).
@@ -246,6 +273,36 @@ impl<T: XformableSchema> XformableExt for T {}
 ///
 /// The [`Default`] query has no ops and does not reset the stack, which is
 /// what a prim that is not `Xformable` contributes.
+///
+/// # Example
+///
+/// ```
+/// use openusd::{gf, usd};
+/// use openusd_schemas::geom::{self, XformableExt};
+///
+/// let stage = usd::Stage::builder()
+///     .schema_registry(openusd_schemas::schema_registry())
+///     .in_memory("scene.usda")?;
+/// let prop = geom::Xform::define(&stage, "/Prop")?.set_translate(gf::vec3d(0.0, 0.0, 0.0))?;
+///
+/// // Two time samples animate the op.
+/// stage
+///     .attribute("/Prop.xformOp:translate")?
+///     .set_at(gf::vec3d(0.0, 0.0, 0.0), usd::TimeCode::new(1.0))?
+///     .set_at(gf::vec3d(10.0, 0.0, 0.0), usd::TimeCode::new(11.0))?;
+///
+/// // One query reads `xformOpOrder` once and answers at every time.
+/// let query = geom::XformQuery::new(&prop)?;
+/// assert!(query.transform_might_be_time_varying()?);
+/// assert_eq!(query.time_samples()?, [1.0, 11.0]);
+/// for (time, x) in [(1.0, 0.0), (6.0, 5.0), (11.0, 10.0)] {
+///     assert_eq!(
+///         query.local_transformation(usd::TimeCode::new(time))?,
+///         gf::Matrix4d::translation([x, 0.0, 0.0])
+///     );
+/// }
+/// # Ok::<(), openusd_schemas::SchemaError>(())
+/// ```
 #[derive(Clone, Default)]
 pub struct XformQuery {
     ops: Vec<XformOp>,

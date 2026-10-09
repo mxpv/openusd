@@ -17,6 +17,30 @@ use crate::authored_at;
 /// generated accessors are. Each walk starts at the prim itself and climbs to
 /// the pseudo-root, reading opinions only on prims that are `Imageable`: an
 /// opinion authored on an untyped or non-imageable ancestor is ignored.
+///
+/// # Example
+///
+/// ```
+/// use openusd::usd;
+/// use openusd_schemas::geom::{self, ImageableExt, ImageableSchema};
+///
+/// let stage = usd::Stage::builder()
+///     .schema_registry(openusd_schemas::schema_registry())
+///     .in_memory("scene.usda")?;
+/// let set = geom::Xform::define(&stage, "/Set")?;
+/// let prop = geom::Mesh::define(&stage, "/Set/Prop")?;
+///
+/// // Nothing is authored yet: both answers are the schema's fallbacks.
+/// assert_eq!(prop.compute_visibility(None)?, geom::Visibility::Inherited);
+/// assert_eq!(prop.compute_purpose()?, geom::Purpose::Default);
+///
+/// // An opinion on the set reaches every imageable prim beneath it.
+/// set.create_visibility_attr()?.set(geom::Visibility::Invisible)?;
+/// set.create_purpose_attr()?.set(geom::Purpose::Render)?;
+/// assert_eq!(prop.compute_visibility(None)?, geom::Visibility::Invisible);
+/// assert_eq!(prop.compute_purpose()?, geom::Purpose::Render);
+/// # Ok::<(), openusd_schemas::SchemaError>(())
+/// ```
 pub trait ImageableExt: ImageableSchema {
     /// Resolve the effective composed `visibility` at `time` (C++
     /// `ComputeVisibility`), where `None` is the default time.

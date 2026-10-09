@@ -16,6 +16,29 @@ impl MotionAPI {
     /// this one or an ancestor of any type, that applies `MotionAPI` and
     /// authors a value there that reads at `time`. A schema fallback is no
     /// authored value, so it never hides an ancestor's.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::usd::{self, SchemaBase};
+    /// use openusd_schemas::geom;
+    ///
+    /// let stage = usd::Stage::builder()
+    ///     .schema_registry(openusd_schemas::schema_registry())
+    ///     .in_memory("scene.usda")?;
+    /// let shot = geom::MotionAPI::apply(geom::Xform::define(&stage, "/Shot")?.prim())?;
+    /// shot.create_motion_blur_scale_attr()?.set(0.5_f32)?;
+    ///
+    /// // The mesh does not apply `MotionAPI`. Viewed through it, the mesh
+    /// // reads the shot's setting.
+    /// let mesh = geom::Mesh::define(&stage, "/Shot/Mesh")?;
+    /// let motion = geom::MotionAPI::from_prim_unchecked(mesh.prim().clone());
+    /// assert_eq!(motion.compute_motion_blur_scale(None)?, 0.5);
+    ///
+    /// // Nothing authors a sample count: the default answers.
+    /// assert_eq!(motion.compute_nonlinear_sample_count(None)?, 3);
+    /// # Ok::<(), openusd_schemas::SchemaError>(())
+    /// ```
     pub fn compute_motion_blur_scale(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<f32> {
         self.inherited(tokens::MOTION_BLUR_SCALE, time.into(), 1.0)
     }

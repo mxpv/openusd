@@ -14,6 +14,32 @@ impl VisibilityAPI {
     /// `visibility`, which
     /// [`ImageableExt::purpose_visibility_attr`](super::ImageableExt::purpose_visibility_attr)
     /// returns for it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::usd::{self, SchemaBase};
+    /// use openusd_schemas::geom::{self, ImageableExt, Purpose, PurposeVisibility};
+    ///
+    /// let stage = usd::Stage::builder()
+    ///     .schema_registry(openusd_schemas::schema_registry())
+    ///     .in_memory("scene.usda")?;
+    /// let rig = geom::Scope::define(&stage, "/Rig")?;
+    /// let handle = geom::Scope::define(&stage, "/Rig/Handle")?;
+    ///
+    /// // With no opinion anywhere, guides are hidden.
+    /// let guide = |scope: &geom::Scope| scope.compute_effective_visibility(Purpose::Guide, None);
+    /// assert_eq!(guide(&handle)?, PurposeVisibility::Invisible);
+    ///
+    /// // The schema applied to the rig carries the purpose attributes. An
+    /// // opinion authored there reaches the handle beneath it.
+    /// let api = geom::VisibilityAPI::apply(rig.prim())?;
+    /// let attr = api.purpose_visibility_attr(Purpose::Guide).expect("guideVisibility");
+    /// assert_eq!(attr.path().as_str(), "/Rig.guideVisibility");
+    /// api.create_guide_visibility_attr()?.set(PurposeVisibility::Visible)?;
+    /// assert_eq!(guide(&handle)?, PurposeVisibility::Visible);
+    /// # Ok::<(), openusd_schemas::SchemaError>(())
+    /// ```
     pub fn purpose_visibility_attr(&self, purpose: Purpose) -> Option<usd::Attribute> {
         match purpose {
             Purpose::Default => None,

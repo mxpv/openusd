@@ -21,6 +21,42 @@ use crate::{PrimvarIndexError, SchemaError};
 /// through [`compute_flattened`](Self::compute_flattened) with the indices
 /// applied. The interpolation's element count applies to the indices of an
 /// indexed primvar, not to its values.
+///
+/// # Example
+///
+/// ```
+/// use openusd::usd::{self, SchemaBase};
+/// use openusd::sdf;
+/// use openusd_schemas::geom;
+///
+/// let stage = usd::Stage::builder()
+///     .schema_registry(openusd_schemas::schema_registry())
+///     .in_memory("scene.usda")?;
+/// let mesh = geom::Mesh::define(&stage, "/Mesh")?;
+///
+/// // Four vertices share two values through the indices.
+/// let heat = geom::PrimvarsAPI::from_prim_unchecked(mesh.prim().clone())
+///     .primvar_builder("heat", "float[]")
+///     .interpolation(geom::Interpolation::Vertex)
+///     .set(sdf::Value::FloatVec(vec![20.0, 35.0]))
+///     .indices(vec![0, 1, 1, 0])
+///     .build()?;
+///
+/// assert_eq!(heat.attribute().name(), "primvars:heat");
+/// assert_eq!(heat.primvar_name(), "heat");
+/// assert_eq!(heat.interpolation()?, geom::Interpolation::Vertex);
+/// assert!(heat.is_indexed()?);
+///
+/// // `get_at` reads the values as authored; `compute_flattened` applies the
+/// // indices and yields one value per vertex.
+/// assert_eq!(heat.get_at::<Vec<f32>>(None)?, Some(vec![20.0, 35.0]));
+/// assert_eq!(heat.indices(None)?, Some(vec![0, 1, 1, 0]));
+/// assert_eq!(
+///     heat.compute_flattened::<Vec<f32>>(None)?,
+///     Some(vec![20.0, 35.0, 35.0, 20.0])
+/// );
+/// # Ok::<(), openusd_schemas::SchemaError>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Primvar {
     attribute: usd::Attribute,
@@ -37,6 +73,25 @@ impl Primvar {
     /// Wrap `attribute` when its name is a primvar's (C++
     /// `UsdGeomPrimvar::IsPrimvar`, without asking whether anything defines
     /// the attribute).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::usd;
+    /// use openusd_schemas::geom::{self, GprimSchema, PointBasedSchema};
+    ///
+    /// let stage = usd::Stage::builder()
+    ///     .schema_registry(openusd_schemas::schema_registry())
+    ///     .in_memory("scene.usda")?;
+    /// let mesh = geom::Mesh::define(&stage, "/Mesh")?;
+    ///
+    /// // `displayColor` is the attribute `primvars:displayColor`; `points` is
+    /// // outside the namespace.
+    /// let color = geom::Primvar::from_attribute(mesh.display_color_attr()).expect("a primvar");
+    /// assert_eq!(color.primvar_name(), "displayColor");
+    /// assert!(geom::Primvar::from_attribute(mesh.points_attr()).is_none());
+    /// # Ok::<(), openusd_schemas::SchemaError>(())
+    /// ```
     pub fn from_attribute(attribute: usd::Attribute) -> Option<Self> {
         Self::is_valid_primvar_name(attribute.name()).then_some(Self { attribute })
     }
