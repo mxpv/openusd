@@ -135,7 +135,7 @@ fn emitted_archive_roundtrips_through_openusd() {
     let mut entry = archive.by_name("root.usdc").unwrap();
     let mut inner = Vec::new();
     std::io::copy(&mut entry, &mut inner).unwrap();
-    let layer = CrateData::open(Cursor::new(&inner), true).unwrap();
+    let layer = CrateData::open(inner, true).unwrap();
 
     assert!(layer.has_spec(&root));
     assert_eq!(layer.spec_type(&foo), Some(sdf::SpecType::Prim));

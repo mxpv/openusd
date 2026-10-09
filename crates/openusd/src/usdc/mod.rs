@@ -1,6 +1,6 @@
 //! Binary file format (`usdc`) implementation.
 
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, fs, io, mem, path::Path, str};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug, fs, io, mem, path::Path, str};
 
 use layout::ValueRep;
 
@@ -10,7 +10,7 @@ mod reader;
 mod writer;
 
 pub use layout::{Version, version};
-pub use reader::{CrateFile, ReadExt};
+pub use reader::CrateFile;
 pub use writer::CrateWriter;
 
 use crate::{ar, sdf, tf};
@@ -23,10 +23,6 @@ pub const MAGIC: &[u8] = b"PXR-USDC";
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReadError {
-    /// Byte I/O against the underlying reader failed.
-    #[error(transparent)]
-    Io(#[from] io::Error),
-
     /// The bytes violate the crate format (bad magic, an out-of-range index, a
     /// truncated or oversized section, invalid value-rep flags, …).
     #[error("corrupt crate data: {reason}")]
@@ -161,18 +157,20 @@ impl Spec {
 }
 
 /// High level interface to binary data.
-pub struct CrateData<R> {
-    file: RefCell<CrateFile<R>>,
+///
+/// TODO(rayon): the file's tables are read-only after open and every decode
+/// runs over `&self`. This is therefore `Send + Sync` as soon as `sdf::Path`
+/// and `tf::Token` are, which the schema registry waits on too.
+pub struct CrateData {
+    file: CrateFile,
     data: HashMap<sdf::Path, Spec>,
 }
 
-impl<R> CrateData<R>
-where
-    R: io::Read + io::Seek,
-{
-    /// Read binary data from any reader.
-    pub fn open(reader: R, safe: bool) -> Result<Self, ReadError> {
-        let mut file = CrateFile::open(reader)?;
+impl CrateData {
+    /// Read binary data from `bytes`, which the data keeps and decodes
+    /// values from on demand.
+    pub fn open(bytes: impl Into<ar::AssetBuffer>, safe: bool) -> Result<Self, ReadError> {
+        let mut file = CrateFile::open(bytes)?;
 
         if safe {
             file.validate()?;
@@ -196,17 +194,11 @@ where
             );
         }
 
-        Ok(Self {
-            file: RefCell::new(file),
-            data,
-        })
+        Ok(Self { file, data })
     }
 }
 
-impl<R> sdf::AbstractData for CrateData<R>
-where
-    R: io::Read + io::Seek,
-{
+impl sdf::AbstractData for CrateData {
     #[inline]
     fn has_spec(&self, path: &sdf::Path) -> bool {
         self.data.contains_key(path)
@@ -220,7 +212,7 @@ where
             return authored.is_some();
         }
         match spec.fieldset {
-            Some(start) => crate_fields(&self.file.borrow(), start).any(|(name, _)| name == field),
+            Some(start) => crate_fields(&self.file, start).any(|(name, _)| name == field),
             None => false,
         }
     }
@@ -240,7 +232,7 @@ where
         let Some(start) = spec.fieldset else {
             return Ok(None);
         };
-        let rep = crate_fields(&self.file.borrow(), start)
+        let rep = crate_fields(&self.file, start)
             .find(|(name, _)| *name == field)
             .map(|(_, rep)| rep);
         let Some(rep) = rep else {
@@ -248,7 +240,7 @@ where
         };
         // The decoder's typed `ReadError` is boxed as the `DataError`'s source:
         // the box is the layering seam that keeps `sdf` below this format.
-        let value = self.file.borrow_mut().value(rep).map_err(|e| sdf::DataError::Decode {
+        let value = self.file.value(rep).map_err(|e| sdf::DataError::Decode {
             path: path.clone(),
             field: field.to_owned(),
             source: Box::new(e),
@@ -260,7 +252,7 @@ where
         let spec = self.data.get(path)?;
         let mut names = Vec::new();
         if let Some(start) = spec.fieldset {
-            for (name, _) in crate_fields(&self.file.borrow(), start) {
+            for (name, _) in crate_fields(&self.file, start) {
                 // A tombstoned crate field is skipped; an overridden one keeps
                 // its crate position and is not duplicated by the overlay pass.
                 if !matches!(spec.authored(name), Some(None)) {
@@ -313,7 +305,7 @@ where
         // idempotent and lets a later set re-append in authored order.
         let masks_crate = spec
             .fieldset
-            .is_some_and(|start| crate_fields(&self.file.borrow(), start).any(|(name, _)| name == field));
+            .is_some_and(|start| crate_fields(&self.file, start).any(|(name, _)| name == field));
         if masks_crate {
             spec.set_authored(field, None);
         } else {
@@ -325,7 +317,7 @@ where
 /// Walks a crate spec's fieldset from `start` to its terminator, yielding each
 /// field's resolved name and value representation. Names borrow the shared token
 /// table, so iterating makes no per-spec copy.
-fn crate_fields<R>(file: &CrateFile<R>, start: usize) -> impl Iterator<Item = (&str, ValueRep)> {
+fn crate_fields(file: &CrateFile, start: usize) -> impl Iterator<Item = (&str, ValueRep)> {
     file.fieldsets
         .get(start..)
         .unwrap_or(&[])
@@ -340,7 +332,7 @@ fn crate_fields<R>(file: &CrateFile<R>, start: usize) -> impl Iterator<Item = (&
 /// Resolves a crate token index to a field name, translating the crate's
 /// internal property-children token to the Sdf `propertyChildren` key the rest
 /// of the toolkit uses.
-fn field_name<R>(file: &CrateFile<R>, token_index: usize) -> &str {
+fn field_name(file: &CrateFile, token_index: usize) -> &str {
     let raw = file.tokens[token_index].as_str();
     if raw == CRATE_PROPERTY_CHILDREN {
         sdf::ChildrenKey::PropertyChildren.as_str()
@@ -352,9 +344,9 @@ fn field_name<R>(file: &CrateFile<R>, token_index: usize) -> &str {
 /// Read `usdc` data from a file on disk.
 pub fn read_file(path: impl AsRef<Path>) -> crate::Result<Box<dyn sdf::AbstractData>> {
     let path = path.as_ref();
-    let file = fs::File::open(path)
+    let bytes = fs::read(path)
         .map_err(|error| io::Error::new(error.kind(), format!("unable to open {}: {error}", path.display())))?;
-    let data = CrateData::open(file, true)?;
+    let data = CrateData::open(bytes, true)?;
 
     Ok(Box::new(data))
 }
@@ -376,8 +368,7 @@ impl sdf::FileFormat for UsdcFileFormat {
     fn read_bytes(&self, bytes: ar::AssetBuffer, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
         // Validated: these bytes are a file the caller did not write, and the
         // decoder indexes into them on trust.
-        let data =
-            CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
+        let data = CrateData::open(bytes, true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
         Ok(Box::new(data))
     }
 

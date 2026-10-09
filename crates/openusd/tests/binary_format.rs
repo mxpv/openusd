@@ -16,7 +16,7 @@
 // PI / E; comparing them as data is intentional, not an approximation slip.
 #![allow(clippy::approx_constant)]
 
-use std::fs::File;
+use std::fs;
 
 use openusd::gf::f16;
 use openusd::sdf::{self, AbstractData, LayerOffset, Payload, Permission, Specifier, Value, Variability};
@@ -29,19 +29,19 @@ const VENDOR: &str = concat!(
 );
 
 /// Open a binary fixture by file name.
-fn read(file: &str) -> CrateData<File> {
+fn read(file: &str) -> CrateData {
     let path = format!("{VENDOR}/{file}");
-    let f = File::open(&path).unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
-    CrateData::open(f, true).unwrap_or_else(|e| panic!("failed to parse {path}: {e:#}"))
+    let bytes = fs::read(&path).unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
+    CrateData::open(bytes, true).unwrap_or_else(|e| panic!("failed to parse {path}: {e:#}"))
 }
 
 /// Open a `gen_<name>.usdc` fixture.
-fn scene(name: &str) -> CrateData<File> {
+fn scene(name: &str) -> CrateData {
     read(&format!("gen_{name}.usdc"))
 }
 
 /// Fetch an authored field value, panicking if it is absent.
-fn value(data: &CrateData<File>, path: &str, field: &str) -> Value {
+fn value(data: &CrateData, path: &str, field: &str) -> Value {
     let p = sdf::path(path).unwrap();
     data.get_field(&p, field)
         .unwrap_or_else(|e| panic!("get {path}.{field}: {e:#}"))
@@ -49,7 +49,7 @@ fn value(data: &CrateData<File>, path: &str, field: &str) -> Value {
 }
 
 /// Returns `true` if the field is authored at the path.
-fn has_field(data: &CrateData<File>, path: &str, field: &str) -> bool {
+fn has_field(data: &CrateData, path: &str, field: &str) -> bool {
     data.has_field(&sdf::path(path).unwrap(), field)
 }
 
@@ -163,7 +163,7 @@ fn assert_floats(name: &str, places: i32) {
 }
 
 /// Shared driver for the `string` / `token` fixtures.
-fn assert_strings(data: &CrateData<File>) {
+fn assert_strings(data: &CrateData) {
     assert_eq!(scalar_str(&value(data, "/root.single", "default")), "Hello/World");
     let array = str_vec(&value(data, "/root.array", "default"));
     assert_eq!(array, vec!["Hello/World", "Good/Bye"]);
@@ -628,4 +628,24 @@ fn path_vector() {
         children,
         vec![sdf::path("/Ball/Looks/BallMaterial/BallTexture.outputs:resultRGB").unwrap()]
     );
+}
+
+/// Every field of a production-sized crate decodes from the file's bytes.
+#[test]
+fn fender_reads_every_field() {
+    let path = format!("{VENDOR}/fender_stratocaster.usdc");
+    if fs::metadata(&path).is_err() {
+        eprintln!("Skipping fender_reads_every_field: fixture not available at {path}");
+        return;
+    }
+    let data = read("fender_stratocaster.usdc");
+    let mut fields = 0;
+    for path in data.spec_paths() {
+        for field in data.list_fields(&path).unwrap_or_default() {
+            data.try_field(&path, &field)
+                .unwrap_or_else(|error| panic!("{path} {field}: {error:#}"));
+            fields += 1;
+        }
+    }
+    assert!(fields > 100, "{fields} fields");
 }

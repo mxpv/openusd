@@ -20,8 +20,7 @@ fn main() -> Result<()> {
         std::process::exit(2);
     };
 
-    let reader = fs::File::open(path)?;
-    let mut file = CrateFile::open(reader)?;
+    let file = CrateFile::open(fs::read(path)?)?;
 
     println!("-- Bootrap header");
     println!("Magic: {:?}", file.bootstrap.ident);

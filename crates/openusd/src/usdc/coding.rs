@@ -2,12 +2,12 @@
 //!
 //! See <https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/integerCoding.cpp#L40>
 
-use std::{collections::HashMap, io, mem};
+use std::{collections::HashMap, mem};
 
 use num_traits::{AsPrimitive, PrimInt};
 
 use super::ReadError;
-use super::reader::ReadExt;
+use super::reader::Stream;
 
 const COMMON: u8 = 0;
 const SMALL: u8 = 1;
@@ -39,7 +39,7 @@ where
 
     let is_64_bit = mem::size_of::<T>() == 8;
 
-    let mut codes_reader = io::Cursor::new(&data[0..]);
+    let mut codes_reader = Stream::new(data);
 
     let common_value = if is_64_bit {
         codes_reader.read_pod::<i64>()?
@@ -57,7 +57,7 @@ where
         let rest = data
             .get(offset..)
             .ok_or_else(|| ReadError::corrupt(format!("{count} integers need more than {} bytes", data.len())))?;
-        io::Cursor::new(rest)
+        Stream::new(rest)
     };
 
     let mut prev = 0_i64;

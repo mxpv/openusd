@@ -79,7 +79,7 @@ fn assert_cross(name: &str, usda_path: &Path) {
             .unwrap_or_else(|e| panic!("usdc emit failed for {name}: {e:#}"));
     }
 
-    let crate_data = CrateData::open(Cursor::new(&buf), true)
+    let crate_data = CrateData::open(buf.clone(), true)
         .unwrap_or_else(|e| panic!("re-parse of emitted usdc failed for {name}: {e:#}"));
 
     let mut a = snapshot(&text as &dyn AbstractData);

@@ -93,8 +93,7 @@ impl<R: Read + Seek> Archive<R> {
         };
 
         if is_crate {
-            let data =
-                usdc::CrateData::open(Cursor::new(buffer), true).map_err(|e| ArchiveError::entry(file_path, e))?;
+            let data = usdc::CrateData::open(buffer, true).map_err(|e| ArchiveError::entry(file_path, e))?;
             Ok(Box::new(data))
         } else {
             let content = String::from_utf8(buffer).map_err(|e| ArchiveError::Utf8 {

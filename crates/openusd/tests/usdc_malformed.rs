@@ -3,7 +3,6 @@
 //! `panic = "abort"` would otherwise crash on a bad file. Each case mutates
 //! a known-good fixture deterministically and reads every field value.
 
-use std::io::Cursor;
 use std::panic;
 
 use openusd::sdf::AbstractData;
@@ -61,7 +60,7 @@ fn mutate(bytes: &mut Vec<u8>, rng: &mut Rng) {
 
 /// Opens the crate and decodes every value, as a stage would.
 fn read_everything(bytes: Vec<u8>) {
-    let Ok(data) = CrateData::open(Cursor::new(bytes), true) else {
+    let Ok(data) = CrateData::open(bytes, true) else {
         return;
     };
     for path in data.spec_paths() {

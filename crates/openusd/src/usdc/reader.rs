@@ -1,18 +1,13 @@
 //! Binary crate file reader.
 
-use std::{
-    any::type_name,
-    collections::HashMap,
-    io::{self, Cursor},
-    mem, str, vec,
-};
+use std::{any::type_name, collections::HashMap, mem, str};
 
 use crate::gf::f16;
-use bytemuck::{AnyBitPattern, NoUninit, Pod, bytes_of, bytes_of_mut, cast_slice_mut};
+use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable, bytes_of, cast_slice_mut, pod_read_unaligned};
 use num_traits::{AsPrimitive, Float, PrimInt};
 
 use crate::{
-    gf,
+    ar, gf,
     sdf::{self, Value},
     tf,
     usdc::coding,
@@ -45,13 +40,14 @@ const MAX_DECOMPRESSED_BYTES: usize = if usize::BITS > 32 { 4 << 30 } else { usi
 //   0.12.0 — Splines
 const SW_VERSION: Version = version(0, 12, 0);
 
-/// Crate file represents structural data loaded from a USDC file on disk.
+/// A crate file: its structural sections, read once by [`open`](Self::open),
+/// over the bytes it decodes values from on demand. The bytes live as long
+/// as the file, whatever holds them (a buffer or a mapping); decoding never
+/// touches a file of its own.
 #[derive(Debug)]
-pub struct CrateFile<R> {
-    /// File reader.
-    reader: R,
-    /// Length of the whole file: what bounds every count read from it.
-    file_length: usize,
+pub struct CrateFile {
+    /// The whole file.
+    bytes: ar::AssetBuffer,
 
     /// File header.
     pub bootstrap: Bootstrap,
@@ -69,35 +65,62 @@ pub struct CrateFile<R> {
     pub paths: Vec<sdf::Path>,
     // All specs.
     pub specs: Vec<Spec>,
+}
 
-    /// The nested values currently being read, innermost last.
-    ///
-    /// A crate file addresses a nested value by offset, so nothing in the
-    /// format stops one from pointing at itself; C++ keeps the same set for
-    /// the same reason (`_LocalUnpackRecursionGuard`).
+/// A cursor over crate bytes: the read primitives every decode is built on.
+/// Each is bounded by the slice, which makes a count or offset a file lies
+/// about a [`ReadError::Corrupt`] before anything is allocated or read.
+pub(super) struct Stream<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+/// The structural sections as [`CrateFile::open`] reads them, over a cursor
+/// into the file's bytes. The tables move into the [`CrateFile`] once all of
+/// them are read.
+struct Loader<'a> {
+    stream: Stream<'a>,
+    bootstrap: Bootstrap,
+    sections: Vec<Section>,
+    tokens: Vec<String>,
+    strings: Vec<usize>,
+    fields: Vec<Field>,
+    fieldsets: Vec<Option<usize>>,
+    paths: Vec<sdf::Path>,
+    specs: Vec<Spec>,
+}
+
+/// One value decode in progress: the file's tables, a cursor over its bytes,
+/// and the nested values being read, innermost last.
+///
+/// A crate file addresses a nested value by offset, so nothing in the format
+/// stops one from pointing at itself; C++ keeps the same set for the same
+/// reason (`_LocalUnpackRecursionGuard`).
+struct Decoder<'a> {
+    file: &'a CrateFile,
+    stream: Stream<'a>,
     unpacking: Vec<ValueRep>,
 }
 
-impl<R> CrateFile<R> {
+/// How deep values may nest before the decoder refuses to go further. A
+/// long but acyclic chain over file-controlled data therefore cannot exhaust
+/// the stack.
+const MAX_NESTING: usize = 64;
+
+impl CrateFile {
     /// Returns file's version extracted from bootstrap header.
     #[inline]
     pub fn version(&self) -> Version {
         Version::from(self.bootstrap)
     }
-}
 
-impl<R: io::Read + io::Seek> CrateFile<R> {
-    /// Read structural sections of a crate file.
-    pub fn open(mut reader: R) -> Result<Self, ReadError> {
-        let bootstrap = Self::read_header(&mut reader)?;
-        let here = reader.stream_position()?;
-        let file_length = reader.seek(io::SeekFrom::End(0))? as usize;
-        reader.seek(io::SeekFrom::Start(here))?;
-
-        let mut file = CrateFile {
-            reader,
-            file_length,
-            bootstrap,
+    /// Read the structural sections of the crate file in `bytes`, which the
+    /// file keeps and decodes values from on demand.
+    pub fn open(bytes: impl Into<ar::AssetBuffer>) -> Result<Self, ReadError> {
+        let bytes = bytes.into();
+        let mut loader = Loader {
+            stream: Stream::new(&bytes),
+            bootstrap: Bootstrap::zeroed(),
             sections: Vec::new(),
             tokens: Vec::new(),
             strings: Vec::new(),
@@ -105,18 +128,50 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             fieldsets: Vec::new(),
             paths: Vec::new(),
             specs: Vec::new(),
-            unpacking: Vec::new(),
         };
 
-        file.read_sections().ctx("sections")?;
-        file.read_tokens().ctx("TOKENS section")?;
-        file.read_strings().ctx("STRINGS section")?;
-        file.read_fields().ctx("FIELDS section")?;
-        file.read_fieldsets().ctx("FIELDSETS section")?;
-        file.read_paths().ctx("PATHS section")?;
-        file.read_specs().ctx("SPECS section")?;
+        loader.read_header()?;
+        loader.read_sections().ctx("sections")?;
+        loader.read_tokens().ctx("TOKENS section")?;
+        loader.read_strings().ctx("STRINGS section")?;
+        loader.read_fields().ctx("FIELDS section")?;
+        loader.read_fieldsets().ctx("FIELDSETS section")?;
+        loader.read_paths().ctx("PATHS section")?;
+        loader.read_specs().ctx("SPECS section")?;
 
-        Ok(file)
+        let Loader {
+            stream: _,
+            bootstrap,
+            sections,
+            tokens,
+            strings,
+            fields,
+            fieldsets,
+            paths,
+            specs,
+        } = loader;
+
+        Ok(CrateFile {
+            bytes,
+            bootstrap,
+            sections,
+            tokens,
+            strings,
+            fields,
+            fieldsets,
+            paths,
+            specs,
+        })
+    }
+
+    /// Find section by name.
+    pub fn find_section(&self, name: &str) -> Option<&Section> {
+        section_named(&self.sections, name)
+    }
+
+    /// Decode the value `rep` describes from the file's bytes.
+    pub fn value(&self, rep: ValueRep) -> Result<sdf::Value, ReadError> {
+        Decoder::new(self).value(rep)
     }
 
     /// Sanity check of structural validity.
@@ -177,10 +232,17 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         Ok(())
     }
+}
+
+impl Loader<'_> {
+    /// Returns file's version extracted from bootstrap header.
+    fn version(&self) -> Version {
+        Version::from(self.bootstrap)
+    }
 
     /// Read and verify bootstrap header, retrieve offset to TOC.
-    fn read_header(mut reader: impl io::Read + io::Seek) -> Result<Bootstrap, ReadError> {
-        let header = reader.read_pod::<Bootstrap>()?;
+    fn read_header(&mut self) -> Result<(), ReadError> {
+        let header = self.stream.read_pod::<Bootstrap>()?;
 
         corrupt!(header.ident.eq(super::MAGIC), "Usd crate bootstrap section corrupt");
 
@@ -194,38 +256,39 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             )));
         }
 
-        Ok(header)
+        self.bootstrap = header;
+        Ok(())
     }
 
     fn read_sections(&mut self) -> Result<(), ReadError> {
-        self.set_position(self.bootstrap.toc_offset)?;
+        self.stream.seek(self.bootstrap.toc_offset)?;
 
-        let count = self.reader.read_count()?;
+        let count = self.stream.read_count()?;
         corrupt!(count > 0, "Crate file has no sections");
         corrupt!(count < 64, "Suspiciously large number of sections: {count}");
 
-        self.sections = self.reader.read_vec::<Section>(count)?;
+        self.sections = self.stream.read_vec::<Section>(count)?;
 
         Ok(())
     }
 
     fn read_tokens(&mut self) -> Result<(), ReadError> {
-        let Some(section) = self.find_section(Section::TOKENS) else {
+        let Some(section) = section_named(&self.sections, Section::TOKENS) else {
             return Ok(());
         };
 
-        self.set_position(section.start)?;
+        self.stream.seek(section.start)?;
 
         let file_ver = self.version();
 
         // Read the number of tokens.
-        let count = self.reader.read_count()?;
+        let count = self.stream.read_count()?;
 
         self.tokens = if file_ver < version(0, 4, 0) {
             return Err(ReadError::unsupported("Support TOKENS reader for < 0.4.0 files"));
         } else {
-            let uncompressed_size = self.reader.read_count()?;
-            let mut buffer = self.read_compressed(uncompressed_size)?;
+            let uncompressed_size = self.stream.read_count()?;
+            let mut buffer = self.stream.read_compressed(uncompressed_size)?;
 
             corrupt!(
                 buffer.len() == uncompressed_size,
@@ -269,19 +332,19 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     fn read_strings(&mut self) -> Result<(), ReadError> {
-        let Some(section) = self.find_section(Section::STRINGS) else {
+        let Some(section) = section_named(&self.sections, Section::STRINGS) else {
             return Ok(());
         };
 
-        self.set_position(section.start)?;
+        self.stream.seek(section.start)?;
 
-        let count = self.reader.read_count()?;
+        let count = self.stream.read_count()?;
         corrupt!(
             count < 128 * 1024 * 1024,
             "Suspiciously large number of strings: {count}"
         );
 
-        let strings = self.reader.read_vec::<u32>(count)?;
+        let strings = self.stream.read_vec::<u32>(count)?;
 
         // These are indices, so convert to usize for convenience.
         self.strings = strings.into_iter().map(|offset| offset as usize).collect::<Vec<_>>();
@@ -290,24 +353,24 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     fn read_fields(&mut self) -> Result<(), ReadError> {
-        let Some(section) = self.find_section(Section::FIELDS) else {
+        let Some(section) = section_named(&self.sections, Section::FIELDS) else {
             return Ok(());
         };
 
-        self.set_position(section.start)?;
+        self.stream.seek(section.start)?;
 
         let file_ver = self.version();
 
         self.fields = if file_ver < version(0, 4, 0) {
             return Err(ReadError::unsupported("Support FIELDS reader before < 0.4.0"));
         } else {
-            let field_count = self.reader.read_count()?;
+            let field_count = self.stream.read_count()?;
 
             // Compressed fields in 0.4.0.
-            let indices = self.read_encoded_ints(field_count)?;
+            let indices = self.stream.read_encoded_ints(field_count)?;
 
             // Compressed value reps.
-            let reps = self.read_compressed(field_count)?;
+            let reps = self.stream.read_compressed(field_count)?;
 
             let fields: Vec<_> = indices
                 .iter()
@@ -324,20 +387,20 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     fn read_fieldsets(&mut self) -> Result<(), ReadError> {
-        let Some(section) = self.find_section(Section::FIELDSETS) else {
+        let Some(section) = section_named(&self.sections, Section::FIELDSETS) else {
             return Ok(());
         };
 
-        self.set_position(section.start)?;
+        self.stream.seek(section.start)?;
 
         let file_ver = self.version();
 
         self.fieldsets = if file_ver < version(0, 4, 0) {
             return Err(ReadError::unsupported("Support FIELDSETS reader for < 0.4.0 files"));
         } else {
-            let count = self.reader.read_count()?;
+            let count = self.stream.read_count()?;
 
-            let decoded = self.read_encoded_ints::<u32>(count)?;
+            let decoded = self.stream.read_encoded_ints::<u32>(count)?;
 
             const INVALID_INDEX: u32 = u32::MAX;
 
@@ -355,11 +418,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     fn read_paths(&mut self) -> Result<(), ReadError> {
-        let Some(section) = self.find_section(Section::PATHS) else {
+        let Some(section) = section_named(&self.sections, Section::PATHS) else {
             return Ok(());
         };
 
-        self.set_position(section.start)?;
+        self.stream.seek(section.start)?;
 
         let file_ver = self.version();
 
@@ -369,7 +432,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             return Err(ReadError::unsupported("Support PATHS reader for < 0.4.0 files"));
         } else {
             // Read # of paths.
-            let path_count = self.reader.read_count()?;
+            let path_count = self.stream.read_count()?;
             self.read_compressed_paths(path_count)?;
         };
 
@@ -379,7 +442,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     /// Read compressed paths.
     fn read_compressed_paths(&mut self, path_count: usize) -> Result<(), ReadError> {
         // Read number of encoded paths.
-        let count: usize = self.reader.read_count()?;
+        let count: usize = self.stream.read_count()?;
         // The table interns unique paths; only the empty path has no encoding.
         corrupt!(
             path_count.checked_sub(count).is_some_and(|empty| empty <= 1),
@@ -388,13 +451,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         // Read compressed data.
 
-        let path_indexes = self.read_encoded_ints::<u32>(count)?;
+        let path_indexes = self.stream.read_encoded_ints::<u32>(count)?;
         corrupt!(path_indexes.len() == count);
 
-        let element_token_indexes = self.read_encoded_ints::<i32>(count)?;
+        let element_token_indexes = self.stream.read_encoded_ints::<i32>(count)?;
         corrupt!(element_token_indexes.len() == count);
 
-        let jumps = self.read_encoded_ints::<i32>(count)?;
+        let jumps = self.stream.read_encoded_ints::<i32>(count)?;
         corrupt!(jumps.len() == count);
 
         for &index in &path_indexes {
@@ -508,11 +571,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     fn read_specs(&mut self) -> Result<(), ReadError> {
-        let Some(section) = self.find_section(Section::SPECS) else {
+        let Some(section) = section_named(&self.sections, Section::SPECS) else {
             return Ok(());
         };
 
-        self.set_position(section.start)?;
+        self.stream.seek(section.start)?;
 
         let file_ver = self.version();
 
@@ -523,11 +586,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         } else {
             // Version 0.4.0 specs are compressed
 
-            let spec_count = self.reader.read_count()?;
+            let spec_count = self.stream.read_count()?;
 
-            let path_indexes = self.read_encoded_ints::<u32>(spec_count)?;
-            let fieldset_indexes = self.read_encoded_ints::<u32>(spec_count)?;
-            let spec_types = self.read_encoded_ints::<u32>(spec_count)?;
+            let path_indexes = self.stream.read_encoded_ints::<u32>(spec_count)?;
+            let fieldset_indexes = self.stream.read_encoded_ints::<u32>(spec_count)?;
+            let spec_types = self.stream.read_encoded_ints::<u32>(spec_count)?;
 
             path_indexes
                 .into_iter()
@@ -546,61 +609,97 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         Ok(())
     }
+}
 
-    /// Find section by name.
-    pub fn find_section(&self, name: &str) -> Option<&Section> {
-        self.sections.iter().find(|s| s.name() == name)
+impl<'a> Stream<'a> {
+    /// A cursor at the start of `bytes`.
+    pub(super) fn new(bytes: &'a [u8]) -> Self {
+        Stream { bytes, pos: 0 }
     }
 
-    fn resolve_string(&self, string_index: u32) -> Result<String, ReadError> {
-        let token = *indexed(&self.strings, string_index as usize, "string")?;
-        Ok(indexed(&self.tokens, token, "token")?.clone())
+    /// The current offset.
+    fn position(&self) -> u64 {
+        self.pos as u64
     }
 
-    fn set_position(&mut self, position: u64) -> Result<(), ReadError> {
-        self.reader.seek(io::SeekFrom::Start(position))?;
+    /// Moves to `position`, which may be the end of the stream but not past
+    /// it.
+    fn seek(&mut self, position: u64) -> Result<(), ReadError> {
+        let pos = usize::try_from(position)
+            .ok()
+            .filter(|&pos| pos <= self.bytes.len())
+            .ok_or_else(|| {
+                ReadError::corrupt(format!("offset {position} is past the {}-byte file", self.bytes.len()))
+            })?;
+        self.pos = pos;
         Ok(())
     }
 
-    fn unpack_value<T: Default + Pod>(&mut self, value: ValueRep) -> Result<T, ReadError> {
-        corrupt!(!value.is_array(), "Can't unpack array {value:?} as inline value");
-
-        let ty = value.ty()?;
-        corrupt!(ty != Type::Invalid, "Invalid value type");
-
-        // If the value is inlined, just decode it.
-        let value = if value.is_inlined() {
-            // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1590
-            let tmp = value.payload() & ((1_u64 << (mem::size_of::<u32>() * 8)) - 1);
-            let mut cursor = Cursor::new(bytes_of(&tmp));
-            cursor.read_pod::<T>()?
-        } else {
-            // Otherwise we have to read it from the file.
-            self.set_position(value.payload())?;
-            self.reader.read_pod::<T>()?
-        };
-
-        Ok(value)
+    /// Moves `delta` bytes from the current offset, either way, staying
+    /// within the stream.
+    fn skip(&mut self, delta: i64) -> Result<(), ReadError> {
+        let pos = isize::try_from(delta)
+            .ok()
+            .and_then(|delta| self.pos.checked_add_signed(delta))
+            .filter(|&pos| pos <= self.bytes.len())
+            .ok_or_else(|| {
+                ReadError::corrupt(format!(
+                    "a jump of {delta} bytes from offset {} leaves the {}-byte file",
+                    self.pos,
+                    self.bytes.len()
+                ))
+            })?;
+        self.pos = pos;
+        Ok(())
     }
 
-    fn read_token(&mut self, value: ValueRep) -> Result<String, ReadError> {
-        let index: u64 = self.unpack_value(value)?;
-        Ok(indexed(&self.tokens, index as usize, "token")?.clone())
+    /// The next `len` bytes, which the stream moves past. The one place a
+    /// read is bounded: a length that reaches past the stream is corrupt.
+    fn take(&mut self, len: usize) -> Result<&'a [u8], ReadError> {
+        let end = self
+            .pos
+            .checked_add(len)
+            .filter(|&end| end <= self.bytes.len())
+            .ok_or_else(|| {
+                ReadError::corrupt(format!(
+                    "{len} bytes at offset {} reach past the {}-byte file",
+                    self.pos,
+                    self.bytes.len()
+                ))
+            })?;
+        let bytes = &self.bytes[self.pos..end];
+        self.pos = end;
+        Ok(bytes)
     }
 
-    /// Read a scalar asset path or path expression.
-    ///
-    /// Both encode an index that points into the token table when the value is
-    /// inlined but into the string table when it is stored on the heap, so the
-    /// table is chosen by the inlined flag (mirrors `SdfAssetPath` /
-    /// `SdfPathExpression` handling in Pixar's crate reader).
-    fn read_asset_path(&mut self, value: ValueRep) -> Result<String, ReadError> {
-        let index = self.unpack_value::<u32>(value)?;
-        if value.is_inlined() {
-            Ok(indexed(&self.tokens, index as usize, "token")?.clone())
-        } else {
-            self.resolve_string(index)
+    /// Read a single "size" or "count" value encoded as `u64`.
+    pub(super) fn read_count(&mut self) -> Result<usize, ReadError> {
+        let count = self.read_pod::<u64>()?;
+        usize::try_from(count).map_err(|_| ReadError::corrupt(format!("count {count} does not fit this platform")))
+    }
+
+    /// Read one plain value, whatever its alignment in the stream.
+    pub(super) fn read_pod<T: AnyBitPattern>(&mut self) -> Result<T, ReadError> {
+        let bytes = self
+            .take(mem::size_of::<T>())
+            .map_err(|error| error.in_context(format!("pod {}", type_name::<T>())))?;
+        Ok(pod_read_unaligned(bytes))
+    }
+
+    /// Read `count` plain values into a new vector, copied out of the stream
+    /// once. The byte size, the slice and the allocation are each checked in
+    /// that order, which fails a lying count before anything is allocated.
+    fn read_vec<T: NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>, ReadError> {
+        if count == 0 {
+            return Ok(Vec::new());
         }
+        let bytes = count
+            .checked_mul(mem::size_of::<T>())
+            .ok_or_else(|| ReadError::corrupt(format!("vector of {count} elements overflows")))?;
+        let raw = self.take(bytes).ctx("vec")?;
+        let mut vec = vec![T::zeroed(); count];
+        cast_slice_mut(&mut vec).copy_from_slice(raw);
+        Ok(vec)
     }
 
     /// Reads a lz4 compressed data and returns decompressed raw bytes.
@@ -611,19 +710,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     ///
     /// # Arguments:
     /// - `estimated_size`: Size enough to hold uncompressed data.
-    fn read_compressed<T: Default + NoUninit + AnyBitPattern>(
-        &mut self,
-        estimated_count: usize,
-    ) -> Result<Vec<T>, ReadError> {
-        // Read data to memory.
-        let compressed_size = self.reader.read_count()?;
-        corrupt!(
-            compressed_size <= self.file_length,
-            "compressed size {compressed_size} is larger than the {}-byte file",
-            self.file_length
-        );
-        let mut input = vec![0_u8; compressed_size];
-        self.reader.read_exact(&mut input)?;
+    fn read_compressed<T: NoUninit + AnyBitPattern>(&mut self, estimated_count: usize) -> Result<Vec<T>, ReadError> {
+        let compressed_size = self.read_count()?;
+        let input = self.take(compressed_size)?;
 
         // Decompress to a buffer no larger than LZ4 can expand this input
         // (`estimated_count` is an upper bound from the file, not a size).
@@ -635,8 +724,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             .saturating_add(64)
             .min(MAX_DECOMPRESSED_BYTES)
             / mem::size_of::<T>().max(1);
-        let mut output = vec![T::default(); estimated_count.min(most)];
-        let actual_size = decompress_lz4(&input, cast_slice_mut(&mut output))?;
+        let mut output = vec![T::zeroed(); estimated_count.min(most)];
+        let actual_size = decompress_lz4(input, cast_slice_mut(&mut output))?;
 
         let actual_count = actual_size / mem::size_of::<T>();
 
@@ -661,6 +750,67 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         Ok(ints)
     }
+}
+
+impl<'a> Decoder<'a> {
+    /// A decoder over `file`'s bytes, at their start.
+    fn new(file: &'a CrateFile) -> Self {
+        Decoder {
+            file,
+            stream: Stream::new(&file.bytes),
+            unpacking: Vec::new(),
+        }
+    }
+
+    fn resolve_string(&self, string_index: u32) -> Result<String, ReadError> {
+        let token = *indexed(&self.file.strings, string_index as usize, "string")?;
+        Ok(indexed(&self.file.tokens, token, "token")?.clone())
+    }
+
+    fn unpack_value<T: AnyBitPattern>(&mut self, value: ValueRep) -> Result<T, ReadError> {
+        corrupt!(!value.is_array(), "Can't unpack array {value:?} as inline value");
+
+        let ty = value.ty()?;
+        corrupt!(ty != Type::Invalid, "Invalid value type");
+
+        // If the value is inlined, just decode it.
+        let value = if value.is_inlined() {
+            // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1590
+            corrupt!(
+                mem::size_of::<T>() <= mem::size_of::<u64>(),
+                "Can't unpack {} from an inline payload",
+                type_name::<T>()
+            );
+            let tmp = value.payload() & ((1_u64 << (mem::size_of::<u32>() * 8)) - 1);
+            pod_read_unaligned(&bytes_of(&tmp)[..mem::size_of::<T>()])
+        } else {
+            // Otherwise we have to read it from the decoder.
+            self.stream.seek(value.payload())?;
+            self.stream.read_pod::<T>()?
+        };
+
+        Ok(value)
+    }
+
+    fn read_token(&mut self, value: ValueRep) -> Result<String, ReadError> {
+        let index: u64 = self.unpack_value(value)?;
+        Ok(indexed(&self.file.tokens, index as usize, "token")?.clone())
+    }
+
+    /// Read a scalar asset path or path expression.
+    ///
+    /// Both encode an index that points into the token table when the value is
+    /// inlined but into the string table when it is stored on the heap, so the
+    /// table is chosen by the inlined flag (mirrors `SdfAssetPath` /
+    /// `SdfPathExpression` handling in Pixar's crate reader).
+    fn read_asset_path(&mut self, value: ValueRep) -> Result<String, ReadError> {
+        let index = self.unpack_value::<u32>(value)?;
+        if value.is_inlined() {
+            Ok(indexed(&self.file.tokens, index as usize, "token")?.clone())
+        } else {
+            self.resolve_string(index)
+        }
+    }
 
     const MIN_COMPRESSED_ARRAY_SIZE: usize = 4;
 
@@ -673,11 +823,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             return Ok((0, false));
         }
 
-        self.set_position(value.payload())?;
+        self.stream.seek(value.payload())?;
 
-        if self.version() < version(0, 5, 0) {
+        if self.file.version() < version(0, 5, 0) {
             // Read and discard shape size.
-            let _ = self.reader.read_pod::<u32>()?;
+            let _ = self.stream.read_pod::<u32>()?;
         }
 
         // Detect compression.
@@ -686,14 +836,14 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             ArrayKind::Ints => {
                 // Version 0.5.0 introduced compressed int arrays.
                 // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1935
-                if self.version() < version(0, 5, 0) || !value.is_compressed() {
+                if self.file.version() < version(0, 5, 0) || !value.is_compressed() {
                     compressed = false;
                 }
             }
             ArrayKind::Floats => {
                 // Version 0.6.0 introduced compressed floating point arrays.
                 // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1961C5-L1961C66
-                if self.version() < version(0, 6, 0) || !value.is_compressed() {
+                if self.file.version() < version(0, 6, 0) || !value.is_compressed() {
                     compressed = false;
                 }
             }
@@ -706,10 +856,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         }
 
         // Read the number of elements.
-        let count = if self.version() < version(0, 7, 0) {
-            self.reader.read_pod::<u32>()? as usize
+        let count = if self.file.version() < version(0, 7, 0) {
+            self.stream.read_pod::<u32>()? as usize
         } else {
-            self.reader.read_pod::<u64>()? as usize
+            self.stream.read_pod::<u64>()? as usize
         };
 
         if count < Self::MIN_COMPRESSED_ARRAY_SIZE {
@@ -730,9 +880,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         }
 
         if compressed {
-            self.read_encoded_ints(count)
+            self.stream.read_encoded_ints(count)
         } else {
-            self.reader.read_vec(count)
+            self.stream.read_vec(count)
         }
     }
 
@@ -743,7 +893,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let (count, compressed) = self.unpack_array_len(value, ArrayKind::Floats)?;
 
         let vec = if compressed {
-            let code = self.reader.read_pod::<u8>()?;
+            let code = self.stream.read_pod::<u8>()?;
 
             match code {
                 // Compressed integers. Pixar's `_ReadCompressedInts` runs the
@@ -752,15 +902,15 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 // (`read_encoded_ints`), not reinterpreted as raw `i32`s
                 // straight out of LZ4.
                 b'i' => {
-                    let ints: Vec<i32> = self.read_encoded_ints(count)?;
+                    let ints: Vec<i32> = self.stream.read_encoded_ints(count)?;
                     ints.into_iter().map(|i| cast(i).unwrap()).collect()
                 }
                 // Lookup table and indexes
                 b't' => {
-                    let lut_size = self.reader.read_pod::<u32>()? as usize;
-                    let lut: Vec<T> = self.reader.read_vec(lut_size)?;
+                    let lut_size = self.stream.read_pod::<u32>()? as usize;
+                    let lut: Vec<T> = self.stream.read_vec(lut_size)?;
 
-                    let indexes: Vec<u32> = self.read_encoded_ints(count)?;
+                    let indexes: Vec<u32> = self.stream.read_encoded_ints(count)?;
                     corrupt!(
                         indexes.len() == count,
                         "Read invalid number of indexes to decompress doubles array"
@@ -782,7 +932,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 }
             }
         } else {
-            self.reader.read_vec(count)?
+            self.stream.read_vec(count)?
         };
 
         Ok(vec)
@@ -793,11 +943,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         value: ValueRep,
         mut read: impl FnMut(&mut Self) -> Result<Vec<T>, ReadError>,
     ) -> Result<sdf::ListOp<T>, ReadError> {
-        self.set_position(value.payload())?;
+        self.stream.seek(value.payload())?;
 
         let mut out = sdf::ListOp::<T>::default();
 
-        let header = self.reader.read_pod::<ListOpHeader>()?;
+        let header = self.stream.read_pod::<ListOpHeader>()?;
 
         if header.is_explicit() {
             out.explicit = true;
@@ -836,47 +986,47 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         &mut self,
         lookup: impl Fn(&Self, usize) -> Result<T, ReadError>,
     ) -> Result<Vec<T>, ReadError> {
-        let count = self.reader.read_count()?;
-        let indices = self.reader.read_vec::<u32>(count)?;
+        let count = self.stream.read_count()?;
+        let indices = self.stream.read_vec::<u32>(count)?;
 
         indices.into_iter().map(|index| lookup(self, index as usize)).collect()
     }
 
     fn read_string_vec(&mut self) -> Result<Vec<String>, ReadError> {
-        self.read_indexed_vec(|file, index| {
-            let token = *indexed(&file.strings, index, "string")?;
-            Ok(indexed(&file.tokens, token, "token")?.clone())
+        self.read_indexed_vec(|decoder, index| {
+            let token = *indexed(&decoder.file.strings, index, "string")?;
+            Ok(indexed(&decoder.file.tokens, token, "token")?.clone())
         })
     }
 
     fn read_token_vec(&mut self) -> Result<Vec<String>, ReadError> {
-        self.read_indexed_vec(|file, index| Ok(indexed(&file.tokens, index, "token")?.clone()))
+        self.read_indexed_vec(|decoder, index| Ok(indexed(&decoder.file.tokens, index, "token")?.clone()))
     }
 
     fn read_path_vec(&mut self) -> Result<Vec<sdf::Path>, ReadError> {
-        self.read_indexed_vec(|file, index| Ok(indexed(&file.paths, index, "path")?.clone()))
+        self.read_indexed_vec(|decoder, index| Ok(indexed(&decoder.file.paths, index, "path")?.clone()))
     }
 
     /// Reads a count-prefixed vector of POD values.
-    fn read_pod_vec<T: Default + NoUninit + AnyBitPattern>(&mut self) -> Result<Vec<T>, ReadError> {
-        let count = self.reader.read_count()?;
-        self.reader.read_vec(count)
+    fn read_pod_vec<T: NoUninit + AnyBitPattern>(&mut self) -> Result<Vec<T>, ReadError> {
+        let count = self.stream.read_count()?;
+        self.stream.read_vec(count)
     }
 
     fn read_string(&mut self) -> Result<String, ReadError> {
-        let index = self.reader.read_pod::<u32>()?;
+        let index = self.stream.read_pod::<u32>()?;
         self.resolve_string(index)
     }
 
     fn read_path(&mut self) -> Result<sdf::Path, ReadError> {
-        let index = self.reader.read_pod::<u32>()?;
-        Ok(indexed(&self.paths, index as usize, "path")?.clone())
+        let index = self.stream.read_pod::<u32>()?;
+        Ok(indexed(&self.file.paths, index as usize, "path")?.clone())
     }
 
     fn read_reference(&mut self) -> Result<sdf::Reference, ReadError> {
         let asset_path = self.read_string()?;
         let prim_path = self.read_path()?;
-        let layer_offset = self.reader.read_pod::<sdf::LayerOffset>()?;
+        let layer_offset = self.stream.read_pod::<sdf::LayerOffset>()?;
         let custom_data = self.read_custom_data()?;
 
         Ok(sdf::Reference {
@@ -900,8 +1050,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         // Layer offsets were added to SdfPayload starting in 0.8.0. Files
         // before that cannot have them.
         // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1214C41-L1214C41
-        if self.version() >= version(0, 8, 0) {
-            payload.layer_offset = self.reader.read_pod::<sdf::LayerOffset>()?;
+        if self.file.version() >= version(0, 8, 0) {
+            payload.layer_offset = self.stream.read_pod::<sdf::LayerOffset>()?;
         }
 
         Ok(payload)
@@ -915,15 +1065,17 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     ///
     /// See <https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100>
     fn apply_recursive_offset(&mut self) -> Result<(), ReadError> {
-        let offset = self.reader.read_pod::<i64>()?;
-        self.reader.seek(io::SeekFrom::Current(offset - 8))?;
-        Ok(())
+        let offset = self.stream.read_pod::<i64>()?;
+        let delta = offset
+            .checked_sub(8)
+            .ok_or_else(|| ReadError::corrupt(format!("recursive offset {offset} overflows")))?;
+        self.stream.skip(delta)
     }
 
     /// Reads a crate dictionary value (`customData`, `assetInfo`, and nested
     /// dictionaries).
     fn read_custom_data(&mut self) -> Result<HashMap<String, Value>, ReadError> {
-        let mut count = self.reader.read_count()?;
+        let mut count = self.stream.read_count()?;
         let mut dict = HashMap::default();
 
         while count > 0 {
@@ -941,28 +1093,18 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     /// past the rep (C++ `Read<VtValue>`).
     ///
     /// A dictionary entry, an unregistered value and the items of an
-    /// unregistered list op all arrive this way, and each can nest another, so
-    /// a value that names itself is refused here rather than recursed into.
-    ///
-    /// TODO: the nesting itself is still one Rust frame per level, so a deep
-    /// but acyclic chain over file-controlled data can exhaust the stack.
-    /// Bound the depth as `build_compressed_paths` does for wide path trees.
+    /// unregistered list op all arrive this way, and each can nest another;
+    /// [`value`](Self::value) refuses one that names itself or nests too
+    /// deep.
     fn read_nested_value(&mut self) -> Result<Value, ReadError> {
         self.apply_recursive_offset()?;
 
-        let rep = self.reader.read_pod::<ValueRep>()?;
+        let rep = self.stream.read_pod::<ValueRep>()?;
         corrupt!(rep.ty()? != Type::Invalid, "Can't parse nested value type");
-        corrupt!(
-            !self.unpacking.contains(&rep),
-            "A nested value recursively contains itself"
-        );
 
-        let resume = self.reader.stream_position()?;
-        self.unpacking.push(rep);
-        let value = self.value(rep);
-        self.unpacking.pop();
-        let value = value?;
-        self.set_position(resume)?;
+        let resume = self.stream.position();
+        let value = self.value(rep)?;
+        self.stream.seek(resume)?;
 
         Ok(value)
     }
@@ -977,7 +1119,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     ///
     /// TODO: widen the list op's item type so those survive.
     fn read_unregistered_items(&mut self) -> Result<Vec<String>, ReadError> {
-        let count = self.reader.read_count()?;
+        let count = self.stream.read_count()?;
         let mut items = Vec::new();
         for _ in 0..count {
             if let sdf::Value::String(text) = self.read_nested_value()? {
@@ -988,24 +1130,34 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     /// Read an array of fixed-size vectors (e.g. `Vec<[f32; 3]>`).
+    ///
+    /// TODO(perf): the one copy left per array read. C++ hands out arrays of
+    /// at least 2048 bytes as views into the mapped file when their address
+    /// is aligned to the element (`USDC_ENABLE_ZERO_COPY_ARRAYS`), copying
+    /// them out only when the file is replaced; that needs an `sdf::Value`
+    /// array form over an `ar::SharedBuffer` view.
+    ///
     /// Reads an array of POD values (including `repr(C)` gf types) directly,
     /// without the intermediate `[T; N]` grouping step that
     /// [`read_vec_array`] performs. `U` must have the same binary layout as
     /// the on-disk element — safe for all gf vec types since they are
     /// `#[repr(C)]` and `bytemuck::Pod`.
-    fn read_gf_array<U: Default + NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>, ReadError> {
+    fn read_gf_array<U: NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>, ReadError> {
         corrupt!(value.is_array() && !value.is_compressed());
         let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
         if count == 0 {
             return Ok(Vec::default());
         }
-        self.reader.read_vec::<U>(count)
+        self.stream.read_vec::<U>(count)
     }
 
-    fn read_vec_array<T: Default + NoUninit + AnyBitPattern, const N: usize>(
+    fn read_vec_array<T: NoUninit + AnyBitPattern, const N: usize>(
         &mut self,
         value: ValueRep,
-    ) -> Result<Vec<[T; N]>, ReadError> {
+    ) -> Result<Vec<[T; N]>, ReadError>
+    where
+        [T; N]: NoUninit + AnyBitPattern,
+    {
         corrupt!(value.is_array());
         corrupt!(!value.is_compressed());
 
@@ -1016,19 +1168,28 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             return Ok(Vec::default());
         }
 
-        let flat: Vec<T> = self.reader.read_vec(count * N)?;
-
-        // Reinterpret the flat vec as a vec of fixed-size arrays. `chunks_exact(N)`
-        // always yields slices of exactly N elements, so `try_into` cannot fail.
-        let result = flat
-            .chunks_exact(N)
-            .map(|chunk| chunk.try_into().expect("chunks_exact yields N elements"))
-            .collect();
-
-        Ok(result)
+        self.stream.read_vec(count)
     }
 
-    pub fn value(&mut self, value: ValueRep) -> Result<sdf::Value, ReadError> {
+    /// Decode the value `rep` describes, refusing one already being decoded
+    /// above it (a value that names itself) and one nested deeper than
+    /// [`MAX_NESTING`].
+    fn value(&mut self, rep: ValueRep) -> Result<sdf::Value, ReadError> {
+        corrupt!(
+            !self.unpacking.contains(&rep),
+            "A nested value recursively contains itself"
+        );
+        corrupt!(
+            self.unpacking.len() < MAX_NESTING,
+            "Values nested more than {MAX_NESTING} deep"
+        );
+        self.unpacking.push(rep);
+        let value = self.decode(rep);
+        self.unpacking.pop();
+        value
+    }
+
+    fn decode(&mut self, value: ValueRep) -> Result<sdf::Value, ReadError> {
         let ty = value.ty()?;
         corrupt!(ty != Type::Invalid, "Invalid value type");
 
@@ -1101,12 +1262,12 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::StringVector => {
                 corrupt!(!value.is_inlined());
 
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
                 sdf::Value::StringVec(self.read_string_vec()?)
             }
 
             Type::String if value.is_array() => {
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
                 sdf::Value::StringVec(self.read_string_vec()?)
             }
 
@@ -1120,17 +1281,17 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 // Asset arrays (`asset[]`, e.g. value-clip `assetPaths`) are
                 // stored like string arrays — string-table indices, not direct
                 // token indices.
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
                 sdf::Value::AssetPathVec(self.read_string_vec()?.into_iter().map(Into::into).collect())
             }
             Type::AssetPath => sdf::Value::AssetPath(self.read_asset_path(value)?.into()),
 
             Type::Token if value.is_array() => {
                 let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
-                let indices = self.reader.read_vec::<u32>(count)?;
+                let indices = self.stream.read_vec::<u32>(count)?;
                 let tokens = indices
                     .into_iter()
-                    .map(|i| Ok(indexed(&self.tokens, i as usize, "token")?.as_str().into()))
+                    .map(|i| Ok(indexed(&self.file.tokens, i as usize, "token")?.as_str().into()))
                     .collect::<Result<Vec<_>, ReadError>>()?;
 
                 sdf::Value::TokenVec(tokens)
@@ -1225,24 +1386,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Matrices
             //
-            Type::Matrix2d if value.is_array() => Value::Matrix2dVec(
-                self.read_vec_array::<f64, 4>(value)?
-                    .into_iter()
-                    .map(gf::Mat2d)
-                    .collect(),
-            ),
-            Type::Matrix3d if value.is_array() => Value::Matrix3dVec(
-                self.read_vec_array::<f64, 9>(value)?
-                    .into_iter()
-                    .map(gf::Mat3d)
-                    .collect(),
-            ),
-            Type::Matrix4d if value.is_array() => Value::Matrix4dVec(
-                self.read_vec_array::<f64, 16>(value)?
-                    .into_iter()
-                    .map(gf::Matrix4d)
-                    .collect(),
-            ),
+            Type::Matrix2d if value.is_array() => Value::Matrix2dVec(self.read_gf_array::<gf::Mat2d>(value)?),
+            Type::Matrix3d if value.is_array() => Value::Matrix3dVec(self.read_gf_array::<gf::Mat3d>(value)?),
+            Type::Matrix4d if value.is_array() => Value::Matrix4dVec(self.read_gf_array::<gf::Matrix4d>(value)?),
 
             Type::Matrix2d if value.is_inlined() => {
                 sdf::Value::Matrix2d(gf::Mat2d(to_mat_diag::<2, 4>(self.unpack_value(value)?)))
@@ -1300,32 +1446,32 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::TokenListOp => {
                 corrupt!(!value.is_inlined());
 
-                let list = self.read_list_op(value, |file: &mut Self| {
-                    Ok(file.read_token_vec()?.into_iter().map(tf::Token::from).collect())
+                let list = self.read_list_op(value, |decoder: &mut Self| {
+                    Ok(decoder.read_token_vec()?.into_iter().map(tf::Token::from).collect())
                 })?;
                 sdf::Value::TokenListOp(list)
             }
             Type::StringListOp => {
                 corrupt!(!value.is_inlined());
 
-                let list = self.read_list_op(value, |file: &mut Self| file.read_string_vec())?;
+                let list = self.read_list_op(value, |decoder: &mut Self| decoder.read_string_vec())?;
                 sdf::Value::StringListOp(list)
             }
             Type::PathListOp => {
                 corrupt!(!value.is_inlined());
 
-                let list = self.read_list_op(value, |file: &mut Self| file.read_path_vec())?;
+                let list = self.read_list_op(value, |decoder: &mut Self| decoder.read_path_vec())?;
                 sdf::Value::PathListOp(list)
             }
             Type::ReferenceListOp => {
                 corrupt!(!value.is_inlined());
 
-                let list = self.read_list_op(value, |file: &mut Self| {
-                    let count = file.reader.read_count()?;
+                let list = self.read_list_op(value, |decoder: &mut Self| {
+                    let count = decoder.stream.read_count()?;
                     let mut vec = Vec::with_capacity(count.min(1024));
 
                     for _ in 0..count {
-                        let reference = file.read_reference()?;
+                        let reference = decoder.read_reference()?;
                         vec.push(reference);
                     }
 
@@ -1358,7 +1504,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::TokenVector => {
                 corrupt!(!value.is_inlined());
 
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
 
                 let tokens = self.read_token_vec()?;
                 sdf::Value::token_vec(tokens)
@@ -1367,7 +1513,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::PathVector => {
                 corrupt!(!value.is_inlined());
 
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
 
                 let paths = self.read_path_vec()?;
                 sdf::Value::PathVec(paths)
@@ -1402,10 +1548,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 corrupt!(!value.is_array());
                 corrupt!(!value.is_compressed());
 
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
 
-                let count = self.reader.read_count()?;
-                let vec = self.reader.read_vec(count)?;
+                let count = self.stream.read_count()?;
+                let vec = self.stream.read_vec(count)?;
 
                 sdf::Value::LayerOffsetVec(vec)
             }
@@ -1415,18 +1561,18 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 corrupt!(!value.is_array());
                 corrupt!(!value.is_compressed());
 
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
 
                 let payload = self.read_payload()?;
                 sdf::Value::Payload(payload)
             }
 
             Type::PayloadListOp => {
-                let list = self.read_list_op(value, |file: &mut Self| {
-                    let count = file.reader.read_count()?;
+                let list = self.read_list_op(value, |decoder: &mut Self| {
+                    let count = decoder.stream.read_count()?;
                     let mut vec = Vec::with_capacity(count.min(1024));
                     for _ in 0..count {
-                        let payload = file.read_payload()?;
+                        let payload = decoder.read_payload()?;
                         vec.push(payload);
                     }
 
@@ -1441,9 +1587,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 corrupt!(!value.is_array());
                 corrupt!(!value.is_compressed());
 
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
 
-                let count = self.reader.read_count()?;
+                let count = self.stream.read_count()?;
                 let mut map = HashMap::with_capacity(count.min(1024));
 
                 for _ in 0..count {
@@ -1459,11 +1605,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 corrupt!(!value.is_inlined());
                 corrupt!(!value.is_compressed());
 
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
 
                 self.apply_recursive_offset()?;
 
-                let times_rep = self.reader.read_pod::<ValueRep>()?;
+                let times_rep = self.stream.read_pod::<ValueRep>()?;
 
                 let ty = times_rep.ty()?;
                 corrupt!(
@@ -1472,7 +1618,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 );
 
                 // Save current position.
-                let saved_position = self.reader.stream_position()?;
+                let saved_position = self.stream.position();
 
                 let times = self
                     .value(times_rep)?
@@ -1480,14 +1626,14 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                     .ok_or_else(|| ReadError::corrupt("Failed to read time samples"))?;
 
                 // Restore position
-                self.set_position(saved_position)?;
+                self.stream.seek(saved_position)?;
 
                 self.apply_recursive_offset()?;
 
-                let count = self.reader.read_count()?;
+                let count = self.stream.read_count()?;
                 corrupt!(count == times.len(), "Invalid time samples count");
 
-                let value_reps = self.reader.read_vec::<ValueRep>(count)?;
+                let value_reps = self.stream.read_vec::<ValueRep>(count)?;
                 corrupt!(value_reps.len() == count);
 
                 let samples = times
@@ -1505,7 +1651,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 corrupt!(!value.is_compressed(), "Dictionary {ty} can't be compressed");
                 corrupt!(!value.is_array(), "Dictionary {ty} can't be inlined");
 
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
 
                 sdf::Value::Dictionary(self.read_custom_data()?)
             }
@@ -1524,7 +1670,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::PathExpression if value.is_array() => {
                 // Path-expression arrays are stored like string arrays
                 // (string-table indices), each entry parsed into an expression.
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
                 sdf::Value::PathExpressionVec(
                     self.read_string_vec()?
                         .iter()
@@ -1541,7 +1687,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // which tells apart the three shapes C++ accepts here.
             Type::UnregisteredValue => {
                 corrupt!(!value.is_inlined());
-                self.set_position(value.payload())?;
+                self.stream.seek(value.payload())?;
                 match self.read_nested_value()? {
                     sdf::Value::String(text) => sdf::Value::UnregisteredValue(text),
                     sdf::Value::Dictionary(entries) => sdf::Value::UnregisteredDictionary(entries),
@@ -1561,14 +1707,14 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             Type::Relocates => {
                 corrupt!(!value.is_inlined());
-                self.set_position(value.payload())?;
-                let count = self.reader.read_count()?;
+                self.stream.seek(value.payload())?;
+                let count = self.stream.read_count()?;
                 let mut pairs = Vec::with_capacity(count.min(1024));
                 for _ in 0..count {
-                    let src_idx: u32 = self.reader.read_pod()?;
-                    let tgt_idx: u32 = self.reader.read_pod()?;
-                    let src = indexed(&self.paths, src_idx as usize, "path")?.clone();
-                    let tgt = indexed(&self.paths, tgt_idx as usize, "path")?.clone();
+                    let src_idx: u32 = self.stream.read_pod()?;
+                    let tgt_idx: u32 = self.stream.read_pod()?;
+                    let src = indexed(&self.file.paths, src_idx as usize, "path")?.clone();
+                    let tgt = indexed(&self.file.paths, tgt_idx as usize, "path")?.clone();
                     pairs.push((src, tgt));
                 }
                 sdf::Value::Relocates(pairs)
@@ -1586,6 +1732,11 @@ enum ArrayKind {
     #[allow(dead_code)]
     Floats,
     Other,
+}
+
+/// The section called `name` among `sections`.
+fn section_named<'a>(sections: &'a [Section], name: &str) -> Option<&'a Section> {
+    sections.iter().find(|s| s.name() == name)
 }
 
 /// Looks up `table[index]`, reporting an out-of-range index — a corrupt
@@ -1632,11 +1783,13 @@ fn to_mat_diag<const N: usize, const M: usize>(data: [i8; N]) -> [f64; M] {
     matrix
 }
 
-fn decompress_lz4(mut input: &[u8], output: &mut [u8]) -> Result<usize, ReadError> {
+fn decompress_lz4(input: &[u8], output: &mut [u8]) -> Result<usize, ReadError> {
     // Check first byte for # chunks.
     // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/base/tf/fastCompression.cpp#L108
 
-    let chunks = input.read_pod::<u8>().ctx("lz4 chunk count")? as usize;
+    let (&chunks, input) = input
+        .split_first()
+        .ok_or_else(|| ReadError::corrupt("lz4 block has no chunk count"))?;
 
     if chunks == 0 {
         let size = lz4_flex::decompress_into(input, output)?;
@@ -1650,65 +1803,13 @@ fn decompress_lz4(mut input: &[u8], output: &mut [u8]) -> Result<usize, ReadErro
     }
 }
 
-pub trait ReadExt {
-    /// Read a single "size" or "count" value encoded as `u64`.
-    ///
-    /// # Format:
-    /// - u64 size
-    fn read_count(&mut self) -> Result<usize, ReadError>;
-
-    fn read_pod<T: Default + Pod>(&mut self) -> Result<T, ReadError>;
-
-    fn read_vec<T: Default + NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>, ReadError>;
-}
-
-impl<R: io::Read> ReadExt for R {
-    fn read_count(&mut self) -> Result<usize, ReadError> {
-        let mut count = 0_u64;
-        self.read_exact(bytes_of_mut(&mut count)).ctx("size from IO stream")?;
-
-        Ok(count as usize)
-    }
-
-    fn read_pod<T: Default + Pod>(&mut self) -> Result<T, ReadError> {
-        let mut object = T::default();
-
-        self.read_exact(bytes_of_mut(&mut object))
-            .map_err(|error| ReadError::from(error).in_context(format!("pod {}", type_name::<T>())))?;
-
-        Ok(object)
-    }
-
-    fn read_vec<T: Default + NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>, ReadError> {
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-
-        // Read what the stream really holds before trusting `count`: a
-        // truncated or lying file fails here instead of allocating first.
-        let bytes = count
-            .checked_mul(mem::size_of::<T>())
-            .ok_or_else(|| ReadError::corrupt(format!("vector of {count} elements overflows")))?;
-        let mut raw = Vec::new();
-        io::Read::read_to_end(&mut io::Read::take(&mut *self, bytes as u64), &mut raw).ctx("vec")?;
-        if raw.len() != bytes {
-            return Err(ReadError::corrupt(format!(
-                "vec: {} of {bytes} bytes before the end",
-                raw.len()
-            )));
-        }
-        let mut vec = vec![T::default(); count];
-        cast_slice_mut(&mut vec).copy_from_slice(&raw);
-        Ok(vec)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Result;
     use crate::usdc;
     use std::fs;
+    use std::io;
 
     /// A relationship with a deeply nested target compresses to fewer bytes
     /// than the number of entries in its path table.
@@ -1737,7 +1838,7 @@ mod tests {
     fn compact_paths_roundtrip() -> Result<()> {
         let (bytes, target) = compact_paths()?;
         let size = bytes.len();
-        let mut file = CrateFile::open(io::Cursor::new(bytes))?;
+        let file = CrateFile::open(bytes)?;
         assert!(file.paths.len() > size, "more path entries than file bytes");
         let value = file
             .fields
@@ -1753,11 +1854,11 @@ mod tests {
     #[test]
     fn empty_path_slot() -> Result<()> {
         let (mut bytes, _) = compact_paths()?;
-        let file = CrateFile::open(io::Cursor::new(bytes.clone()))?;
+        let file = CrateFile::open(bytes.clone())?;
         let start = file.find_section(Section::PATHS).expect("paths section").start as usize;
         let count = file.paths.len();
         bytes[start..start + 8].copy_from_slice(&((count + 1) as u64).to_le_bytes());
-        let decoded = CrateFile::open(io::Cursor::new(bytes))?;
+        let decoded = CrateFile::open(bytes)?;
         assert_eq!(decoded.paths.len(), count + 1);
         assert!(decoded.paths[count].is_empty());
         Ok(())
@@ -1766,12 +1867,12 @@ mod tests {
     #[test]
     fn invalid_path_counts() -> Result<()> {
         let (bytes, _) = compact_paths()?;
-        let file = CrateFile::open(io::Cursor::new(bytes.clone()))?;
+        let file = CrateFile::open(bytes.clone())?;
         let start = file.find_section(Section::PATHS).expect("paths section").start as usize;
         for count in [0, file.paths.len() as u64 + 2, u64::MAX] {
             let mut damaged = bytes.clone();
             damaged[start..start + 8].copy_from_slice(&count.to_le_bytes());
-            let error = CrateFile::open(io::Cursor::new(damaged)).expect_err("invalid slot count");
+            let error = CrateFile::open(damaged).expect_err("invalid slot count");
             assert!(format!("{error:?}").contains("path table has"), "{error:?}");
         }
         Ok(())
@@ -1779,7 +1880,7 @@ mod tests {
 
     #[test]
     fn integer_compressed_float_fixture_uses_i_encoding() -> Result<()> {
-        let mut file = CrateFile::open(fs::File::open("fixtures/integer_compressed_floats.usdc")?)?;
+        let file = CrateFile::open(fs::read("fixtures/integer_compressed_floats.usdc")?)?;
         let value = file
             .fields
             .iter()
@@ -1793,11 +1894,68 @@ mod tests {
             })
             .expect("fixture must contain one compressed float default value");
 
-        file.set_position(value.payload())?;
-        let (count, compressed) = file.unpack_array_len(value, ArrayKind::Floats)?;
+        let mut decoder = Decoder::new(&file);
+        decoder.stream.seek(value.payload())?;
+        let (count, compressed) = decoder.unpack_array_len(value, ArrayKind::Floats)?;
         assert_eq!(count, 16);
         assert!(compressed);
-        assert_eq!(file.reader.read_pod::<u8>()?, b'i');
+        assert_eq!(decoder.stream.read_pod::<u8>()?, b'i');
+        Ok(())
+    }
+
+    /// Every read is bounded by the stream: a take, a seek or a jump past
+    /// either end is corrupt, never a panic, and a vector whose byte size
+    /// overflows is refused before it is allocated.
+    #[test]
+    fn stream_bounds() {
+        let bytes = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let mut stream = Stream::new(&bytes);
+        assert_eq!(stream.read_pod::<u32>().unwrap(), u32::from_le_bytes([1, 2, 3, 4]));
+        assert!(stream.take(5).is_err());
+        assert_eq!(stream.take(4).unwrap(), &[5, 6, 7, 8]);
+        assert!(stream.take(1).is_err());
+        assert!(stream.seek(9).is_err());
+        stream.seek(8).unwrap();
+        assert!(stream.skip(1).is_err());
+        assert!(stream.skip(-9).is_err());
+        assert!(stream.skip(i64::MIN).is_err());
+        stream.skip(-8).unwrap();
+        assert_eq!(stream.position(), 0);
+        assert!(stream.read_vec::<[f64; 16]>(usize::MAX / 8).is_err());
+        assert!(stream.read_vec::<u8>(9).is_err());
+        assert_eq!(stream.read_vec::<u8>(8).unwrap(), bytes);
+    }
+
+    /// A time-sample block whose sample points back at the block itself is
+    /// corrupt, not a stack overflow: the recursion guard covers every nested
+    /// decode, time samples included.
+    #[test]
+    fn time_samples_cycle() -> Result<()> {
+        let (bytes, _) = compact_paths()?;
+        let file = CrateFile::open(bytes)?;
+        let rep = |ty: Type, payload: u64| ValueRep(((ty as u64) << 48) | payload);
+        let samples = rep(Type::TimeSamples, 0);
+        assert_eq!(samples.ty()?, Type::TimeSamples);
+        let times = rep(Type::DoubleVector, 40);
+        assert_eq!(times.ty()?, Type::DoubleVector);
+        // The block: the jump to the times rep, the times rep, the jump to
+        // the sample reps, their count, the one sample rep (the block's own),
+        // then the times array the times rep points at.
+        let mut block = Vec::new();
+        block.extend_from_slice(&8i64.to_le_bytes());
+        block.extend_from_slice(&times.0.to_le_bytes());
+        block.extend_from_slice(&8i64.to_le_bytes());
+        block.extend_from_slice(&1u64.to_le_bytes());
+        block.extend_from_slice(&samples.0.to_le_bytes());
+        block.extend_from_slice(&1u64.to_le_bytes());
+        block.extend_from_slice(&0f64.to_le_bytes());
+        let mut decoder = Decoder {
+            file: &file,
+            stream: Stream::new(&block),
+            unpacking: Vec::new(),
+        };
+        let error = decoder.value(samples).expect_err("a self-referencing time sample");
+        assert!(format!("{error:?}").contains("recursively"), "{error:?}");
         Ok(())
     }
 
@@ -1812,9 +1970,8 @@ mod tests {
             return;
         }
 
-        let mut f = fs::File::open(path).expect("Failed to read crate file");
-
-        let file = CrateFile::open(&mut f).expect("Failed to read crate file");
+        let bytes = fs::read(path).expect("Failed to read crate file");
+        let file = CrateFile::open(bytes).expect("Failed to read crate file");
 
         assert_eq!(file.sections.len(), 6);
 
