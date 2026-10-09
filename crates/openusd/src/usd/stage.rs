@@ -3446,7 +3446,7 @@ impl Stage {
         // Each prim carries the population epoch under which its parent
         // resolved active, loaded, defined and not abstract, if it did. While
         // the population is unchanged the prim then reads only its own
-        // opinions instead of walking its ancestors.
+        // opinions.
         let mut stack = vec![(sdf::Path::abs_root(), None)];
 
         while let Some((path, parent)) = stack.pop() {

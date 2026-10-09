@@ -1400,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn clones_share_text_and_derivations_preserve_original() {
+    fn clone_shares_text() {
         let path = Path::new("/Root/Branch").unwrap();
         let clone = path.clone();
         assert!(Arc::ptr_eq(&path.path, &clone.path));
@@ -1419,7 +1419,7 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
-    fn shared_paths_preserve_string_serialization() {
+    fn serde_as_string() {
         for path in [
             Path::default(),
             Path::abs_root(),
