@@ -166,8 +166,8 @@ pub trait FileFormat: Sync {
     /// The bytes live as long as the layer because a decoder may keep
     /// reading them: the crate format indexes into the buffer in place,
     /// whether it is compiled into the program, owned, or shared with the
-    /// asset it came from (see [`ar::AssetBytes`]).
-    fn read_bytes(&self, bytes: ar::AssetBytes, source_name: &str) -> Result<LayerData, FormatError>;
+    /// asset it came from (see [`ar::AssetBuffer`]).
+    fn read_bytes(&self, bytes: ar::AssetBuffer, source_name: &str) -> Result<LayerData, FormatError>;
 
     /// Read a layer's data from `resolved`, opening the asset (and any
     /// sibling assets) through `resolver`.

@@ -264,7 +264,7 @@ impl LayerRegistry {
     /// A package has no content signature, so a `.usdz` is read from its asset
     /// rather than from bytes. `source_name` names their origin, for
     /// diagnostics that quote a location.
-    pub fn read_bytes(bytes: ar::AssetBytes, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+    pub fn read_bytes(bytes: ar::AssetBuffer, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
         DEFAULT_FORMATS
             .iter()
             .copied()

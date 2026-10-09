@@ -120,8 +120,8 @@ pub trait Asset: Read + Seek + Send {
     /// them with [`read_all`](Self::read_all); an asset that already holds
     /// them in memory hands them over, owned or shared (C++
     /// `ArAsset::GetBuffer`).
-    fn into_bytes(mut self: Box<Self>) -> io::Result<AssetBytes> {
-        self.read_all().map(AssetBytes::Owned)
+    fn into_bytes(mut self: Box<Self>) -> io::Result<AssetBuffer> {
+        self.read_all().map(AssetBuffer::Owned)
     }
 }
 
@@ -132,7 +132,7 @@ pub trait Asset: Read + Seek + Send {
 /// indexes into the buffer in place, while the text format copies out what
 /// it keeps.
 #[derive(Debug, Clone)]
-pub enum AssetBytes {
+pub enum AssetBuffer {
     /// Bytes compiled into the program.
     Static(&'static [u8]),
     /// Bytes the caller owns outright.
@@ -141,39 +141,39 @@ pub enum AssetBytes {
     Shared(Arc<[u8]>),
 }
 
-impl Deref for AssetBytes {
+impl Deref for AssetBuffer {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
         match self {
-            AssetBytes::Static(bytes) => bytes,
-            AssetBytes::Owned(bytes) => bytes,
-            AssetBytes::Shared(bytes) => bytes,
+            AssetBuffer::Static(bytes) => bytes,
+            AssetBuffer::Owned(bytes) => bytes,
+            AssetBuffer::Shared(bytes) => bytes,
         }
     }
 }
 
-impl AsRef<[u8]> for AssetBytes {
+impl AsRef<[u8]> for AssetBuffer {
     fn as_ref(&self) -> &[u8] {
         self
     }
 }
 
-impl From<&'static [u8]> for AssetBytes {
+impl From<&'static [u8]> for AssetBuffer {
     fn from(bytes: &'static [u8]) -> Self {
-        AssetBytes::Static(bytes)
+        AssetBuffer::Static(bytes)
     }
 }
 
-impl From<Vec<u8>> for AssetBytes {
+impl From<Vec<u8>> for AssetBuffer {
     fn from(bytes: Vec<u8>) -> Self {
-        AssetBytes::Owned(bytes)
+        AssetBuffer::Owned(bytes)
     }
 }
 
-impl From<Arc<[u8]>> for AssetBytes {
+impl From<Arc<[u8]>> for AssetBuffer {
     fn from(bytes: Arc<[u8]>) -> Self {
-        AssetBytes::Shared(bytes)
+        AssetBuffer::Shared(bytes)
     }
 }
 
@@ -189,8 +189,8 @@ impl Asset for io::Cursor<Vec<u8>> {
     }
 
     /// Hands the buffer over.
-    fn into_bytes(self: Box<Self>) -> io::Result<AssetBytes> {
-        Ok(AssetBytes::Owned(self.into_inner()))
+    fn into_bytes(self: Box<Self>) -> io::Result<AssetBuffer> {
+        Ok(AssetBuffer::Owned(self.into_inner()))
     }
 }
 
@@ -202,8 +202,8 @@ impl Asset for io::Cursor<Arc<[u8]>> {
     }
 
     /// Shares the buffer.
-    fn into_bytes(self: Box<Self>) -> io::Result<AssetBytes> {
-        Ok(AssetBytes::Shared(self.into_inner()))
+    fn into_bytes(self: Box<Self>) -> io::Result<AssetBuffer> {
+        Ok(AssetBuffer::Shared(self.into_inner()))
     }
 }
 
@@ -1230,14 +1230,14 @@ pub(crate) mod tests {
         let mut asset: Box<dyn Asset> = Box::new(io::Cursor::new(data));
         assert_eq!(asset.read_all().unwrap(), b"hello world");
         assert_eq!(asset.size().unwrap(), 11);
-        let AssetBytes::Owned(moved) = asset.into_bytes().unwrap() else {
+        let AssetBuffer::Owned(moved) = asset.into_bytes().unwrap() else {
             panic!("an owned cursor moves its buffer out");
         };
         assert_eq!(moved.as_ptr(), pointer);
 
         let shared: Arc<[u8]> = b"hello world".to_vec().into();
         let asset: Box<dyn Asset> = Box::new(io::Cursor::new(shared.clone()));
-        let AssetBytes::Shared(bytes) = asset.into_bytes().unwrap() else {
+        let AssetBuffer::Shared(bytes) = asset.into_bytes().unwrap() else {
             panic!("a shared cursor shares its buffer");
         };
         assert!(Arc::ptr_eq(&bytes, &shared));

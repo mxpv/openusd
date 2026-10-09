@@ -63,7 +63,7 @@ impl sdf::FileFormat for UsdaFileFormat {
         prefix[start..].starts_with(MAGIC)
     }
 
-    fn read_bytes(&self, bytes: ar::AssetBytes, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+    fn read_bytes(&self, bytes: ar::AssetBuffer, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
         // The parse copies out everything it keeps and never copies `bytes`
         // wholesale, whether they are compiled into the program, owned, or
         // shared with an asset.

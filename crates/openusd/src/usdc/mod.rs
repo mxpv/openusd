@@ -373,7 +373,7 @@ impl sdf::FileFormat for UsdcFileFormat {
         &["usdc", "usd"]
     }
 
-    fn read_bytes(&self, bytes: ar::AssetBytes, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+    fn read_bytes(&self, bytes: ar::AssetBuffer, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
         // Validated: these bytes are a file the caller did not write, and the
         // decoder indexes into them on trust.
         let data =

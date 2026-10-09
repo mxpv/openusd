@@ -150,7 +150,7 @@ impl sdf::FileFormat for UsdzFileFormat {
         })
     }
 
-    fn read_bytes(&self, bytes: ar::AssetBytes, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+    fn read_bytes(&self, bytes: ar::AssetBuffer, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
         // A bare package has no named entry, so read its first (default) layer.
         //
         // Every failure here is a decode: the bytes are already in hand, so
