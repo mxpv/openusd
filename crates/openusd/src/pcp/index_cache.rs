@@ -166,6 +166,23 @@ pub struct IndexCache {
     pub(super) pending_loads: Vec<Demand>,
 }
 
+/// A prim's own contribution to its inherited status: the inputs C++
+/// `Usd_PrimData::_ComposeAndCacheFlags` reads from the prim itself before
+/// combining them with its parent's flags, which [`IndexCache::own_status`]
+/// answers in one borrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnStatus {
+    /// The prim's composed `active`, `true` when unauthored.
+    pub active: bool,
+    /// Whether the prim's specifier defines it (`def` or `class`).
+    pub defining: bool,
+    /// Whether the prim's specifier is `class`.
+    pub class: bool,
+    /// Whether the load rules include the prim's own payload: `true` for a
+    /// prim without one, and under no rules at all.
+    pub payload_included: bool,
+}
+
 /// The resolved source of an attribute's value at a time code, the cacheable
 /// half of [`IndexCache::value_at`]. A cached view
 /// ([`Stage::attribute_query`](crate::usd::Stage::attribute_query)) resolves
@@ -2059,110 +2076,61 @@ impl IndexCache {
         Ok(true)
     }
 
-    /// Whether `path` and every ancestor below the pseudo-root carry a defining
-    /// specifier — `def` or `class` (C++ `UsdPrim::IsDefined`). An `over`, a
-    /// missing specifier opinion, and a prim with no composed spec are all
-    /// undefined. A prototype root is defined whatever its source index says,
-    /// as C++ `Usd_PrimData` sets it.
-    ///
-    /// The specifier twin of [`Self::is_active`], and resolved the same way:
-    /// one cache borrow for the whole ancestor chain, rather than a stage
-    /// round-trip per level.
-    pub(crate) fn is_defined(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
-        if path.is_abs_root() {
-            return Ok(true);
+    /// `path`'s own contribution to its inherited status, or `None` for a
+    /// path nothing composes: the inputs a caller combines with the parent's
+    /// status as C++ `Usd_PrimData::_ComposeAndCacheFlags` does, read in one
+    /// borrow after one redirection onto the index that composes the prim.
+    pub(crate) fn own_status(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<OwnStatus>, QueryError> {
+        let at = &self.effective_path(graph, path)?;
+        if !self.has_spec_at(graph, at)? {
+            return Ok(None);
         }
-        if !self.has_spec(graph, path)? {
-            return Ok(false);
-        }
-        for ancestor in path.ancestors_below_root() {
-            if self.is_prototype(&ancestor) {
-                break;
-            }
-            let specifier = self
-                .resolve_field(graph, &ancestor, FieldKey::Specifier.as_str())?
-                .map(sdf::Specifier::try_from)
-                .transpose()?;
-            if !matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class)) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    /// Whether `path` or any ancestor below the pseudo-root resolves to
-    /// `class` (C++ `UsdPrim::IsAbstract`). A prim with no composed spec is
-    /// not abstract, and a prototype root is `def` whatever its source says,
-    /// as C++ `Usd_PrimData` sets it. Resolved like [`Self::is_defined`],
-    /// under one cache borrow for the whole ancestor chain.
-    pub(crate) fn is_abstract(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
-        if path.is_abs_root() || !self.has_spec(graph, path)? {
-            return Ok(false);
-        }
-        for ancestor in path.ancestors_below_root() {
-            if self.is_prototype(&ancestor) {
-                break;
-            }
-            let specifier = self
-                .resolve_field(graph, &ancestor, FieldKey::Specifier.as_str())?
-                .map(sdf::Specifier::try_from)
-                .transpose()?;
-            if specifier == Some(sdf::Specifier::Class) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// [`Self::is_defined`] and [`Self::is_abstract`] together, from one walk
-    /// up the ancestor chain, for a caller asking both.
-    pub(crate) fn specifier_status(&mut self, graph: &LayerGraph, path: &Path) -> Result<(bool, bool), QueryError> {
-        if path.is_abs_root() {
-            return Ok((true, false));
-        }
-        if !self.has_spec(graph, path)? {
-            return Ok((false, false));
-        }
-        let (mut defined, mut is_abstract) = (true, false);
-        for ancestor in path.ancestors_below_root() {
-            if self.is_prototype(&ancestor) {
-                break;
-            }
-            let specifier = self
-                .resolve_field(graph, &ancestor, FieldKey::Specifier.as_str())?
-                .map(sdf::Specifier::try_from)
-                .transpose()?;
-            defined &= matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class));
-            is_abstract |= specifier == Some(sdf::Specifier::Class);
-            if !defined && is_abstract {
-                break;
-            }
-        }
-        Ok((defined, is_abstract))
-    }
-
-    /// The active, defined and abstract state of `path` from its own opinions
-    /// alone, for a prim whose parent resolved active, defined and not
-    /// abstract: below such a parent, [`Self::is_active`],
-    /// [`Self::is_defined`] and [`Self::is_abstract`] are each decided at the
-    /// prim itself.
-    pub(crate) fn local_status(&mut self, graph: &LayerGraph, path: &Path) -> Result<(bool, bool, bool), QueryError> {
-        if !self.has_spec(graph, path)? {
-            return Ok((false, false, false));
-        }
-        let active = self.active_locally(graph, path)?;
-        if self.is_prototype(path) {
-            return Ok((active, true, false));
-        }
-        let specifier = self
-            .resolve_field(graph, path, FieldKey::Specifier.as_str())?
-            .map(sdf::Specifier::try_from)
-            .transpose()?;
-        Ok((
+        let active = self.active_at(graph, at)?;
+        let specifier = self.specifier_at(graph, at)?;
+        // No rule anywhere means every path resolves loaded (`LoadRules`'
+        // documented default). The rules are keyed by the prim's own path,
+        // not by the index it reads through.
+        let payload_included = self.load_rules().is_empty() || !self.has_payload_at(graph, at)? || self.is_loaded(path);
+        Ok(Some(OwnStatus {
             active,
-            matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class)),
-            specifier == Some(sdf::Specifier::Class),
-        ))
+            defining: matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class)),
+            class: specifier == Some(sdf::Specifier::Class),
+            payload_included,
+        }))
+    }
+
+    /// The composed specifier at `path`, a path already redirected onto the
+    /// index that composes it. A prototype root is `def` whatever its source
+    /// says, as C++ `Usd_PrimData` sets it (`_GetPrimSpecifierImpl`).
+    fn specifier_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<sdf::Specifier>, QueryError> {
+        if self.is_prototype(path) {
+            return Ok(Some(sdf::Specifier::Def));
+        }
+        Ok(self
+            .resolve_field_at(graph, path, FieldKey::Specifier.as_str())?
+            .map(sdf::Specifier::try_from)
+            .transpose()?)
+    }
+
+    /// Whether a non-empty `payload` opinion composes at `path` (C++
+    /// `PcpPrimIndex::HasAnyPayloads`).
+    pub(crate) fn has_payload(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        let path = &self.effective_path(graph, path)?;
+        self.has_payload_at(graph, path)
+    }
+
+    /// [`has_payload`](Self::has_payload) for a path already redirected onto
+    /// the index that composes it. A prototype root reads no opinions and has
+    /// none.
+    fn has_payload_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        if self.is_prototype(path) {
+            return Ok(false);
+        }
+        Ok(match self.resolve_field_at(graph, path, FieldKey::Payload.as_str())? {
+            Some(Value::Payload(payload)) => payload_has_target(&payload),
+            Some(Value::PayloadListOp(op)) => op.reduced().flatten().iter().any(payload_has_target),
+            _ => false,
+        })
     }
 
     /// This prim's own composed `active` opinion, defaulting to `true`. The
@@ -3485,6 +3453,11 @@ fn target_prim_inherits_class(
                 .eq(class_layers.iter().copied())
             && n.path.has_prefix(class_path)
     })
+}
+
+/// Whether `payload` names a target, by asset path or prim path.
+fn payload_has_target(payload: &sdf::Payload) -> bool {
+    !payload.asset_path.is_empty() || !payload.prim_path.is_empty()
 }
 
 #[cfg(test)]

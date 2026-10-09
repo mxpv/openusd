@@ -4935,7 +4935,8 @@ fn prototype_root_active() -> Result<()> {
 /// Traversal reads a prim's inherited status from its parent's, and visits
 /// exactly the prims whose own full status matches, in the same order: over
 /// inactive, `over` and `class` branches, an instance, deep nesting, and
-/// payloads with and without load rules.
+/// payloads with and without load rules, under the default predicates and
+/// ones consulting a single inherited bit.
 #[test]
 fn traversal_matches_prim_status() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -5018,7 +5019,15 @@ def "World"
         stage.prim("/World/Loaded")?.load(LoadPolicy::WithDescendants);
         let mut all = Vec::new();
         stage.traverse(PrimPredicate::ALL, |path| all.push(path.clone()))?;
-        for predicate in [PrimPredicate::DEFAULT, PrimPredicate::DEFAULT_PROXIES] {
+        let predicates = [
+            PrimPredicate::DEFAULT,
+            PrimPredicate::DEFAULT_PROXIES,
+            PrimPredicate::new(PrimStatus::ACTIVE, PrimStatus::empty()),
+            PrimPredicate::new(PrimStatus::LOADED, PrimStatus::empty()),
+            PrimPredicate::new(PrimStatus::DEFINED, PrimStatus::empty()),
+            PrimPredicate::new(PrimStatus::empty(), PrimStatus::ABSTRACT),
+        ];
+        for predicate in predicates {
             let mut expected = Vec::new();
             let mut instances: Vec<sdf::Path> = Vec::new();
             for path in &all {

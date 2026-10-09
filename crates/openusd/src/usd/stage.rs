@@ -77,6 +77,17 @@ bitflags! {
     }
 }
 
+impl PrimStatus {
+    /// The bits a prim composes from its parent's status and its own opinions
+    /// (C++ `Usd_PrimData::_ComposeAndCacheFlags`), answered together: the
+    /// three the default traversal requires and the one it rejects.
+    const INHERITED: PrimStatus = PrimPredicate::INHERITED_REQUIRED.union(PrimPredicate::INHERITED_REJECTED);
+
+    /// The pseudo-root's status, which every root prim composes from: active,
+    /// loaded and defined, as C++ `Usd_PrimData` sets it.
+    const ROOT: PrimStatus = PrimStatus::ACTIVE.union(PrimStatus::LOADED).union(PrimStatus::DEFINED);
+}
+
 /// Predicate used to filter prim traversal by resolved status bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrimPredicate {
@@ -3187,67 +3198,88 @@ impl Stage {
         self.prim_status_masked(&sdf::try_into_path(prim)?.prim_path(), PrimStatus::all())
     }
 
-    /// Computes only the status bits set in `mask`. Bits outside `mask` are
-    /// left unset. Used by traversal so unused checks (e.g. INSTANCE, MODEL
-    /// for default traversal) are skipped.
-    fn prim_status_masked(&self, prim: &sdf::Path, mask: PrimStatus) -> Result<PrimStatus> {
-        let prim = super::Prim::new(self, prim.clone());
-        let mut status = PrimStatus::empty();
-        if mask.contains(PrimStatus::ACTIVE) {
-            status.set(PrimStatus::ACTIVE, prim.is_active()?);
-        }
-        if mask.contains(PrimStatus::LOADED) {
-            let loaded = if mask.contains(PrimStatus::ACTIVE) {
-                prim.is_loaded_with_active(status.contains(PrimStatus::ACTIVE))?
-            } else {
-                prim.is_loaded()?
-            };
-            status.set(PrimStatus::LOADED, loaded);
-        }
-        if mask.contains(PrimStatus::DEFINED | PrimStatus::ABSTRACT) {
-            let (defined, is_abstract) = self.masked(prim.path(), |g, c| c.specifier_status(g, prim.path()))?;
-            status.set(PrimStatus::DEFINED, defined);
-            status.set(PrimStatus::ABSTRACT, is_abstract);
-        } else if mask.contains(PrimStatus::DEFINED) {
-            status.set(PrimStatus::DEFINED, prim.is_defined()?);
-        } else if mask.contains(PrimStatus::ABSTRACT) {
-            status.set(PrimStatus::ABSTRACT, prim.is_abstract()?);
-        }
-        Self::set_own_status(&prim, mask, &mut status)?;
-        Ok(status)
+    /// Computes only the status bits set in `mask`, with the inherited four
+    /// ([`PrimStatus::INHERITED`]) answered together whenever any is asked,
+    /// since one composition down the ancestor chain yields them all. Bits
+    /// outside `mask` are otherwise left unset. Used by traversal so unused
+    /// checks (e.g. INSTANCE, MODEL for default traversal) are skipped.
+    pub(super) fn prim_status_masked(&self, prim: &sdf::Path, mask: PrimStatus) -> Result<PrimStatus> {
+        let status = self.masked(prim, |g, c| {
+            let mut status = PrimStatus::empty();
+            if mask.intersects(PrimStatus::INHERITED) {
+                let chain: Vec<sdf::Path> = prim.ancestors_below_root().collect();
+                status = chain.iter().rev().try_fold(PrimStatus::ROOT, |parent, ancestor| {
+                    Self::status_below(c, g, parent, ancestor)
+                })?;
+            }
+            if mask.contains(PrimStatus::INSTANCE) {
+                status.set(PrimStatus::INSTANCE, c.is_instance(g, prim)?);
+            }
+            Ok(status)
+        })?;
+        self.with_own_status(prim, status, mask)
     }
 
     /// [`prim_status_masked`](Self::prim_status_masked) for a prim whose
-    /// parent resolved active, loaded, defined and not abstract. Those bits
-    /// then come from the prim's own opinions, with no walk up its ancestors,
-    /// as C++ `Usd_PrimData` composes a prim's flags from its parent's.
-    fn child_status_masked(&self, prim: &sdf::Path, mask: PrimStatus) -> Result<PrimStatus> {
-        let (active, defined, is_abstract) = self.masked(prim, |g, c| c.local_status(g, prim))?;
-        let prim = super::Prim::new(self, prim.clone());
+    /// parent's inherited bits are `parent`: its own compose from them in one
+    /// step.
+    fn child_status_masked(&self, prim: &sdf::Path, parent: PrimStatus, mask: PrimStatus) -> Result<PrimStatus> {
+        let status = self.masked(prim, |g, c| {
+            let mut status = PrimStatus::empty();
+            if mask.intersects(PrimStatus::INHERITED) {
+                status = Self::status_below(c, g, parent, prim)?;
+            }
+            if mask.contains(PrimStatus::INSTANCE) {
+                status.set(PrimStatus::INSTANCE, c.is_instance(g, prim)?);
+            }
+            Ok(status)
+        })?;
+        self.with_own_status(prim, status, mask)
+    }
+
+    /// `prim`'s inherited bits below a parent whose are `parent`, from the
+    /// prim's own opinions as C++ `Usd_PrimData::_ComposeAndCacheFlags`
+    /// combines them: active and defined require the parent's, abstract is
+    /// the parent's or the prim's own `class`, and loaded requires an active
+    /// prim below a loaded parent whose own payload, if any, the load rules
+    /// include. A prim nothing composes has no status.
+    fn status_below(
+        cache: &mut pcp::IndexCache,
+        graph: &pcp::LayerGraph,
+        parent: PrimStatus,
+        prim: &sdf::Path,
+    ) -> Result<PrimStatus, pcp::QueryError> {
+        let Some(own) = cache.own_status(graph, prim)? else {
+            return Ok(PrimStatus::empty());
+        };
+        let active = parent.contains(PrimStatus::ACTIVE) && own.active;
         let mut status = PrimStatus::empty();
         status.set(PrimStatus::ACTIVE, active);
-        if mask.contains(PrimStatus::LOADED) {
-            status.set(PrimStatus::LOADED, prim.is_loaded_below_loaded(active)?);
-        }
-        status.set(PrimStatus::DEFINED, defined);
-        status.set(PrimStatus::ABSTRACT, is_abstract);
-        status &= mask;
-        Self::set_own_status(&prim, mask, &mut status)?;
+        status.set(
+            PrimStatus::LOADED,
+            active && parent.contains(PrimStatus::LOADED) && own.payload_included,
+        );
+        status.set(
+            PrimStatus::DEFINED,
+            parent.contains(PrimStatus::DEFINED) && own.defining,
+        );
+        status.set(PrimStatus::ABSTRACT, parent.contains(PrimStatus::ABSTRACT) || own.class);
         Ok(status)
     }
 
-    /// The status bits a prim's ancestors do not decide.
-    fn set_own_status(prim: &super::Prim, mask: PrimStatus, status: &mut PrimStatus) -> Result<()> {
-        if mask.contains(PrimStatus::INSTANCE) {
-            status.set(PrimStatus::INSTANCE, prim.is_instance()?);
+    /// `status` with the bits `mask` asks for that neither `prim`'s ancestors
+    /// nor its own composition decide.
+    fn with_own_status(&self, prim: &sdf::Path, mut status: PrimStatus, mask: PrimStatus) -> Result<PrimStatus> {
+        if mask.intersects(PrimStatus::MODEL | PrimStatus::IN_PROTOTYPE) {
+            let prim = super::Prim::new(self, prim.clone());
+            if mask.contains(PrimStatus::MODEL) {
+                status.set(PrimStatus::MODEL, prim.is_model()?);
+            }
+            if mask.contains(PrimStatus::IN_PROTOTYPE) {
+                status.set(PrimStatus::IN_PROTOTYPE, prim.is_in_prototype()?);
+            }
         }
-        if mask.contains(PrimStatus::MODEL) {
-            status.set(PrimStatus::MODEL, prim.is_model()?);
-        }
-        if mask.contains(PrimStatus::IN_PROTOTYPE) {
-            status.set(PrimStatus::IN_PROTOTYPE, prim.is_in_prototype()?);
-        }
-        Ok(())
+        Ok(status)
     }
 
     /// Borrows the stage's composition cache, first draining any pending layer
@@ -3441,26 +3473,23 @@ impl Stage {
     /// excludes those regions.
     pub fn traverse(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&sdf::Path)) -> Result<()> {
         let needed = predicate.consulted_bits();
-        let inherited = PrimPredicate::INHERITED_REQUIRED.union(PrimPredicate::INHERITED_REJECTED);
-        let threads = needed.contains(inherited);
-        // Each prim carries the population epoch under which its parent
-        // resolved active, loaded, defined and not abstract, if it did. While
-        // the population is unchanged the prim then reads only its own
-        // opinions.
+        // Each prim carries its parent's status and the population epoch it
+        // was read under. While the population is unchanged the prim composes
+        // its inherited bits from that status and its own opinions, as C++
+        // `Usd_PrimData` does; after a change it walks its ancestors afresh.
         let mut stack = vec![(sdf::Path::abs_root(), None)];
 
         while let Some((path, parent)) = stack.pop() {
             let epoch = self.population_epoch();
-            let mut passed = threads.then_some(epoch);
-            if !path.is_abs_root() {
-                let status = if parent == Some(epoch) {
-                    self.child_status_masked(&path, needed)?
-                } else {
-                    self.prim_status_masked(&path, needed)?
+            let status = if path.is_abs_root() {
+                PrimStatus::ROOT
+            } else {
+                let status = match parent {
+                    Some((parent_epoch, parent)) if parent_epoch == epoch => {
+                        self.child_status_masked(&path, parent, needed)?
+                    }
+                    _ => self.prim_status_masked(&path, needed)?,
                 };
-                let default = status.contains(PrimPredicate::INHERITED_REQUIRED)
-                    && !status.intersects(PrimPredicate::INHERITED_REJECTED);
-                passed = passed.filter(|_| default && self.population_epoch() == epoch);
                 if predicate.matches(status) {
                     visitor(&path);
                 }
@@ -3472,13 +3501,14 @@ impl Stage {
                 if !predicate.traverse_instance_proxies && status.contains(PrimStatus::INSTANCE) {
                     continue;
                 }
-            }
+                status
+            };
 
             let children = self.masked(&path, |g, cache| cache.prim_children(g, &path))?;
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
                 if let Ok(child) = path.append_path(name.as_str()) {
-                    stack.push((child, passed));
+                    stack.push((child, Some((epoch, status))));
                 }
             }
         }
