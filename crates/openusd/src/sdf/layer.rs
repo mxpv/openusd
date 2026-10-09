@@ -405,11 +405,12 @@ impl Layer {
     /// A save is three steps, each leaving the layer whole if it fails. The
     /// layer is serialized in memory and written to a temporary file beside
     /// its own; a failure there changes nothing. A layer whose data decodes
-    /// from its bytes on demand ([`AbstractData::is_lazy`], the crate format)
-    /// then rebinds to the bytes it serialized, read through its format,
+    /// from its bytes on demand (the crate format) then rebinds to the data
+    /// its format built over the bytes it serialized
+    /// ([`FileFormat::write_bytes`](super::FileFormat::write_bytes)),
     /// dropping the bytes it read before, which releases any view of its own
-    /// file it held; bytes that fail to parse leave the old ones in place.
-    /// Data that copied everything out of its bytes stays as it is. Last the
+    /// file it held. Data that copied everything out of its bytes stays as
+    /// it is. Last the
     /// temporary file is renamed over the layer's own, which replaces it
     /// atomically; a rename that fails (a destination that is no longer a
     /// file, a filesystem that refuses it) is [`ExportError::Replace`]: the
@@ -458,22 +459,15 @@ impl Layer {
         // load path records the FileFormat a layer was read with (C++
         // `_fileFormat`), save should reuse it to preserve the original encoding.
         let format = super::LayerRegistry::export_format(&self.identifier)?;
-        let mut bytes = Cursor::new(Vec::new());
-        format.write(self.data(), &mut bytes)?;
-        let bytes = bytes.into_inner();
+        let written = format.write_bytes(self.data())?;
         let create = |source| ExportError::Create {
             filename: self.identifier.clone(),
             source,
         };
         let mut temp = tf::SafeOutputFile::create(path).map_err(create)?;
-        temp.file().write_all(&bytes).map_err(create)?;
-        if self.data.is_lazy() {
-            // TODO(perf): the rebind decodes the written bytes' structural
-            // sections from scratch, the work that dominates a large crate's
-            // open. C++ `Usd_CrateDataImpl::Save` keeps its tables and maps
-            // them onto the new file; a `FileFormat` seam for rebinding data
-            // to bytes it just wrote would do the same here.
-            self.data = CowData::new(format.read_bytes(bytes.into(), &self.identifier)?);
+        temp.file().write_all(&written.bytes).map_err(create)?;
+        if let Some(data) = written.data {
+            self.data = CowData::new(data);
         }
         temp.persist().map_err(|source| ExportError::Replace {
             filename: self.identifier.clone(),

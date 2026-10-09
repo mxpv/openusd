@@ -46,7 +46,7 @@ pub use copy::{
 pub(crate) use copy::{author_spec, is_children_field};
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub use expr::{Evaluation, EvaluationValue, Expr, ExprError, StringEvaluation, StringSegment};
-pub use file_format::{FileFormat, FileFormatCaps, FormatError, WriteSeek};
+pub use file_format::{FileFormat, FileFormatCaps, FormatError, WriteSeek, Written};
 pub use layer::{
     AuthoringError, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId, PendingLayerChange,
     default_prim_path,

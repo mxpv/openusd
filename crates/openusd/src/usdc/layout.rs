@@ -97,6 +97,20 @@ impl Section {
     pub const PATHS: &'static str = "PATHS";
     pub const SPECS: &'static str = "SPECS";
 
+    /// A section called `name`, cut to the format's name length, holding
+    /// `size` bytes from `start`.
+    pub(crate) fn new(name: &str, start: u64, size: u64) -> Self {
+        let mut section = Section {
+            name: [0; SECTION_NAME_MAX_LENGTH + 1],
+            start,
+            size,
+        };
+        let bytes = name.as_bytes();
+        let len = bytes.len().min(SECTION_NAME_MAX_LENGTH);
+        section.name[..len].copy_from_slice(&bytes[..len]);
+        section
+    }
+
     /// Convert array of bytes to a human-readable string.
     pub fn name(&self) -> &str {
         CStr::from_bytes_until_nul(&self.name)

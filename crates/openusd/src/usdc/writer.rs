@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::path::Path as FsPath;
 
 use crate::gf::f16;
@@ -16,15 +16,14 @@ use bytemuck::{Pod, bytes_of};
 use num_traits::{AsPrimitive, PrimInt};
 
 use crate::{
-    gf, sdf,
+    ar, gf, sdf,
     sdf::{AbstractData, FormatError, LayerOffset, ListOp, Path, PathElement, Payload, Reference, Value},
     tf,
 };
 
 use super::coding;
-use super::layout::{
-    Bootstrap, ListOpHeader, SECTION_NAME_MAX_LENGTH, Section, Spec as FileSpec, Type, ValueRep, Version, version,
-};
+use super::layout::{Bootstrap, Field, ListOpHeader, Section, Spec as FileSpec, Type, ValueRep, Version, version};
+use super::reader::CrateFile;
 
 /// Crate format version this writer emits. Supports all features the reader
 /// handles (time samples, relocates, path expressions, etc.).
@@ -50,7 +49,45 @@ impl CrateWriter {
     pub fn write<W: Write + Seek>(data: &dyn AbstractData, out: &mut W) -> Result<(), FormatError> {
         let mut packer = Packer::new(out);
         packer.pack(data)?;
-        packer.finish()
+        packer.finish()?;
+        Ok(())
+    }
+
+    /// Writes the layer into memory and returns the file over those bytes,
+    /// its tables the ones the writer built. A reader of it decodes no
+    /// structural section.
+    pub fn write_file(data: &dyn AbstractData) -> Result<CrateFile, FormatError> {
+        let mut out = Cursor::new(Vec::new());
+        let mut packer = Packer::new(&mut out);
+        packer.pack(data)?;
+        let (bootstrap, sections) = packer.finish()?;
+        let Packer {
+            tokens,
+            strings,
+            paths,
+            fields,
+            fieldsets,
+            specs,
+            ..
+        } = packer;
+        Ok(CrateFile {
+            bytes: ar::AssetBuffer::from(out.into_inner()),
+            bootstrap,
+            sections,
+            tokens: tokens.items,
+            strings: strings.items.into_iter().map(|token| token as usize).collect(),
+            fields: fields
+                .items
+                .into_iter()
+                .map(|(token, rep)| Field::new(token, rep))
+                .collect(),
+            fieldsets: fieldsets
+                .into_iter()
+                .map(|index| index.map(|index| index as usize))
+                .collect(),
+            paths: paths.items,
+            specs,
+        })
     }
 }
 
@@ -176,8 +213,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.paths.intern(path)
     }
 
-    /// Emit all sections then the TOC then the bootstrap header.
-    fn finish(mut self) -> Result<(), FormatError> {
+    /// Emit all sections then the TOC then the bootstrap header, returning
+    /// the header and the section table as written.
+    fn finish(&mut self) -> Result<(Bootstrap, Vec<Section>), FormatError> {
         self.write_tokens_section()?;
         self.write_strings_section()?;
         self.write_fields_section()?;
@@ -186,10 +224,10 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.write_specs_section()?;
 
         let toc_offset = self.pos()?;
-        self.write_toc()?;
+        let sections = self.write_toc()?;
 
-        self.write_bootstrap(toc_offset)?;
-        Ok(())
+        let bootstrap = self.write_bootstrap(toc_offset)?;
+        Ok((bootstrap, sections))
     }
 
     // -----------------------------------------------------------------
@@ -322,24 +360,22 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.end_section()
     }
 
-    fn write_toc(&mut self) -> Result<(), FormatError> {
-        // `finish()` consumes `self` immediately after this call, so taking
-        // the vec out is fine; it lets us iterate without a pre-copy.
-        let sections = std::mem::take(&mut self.sections_written);
+    /// Writes the section table and returns it.
+    fn write_toc(&mut self) -> Result<Vec<Section>, FormatError> {
+        let sections: Vec<Section> = self
+            .sections_written
+            .iter()
+            .map(|(name, start, size)| Section::new(name, *start, *size))
+            .collect();
         self.write_count(sections.len() as u64)?;
-        for (name, start, size) in &sections {
-            let mut name_buf = [0_u8; SECTION_NAME_MAX_LENGTH + 1];
-            let bytes = name.as_bytes();
-            let n = bytes.len().min(SECTION_NAME_MAX_LENGTH);
-            name_buf[..n].copy_from_slice(&bytes[..n]);
-            self.write_bytes(&name_buf)?;
-            self.write_pod(start)?;
-            self.write_pod(size)?;
+        for section in &sections {
+            self.write_pod(section)?;
         }
-        Ok(())
+        Ok(sections)
     }
 
-    fn write_bootstrap(&mut self, toc_offset: u64) -> Result<(), FormatError> {
+    /// Writes the header at the start of the file and returns it.
+    fn write_bootstrap(&mut self, toc_offset: u64) -> Result<Bootstrap, FormatError> {
         let mut boot = Bootstrap::default();
         boot.ident = *b"PXR-USDC";
         boot.version[0] = WRITER_VERSION.major;
@@ -349,7 +385,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
         self.out.seek(SeekFrom::Start(0))?;
         self.write_pod(&boot)?;
-        Ok(())
+        Ok(boot)
     }
 
     // -----------------------------------------------------------------

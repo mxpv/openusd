@@ -179,8 +179,13 @@ impl CrateData {
     /// Read binary data from `bytes`, which the data keeps and decodes
     /// values from on demand.
     pub fn open(bytes: impl Into<ar::AssetBuffer>, safe: bool) -> Result<Self, ReadError> {
-        let mut file = CrateFile::open(bytes)?;
+        Self::from_file(CrateFile::open(bytes)?, safe)
+    }
 
+    /// Data over `file`, whose specs are indexed by path; `safe` checks the
+    /// file's tables against each other first, which a file read from bytes
+    /// the library did not write needs.
+    pub fn from_file(mut file: CrateFile, safe: bool) -> Result<Self, ReadError> {
         if safe {
             file.validate()?;
         }
@@ -208,11 +213,6 @@ impl CrateData {
 }
 
 impl sdf::AbstractData for CrateData {
-    /// Every value decodes from the file's bytes on demand.
-    fn is_lazy(&self) -> bool {
-        true
-    }
-
     #[inline]
     fn has_spec(&self, path: &sdf::Path) -> bool {
         self.data.contains_key(path)
@@ -393,6 +393,18 @@ impl sdf::FileFormat for UsdcFileFormat {
     fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
         CrateWriter::write(data, &mut sink)
     }
+
+    /// The data is built from the writer's own tables over the bytes it
+    /// wrote. Nothing is decoded again.
+    fn write_bytes(&self, data: &dyn sdf::AbstractData) -> Result<sdf::Written, sdf::FormatError> {
+        let file = CrateWriter::write_file(data)?;
+        let bytes = file.bytes().clone().into_shared();
+        let data = CrateData::from_file(file, false).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
+        Ok(sdf::Written {
+            bytes,
+            data: Some(Box::new(data)),
+        })
+    }
 }
 
 /// The crate (binary) format names the property-children field "properties",
@@ -430,6 +442,36 @@ mod tests {
         assert_eq!(Arc::strong_count(&bytes), 3);
         drop(data);
         assert_eq!(Arc::strong_count(&bytes), 2);
+        Ok(())
+    }
+
+    /// The file the writer returns reads as the file a reader opens from the
+    /// same bytes: every spec, field and value agrees.
+    #[test]
+    fn write_file_matches_open() -> Result<()> {
+        let source = read_file("fixtures/fields.usdc")?;
+        let file = CrateWriter::write_file(source.as_ref())?;
+        let bytes = file.bytes().clone();
+        let built = CrateData::from_file(file, false)?;
+        let opened = CrateData::open(bytes, true)?;
+        let mut paths = built.spec_paths();
+        paths.sort();
+        let mut other = opened.spec_paths();
+        other.sort();
+        assert_eq!(paths, other);
+        assert!(!paths.is_empty());
+        for path in &paths {
+            assert_eq!(built.spec_type(path), opened.spec_type(path), "{path}");
+            let fields = built.list_fields(path).unwrap_or_default();
+            assert_eq!(fields, opened.list_fields(path).unwrap_or_default(), "{path}");
+            for field in &fields {
+                assert_eq!(
+                    built.try_field(path, field)?,
+                    opened.try_field(path, field)?,
+                    "{path} {field}"
+                );
+            }
+        }
         Ok(())
     }
 

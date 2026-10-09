@@ -205,6 +205,31 @@ pub trait FileFormat: Sync {
 
     /// Serialize `data` to `sink` in this format.
     fn write(&self, data: &dyn AbstractData, sink: &mut dyn WriteSeek) -> Result<(), FormatError>;
+
+    /// Serializes `data` into memory for a layer that rebinds to what it
+    /// writes. A format whose data decodes from its bytes on demand builds
+    /// that data from what its writer already knows, and no structural
+    /// decode runs. The default serializes through [`write`](Self::write)
+    /// and returns no data.
+    fn write_bytes(&self, data: &dyn AbstractData) -> Result<Written, FormatError> {
+        let mut sink = io::Cursor::new(Vec::new());
+        self.write(data, &mut sink)?;
+        Ok(Written {
+            bytes: ar::SharedBuffer::new(sink.into_inner()),
+            data: None,
+        })
+    }
+}
+
+/// What [`FileFormat::write_bytes`] produces: the serialized bytes and, for
+/// a format whose data decodes from its bytes on demand, that data over them.
+pub struct Written {
+    /// The layer, serialized.
+    pub bytes: ar::SharedBuffer,
+    /// Data reading from `bytes`, for a layer to rebind to; `None` when the
+    /// format's data copies everything out of its bytes and a layer keeps
+    /// the data it has.
+    pub data: Option<LayerData>,
 }
 
 #[cfg(test)]

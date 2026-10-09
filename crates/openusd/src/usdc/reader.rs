@@ -47,7 +47,7 @@ const SW_VERSION: Version = version(0, 12, 0);
 #[derive(Debug)]
 pub struct CrateFile {
     /// The whole file.
-    bytes: ar::AssetBuffer,
+    pub(super) bytes: ar::AssetBuffer,
 
     /// File header.
     pub bootstrap: Bootstrap,
@@ -131,6 +131,11 @@ impl CrateFile {
             paths,
             specs,
         })
+    }
+
+    /// The whole file's bytes.
+    pub fn bytes(&self) -> &ar::AssetBuffer {
+        &self.bytes
     }
 
     /// Decode the value `rep` describes from the file's bytes.
