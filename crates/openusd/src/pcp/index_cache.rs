@@ -3380,7 +3380,7 @@ impl IndexCache {
         let mut to_build = Vec::new();
         let mut p = Some(path.clone());
         while let Some(pp) = p {
-            if pp == Path::abs_root() || self.is_indexed(&pp) {
+            if pp.is_abs_root() || self.is_indexed(&pp) {
                 break;
             }
             to_build.push(pp.clone());

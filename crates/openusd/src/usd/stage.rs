@@ -3452,7 +3452,7 @@ impl Stage {
         while let Some((path, parent)) = stack.pop() {
             let epoch = self.population_epoch();
             let mut passed = threads.then_some(epoch);
-            if path != sdf::Path::abs_root() {
+            if !path.is_abs_root() {
                 let status = if parent == Some(epoch) {
                     self.child_status_masked(&path, needed)?
                 } else {

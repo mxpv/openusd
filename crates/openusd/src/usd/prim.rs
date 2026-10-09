@@ -951,7 +951,7 @@ impl Prim {
     /// A prototype root is a group whatever it authors, as C++ `Usd_PrimData`
     /// sets it, so the walk from one of its descendants ends there.
     fn model_kind(&self) -> Result<Option<&'static str>> {
-        if self.path == sdf::Path::abs_root() || !self.stage.has_spec(&self.path)? {
+        if self.path.is_abs_root() || !self.stage.has_spec(&self.path)? {
             return Ok(None);
         }
         if self.stage.cache().is_prototype(&self.path) {

@@ -1489,7 +1489,7 @@ pub(crate) mod tests {
         let mut chain: Vec<Path> = Vec::new();
         let mut p = Some(path.clone());
         while let Some(pp) = p {
-            if pp == Path::abs_root() {
+            if pp.is_abs_root() {
                 break;
             }
             chain.push(pp.clone());
