@@ -3255,12 +3255,12 @@ fn lazy_reference_loads_on_demand() -> Result<()> {
 /// Opening a stage reads its root and session layers once each: the read that
 /// composes their expression variables is the one their stacks are built from.
 #[test]
-fn root_and_session_layers_read_once() -> Result<()> {
+fn root_layers_read_once() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let session = dir.path().join("session.usda");
-    std::fs::write(&root, "#usda 1.0\ndef \"World\" {}\n")?;
-    std::fs::write(&session, "#usda 1.0\n")?;
+    fs::write(&root, "#usda 1.0\ndef \"World\" {}\n")?;
+    fs::write(&session, "#usda 1.0\n")?;
     let opened = Rc::new(RefCell::new(Vec::new()));
     Stage::builder()
         .resolver(RecordingResolver::new(opened.clone()))
@@ -5045,7 +5045,7 @@ def "World"
 /// A prim sorts its properties into attributes and relationships by their
 /// composed spec, and a prototype root, which reads no opinions, has neither.
 #[test]
-fn properties_sorted_by_spec_type() -> Result<()> {
+fn properties_by_spec_type() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     fs::write(
@@ -5092,7 +5092,7 @@ def "A" (
 /// agree with `is_defined` and `is_abstract` asked one at a time, across
 /// `def`, `over` and `class` chains and an instance's prototype.
 #[test]
-fn prim_status_specifier_bits_match_queries() -> Result<()> {
+fn status_bits_match_queries() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     fs::write(
