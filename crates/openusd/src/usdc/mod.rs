@@ -1,6 +1,6 @@
 //! Binary file format (`usdc`) implementation.
 
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, fs, io, mem, path::Path, str};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, fs, io, mem, path::Path, str, sync::Arc};
 
 use layout::ValueRep;
 
@@ -381,11 +381,7 @@ impl sdf::FileFormat for UsdcFileFormat {
         Ok(Box::new(data))
     }
 
-    fn read_shared_bytes(
-        &self,
-        bytes: std::sync::Arc<[u8]>,
-        _source_name: &str,
-    ) -> Result<sdf::LayerData, sdf::FormatError> {
+    fn read_shared_bytes(&self, bytes: Arc<[u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
         let data =
             CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
         Ok(Box::new(data))
@@ -411,34 +407,8 @@ mod tests {
     use super::*;
     use crate::sdf::FileFormat;
     use crate::{Result, ar};
-    use std::sync::Arc;
 
-    /// An asset over shared bytes, as a resolver holding assets in memory
-    /// serves them.
-    struct SharedAsset(io::Cursor<Arc<[u8]>>);
-
-    impl io::Read for SharedAsset {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.0.read(buf)
-        }
-    }
-
-    impl io::Seek for SharedAsset {
-        fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
-            self.0.seek(pos)
-        }
-    }
-
-    impl ar::Asset for SharedAsset {
-        fn size(&self) -> io::Result<u64> {
-            Ok(self.0.get_ref().len() as u64)
-        }
-
-        fn shared_bytes(&self) -> Option<Arc<[u8]>> {
-            Some(self.0.get_ref().clone())
-        }
-    }
-
+    /// A resolver that serves one asset from bytes it holds in memory.
     struct SharedResolver(Arc<[u8]>);
 
     impl ar::Resolver for SharedResolver {
@@ -455,14 +425,14 @@ mod tests {
         }
 
         fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-            Ok(Box::new(SharedAsset(io::Cursor::new(self.0.clone()))))
+            Ok(Box::new(io::Cursor::new(self.0.clone())))
         }
     }
 
     /// A crate layer read from an asset that shares its bytes decodes from
-    /// those bytes, holding a reference rather than a copy.
+    /// those bytes and keeps a reference to them.
     #[test]
-    fn shared_asset_bytes_are_kept() -> Result<()> {
+    fn shared_bytes_kept() -> Result<()> {
         let mut layer = sdf::Data::new();
         layer.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
         let mut bytes = io::Cursor::new(Vec::new());
