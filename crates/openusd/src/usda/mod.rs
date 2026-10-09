@@ -87,7 +87,7 @@ mod tests {
 
     /// Text shared with an asset parses from the shared bytes.
     #[test]
-    fn shared_bytes_parse() {
+    fn shared_buffer_parse() {
         let bytes: Arc<[u8]> = b"#usda 1.0\ndef \"Root\"\n{\n}\n".to_vec().into();
         let data = UsdaFileFormat.read_bytes(bytes.into(), "shared.usda").expect("parse");
         assert_eq!(data.spec_type(&sdf::path("/Root").unwrap()), Some(SpecType::Prim));

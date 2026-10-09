@@ -15,7 +15,7 @@ use crate::{ar, sdf, usda, usdc};
 ///
 /// The directory is read once, at construction; an entry's local header is
 /// read only when that entry is requested. The entry's bytes come as a view
-/// of the package when the asset shares its bytes ([`ar::Asset::shared_bytes`]:
+/// of the package when the asset shares its bytes ([`ar::Asset::shared_buffer`]:
 /// a buffer a host holds, or a mapped file), and as a bounded read of the
 /// entry's range otherwise.
 pub struct Archive {
@@ -36,7 +36,7 @@ impl Archive {
 
     /// A package over `asset`, reading only its central directory.
     pub fn from_asset(asset: Box<dyn ar::Asset>) -> Result<Self, ArchiveError> {
-        let bytes = asset.shared_bytes();
+        let bytes = asset.shared_buffer();
         let archive = ZipArchive::new(asset)?;
         Ok(Archive { archive, bytes })
     }

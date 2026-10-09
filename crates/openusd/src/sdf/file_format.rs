@@ -176,7 +176,7 @@ pub trait FileFormat: Sync {
     /// [`read_bytes`](Self::read_bytes); one that reaches for sibling assets
     /// overrides this.
     fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData, FormatError> {
-        let bytes = resolver.open_asset(resolved)?.into_bytes()?;
+        let bytes = resolver.open_asset(resolved)?.into_buffer()?;
         self.read_bytes(bytes, &resolved.to_string())
     }
 

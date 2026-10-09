@@ -398,7 +398,7 @@ mod tests {
     /// A crate layer read from an asset that shares its bytes decodes from
     /// those bytes and keeps a reference to them.
     #[test]
-    fn shared_bytes_kept() -> Result<()> {
+    fn shared_buffer_kept() -> Result<()> {
         let mut layer = sdf::Data::new();
         layer.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
         let mut bytes = io::Cursor::new(Vec::new());

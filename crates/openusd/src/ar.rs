@@ -112,28 +112,33 @@ pub trait Asset: Read + Seek + Send {
 
     /// Reads the entire asset into a byte buffer.
     fn read_all(&mut self) -> io::Result<Vec<u8>> {
-        let size = self.size()? as usize;
+        let size = usize::try_from(self.size()?).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the asset is larger than this platform addresses",
+            )
+        })?;
         let mut buf = Vec::with_capacity(size);
         self.read_to_end(&mut buf)?;
         Ok(buf)
     }
 
-    /// The view of its bytes an asset over shared backing holds, without
-    /// consuming the asset (C++ `ArAsset::GetBuffer`); `None`, the default,
-    /// for an asset that has to be read.
+    /// Returns a shared view of the complete asset without consuming it,
+    /// or `None` if the asset must be read into a buffer (C++
+    /// `ArAsset::GetBuffer`).
     ///
-    /// The view is the complete asset from offset zero: byte for byte what
-    /// [`Read`] and [`Seek`] expose, and so for the asset's whole life.
-    fn shared_bytes(&self) -> Option<SharedBuffer> {
+    /// The view starts at offset zero and matches the bytes exposed through
+    /// [`Read`] and [`Seek`] for the asset's lifetime.
+    fn shared_buffer(&self) -> Option<SharedBuffer> {
         None
     }
 
-    /// The complete asset's bytes, consuming the asset: the view
-    /// [`shared_bytes`](Self::shared_bytes) offers when it offers one,
+    /// The complete asset as a buffer, consuming the asset: the view
+    /// [`shared_buffer`](Self::shared_buffer) returns when it returns one,
     /// otherwise what [`read_all`](Self::read_all) reads. An asset that owns
     /// its buffer hands it over.
-    fn into_bytes(mut self: Box<Self>) -> io::Result<AssetBuffer> {
-        match self.shared_bytes() {
+    fn into_buffer(mut self: Box<Self>) -> io::Result<AssetBuffer> {
+        match self.shared_buffer() {
             Some(view) => Ok(AssetBuffer::Shared(view)),
             None => self.read_all().map(AssetBuffer::Owned),
         }
@@ -141,7 +146,7 @@ pub trait Asset: Read + Seek + Send {
 }
 
 /// The bytes a layer decodes from: an asset's complete contents, as
-/// [`Asset::into_bytes`] yields them, or bytes that never were an asset,
+/// [`Asset::into_buffer`] yields them, or bytes that never were an asset,
 /// compiled into the program or handed over by a host. They live as long as
 /// the layer because a decoder may keep reading them: the crate format
 /// indexes into the buffer in place, while the text format copies out what
@@ -276,8 +281,9 @@ impl fmt::Debug for SharedBuffer {
 
 /// The backing a [`SharedBuffer`] views: bytes whose length and contents
 /// are fixed for as long as the source lives. The trait is sealed since every
-/// view relies on that promise; the sources are `&'static [u8]`, `Vec<u8>`
-/// and `Arc<[u8]>`.
+/// view relies on that promise; the sources are `&'static [u8]`, `Vec<u8>`,
+/// `Arc<[u8]>` and, with the `mmap` feature, a read-only file mapping, whose
+/// promise is the one [`DefaultResolver::map_files`] has its caller make.
 pub trait SharedSource: sealed::Sealed + Send + Sync {
     /// The whole of the source's bytes.
     fn bytes(&self) -> &[u8];
@@ -301,6 +307,13 @@ impl SharedSource for Arc<[u8]> {
     }
 }
 
+#[cfg(feature = "mmap")]
+impl SharedSource for memmap2::Mmap {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
 mod sealed {
     use std::sync::Arc;
 
@@ -309,6 +322,8 @@ mod sealed {
     impl Sealed for &'static [u8] {}
     impl Sealed for Vec<u8> {}
     impl Sealed for Arc<[u8]> {}
+    #[cfg(feature = "mmap")]
+    impl Sealed for memmap2::Mmap {}
 }
 
 impl Asset for fs::File {
@@ -323,7 +338,7 @@ impl Asset for io::Cursor<Vec<u8>> {
     }
 
     /// Hands the buffer over.
-    fn into_bytes(self: Box<Self>) -> io::Result<AssetBuffer> {
+    fn into_buffer(self: Box<Self>) -> io::Result<AssetBuffer> {
         Ok(AssetBuffer::Owned(self.into_inner()))
     }
 }
@@ -335,7 +350,7 @@ impl Asset for io::Cursor<Arc<[u8]>> {
         Ok(self.get_ref().len() as u64)
     }
 
-    fn shared_bytes(&self) -> Option<SharedBuffer> {
+    fn shared_buffer(&self) -> Option<SharedBuffer> {
         Some(SharedBuffer::new(Arc::clone(self.get_ref())))
     }
 }
@@ -347,7 +362,7 @@ impl Asset for io::Cursor<AssetBuffer> {
         Ok(self.get_ref().len() as u64)
     }
 
-    fn shared_bytes(&self) -> Option<SharedBuffer> {
+    fn shared_buffer(&self) -> Option<SharedBuffer> {
         match self.get_ref() {
             AssetBuffer::Shared(view) => Some(view.clone()),
             AssetBuffer::Static(_) | AssetBuffer::Owned(_) => None,
@@ -355,7 +370,7 @@ impl Asset for io::Cursor<AssetBuffer> {
     }
 
     /// Hands the buffer over.
-    fn into_bytes(self: Box<Self>) -> io::Result<AssetBuffer> {
+    fn into_buffer(self: Box<Self>) -> io::Result<AssetBuffer> {
         Ok(self.into_inner())
     }
 }
@@ -442,8 +457,15 @@ pub trait Resolver {
 ///
 /// This corresponds to `ArDefaultResolver` in the C++ USD API:
 /// <https://openusd.org/dev/api/class_ar_default_resolver.html>
+///
+/// A file asset is read into memory unless the resolver was told to map
+/// files ([`map_files`](Self::map_files)), in which case it is served from a
+/// read-only memory mapping and a layer holds no copy of its file.
 pub struct DefaultResolver {
     search_paths: Vec<PathBuf>,
+    /// Whether a file asset is served from a memory mapping.
+    #[cfg(feature = "mmap")]
+    map_files: bool,
 }
 
 impl DefaultResolver {
@@ -451,7 +473,39 @@ impl DefaultResolver {
     pub fn new() -> Self {
         Self {
             search_paths: Vec::new(),
+            #[cfg(feature = "mmap")]
+            map_files: false,
         }
+    }
+
+    /// Serves every file asset from a read-only memory mapping of it. A
+    /// layer then holds no copy of its file, and only the pages a read
+    /// touches are loaded. An empty file, or one the platform cannot map, is
+    /// read as before.
+    ///
+    /// # Safety
+    ///
+    /// A mapped file must not be modified, by this process or any other,
+    /// while anything read from it is alive: a layer, a package index, or an
+    /// [`AssetBuffer`] view. The caller guarantees that for every file this
+    /// resolver serves. The library upholds its half by never writing into a
+    /// file it holds a view of: [`Layer::save`](crate::sdf::Layer::save)
+    /// writes beside the file and renames over it, which unlinks the mapped
+    /// file and leaves its bytes as they are. On Windows the mapped file is
+    /// opened with write sharing denied, which keeps other processes from
+    /// opening it for writing meanwhile, and with delete sharing allowed,
+    /// which lets a rename over it go through. Neither establishes the
+    /// guarantee. If it is
+    /// broken, a read faults the process when the file has shrunk and is
+    /// undefined behaviour otherwise.
+    #[cfg(feature = "mmap")]
+    // Declaring the opt-in `unsafe` is what puts the promise on the caller;
+    // the method itself does nothing unsafe, which is why the crate's ban on
+    // unsafe code is lifted for its declaration alone.
+    #[allow(unsafe_code)]
+    pub unsafe fn map_files(mut self) -> Self {
+        self.map_files = true;
+        self
     }
 
     /// Creates a new default resolver with the given search paths.
@@ -463,7 +517,11 @@ impl DefaultResolver {
     /// [`identity`](Self::identity), identically.
     pub fn with_search_paths(paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         let search_paths = paths.into_iter().map(|p| normalize_search_path(p.into())).collect();
-        Self { search_paths }
+        Self {
+            search_paths,
+            #[cfg(feature = "mmap")]
+            map_files: false,
+        }
     }
 
     /// Searches for an asset by trying the path against the resolver's search
@@ -640,14 +698,68 @@ impl Resolver for DefaultResolver {
                 )
             })?;
 
-            let mut archive = usdz::Archive::open(Path::new(&package)).map_err(io::Error::other)?;
+            let mut archive =
+                usdz::Archive::from_asset(self.open_file(Path::new(&package))?).map_err(io::Error::other)?;
             let bytes = package_entry(&mut archive, &inner)?;
 
             return Ok(Box::new(io::Cursor::new(bytes)));
         }
 
-        let file = fs::File::open(&**resolved_path)?;
-        Ok(Box::new(file))
+        self.open_file(resolved_path)
+    }
+}
+
+impl DefaultResolver {
+    /// Opens the file at `path` as an asset: over a mapping of it when the
+    /// resolver maps files, over the file itself otherwise. A package is
+    /// opened the same way, so its entries are views of the mapping too.
+    fn open_file(&self, path: &Path) -> io::Result<Box<dyn Asset>> {
+        #[cfg(feature = "mmap")]
+        if self.map_files {
+            return open_mapped(path);
+        }
+        Ok(Box::new(fs::File::open(path)?))
+    }
+}
+
+/// Opens the file at `path` as an asset over a read-only mapping of it, or
+/// over the file itself when it is empty (Windows cannot map zero bytes) or
+/// the platform cannot map it.
+#[cfg(feature = "mmap")]
+// Mapping a file is `unsafe` in memmap2: a file changed underneath the map is
+// undefined behaviour, which no code here can rule out. The crate denies
+// `unsafe_code` everywhere else; the exemption stops at this call, whose
+// promise the caller of `DefaultResolver::map_files` makes.
+#[allow(unsafe_code)]
+fn open_mapped(path: &Path) -> io::Result<Box<dyn Asset>> {
+    let file = open_for_mapping(path)?;
+    if file.metadata()?.len() == 0 {
+        return Ok(Box::new(file));
+    }
+    // SAFETY: the mapping is read-only, and `DefaultResolver::map_files`, the
+    // only way here, is `unsafe` so that its caller promises the file is not
+    // modified while anything read from it is alive.
+    match unsafe { memmap2::Mmap::map(&file) } {
+        Ok(map) => Ok(Box::new(io::Cursor::new(AssetBuffer::Shared(SharedBuffer::new(map))))),
+        Err(_) => Ok(Box::new(file)),
+    }
+}
+
+/// Opens `path` for reading; on Windows with write sharing denied, which
+/// keeps any other process from opening the file for writing while the
+/// handle, or a mapping made from it, lives.
+#[cfg(feature = "mmap")]
+fn open_for_mapping(path: &Path) -> io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // `FILE_SHARE_READ | FILE_SHARE_DELETE` from the Windows SDK: readers
+        // and a rename may share the file, a writer may not.
+        fs::OpenOptions::new().read(true).share_mode(0x1 | 0x4).open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::File::open(path)
     }
 }
 
@@ -1363,20 +1475,20 @@ pub(crate) mod tests {
     /// it out and a shared one shares it. Reading the asset first leaves it
     /// intact.
     #[test]
-    fn cursor_into_bytes() {
+    fn cursor_into_buffer() {
         let data = b"hello world".to_vec();
         let pointer = data.as_ptr();
         let mut asset: Box<dyn Asset> = Box::new(io::Cursor::new(data));
         assert_eq!(asset.read_all().unwrap(), b"hello world");
         assert_eq!(asset.size().unwrap(), 11);
-        let AssetBuffer::Owned(moved) = asset.into_bytes().unwrap() else {
+        let AssetBuffer::Owned(moved) = asset.into_buffer().unwrap() else {
             panic!("an owned cursor moves its buffer out");
         };
         assert_eq!(moved.as_ptr(), pointer);
 
         let shared: Arc<[u8]> = b"hello world".to_vec().into();
         let asset: Box<dyn Asset> = Box::new(io::Cursor::new(shared.clone()));
-        let AssetBuffer::Shared(view) = asset.into_bytes().unwrap() else {
+        let AssetBuffer::Shared(view) = asset.into_buffer().unwrap() else {
             panic!("a shared cursor shares its buffer");
         };
         assert_eq!(view.as_ptr(), shared.as_ptr());
@@ -1400,10 +1512,54 @@ pub(crate) mod tests {
         assert!(view.slice(32..32).is_some());
     }
 
+    /// A file asset is read, and offers no view, unless the resolver maps
+    /// files.
+    #[test]
+    fn file_asset_read() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("asset.bin");
+        fs::write(&path, b"hello world")?;
+        let asset = DefaultResolver::new().open_asset(&ResolvedPath::new(&path))?;
+        assert!(asset.shared_buffer().is_none());
+        let AssetBuffer::Owned(bytes) = asset.into_buffer()? else {
+            panic!("a file asset is read");
+        };
+        assert_eq!(bytes, b"hello world");
+        Ok(())
+    }
+
+    /// With the opt-in a file asset is a view of its mapping, as long as the
+    /// file; an empty file, which cannot be mapped, is read.
+    #[cfg(feature = "mmap")]
+    #[test]
+    // The opt-in is `unsafe` by contract, and this test, the only writer of
+    // its directory, can make the promise.
+    #[allow(unsafe_code)]
+    fn file_asset_mapped() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("asset.bin");
+        fs::write(&path, b"hello world")?;
+        // SAFETY: nothing writes the files in this directory while they are
+        // mapped.
+        let resolver = unsafe { DefaultResolver::new().map_files() };
+        let asset = resolver.open_asset(&ResolvedPath::new(&path))?;
+        let view = asset.shared_buffer().expect("a mapped file offers its bytes");
+        assert_eq!(view.len() as u64, fs::metadata(&path)?.len());
+        assert_eq!(&*view, b"hello world");
+        assert!(matches!(asset.into_buffer()?, AssetBuffer::Shared(_)));
+
+        let empty = dir.path().join("empty.bin");
+        fs::write(&empty, b"")?;
+        let asset = resolver.open_asset(&ResolvedPath::new(&empty))?;
+        assert!(asset.shared_buffer().is_none());
+        assert!(matches!(asset.into_buffer()?, AssetBuffer::Owned(bytes) if bytes.is_empty()));
+        Ok(())
+    }
+
     /// Turning an owned buffer into a view keeps its allocation, and an
     /// in-memory asset's view is the whole asset from offset zero.
     #[test]
-    fn shared_bytes_whole_asset() {
+    fn shared_buffer_whole_asset() {
         let data = b"hello world".to_vec();
         let pointer = data.as_ptr();
         let view = AssetBuffer::Owned(data).into_shared();
@@ -1413,17 +1569,21 @@ pub(crate) mod tests {
         let shared: Arc<[u8]> = b"hello world".to_vec().into();
         let mut asset = io::Cursor::new(shared.clone());
         asset.seek(io::SeekFrom::Start(6)).unwrap();
-        let view = asset.shared_bytes().expect("a shared cursor offers its bytes");
+        let view = asset.shared_buffer().expect("a shared cursor offers its bytes");
         asset.seek(io::SeekFrom::Start(0)).unwrap();
         assert_eq!(&*view, asset.read_all().unwrap().as_slice());
 
         let mut asset = io::Cursor::new(AssetBuffer::Shared(view));
         assert_eq!(
-            asset.shared_bytes().expect("a view is offered").as_ptr(),
+            asset.shared_buffer().expect("a view is offered").as_ptr(),
             shared.as_ptr()
         );
         assert_eq!(asset.read_all().unwrap(), b"hello world");
-        assert!(io::Cursor::new(AssetBuffer::Owned(Vec::new())).shared_bytes().is_none());
+        assert!(
+            io::Cursor::new(AssetBuffer::Owned(Vec::new()))
+                .shared_buffer()
+                .is_none()
+        );
     }
 
     #[test]

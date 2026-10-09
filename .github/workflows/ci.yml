@@ -21,11 +21,22 @@ jobs:
         with:
           submodules: true
 
-      - run: cargo check --workspace --examples --tests
+      # `shell: bash` so an earlier failing command fails the step on every
+      # runner; the Windows default shell only reports the last command's exit
+      # code.
+      - name: Check
+        shell: bash
+        run: |
+          cargo check --workspace --examples --tests
+          cargo check -p openusd --no-default-features --all-targets
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo fmt --all -- --check --files-with-diff
       - run: cargo doc --workspace --no-deps
-      - run: cargo test --workspace --all-targets --all-features
+      - name: Test
+        shell: bash
+        run: |
+          cargo test --workspace --all-targets --all-features
+          cargo test -p openusd --no-default-features --lib
 
       # The members require each other by version, and a stale value there
       # publishes a crate pinned to the previous release. Nothing else catches

@@ -12283,14 +12283,40 @@ fn instancing_edits_refused() -> Result<()> {
 #[test]
 fn save_keeps_composed_values_quiet() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let root = dir.path().join("scene.usdc");
+    let root = quiet_save_root(dir.path())?;
+    quiet_save(Stage::open(&root)?, &root)
+}
+
+/// The same through a resolver that maps files: the save releases the
+/// layer's view of its file and rebinds to the written bytes.
+#[cfg(feature = "mmap")]
+#[test]
+// The mapping opt-in is `unsafe` by contract, and this test, the only writer
+// of its directory, can make the promise.
+#[allow(unsafe_code)]
+fn save_keeps_composed_values_quiet_mapped() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = quiet_save_root(dir.path())?;
+    // SAFETY: only the save under test writes the files in this directory,
+    // and a save never writes into a file it holds a view of.
+    let resolver = unsafe { ar::DefaultResolver::new().map_files() };
+    quiet_save(Stage::builder().resolver(resolver).open(&root)?, &root)
+}
+
+/// Writes the crate root layer the quiet-save tests open, returning its path.
+fn quiet_save_root(dir: &FsPath) -> Result<String> {
+    let root = dir.join("scene.usdc");
     sdf::Layer::from_bytes(
         "scene",
         b"#usda 1.0\ndef \"World\"\n{\n    float[] sizes = [1, 2, 3]\n}\n".as_slice(),
     )?
     .export(root.to_string_lossy())?;
-    let root = root.to_str().expect("utf-8 temp path");
-    let stage = Stage::open(root)?;
+    Ok(root.to_str().expect("utf-8 temp path").to_owned())
+}
+
+/// Authors an attribute on `stage`, saves its root layer, and checks that no
+/// sink fired and nothing composed changed.
+fn quiet_save(stage: Stage, root: &str) -> Result<()> {
     stage.edit(|edit| edit.attribute_builder("/World.answer", "int").set(42).build())?;
     let sizes = stage.attribute("/World.sizes")?.get::<Vec<f32>>()?;
     let answer = stage.attribute("/World.answer")?.get::<i32>()?;

@@ -363,8 +363,9 @@ impl Layer {
     /// `.usd` path still reads back correctly.
     ///
     /// The file is written beside the destination and renamed over it once
-    /// complete, so the destination is never a half-written file and a file a
-    /// layer reads from is never written into. A destination this layer
+    /// complete, keeping the destination's permissions. The destination is
+    /// therefore never a half-written file, and a file a layer reads from is
+    /// never written into. A destination this layer
     /// itself reads from is written through [`save`](Self::save), which also
     /// rebinds the layer to what it wrote.
     pub fn export(&self, filename: impl AsRef<str>) -> Result<(), ExportError> {
@@ -403,14 +404,17 @@ impl Layer {
     /// through its format, dropping the bytes it read before, which releases
     /// any view of its own file it held; a file that fails to parse leaves the
     /// old bytes in place. Last the temporary file is renamed over the layer's
-    /// own, which replaces it atomically; a rename that fails (a file another
-    /// layer in this process still views on Windows, a destination that is no
-    /// longer a file) is [`ExportError::Replace`], the temporary file is
-    /// removed, and the layer keeps the rebound bytes, so its edits stay in
+    /// own, which replaces it atomically; a rename that fails (a destination
+    /// that is no longer a file, a filesystem that refuses it) is
+    /// [`ExportError::Replace`]: the temporary file is
+    /// removed and the layer keeps the rebound bytes, which holds its edits in
     /// memory for a later save to retry. Rebinding is not an edit: no change
     /// list is derived and no sink fires. The rebound bytes are a heap buffer
     /// whatever the layer read from before; a layer that reads through a
-    /// mapping maps its file again on its next open through the resolver.
+    /// mapping maps its file again on its next open through the resolver. A
+    /// view another layer holds of the file does not block the replacement:
+    /// that layer goes on reading the file it mapped, which the rename
+    /// unlinks and leaves as it was.
     pub fn save(&mut self) -> Result<(), ExportError> {
         if self.is_anonymous() {
             return Err(ExportError::Anonymous {
@@ -1137,14 +1141,14 @@ impl Drop for GroupEditGuard<'_, '_> {
 /// destination at once.
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A file written beside its destination and renamed over it once complete,
-/// so the destination is never a half-written file and a file a layer reads
-/// from is never written into. Dropped without [`persist`](Self::persist),
-/// the file is removed.
+/// A file written beside its destination and renamed over it once complete.
+/// The destination is therefore never a half-written file, and a file a layer
+/// reads from is never written into. Dropped without
+/// [`persist`](Self::persist), the file is removed.
 struct TempFile {
     destination: String,
     path: PathBuf,
-    /// Taken by [`persist`](Self::persist), so the handle is closed before
+    /// Taken by [`persist`](Self::persist), which closes the handle before
     /// the rename.
     file: Option<fs::File>,
 }
@@ -1163,11 +1167,22 @@ impl TempFile {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let path = target.with_file_name(format!(".{}.{}-{seq}.tmp", name.to_string_lossy(), process::id()));
         let file = fs::File::create_new(&path).map_err(create)?;
-        Ok(TempFile {
+        let temp = TempFile {
             destination: destination.to_owned(),
             path,
             file: Some(file),
-        })
+        };
+        // The replacement keeps the destination's permissions. The temporary
+        // file is created with the process's default mode, which would widen
+        // a restricted destination once renamed over it, so a destination that
+        // exists lends its mode before anything is written. Windows permissions
+        // reduce to the read-only attribute, which would refuse the write and
+        // the rename alike, so nothing is copied there.
+        #[cfg(unix)]
+        if let Ok(existing) = fs::metadata(&temp.destination) {
+            fs::set_permissions(&temp.path, existing.permissions()).map_err(create)?;
+        }
+        Ok(temp)
     }
 
     /// The file, to write to.
@@ -1335,6 +1350,23 @@ mod tests {
         Ok(())
     }
 
+    /// Replacing a file keeps its permissions: a private layer stays private
+    /// after a save and after an export over it.
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_permissions() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let path = crate_fixture(dir.path())?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        layer.save()?;
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        layer.export(path.to_string_lossy())?;
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        Ok(())
+    }
+
     /// An export over an existing file leaves only that file behind, and one
     /// that cannot create its temporary file leaves nothing.
     #[test]
@@ -1348,6 +1380,46 @@ mod tests {
         let error = layer.export(missing.to_string_lossy()).expect_err("no such directory");
         assert!(matches!(error, ExportError::Create { .. }), "{error:?}");
         assert_eq!(fs::read_dir(dir.path())?.count(), 1);
+        Ok(())
+    }
+
+    /// A view another layer holds does not block a save: the file is replaced
+    /// under it, the other layer goes on reading the bytes it mapped, and a
+    /// fresh open sees the edit.
+    #[cfg(feature = "mmap")]
+    #[test]
+    // The mapping opt-in is `unsafe` by contract, and this test, the only
+    // writer of its directory, can make the promise.
+    #[allow(unsafe_code)]
+    fn save_with_other_view() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = crate_fixture(dir.path())?;
+        // SAFETY: only the save below writes the files in this directory, and
+        // a save never writes into a file it holds a view of: it replaces the
+        // file beside it.
+        let resolver = unsafe { ar::DefaultResolver::new().map_files() };
+        let registry = crate::sdf::LayerRegistry::new(Box::new(resolver));
+        let identifier = registry.create_identifier(&path.to_string_lossy(), None);
+        let mut editing = registry.open_layer(&identifier)?.expect("the layer resolves");
+        let other = registry.open_layer(&identifier)?.expect("the layer resolves");
+        edit_layer(&mut editing, |e| {
+            e.prim_mut("/World")
+                .unwrap()
+                .expect("the prim exists")
+                .set_kind("component");
+        });
+
+        editing.save()?;
+        let component = Some(Value::Token("component".into()));
+        assert_eq!(world_kind(&editing), component);
+        assert_eq!(world_kind(&other), None, "the other view reads the file it mapped");
+        let size = other
+            .data()
+            .get_field(&Path::new("/World.size")?, "default")
+            .expect("still decodes from its view")
+            .into_owned();
+        assert_eq!(size, Value::FloatVec(vec![1.0; 64]));
+        assert_eq!(world_kind(&Layer::open(path.to_string_lossy())?), component);
         Ok(())
     }
 

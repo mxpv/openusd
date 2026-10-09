@@ -508,7 +508,7 @@ impl LayerRegistry {
             let bytes = self
                 .resolver
                 .open_asset(resolved)
-                .and_then(|asset| asset.into_bytes())
+                .and_then(|asset| asset.into_buffer())
                 .map_err(sdf::FormatError::from)?;
             return Ok(Self::read_bytes(bytes, &resolved.to_string())?);
         }

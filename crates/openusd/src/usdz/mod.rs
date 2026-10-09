@@ -360,7 +360,7 @@ mod tests {
     /// A package read from an asset that shares its bytes decodes its default
     /// layer from the shared bytes.
     #[test]
-    fn shared_bytes_read() -> Result<()> {
+    fn shared_buffer_read() -> Result<()> {
         let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()));
         writer.add_layer("root.usda", b"#usda 1.0\ndef \"Root\" {}\n")?;
         let package: Arc<[u8]> = writer.finish()?.into_inner().into();

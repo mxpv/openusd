@@ -22,7 +22,11 @@
 //! without it the default value is read and no sample is touched. `--save`
 //! adds a phase that authors one attribute and saves the root layer; it runs
 //! on a copy of a single-file root in the temporary directory, so the file
-//! named on the command line is never written.
+//! named on the command line is never written. `--no-arrays` skips the
+//! array phase, for measuring what a stage that never reads its arrays
+//! holds. `--mmap` opens the scene through a resolver that maps files (the
+//! `mmap` feature), which asks that nothing write the scene's files while
+//! the benchmark runs.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::mem;
@@ -32,13 +36,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use std::{env, fs};
 
-use openusd::sdf;
+#[cfg(feature = "mmap")]
+use openusd::ar;
 use openusd::usd::{PrimPredicate, Stage, TimeCode};
-use openusd::{Error, Result};
+use openusd::{Error, Result, sdf};
 
 fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
-        eprintln!("usage: open_bench [--time <t>] [--save] <root.usd[a|c|z]>");
+        eprintln!("usage: open_bench [--time <t>] [--save] [--no-arrays] [--mmap] <root.usd[a|c|z]>");
         process::exit(2);
     };
     let root = match args.save {
@@ -48,7 +53,10 @@ fn main() -> Result<()> {
     let root = root.to_str().expect("a UTF-8 path");
 
     let phase = Phase::start("open");
-    let stage = Stage::open(root)?;
+    let stage = match args.mmap {
+        true => open_mapped(root)?,
+        false => Stage::open(root)?,
+    };
     phase.end("");
 
     let phase = Phase::start("metadata");
@@ -59,20 +67,22 @@ fn main() -> Result<()> {
     }
     phase.end(&format!("prims: {}", prims.len()));
 
-    let phase = Phase::start("arrays");
-    let time = args.time.map(TimeCode::new);
-    let (mut arrays, mut decoded) = (0usize, 0usize);
-    for path in &prims {
-        for attribute in stage.prim(path.clone())?.attributes()? {
-            if let Some(value) = attribute.get_at::<sdf::Value>(time)?
-                && let Some(bytes) = array_bytes(&value)
-            {
-                arrays += 1;
-                decoded += bytes;
+    if !args.no_arrays {
+        let phase = Phase::start("arrays");
+        let time = args.time.map(TimeCode::new);
+        let (mut arrays, mut decoded) = (0usize, 0usize);
+        for path in &prims {
+            for attribute in stage.prim(path.clone())?.attributes()? {
+                if let Some(value) = attribute.get_at::<sdf::Value>(time)?
+                    && let Some(bytes) = array_bytes(&value)
+                {
+                    arrays += 1;
+                    decoded += bytes;
+                }
             }
         }
+        phase.end(&format!("arrays: {arrays}  decoded: {}", mib(decoded)));
     }
-    phase.end(&format!("arrays: {arrays}  decoded: {}", mib(decoded)));
 
     if args.save {
         let phase = Phase::start("save");
@@ -91,11 +101,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The command line: the root layer to open and the two optional switches.
+/// The command line: the root layer to open and the optional switches.
 struct Args {
     root: PathBuf,
     time: Option<f64>,
     save: bool,
+    no_arrays: bool,
+    mmap: bool,
 }
 
 impl Args {
@@ -106,16 +118,39 @@ impl Args {
             root: PathBuf::new(),
             time: None,
             save: false,
+            no_arrays: false,
+            mmap: false,
         };
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--time" => parsed.time = Some(args.next()?.parse().ok()?),
                 "--save" => parsed.save = true,
+                "--no-arrays" => parsed.no_arrays = true,
+                "--mmap" => parsed.mmap = true,
                 _ => parsed.root = PathBuf::from(arg),
             }
         }
         (!parsed.root.as_os_str().is_empty()).then_some(parsed)
     }
+}
+
+/// Opens the stage at `root` through a resolver that maps files.
+#[cfg(feature = "mmap")]
+// The mapping opt-in is `unsafe` by contract; `--mmap` passes the promise on
+// to whoever runs the benchmark, as the usage text says.
+#[allow(unsafe_code)]
+fn open_mapped(root: &str) -> Result<Stage> {
+    // SAFETY: the benchmark only reads the scene, and `--mmap` asks its user
+    // to keep every other writer away from the scene's files while it runs.
+    let resolver = unsafe { ar::DefaultResolver::new().map_files() };
+    Stage::builder().resolver(resolver).open(root)
+}
+
+/// `--mmap` without the feature that provides it.
+#[cfg(not(feature = "mmap"))]
+fn open_mapped(_root: &str) -> Result<Stage> {
+    eprintln!("--mmap needs the mmap feature");
+    process::exit(2);
 }
 
 /// Copies the single-file root at `root` into the temporary directory, where
