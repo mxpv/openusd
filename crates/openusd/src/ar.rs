@@ -116,12 +116,25 @@ pub trait Asset: Read + Seek + Send {
         Ok(buf)
     }
 
-    /// The complete asset's bytes, consuming the asset. The default reads
-    /// them with [`read_all`](Self::read_all); an asset that already holds
-    /// them in memory hands them over, owned or shared (C++
-    /// `ArAsset::GetBuffer`).
+    /// The view of its bytes an asset over shared backing holds, without
+    /// consuming the asset (C++ `ArAsset::GetBuffer`); `None`, the default,
+    /// for an asset that has to be read.
+    ///
+    /// The view is the complete asset from offset zero: byte for byte what
+    /// [`Read`] and [`Seek`] expose, and so for the asset's whole life.
+    fn shared_bytes(&self) -> Option<SharedBuffer> {
+        None
+    }
+
+    /// The complete asset's bytes, consuming the asset: the view
+    /// [`shared_bytes`](Self::shared_bytes) offers when it offers one,
+    /// otherwise what [`read_all`](Self::read_all) reads. An asset that owns
+    /// its buffer hands it over.
     fn into_bytes(mut self: Box<Self>) -> io::Result<AssetBuffer> {
-        self.read_all().map(AssetBuffer::Owned)
+        match self.shared_bytes() {
+            Some(view) => Ok(AssetBuffer::Shared(view)),
+            None => self.read_all().map(AssetBuffer::Owned),
+        }
     }
 }
 
@@ -137,8 +150,22 @@ pub enum AssetBuffer {
     Static(&'static [u8]),
     /// Bytes the caller owns outright.
     Owned(Vec<u8>),
-    /// Bytes shared with whoever else holds them.
-    Shared(Arc<[u8]>),
+    /// A view of bytes somebody else holds: a buffer a host resolver keeps,
+    /// or a mapped file.
+    Shared(SharedBuffer),
+}
+
+impl AssetBuffer {
+    /// This buffer as a view, sharing its bytes from then on: a `Static` or
+    /// `Owned` buffer becomes the source of a view over all of it, without
+    /// copying, and a `Shared` one is returned as it is.
+    pub fn into_shared(self) -> SharedBuffer {
+        match self {
+            AssetBuffer::Static(bytes) => SharedBuffer::new(bytes),
+            AssetBuffer::Owned(bytes) => SharedBuffer::new(bytes),
+            AssetBuffer::Shared(view) => view,
+        }
+    }
 }
 
 impl Deref for AssetBuffer {
@@ -148,7 +175,7 @@ impl Deref for AssetBuffer {
         match self {
             AssetBuffer::Static(bytes) => bytes,
             AssetBuffer::Owned(bytes) => bytes,
-            AssetBuffer::Shared(bytes) => bytes,
+            AssetBuffer::Shared(view) => view,
         }
     }
 }
@@ -173,8 +200,112 @@ impl From<Vec<u8>> for AssetBuffer {
 
 impl From<Arc<[u8]>> for AssetBuffer {
     fn from(bytes: Arc<[u8]>) -> Self {
-        AssetBuffer::Shared(bytes)
+        AssetBuffer::Shared(SharedBuffer::new(bytes))
     }
+}
+
+impl From<SharedBuffer> for AssetBuffer {
+    fn from(view: SharedBuffer) -> Self {
+        AssetBuffer::Shared(view)
+    }
+}
+
+/// A view of bytes a [`SharedSource`] holds: the range of the source it
+/// covers, which it never outgrows. A clone shares the source, and
+/// [`slice`](Self::slice) narrows the range without copying, so a package
+/// entry is a view of its package and a layer's bytes a view of its asset.
+///
+/// A source's bytes have a fixed length and fixed contents for as long as
+/// any view of it lives. The sources are a sealed set that each guarantee
+/// that on their own, so the range recorded here stays within the source
+/// and a view never reads past it.
+#[derive(Clone)]
+pub struct SharedBuffer {
+    source: Arc<dyn SharedSource>,
+    range: Range<usize>,
+}
+
+impl SharedBuffer {
+    /// A view of the whole of `source`.
+    pub fn new(source: impl SharedSource + 'static) -> Self {
+        let len = source.bytes().len();
+        SharedBuffer {
+            source: Arc::new(source),
+            range: 0..len,
+        }
+    }
+
+    /// The view of `range` within this view, sharing the source, or `None`
+    /// when `range` reaches past it.
+    pub fn slice(&self, range: Range<usize>) -> Option<SharedBuffer> {
+        if range.start > range.end || range.end > self.range.len() {
+            return None;
+        }
+        Some(SharedBuffer {
+            source: Arc::clone(&self.source),
+            range: self.range.start + range.start..self.range.start + range.end,
+        })
+    }
+}
+
+impl Deref for SharedBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.source.bytes()[self.range.clone()]
+    }
+}
+
+impl AsRef<[u8]> for SharedBuffer {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl fmt::Debug for SharedBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedBuffer")
+            .field("range", &self.range)
+            .field("source_len", &self.source.bytes().len())
+            .finish()
+    }
+}
+
+/// The backing a [`SharedBuffer`] views: bytes whose length and contents
+/// are fixed for as long as the source lives. Sealed, because that promise
+/// is what every view relies on; the sources are `&'static [u8]`, `Vec<u8>`
+/// and `Arc<[u8]>`.
+pub trait SharedSource: sealed::Sealed + Send + Sync {
+    /// The whole of the source's bytes.
+    fn bytes(&self) -> &[u8];
+}
+
+impl SharedSource for &'static [u8] {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl SharedSource for Vec<u8> {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl SharedSource for Arc<[u8]> {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+mod sealed {
+    use std::sync::Arc;
+
+    pub trait Sealed {}
+
+    impl Sealed for &'static [u8] {}
+    impl Sealed for Vec<u8> {}
+    impl Sealed for Arc<[u8]> {}
 }
 
 impl Asset for fs::File {
@@ -201,9 +332,28 @@ impl Asset for io::Cursor<Arc<[u8]>> {
         Ok(self.get_ref().len() as u64)
     }
 
-    /// Shares the buffer.
+    fn shared_bytes(&self) -> Option<SharedBuffer> {
+        Some(SharedBuffer::new(Arc::clone(self.get_ref())))
+    }
+}
+
+/// An asset over a buffer already in hand, as a package entry or a layer a
+/// host hands over is served.
+impl Asset for io::Cursor<AssetBuffer> {
+    fn size(&self) -> io::Result<u64> {
+        Ok(self.get_ref().len() as u64)
+    }
+
+    fn shared_bytes(&self) -> Option<SharedBuffer> {
+        match self.get_ref() {
+            AssetBuffer::Shared(view) => Some(view.clone()),
+            AssetBuffer::Static(_) | AssetBuffer::Owned(_) => None,
+        }
+    }
+
+    /// Hands the buffer over.
     fn into_bytes(self: Box<Self>) -> io::Result<AssetBuffer> {
-        Ok(AssetBuffer::Shared(self.into_inner()))
+        Ok(self.into_inner())
     }
 }
 
@@ -1237,10 +1387,54 @@ pub(crate) mod tests {
 
         let shared: Arc<[u8]> = b"hello world".to_vec().into();
         let asset: Box<dyn Asset> = Box::new(io::Cursor::new(shared.clone()));
-        let AssetBuffer::Shared(bytes) = asset.into_bytes().unwrap() else {
+        let AssetBuffer::Shared(view) = asset.into_bytes().unwrap() else {
             panic!("a shared cursor shares its buffer");
         };
-        assert!(Arc::ptr_eq(&bytes, &shared));
+        assert_eq!(view.as_ptr(), shared.as_ptr());
+    }
+
+    /// A view's bytes are the source's own, a slice of a slice composes the
+    /// ranges, and a range past the view is refused.
+    #[test]
+    fn shared_slice() {
+        let source: Arc<[u8]> = (0..32u8).collect::<Vec<_>>().into();
+        let view = SharedBuffer::new(source.clone());
+        assert_eq!(view.as_ptr(), source.as_ptr());
+        let middle = view.slice(8..24).expect("within the view");
+        assert_eq!(middle.as_ptr(), source[8..].as_ptr());
+        assert_eq!(&*middle, &source[8..24]);
+        let inner = middle.slice(4..8).expect("within the slice");
+        assert_eq!(&*inner, &source[12..16]);
+        assert!(middle.slice(8..17).is_none());
+        let (start, end) = (5, 4);
+        assert!(middle.slice(start..end).is_none());
+        assert!(view.slice(32..32).is_some());
+    }
+
+    /// Turning an owned buffer into a view keeps its allocation, and an
+    /// in-memory asset's view is the whole asset from offset zero.
+    #[test]
+    fn shared_bytes_whole_asset() {
+        let data = b"hello world".to_vec();
+        let pointer = data.as_ptr();
+        let view = AssetBuffer::Owned(data).into_shared();
+        assert_eq!(view.as_ptr(), pointer);
+        assert_eq!(&*view, b"hello world");
+
+        let shared: Arc<[u8]> = b"hello world".to_vec().into();
+        let mut asset = io::Cursor::new(shared.clone());
+        asset.seek(io::SeekFrom::Start(6)).unwrap();
+        let view = asset.shared_bytes().expect("a shared cursor offers its bytes");
+        asset.seek(io::SeekFrom::Start(0)).unwrap();
+        assert_eq!(&*view, asset.read_all().unwrap().as_slice());
+
+        let mut asset = io::Cursor::new(AssetBuffer::Shared(view));
+        assert_eq!(
+            asset.shared_bytes().expect("a view is offered").as_ptr(),
+            shared.as_ptr()
+        );
+        assert_eq!(asset.read_all().unwrap(), b"hello world");
+        assert!(io::Cursor::new(AssetBuffer::Owned(Vec::new())).shared_bytes().is_none());
     }
 
     #[test]

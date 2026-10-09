@@ -339,7 +339,7 @@ mod tests {
         writer.add_layer("root.usda", b"#usda 1.0\ndef \"Root\" {}\n")?;
         let package: Arc<[u8]> = writer.finish()?.into_inner().into();
         let resolver = TestResolver({
-            let package = package.clone();
+            let package = ar::AssetBuffer::from(package.clone());
             move || -> io::Result<Box<dyn ar::Asset>> { Ok(Box::new(Cursor::new(package.clone()))) }
         });
 
