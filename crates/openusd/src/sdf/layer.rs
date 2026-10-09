@@ -1301,6 +1301,37 @@ mod tests {
         Ok(())
     }
 
+    /// Replacing a file on Windows keeps its access control list: a layer
+    /// whose list is explicit and uninherited stays so after a save and an
+    /// export over it.
+    #[cfg(windows)]
+    #[test]
+    fn save_keeps_acl() -> Result<()> {
+        use std::env;
+        use std::process::Command;
+        let dir = tempfile::tempdir()?;
+        let path = crate_fixture(dir.path())?;
+        let file = path.to_str().expect("utf-8 temp path");
+        let icacls = |args: &[&str]| -> Result<String> {
+            let output = Command::new("icacls").args(args).output()?;
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        };
+        let grant = format!("{}:(R,W)", env::var("USERNAME").expect("USERNAME is set"));
+        icacls(&[file, "/inheritance:r", "/grant:r", &grant])?;
+        let before = icacls(&[file])?;
+        assert!(before.contains("(R,W)"), "{before}");
+
+        let mut layer = Layer::open(file)?;
+        set_component(&mut layer);
+        layer.save()?;
+        assert_eq!(icacls(&[file])?, before, "the list survives the save");
+        layer.export(file)?;
+        assert_eq!(icacls(&[file])?, before, "the list survives the export");
+        assert_eq!(world_kind(&Layer::open(file)?), Some(tf::Token::from("component")));
+        Ok(())
+    }
+
     /// Replacing a file keeps its permissions: a private layer stays private
     /// after a save and after an export over it.
     #[cfg(unix)]

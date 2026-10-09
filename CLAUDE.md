@@ -353,6 +353,8 @@ Key external dependencies:
 - `thiserror` - Error type derive macros behind every error type, from the
   per-module errors (`sdf::AuthoringError`, `pcp::QueryError`) up to the root
   `openusd::Error` they nest into
+- `windows-sys` (Windows only) - The Win32 security API, through which a
+  replaced layer file keeps its access control list
 - `zip` - USDZ archive reading
 - `serde` (optional, `serde` feature) - Serialization support
 

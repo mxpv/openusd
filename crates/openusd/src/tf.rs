@@ -213,15 +213,15 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 impl SafeOutputFile {
     /// Creates the file beside `destination`.
     ///
-    /// On Unix the replacement keeps the destination's mode: a destination
-    /// that exists lends it at [`persist`](Self::persist), and until then the
-    /// file is readable by its owner alone, so no reader sees it under a
-    /// wider mode in between. A destination that does not exist leaves the
-    /// file with the process's default mode. On Windows the replacement
-    /// carries the access control the directory gives a new file, as C++
-    /// `TfSafeOutputFile` does; an access control list set on the old file
-    /// itself is not carried over, since the standard library exposes no
-    /// way to copy one.
+    /// The replacement keeps the destination's permissions, and nothing
+    /// reads the file under wider access than the destination allows in the
+    /// meantime. On Unix a destination that exists lends its mode at
+    /// [`persist`](Self::persist), and until then the file is readable by its
+    /// owner alone. On Windows the file takes the destination's access
+    /// control list, inheritance state included, before anything is written
+    /// into it; a list that cannot be read or applied is an error. A
+    /// destination that does not exist leaves the file with the process's
+    /// default mode or the directory's defaults.
     pub(crate) fn create(destination: &Path) -> io::Result<Self> {
         let destination = real_path(destination);
         let name = destination
@@ -237,12 +237,17 @@ impl SafeOutputFile {
             options.mode(0o600);
         }
         let file = options.open(&path)?;
-        Ok(SafeOutputFile {
+        let temp = SafeOutputFile {
             destination,
             path,
             file: Some(file),
             persisted: false,
-        })
+        };
+        #[cfg(windows)]
+        if temp.destination.exists() {
+            copy_access_control(&temp.destination, &temp.path)?;
+        }
+        Ok(temp)
     }
 
     /// The file, to write to.
@@ -273,6 +278,84 @@ impl Drop for SafeOutputFile {
             let _ = fs::remove_file(&self.path);
         }
     }
+}
+
+/// Gives `to` the discretionary access control list of `from`, with the
+/// same inheritance state: what a file replacing `from` needs to keep its
+/// access control. A list that cannot be read or applied is an error.
+#[cfg(windows)]
+// The Win32 security API is reachable only through FFI. The crate denies
+// `unsafe_code` everywhere else; the exemption stops at this function.
+#[allow(unsafe_code)]
+fn copy_access_control(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW};
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, PROTECTED_DACL_SECURITY_INFORMATION,
+        SE_DACL_PROTECTED, UNPROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let wide = |path: &Path| path.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>();
+    let (from, to) = (wide(from), wide(to));
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    // SAFETY: `from` is a NUL-terminated wide string that outlives the call,
+    // and each out-pointer is a live local the call writes once. The
+    // descriptor the call allocates is released below.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            from.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let mut control = 0;
+    let mut revision = 0;
+    // SAFETY: `descriptor` is the descriptor the call above returned, still
+    // allocated, and the out-pointers are live locals.
+    let known = unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } != 0;
+    let applied = if known {
+        // A list that stops inheriting from the directory stays that way.
+        let inheritance = if (control & SE_DACL_PROTECTED) != 0 {
+            PROTECTED_DACL_SECURITY_INFORMATION
+        } else {
+            UNPROTECTED_DACL_SECURITY_INFORMATION
+        };
+        // SAFETY: `to` is a NUL-terminated wide string that outlives the
+        // call, and `dacl` points into `descriptor`, still allocated.
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                to.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | inheritance,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                dacl,
+                ptr::null_mut(),
+            )
+        };
+        if status == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(status as i32))
+        }
+    } else {
+        Err(io::Error::last_os_error())
+    };
+    // SAFETY: `descriptor` came from `GetNamedSecurityInfoW`, which names
+    // `LocalFree` as its release, and nothing reads it after this.
+    unsafe { LocalFree(descriptor) };
+    applied
 }
 
 /// `path` with every symbolic link resolved (C++ `TfRealPath`): the

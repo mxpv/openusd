@@ -38,6 +38,11 @@ strum.workspace = true
 thiserror.workspace = true
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 
+# The access control a replaced file keeps on Windows, which only the Win32
+# security API reaches.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"] }
+
 [dev-dependencies]
 diff_json.workspace = true
 serde.workspace = true
