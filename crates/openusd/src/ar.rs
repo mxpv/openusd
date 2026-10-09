@@ -34,6 +34,7 @@ use std::fs;
 use std::io::{self, Read, Seek};
 use std::ops::{Deref, Range};
 use std::path::{self, Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// A resolved asset path representing the physical location of an asset.
@@ -109,9 +110,9 @@ pub trait Asset: Read + Seek + Send {
 
     /// The complete asset as bytes shared with the caller, whatever the
     /// cursor position, for an asset already held in memory (C++
-    /// `ArAsset::GetBuffer`). A format that decodes in place keeps them
-    /// instead of copying; `None`, the default, has the asset read instead.
-    fn shared_bytes(&self) -> Option<std::sync::Arc<[u8]>> {
+    /// `ArAsset::GetBuffer`). A format that decodes in place keeps them.
+    /// With `None`, the default, the asset is read.
+    fn shared_bytes(&self) -> Option<Arc<[u8]>> {
         None
     }
 
@@ -121,6 +122,38 @@ pub trait Asset: Read + Seek + Send {
         let mut buf = Vec::with_capacity(size);
         self.read_to_end(&mut buf)?;
         Ok(buf)
+    }
+
+    /// The complete asset's bytes, consuming the asset: the ones it shares
+    /// when [`shared_bytes`](Self::shared_bytes) offers them, otherwise the
+    /// ones [`read_all`](Self::read_all) reads. An asset that owns its
+    /// buffer hands it over.
+    fn into_bytes(mut self: Box<Self>) -> io::Result<AssetBytes> {
+        match self.shared_bytes() {
+            Some(bytes) => Ok(AssetBytes::Shared(bytes)),
+            None => self.read_all().map(AssetBytes::Owned),
+        }
+    }
+}
+
+/// An asset's complete bytes, as [`Asset::into_bytes`] yields them.
+#[derive(Debug, Clone)]
+pub enum AssetBytes {
+    /// Bytes the asset shares with whoever else holds them, which a format
+    /// that decodes in place keeps.
+    Shared(Arc<[u8]>),
+    /// Bytes the caller owns outright.
+    Owned(Vec<u8>),
+}
+
+impl Deref for AssetBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            AssetBytes::Shared(bytes) => bytes,
+            AssetBytes::Owned(bytes) => bytes,
+        }
     }
 }
 
@@ -135,15 +168,21 @@ impl Asset for io::Cursor<Vec<u8>> {
         Ok(self.get_ref().len() as u64)
     }
 
-    /// A cursor still at its start hands its buffer over instead of copying
-    /// it, leaving itself empty.
-    fn read_all(&mut self) -> io::Result<Vec<u8>> {
-        if self.position() != 0 {
-            let mut buf = Vec::new();
-            self.read_to_end(&mut buf)?;
-            return Ok(buf);
-        }
-        Ok(std::mem::take(self.get_mut()))
+    /// Hands the buffer over.
+    fn into_bytes(self: Box<Self>) -> io::Result<AssetBytes> {
+        Ok(AssetBytes::Owned(self.into_inner()))
+    }
+}
+
+/// An asset over bytes its resolver shares, as a resolver that keeps its
+/// assets in memory serves them.
+impl Asset for io::Cursor<Arc<[u8]>> {
+    fn size(&self) -> io::Result<u64> {
+        Ok(self.get_ref().len() as u64)
+    }
+
+    fn shared_bytes(&self) -> Option<Arc<[u8]>> {
+        Some(self.get_ref().clone())
     }
 }
 
@@ -1137,19 +1176,27 @@ mod tests {
         assert_eq!(result, data);
     }
 
-    /// A cursor at its start hands its buffer over; one already read into
-    /// returns the rest.
+    /// Consuming a cursor asset hands its buffer over: an owned cursor moves
+    /// it out and a shared one shares it. Reading the asset first leaves it
+    /// intact.
     #[test]
-    fn cursor_asset_read_all_moves_buffer() {
+    fn cursor_into_bytes() {
         let data = b"hello world".to_vec();
         let pointer = data.as_ptr();
-        let mut asset = io::Cursor::new(data);
-        let moved = asset.read_all().unwrap();
+        let mut asset: Box<dyn Asset> = Box::new(io::Cursor::new(data));
+        assert_eq!(asset.read_all().unwrap(), b"hello world");
+        assert_eq!(asset.size().unwrap(), 11);
+        let AssetBytes::Owned(moved) = asset.into_bytes().unwrap() else {
+            panic!("an owned cursor moves its buffer out");
+        };
         assert_eq!(moved.as_ptr(), pointer);
 
-        let mut asset = io::Cursor::new(b"hello world".to_vec());
-        asset.seek(io::SeekFrom::Start(6)).unwrap();
-        assert_eq!(asset.read_all().unwrap(), b"world");
+        let shared: Arc<[u8]> = b"hello world".to_vec().into();
+        let asset: Box<dyn Asset> = Box::new(io::Cursor::new(shared.clone()));
+        let AssetBytes::Shared(bytes) = asset.into_bytes().unwrap() else {
+            panic!("a shared cursor shares its buffer");
+        };
+        assert!(Arc::ptr_eq(&bytes, &shared));
     }
 
     #[test]

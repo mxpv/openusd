@@ -266,26 +266,18 @@ impl LayerRegistry {
     /// rather than from bytes. `source_name` names their origin, for
     /// diagnostics that quote a location.
     pub fn read_bytes(bytes: Cow<'static, [u8]>, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        DEFAULT_FORMATS
-            .iter()
-            .copied()
-            .find(|format| format.matches_content(&bytes))
-            .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))?
-            .read_bytes(bytes, source_name)
+        Self::find_by_content(&bytes, source_name)?.read_bytes(bytes, source_name)
     }
 
-    /// [`read_bytes`](Self::read_bytes) for bytes shared with an asset, which
-    /// a format that decodes in place keeps rather than copies.
-    pub fn read_shared_bytes(
-        bytes: std::sync::Arc<[u8]>,
-        source_name: &str,
-    ) -> Result<sdf::LayerData, sdf::FormatError> {
+    /// The format whose [`matches_content`](sdf::FileFormat::matches_content)
+    /// claims `prefix`, or the [`Unrecognized`](sdf::FormatError::Unrecognized)
+    /// error naming `source_name` when none does.
+    fn find_by_content(prefix: &[u8], source_name: &str) -> Result<&'static dyn sdf::FileFormat, sdf::FormatError> {
         DEFAULT_FORMATS
             .iter()
             .copied()
-            .find(|format| format.matches_content(&bytes))
-            .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))?
-            .read_shared_bytes(bytes, source_name)
+            .find(|format| format.matches_content(prefix))
+            .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))
     }
 
     /// Find the format claiming `ext` (without the leading dot, case-insensitive),
@@ -538,18 +530,19 @@ impl LayerRegistry {
 
     /// Opens the layer at `resolved`, dispatching to the registered format for
     /// its extension. The `.usd` extension is the one ambiguous case — binary
-    /// crate or text — so it reads the bytes once and lets
-    /// [`read_bytes`](Self::read_bytes) choose by content.
+    /// crate or text — so it reads the bytes once and chooses by content, as
+    /// [`read_bytes`](Self::read_bytes) does.
     /// C++ `SdfFileFormat::FindByExtension` + `CanRead`.
     fn read(&self, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData, LoadError> {
         let ext = resolved.extension();
         if ext.eq_ignore_ascii_case("usd") {
-            let mut asset = self.resolver.open_asset(resolved).map_err(sdf::FormatError::from)?;
-            if let Some(bytes) = asset.shared_bytes() {
-                return Ok(Self::read_shared_bytes(bytes, &resolved.to_string())?);
-            }
-            let bytes = asset.read_all().map_err(sdf::FormatError::from)?;
-            return Ok(Self::read_bytes(bytes.into(), &resolved.to_string())?);
+            let bytes = self
+                .resolver
+                .open_asset(resolved)
+                .and_then(|asset| asset.into_bytes())
+                .map_err(sdf::FormatError::from)?;
+            let source_name = resolved.to_string();
+            return Ok(Self::find_by_content(&bytes, &source_name)?.read_asset_bytes(bytes, &source_name)?);
         }
         Ok(Self::find_by_extension(&ext)
             .ok_or_else(|| LoadError::UnsupportedFormat {
