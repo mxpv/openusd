@@ -1,3 +1,4 @@
+use std::sync::{Arc, LazyLock};
 use std::{convert::Infallible, fmt, str::FromStr};
 
 use crate::tf;
@@ -41,11 +42,25 @@ pub fn try_into_path(path: impl IntoPath) -> Result<Path, PathParseError> {
 /// rejects malformed text with a [`PathParseError`]. The empty path is not
 /// parseable; construct it with [`Path::default`].
 ///
-/// Clones share the path's text rather than copying it, as C++ `SdfPath`
-/// copies share one pooled path node.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Clones share the path's text, as C++ `SdfPath` copies share one pooled
+/// path node, and the empty and absolute root paths share one text each
+/// however they are reached.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Path {
-    path: std::sync::Arc<String>,
+    path: Arc<String>,
+}
+
+/// The text of the empty path, shared by every [`Path::default`].
+static EMPTY: LazyLock<Arc<String>> = LazyLock::new(Arc::default);
+
+/// The text of the absolute root path, shared by every [`Path::abs_root`].
+static ABS_ROOT: LazyLock<Arc<String>> = LazyLock::new(|| Arc::new(String::from("/")));
+
+impl Default for Path {
+    /// The empty path.
+    fn default() -> Self {
+        Path { path: EMPTY.clone() }
+    }
 }
 
 impl fmt::Display for Path {
@@ -111,9 +126,10 @@ impl Path {
         Path::from_str(path)
     }
 
+    /// The absolute root path `/` (pseudo-root).
     #[inline]
     pub fn abs_root() -> Path {
-        Path::from_str_unchecked("/")
+        Path { path: ABS_ROOT.clone() }
     }
 
     /// Wraps `path` without validating it — the fast path for strings a
@@ -126,8 +142,12 @@ impl Path {
             path.is_empty() || Path::validate(path).is_ok(),
             "from_str_unchecked on invalid path {path:?}"
         );
-        Path {
-            path: path.to_owned().into(),
+        match path {
+            "" => Path::default(),
+            "/" => Path::abs_root(),
+            _ => Path {
+                path: path.to_owned().into(),
+            },
         }
     }
 
@@ -1359,15 +1379,31 @@ impl TryFrom<&String> for Path {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use crate::Result;
 
     use super::*;
+
+    /// The empty and absolute root paths share one text each, from every
+    /// constructor and derivation that reaches them.
+    #[test]
+    fn sentinels_shared() {
+        assert!(Arc::ptr_eq(&Path::default().path, &Path::default().path));
+        assert!(Arc::ptr_eq(&Path::abs_root().path, &Path::abs_root().path));
+        let root = Path::new("/Root").unwrap();
+        assert!(Arc::ptr_eq(&root.parent().unwrap().path, &Path::abs_root().path));
+        assert!(Arc::ptr_eq(
+            &Path::new(".bar").unwrap().prim_path().path,
+            &Path::default().path
+        ));
+    }
 
     #[test]
     fn clones_share_text_and_derivations_preserve_original() {
         let path = Path::new("/Root/Branch").unwrap();
         let clone = path.clone();
-        assert!(std::sync::Arc::ptr_eq(&path.path, &clone.path));
+        assert!(Arc::ptr_eq(&path.path, &clone.path));
         assert_eq!(clone.append_property("size").unwrap().as_str(), "/Root/Branch.size");
         assert_eq!(clone.append_path("Leaf").unwrap().as_str(), "/Root/Branch/Leaf");
         assert_eq!(path.as_str(), "/Root/Branch");
@@ -1376,7 +1412,7 @@ mod tests {
         let independent = Path::try_from(text).unwrap();
         assert_eq!(independent.as_str().as_ptr(), allocation);
         assert_eq!(path, independent);
-        let mut paths = std::collections::HashSet::new();
+        let mut paths = HashSet::new();
         paths.insert(path);
         assert!(paths.contains(&independent));
     }

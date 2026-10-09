@@ -707,8 +707,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A variant selection path takes no ancestral opinions (C++
         // `Pcp_BuildPrimIndex`): composing its parent prim evaluates the
         // variant arc, which already accounts for them.
-        let needs_ancestor =
-            !path.is_prim_variant_selection_path() && matches!(&parent, Some(p) if p != &Path::abs_root());
+        let needs_ancestor = !path.is_prim_variant_selection_path() && matches!(&parent, Some(p) if !p.is_abs_root());
 
         if !needs_ancestor {
             // Root prim or variant selection: synthetic inert root plus a local
@@ -1754,7 +1753,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn eval_node_ancestral_variant_sets(&mut self, node: NodeId) -> BuildResult<()> {
         let mut path = self.node(node).path.parent();
         while let Some(p) = path {
-            if p == Path::abs_root() {
+            if p.is_abs_root() {
                 break;
             }
             // A node restricted below this depth (a relocate source past its own
