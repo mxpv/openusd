@@ -33,15 +33,6 @@ impl Archive<File> {
     }
 }
 
-impl Archive<Cursor<Vec<u8>>> {
-    /// Reads the entire package at `resolved` through the resolver's asset seam
-    /// and opens it as an archive, so a host-provided byte source is honored.
-    pub fn from_asset(resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<Self, ArchiveError> {
-        let bytes = resolver.open_asset(resolved)?.read_all()?;
-        Archive::from_reader(Cursor::new(bytes))
-    }
-}
-
 impl<R: Read + Seek> Archive<R> {
     /// Creates an archive from any `Read + Seek` source.
     ///
@@ -60,7 +51,7 @@ impl<R: Read + Seek> Archive<R> {
     pub fn first_layer_name(&self) -> Option<String> {
         self.archive
             .file_names()
-            .find(|name| name.ends_with(".usdc") || name.ends_with(".usda") || name.ends_with(".usd"))
+            .find(|name| is_layer_name(name))
             .map(String::from)
     }
 
@@ -114,6 +105,13 @@ impl<R: Read + Seek> Archive<R> {
             Ok(Box::new(data))
         }
     }
+}
+
+/// Whether `name` names a native USD layer, one a non-package format reads
+/// (`.usd`, `.usda` or `.usdc`): the kind of entry
+/// [`Archive::first_layer_name`] takes for the default layer.
+pub(crate) fn is_layer_name(name: &str) -> bool {
+    sdf::LayerRegistry::find_by_extension(ar::extension(name)).is_some_and(|format| !format.is_package())
 }
 
 #[cfg(test)]

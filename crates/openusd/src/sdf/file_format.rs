@@ -151,6 +151,13 @@ pub trait FileFormat: Sync {
         FileFormatCaps::all()
     }
 
+    /// Whether a layer of this format is a package holding other assets (C++
+    /// `SdfFileFormat::IsPackage`): it opens at its default packaged layer,
+    /// and as a dependency it is carried whole.
+    fn is_package(&self) -> bool {
+        false
+    }
+
     /// Decode a layer's data from `bytes`, already read out of `source_name`.
     ///
     /// `source_name` is where the bytes came from, for diagnostics that quote a

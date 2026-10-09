@@ -18,6 +18,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::PathBuf;
 
 use crate::ar;
@@ -203,7 +204,7 @@ impl LayerRegistry {
     }
 
     /// Opens the asset at a [`resolve`](Self::resolve)d location for reading.
-    pub(crate) fn open_asset(&self, resolved: &ar::ResolvedPath) -> std::io::Result<Box<dyn ar::Asset>> {
+    pub(crate) fn open_asset(&self, resolved: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
         self.resolver.open_asset(resolved)
     }
 
@@ -270,6 +271,27 @@ impl LayerRegistry {
             .find(|f| f.extensions().iter().any(|e| e.eq_ignore_ascii_case(ext)))
     }
 
+    /// The format that writes a layer at `filename`, chosen by its extension:
+    /// [`find_by_extension`](Self::find_by_extension) narrowed to a format
+    /// that can write, with the error an export reports otherwise.
+    pub(crate) fn export_format(filename: &str) -> Result<&'static dyn sdf::FileFormat, sdf::ExportError> {
+        let ext = ar::extension(filename);
+        let format = Self::find_by_extension(ext).ok_or_else(|| match ext {
+            "" => sdf::ExportError::NoExtension {
+                filename: filename.to_owned(),
+            },
+            other => sdf::ExportError::UnsupportedExtension {
+                extension: other.to_owned(),
+            },
+        })?;
+        if !format.caps().can_write() {
+            return Err(sdf::ExportError::NotWritable {
+                format: format.format_id(),
+            });
+        }
+        Ok(format)
+    }
+
     /// Find the format with the given [`format_id`](sdf::FileFormat::format_id),
     /// e.g. `"usdc"`. C++ `SdfFileFormat::FindById`.
     pub fn find_by_id(id: &str) -> Option<&'static dyn sdf::FileFormat> {
@@ -283,10 +305,9 @@ impl LayerRegistry {
     ///
     /// The resolved location comes back with the data because it is what anchors
     /// the relative asset paths the layer authors, and it is not always the
-    /// identifier: a package resolves to its package-relative default layer. A
-    /// caller building an [`sdf::Layer`] from this passes it to
-    /// [`Layer::new_resolved`](sdf::Layer::new_resolved) rather than letting
-    /// `real_path` fall back to the identifier.
+    /// identifier: a package resolves to its package-relative default layer.
+    /// [`open_layer`](Self::open_layer) builds the [`sdf::Layer`] that keeps
+    /// it.
     pub(crate) fn open(&self, identifier: &str) -> Result<Option<(ar::ResolvedPath, sdf::LayerData)>, LoadError> {
         match self.resolve_layer(identifier) {
             Some(resolved) => {
@@ -295,6 +316,15 @@ impl LayerRegistry {
             }
             None => Ok(None),
         }
+    }
+
+    /// Opens the layer at `identifier` as an [`sdf::Layer`] anchored at the
+    /// location it resolved to, which for a package is its default packaged
+    /// layer, or `None` when it does not resolve.
+    pub(crate) fn open_layer(&self, identifier: &str) -> Result<Option<sdf::Layer>, LoadError> {
+        Ok(self
+            .open(identifier)?
+            .map(|(resolved, data)| sdf::Layer::new_resolved(identifier, &resolved, data)))
     }
 
     /// The `expressionVariables` authored on the single layer at `asset_path`

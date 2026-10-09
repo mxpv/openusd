@@ -28,10 +28,11 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Seek};
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::path::{self, Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -61,19 +62,7 @@ impl ResolvedPath {
     /// format case-insensitively — `resolved.extension() == "usdz"` — the way the
     /// format registry's `find_by_extension` does, without juggling `OsStr`.
     pub(crate) fn extension(&self) -> String {
-        // For a package-relative path (`pkg.usdz[inner/layer.usd]`) the format is
-        // the innermost packaged layer's extension, not the literal trailing
-        // chars (`.usd]`), so inspect the inner path rather than `self.0`.
-        let s = self.0.to_string_lossy();
-        let inner = is_package_relative_path(&s)
-            .then(|| split_package_relative_path_inner(&s))
-            .flatten()
-            .map(|(_, inner)| inner);
-        let path = inner.as_deref().map_or(self.0.as_path(), Path::new);
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_default()
+        extension(&self.0.to_string_lossy()).to_ascii_lowercase()
     }
 }
 
@@ -171,12 +160,10 @@ pub trait Resolver {
     /// Opens a resolved asset for reading.
     fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>>;
 
-    /// Returns the file extension of the given asset path (without the leading dot).
+    /// Returns the file extension of the given asset path (without the leading
+    /// dot), the innermost packaged path's for a package-relative one.
     fn get_extension<'a>(&self, asset_path: &'a str) -> &'a str {
-        Path::new(asset_path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default()
+        extension(asset_path)
     }
 
     /// Returns metadata about a resolved asset.
@@ -672,6 +659,30 @@ pub fn join_package_relative_path(package_path: &str, packaged_path: &str) -> St
     format!("{}[{}]", package_path, packaged_path)
 }
 
+/// The byte range of the innermost packaged path of `path`, or of the whole
+/// of `path` when it is not package-relative: the part a file extension or
+/// name is read from.
+fn innermost_span(path: &str) -> Range<usize> {
+    if !is_package_relative_path(path) {
+        return 0..path.len();
+    }
+    let Some(open) = path.rfind('[') else {
+        return 0..path.len();
+    };
+    let close = path[open..].find(']').map_or(path.len(), |i| open + i);
+    open + 1..close
+}
+
+/// The file extension of `path` without its leading dot, read inside the
+/// innermost package bracket (C++ `ArResolver::GetExtension`), or `""` when
+/// there is none.
+pub(crate) fn extension(path: &str) -> &str {
+    Path::new(&path[innermost_span(path)])
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+}
+
 /// Joins a package-internal directory with a relative reference authored inside
 /// it, producing the entry name a packaged layer is stored under.
 ///
@@ -850,6 +861,7 @@ mod tests {
         assert_eq!(resolver.get_extension("archive.usdz"), "usdz");
         assert_eq!(resolver.get_extension("no_extension"), "");
         assert_eq!(resolver.get_extension("path/to/file.usdc"), "usdc");
+        assert_eq!(resolver.get_extension("pkg.usdz[inner.usdz[a.usda]]"), "usda");
     }
 
     #[test]

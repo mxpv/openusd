@@ -133,20 +133,28 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             .chain(&self.added_items)
     }
 
+    /// Every bucket, with whether its items contribute opinions: `true` for
+    /// the explicit, added, prepended and appended items, `false` for the
+    /// deleted and ordered ones, which only remove or reorder. Keeps the full
+    /// set of buckets defined in one place.
+    pub fn buckets_mut(&mut self) -> [(&mut Vec<T>, bool); 6] {
+        [
+            (&mut self.explicit_items, true),
+            (&mut self.added_items, true),
+            (&mut self.prepended_items, true),
+            (&mut self.appended_items, true),
+            (&mut self.deleted_items, false),
+            (&mut self.ordered_items, false),
+        ]
+    }
+
     /// Returns a mutable iterator over the items in **every** bucket so callers
     /// can rewrite each item in place (e.g. retiming a reference's layer
     /// offset). Unlike [`iter`](Self::iter), this includes `deleted_items` and
     /// `ordered_items` — a rewrite must touch every item or a delete/reorder
-    /// would no longer match its retimed counterpart. Keeps the full set of
-    /// buckets defined in one place.
+    /// would no longer match its retimed counterpart.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.explicit_items
-            .iter_mut()
-            .chain(&mut self.added_items)
-            .chain(&mut self.prepended_items)
-            .chain(&mut self.appended_items)
-            .chain(&mut self.deleted_items)
-            .chain(&mut self.ordered_items)
+        self.buckets_mut().into_iter().flat_map(|(items, _)| items.iter_mut())
     }
 
     /// Returns true if this list op has no effect (all fields empty, not explicit).

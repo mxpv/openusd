@@ -1376,18 +1376,12 @@ impl ClipCache {
         if graph.id_of(&clip_id).is_none() && !self.clip_layers.contains_key(&clip_id) {
             let opened = graph
                 .layer_registry()
-                .open(&clip_id)
+                .open_layer(&clip_id)
                 .map_err(|error| ClipLoad::new(clip_id.clone(), error))?;
-            let Some((resolved, data)) = opened else {
+            let Some(layer) = opened else {
                 return Ok(None);
             };
-            // Built with the location it resolved to, not just the identifier:
-            // that is what anchors the relative asset paths the clip authors, and
-            // for a package it is the package-relative default layer.
-            self.clip_layers.insert(
-                clip_id.clone(),
-                sdf::Layer::new_resolved(clip_id.clone(), &resolved, data),
-            );
+            self.clip_layers.insert(clip_id.clone(), layer);
         }
         Ok(Some(clip_id))
     }

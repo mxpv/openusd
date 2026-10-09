@@ -123,6 +123,10 @@ impl sdf::FileFormat for UsdzFileFormat {
         sdf::FileFormatCaps::READ | sdf::FileFormatCaps::WRITE
     }
 
+    fn is_package(&self) -> bool {
+        true
+    }
+
     fn resolve_layer(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
         // A package is anchored to its default (first) packaged layer. A package
         // nested in another (`pkg.usdz[inner.usdz]`) is anchored inside the
@@ -135,15 +139,15 @@ impl sdf::FileFormat for UsdzFileFormat {
         // The resolver's asset is `Seek`, so only the central directory is read
         // to list the default layer, as `ar::open_package_archive` does off a
         // `File`.
-        match resolver
+        let first = resolver
             .open_asset(resolved)
             .ok()
             .and_then(|asset| Archive::from_reader(asset).ok())
-            .and_then(|a| a.first_layer_name())
-        {
-            Some(first) => Some(ar::ResolvedPath::new(ar::nest_packaged_path(&package, &first))),
-            None => Some(resolved.clone()),
-        }
+            .and_then(|archive| archive.first_layer_name());
+        Some(match first {
+            Some(first) => ar::ResolvedPath::new(ar::nest_packaged_path(&package, &first)),
+            None => resolved.clone(),
+        })
     }
 
     fn read(
@@ -197,11 +201,12 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A resolver whose assets exist but cannot be opened, standing in for a
-    /// storage failure underneath a resolved package.
-    struct FailingResolver;
+    /// A resolver under which every asset path resolves to itself and opens
+    /// to what `open` gives, standing in for the storage underneath a resolved
+    /// package.
+    struct TestResolver<F>(F);
 
-    impl ar::Resolver for FailingResolver {
+    impl<F: Fn() -> io::Result<Box<dyn ar::Asset>>> ar::Resolver for TestResolver<F> {
         fn create_identifier(&self, asset_path: &str, _anchor: Option<&ar::ResolvedPath>) -> String {
             asset_path.to_string()
         }
@@ -215,17 +220,17 @@ mod tests {
         }
 
         fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            (self.0)()
         }
     }
 
-    /// A resolver serving one in-memory package, counting the bytes read from
-    /// it.
-    struct CountingResolver {
-        package: Vec<u8>,
-        read: Arc<AtomicUsize>,
+    /// A resolver whose assets exist but cannot be opened, standing in for a
+    /// storage failure underneath a resolved package.
+    fn failing_resolver() -> impl ar::Resolver {
+        TestResolver(|| -> io::Result<Box<dyn ar::Asset>> { Err(io::Error::from(io::ErrorKind::PermissionDenied)) })
     }
 
+    /// An in-memory asset counting the bytes read from it.
     struct CountingAsset {
         inner: Cursor<Vec<u8>>,
         read: Arc<AtomicUsize>,
@@ -247,28 +252,7 @@ mod tests {
 
     impl ar::Asset for CountingAsset {
         fn size(&self) -> io::Result<u64> {
-            Ok(self.inner.get_ref().len() as u64)
-        }
-    }
-
-    impl ar::Resolver for CountingResolver {
-        fn create_identifier(&self, asset_path: &str, _anchor: Option<&ar::ResolvedPath>) -> String {
-            asset_path.to_string()
-        }
-
-        fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-            Some(ar::ResolvedPath::new(asset_path))
-        }
-
-        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-            Some(ar::ResolvedPath::new(asset_path))
-        }
-
-        fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-            Ok(Box::new(CountingAsset {
-                inner: Cursor::new(self.package.clone()),
-                read: self.read.clone(),
-            }))
+            self.inner.size()
         }
     }
 
@@ -302,7 +286,7 @@ mod tests {
 
     #[test]
     fn read_io_stays_io() {
-        let Err(error) = UsdzFileFormat.read(&FailingResolver, &ar::ResolvedPath::new("pkg.usdz")) else {
+        let Err(error) = UsdzFileFormat.read(&failing_resolver(), &ar::ResolvedPath::new("pkg.usdz")) else {
             panic!("asset open fails");
         };
         let sdf::FormatError::Io(error) = error else {
@@ -355,17 +339,22 @@ mod tests {
     /// Anchoring a bare package to its default layer reads the archive's
     /// central directory, not the packaged entries.
     #[test]
-    fn default_layer_reads_central_directory() -> Result<()> {
+    fn default_layer_central_directory() -> Result<()> {
         let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()));
         writer.add_layer("root.usda", b"#usda 1.0\n")?;
         writer.add_layer("texture.bin", &vec![0; 1 << 20])?;
         let package = writer.finish()?.into_inner();
         let size = package.len();
         let read = Arc::new(AtomicUsize::new(0));
-        let resolver = CountingResolver {
-            package,
-            read: read.clone(),
-        };
+        let resolver = TestResolver({
+            let read = read.clone();
+            move || -> io::Result<Box<dyn ar::Asset>> {
+                Ok(Box::new(CountingAsset {
+                    inner: Cursor::new(package.clone()),
+                    read: read.clone(),
+                }))
+            }
+        });
 
         let resolved = UsdzFileFormat.resolve_layer(&resolver, &ar::ResolvedPath::new("pkg.usdz"));
         assert_eq!(resolved, Some(ar::ResolvedPath::new("pkg.usdz[root.usda]")));

@@ -138,10 +138,8 @@ impl Layer {
         // addressed by the identifier it keeps, so a caller's spelling of one
         // file must not become a second identity for it.
         let identifier = registry.create_identifier(identifier.as_ref(), None);
-        let (resolved, data) = registry
-            .open(&identifier)?
-            .ok_or(crate::Error::UnresolvedAsset(identifier.clone()))?;
-        Ok(Self::new_resolved(identifier, &resolved, data))
+        let layer = registry.open_layer(&identifier)?;
+        layer.ok_or(crate::Error::UnresolvedAsset(identifier))
     }
 
     /// Decode `bytes` as an anonymous layer tagged `tag`, in whichever format
@@ -365,23 +363,7 @@ impl Layer {
     /// `.usd` path still reads back correctly.
     pub fn export(&self, filename: impl AsRef<str>) -> Result<(), ExportError> {
         let filename = filename.as_ref();
-        let ext = FsPath::new(filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default();
-        let format = super::LayerRegistry::find_by_extension(ext).ok_or_else(|| match ext {
-            "" => ExportError::NoExtension {
-                filename: filename.to_owned(),
-            },
-            other => ExportError::UnsupportedExtension {
-                extension: other.to_owned(),
-            },
-        })?;
-        if !format.caps().can_write() {
-            return Err(ExportError::NotWritable {
-                format: format.format_id(),
-            });
-        }
+        let format = super::LayerRegistry::export_format(filename)?;
         let mut file = fs::File::create(filename).map_err(|source| ExportError::Create {
             filename: filename.to_owned(),
             source,
