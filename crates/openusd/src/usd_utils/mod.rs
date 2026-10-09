@@ -6,18 +6,21 @@
 //! [`modify_asset_paths`] rewrites the asset paths a layer authors (C++
 //! `UsdUtilsModifyAssetPaths`).
 
-mod dependencies;
+mod discover;
 mod package;
+mod walk;
 
-pub use dependencies::{Dependencies, compute_all_dependencies, modify_asset_paths};
+pub use discover::{Dependencies, compute_all_dependencies};
 pub use package::create_new_usdz_package;
+pub use walk::modify_asset_paths;
 
 /// An asset path the dependency walk cannot follow.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DependencyError {
-    /// An asset path C++ expands before following it: a variable expression,
-    /// a UDIM or UV-tile pattern, or a clip template.
+    /// An asset path that needs expanding or evaluating before it can be
+    /// followed: a UDIM pattern or clip template, which C++ expands by listing
+    /// the filesystem, or a variable expression.
     #[error("{kind} {path:?} in {layer} is not supported yet")]
     Unsupported {
         /// What the path needs expanded.

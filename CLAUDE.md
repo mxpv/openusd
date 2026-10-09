@@ -96,6 +96,16 @@ source of truth for specifics.
   documented as `sdf::impl_token_value`, the module that owns what it is about,
   and `include_schema!` is the one macro documented at the root itself.
 
+- **`usd_utils/`** - Utilities over layers and stages (C++ `UsdUtils`):
+  `compute_all_dependencies` (C++ `UsdUtilsComputeAllDependencies`),
+  `create_new_usdz_package` (C++ `UsdUtilsCreateNewUsdzPackage`) and
+  `modify_asset_paths` (C++ `UsdUtilsModifyAssetPaths`). `walk.rs` is the walk
+  over the asset paths a layer authors, under a `Visit` policy; `discover.rs`
+  the breadth-first discovery of the files a root reaches (`Discovery` /
+  `Source`, with a scope of its own for each package the stage holds layers
+  in); `package.rs` the placement of each source at one entry and the write.
+  Start at `usd_utils/mod.rs`.
+
 - **`openusd-schemas`** - A separate crate (`crates/openusd-schemas`), not a
   module of the core: domain schemas layered on `sdf` / `usd`, not part of the
   AOUSD core spec. It depends on `openusd`, so the core must never reference it.

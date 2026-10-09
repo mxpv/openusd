@@ -1,10 +1,16 @@
-//! USDZ packaging (C++ `UsdUtilsCreateNewUsdzPackage`).
+//! USDZ packaging (C++ `UsdUtilsCreateNewUsdzPackage`): the files
+//! [`discover`] finds, each given one entry, rewritten to reach each other
+//! there, and written out.
 
-use std::collections::{HashMap, VecDeque};
-use std::io::Cursor;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{Cursor, Read, Seek, Write};
+use std::path::{Component, Path, PathBuf};
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::dependencies::{AssetRef, SourceLayer, Visit, root_identifier, visit_asset_paths};
+use super::discover::{Content, Discover, Discovery, Placement, Source, Use, discover};
+use super::walk::{Visit, apply_edits, visit_asset_paths};
 use crate::sdf::{self, AbstractData};
 use crate::usd::Stage;
 use crate::{Error, Result, ar, pcp, usdz};
@@ -20,14 +26,27 @@ use crate::{Error, Result, ar, pcp, usdz};
 /// [`compute_all_dependencies`] reads them, unsaved edits included.
 ///
 /// The root layer is the package's first entry, named `first_layer_name` or
-/// the root's file name. A dependency authored as a `./` or `../` path that
-/// stays inside the package keeps its path and its place relative to the root.
-/// Any other (an absolute path, a search path, or one leading out of the
-/// package) moves into a numbered directory per source directory (`0/`, `1/`,
-/// ...) and its authored path is rewritten to reach it. A `.usdz` dependency
-/// is stored whole, as a package nested in the new one.
+/// the root's file name; either way it must name a native layer (`.usd`,
+/// `.usda` or `.usdc`) for the package to open at it. A dependency authored
+/// as a `./` or `../` path that stays inside the package keeps its path and
+/// its place relative to the root. Any other (an absolute path, a search path,
+/// or one leading out of the package) moves into a numbered directory per
+/// source directory (`0/`, `1/`, ...) and its authored path is rewritten to
+/// reach it. Each source is stored once: a later path to it, from wherever
+/// it is authored, is rewritten to the entry it already has. That keeps a
+/// reference deleted in one layer matching the one another layer adds.
 ///
-/// A missing non-layer asset fails the package, as in C++.
+/// A `.usdz` dependency is stored whole, as a package nested in the new one.
+/// The layers in it that `stage` holds, at any depth of nesting, are
+/// re-serialized from memory so their unsaved edits are packaged too, and
+/// whatever they name outside their package is packaged into it the same
+/// way, since nothing inside a package can reach outside it. A root that is
+/// itself inside a package is repackaged from the entries the walk reaches.
+///
+/// A missing non-layer asset fails the package, as in C++, before anything is
+/// written. The package is written beside its destination and moved there
+/// once complete. A source read along the way, the destination itself
+/// included, stays intact until then.
 ///
 /// [`compute_all_dependencies`]: super::compute_all_dependencies
 pub fn create_new_usdz_package(
@@ -37,197 +56,235 @@ pub fn create_new_usdz_package(
     first_layer_name: Option<&str>,
 ) -> Result<Vec<String>> {
     let graph = stage.layers();
-    let root = root_identifier(&graph, asset_path);
-    let unresolved = || Error::UnresolvedAsset(asset_path.to_owned());
-    let layer = SourceLayer::open(&graph, &root)?.ok_or_else(unresolved)?;
-    let name = match first_layer_name {
-        Some(name) => name.to_owned(),
-        None => file_name(layer.resolved_path().ok_or_else(unresolved)?),
+    let policy = Discover {
+        inactive: true,
+        open_packages: false,
     };
-    let mut package = Package {
-        graph: &graph,
-        entries: vec![(name.clone(), Vec::new())],
-        owners: HashMap::from([(name.clone(), root.clone())]),
-        placed: HashMap::from([(root, name)]),
-        directories: HashMap::new(),
-        pending: VecDeque::new(),
-        skipped: Vec::new(),
+    let discovery = discover(&graph, asset_path, policy)?;
+    let mut skipped = Vec::new();
+    for (identifier, kind) in &discovery.unresolved {
+        if *kind == super::walk::AssetKind::Asset {
+            return Err(Error::UnresolvedAsset(identifier.clone()));
+        }
+        skipped.push(identifier.clone());
+    }
+    let name = if let Some(name) = first_layer_name {
+        name.to_owned()
+    } else {
+        let location = discovery.sources[0]
+            .content
+            .location()
+            .ok_or_else(|| Error::UnresolvedAsset(asset_path.to_owned()))?;
+        ar::split_file_name(location).1.to_owned()
     };
-    package.write_layer(0, &layer)?;
-    while let Some((index, identifier)) = package.pending.pop_front() {
-        let layer = SourceLayer::open(&graph, &identifier)?.ok_or(Error::UnresolvedAsset(identifier))?;
-        package.write_layer(index, &layer)?;
-    }
-
-    let mut archive = usdz::ArchiveWriter::create(usdz_file_path)?;
-    for (name, bytes) in &package.entries {
-        archive.add_layer(name, bytes)?;
-    }
-    archive.finish()?;
-    Ok(package.skipped)
-}
-
-/// How a dependency is stored.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    /// Serialized from its layer, with its own dependencies followed.
-    Layer,
-    /// Copied as it is.
-    Asset,
-    /// A package, copied as it is.
-    Package,
-}
-
-/// The package being built.
-struct Package<'a> {
-    graph: &'a pcp::LayerGraph,
-    /// Entry names and contents, in archive order.
-    entries: Vec<(String, Vec<u8>)>,
-    /// The source identifier each entry holds.
-    owners: HashMap<String, String>,
-    /// The entry each source identifier was first placed at.
-    placed: HashMap<String, String>,
-    /// The numbered directory each source directory moves into.
-    directories: HashMap<String, usize>,
-    /// Layer entries whose contents are still to be written.
-    pending: VecDeque<(usize, String)>,
-    skipped: Vec<String>,
-}
-
-impl Package<'_> {
-    /// Writes `layer` as entry `index`, placing its dependencies and rewriting
-    /// the paths of the ones that move.
-    fn write_layer(&mut self, index: usize, layer: &sdf::Layer) -> Result<()> {
-        let anchor = layer.anchor_location();
-        let location = self.entries[index].0.clone();
-        let edits = visit_asset_paths(layer.data(), layer.identifier(), Visit::STRICT, |asset| {
-            self.place(&asset, anchor.as_ref(), &location)
-        })?;
-        let bytes = if edits.is_empty() {
-            serialize(layer.data(), &location)?
-        } else {
-            let mut data = sdf::Data::from_abstract(layer.data())?;
-            for (path, field, value) in edits {
-                match value {
-                    Some(value) => data.set_field(&path, &field, value),
-                    None => data.erase_field(&path, &field),
-                }
-            }
-            serialize(&data, &location)?
-        };
-        self.entries[index].1 = bytes;
-        Ok(())
-    }
-
-    /// Places the dependency `asset` names from the layer stored at
-    /// `location`, returning its rewritten path when it moves. A path into a
-    /// package (`inner.usdz[layer.usda]`) places the package whole.
-    fn place(
-        &mut self,
-        asset: &AssetRef<'_>,
-        anchor: Option<&ar::ResolvedPath>,
-        location: &str,
-    ) -> Result<Option<String>> {
-        if let Some((package, inner)) = ar::split_package_relative_path_outer(asset.path) {
-            let moved = self.place_file(&package, Kind::Package, anchor, location)?;
-            return Ok(moved.map(|package| ar::join_package_relative_path(&package, &inner)));
+    if !usdz::is_layer_name(&name) {
+        return Err(usdz::ArchiveError::InvalidEntryName {
+            name,
+            reason: "must name a native USD layer (.usd, .usda or .usdc) to be the package's default layer",
         }
-        let kind = if has_extension(asset.path, "usdz") {
-            Kind::Package
-        } else if asset.layer {
-            Kind::Layer
-        } else {
-            Kind::Asset
-        };
-        self.place_file(asset.path, kind, anchor, location)
+        .into());
     }
+    let entries = assign_entries(&discovery, &name, HashSet::new());
 
-    fn place_file(
-        &mut self,
-        path: &str,
-        kind: Kind,
-        anchor: Option<&ar::ResolvedPath>,
-        location: &str,
-    ) -> Result<Option<String>> {
-        let registry = self.graph.layer_registry();
-        let source = registry.create_identifier(path, anchor);
-        let resolved = registry.resolve(&source);
-        if !self.placed.contains_key(&source) {
-            let live = kind == Kind::Layer && self.graph.id_of(&source).is_some();
-            if resolved.is_none() && !live {
-                if kind == Kind::Asset {
-                    return Err(Error::UnresolvedAsset(source));
-                }
-                if !self.skipped.contains(&source) {
-                    self.skipped.push(source);
-                }
-                return Ok(None);
+    let usdz_file_path = usdz_file_path.as_ref();
+    let staging = staging_path(usdz_file_path);
+    let mut archive = usdz::ArchiveWriter::create(&staging)?;
+    let written = write_entries(&graph, &discovery, &entries, &mut archive)
+        .and_then(|()| Ok(archive.finish()?))
+        .and_then(|file| {
+            drop(file);
+            fs::rename(&staging, usdz_file_path).map_err(Error::from)
+        });
+    if written.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    written?;
+    Ok(skipped)
+}
+
+/// A sibling of `path` to write the package into before it replaces `path`.
+fn staging_path(path: &Path) -> PathBuf {
+    let name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    path.with_file_name(format!(".{name}.{}.{nanos}.part", process::id()))
+}
+
+/// The entry each source of a scope is stored at, by source index: the root
+/// at `first_name`, an existing entry of a package at its own name. A named
+/// source keeps the place the layer that first named it reaches by a `./` or
+/// `../` path, when that entry is still free; any other moves into the
+/// numbered directory of its source directory. `reserved` holds the entry
+/// names already in use, every entry of a package being rebuilt.
+fn assign_entries(discovery: &Discovery<'_>, first_name: &str, reserved: HashSet<String>) -> Vec<String> {
+    let mut entries: Vec<String> = Vec::with_capacity(discovery.sources.len());
+    let mut taken = reserved;
+    let mut directories = HashMap::new();
+    for source in &discovery.sources {
+        let entry = match &source.placement {
+            Placement::Root => first_name.to_owned(),
+            Placement::Entry(name) => name.clone(),
+            Placement::Named { by, path } => kept_entry(&entries[*by], path)
+                .filter(|entry| !taken.contains(entry))
+                .unwrap_or_else(|| moved_entry(&mut directories, &taken, &source.identifier)),
+        };
+        taken.insert(entry.clone());
+        entries.push(entry);
+    }
+    entries
+}
+
+/// The entry a moved source takes: its file name in the numbered directory
+/// of its source directory, `directories` numbering them in the order they
+/// first move and `taken` holding the entry names in use.
+fn moved_entry(directories: &mut HashMap<String, usize>, taken: &HashSet<String>, source: &str) -> String {
+    let (directory, name) = ar::split_file_name(source);
+    let next = directories.len();
+    let mut number = *directories.entry(directory.to_owned()).or_insert(next);
+    let mut entry = format!("{number}/{name}");
+    while taken.contains(&entry) {
+        number += 1;
+        entry = format!("{number}/{name}");
+    }
+    entry
+}
+
+/// Writes every source of the root scope to `archive` at its entry, in
+/// source order.
+///
+/// TODO(rayon): each entry's bytes are produced independently of the others;
+/// only the writes are in order.
+fn write_entries<W: Write + Seek>(
+    graph: &pcp::LayerGraph,
+    discovery: &Discovery<'_>,
+    entries: &[String],
+    archive: &mut usdz::ArchiveWriter<W>,
+) -> Result<()> {
+    for (index, source) in discovery.sources.iter().enumerate() {
+        let bytes = source_bytes(graph, source, &entries[index], entries, None)?;
+        archive.add_layer(&entries[index], &bytes)?;
+    }
+    Ok(())
+}
+
+/// The bytes `source` is stored as at `location`, its scope's sources at
+/// `entries`: a layer with its paths rewritten to reach their entries, a
+/// package rebuilt around the layers the stage holds in it from `original`
+/// (its bytes as an entry of the enclosing package) or from its location, any
+/// other file as it is.
+fn source_bytes(
+    graph: &pcp::LayerGraph,
+    source: &Source<'_>,
+    location: &str,
+    entries: &[String],
+    original: Option<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    match &source.content {
+        Content::Layer { layer, uses } => {
+            let edits = visit_asset_paths(layer.data(), layer.identifier(), Visit::DISCOVER, |asset| {
+                Ok(rewrite(location, asset.path, uses, entries))
+            })?;
+            if edits.is_empty() {
+                serialize(layer.data(), location)
+            } else {
+                let mut data = sdf::Data::from_abstract(layer.data())?;
+                apply_edits(&mut data, edits);
+                serialize(&data, location)
             }
         }
-
-        let kept = kept_entry(location, path);
-        let entry = match kept
-            .as_ref()
-            .filter(|entry| self.owners.get(*entry).is_none_or(|owner| *owner == source))
-        {
-            Some(entry) => entry.clone(),
-            None => match self.placed.get(&source) {
-                Some(entry) => entry.clone(),
-                None => self.moved_entry(&source),
-            },
-        };
-        if !self.owners.contains_key(&entry) {
-            self.owners.insert(entry.clone(), source.clone());
-            self.placed.entry(source.clone()).or_insert_with(|| entry.clone());
-            let index = self.entries.len();
-            let bytes = match (kind, &resolved) {
-                (Kind::Asset | Kind::Package, Some(resolved)) => registry.open_asset(resolved)?.read_all()?,
-                _ => Vec::new(),
+        Content::Package { resolved, inside } => {
+            let bytes = match original {
+                Some(bytes) => bytes,
+                None => read_asset(graph, resolved)?,
             };
-            self.entries.push((entry.clone(), bytes));
-            if kind == Kind::Layer {
-                self.pending.push_back((index, source));
-            }
+            rebuild_package(graph, bytes, inside)
         }
-        Ok((kept.as_ref() != Some(&entry)).then(|| path_to(location, &entry)))
-    }
-
-    /// The entry a moved source takes: its file name in the numbered
-    /// directory of its source directory.
-    fn moved_entry(&mut self, source: &str) -> String {
-        let (directory, name) = if let Some((package, inner)) = ar::split_package_relative_path_inner(source) {
-            let (directory, name) = inner.rsplit_once('/').unwrap_or(("", &inner));
-            (format!("{package}[{directory}"), name.to_owned())
-        } else {
-            let (directory, name) = source.rsplit_once(['/', '\\']).unwrap_or(("", source));
-            (directory.to_owned(), name.to_owned())
-        };
-        let next = self.directories.len();
-        let mut number = *self.directories.entry(directory).or_insert(next);
-        let mut entry = format!("{number}/{name}");
-        while self.owners.contains_key(&entry) {
-            number += 1;
-            entry = format!("{number}/{name}");
-        }
-        entry
+        Content::Asset(resolved) => match original {
+            Some(bytes) => Ok(bytes),
+            None => read_asset(graph, resolved),
+        },
     }
 }
 
-/// The entry a `./` or `../` path authored in the layer at `location` reaches,
-/// or `None` for any other path or one leading out of the package.
+/// `bytes`, a package, as they are when the stage holds no layer inside it,
+/// otherwise rebuilt from its scope `inside`: each entry the stage holds a
+/// layer for re-serialized from memory, each nested package holding one
+/// rebuilt the same way, every other entry copied, and whatever those layers
+/// named outside the package added at its entry.
+fn rebuild_package(graph: &pcp::LayerGraph, bytes: Vec<u8>, inside: &Discovery<'_>) -> Result<Vec<u8>> {
+    if inside.sources.is_empty() {
+        return Ok(bytes);
+    }
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).map_err(usdz::ArchiveError::from)?;
+    let reserved = archive.file_names().map(str::to_owned).collect();
+    let entries = assign_entries(inside, "", reserved);
+    let existing: HashMap<&str, usize> = inside
+        .sources
+        .iter()
+        .enumerate()
+        .filter_map(|(index, source)| match &source.placement {
+            Placement::Entry(name) => Some((name.as_str(), index)),
+            Placement::Root | Placement::Named { .. } => None,
+        })
+        .collect();
+    let mut rebuilt = usdz::ArchiveWriter::new(Cursor::new(Vec::new()));
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(usdz::ArchiveError::from)?;
+        let name = entry.name().to_owned();
+        let mut contents = Vec::new();
+        entry.read_to_end(&mut contents)?;
+        let contents = match existing.get(name.as_str()) {
+            Some(&source) => source_bytes(graph, &inside.sources[source], &name, &entries, Some(contents))?,
+            None => contents,
+        };
+        rebuilt.add_layer(&name, &contents)?;
+    }
+    for (index, source) in inside.sources.iter().enumerate() {
+        if matches!(source.placement, Placement::Named { .. }) {
+            let contents = source_bytes(graph, source, &entries[index], &entries, None)?;
+            rebuilt.add_layer(&entries[index], &contents)?;
+        }
+    }
+    Ok(rebuilt.finish()?.into_inner())
+}
+
+/// The path the layer at `location` reaches the entry of the source it
+/// authored `path` for, when that is not `path` itself; `None` leaves the
+/// path as authored, as it is for one that did not resolve. A path into a
+/// package keeps the part its use records.
+fn rewrite(location: &str, path: &str, uses: &HashMap<String, Use>, entries: &[String]) -> Option<String> {
+    let Use { source, packaged } = uses.get(path)?;
+    let entry = &entries[*source];
+    let to_source = ar::split_package_relative_path_outer(path).map_or_else(|| path.to_owned(), |(package, _)| package);
+    if kept_entry(location, &to_source).as_deref() == Some(entry) {
+        return None;
+    }
+    let moved = path_to(location, entry);
+    Some(match packaged {
+        Some(inner) => ar::join_package_relative_path(&moved, inner),
+        None => moved,
+    })
+}
+
+/// The entry a path authored relative to the layer at `location` (`./a.usda`,
+/// `../tex/t.png`) reaches, or `None` for any other path or one leading out
+/// of the package.
 fn kept_entry(location: &str, path: &str) -> Option<String> {
-    if !path.starts_with("./") && !path.starts_with("../") {
+    let mut components = Path::new(path).components().peekable();
+    if !matches!(components.peek(), Some(Component::CurDir | Component::ParentDir)) {
         return None;
     }
     let mut parts: Vec<&str> = location.split('/').collect();
     parts.pop();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
+    for component in components {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
                 parts.pop()?;
             }
-            part => parts.push(part),
+            Component::Normal(part) => parts.push(part.to_str()?),
+            Component::RootDir | Component::Prefix(_) => return None,
         }
     }
     Some(parts.join("/"))
@@ -238,46 +295,26 @@ fn path_to(location: &str, entry: &str) -> String {
     format!("{}{entry}", "../".repeat(location.matches('/').count()))
 }
 
-/// The file name of `path`, inside its innermost package bracket.
-fn file_name(path: &str) -> String {
-    let inner = ar::split_package_relative_path_inner(path).map_or_else(|| path.to_owned(), |(_, inner)| inner);
-    inner.rsplit(['/', '\\']).next().unwrap_or_default().to_owned()
-}
-
-fn has_extension(path: &str, extension: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .is_some_and(|found| found.eq_ignore_ascii_case(extension))
+/// The bytes of the asset at `resolved`.
+fn read_asset(graph: &pcp::LayerGraph, resolved: &ar::ResolvedPath) -> Result<Vec<u8>> {
+    Ok(graph.layer_registry().open_asset(resolved)?.read_all()?)
 }
 
 /// Serializes `data` in the format the extension of `location` names.
 fn serialize(data: &dyn AbstractData, location: &str) -> Result<Vec<u8>> {
-    let extension = Path::new(location)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
-    let format = sdf::LayerRegistry::find_by_extension(extension)
-        .filter(|format| format.caps().can_write())
-        .ok_or_else(|| Error::UnsupportedFormat(location.to_owned()))?;
     let mut bytes = Cursor::new(Vec::new());
-    format.write(data, &mut bytes)?;
+    sdf::LayerRegistry::export_format(location)?.write(data, &mut bytes)?;
     Ok(bytes.into_inner())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::io::Read;
-
     use super::*;
-    use crate::usd::TimeCode;
+    use crate::ar::Resolver;
+    use crate::usd::stage::tests::attribute_value;
+    use crate::usd_utils::compute_all_dependencies;
+    use crate::usd_utils::discover::tests::{open, write};
     use crate::usdz::ArchiveWriter;
-
-    fn write(dir: &Path, path: &str, contents: &str) {
-        let path = dir.join(path);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, contents).unwrap();
-    }
 
     /// The archive's entry names in order, and the text of its `.usda` entries.
     fn entries(path: &Path) -> (Vec<String>, HashMap<String, String>) {
@@ -297,8 +334,28 @@ mod tests {
         (names, texts)
     }
 
-    fn probe(stage: &Stage, attr: &str) -> Option<sdf::Value> {
-        stage.attribute(attr).unwrap().get_at(TimeCode::new(0.0)).unwrap()
+    /// The entry names of the package at `packaged`, a path into one or more
+    /// packages, and the text of its `.usda` entries.
+    fn nested_entries(packaged: &str) -> (Vec<String>, HashMap<String, String>) {
+        let bytes = ar::DefaultResolver::new()
+            .open_asset(&ar::ResolvedPath::new(packaged))
+            .unwrap()
+            .read_all()
+            .unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut names = Vec::new();
+        let mut texts = HashMap::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            let name = entry.name().to_owned();
+            if name.ends_with(".usda") {
+                let mut text = String::new();
+                entry.read_to_string(&mut text).unwrap();
+                texts.insert(name.clone(), text);
+            }
+            names.push(name);
+        }
+        (names, texts)
     }
 
     const ROOT: &str = r#"#usda 1.0
@@ -342,11 +399,14 @@ def "T"
 }
 "#;
 
-    /// The layout C++ gives the same scene, with the paths a layer in a
-    /// subdirectory authors made to reach their moved entries: C++ 25.05
-    /// writes `0/d.usda` in `sub/a.usda`, which resolves to `sub/0/d.usda`.
+    /// The layout C++ gives the same scene, with two differences: the paths a
+    /// layer in a subdirectory authors are made to reach their moved entries
+    /// (C++ 25.05 writes `0/d.usda` in `sub/a.usda`, which resolves to
+    /// `sub/0/d.usda`), and the texture `0/b.usda` reaches by its own
+    /// relative path is the one entry it already has (C++ copies it again at
+    /// `scene/tex/t.png`).
     #[test]
-    fn packages_dependencies_as_cpp_lays_them_out() -> Result<()> {
+    fn layout_matches_cpp() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let base = dir.path();
         write(base, "scene/root.usda", ROOT);
@@ -374,12 +434,16 @@ def "T"
         inner.add_layer("second.usda", b"#usda 1.0\ndef \"Second\" {\n    int probe = 6\n}\n")?;
         inner.finish()?;
 
-        let root = base.join("scene/root.usda").to_str().unwrap().to_owned();
-        let stage = Stage::open(&root)?;
+        let (root, stage) = open(base, "scene/root.usda")?;
         let output = base.join("out.usdz");
         let skipped = create_new_usdz_package(&stage, &root, &output, None)?;
         assert_eq!(skipped.len(), 1);
         assert!(Path::new(&skipped[0]).ends_with("scene/missing.usda"));
+        assert_eq!(
+            fs::read_dir(base)?.count(),
+            4,
+            "no staging file left beside the package"
+        );
 
         let (names, texts) = entries(&output);
         assert_eq!(
@@ -393,7 +457,6 @@ def "T"
                 "2/inner.usdz",
                 "tex/t.png",
                 "0/d.usda",
-                "scene/tex/t.png",
             ]
         );
         let root_text = &texts["root.usda"];
@@ -410,24 +473,23 @@ def "T"
         }
         assert!(texts["sub/a.usda"].contains("@../0/d.usda@"));
         assert!(texts["sub/a.usda"].contains("@../tex/t.png@"));
-        assert!(texts["0/b.usda"].contains("@../scene/tex/t.png@"));
+        assert!(texts["0/b.usda"].contains("@../tex/t.png@"));
 
         let packaged = Stage::open(output.to_str().unwrap())?;
-        assert_eq!(probe(&packaged, "/S.probe"), Some(sdf::Value::Int(1)));
-        assert_eq!(probe(&packaged, "/A.probe"), Some(sdf::Value::Int(4)));
-        assert_eq!(probe(&packaged, "/B.probe"), Some(sdf::Value::Int(3)));
-        assert_eq!(probe(&packaged, "/C.probe"), Some(sdf::Value::Int(5)));
-        assert_eq!(probe(&packaged, "/N.probe"), Some(sdf::Value::Int(6)));
+        assert_eq!(attribute_value(&packaged, "/S.probe"), Some(sdf::Value::Int(1)));
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(4)));
+        assert_eq!(attribute_value(&packaged, "/B.probe"), Some(sdf::Value::Int(3)));
+        assert_eq!(attribute_value(&packaged, "/C.probe"), Some(sdf::Value::Int(5)));
+        assert_eq!(attribute_value(&packaged, "/N.probe"), Some(sdf::Value::Int(6)));
         Ok(())
     }
 
     /// The root keeps its unsaved edits and takes the given first entry name.
     #[test]
-    fn packages_unsaved_edits_under_first_layer_name() -> Result<()> {
+    fn unsaved_edits_first_layer_name() -> Result<()> {
         let dir = tempfile::tempdir()?;
         write(dir.path(), "root.usda", "#usda 1.0\ndef \"A\" {\n}\n");
-        let root = dir.path().join("root.usda").to_str().unwrap().to_owned();
-        let stage = Stage::open(&root)?;
+        let (root, stage) = open(dir.path(), "root.usda")?;
         stage.define_prim("/Edited")?;
         let output = dir.path().join("out.usdz");
         create_new_usdz_package(&stage, &root, &output, Some("scene.usdc"))?;
@@ -438,7 +500,63 @@ def "T"
         Ok(())
     }
 
-    /// A missing texture fails the package, as in C++.
+    /// A source reached by different paths from different entries is stored
+    /// once. A reference deleted in one layer and prepended in another still
+    /// names the same target after packaging.
+    #[test]
+    fn one_entry_per_source() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "scene/root.usda",
+            "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\ndef \"A\" (\n    delete references = @./ref.usda@</R>\n)\n{\n}\n",
+        );
+        write(
+            dir.path(),
+            "scene/weak.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./ref.usda@</R>\n)\n{\n}\n",
+        );
+        write(
+            dir.path(),
+            "scene/ref.usda",
+            "#usda 1.0\ndef \"R\" {\n    int probe = 42\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "scene/root.usda")?;
+        assert_eq!(attribute_value(&stage, "/A.probe"), None);
+
+        let output = dir.path().join("out.usdz");
+        create_new_usdz_package(&stage, &root, &output, None)?;
+        let (names, texts) = entries(&output);
+        assert_eq!(names, ["root.usda", "0/weak.usda", "ref.usda"]);
+        assert!(
+            texts["0/weak.usda"].contains("@../ref.usda@"),
+            "{}",
+            texts["0/weak.usda"]
+        );
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/A.probe"), None);
+        Ok(())
+    }
+
+    /// A first layer name the package could not open at is refused before
+    /// anything is written.
+    #[test]
+    fn first_layer_name_not_layer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(dir.path(), "root.usda", "#usda 1.0\ndef \"A\" {\n}\n");
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        let output = dir.path().join("out.usdz");
+        let error = create_new_usdz_package(&stage, &root, &output, Some("root.usdz")).unwrap_err();
+        assert!(
+            matches!(&error, Error::Archive(archive) if matches!(**archive, usdz::ArchiveError::InvalidEntryName { .. })),
+            "{error}"
+        );
+        assert!(!output.exists());
+        Ok(())
+    }
+
+    /// A missing texture fails the package, as in C++, before anything is
+    /// written.
     #[test]
     fn missing_asset_fails() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -447,13 +565,14 @@ def "T"
             "root.usda",
             "#usda 1.0\ndef \"A\" {\n    asset t = @./missing.png@\n}\n",
         );
-        let root = dir.path().join("root.usda").to_str().unwrap().to_owned();
-        let stage = Stage::open(&root)?;
-        let error = create_new_usdz_package(&stage, &root, dir.path().join("out.usdz"), None).unwrap_err();
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        let output = dir.path().join("out.usdz");
+        let error = create_new_usdz_package(&stage, &root, &output, None).unwrap_err();
         assert!(
             matches!(&error, Error::UnresolvedAsset(path) if path.ends_with("missing.png")),
             "{error}"
         );
+        assert!(!output.exists());
         Ok(())
     }
 
@@ -479,7 +598,312 @@ def "T"
         create_new_usdz_package(&stage, source.to_str().unwrap(), &output, None)?;
         assert_eq!(entries(&output).0, ["root.usda", "sub/inner.usda", "tex.png"]);
         let packaged = Stage::open(output.to_str().unwrap())?;
-        assert_eq!(probe(&packaged, "/A.probe"), Some(sdf::Value::Int(7)));
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(7)));
+        Ok(())
+    }
+
+    /// A package written over the package the stage was opened from reads
+    /// its sources from the original, which stays until the package is
+    /// complete.
+    #[test]
+    fn repackages_onto_itself() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("scene.usdz");
+        let mut writer = ArchiveWriter::create(&source)?;
+        writer.add_layer(
+            "root.usda",
+            b"#usda 1.0\ndef \"A\" {\n    asset t = @./tex.png@\n    int probe = 7\n}\n",
+        )?;
+        writer.add_layer("tex.png", b"PNG")?;
+        writer.finish()?;
+
+        let stage = Stage::open(source.to_str().unwrap())?;
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(7)));
+        create_new_usdz_package(&stage, source.to_str().unwrap(), &source, None)?;
+        assert_eq!(fs::read_dir(dir.path())?.count(), 1, "only the package is left");
+        assert_eq!(entries(&source).0, ["root.usda", "tex.png"]);
+        let packaged = Stage::open(source.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(7)));
+        Ok(())
+    }
+
+    /// The layers the stage holds inside a referenced package, its default
+    /// one and one named by entry, are re-serialized from memory with their
+    /// unsaved edits, while the other entries are copied.
+    #[test]
+    fn nested_package_edits_kept() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut writer = ArchiveWriter::create(dir.path().join("pkg.usdz"))?;
+        writer.add_layer("first.usda", b"#usda 1.0\ndef \"R\" {\n    int probe = 1\n}\n")?;
+        writer.add_layer("other.usda", b"#usda 1.0\ndef \"R\" {\n    int probe = 1\n}\n")?;
+        writer.add_layer("tex.png", b"PNG")?;
+        writer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\ndef \"B\" (\n    prepend references = @./pkg.usdz[other.usda]@</R>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        // Composing the references loads the packaged layers into the stage.
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
+        assert_eq!(attribute_value(&stage, "/B.probe"), Some(sdf::Value::Int(1)));
+        let dependencies = compute_all_dependencies(&stage, &root)?;
+        let probe = sdf::path("/R.probe")?;
+        for identifier in dependencies.layers.iter().filter(|layer| layer.contains("pkg.usdz")) {
+            stage.layer_mut(identifier).unwrap().edit(|edit| {
+                edit.data_mut()
+                    .set_field(&probe, sdf::FieldKey::Default.as_str(), sdf::Value::Int(42));
+                Ok(())
+            })?;
+        }
+
+        let output = dir.path().join("out.usdz");
+        create_new_usdz_package(&stage, &root, &output, None)?;
+        assert_eq!(entries(&output).0, ["root.usda", "pkg.usdz"]);
+        let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
+        assert_eq!(nested_entries(&nested).0, ["first.usda", "other.usda", "tex.png"]);
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(42)));
+        assert_eq!(attribute_value(&packaged, "/B.probe"), Some(sdf::Value::Int(42)));
+        Ok(())
+    }
+
+    /// A package nested in a rebuilt one keeps every entry: the layer the
+    /// stage holds in it is re-serialized, the rest copied.
+    #[test]
+    fn nested_archives_kept() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut inner = ArchiveWriter::new(Cursor::new(Vec::new()));
+        inner.add_layer(
+            "first.usda",
+            b"#usda 1.0\ndef \"A\" (\n    prepend references = @./second.usda@</B>\n)\n{\n}\n",
+        )?;
+        inner.add_layer("second.usda", b"#usda 1.0\ndef \"B\" {\n    int probe = 7\n}\n")?;
+        inner.add_layer("tex.png", b"PNG")?;
+        let inner = inner.finish()?.into_inner();
+        let mut outer = ArchiveWriter::create(dir.path().join("outer.usdz"))?;
+        outer.add_layer(
+            "root.usda",
+            b"#usda 1.0\ndef \"A\" (\n    prepend references = @./inner.usdz@</A>\n)\n{\n}\n",
+        )?;
+        outer.add_layer("inner.usdz", &inner)?;
+        outer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./outer.usdz@</A>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(7)));
+
+        let output = dir.path().join("out.usdz");
+        create_new_usdz_package(&stage, &root, &output, None)?;
+        let nested = ar::join_package_relative_path(output.to_str().unwrap(), "outer.usdz[inner.usdz]");
+        assert_eq!(nested_entries(&nested).0, ["first.usda", "second.usda", "tex.png"]);
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(7)));
+        Ok(())
+    }
+
+    /// What a layer the stage holds inside a package names outside it is
+    /// packaged into that package, and the path rewritten to reach it there.
+    #[test]
+    fn nested_layer_dependencies_packaged() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(dir.path(), "textures/t.png", "PNG");
+        let texture = dir.path().join("textures/t.png");
+        let texture = texture.to_str().unwrap().replace('\\', "/");
+        let mut writer = ArchiveWriter::create(dir.path().join("pkg.usdz"))?;
+        writer.add_layer(
+            "first.usda",
+            format!("#usda 1.0\ndef \"R\" {{\n    asset tex = @{texture}@\n    int probe = 1\n}}\n").as_bytes(),
+        )?;
+        writer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
+
+        let output = dir.path().join("out.usdz");
+        create_new_usdz_package(&stage, &root, &output, None)?;
+        let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
+        let (names, texts) = nested_entries(&nested);
+        assert_eq!(names, ["first.usda", "0/t.png"]);
+        assert!(texts["first.usda"].contains("@0/t.png@"), "{}", texts["first.usda"]);
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        let dependencies = compute_all_dependencies(&packaged, output.to_str().unwrap())?;
+        assert!(
+            dependencies
+                .assets
+                .iter()
+                .any(|asset| asset.ends_with("out.usdz[pkg.usdz[0/t.png]]")),
+            "{:?}",
+            dependencies.assets
+        );
+        assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+        Ok(())
+    }
+
+    /// A file packaged into a rebuilt package takes an entry none of the
+    /// package's own entries has, including those the stage holds no layer
+    /// for.
+    #[test]
+    fn nested_entry_names_reserved() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(dir.path(), "textures/extra.png", "NEW");
+        let texture = dir.path().join("textures/extra.png");
+        let texture = texture.to_str().unwrap().replace('\\', "/");
+        let mut writer = ArchiveWriter::create(dir.path().join("pkg.usdz"))?;
+        writer.add_layer(
+            "first.usda",
+            format!("#usda 1.0\ndef \"R\" {{\n    asset tex = @{texture}@\n    int probe = 1\n}}\n").as_bytes(),
+        )?;
+        writer.add_layer("0/extra.png", b"EXISTING")?;
+        writer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
+
+        let output = dir.path().join("out.usdz");
+        create_new_usdz_package(&stage, &root, &output, None)?;
+        let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
+        let (names, texts) = nested_entries(&nested);
+        assert_eq!(names, ["first.usda", "0/extra.png", "1/extra.png"]);
+        assert!(texts["first.usda"].contains("@1/extra.png@"), "{}", texts["first.usda"]);
+        Ok(())
+    }
+
+    /// A missing asset named by a layer the stage holds two packages deep
+    /// fails the package like one named at the top.
+    #[test]
+    fn deep_missing_asset_fails() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut inner = ArchiveWriter::new(Cursor::new(Vec::new()));
+        inner.add_layer(
+            "first.usda",
+            b"#usda 1.0\ndef \"A\" {\n    asset t = @./missing.png@\n    int probe = 7\n}\n",
+        )?;
+        let inner = inner.finish()?.into_inner();
+        let mut outer = ArchiveWriter::create(dir.path().join("outer.usdz"))?;
+        outer.add_layer(
+            "root.usda",
+            b"#usda 1.0\ndef \"A\" (\n    prepend references = @./inner.usdz@</A>\n)\n{\n}\n",
+        )?;
+        outer.add_layer("inner.usdz", &inner)?;
+        outer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./outer.usdz@</A>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(7)));
+
+        let output = dir.path().join("out.usdz");
+        let error = create_new_usdz_package(&stage, &root, &output, None).unwrap_err();
+        assert!(
+            matches!(&error, Error::UnresolvedAsset(path) if path.ends_with("outer.usdz[inner.usdz[missing.png]]")),
+            "{error}"
+        );
+        assert!(!output.exists());
+        Ok(())
+    }
+
+    /// An absolute path into the very package a layer the stage holds is in
+    /// names the original archive. It is rewritten to reach the entry inside
+    /// the packaged copy, a file or a package nested there alike, and the
+    /// original can then go.
+    #[test]
+    fn absolute_packaged_paths_rewritten() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let package = dir.path().join("pkg.usdz");
+        let absolute = package.to_str().unwrap().replace('\\', "/");
+        let mut inner = ArchiveWriter::new(Cursor::new(Vec::new()));
+        inner.add_layer("a.usda", b"#usda 1.0\ndef \"B\" {\n    int deep = 9\n}\n")?;
+        let inner = inner.finish()?.into_inner();
+        let mut writer = ArchiveWriter::create(&package)?;
+        writer.add_layer(
+            "first.usda",
+            format!(
+                "#usda 1.0\ndef \"R\" (\n    prepend references = @{absolute}[inner.usdz[a.usda]]@</B>\n)\n{{\n    asset tex = @{absolute}[tex.png]@\n    int probe = 1\n}}\n"
+            )
+            .as_bytes(),
+        )?;
+        writer.add_layer("inner.usdz", &inner)?;
+        writer.add_layer("tex.png", b"PNG")?;
+        writer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert_eq!(attribute_value(&stage, "/A.deep"), Some(sdf::Value::Int(9)));
+
+        let output = dir.path().join("out.usdz");
+        create_new_usdz_package(&stage, &root, &output, None)?;
+        fs::rename(&package, dir.path().join("moved.usdz"))?;
+        let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
+        let (names, texts) = nested_entries(&nested);
+        assert_eq!(names, ["first.usda", "inner.usdz", "tex.png"]);
+        assert!(
+            texts["first.usda"].contains("@inner.usdz[a.usda]@"),
+            "{}",
+            texts["first.usda"]
+        );
+        assert!(texts["first.usda"].contains("@tex.png@"), "{}", texts["first.usda"]);
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/A.deep"), Some(sdf::Value::Int(9)));
+        let dependencies = compute_all_dependencies(&packaged, output.to_str().unwrap())?;
+        assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+        Ok(())
+    }
+
+    /// A packaged path is checked whole: a missing packaged layer is left out
+    /// and reported, a missing packaged asset fails the package.
+    #[test]
+    fn missing_packaged_entry() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut package = ArchiveWriter::create(dir.path().join("assets.usdz"))?;
+        package.add_layer("a.usda", b"#usda 1.0\ndef \"A\" {\n}\n")?;
+        package.finish()?;
+        for (root, missing, layer) in [
+            (
+                "#usda 1.0\ndef \"A\" (\n    prepend references = @./assets.usdz[missing.usda]@\n)\n{\n}\n",
+                "assets.usdz[missing.usda]",
+                true,
+            ),
+            (
+                "#usda 1.0\ndef \"A\" {\n    asset t = @./assets.usdz[missing.png]@\n}\n",
+                "assets.usdz[missing.png]",
+                false,
+            ),
+        ] {
+            write(dir.path(), "root.usda", root);
+            let (root, stage) = open(dir.path(), "root.usda")?;
+            let result = create_new_usdz_package(&stage, &root, dir.path().join("out.usdz"), None);
+            if layer {
+                let skipped = result?;
+                assert_eq!(skipped.len(), 1, "{skipped:?}");
+                assert!(skipped[0].ends_with(missing), "{skipped:?}");
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    matches!(&error, Error::UnresolvedAsset(path) if path.ends_with(missing)),
+                    "{error}"
+                );
+            }
+        }
         Ok(())
     }
 }

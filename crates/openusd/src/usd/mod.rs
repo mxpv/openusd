@@ -25,7 +25,7 @@ mod schema;
 mod schema_decl;
 mod schema_registry;
 mod sink;
-mod stage;
+pub(crate) mod stage;
 mod timecode;
 
 pub use attribute::{Attribute, AttributeBuilder, AttributeQuery};
