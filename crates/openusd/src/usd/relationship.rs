@@ -142,6 +142,12 @@ impl Relationship {
         &self.path
     }
 
+    /// The relationship's name within its prim, namespaces included, or `""`
+    /// when the handle addresses no property. Mirrors C++ `UsdObject::GetName`.
+    pub fn name(&self) -> &str {
+        self.path.split_property().map_or("", |(_, name)| name)
+    }
+
     /// The stage this handle is anchored to.
     pub fn stage(&self) -> &Stage {
         &self.stage
