@@ -3677,12 +3677,8 @@ impl StageBuilder {
         // session), and composition later resolves each `${VAR}` sublayer to the same
         // layer this collection opened.
         let root = self.registry.prepare_root(root_path, None)?;
-        let session = self
-            .session_layer
-            .as_deref()
-            .map(|path| self.registry.prepare_root(path, None))
-            .transpose()?;
-        let root_stack_vars = self.root_stack_expression_variables(root_path, &root, session.as_ref())?;
+        let session = self.prepare_session()?;
+        let root_stack_vars = self.root_stack_expression_variables(&root, session.as_ref())?;
         let session = session
             .map(|session| self.collect_layers(session, &root_stack_vars))
             .transpose()?
@@ -3716,9 +3712,8 @@ impl StageBuilder {
         // stack context reduces to the session root's own — which
         // `open_prepared_stack` composes from the empty ancestor anyway.
         let session = self
-            .session_layer
-            .as_deref()
-            .map(|path| self.collect_layers(self.registry.prepare_root(path, None)?, &HashMap::new()))
+            .prepare_session()?
+            .map(|session| self.collect_layers(session, &HashMap::new()))
             .transpose()?
             .unwrap_or_default();
         let session_layer_count = session.layers.len();
@@ -3728,6 +3723,16 @@ impl StageBuilder {
             .chain(std::iter::once(sdf::Layer::new_anonymous(identifier)))
             .collect();
         Ok(self.make_stage(layers, session_layer_count, session.diagnostics))
+    }
+
+    /// The configured session layer read ahead of its stack, or `None` when
+    /// the builder has none.
+    fn prepare_session(&self) -> Result<Option<sdf::PreparedLayer>> {
+        Ok(self
+            .session_layer
+            .as_deref()
+            .map(|path| self.registry.prepare_root(path, None))
+            .transpose()?)
     }
 
     /// Opens the sublayer stack of `root`, a root layer
@@ -3766,27 +3771,16 @@ impl StageBuilder {
         })
     }
 
-    /// The builder's requested mutes, canonicalized against the root layer the way
-    /// the graph's muted set is (C++ `Pcp_MutedLayers::_GetCanonicalLayerId`): with
-    /// a resolvable root anchor each spelling is resolved to the identifier its
-    /// layer interns under, so any spelling of one layer collapses to one entry; an
-    /// in-memory or anonymous root has no anchor, so the spelling passes through.
-    /// Lets collection test a sublayer's interned identifier for muting before the
-    /// graph exists. Empty when nothing is muted.
-    fn canonical_muted_set(&self, root_path: &str) -> HashSet<String> {
-        if self.muted.is_empty() {
-            return HashSet::new();
-        }
-        let root_anchor = self
-            .registry
-            .resolve_layer(&self.registry.create_identifier(root_path, None));
+    /// Whether the builder's requested mutes name `identifier`, each spelling
+    /// canonicalized against the root layer at `root` the way the graph's
+    /// muted set is (C++ `Pcp_MutedLayers::_GetCanonicalLayerId`): resolved
+    /// to the identifier its layer interns under. Any spelling of one layer
+    /// therefore matches. Lets collection test an interned identifier for
+    /// muting before the graph exists.
+    fn mutes(&self, root: &ar::ResolvedPath, identifier: &str) -> bool {
         self.muted
             .iter()
-            .map(|m| match root_anchor.as_ref() {
-                Some(a) => self.registry.create_identifier(m, Some(a)),
-                None => m.clone(),
-            })
-            .collect()
+            .any(|m| self.registry.create_identifier(m, Some(root)) == identifier)
     }
 
     /// The stage root stack's single expression-variable context (C++
@@ -3797,17 +3791,15 @@ impl StageBuilder {
     /// and the root region's `${VAR}` sublayers resolve against.
     fn root_stack_expression_variables(
         &self,
-        root_path: &str,
         root: &sdf::PreparedLayer,
         session: Option<&sdf::PreparedLayer>,
     ) -> Result<HashMap<String, sdf::Value>> {
         let mut vars = sdf::expr::read_expression_variables(root.data.as_ref())?.into_owned();
-        if let Some(session) = session {
-            let muted = !self.muted.is_empty() && self.canonical_muted_set(root_path).contains(&session.identifier);
-            if !muted {
-                let session_own = sdf::expr::read_expression_variables(session.data.as_ref())?.into_owned();
-                sdf::expr::compose_over(&mut vars, &session_own);
-            }
+        if let Some(session) = session
+            && !self.mutes(&root.resolved, &session.identifier)
+        {
+            let session_own = sdf::expr::read_expression_variables(session.data.as_ref())?.into_owned();
+            sdf::expr::compose_over(&mut vars, &session_own);
         }
         Ok(vars)
     }

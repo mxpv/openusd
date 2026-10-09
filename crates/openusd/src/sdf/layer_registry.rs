@@ -147,9 +147,9 @@ pub struct LayerRegistry {
     resolver: Box<dyn ar::Resolver>,
 }
 
-/// A stack's root layer, read ahead of its stack by
-/// [`LayerRegistry::prepare_root`] and handed to
-/// [`LayerRegistry::open_prepared_stack`] so it is not read twice.
+/// A layer as [`LayerRegistry::open`] reads it: its canonical identifier,
+/// the location it resolved to, and its parsed data, ahead of the
+/// [`sdf::Layer`] or sublayer walk built from it.
 pub(crate) struct PreparedLayer {
     /// The layer's canonical identifier.
     pub identifier: String,
@@ -309,24 +309,26 @@ impl LayerRegistry {
         DEFAULT_FORMATS.iter().copied().find(|f| f.format_id() == id)
     }
 
-    /// Resolves `identifier` and opens the layer there in its file format,
-    /// returning the location it resolved to alongside the data, or `None` when
-    /// it does not resolve. Used for value-clip and manifest layers, which
-    /// compose outside the layer graph (spec 12.3.4).
+    /// Resolves `identifier` and reads the layer there in its file format, or
+    /// `None` when it does not resolve: the one resolve-and-read step every
+    /// open builds on. Value-clip and manifest layers, which compose outside
+    /// the layer graph (spec 12.3.4), use it directly.
     ///
     /// The resolved location comes back with the data because it is what anchors
     /// the relative asset paths the layer authors, and it is not always the
     /// identifier: a package resolves to its package-relative default layer.
     /// [`open_layer`](Self::open_layer) builds the [`sdf::Layer`] that keeps
     /// it.
-    pub(crate) fn open(&self, identifier: &str) -> Result<Option<(ar::ResolvedPath, sdf::LayerData)>, LoadError> {
-        match self.resolve_layer(identifier) {
-            Some(resolved) => {
-                let data = self.read(&resolved)?;
-                Ok(Some((resolved, data)))
-            }
-            None => Ok(None),
-        }
+    pub(crate) fn open(&self, identifier: &str) -> Result<Option<PreparedLayer>, LoadError> {
+        let Some(resolved) = self.resolve_layer(identifier) else {
+            return Ok(None);
+        };
+        let data = self.read(&resolved)?;
+        Ok(Some(PreparedLayer {
+            identifier: identifier.to_owned(),
+            resolved,
+            data,
+        }))
     }
 
     /// Opens the layer at `identifier` as an [`sdf::Layer`] anchored at the
@@ -335,7 +337,7 @@ impl LayerRegistry {
     pub(crate) fn open_layer(&self, identifier: &str) -> Result<Option<sdf::Layer>, LoadError> {
         Ok(self
             .open(identifier)?
-            .map(|(resolved, data)| sdf::Layer::new_resolved(identifier, &resolved, data)))
+            .map(|layer| sdf::Layer::new_resolved(identifier, &layer.resolved, layer.data)))
     }
 
     /// Reads the single layer at `asset_path` (anchored against `anchor`)
@@ -359,13 +361,7 @@ impl LayerRegistry {
         if identifier.is_empty() {
             return Err(unresolved());
         }
-        let resolved = self.resolve_layer(&identifier).ok_or_else(unresolved)?;
-        let data = self.read(&resolved)?;
-        Ok(PreparedLayer {
-            identifier,
-            resolved,
-            data,
-        })
+        self.open(&identifier)?.ok_or_else(unresolved)
     }
 
     /// Opens the layer at `identifier` — a canonical identifier, as
@@ -423,23 +419,9 @@ impl LayerRegistry {
         if identifier.is_empty() {
             return Ok(None);
         }
-        let identifier = identifier.to_string();
-        let Some(resolved) = self.resolve_layer(&identifier) else {
-            return Ok(None);
-        };
-        let data = self.read(&resolved)?;
-        self.open_prepared_stack(
-            PreparedLayer {
-                identifier,
-                resolved,
-                data,
-            },
-            ancestor_expr_vars,
-            reload,
-            on_error,
-            already_present,
-        )
-        .map(Some)
+        self.open(identifier)?
+            .map(|root| self.open_prepared_stack(root, ancestor_expr_vars, reload, on_error, already_present))
+            .transpose()
     }
 
     /// [`open_stack`](Self::open_stack) from a root layer already read by
@@ -452,25 +434,17 @@ impl LayerRegistry {
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
     ) -> Result<Vec<sdf::Layer>, LoadError> {
-        let PreparedLayer {
-            identifier,
-            resolved,
-            data,
-        } = root;
         let mut layers = Vec::new();
-        let mut visited = HashSet::new();
-        visited.insert(identifier.clone());
+        let mut visited = HashSet::from([root.identifier.clone()]);
 
         // The whole stack resolves its `${VAR}` sublayers against one context (C++
         // `PcpExpressionVariables`): the root layer's own `expressionVariables`
         // overlaid by the inherited overrides. Sublayers contribute nothing, so it
         // is fixed for the walk.
-        let stack_vars = expr::stack_expression_variables(data.as_ref(), ancestor_expr_vars)?;
+        let stack_vars = expr::stack_expression_variables(root.data.as_ref(), ancestor_expr_vars)?;
 
         self.open_sublayers(
-            identifier,
-            resolved,
-            data,
+            root,
             &stack_vars,
             reload,
             on_error,
@@ -506,16 +480,13 @@ impl LayerRegistry {
         stack_vars: &HashMap<String, sdf::Value>,
         already_present: &dyn Fn(&str) -> bool,
     ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
-        let Some(resolved) = self.resolve_layer(identifier) else {
+        let Some(layer) = self.open(identifier)? else {
             return Ok(None);
         };
-        let data = self.read(&resolved)?;
         let mut layers = Vec::new();
         let mut visited = HashSet::from([identifier.to_string()]);
         self.open_sublayers(
-            identifier.to_string(),
-            resolved,
-            data,
+            layer,
             stack_vars,
             false,
             &|_| Ok(()),
@@ -550,23 +521,21 @@ impl LayerRegistry {
 
     /// Emits an already-read layer and recursively opens its sublayers.
     ///
-    /// `identifier`, `resolved`, and `data` are this layer's canonical
-    /// identifier, resolved location, and parsed contents — read by the caller
-    /// (the root in [`open_stack`](Self::open_stack), each sublayer in the loop
-    /// below) so a sublayer's read failure is routed to `on_error` while the
-    /// root's propagates.
+    /// `layer` is read by the caller (the root in
+    /// [`open_prepared_stack`](Self::open_prepared_stack), each sublayer in
+    /// the loop below) so a sublayer's read failure is routed to `on_error`
+    /// while the root's propagates.
     ///
     /// `stack_vars` is the one context the whole stack resolves against (the root
     /// layer's own `expressionVariables` overlaid by the inherited overrides,
-    /// computed once in [`open_stack`](Self::open_stack)). This layer's own
-    /// `expressionVariables` do not contribute — only the stack root's do (C++
-    /// `PcpExpressionVariables`) — so it is passed down unchanged.
+    /// computed once in [`open_prepared_stack`](Self::open_prepared_stack)).
+    /// This layer's own `expressionVariables` do not contribute — only the
+    /// stack root's do (C++ `PcpExpressionVariables`) — so it is passed down
+    /// unchanged.
     #[allow(clippy::too_many_arguments)]
     fn open_sublayers(
         &self,
-        identifier: String,
-        resolved: ar::ResolvedPath,
-        data: sdf::LayerData,
+        layer: PreparedLayer,
         stack_vars: &HashMap<String, sdf::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
@@ -574,6 +543,11 @@ impl LayerRegistry {
         visited: &mut HashSet<String>,
         layers: &mut Vec<sdf::Layer>,
     ) -> Result<(), LoadError> {
+        let PreparedLayer {
+            identifier,
+            resolved,
+            data,
+        } = layer;
         let sub_paths = Self::sublayer_paths(data.as_ref());
 
         // Emit this layer ahead of its sublayers so the collected stack is
@@ -596,6 +570,10 @@ impl LayerRegistry {
         // in-package: a package root is anchored to its first layer, so this
         // layer's `resolved` is already package-relative and its sublayer paths
         // anchor against it the same way any other layer's do.
+        //
+        // TODO(rayon): each sublayer's resolve and read is independent of its
+        // siblings'; only the emission order and the `visited` / `failed`
+        // bookkeeping are sequential.
         for sub_path in sub_paths {
             // Evaluate an expression-valued sublayer path. An unevaluable
             // expression drops only this sublayer — like an unresolved or
@@ -668,9 +646,11 @@ impl LayerRegistry {
             visited.insert(sub_id.clone());
 
             self.open_sublayers(
-                sub_id,
-                sub_resolved,
-                sub_data,
+                PreparedLayer {
+                    identifier: sub_id,
+                    resolved: sub_resolved,
+                    data: sub_data,
+                },
                 stack_vars,
                 reload,
                 on_error,
