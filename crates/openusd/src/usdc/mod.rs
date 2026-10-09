@@ -1,6 +1,6 @@
 //! Binary file format (`usdc`) implementation.
 
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, fs, io, mem, path::Path, str, sync::Arc};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, fs, io, mem, path::Path, str};
 
 use layout::ValueRep;
 
@@ -13,7 +13,7 @@ pub use layout::{Version, version};
 pub use reader::{CrateFile, ReadExt};
 pub use writer::CrateWriter;
 
-use crate::{sdf, tf};
+use crate::{ar, sdf, tf};
 
 /// USDC binary format magic bytes (`PXR-USDC`).
 pub const MAGIC: &[u8] = b"PXR-USDC";
@@ -373,12 +373,12 @@ impl sdf::FileFormat for UsdcFileFormat {
         &["usdc", "usd"]
     }
 
-    fn read_bytes(&self, bytes: Cow<'static, [u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        open_bytes(bytes)
-    }
-
-    fn read_shared_bytes(&self, bytes: Arc<[u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        open_bytes(bytes)
+    fn read_bytes(&self, bytes: ar::AssetBytes, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+        // Validated: these bytes are a file the caller did not write, and the
+        // decoder indexes into them on trust.
+        let data =
+            CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
+        Ok(Box::new(data))
     }
 
     fn matches_content(&self, prefix: &[u8]) -> bool {
@@ -390,15 +390,6 @@ impl sdf::FileFormat for UsdcFileFormat {
     }
 }
 
-/// Decodes the crate file in `bytes`, indexing into them in place. The file
-/// is validated first: the caller did not write these bytes, and the decoder
-/// indexes into them on trust.
-fn open_bytes(bytes: impl AsRef<[u8]> + 'static) -> Result<sdf::LayerData, sdf::FormatError> {
-    let data =
-        CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
-    Ok(Box::new(data))
-}
-
 /// The crate (binary) format names the property-children field "properties",
 /// while the rest of the toolkit uses the Sdf token "propertyChildren". The
 /// crate reader (`CrateData::open`) and writer translate between the two at that
@@ -407,30 +398,11 @@ const CRATE_PROPERTY_CHILDREN: &str = "properties";
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::Result;
     use crate::sdf::FileFormat;
-    use crate::{Result, ar};
-
-    /// A resolver that serves one asset from bytes it holds in memory.
-    struct SharedResolver(Arc<[u8]>);
-
-    impl ar::Resolver for SharedResolver {
-        fn create_identifier(&self, asset_path: &str, _anchor: Option<&ar::ResolvedPath>) -> String {
-            asset_path.to_string()
-        }
-
-        fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-            Some(ar::ResolvedPath::new(asset_path))
-        }
-
-        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-            Some(ar::ResolvedPath::new(asset_path))
-        }
-
-        fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-            Ok(Box::new(io::Cursor::new(self.0.clone())))
-        }
-    }
 
     /// A crate layer read from an asset that shares its bytes decodes from
     /// those bytes and keeps a reference to them.
@@ -442,7 +414,10 @@ mod tests {
         CrateWriter::write(&layer, &mut bytes)?;
         let bytes: Arc<[u8]> = bytes.into_inner().into();
 
-        let resolver = SharedResolver(bytes.clone());
+        let resolver = ar::tests::TestResolver({
+            let bytes = bytes.clone();
+            move || -> io::Result<Box<dyn ar::Asset>> { Ok(Box::new(io::Cursor::new(bytes.clone()))) }
+        });
         let data = UsdcFileFormat.read(&resolver, &ar::ResolvedPath::new("shared.usdc"))?;
         assert!(data.has_spec(&sdf::Path::abs_root()));
         assert_eq!(Arc::strong_count(&bytes), 3);

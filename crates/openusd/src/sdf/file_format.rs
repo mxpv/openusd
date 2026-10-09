@@ -8,9 +8,7 @@
 //! [`LayerRegistry`](super::LayerRegistry) (`find_by_extension` / `find_by_id`),
 //! mirroring C++ `SdfFileFormat::FindByExtension` / `FindById`.
 
-use std::borrow::Cow;
 use std::io::{self, Seek, Write};
-use std::sync::Arc;
 use std::{error, fmt, mem};
 
 use bitflags::bitflags;
@@ -165,28 +163,11 @@ pub trait FileFormat: Sync {
     /// location: the resolved path for a layer read off disk, and whatever
     /// label a caller chooses for bytes that were never there.
     ///
-    /// The bytes are owned or borrowed for the program's life because a
-    /// decoder may keep reading them — the crate format indexes into the
-    /// buffer rather than copying it out — so bytes compiled into the program
-    /// decode without a copy while bytes just read off disk move in.
-    fn read_bytes(&self, bytes: Cow<'static, [u8]>, source_name: &str) -> Result<LayerData, FormatError>;
-
-    /// [`read_bytes`](Self::read_bytes) for bytes shared with an asset
-    /// ([`ar::Asset::shared_bytes`]). A format that decodes in place keeps
-    /// them; the default copies them into `read_bytes`.
-    fn read_shared_bytes(&self, bytes: Arc<[u8]>, source_name: &str) -> Result<LayerData, FormatError> {
-        self.read_bytes(bytes.as_ref().to_vec().into(), source_name)
-    }
-
-    /// Decodes an asset's complete bytes, as [`ar::Asset::into_bytes`]
-    /// yields them, through [`read_shared_bytes`](Self::read_shared_bytes)
-    /// or [`read_bytes`](Self::read_bytes) by how the asset holds them.
-    fn read_asset_bytes(&self, bytes: ar::AssetBytes, source_name: &str) -> Result<LayerData, FormatError> {
-        match bytes {
-            ar::AssetBytes::Shared(bytes) => self.read_shared_bytes(bytes, source_name),
-            ar::AssetBytes::Owned(bytes) => self.read_bytes(bytes.into(), source_name),
-        }
-    }
+    /// The bytes live as long as the layer because a decoder may keep
+    /// reading them: the crate format indexes into the buffer in place,
+    /// whether it is compiled into the program, owned, or shared with the
+    /// asset it came from (see [`ar::AssetBytes`]).
+    fn read_bytes(&self, bytes: ar::AssetBytes, source_name: &str) -> Result<LayerData, FormatError>;
 
     /// Read a layer's data from `resolved`, opening the asset (and any
     /// sibling assets) through `resolver`.
@@ -196,7 +177,7 @@ pub trait FileFormat: Sync {
     /// overrides this.
     fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData, FormatError> {
         let bytes = resolver.open_asset(resolved)?.into_bytes()?;
-        self.read_asset_bytes(bytes, &resolved.to_string())
+        self.read_bytes(bytes, &resolved.to_string())
     }
 
     /// Resolves the real path of the layer to open at `resolved` — the location

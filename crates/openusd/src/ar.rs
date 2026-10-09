@@ -108,14 +108,6 @@ pub trait Asset: Read + Seek + Send {
     /// Returns the total size of the asset in bytes.
     fn size(&self) -> io::Result<u64>;
 
-    /// The complete asset as bytes shared with the caller, whatever the
-    /// cursor position, for an asset already held in memory (C++
-    /// `ArAsset::GetBuffer`). A format that decodes in place keeps them.
-    /// With `None`, the default, the asset is read.
-    fn shared_bytes(&self) -> Option<Arc<[u8]>> {
-        None
-    }
-
     /// Reads the entire asset into a byte buffer.
     fn read_all(&mut self) -> io::Result<Vec<u8>> {
         let size = self.size()? as usize;
@@ -124,26 +116,29 @@ pub trait Asset: Read + Seek + Send {
         Ok(buf)
     }
 
-    /// The complete asset's bytes, consuming the asset: the ones it shares
-    /// when [`shared_bytes`](Self::shared_bytes) offers them, otherwise the
-    /// ones [`read_all`](Self::read_all) reads. An asset that owns its
-    /// buffer hands it over.
+    /// The complete asset's bytes, consuming the asset. The default reads
+    /// them with [`read_all`](Self::read_all); an asset that already holds
+    /// them in memory hands them over, owned or shared (C++
+    /// `ArAsset::GetBuffer`).
     fn into_bytes(mut self: Box<Self>) -> io::Result<AssetBytes> {
-        match self.shared_bytes() {
-            Some(bytes) => Ok(AssetBytes::Shared(bytes)),
-            None => self.read_all().map(AssetBytes::Owned),
-        }
+        self.read_all().map(AssetBytes::Owned)
     }
 }
 
-/// An asset's complete bytes, as [`Asset::into_bytes`] yields them.
+/// The bytes a layer decodes from: an asset's complete contents, as
+/// [`Asset::into_bytes`] yields them, or bytes that never were an asset,
+/// compiled into the program or handed over by a host. They live as long as
+/// the layer because a decoder may keep reading them: the crate format
+/// indexes into the buffer in place, while the text format copies out what
+/// it keeps.
 #[derive(Debug, Clone)]
 pub enum AssetBytes {
-    /// Bytes the asset shares with whoever else holds them, which a format
-    /// that decodes in place keeps.
-    Shared(Arc<[u8]>),
+    /// Bytes compiled into the program.
+    Static(&'static [u8]),
     /// Bytes the caller owns outright.
     Owned(Vec<u8>),
+    /// Bytes shared with whoever else holds them.
+    Shared(Arc<[u8]>),
 }
 
 impl Deref for AssetBytes {
@@ -151,9 +146,34 @@ impl Deref for AssetBytes {
 
     fn deref(&self) -> &[u8] {
         match self {
-            AssetBytes::Shared(bytes) => bytes,
+            AssetBytes::Static(bytes) => bytes,
             AssetBytes::Owned(bytes) => bytes,
+            AssetBytes::Shared(bytes) => bytes,
         }
+    }
+}
+
+impl AsRef<[u8]> for AssetBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl From<&'static [u8]> for AssetBytes {
+    fn from(bytes: &'static [u8]) -> Self {
+        AssetBytes::Static(bytes)
+    }
+}
+
+impl From<Vec<u8>> for AssetBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        AssetBytes::Owned(bytes)
+    }
+}
+
+impl From<Arc<[u8]>> for AssetBytes {
+    fn from(bytes: Arc<[u8]>) -> Self {
+        AssetBytes::Shared(bytes)
     }
 }
 
@@ -181,8 +201,9 @@ impl Asset for io::Cursor<Arc<[u8]>> {
         Ok(self.get_ref().len() as u64)
     }
 
-    fn shared_bytes(&self) -> Option<Arc<[u8]>> {
-        Some(self.get_ref().clone())
+    /// Shares the buffer.
+    fn into_bytes(self: Box<Self>) -> io::Result<AssetBytes> {
+        Ok(AssetBytes::Shared(self.into_inner()))
     }
 }
 
@@ -790,8 +811,31 @@ pub(crate) fn nest_packaged_path(base: &str, leaf: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A resolver under which every asset path resolves to itself and opens
+    /// to what `open` gives, standing in for the storage underneath a
+    /// resolved asset.
+    pub(crate) struct TestResolver<F>(pub(crate) F);
+
+    impl<F: Fn() -> io::Result<Box<dyn Asset>>> Resolver for TestResolver<F> {
+        fn create_identifier(&self, asset_path: &str, _anchor: Option<&ResolvedPath>) -> String {
+            asset_path.to_string()
+        }
+
+        fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
+            Some(ResolvedPath::new(asset_path))
+        }
+
+        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
+            Some(ResolvedPath::new(asset_path))
+        }
+
+        fn open_asset(&self, _resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
+            (self.0)()
+        }
+    }
 
     // -----------------------------------------------------------------------
     // ResolvedPath
