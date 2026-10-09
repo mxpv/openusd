@@ -12,10 +12,8 @@ pub use reader::Archive;
 pub(crate) use reader::is_layer_name;
 pub use writer::ArchiveWriter;
 
-use std::borrow::Cow;
 use std::io::{self, Cursor};
 use std::str;
-use std::sync::Arc;
 
 use crate::{ar, sdf, tf, usda, usdc};
 
@@ -152,12 +150,15 @@ impl sdf::FileFormat for UsdzFileFormat {
         })
     }
 
-    fn read_bytes(&self, bytes: Cow<'static, [u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        read_package(bytes)
-    }
-
-    fn read_shared_bytes(&self, bytes: Arc<[u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        read_package(bytes)
+    fn read_bytes(&self, bytes: ar::AssetBytes, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+        // A bare package has no named entry, so read its first (default) layer.
+        //
+        // Every failure here is a decode: the bytes are already in hand, so
+        // even an I/O error comes from the cursor reading them and means the
+        // package is truncated or corrupt.
+        Archive::from_reader(Cursor::new(bytes))
+            .and_then(|mut archive| archive.read_first_layer())
+            .map_err(|error| sdf::FormatError::Decode(Box::new(error)))
     }
 
     fn write(&self, data: &dyn sdf::AbstractData, sink: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
@@ -180,50 +181,16 @@ impl sdf::FileFormat for UsdzFileFormat {
     }
 }
 
-/// A bare package names no entry and reads as its first (default) layer,
-/// decoded here from the package in `bytes`.
-///
-/// Every failure here is a decode: the bytes are already in hand, so even an
-/// I/O error comes from the cursor reading them and means the package is
-/// truncated or corrupt.
-fn read_package(bytes: impl AsRef<[u8]>) -> Result<sdf::LayerData, sdf::FormatError> {
-    Archive::from_reader(Cursor::new(bytes))
-        .and_then(|mut archive| archive.read_first_layer())
-        .map_err(|error| sdf::FormatError::Decode(Box::new(error)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Result;
     use crate::ar::Resolver;
+    use crate::ar::tests::TestResolver;
     use crate::sdf::FileFormat;
     use crate::usd::{Stage, TimeCode};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// A resolver under which every asset path resolves to itself and opens
-    /// to what `open` gives, standing in for the storage underneath a resolved
-    /// package.
-    struct TestResolver<F>(F);
-
-    impl<F: Fn() -> io::Result<Box<dyn ar::Asset>>> ar::Resolver for TestResolver<F> {
-        fn create_identifier(&self, asset_path: &str, _anchor: Option<&ar::ResolvedPath>) -> String {
-            asset_path.to_string()
-        }
-
-        fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-            Some(ar::ResolvedPath::new(asset_path))
-        }
-
-        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-            Some(ar::ResolvedPath::new(asset_path))
-        }
-
-        fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-            (self.0)()
-        }
-    }
 
     /// A resolver whose assets exist but cannot be opened, standing in for a
     /// storage failure underneath a resolved package.

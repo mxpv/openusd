@@ -40,7 +40,6 @@
 //! [`LayerRegistry`](super::LayerRegistry); cross-layer composition (references,
 //! payloads) lives in [`crate::pcp`].
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -152,7 +151,7 @@ impl Layer {
     /// C++ opens the schema data it compiles against the same way
     /// (`SdfLayer::OpenAsAnonymous`). `tag` names their origin for diagnostics,
     /// as in [`new_anonymous`](Self::new_anonymous).
-    pub fn from_bytes(tag: impl fmt::Display, bytes: impl Into<Cow<'static, [u8]>>) -> Result<Self, FormatError> {
+    pub fn from_bytes(tag: impl fmt::Display, bytes: impl Into<ar::AssetBytes>) -> Result<Self, FormatError> {
         let identifier = Self::anonymous_identifier(tag);
         let data = sdf::LayerRegistry::read_bytes(bytes.into(), &identifier)?;
         Ok(Self::new(identifier, data))

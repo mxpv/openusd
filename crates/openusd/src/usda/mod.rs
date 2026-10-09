@@ -1,10 +1,8 @@
 //! Text file format (`usda`) reader and writer.
 
-use std::borrow::Cow;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
 
 mod cursor;
 mod error;
@@ -18,7 +16,7 @@ use parser::Parser;
 pub use error::ParseError;
 pub use writer::TextWriter;
 
-use crate::{sdf, tf};
+use crate::{ar, sdf, tf};
 
 /// Parse `usda` text into an in-memory [`sdf::Data`] store.
 pub fn parse(text: &str) -> Result<sdf::Data, ParseError> {
@@ -65,12 +63,14 @@ impl sdf::FileFormat for UsdaFileFormat {
         prefix[start..].starts_with(MAGIC)
     }
 
-    fn read_bytes(&self, bytes: Cow<'static, [u8]>, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        read_text(&bytes, source_name)
-    }
-
-    fn read_shared_bytes(&self, bytes: Arc<[u8]>, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        read_text(&bytes, source_name)
+    fn read_bytes(&self, bytes: ar::AssetBytes, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+        // The parse copies out everything it keeps and never copies `bytes`
+        // wholesale, whether they are compiled into the program, owned, or
+        // shared with an asset.
+        let text = str::from_utf8(&bytes).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
+        let data = parse(text)
+            .map_err(|error| sdf::FormatError::Decode(Box::new(error.with_source_name(source_name.to_owned()))))?;
+        Ok(Box::new(data))
     }
 
     fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
@@ -78,18 +78,10 @@ impl sdf::FileFormat for UsdaFileFormat {
     }
 }
 
-/// Parses the `.usda` text in `bytes`, read from `source_name`. The parse
-/// copies out everything it keeps and never copies `bytes` wholesale, whether
-/// they are compiled into the program or shared with an asset.
-fn read_text(bytes: &[u8], source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-    let text = str::from_utf8(bytes).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
-    let data = parse(text)
-        .map_err(|error| sdf::FormatError::Decode(Box::new(error.with_source_name(source_name.to_owned()))))?;
-    Ok(Box::new(data))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::sdf::{AbstractData, FileFormat, SpecType};
 
@@ -97,7 +89,7 @@ mod tests {
     #[test]
     fn shared_bytes_parse() {
         let bytes: Arc<[u8]> = b"#usda 1.0\ndef \"Root\"\n{\n}\n".to_vec().into();
-        let data = UsdaFileFormat.read_shared_bytes(bytes, "shared.usda").expect("parse");
+        let data = UsdaFileFormat.read_bytes(bytes.into(), "shared.usda").expect("parse");
         assert_eq!(data.spec_type(&sdf::path("/Root").unwrap()), Some(SpecType::Prim));
     }
 

@@ -16,7 +16,6 @@
 //! opinions to its own namespace and so must be present whenever the layer is
 //! (spec 10.3.1.1).
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
@@ -265,19 +264,13 @@ impl LayerRegistry {
     /// A package has no content signature, so a `.usdz` is read from its asset
     /// rather than from bytes. `source_name` names their origin, for
     /// diagnostics that quote a location.
-    pub fn read_bytes(bytes: Cow<'static, [u8]>, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        Self::find_by_content(&bytes, source_name)?.read_bytes(bytes, source_name)
-    }
-
-    /// The format whose [`matches_content`](sdf::FileFormat::matches_content)
-    /// claims `prefix`, or the [`Unrecognized`](sdf::FormatError::Unrecognized)
-    /// error naming `source_name` when none does.
-    fn find_by_content(prefix: &[u8], source_name: &str) -> Result<&'static dyn sdf::FileFormat, sdf::FormatError> {
+    pub fn read_bytes(bytes: ar::AssetBytes, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
         DEFAULT_FORMATS
             .iter()
             .copied()
-            .find(|format| format.matches_content(prefix))
-            .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))
+            .find(|format| format.matches_content(&bytes))
+            .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))?
+            .read_bytes(bytes, source_name)
     }
 
     /// Find the format claiming `ext` (without the leading dot, case-insensitive),
@@ -535,8 +528,8 @@ impl LayerRegistry {
 
     /// Opens the layer at `resolved`, dispatching to the registered format for
     /// its extension. The `.usd` extension is the one ambiguous case — binary
-    /// crate or text — so it reads the bytes once and chooses by content, as
-    /// [`read_bytes`](Self::read_bytes) does.
+    /// crate or text — so it reads the bytes once and lets
+    /// [`read_bytes`](Self::read_bytes) choose by content.
     /// C++ `SdfFileFormat::FindByExtension` + `CanRead`.
     fn read(&self, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData, LoadError> {
         let ext = resolved.extension();
@@ -546,8 +539,7 @@ impl LayerRegistry {
                 .open_asset(resolved)
                 .and_then(|asset| asset.into_bytes())
                 .map_err(sdf::FormatError::from)?;
-            let source_name = resolved.to_string();
-            return Ok(Self::find_by_content(&bytes, &source_name)?.read_asset_bytes(bytes, &source_name)?);
+            return Ok(Self::read_bytes(bytes, &resolved.to_string())?);
         }
         Ok(Self::find_by_extension(&ext)
             .ok_or_else(|| LoadError::UnsupportedFormat {
