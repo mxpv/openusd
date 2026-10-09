@@ -35,8 +35,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
-    ApplyApiError, Attribute, EditTarget, EditTargetArc, LoadPolicy, PrimDefinition, PrimTypeInfo, Relationship,
-    SchemaRegistry, SpecSite, Stage, StageAuthoringError, VersionFilter,
+    ApplyApiError, Attribute, EditTarget, EditTargetArc, LoadPolicy, PrimDefinition, PrimStatus, PrimTypeInfo,
+    Relationship, SchemaRegistry, SpecSite, Stage, StageAuthoringError, VersionFilter,
 };
 use crate::tf::Token;
 use crate::{Result, pcp, sdf};
@@ -769,35 +769,10 @@ impl Prim {
     /// or above it (per the stage's runtime load rules) is excluded. Mirrors
     /// C++ `UsdPrim::IsLoaded`.
     pub fn is_loaded(&self) -> Result<bool> {
-        self.is_loaded_with_active(self.is_active()?)
-    }
-
-    /// [`is_loaded`](Self::is_loaded) for a prim whose
-    /// [`is_active`](Self::is_active) is already known to be `active`.
-    pub(crate) fn is_loaded_with_active(&self, active: bool) -> Result<bool> {
-        if !active {
-            return Ok(false);
-        }
-        // No rule anywhere means every path resolves loaded (`LoadRules`'
-        // documented default) -- skip the ancestor walk below entirely.
-        if self.stage.cache().load_rules().is_empty() {
-            return Ok(true);
-        }
-        for path in self.path.ancestors_below_root() {
-            if has_payload(&self.stage, &path)? && !self.stage.is_path_loaded(&path) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    /// [`is_loaded_with_active`](Self::is_loaded_with_active) for a prim
-    /// whose parent is loaded, so only its own payload can leave it unloaded.
-    pub(crate) fn is_loaded_below_loaded(&self, active: bool) -> Result<bool> {
-        if !active || self.stage.cache().load_rules().is_empty() {
-            return Ok(active);
-        }
-        Ok(!has_payload(&self.stage, &self.path)? || self.stage.is_path_loaded(&self.path))
+        Ok(self
+            .stage
+            .prim_status_masked(&self.path, PrimStatus::LOADED)?
+            .contains(PrimStatus::LOADED))
     }
 
     /// Loads this prim's payload, its ancestors', and — under
@@ -823,7 +798,8 @@ impl Prim {
     pub fn is_defined(&self) -> Result<bool> {
         Ok(self
             .stage
-            .masked(&self.path, |g, cache| cache.is_defined(g, &self.path))?)
+            .prim_status_masked(&self.path, PrimStatus::DEFINED)?
+            .contains(PrimStatus::DEFINED))
     }
 
     /// `true` if the prim or any ancestor resolves to `class`. Mirrors C++
@@ -831,7 +807,8 @@ impl Prim {
     pub fn is_abstract(&self) -> Result<bool> {
         Ok(self
             .stage
-            .masked(&self.path, |g, cache| cache.is_abstract(g, &self.path))?)
+            .prim_status_masked(&self.path, PrimStatus::ABSTRACT)?
+            .contains(PrimStatus::ABSTRACT))
     }
 
     /// `true` if the prim index contains at least one composition arc.
@@ -1256,16 +1233,7 @@ impl Prim {
 /// `true` when a non-empty `payload` opinion is composed at `prim` — the
 /// per-prim check behind [`Prim::is_loaded`].
 pub(super) fn has_payload(stage: &Stage, prim: &sdf::Path) -> Result<bool> {
-    let payload = stage.field::<sdf::Value>(prim, sdf::FieldKey::Payload)?;
-    Ok(match payload {
-        Some(sdf::Value::Payload(payload)) => payload_has_target(&payload),
-        Some(sdf::Value::PayloadListOp(op)) => op.reduced().flatten().iter().any(payload_has_target),
-        _ => false,
-    })
-}
-
-fn payload_has_target(payload: &sdf::Payload) -> bool {
-    !payload.asset_path.is_empty() || !payload.prim_path.is_empty()
+    Ok(stage.masked_opinions(prim, |g, cache| cache.has_payload(g, prim))?)
 }
 
 /// Whether the property `name` sits under `namespace`: the name continues past
