@@ -1,46 +1,55 @@
 //! USDZ archive reader.
 
-use std::{
-    fs::File,
-    io::{self, Cursor, Read, Seek},
-    path::Path,
-};
+use std::fs::File;
+use std::io::{self, Cursor, Read};
+use std::path::Path;
+use std::str;
 
-use zip::ZipArchive;
+use zip::{CompressionMethod, ZipArchive};
 
 use super::ArchiveError;
 use crate::{ar, sdf, usda, usdc};
 
-/// USDZ archive reader.
+/// A USDZ package: the entries its central directory lists, over the asset
+/// the package came from.
 ///
-/// Provides access to USD files within a USDZ archive. The type parameter `R`
-/// is the underlying reader; it defaults to [`File`] for the common case of
-/// opening an archive from disk via [`Archive::open`]. Use
-/// [`Archive::from_reader`] to construct an archive from any `Read + Seek`
-/// source, such as an in-memory buffer supplied by a custom asset resolver.
-pub struct Archive<R: Read + Seek = File> {
-    archive: ZipArchive<R>,
+/// The directory is read once, at construction; an entry's local header is
+/// read only when that entry is requested. The entry's bytes come as a view
+/// of the package when the asset shares its bytes ([`ar::Asset::shared_bytes`]:
+/// a buffer a host holds, or a mapped file), and as a bounded read of the
+/// entry's range otherwise.
+pub struct Archive {
+    archive: ZipArchive<Box<dyn ar::Asset>>,
+    /// The package's bytes when the asset shares them, which entry views
+    /// slice.
+    bytes: Option<ar::SharedBuffer>,
 }
 
-impl Archive<File> {
-    /// Opens a USDZ archive from a file path.
+impl Archive {
+    /// Opens the package at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ArchiveError> {
         let path = path.as_ref();
         let file = File::open(path)
             .map_err(|error| io::Error::new(error.kind(), format!("unable to open {}: {error}", path.display())))?;
-        let archive = ZipArchive::new(file)?;
-        Ok(Self { archive })
+        Self::from_asset(Box::new(file))
     }
-}
 
-impl<R: Read + Seek> Archive<R> {
-    /// Creates an archive from any `Read + Seek` source.
-    ///
-    /// Use this when the archive bytes come from a custom asset resolver
-    /// rather than directly from the filesystem.
-    pub fn from_reader(reader: R) -> Result<Self, ArchiveError> {
-        let archive = ZipArchive::new(reader)?;
-        Ok(Self { archive })
+    /// A package over `asset`, reading only its central directory.
+    pub fn from_asset(asset: Box<dyn ar::Asset>) -> Result<Self, ArchiveError> {
+        let bytes = asset.shared_bytes();
+        let archive = ZipArchive::new(asset)?;
+        Ok(Archive { archive, bytes })
+    }
+
+    /// A package over bytes already in hand, whose entries are views of them.
+    pub fn from_bytes(bytes: impl Into<ar::AssetBuffer>) -> Result<Self, ArchiveError> {
+        let bytes = bytes.into().into_shared();
+        Self::from_asset(Box::new(Cursor::new(ar::AssetBuffer::Shared(bytes))))
+    }
+
+    /// Whether the package lists an entry called `name`.
+    pub fn contains(&self, name: &str) -> bool {
+        self.archive.index_for_name(name).is_some()
     }
 
     /// Returns the file name of the first layer in the archive.
@@ -61,20 +70,74 @@ impl<R: Read + Seek> Archive<R> {
         self.read(&name)
     }
 
+    /// The bytes of the entry `name`.
+    ///
+    /// Only a stored, unencrypted entry is served, as the USDZ specification
+    /// requires and C++ `usdzResolver` enforces. A package whose asset
+    /// shares its bytes serves a view of them, unchecked, as C++ serves a
+    /// mapped package; [`verify`](Self::verify) checks one on request. A
+    /// package without shared bytes reads the entry's range through the ZIP
+    /// reader, which checks the entry's checksum on the way.
+    pub fn entry(&mut self, name: &str) -> Result<ar::AssetBuffer, ArchiveError> {
+        let index = self.index(name)?;
+        let (start, size, method, encrypted) = {
+            let file = self
+                .archive
+                .by_index_raw(index)
+                .map_err(|error| ArchiveError::entry(name, error))?;
+            (file.data_start(), file.size(), file.compression(), file.encrypted())
+        };
+        if encrypted {
+            return Err(ArchiveError::Encrypted { name: name.to_owned() });
+        }
+        if method != CompressionMethod::Stored {
+            return Err(ArchiveError::Compressed {
+                name: name.to_owned(),
+                method,
+            });
+        }
+        let Some(bytes) = &self.bytes else {
+            let mut file = self
+                .archive
+                .by_index(index)
+                .map_err(|error| ArchiveError::entry(name, error))?;
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer)
+                .map_err(|error| ArchiveError::entry(name, error))?;
+            return Ok(ar::AssetBuffer::Owned(buffer));
+        };
+        // A stored entry's data is its size at `data_start`, which the raw
+        // open located; a truncated package reaches past the view.
+        let range = start
+            .and_then(|start| usize::try_from(start).ok())
+            .zip(usize::try_from(size).ok())
+            .and_then(|(start, size)| Some(start..start.checked_add(size)?))
+            .and_then(|range| bytes.slice(range));
+        match range {
+            Some(view) => Ok(ar::AssetBuffer::Shared(view)),
+            None => Err(ArchiveError::entry(name, io::Error::from(io::ErrorKind::UnexpectedEof))),
+        }
+    }
+
+    /// Reads the entry `name` through the ZIP reader, which checks its
+    /// checksum, for a caller that wants the check a view skips.
+    pub fn verify(&mut self, name: &str) -> Result<(), ArchiveError> {
+        let index = self.index(name)?;
+        let mut file = self
+            .archive
+            .by_index(index)
+            .map_err(|error| ArchiveError::entry(name, error))?;
+        io::copy(&mut file, &mut io::sink()).map_err(|error| ArchiveError::entry(name, error))?;
+        Ok(())
+    }
+
     /// Read either a USDA or USDC file from the archive. A nested `.usdz`
     /// entry reads that package's default (first) layer.
     pub fn read(&mut self, file_path: &str) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
-        let mut file = self
-            .archive
-            .by_name(file_path)
-            .map_err(|e| ArchiveError::entry(file_path, e))?;
-
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)
-            .map_err(|e| ArchiveError::entry(file_path, e))?;
+        let bytes = self.entry(file_path)?;
 
         if file_path.ends_with(".usdz") {
-            return Archive::from_reader(Cursor::new(buffer))
+            return Archive::from_bytes(bytes)
                 .and_then(|mut nested| nested.read_first_layer())
                 .map_err(|e| ArchiveError::entry(file_path, e));
         }
@@ -89,20 +152,27 @@ impl<R: Read + Seek> Archive<R> {
         } else if file_path.ends_with(".usda") {
             false
         } else {
-            buffer.starts_with(usdc::MAGIC)
+            bytes.starts_with(usdc::MAGIC)
         };
 
         if is_crate {
-            let data = usdc::CrateData::open(buffer, true).map_err(|e| ArchiveError::entry(file_path, e))?;
+            let data = usdc::CrateData::open(bytes, true).map_err(|e| ArchiveError::entry(file_path, e))?;
             Ok(Box::new(data))
         } else {
-            let content = String::from_utf8(buffer).map_err(|e| ArchiveError::Utf8 {
+            let content = str::from_utf8(&bytes).map_err(|source| ArchiveError::Utf8 {
                 name: file_path.to_owned(),
-                source: e.utf8_error(),
+                source,
             })?;
-            let data = usda::parse(&content).map_err(|error| error.with_source_name(file_path))?;
+            let data = usda::parse(content).map_err(|error| error.with_source_name(file_path))?;
             Ok(Box::new(data))
         }
+    }
+
+    /// The directory index of the entry `name`.
+    fn index(&self, name: &str) -> Result<usize, ArchiveError> {
+        self.archive
+            .index_for_name(name)
+            .ok_or_else(|| ArchiveError::entry(name, zip::result::ZipError::FileNotFound))
     }
 }
 

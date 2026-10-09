@@ -37,6 +37,8 @@ use std::path::{self, Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::usdz;
+
 /// A resolved asset path representing the physical location of an asset.
 ///
 /// This is a newtype around a [`PathBuf`] that distinguishes resolved paths
@@ -637,10 +639,10 @@ impl Resolver for DefaultResolver {
                 )
             })?;
 
-            let archive = open_package_archive(Path::new(&package))?;
-            let buffer = read_package_entry(archive, &inner)?;
+            let mut archive = usdz::Archive::open(Path::new(&package)).map_err(io::Error::other)?;
+            let bytes = package_entry(&mut archive, &inner)?;
 
-            return Ok(Box::new(io::Cursor::new(buffer)));
+            return Ok(Box::new(io::Cursor::new(bytes)));
         }
 
         let file = fs::File::open(&**resolved_path)?;
@@ -723,35 +725,22 @@ fn normalize_search_path(path: PathBuf) -> PathBuf {
 
 /// Opens `package` as a ZIP archive, reading only its central directory.
 ///
-/// Shared by [`DefaultResolver::open_asset`], which then extracts an entry, and
-/// [`package_contains`], which only checks an entry's presence.
-fn open_package_archive(package: &Path) -> io::Result<zip::ZipArchive<fs::File>> {
-    let file = fs::File::open(package)?;
-    zip::ZipArchive::new(file).map_err(io::Error::other)
-}
-
-/// Reads the entry `inner` names from `archive`. A nested packaged path
-/// (`inner.usdz[deep.usd]`) reads the inner package from its entry and descends
-/// into it, one level per bracket, as C++ `ArPackageResolver` does for a
-/// package inside a package.
-///
-/// TODO(perf): a nested level reads its whole package into memory and parses
-/// its central directory on every open. USDZ entries are stored uncompressed,
-/// so a bounded `Read + Seek` view over the outer entry's byte range would let
-/// the inner archive read only its directory and the one entry.
-fn read_package_entry<R: Read + Seek>(mut archive: zip::ZipArchive<R>, inner: &str) -> io::Result<Vec<u8>> {
+/// The bytes of the entry `inner` names in `archive`. A nested packaged path
+/// (`inner.usdz[deep.usd]`) opens the inner package over its entry and
+/// descends into it, one level per bracket, as C++ `ArPackageResolver` does
+/// for a package inside a package; each level is a view of the one outside
+/// it when the package shares its bytes.
+fn package_entry(archive: &mut usdz::Archive, inner: &str) -> io::Result<AssetBuffer> {
     let (package, rest) = split_package_relative_path_outer(inner).unzip();
-    let mut buffer = Vec::new();
-    archive
-        .by_name(package.as_deref().unwrap_or(inner))
-        .map_err(io::Error::other)?
-        .read_to_end(&mut buffer)?;
+    let bytes = archive
+        .entry(package.as_deref().unwrap_or(inner))
+        .map_err(io::Error::other)?;
     match rest {
         Some(rest) => {
-            let archive = zip::ZipArchive::new(io::Cursor::new(buffer)).map_err(io::Error::other)?;
-            read_package_entry(archive, &rest)
+            let mut nested = usdz::Archive::from_bytes(bytes).map_err(io::Error::other)?;
+            package_entry(&mut nested, &rest)
         }
-        None => Ok(buffer),
+        None => Ok(bytes),
     }
 }
 
@@ -768,32 +757,31 @@ fn read_package_entry<R: Read + Seek>(mut archive: zip::ZipArchive<R>, inner: &s
 /// entry) is deliberately treated as present so the eventual open surfaces the
 /// accurate error instead of a misleading "missing asset".
 ///
-/// TODO(perf): opens the package's central directory on every package-relative
-/// resolve (per in-package arc, re-run each composition pass). Cache parsed
-/// central directories keyed by resolved package path so repeated probes and
-/// the eventual load share one parse.
+/// TODO(perf): parses the package's central directory on every
+/// package-relative resolve (per in-package arc, re-run each composition
+/// pass). A per-resolver cache of [`usdz::Archive`]s keyed by resolved package
+/// path would let repeated probes and the eventual load share one parse.
 fn package_contains(package: &Path, inner: &str) -> bool {
-    match open_package_archive(package) {
+    match usdz::Archive::open(package) {
         Ok(archive) => archive_contains(archive, inner),
         Err(_) => true,
     }
 }
 
 /// Whether `archive` holds the entry `inner` names, descending into a nested
-/// package as [`read_package_entry`] does. A nested package that cannot be
-/// read is treated as present, like an unopenable outer one.
-fn archive_contains<R: Read + Seek>(mut archive: zip::ZipArchive<R>, inner: &str) -> bool {
+/// package as [`package_entry`] does. A nested package that cannot be read is
+/// treated as present, like an unopenable outer one.
+fn archive_contains(mut archive: usdz::Archive, inner: &str) -> bool {
     let Some((package, rest)) = split_package_relative_path_outer(inner) else {
-        return archive.by_name(inner).is_ok();
+        return archive.contains(inner);
     };
-    let Ok(mut entry) = archive.by_name(&package) else {
+    if !archive.contains(&package) {
         return false;
-    };
-    let mut buffer = Vec::new();
-    if entry.read_to_end(&mut buffer).is_err() {
-        return true;
     }
-    match zip::ZipArchive::new(io::Cursor::new(buffer)) {
+    let Ok(bytes) = archive.entry(&package) else {
+        return true;
+    };
+    match usdz::Archive::from_bytes(bytes) {
         Ok(nested) => archive_contains(nested, &rest),
         Err(_) => true,
     }

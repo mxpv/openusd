@@ -4,6 +4,15 @@
 //! resources such as textures). Per the specification, archived files are
 //! stored uncompressed (STORED, method 0) and aligned to a 64-byte boundary
 //! so the contained data can be consumed in place without extraction.
+//!
+//! The reader does consume it in place: [`Archive::entry`] serves a stored
+//! entry as a view of the package's bytes when the asset shares them, and
+//! refuses a compressed or encrypted entry as C++ does. A view is served
+//! without checking the entry's CRC32, again as C++ serves a mapped package;
+//! [`Archive::verify`] checks one on request, and the bounded read a package
+//! without shared bytes falls back to checks it on the way. The `deflate`
+//! feature of the `zip` crate stays for `usd_utils` package rebuilding,
+//! which copies entries through the ZIP reader.
 
 mod reader;
 mod writer;
@@ -70,6 +79,23 @@ pub enum ArchiveError {
         #[source]
         source: str::Utf8Error,
     },
+
+    /// An entry is compressed, which the USDZ specification forbids: only a
+    /// stored entry can be served in place.
+    #[error("USDZ entry {name:?} is {method} compressed; only stored entries are read")]
+    Compressed {
+        /// The archive-relative entry name.
+        name: String,
+        /// The compression the entry uses.
+        method: zip::CompressionMethod,
+    },
+
+    /// An entry is encrypted, which the USDZ specification forbids.
+    #[error("USDZ entry {name:?} is encrypted; only plain entries are read")]
+    Encrypted {
+        /// The archive-relative entry name.
+        name: String,
+    },
 }
 
 impl ArchiveError {
@@ -85,7 +111,7 @@ impl ArchiveError {
     /// the entry and ZIP wrappers, or `None` when the failure is about the
     /// data rather than the destination. Meaningful only where the sink is
     /// real storage — the write seam; on the read side the package is already
-    /// in memory, so a nested I/O failure there means truncated content.
+    /// in hand, so a nested I/O failure there means truncated content.
     fn io_kind(&self) -> Option<io::ErrorKind> {
         match self {
             Self::Io(error) | Self::Zip(zip::result::ZipError::Io(error)) => Some(error.kind()),
@@ -136,13 +162,12 @@ impl sdf::FileFormat for UsdzFileFormat {
         // back to the bare package path so `read` surfaces the precise zip/parse
         // error, rather than being demoted to an unresolved (missing) asset.
         //
-        // The resolver's asset is `Seek`, so only the central directory is read
-        // to list the default layer, as `ar::open_package_archive` does off a
-        // `File`.
+        // Only the central directory is read to list the default layer,
+        // whatever the asset.
         let first = resolver
             .open_asset(resolved)
             .ok()
-            .and_then(|asset| Archive::from_reader(asset).ok())
+            .and_then(|asset| Archive::from_asset(asset).ok())
             .and_then(|archive| archive.first_layer_name());
         Some(match first {
             Some(first) => ar::ResolvedPath::new(ar::nest_packaged_path(&package, &first)),
@@ -156,7 +181,7 @@ impl sdf::FileFormat for UsdzFileFormat {
         // Every failure here is a decode: the bytes are already in hand, so
         // even an I/O error comes from the cursor reading them and means the
         // package is truncated or corrupt.
-        Archive::from_reader(Cursor::new(bytes))
+        Archive::from_bytes(bytes)
             .and_then(|mut archive| archive.read_first_layer())
             .map_err(|error| sdf::FormatError::Decode(Box::new(error)))
     }
@@ -188,7 +213,8 @@ mod tests {
     use crate::ar::Resolver;
     use crate::ar::tests::TestResolver;
     use crate::sdf::FileFormat;
-    use crate::usd::{Stage, TimeCode};
+    use crate::usd::{PrimPredicate, Stage, TimeCode};
+    use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -345,6 +371,142 @@ mod tests {
 
         let data = UsdzFileFormat.read(&resolver, &ar::ResolvedPath::new("pkg.usdz"))?;
         assert_eq!(data.spec_type(&sdf::path("/Root").unwrap()), Some(sdf::SpecType::Prim));
+        Ok(())
+    }
+
+    /// A package over bytes in hand serves an entry as a view into them.
+    #[test]
+    fn entry_is_view() -> Result<()> {
+        let layer = b"#usda 1.0\ndef \"Root\" {}\n";
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()));
+        writer.add_layer("root.usda", layer)?;
+        let package = writer.finish()?.into_inner();
+        let (base, len) = (package.as_ptr().addr(), package.len());
+
+        let mut archive = Archive::from_bytes(package)?;
+        let ar::AssetBuffer::Shared(view) = archive.entry("root.usda")? else {
+            panic!("a package in hand serves views");
+        };
+        let offset = view.as_ptr().addr() - base;
+        assert!(offset + view.len() <= len, "the view lies inside the package");
+        assert_eq!(&*view, layer);
+        Ok(())
+    }
+
+    /// A package over an asset with no shared bytes probes its directory
+    /// alone and reads an entry's range through the ZIP reader: the
+    /// directory, one local header and the entry, not the package.
+    #[test]
+    fn entry_is_read_without_view() -> Result<()> {
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()));
+        writer.add_layer("root.usda", b"#usda 1.0\n")?;
+        writer.add_layer("texture.bin", &vec![0; 1 << 20])?;
+        let package = writer.finish()?.into_inner();
+        let size = package.len();
+        let read = Arc::new(AtomicUsize::new(0));
+        let mut archive = Archive::from_asset(Box::new(CountingAsset {
+            inner: Cursor::new(package),
+            read: read.clone(),
+        }))?;
+
+        assert!(archive.contains("root.usda"));
+        assert!(archive.contains("texture.bin"));
+        assert!(!archive.contains("missing.usda"));
+        assert_eq!(archive.first_layer_name().as_deref(), Some("root.usda"));
+        let probed = read.load(Ordering::Relaxed);
+        assert!(probed < size / 4, "the probes read {probed} of {size} bytes");
+
+        let ar::AssetBuffer::Owned(bytes) = archive.entry("root.usda")? else {
+            panic!("an asset without shared bytes is read");
+        };
+        assert_eq!(bytes, b"#usda 1.0\n");
+        let entry = read.load(Ordering::Relaxed) - probed;
+        assert!(entry < 4096, "the entry read {entry} bytes");
+        Ok(())
+    }
+
+    /// A compressed entry is refused, as C++ refuses it.
+    #[test]
+    fn compressed_entry_rejected() -> Result<()> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("root.usda", deflated).map_err(ArchiveError::from)?;
+        zip.write_all(b"#usda 1.0\n")?;
+        let package = zip.finish().map_err(ArchiveError::from)?.into_inner();
+
+        let error = Archive::from_bytes(package)?
+            .entry("root.usda")
+            .expect_err("a deflated entry is refused");
+        assert!(matches!(error, ArchiveError::Compressed { .. }), "{error:?}");
+        Ok(())
+    }
+
+    /// A view is served without a checksum check; `verify` reports the
+    /// corruption, and so does the bounded read of a package without shared
+    /// bytes.
+    #[test]
+    fn corrupt_entry() -> Result<()> {
+        let layer = b"#usda 1.0\ndef \"Root\" {}\n";
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()));
+        writer.add_layer("root.usda", layer)?;
+        let mut package = writer.finish()?.into_inner();
+        let offset = package
+            .windows(layer.len())
+            .position(|window| window == layer)
+            .expect("the stored entry");
+        package[offset + 1] ^= 0xff;
+
+        let mut archive = Archive::from_bytes(package.clone())?;
+        assert_eq!(archive.entry("root.usda")?[1], layer[1] ^ 0xff);
+        let error = archive.verify("root.usda").expect_err("the checksum no longer matches");
+        assert!(format!("{error:?}").to_lowercase().contains("checksum"), "{error:?}");
+
+        let mut archive = Archive::from_asset(Box::new(Cursor::new(package)))?;
+        assert!(
+            archive.entry("root.usda").is_err(),
+            "a checked read reports the corruption"
+        );
+        Ok(())
+    }
+
+    /// A nested package's entry is a view into the outer package.
+    #[test]
+    fn nested_entry_is_view() -> Result<()> {
+        let mut inner = ArchiveWriter::new(Cursor::new(Vec::new()));
+        inner.add_layer("inner.usda", b"#usda 1.0\n")?;
+        let inner = inner.finish()?.into_inner();
+        let mut outer = ArchiveWriter::new(Cursor::new(Vec::new()));
+        outer.add_layer("root.usda", b"#usda 1.0\n")?;
+        outer.add_layer("inner.usdz", &inner)?;
+        let outer = outer.finish()?.into_inner();
+        let (base, len) = (outer.as_ptr().addr(), outer.len());
+
+        let mut archive = Archive::from_bytes(outer)?;
+        let mut nested = Archive::from_bytes(archive.entry("inner.usdz")?)?;
+        let ar::AssetBuffer::Shared(view) = nested.entry("inner.usda")? else {
+            panic!("a nested package serves views");
+        };
+        let offset = view.as_ptr().addr() - base;
+        assert!(offset + view.len() <= len, "the view lies inside the outer package");
+        assert_eq!(&*view, b"#usda 1.0\n");
+        Ok(())
+    }
+
+    /// A production package opens as a stage.
+    #[test]
+    fn stage_over_package() -> Result<()> {
+        let path = concat!(
+            env!("CARGO_WORKSPACE_DIR"),
+            "vendor/usd-wg-assets/full_assets/CarbonFrameBike/CarbonFrameBike.usdz"
+        );
+        if std::fs::metadata(path).is_err() {
+            eprintln!("Skipping stage_over_package: fixture not available at {path}");
+            return Ok(());
+        }
+        let stage = Stage::open(path)?;
+        let mut prims = 0;
+        stage.traverse(PrimPredicate::DEFAULT, |_| prims += 1)?;
+        assert!(prims > 100, "{prims} prims");
         Ok(())
     }
 
