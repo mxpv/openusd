@@ -374,17 +374,11 @@ impl sdf::FileFormat for UsdcFileFormat {
     }
 
     fn read_bytes(&self, bytes: Cow<'static, [u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        // Validated: these bytes are a file the caller did not write, and the
-        // decoder indexes into them on trust.
-        let data =
-            CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
-        Ok(Box::new(data))
+        open_bytes(bytes)
     }
 
     fn read_shared_bytes(&self, bytes: Arc<[u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        let data =
-            CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
-        Ok(Box::new(data))
+        open_bytes(bytes)
     }
 
     fn matches_content(&self, prefix: &[u8]) -> bool {
@@ -394,6 +388,15 @@ impl sdf::FileFormat for UsdcFileFormat {
     fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
         CrateWriter::write(data, &mut sink)
     }
+}
+
+/// Decodes the crate file in `bytes`, indexing into them in place. The file
+/// is validated first: the caller did not write these bytes, and the decoder
+/// indexes into them on trust.
+fn open_bytes(bytes: impl AsRef<[u8]> + 'static) -> Result<sdf::LayerData, sdf::FormatError> {
+    let data =
+        CrateData::open(io::Cursor::new(bytes), true).map_err(|error| sdf::FormatError::Decode(Box::new(error)))?;
+    Ok(Box::new(data))
 }
 
 /// The crate (binary) format names the property-children field "properties",

@@ -15,6 +15,7 @@ pub use writer::ArchiveWriter;
 use std::borrow::Cow;
 use std::io::{self, Cursor};
 use std::str;
+use std::sync::Arc;
 
 use crate::{ar, sdf, tf, usda, usdc};
 
@@ -151,25 +152,12 @@ impl sdf::FileFormat for UsdzFileFormat {
         })
     }
 
-    fn read(
-        &self,
-        resolver: &dyn ar::Resolver,
-        resolved: &ar::ResolvedPath,
-    ) -> Result<sdf::LayerData, sdf::FormatError> {
-        let source_name = resolved.to_string();
-        let bytes = resolver.open_asset(resolved)?.read_all()?;
-        self.read_bytes(bytes.into(), &source_name)
+    fn read_bytes(&self, bytes: Cow<'static, [u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+        read_package(bytes)
     }
 
-    fn read_bytes(&self, bytes: Cow<'static, [u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        // A bare package has no named entry, so read its first (default) layer.
-        //
-        // Every failure here is a decode: the bytes are already in hand, so
-        // even an I/O error comes from the cursor reading them and means the
-        // package is truncated or corrupt.
-        Archive::from_reader(Cursor::new(bytes))
-            .and_then(|mut archive| archive.read_first_layer())
-            .map_err(|error| sdf::FormatError::Decode(Box::new(error)))
+    fn read_shared_bytes(&self, bytes: Arc<[u8]>, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+        read_package(bytes)
     }
 
     fn write(&self, data: &dyn sdf::AbstractData, sink: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
@@ -190,6 +178,18 @@ impl sdf::FileFormat for UsdzFileFormat {
         archive.finish().map_err(encode)?;
         Ok(())
     }
+}
+
+/// A bare package names no entry and reads as its first (default) layer,
+/// decoded here from the package in `bytes`.
+///
+/// Every failure here is a decode: the bytes are already in hand, so even an
+/// I/O error comes from the cursor reading them and means the package is
+/// truncated or corrupt.
+fn read_package(bytes: impl AsRef<[u8]>) -> Result<sdf::LayerData, sdf::FormatError> {
+    Archive::from_reader(Cursor::new(bytes))
+        .and_then(|mut archive| archive.read_first_layer())
+        .map_err(|error| sdf::FormatError::Decode(Box::new(error)))
 }
 
 #[cfg(test)]
@@ -361,6 +361,23 @@ mod tests {
         assert_eq!(resolved, Some(ar::ResolvedPath::new("pkg.usdz[root.usda]")));
         let read = read.load(Ordering::Relaxed);
         assert!(read < size / 4, "read {read} of {size} bytes");
+        Ok(())
+    }
+
+    /// A package read from an asset that shares its bytes decodes its default
+    /// layer from the shared bytes.
+    #[test]
+    fn shared_bytes_read() -> Result<()> {
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()));
+        writer.add_layer("root.usda", b"#usda 1.0\ndef \"Root\" {}\n")?;
+        let package: Arc<[u8]> = writer.finish()?.into_inner().into();
+        let resolver = TestResolver({
+            let package = package.clone();
+            move || -> io::Result<Box<dyn ar::Asset>> { Ok(Box::new(Cursor::new(package.clone()))) }
+        });
+
+        let data = UsdzFileFormat.read(&resolver, &ar::ResolvedPath::new("pkg.usdz"))?;
+        assert_eq!(data.spec_type(&sdf::path("/Root").unwrap()), Some(sdf::SpecType::Prim));
         Ok(())
     }
 
