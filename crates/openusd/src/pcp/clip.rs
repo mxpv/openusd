@@ -1802,7 +1802,7 @@ mod tests {
         );
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
-        let (_, data) = registry.open(&root).expect("open root").expect("root resolves");
+        let data = registry.open(&root).expect("open root").expect("root resolves").data;
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 
@@ -1838,7 +1838,7 @@ mod tests {
         );
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
-        let (_, data) = registry.open(&root).expect("open root").expect("root resolves");
+        let data = registry.open(&root).expect("open root").expect("root resolves").data;
         // A second layer interned under a bare name, as an in-memory layer is.
         let clip = sdf::Layer::new_in_memory("in_memory_clip.usda");
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data), clip], 0, registry);
@@ -1876,7 +1876,7 @@ mod tests {
         );
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
-        let (_, data) = registry.open(&root).expect("open root").expect("root resolves");
+        let data = registry.open(&root).expect("open root").expect("root resolves").data;
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 

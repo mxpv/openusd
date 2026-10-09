@@ -1569,9 +1569,10 @@ mod tests {
         );
 
         // The registry's content-sniff must accept it as binary.
-        let (_, round) = sdf::LayerRegistry::default()
+        let round = sdf::LayerRegistry::default()
             .open(path.to_str().unwrap())?
-            .expect("the layer opens");
+            .expect("the layer opens")
+            .data;
         assert_eq!(round.spec_type(&bar), Some(SpecType::Prim));
         assert_eq!(
             round.get_field(&bar, "typeName").unwrap().into_owned(),
