@@ -5066,21 +5066,19 @@ def "A" (
 "#,
     )?;
     let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
-    let names = |properties: Vec<sdf::Path>| -> Vec<String> {
-        properties
-            .iter()
-            .map(|path| path.as_str().rsplit_once('.').unwrap_or_default().1.to_owned())
-            .collect()
-    };
     let source = stage.prim("/Source")?;
-    assert_eq!(
-        names(source.attributes()?.iter().map(|a| a.path().clone()).collect()),
-        ["size"]
-    );
-    assert_eq!(
-        names(source.relationships()?.iter().map(|r| r.path().clone()).collect()),
-        ["target"]
-    );
+    let attributes: Vec<String> = source
+        .attributes()?
+        .iter()
+        .map(|attribute| attribute.name().to_owned())
+        .collect();
+    assert_eq!(attributes, ["size"]);
+    let relationships: Vec<String> = source
+        .relationships()?
+        .iter()
+        .map(|rel| rel.name().to_owned())
+        .collect();
+    assert_eq!(relationships, ["target"]);
 
     let prototype = stage.prim(stage.prim("/A")?.prototype()?.expect("A is an instance"))?;
     assert!(prototype.attributes()?.is_empty());

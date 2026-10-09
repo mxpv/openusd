@@ -1191,17 +1191,14 @@ impl Prim {
         let info = self.prim_type_info()?;
         let definition = info.prim_definition();
 
-        Ok(self.stage.masked(&self.path, |graph, cache| {
-            // A property is one of the prim's opinions, so a prototype root
-            // has none.
-            let opinions = !cache.is_prototype(&self.path);
+        Ok(self.stage.masked_opinions(&self.path, |graph, cache| {
             let mut paths = Vec::new();
             for name in &names {
                 let path = self.property_path(name);
-                let composed = if opinions && !path.is_empty() {
-                    cache.spec_type(graph, &path)?
-                } else {
+                let composed = if path.is_empty() {
                     None
+                } else {
+                    cache.spec_type(graph, &path)?
                 };
                 let spec_type = match (composed, source) {
                     (Some(spec_type), _) => Some(spec_type),
