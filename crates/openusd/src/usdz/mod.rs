@@ -191,6 +191,7 @@ impl sdf::FileFormat for UsdzFileFormat {
 mod tests {
     use super::*;
     use crate::Result;
+    use crate::ar::Resolver;
     use crate::sdf::FileFormat;
     use crate::usd::{Stage, TimeCode};
     use std::sync::Arc;
@@ -403,6 +404,14 @@ mod tests {
 
         let data = Archive::open(&path)?.read("inner.usdz")?;
         assert!(data.has_spec(&sdf::path("/Inner")?));
+
+        // A missing entry at any bracket level is unresolved, not an entry
+        // that fails to read.
+        let resolver = ar::DefaultResolver::new();
+        for missing in ["inner.usdz[missing.usda]", "missing.usdz[inner.usda]"] {
+            let nested = ar::join_package_relative_path(path.to_str().unwrap(), missing);
+            assert_eq!(resolver.resolve(&nested), None, "{nested}");
+        }
         Ok(())
     }
 }

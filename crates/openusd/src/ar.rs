@@ -518,17 +518,19 @@ fn open_package_archive(package: &Path) -> io::Result<zip::ZipArchive<fs::File>>
 /// (`inner.usdz[deep.usd]`) reads the inner package from its entry and descends
 /// into it, one level per bracket, as C++ `ArPackageResolver` does for a
 /// package inside a package.
-fn read_package_entry<R: Read + io::Seek>(mut archive: zip::ZipArchive<R>, inner: &str) -> io::Result<Vec<u8>> {
-    let (name, nested) = match split_package_relative_path_outer(inner) {
-        Some((package, rest)) => (package, Some(rest)),
-        None => (inner.to_owned(), None),
-    };
+///
+/// TODO(perf): a nested level reads its whole package into memory and parses
+/// its central directory on every open. USDZ entries are stored uncompressed,
+/// so a bounded `Read + Seek` view over the outer entry's byte range would let
+/// the inner archive read only its directory and the one entry.
+fn read_package_entry<R: Read + Seek>(mut archive: zip::ZipArchive<R>, inner: &str) -> io::Result<Vec<u8>> {
+    let (package, rest) = split_package_relative_path_outer(inner).unzip();
     let mut buffer = Vec::new();
     archive
-        .by_name(&name)
+        .by_name(package.as_deref().unwrap_or(inner))
         .map_err(io::Error::other)?
         .read_to_end(&mut buffer)?;
-    match nested {
+    match rest {
         Some(rest) => {
             let archive = zip::ZipArchive::new(io::Cursor::new(buffer)).map_err(io::Error::other)?;
             read_package_entry(archive, &rest)
@@ -542,24 +544,41 @@ fn read_package_entry<R: Read + io::Seek>(mut archive: zip::ZipArchive<R>, inner
 /// Reading only the archive's central directory — not its entry data — a
 /// readable archive that genuinely lacks a flat entry reports it absent, so
 /// [`DefaultResolver::resolve`] reports a missing inner layer as unresolved
-/// rather than as a layer that exists but cannot be read. Two cases are
-/// deliberately treated as present so the eventual open surfaces the accurate
-/// error instead of a misleading "missing asset": a `package` that cannot be
-/// opened right now (a transient IO error or a corrupt archive — distinct from
-/// a genuinely absent entry), and a nested packaged path
-/// (`inner.usdz[deep.usd]`, which is not a flat entry name and is checked when
-/// the inner package opens).
+/// rather than as a layer that exists but cannot be read. A nested packaged
+/// path (`inner.usdz[deep.usd]`) is checked one bracket at a time, the inner
+/// package read from its entry, as C++ `ArResolver` resolves each level with
+/// the package resolver. A `package` that cannot be opened right now (a
+/// transient IO error or a corrupt archive — distinct from a genuinely absent
+/// entry) is deliberately treated as present so the eventual open surfaces the
+/// accurate error instead of a misleading "missing asset".
 ///
 /// TODO(perf): opens the package's central directory on every package-relative
 /// resolve (per in-package arc, re-run each composition pass). Cache parsed
 /// central directories keyed by resolved package path so repeated probes and
 /// the eventual load share one parse.
 fn package_contains(package: &Path, inner: &str) -> bool {
-    if is_package_relative_path(inner) {
+    match open_package_archive(package) {
+        Ok(archive) => archive_contains(archive, inner),
+        Err(_) => true,
+    }
+}
+
+/// Whether `archive` holds the entry `inner` names, descending into a nested
+/// package as [`read_package_entry`] does. A nested package that cannot be
+/// read is treated as present, like an unopenable outer one.
+fn archive_contains<R: Read + Seek>(mut archive: zip::ZipArchive<R>, inner: &str) -> bool {
+    let Some((package, rest)) = split_package_relative_path_outer(inner) else {
+        return archive.by_name(inner).is_ok();
+    };
+    let Ok(mut entry) = archive.by_name(&package) else {
+        return false;
+    };
+    let mut buffer = Vec::new();
+    if entry.read_to_end(&mut buffer).is_err() {
         return true;
     }
-    match open_package_archive(package) {
-        Ok(mut archive) => archive.by_name(inner).is_ok(),
+    match zip::ZipArchive::new(io::Cursor::new(buffer)) {
+        Ok(nested) => archive_contains(nested, &rest),
         Err(_) => true,
     }
 }
