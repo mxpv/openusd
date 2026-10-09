@@ -633,11 +633,6 @@ fn path_vector() {
 /// Every field of a production-sized crate decodes from the file's bytes.
 #[test]
 fn fender_reads_every_field() {
-    let path = format!("{VENDOR}/fender_stratocaster.usdc");
-    if fs::metadata(&path).is_err() {
-        eprintln!("Skipping fender_reads_every_field: fixture not available at {path}");
-        return;
-    }
     let data = read("fender_stratocaster.usdc");
     let mut fields = 0;
     for path in data.spec_paths() {

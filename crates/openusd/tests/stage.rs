@@ -12281,7 +12281,7 @@ fn instancing_edits_refused() -> Result<()> {
 /// Saving a layer rebinds it to the file it wrote without an edit: no stage
 /// or layer sink fires, and the composed values and status are as before.
 #[test]
-fn save_keeps_composed_values_quiet() -> Result<()> {
+fn save_quiet() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = quiet_save_root(dir.path())?;
     quiet_save(Stage::open(&root)?, &root)
@@ -12294,7 +12294,7 @@ fn save_keeps_composed_values_quiet() -> Result<()> {
 // The mapping opt-in is `unsafe` by contract, and this test, the only writer
 // of its directory, can make the promise.
 #[allow(unsafe_code)]
-fn save_keeps_composed_values_quiet_mapped() -> Result<()> {
+fn save_quiet_mapped() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = quiet_save_root(dir.path())?;
     // SAFETY: only the save under test writes the files in this directory,
@@ -12322,14 +12322,14 @@ fn quiet_save(stage: Stage, root: &str) -> Result<()> {
     let answer = stage.attribute("/World.answer")?.get::<i32>()?;
     let status = stage.prim_status("/World")?;
 
-    struct Counter(Rc<Cell<usize>>);
-    impl StageSink for Counter {
-        fn after_commit(&self, _: &Stage, _: &CommittedChange<'_>) {
-            self.0.set(self.0.get() + 1);
-        }
-    }
     let stage_fired = Rc::new(Cell::new(0));
-    stage.add_sink(Counter(stage_fired.clone()));
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new({
+            let fired = stage_fired.clone();
+            move |_, _| fired.set(fired.get() + 1)
+        })),
+        ..Default::default()
+    });
     let layer_fired = Rc::new(Cell::new(0));
     let identifier = stage.root_layer().identifier().to_owned();
     {

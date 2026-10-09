@@ -76,6 +76,10 @@ struct Packer<'w, W: Write + Seek> {
 
     /// Accumulated section offsets (for TOC).
     sections_written: Vec<(String, u64, u64)>,
+
+    /// How many nested values enclose the one being written, bounded by
+    /// [`MAX_NESTING`](super::MAX_NESTING) as the reader bounds its decode.
+    depth: usize,
 }
 
 impl<'w, W: Write + Seek> Packer<'w, W> {
@@ -89,6 +93,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             fieldsets: Vec::new(),
             specs: Vec::new(),
             sections_written: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -878,7 +883,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
     /// Serialize a nested, self-describing value: a forward offset to where
     /// its `ValueRep` lands, the body `write_body` emits, then that rep
-    /// (C++ `Write(VtValue const &)`).
+    /// (C++ `Write(VtValue const &)`). A value nested deeper than
+    /// [`MAX_NESTING`](super::MAX_NESTING) is refused, since the reader
+    /// refuses to decode one.
     ///
     /// The reader does `seek(Current(offset - 8))` after consuming the
     /// offset, so the offset is measured from its own slot rather than from
@@ -890,7 +897,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         let offset_slot = self.pos()?;
         self.write_pod(&0_i64)?; // placeholder
 
-        let rep = write_body(self)?;
+        let rep = self.nested(write_body)?;
 
         let pre_rep = self.pos()?;
         self.write_pod(&rep.0)?;
@@ -901,6 +908,23 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.write_pod(&recursive_offset)?;
         self.out.seek(SeekFrom::Start(end))?;
         Ok(())
+    }
+
+    /// Runs `write` one nesting level down, refusing a level past
+    /// [`MAX_NESTING`](super::MAX_NESTING) as the reader refuses to decode
+    /// one. Every value the reader decodes as nested in another is written
+    /// through here: a dictionary entry, an unregistered value or list-op
+    /// item, a time-samples times array and each sample value.
+    fn nested<T>(&mut self, write: impl FnOnce(&mut Self) -> Result<T, FormatError>) -> Result<T, FormatError> {
+        if self.depth >= super::MAX_NESTING {
+            return Err(FormatError::Encode {
+                reason: format!("values nested more than {} deep", super::MAX_NESTING).into(),
+            });
+        }
+        self.depth += 1;
+        let written = write(self);
+        self.depth -= 1;
+        written
     }
 
     /// Serialize the wrapper an unregistered field's value is carried in: the
@@ -1070,7 +1094,8 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.write_pod(&0_i64)?;
 
         // Write the times array heap and capture its ValueRep.
-        let times_rep = self.write_array_f64_type(Type::Double, samples.len(), samples.iter().map(|(t, _)| *t))?;
+        let times_rep =
+            self.nested(|w| w.write_array_f64_type(Type::Double, samples.len(), samples.iter().map(|(t, _)| *t)))?;
 
         // Inline ValueRep for the times array, reachable by rel1.
         let times_rep_pos = self.pos()?;
@@ -1091,7 +1116,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
         let mut reps = Vec::with_capacity(samples.len());
         for (_, v) in samples {
-            reps.push(self.write_value(v)?);
+            reps.push(self.nested(|w| w.write_value(v))?);
         }
         let heap_end = self.pos()?;
 

@@ -22,6 +22,12 @@ use crate::sdf::{Path, SpecData, SpecType, Value};
 /// convenience layered on top of this interface, paralleling how `SdfPrimSpec`
 /// sits above `SdfAbstractData`.
 pub trait AbstractData {
+    /// Whether values are decoded on demand from retained source bytes
+    /// (C++ `SdfAbstractData::StreamsData`).
+    fn is_lazy(&self) -> bool {
+        false
+    }
+
     /// Returns `true` if this data has a spec for the given path.
     fn has_spec(&self, path: &Path) -> bool;
 
@@ -265,6 +271,10 @@ impl AbstractData for Data {
 }
 
 impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
+    fn is_lazy(&self) -> bool {
+        (**self).is_lazy()
+    }
+
     fn has_spec(&self, path: &Path) -> bool {
         (**self).has_spec(path)
     }
@@ -458,6 +468,11 @@ impl<T: AbstractData> CowData<T> {
 }
 
 impl<T: AbstractData> AbstractData for CowData<T> {
+    /// The overlay copies what it stages; the base decides.
+    fn is_lazy(&self) -> bool {
+        self.base.is_lazy()
+    }
+
     fn has_spec(&self, path: &Path) -> bool {
         match self.staged(path) {
             Some(Patch::Tombstone) => false,

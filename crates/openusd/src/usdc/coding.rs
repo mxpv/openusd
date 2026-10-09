@@ -52,13 +52,8 @@ where
         .ok_or_else(|| ReadError::corrupt(format!("integer count {count} overflows")))?
         .div_ceil(8);
 
-    let mut ints_reader = {
-        let offset = mem::size_of::<T>() + num_code_bytes;
-        let rest = data
-            .get(offset..)
-            .ok_or_else(|| ReadError::corrupt(format!("{count} integers need more than {} bytes", data.len())))?;
-        Stream::new(rest)
-    };
+    let mut ints_reader = Stream::new(data);
+    ints_reader.seek((mem::size_of::<T>() + num_code_bytes) as u64)?;
 
     let mut prev = 0_i64;
     // Every integer takes at least two bits of `data`.

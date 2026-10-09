@@ -3,17 +3,14 @@
 //! there, and written out.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::io::{Cursor, Read, Seek, Write};
-use std::path::{Component, Path, PathBuf};
-use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Component, Path};
 
 use super::discover::{Content, Discover, Discovery, Placement, Source, Use, discover};
 use super::walk::{Visit, apply_edits, visit_asset_paths};
 use crate::sdf::{self, AbstractData};
 use crate::usd::Stage;
-use crate::{Error, Result, ar, pcp, usdz};
+use crate::{Error, Result, ar, pcp, tf, usdz};
 
 /// Writes the layer at `asset_path` and everything it depends on into a new
 /// USDZ package at `usdz_file_path`, as C++ `UsdUtilsCreateNewUsdzPackage`
@@ -86,29 +83,12 @@ pub fn create_new_usdz_package(
     }
     let entries = assign_entries(&discovery, &name, HashSet::new());
 
-    let usdz_file_path = usdz_file_path.as_ref();
-    let staging = staging_path(usdz_file_path);
-    let mut archive = usdz::ArchiveWriter::create(&staging)?;
-    let written = write_entries(&graph, &discovery, &entries, &mut archive)
-        .and_then(|()| Ok(archive.finish()?))
-        .and_then(|file| {
-            drop(file);
-            fs::rename(&staging, usdz_file_path).map_err(Error::from)
-        });
-    if written.is_err() {
-        let _ = fs::remove_file(&staging);
-    }
-    written?;
+    let mut temp = tf::SafeOutputFile::create(usdz_file_path.as_ref())?;
+    let mut archive = usdz::ArchiveWriter::new(temp.file());
+    write_entries(&graph, &discovery, &entries, &mut archive)?;
+    archive.finish()?;
+    temp.persist()?;
     Ok(skipped)
-}
-
-/// A sibling of `path` to write the package into before it replaces `path`.
-fn staging_path(path: &Path) -> PathBuf {
-    let name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    path.with_file_name(format!(".{name}.{}.{nanos}.part", process::id()))
 }
 
 /// The entry each source of a scope is stored at, by source index: the root
@@ -310,6 +290,8 @@ fn serialize(data: &dyn AbstractData, location: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
     use crate::ar::Resolver;
     use crate::usd::stage::tests::attribute_value;
     use crate::usd_utils::compute_all_dependencies;

@@ -1,14 +1,20 @@
 //! Tools Foundation (C++ `Tf`): foundational utility types shared across the
-//! crate. Currently [`Token`], the interned-identifier string (C++ `TfToken`).
+//! crate. [`Token`], the interned-identifier string (C++ `TfToken`), and the
+//! crate's own file-replacing writer (C++ `TfSafeOutputFile`).
 
 use std::cmp::Ordering;
 use std::convert::Infallible;
 use std::error;
 use std::fmt;
+use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io;
 use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::process;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{self, AtomicU64};
 
 /// An immutable identifier string.
 ///
@@ -183,6 +189,109 @@ impl serde::Serialize for Token {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
     }
+}
+
+/// A file written beside its destination and renamed over it once complete
+/// (C++ `TfSafeOutputFile`). The destination is therefore never a
+/// half-written file, and a file a reader holds a view of is never written
+/// into. A destination that is a symbolic link is resolved first, so the
+/// file the link reaches is what gets replaced. Dropped without
+/// [`persist`](Self::persist), the file is removed.
+pub(crate) struct SafeOutputFile {
+    destination: PathBuf,
+    path: PathBuf,
+    /// Taken by [`persist`](Self::persist), which closes the handle before
+    /// the rename.
+    file: Option<fs::File>,
+    persisted: bool,
+}
+
+/// Distinguishes the temporary files one process writes beside the same
+/// destination at once.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+impl SafeOutputFile {
+    /// Creates the file beside `destination`.
+    ///
+    /// On Unix the replacement keeps the destination's mode: a destination
+    /// that exists lends it at [`persist`](Self::persist), and until then the
+    /// file is readable by its owner alone, so no reader sees it under a
+    /// wider mode in between. A destination that does not exist leaves the
+    /// file with the process's default mode. On Windows the replacement
+    /// carries the access control the directory gives a new file, as C++
+    /// `TfSafeOutputFile` does; an access control list set on the old file
+    /// itself is not carried over, since the standard library exposes no
+    /// way to copy one.
+    pub(crate) fn create(destination: &Path) -> io::Result<Self> {
+        let destination = real_path(destination);
+        let name = destination
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
+        let seq = TEMP_SEQ.fetch_add(1, atomic::Ordering::Relaxed);
+        let path = destination.with_file_name(format!(".{}.{}-{seq}.tmp", name.to_string_lossy(), process::id()));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if destination.exists() {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
+        Ok(SafeOutputFile {
+            destination,
+            path,
+            file: Some(file),
+            persisted: false,
+        })
+    }
+
+    /// The file, to write to.
+    pub(crate) fn file(&mut self) -> &mut fs::File {
+        self.file.as_mut().expect("the file is open until persisted")
+    }
+
+    /// Flushes what was written to storage and renames the file over the
+    /// destination, the one step that replaces it. A failure leaves the
+    /// destination as it was and removes the file.
+    pub(crate) fn persist(mut self) -> io::Result<()> {
+        #[cfg(unix)]
+        if let Ok(existing) = fs::metadata(&self.destination) {
+            self.file().set_permissions(existing.permissions())?;
+        }
+        self.file().sync_all()?;
+        self.file = None;
+        fs::rename(&self.path, &self.destination)?;
+        self.persisted = true;
+        Ok(())
+    }
+}
+
+impl Drop for SafeOutputFile {
+    fn drop(&mut self) {
+        if !self.persisted {
+            self.file = None;
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// `path` with every symbolic link resolved (C++ `TfRealPath`): the
+/// filesystem's canonical form when the path exists, otherwise the chain of
+/// links followed as far as it goes, so a link to a file not yet written
+/// still names the file. A path that is no link is returned as it is.
+fn real_path(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    let mut current = path.to_owned();
+    // A chain longer than this is a loop.
+    for _ in 0..32 {
+        let Ok(target) = fs::read_link(&current) else {
+            break;
+        };
+        current = current.parent().map_or(target.clone(), |dir| dir.join(target));
+    }
+    current
 }
 
 /// Renders `error` followed by its `source` chain as one `: `-separated line,

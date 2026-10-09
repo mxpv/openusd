@@ -3,7 +3,7 @@
 use std::{any::type_name, collections::HashMap, mem, str};
 
 use crate::gf::f16;
-use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable, bytes_of, cast_slice_mut, pod_read_unaligned};
+use bytemuck::{AnyBitPattern, NoUninit, Pod, bytes_of, cast_slice_mut, pod_read_unaligned};
 use num_traits::{AsPrimitive, Float, PrimInt};
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::layout::*;
-use super::{ReadError, ReadResultExt};
+use super::{MAX_NESTING, ReadError, ReadResultExt};
 
 /// Returns a [`ReadError::Corrupt`] unless `cond` holds. Without a message the
 /// failed condition itself is the reason.
@@ -75,37 +75,28 @@ pub(super) struct Stream<'a> {
     pos: usize,
 }
 
-/// The structural sections as [`CrateFile::open`] reads them, over a cursor
-/// into the file's bytes. The tables move into the [`CrateFile`] once all of
-/// them are read.
+/// The structural sections as [`CrateFile::open`] reads them: a cursor into
+/// the file's bytes, the header, and the section table every reader seeks
+/// by.
 struct Loader<'a> {
     stream: Stream<'a>,
     bootstrap: Bootstrap,
+    version: Version,
     sections: Vec<Section>,
-    tokens: Vec<String>,
-    strings: Vec<usize>,
-    fields: Vec<Field>,
-    fieldsets: Vec<Option<usize>>,
-    paths: Vec<sdf::Path>,
-    specs: Vec<Spec>,
 }
 
 /// One value decode in progress: the file's tables, a cursor over its bytes,
-/// and the nested values being read, innermost last.
+/// and the values nested inside the one being decoded, innermost last.
 ///
 /// A crate file addresses a nested value by offset, so nothing in the format
 /// stops one from pointing at itself; C++ keeps the same set for the same
-/// reason (`_LocalUnpackRecursionGuard`).
+/// reason (`_LocalUnpackRecursionGuard`). A value that nests nothing never
+/// touches it.
 struct Decoder<'a> {
     file: &'a CrateFile,
     stream: Stream<'a>,
     unpacking: Vec<ValueRep>,
 }
-
-/// How deep values may nest before the decoder refuses to go further. A
-/// long but acyclic chain over file-controlled data therefore cannot exhaust
-/// the stack.
-const MAX_NESTING: usize = 64;
 
 impl CrateFile {
     /// Returns file's version extracted from bootstrap header.
@@ -118,37 +109,15 @@ impl CrateFile {
     /// file keeps and decodes values from on demand.
     pub fn open(bytes: impl Into<ar::AssetBuffer>) -> Result<Self, ReadError> {
         let bytes = bytes.into();
-        let mut loader = Loader {
-            stream: Stream::new(&bytes),
-            bootstrap: Bootstrap::zeroed(),
-            sections: Vec::new(),
-            tokens: Vec::new(),
-            strings: Vec::new(),
-            fields: Vec::new(),
-            fieldsets: Vec::new(),
-            paths: Vec::new(),
-            specs: Vec::new(),
-        };
-
-        loader.read_header()?;
-        loader.read_sections().ctx("sections")?;
-        loader.read_tokens().ctx("TOKENS section")?;
-        loader.read_strings().ctx("STRINGS section")?;
-        loader.read_fields().ctx("FIELDS section")?;
-        loader.read_fieldsets().ctx("FIELDSETS section")?;
-        loader.read_paths().ctx("PATHS section")?;
-        loader.read_specs().ctx("SPECS section")?;
-
+        let mut loader = Loader::new(&bytes)?;
+        let tokens = loader.read_tokens().ctx("TOKENS section")?;
+        let strings = loader.read_strings().ctx("STRINGS section")?;
+        let fields = loader.read_fields().ctx("FIELDS section")?;
+        let fieldsets = loader.read_fieldsets().ctx("FIELDSETS section")?;
+        let paths = loader.read_paths(&tokens).ctx("PATHS section")?;
+        let specs = loader.read_specs().ctx("SPECS section")?;
         let Loader {
-            stream: _,
-            bootstrap,
-            sections,
-            tokens,
-            strings,
-            fields,
-            fieldsets,
-            paths,
-            specs,
+            bootstrap, sections, ..
         } = loader;
 
         Ok(CrateFile {
@@ -164,14 +133,9 @@ impl CrateFile {
         })
     }
 
-    /// Find section by name.
-    pub fn find_section(&self, name: &str) -> Option<&Section> {
-        section_named(&self.sections, name)
-    }
-
     /// Decode the value `rep` describes from the file's bytes.
     pub fn value(&self, rep: ValueRep) -> Result<sdf::Value, ReadError> {
-        Decoder::new(self).value(rep)
+        Decoder::new(self).decode(rep)
     }
 
     /// Sanity check of structural validity.
@@ -234,106 +198,94 @@ impl CrateFile {
     }
 }
 
-impl Loader<'_> {
-    /// Returns file's version extracted from bootstrap header.
-    fn version(&self) -> Version {
-        Version::from(self.bootstrap)
-    }
+impl<'a> Loader<'a> {
+    /// Reads and verifies the header of `bytes`, then the section table it
+    /// points at.
+    fn new(bytes: &'a [u8]) -> Result<Self, ReadError> {
+        let mut stream = Stream::new(bytes);
+        let bootstrap = stream.read_pod::<Bootstrap>()?;
 
-    /// Read and verify bootstrap header, retrieve offset to TOC.
-    fn read_header(&mut self) -> Result<(), ReadError> {
-        let header = self.stream.read_pod::<Bootstrap>()?;
+        corrupt!(bootstrap.ident.eq(super::MAGIC), "Usd crate bootstrap section corrupt");
 
-        corrupt!(header.ident.eq(super::MAGIC), "Usd crate bootstrap section corrupt");
+        corrupt!(bootstrap.toc_offset > 0, "Invalid TOC offset");
 
-        corrupt!(header.toc_offset > 0, "Invalid TOC offset");
+        let version = Version::from(bootstrap);
 
-        let file_ver = version(header.version[0], header.version[1], header.version[2]);
-
-        if !SW_VERSION.can_read(file_ver) {
+        if !SW_VERSION.can_read(version) {
             return Err(ReadError::unsupported(format!(
-                "Usd crate version mismatch, file is {file_ver}, library supports {SW_VERSION}"
+                "Usd crate version mismatch, file is {version}, library supports {SW_VERSION}"
             )));
         }
 
-        self.bootstrap = header;
-        Ok(())
+        let sections = read_sections(&mut stream, bootstrap.toc_offset).ctx("sections")?;
+
+        Ok(Loader {
+            stream,
+            bootstrap,
+            version,
+            sections,
+        })
     }
 
-    fn read_sections(&mut self) -> Result<(), ReadError> {
-        self.stream.seek(self.bootstrap.toc_offset)?;
-
-        let count = self.stream.read_count()?;
-        corrupt!(count > 0, "Crate file has no sections");
-        corrupt!(count < 64, "Suspiciously large number of sections: {count}");
-
-        self.sections = self.stream.read_vec::<Section>(count)?;
-
-        Ok(())
-    }
-
-    fn read_tokens(&mut self) -> Result<(), ReadError> {
+    /// The TOKENS section: every token's text.
+    fn read_tokens(&mut self) -> Result<Vec<String>, ReadError> {
         let Some(section) = section_named(&self.sections, Section::TOKENS) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
         self.stream.seek(section.start)?;
 
-        let file_ver = self.version();
+        if self.version < version(0, 4, 0) {
+            return Err(ReadError::unsupported("Support TOKENS reader for < 0.4.0 files"));
+        }
 
         // Read the number of tokens.
         let count = self.stream.read_count()?;
+        let uncompressed_size = self.stream.read_count()?;
+        let mut buffer = self.stream.read_compressed(uncompressed_size)?;
 
-        self.tokens = if file_ver < version(0, 4, 0) {
-            return Err(ReadError::unsupported("Support TOKENS reader for < 0.4.0 files"));
-        } else {
-            let uncompressed_size = self.stream.read_count()?;
-            let mut buffer = self.stream.read_compressed(uncompressed_size)?;
+        corrupt!(
+            buffer.len() == uncompressed_size,
+            "Decompressed size mismatch (expected {}, got {})",
+            uncompressed_size,
+            buffer.len(),
+        );
 
+        if buffer.is_empty() {
             corrupt!(
-                buffer.len() == uncompressed_size,
-                "Decompressed size mismatch (expected {}, got {})",
-                uncompressed_size,
-                buffer.len(),
+                count == 0,
+                "Tokens section claims {count} tokens but the buffer is empty"
             );
+            return Ok(Vec::new());
+        }
 
-            if buffer.is_empty() {
-                corrupt!(
-                    count == 0,
-                    "Tokens section claims {count} tokens but the buffer is empty"
-                );
-                Vec::new()
-            } else {
-                corrupt!(
-                    buffer.last() == Some(&b'\0'),
-                    "Tokens section not null-terminated in crate file"
-                );
+        corrupt!(
+            buffer.last() == Some(&b'\0'),
+            "Tokens section not null-terminated in crate file"
+        );
 
-                // Pop last \0 byte to split strings without empty one at the end.
-                buffer.pop();
+        // Pop last \0 byte to split strings without empty one at the end.
+        buffer.pop();
 
-                let strings = buffer
-                    .split(|c| *c == b'\0')
-                    .map(|buf| str::from_utf8(buf).map(|str| str.to_string()))
-                    .collect::<Result<Vec<_>, str::Utf8Error>>()?;
+        let strings = buffer
+            .split(|c| *c == b'\0')
+            .map(|buf| str::from_utf8(buf).map(|str| str.to_string()))
+            .collect::<Result<Vec<_>, str::Utf8Error>>()?;
 
-                corrupt!(
-                    strings.len() == count,
-                    "Crate file claims {} tokens, but found {}",
-                    count,
-                    strings.len(),
-                );
+        corrupt!(
+            strings.len() == count,
+            "Crate file claims {} tokens, but found {}",
+            count,
+            strings.len(),
+        );
 
-                strings
-            }
-        };
-
-        Ok(())
+        Ok(strings)
     }
 
-    fn read_strings(&mut self) -> Result<(), ReadError> {
+    /// The STRINGS section: each string as an index into the tokens.
+    fn read_strings(&mut self) -> Result<Vec<usize>, ReadError> {
         let Some(section) = section_named(&self.sections, Section::STRINGS) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
         self.stream.seek(section.start)?;
@@ -347,100 +299,90 @@ impl Loader<'_> {
         let strings = self.stream.read_vec::<u32>(count)?;
 
         // These are indices, so convert to usize for convenience.
-        self.strings = strings.into_iter().map(|offset| offset as usize).collect::<Vec<_>>();
-
-        Ok(())
+        Ok(strings.into_iter().map(|offset| offset as usize).collect())
     }
 
-    fn read_fields(&mut self) -> Result<(), ReadError> {
+    /// The FIELDS section: every unique field.
+    fn read_fields(&mut self) -> Result<Vec<Field>, ReadError> {
         let Some(section) = section_named(&self.sections, Section::FIELDS) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
         self.stream.seek(section.start)?;
 
-        let file_ver = self.version();
-
-        self.fields = if file_ver < version(0, 4, 0) {
+        if self.version < version(0, 4, 0) {
             return Err(ReadError::unsupported("Support FIELDS reader before < 0.4.0"));
-        } else {
-            let field_count = self.stream.read_count()?;
+        }
 
-            // Compressed fields in 0.4.0.
-            let indices = self.stream.read_encoded_ints(field_count)?;
+        let field_count = self.stream.read_count()?;
 
-            // Compressed value reps.
-            let reps = self.stream.read_compressed(field_count)?;
+        // Compressed fields in 0.4.0.
+        let indices = self.stream.read_encoded_ints(field_count)?;
 
-            let fields: Vec<_> = indices
-                .iter()
-                .zip(reps.iter())
-                .map(|(index, value)| Field::new(*index, *value))
-                .collect();
+        // Compressed value reps.
+        let reps = self.stream.read_compressed(field_count)?;
 
-            corrupt!(fields.len() == field_count);
+        let fields: Vec<_> = indices
+            .iter()
+            .zip(reps.iter())
+            .map(|(index, value)| Field::new(*index, *value))
+            .collect();
 
-            fields
-        };
+        corrupt!(fields.len() == field_count);
 
-        Ok(())
+        Ok(fields)
     }
 
-    fn read_fieldsets(&mut self) -> Result<(), ReadError> {
+    /// The FIELDSETS section: runs of field indices, each ended by `None`.
+    fn read_fieldsets(&mut self) -> Result<Vec<Option<usize>>, ReadError> {
         let Some(section) = section_named(&self.sections, Section::FIELDSETS) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
         self.stream.seek(section.start)?;
 
-        let file_ver = self.version();
-
-        self.fieldsets = if file_ver < version(0, 4, 0) {
+        if self.version < version(0, 4, 0) {
             return Err(ReadError::unsupported("Support FIELDSETS reader for < 0.4.0 files"));
-        } else {
-            let count = self.stream.read_count()?;
+        }
 
-            let decoded = self.stream.read_encoded_ints::<u32>(count)?;
+        let count = self.stream.read_count()?;
 
-            const INVALID_INDEX: u32 = u32::MAX;
+        let decoded = self.stream.read_encoded_ints::<u32>(count)?;
 
-            let sets = decoded
-                .into_iter()
-                .map(|i| if i == INVALID_INDEX { None } else { Some(i as usize) })
-                .collect::<Vec<_>>();
+        const INVALID_INDEX: u32 = u32::MAX;
 
-            corrupt!(sets.len() == count);
+        let sets = decoded
+            .into_iter()
+            .map(|i| if i == INVALID_INDEX { None } else { Some(i as usize) })
+            .collect::<Vec<_>>();
 
-            sets
-        };
+        corrupt!(sets.len() == count);
 
-        Ok(())
+        Ok(sets)
     }
 
-    fn read_paths(&mut self) -> Result<(), ReadError> {
+    /// The PATHS section: every unique path, its elements named by `tokens`.
+    fn read_paths(&mut self, tokens: &[String]) -> Result<Vec<sdf::Path>, ReadError> {
         let Some(section) = section_named(&self.sections, Section::PATHS) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
         self.stream.seek(section.start)?;
 
-        let file_ver = self.version();
-
-        if file_ver == version(0, 0, 1) {
+        if self.version == version(0, 0, 1) {
             return Err(ReadError::unsupported("Support PATHS reader for == 0.0.1 files"));
-        } else if file_ver < version(0, 4, 0) {
+        }
+        if self.version < version(0, 4, 0) {
             return Err(ReadError::unsupported("Support PATHS reader for < 0.4.0 files"));
-        } else {
-            // Read # of paths.
-            let path_count = self.stream.read_count()?;
-            self.read_compressed_paths(path_count)?;
-        };
+        }
 
-        Ok(())
+        // Read # of paths.
+        let path_count = self.stream.read_count()?;
+        self.read_compressed_paths(path_count, tokens)
     }
 
     /// Read compressed paths.
-    fn read_compressed_paths(&mut self, path_count: usize) -> Result<(), ReadError> {
+    fn read_compressed_paths(&mut self, path_count: usize, tokens: &[String]) -> Result<Vec<sdf::Path>, ReadError> {
         // Read number of encoded paths.
         let count: usize = self.stream.read_count()?;
         // The table interns unique paths; only the empty path has no encoding.
@@ -467,147 +409,52 @@ impl Loader<'_> {
             );
         }
         // Allocate slots after all three encoded tables have been decoded.
-        self.paths
+        let mut paths = Vec::new();
+        paths
             .try_reserve_exact(path_count)
             .map_err(|error| ReadError::corrupt(format!("cannot allocate {path_count} path slots: {error}")))?;
-        self.paths.resize(path_count, sdf::Path::default());
+        paths.resize(path_count, sdf::Path::default());
 
-        self.build_compressed_paths(&path_indexes, &element_token_indexes, &jumps)?;
+        build_compressed_paths(&mut paths, tokens, &path_indexes, &element_token_indexes, &jumps)?;
 
-        Ok(())
+        Ok(paths)
     }
 
-    fn build_compressed_paths(
-        &mut self,
-        path_indexes: &[u32],
-        element_token_indexes: &[i32],
-        jumps: &[i32],
-    ) -> Result<(), ReadError> {
-        // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3760
-        //
-        // The inner loop walks a child chain; a node that has both a child and a
-        // jump-addressed sibling pushes that sibling subtree onto an explicit
-        // stack, so stack frames stay bounded by namespace depth (the child
-        // chain) while namespace width fans out through the queue. C++
-        // `_BuildDecompressedPathsImpl` does the same, dispatching each sibling
-        // subtree to a `WorkDispatcher` task.
-        //
-        // TODO(rayon): this decoder is performance-critical — it runs for every
-        // loaded layer and dominates open time on large scenes. The deferred
-        // sibling subtrees are independent and should be decoded in parallel, as
-        // the C++ WorkDispatcher does.
-        //
-        // TODO(perf): the append_property / append_variant_segment calls below
-        // validate each element token; if the PATHS decode shows in large-scene
-        // profiles, add a pub(crate) unchecked single-element append for
-        // machine-written crate files.
-        //
-        // TODO(diagnostics): a single malformed element token fails the whole
-        // file load. C++ posts an error and skips the unaddressable subtree;
-        // matching that needs a layer-open diagnostics channel to carry the
-        // partial-load errors. The same channel would let the traversals that
-        // today skip unaddressable authored names silently — the connection
-        // graph and collection walks in `usd`, and the layer-registry variant
-        // walk — surface each skipped entry as a warning.
-        // Nothing to decode when the PATHS section is empty.
-        if path_indexes.is_empty() {
-            return Ok(());
-        }
-
-        let mut pending = vec![(0usize, sdf::Path::default())];
-
-        while let Some((mut current_index, mut parent_path)) = pending.pop() {
-            loop {
-                let index = current_index;
-                current_index += 1;
-
-                if parent_path.is_empty() {
-                    parent_path = sdf::Path::new("/")?;
-                    checked_path_slot(&self.paths, index)?;
-                    self.paths[index] = parent_path.clone();
-                } else {
-                    let token_index = *indexed(element_token_indexes, index, "path element")?;
-                    let is_prim_property_path = token_index < 0;
-                    let token_index = token_index.unsigned_abs() as usize;
-                    let element_token = indexed(&self.tokens, token_index, "token")?.as_str();
-
-                    let slot = *indexed(path_indexes, index, "path")? as usize;
-                    checked_path_slot(&self.paths, slot)?;
-                    self.paths[slot] = if is_prim_property_path {
-                        parent_path.append_property(element_token)?
-                    } else if element_token.starts_with('{') {
-                        // Variant segments are appended directly without a separator
-                        // to produce canonical paths like /Prim{set=sel}.
-                        parent_path.append_variant_segment(element_token)?
-                    } else {
-                        parent_path.append_path(element_token)?
-                    };
-                }
-
-                let jump = *indexed(jumps, index, "path jump")?;
-                let has_child = jump > 0 || jump == -1;
-                let has_sibling = jump >= 0;
-
-                if has_child {
-                    if has_sibling {
-                        let sibling_index = index + jump as usize;
-                        // Siblings share this node's parent; defer the subtree.
-                        pending.push((sibling_index, parent_path.clone()));
-                    }
-
-                    // Descend into the child (the next sequential entry) under
-                    // this node's path.
-                    let slot = *indexed(path_indexes, index, "path")? as usize;
-                    parent_path = indexed(&self.paths, slot, "path")?.clone();
-                }
-
-                if !has_child && !has_sibling {
-                    break;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn read_specs(&mut self) -> Result<(), ReadError> {
+    /// The SPECS section: every spec, by path and fieldset index.
+    fn read_specs(&mut self) -> Result<Vec<Spec>, ReadError> {
         let Some(section) = section_named(&self.sections, Section::SPECS) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
         self.stream.seek(section.start)?;
 
-        let file_ver = self.version();
-
-        self.specs = if file_ver == version(0, 0, 1) {
+        if self.version == version(0, 0, 1) {
             return Err(ReadError::unsupported("Support SPECS reader for == 0.0.1 files"));
-        } else if file_ver < version(0, 4, 0) {
+        }
+        if self.version < version(0, 4, 0) {
             return Err(ReadError::unsupported("Support SPECS reader for < 0.4.0 files"));
-        } else {
-            // Version 0.4.0 specs are compressed
+        }
 
-            let spec_count = self.stream.read_count()?;
+        // Version 0.4.0 specs are compressed
+        let spec_count = self.stream.read_count()?;
 
-            let path_indexes = self.stream.read_encoded_ints::<u32>(spec_count)?;
-            let fieldset_indexes = self.stream.read_encoded_ints::<u32>(spec_count)?;
-            let spec_types = self.stream.read_encoded_ints::<u32>(spec_count)?;
+        let path_indexes = self.stream.read_encoded_ints::<u32>(spec_count)?;
+        let fieldset_indexes = self.stream.read_encoded_ints::<u32>(spec_count)?;
+        let spec_types = self.stream.read_encoded_ints::<u32>(spec_count)?;
 
-            path_indexes
-                .into_iter()
-                .zip(fieldset_indexes)
-                .zip(spec_types)
-                .map(|((path, fieldset), spec_type)| {
-                    Ok(Spec {
-                        path_index: path as usize,
-                        fieldset_index: fieldset as usize,
-                        spec_type: sdf::SpecType::from_repr(spec_type)
-                            .ok_or_else(|| ReadError::corrupt(format!("Unable to parse SDF spec type: {spec_type}")))?,
-                    })
+        path_indexes
+            .into_iter()
+            .zip(fieldset_indexes)
+            .zip(spec_types)
+            .map(|((path, fieldset), spec_type)| {
+                Ok(Spec {
+                    path_index: path as usize,
+                    fieldset_index: fieldset as usize,
+                    spec_type: sdf::SpecType::from_repr(spec_type)
+                        .ok_or_else(|| ReadError::corrupt(format!("Unable to parse SDF spec type: {spec_type}")))?,
                 })
-                .collect::<Result<Vec<_>, ReadError>>()?
-        };
-
-        Ok(())
+            })
+            .collect()
     }
 }
 
@@ -617,19 +464,27 @@ impl<'a> Stream<'a> {
         Stream { bytes, pos: 0 }
     }
 
-    /// The current offset.
-    fn position(&self) -> u64 {
-        self.pos as u64
+    /// The current offset, for [`rewind`](Self::rewind) to return to.
+    fn position(&self) -> usize {
+        self.pos
     }
 
-    /// Moves to `position`, which may be the end of the stream but not past
-    /// it.
-    fn seek(&mut self, position: u64) -> Result<(), ReadError> {
+    /// Returns to `position`, one [`position`](Self::position) produced.
+    fn rewind(&mut self, position: usize) {
+        self.pos = position;
+    }
+
+    /// Moves to `position`, an offset the file states, which may be the end
+    /// of the stream but not past it.
+    pub(super) fn seek(&mut self, position: u64) -> Result<(), ReadError> {
         let pos = usize::try_from(position)
             .ok()
             .filter(|&pos| pos <= self.bytes.len())
             .ok_or_else(|| {
-                ReadError::corrupt(format!("offset {position} is past the {}-byte file", self.bytes.len()))
+                ReadError::corrupt(format!(
+                    "offset {position} is past the {}-byte stream",
+                    self.bytes.len()
+                ))
             })?;
         self.pos = pos;
         Ok(())
@@ -644,7 +499,7 @@ impl<'a> Stream<'a> {
             .filter(|&pos| pos <= self.bytes.len())
             .ok_or_else(|| {
                 ReadError::corrupt(format!(
-                    "a jump of {delta} bytes from offset {} leaves the {}-byte file",
+                    "a jump of {delta} bytes from offset {} leaves the {}-byte stream",
                     self.pos,
                     self.bytes.len()
                 ))
@@ -662,7 +517,7 @@ impl<'a> Stream<'a> {
             .filter(|&end| end <= self.bytes.len())
             .ok_or_else(|| {
                 ReadError::corrupt(format!(
-                    "{len} bytes at offset {} reach past the {}-byte file",
+                    "{len} bytes at offset {} reach past the {}-byte stream",
                     self.pos,
                     self.bytes.len()
                 ))
@@ -673,7 +528,7 @@ impl<'a> Stream<'a> {
     }
 
     /// Read a single "size" or "count" value encoded as `u64`.
-    pub(super) fn read_count(&mut self) -> Result<usize, ReadError> {
+    fn read_count(&mut self) -> Result<usize, ReadError> {
         let count = self.read_pod::<u64>()?;
         usize::try_from(count).map_err(|_| ReadError::corrupt(format!("count {count} does not fit this platform")))
     }
@@ -792,9 +647,9 @@ impl<'a> Decoder<'a> {
         Ok(value)
     }
 
-    fn read_token(&mut self, value: ValueRep) -> Result<String, ReadError> {
+    fn read_token(&mut self, value: ValueRep) -> Result<tf::Token, ReadError> {
         let index: u64 = self.unpack_value(value)?;
-        Ok(indexed(&self.file.tokens, index as usize, "token")?.clone())
+        Ok(indexed(&self.file.tokens, index as usize, "token")?.as_str().into())
     }
 
     /// Read a scalar asset path or path expression.
@@ -999,8 +854,8 @@ impl<'a> Decoder<'a> {
         })
     }
 
-    fn read_token_vec(&mut self) -> Result<Vec<String>, ReadError> {
-        self.read_indexed_vec(|decoder, index| Ok(indexed(&decoder.file.tokens, index, "token")?.clone()))
+    fn read_token_vec(&mut self) -> Result<Vec<tf::Token>, ReadError> {
+        self.read_indexed_vec(|decoder, index| Ok(indexed(&decoder.file.tokens, index, "token")?.as_str().into()))
     }
 
     fn read_path_vec(&mut self) -> Result<Vec<sdf::Path>, ReadError> {
@@ -1103,8 +958,8 @@ impl<'a> Decoder<'a> {
         corrupt!(rep.ty()? != Type::Invalid, "Can't parse nested value type");
 
         let resume = self.stream.position();
-        let value = self.value(rep)?;
-        self.stream.seek(resume)?;
+        let value = self.nested_value(rep)?;
+        self.stream.rewind(resume);
 
         Ok(value)
     }
@@ -1129,52 +984,29 @@ impl<'a> Decoder<'a> {
         Ok(items)
     }
 
-    /// Read an array of fixed-size vectors (e.g. `Vec<[f32; 3]>`).
+    /// Reads an array of plain values, `U` laid out as the on-disk element:
+    /// a scalar, a `[T; N]` group, or a `repr(C)` gf type.
     ///
-    /// TODO(perf): the one copy left per array read. C++ hands out arrays of
-    /// at least 2048 bytes as views into the mapped file when their address
-    /// is aligned to the element (`USDC_ENABLE_ZERO_COPY_ARRAYS`), copying
-    /// them out only when the file is replaced; that needs an `sdf::Value`
-    /// array form over an `ar::SharedBuffer` view.
-    ///
-    /// Reads an array of POD values (including `repr(C)` gf types) directly,
-    /// without the intermediate `[T; N]` grouping step that
-    /// [`read_vec_array`] performs. `U` must have the same binary layout as
-    /// the on-disk element — safe for all gf vec types since they are
-    /// `#[repr(C)]` and `bytemuck::Pod`.
-    fn read_gf_array<U: NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>, ReadError> {
+    /// TODO(perf): the one copy left per array read, which zero-fills the
+    /// vector before copying into it. C++ aligns every array payload to 8
+    /// bytes, so for a file it wrote `bytemuck::try_cast_slice` over the
+    /// taken bytes followed by `to_vec` would copy once with no fill (the
+    /// crate writer here does not align, so the fill stays as the fallback).
+    /// C++ goes further and hands out arrays of at least 2048 bytes as views
+    /// into the mapped file when their address is aligned to the element
+    /// (`USDC_ENABLE_ZERO_COPY_ARRAYS`), copying them out only when the file
+    /// is replaced; that needs an `sdf::Value` array form over an
+    /// `ar::SharedBuffer` view.
+    fn read_array<U: NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>, ReadError> {
         corrupt!(value.is_array() && !value.is_compressed());
         let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
-        if count == 0 {
-            return Ok(Vec::default());
-        }
         self.stream.read_vec::<U>(count)
     }
 
-    fn read_vec_array<T: NoUninit + AnyBitPattern, const N: usize>(
-        &mut self,
-        value: ValueRep,
-    ) -> Result<Vec<[T; N]>, ReadError>
-    where
-        [T; N]: NoUninit + AnyBitPattern,
-    {
-        corrupt!(value.is_array());
-        corrupt!(!value.is_compressed());
-
-        let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
-
-        // Array allowed to be empty.
-        if count == 0 {
-            return Ok(Vec::default());
-        }
-
-        self.stream.read_vec(count)
-    }
-
-    /// Decode the value `rep` describes, refusing one already being decoded
-    /// above it (a value that names itself) and one nested deeper than
-    /// [`MAX_NESTING`].
-    fn value(&mut self, rep: ValueRep) -> Result<sdf::Value, ReadError> {
+    /// Decode the value `rep` describes as one nested in the value being
+    /// decoded, refusing one already being decoded above it (a value that
+    /// names itself) and one nested deeper than [`MAX_NESTING`].
+    fn nested_value(&mut self, rep: ValueRep) -> Result<sdf::Value, ReadError> {
         corrupt!(
             !self.unpacking.contains(&rep),
             "A nested value recursively contains itself"
@@ -1198,13 +1030,7 @@ impl<'a> Decoder<'a> {
             // Bool and chars
             //
             Type::Bool if value.is_array() => {
-                let vec = self
-                    .read_vec_array::<u8, 1>(value)?
-                    .into_iter()
-                    .map(|[v]| v != 0)
-                    .collect();
-
-                sdf::Value::BoolVec(vec)
+                sdf::Value::BoolVec(self.read_array::<u8>(value)?.into_iter().map(|v| v != 0).collect())
             }
 
             Type::Bool => {
@@ -1212,10 +1038,7 @@ impl<'a> Decoder<'a> {
                 sdf::Value::Bool(value != 0)
             }
 
-            Type::Uchar if value.is_array() => {
-                let vec = self.read_vec_array::<u8, 1>(value)?.into_iter().map(|[v]| v).collect();
-                sdf::Value::UcharVec(vec)
-            }
+            Type::Uchar if value.is_array() => sdf::Value::UcharVec(self.read_array::<u8>(value)?),
 
             Type::Uchar => {
                 let value = self.unpack_value::<u8>(value)?;
@@ -1296,25 +1119,25 @@ impl<'a> Decoder<'a> {
 
                 sdf::Value::TokenVec(tokens)
             }
-            Type::Token => sdf::Value::Token(self.read_token(value)?.into()),
+            Type::Token => sdf::Value::Token(self.read_token(value)?),
 
             //
             // Vectors (half, float, double, int + vec{2,3,4})
             //
-            Type::Vec2h if value.is_array() => Value::Vec2hVec(self.read_gf_array::<gf::Vec2h>(value)?),
-            Type::Vec2f if value.is_array() => Value::Vec2fVec(self.read_gf_array::<gf::Vec2f>(value)?),
-            Type::Vec2d if value.is_array() => Value::Vec2dVec(self.read_gf_array::<gf::Vec2d>(value)?),
-            Type::Vec2i if value.is_array() => Value::Vec2iVec(self.read_gf_array::<gf::Vec2i>(value)?),
+            Type::Vec2h if value.is_array() => Value::Vec2hVec(self.read_array::<gf::Vec2h>(value)?),
+            Type::Vec2f if value.is_array() => Value::Vec2fVec(self.read_array::<gf::Vec2f>(value)?),
+            Type::Vec2d if value.is_array() => Value::Vec2dVec(self.read_array::<gf::Vec2d>(value)?),
+            Type::Vec2i if value.is_array() => Value::Vec2iVec(self.read_array::<gf::Vec2i>(value)?),
 
-            Type::Vec3h if value.is_array() => Value::Vec3hVec(self.read_gf_array::<gf::Vec3h>(value)?),
-            Type::Vec3f if value.is_array() => Value::Vec3fVec(self.read_gf_array::<gf::Vec3f>(value)?),
-            Type::Vec3d if value.is_array() => Value::Vec3dVec(self.read_gf_array::<gf::Vec3d>(value)?),
-            Type::Vec3i if value.is_array() => Value::Vec3iVec(self.read_gf_array::<gf::Vec3i>(value)?),
+            Type::Vec3h if value.is_array() => Value::Vec3hVec(self.read_array::<gf::Vec3h>(value)?),
+            Type::Vec3f if value.is_array() => Value::Vec3fVec(self.read_array::<gf::Vec3f>(value)?),
+            Type::Vec3d if value.is_array() => Value::Vec3dVec(self.read_array::<gf::Vec3d>(value)?),
+            Type::Vec3i if value.is_array() => Value::Vec3iVec(self.read_array::<gf::Vec3i>(value)?),
 
-            Type::Vec4h if value.is_array() => Value::Vec4hVec(self.read_gf_array::<gf::Vec4h>(value)?),
-            Type::Vec4f if value.is_array() => Value::Vec4fVec(self.read_gf_array::<gf::Vec4f>(value)?),
-            Type::Vec4d if value.is_array() => Value::Vec4dVec(self.read_gf_array::<gf::Vec4d>(value)?),
-            Type::Vec4i if value.is_array() => Value::Vec4iVec(self.read_gf_array::<gf::Vec4i>(value)?),
+            Type::Vec4h if value.is_array() => Value::Vec4hVec(self.read_array::<gf::Vec4h>(value)?),
+            Type::Vec4f if value.is_array() => Value::Vec4fVec(self.read_array::<gf::Vec4f>(value)?),
+            Type::Vec4d if value.is_array() => Value::Vec4dVec(self.read_array::<gf::Vec4d>(value)?),
+            Type::Vec4i if value.is_array() => Value::Vec4iVec(self.read_array::<gf::Vec4i>(value)?),
 
             // Inlined scalar vecs: the 32-bit inline payload stores [i8; N]
             // sign-extended integers for all types except half-2, which is the
@@ -1386,9 +1209,9 @@ impl<'a> Decoder<'a> {
             //
             // Matrices
             //
-            Type::Matrix2d if value.is_array() => Value::Matrix2dVec(self.read_gf_array::<gf::Mat2d>(value)?),
-            Type::Matrix3d if value.is_array() => Value::Matrix3dVec(self.read_gf_array::<gf::Mat3d>(value)?),
-            Type::Matrix4d if value.is_array() => Value::Matrix4dVec(self.read_gf_array::<gf::Matrix4d>(value)?),
+            Type::Matrix2d if value.is_array() => Value::Matrix2dVec(self.read_array::<gf::Mat2d>(value)?),
+            Type::Matrix3d if value.is_array() => Value::Matrix3dVec(self.read_array::<gf::Mat3d>(value)?),
+            Type::Matrix4d if value.is_array() => Value::Matrix4dVec(self.read_array::<gf::Matrix4d>(value)?),
 
             Type::Matrix2d if value.is_inlined() => {
                 sdf::Value::Matrix2d(gf::Mat2d(to_mat_diag::<2, 4>(self.unpack_value(value)?)))
@@ -1416,25 +1239,19 @@ impl<'a> Decoder<'a> {
             // — without this, binary USDC quats from real production
             // assets (Isaac Sim Agilebot, Omniverse robotics scenes)
             // come out with axes scrambled.
-            Type::Quath if value.is_array() => {
-                Value::QuathVec(xyzw_to_wxyz_quath(self.read_vec_array::<f16, 4>(value)?))
-            }
+            Type::Quath if value.is_array() => Value::QuathVec(xyzw_to_wxyz_quath(self.read_array::<[f16; 4]>(value)?)),
             Type::Quath => {
                 let raw = self.unpack_value::<[f16; 4]>(value)?;
                 sdf::Value::quath(raw[3], raw[0], raw[1], raw[2])
             }
 
-            Type::Quatf if value.is_array() => {
-                Value::QuatfVec(xyzw_to_wxyz_quatf(self.read_vec_array::<f32, 4>(value)?))
-            }
+            Type::Quatf if value.is_array() => Value::QuatfVec(xyzw_to_wxyz_quatf(self.read_array::<[f32; 4]>(value)?)),
             Type::Quatf => {
                 let raw = self.unpack_value::<[f32; 4]>(value)?;
                 sdf::Value::quatf(raw[3], raw[0], raw[1], raw[2])
             }
 
-            Type::Quatd if value.is_array() => {
-                Value::QuatdVec(xyzw_to_wxyz_quatd(self.read_vec_array::<f64, 4>(value)?))
-            }
+            Type::Quatd if value.is_array() => Value::QuatdVec(xyzw_to_wxyz_quatd(self.read_array::<[f64; 4]>(value)?)),
             Type::Quatd => {
                 let raw = self.unpack_value::<[f64; 4]>(value)?;
                 sdf::Value::quatd(raw[3], raw[0], raw[1], raw[2])
@@ -1446,9 +1263,7 @@ impl<'a> Decoder<'a> {
             Type::TokenListOp => {
                 corrupt!(!value.is_inlined());
 
-                let list = self.read_list_op(value, |decoder: &mut Self| {
-                    Ok(decoder.read_token_vec()?.into_iter().map(tf::Token::from).collect())
-                })?;
+                let list = self.read_list_op(value, |decoder: &mut Self| decoder.read_token_vec())?;
                 sdf::Value::TokenListOp(list)
             }
             Type::StringListOp => {
@@ -1506,8 +1321,7 @@ impl<'a> Decoder<'a> {
 
                 self.stream.seek(value.payload())?;
 
-                let tokens = self.read_token_vec()?;
-                sdf::Value::token_vec(tokens)
+                sdf::Value::TokenVec(self.read_token_vec()?)
             }
 
             Type::PathVector => {
@@ -1621,12 +1435,12 @@ impl<'a> Decoder<'a> {
                 let saved_position = self.stream.position();
 
                 let times = self
-                    .value(times_rep)?
+                    .nested_value(times_rep)?
                     .try_as_double_vec()
                     .ok_or_else(|| ReadError::corrupt("Failed to read time samples"))?;
 
                 // Restore position
-                self.stream.seek(saved_position)?;
+                self.stream.rewind(saved_position);
 
                 self.apply_recursive_offset()?;
 
@@ -1639,7 +1453,7 @@ impl<'a> Decoder<'a> {
                 let samples = times
                     .into_iter()
                     .zip(value_reps)
-                    .map(|(time, rep)| Ok((time, self.value(rep)?)))
+                    .map(|(time, rep)| Ok((time, self.nested_value(rep)?)))
                     .collect::<Result<Vec<_>, ReadError>>()?;
 
                 sdf::Value::TimeSamples(sdf::normalize_time_samples(samples))
@@ -1729,9 +1543,115 @@ impl<'a> Decoder<'a> {
 
 enum ArrayKind {
     Ints,
-    #[allow(dead_code)]
     Floats,
     Other,
+}
+
+/// The section table at `toc_offset`.
+fn read_sections(stream: &mut Stream<'_>, toc_offset: u64) -> Result<Vec<Section>, ReadError> {
+    stream.seek(toc_offset)?;
+
+    let count = stream.read_count()?;
+    corrupt!(count > 0, "Crate file has no sections");
+    corrupt!(count < 64, "Suspiciously large number of sections: {count}");
+
+    stream.read_vec::<Section>(count)
+}
+
+/// Fills `paths` from the three encoded PATHS tables, each element named by
+/// `tokens`.
+fn build_compressed_paths(
+    paths: &mut [sdf::Path],
+    tokens: &[String],
+    path_indexes: &[u32],
+    element_token_indexes: &[i32],
+    jumps: &[i32],
+) -> Result<(), ReadError> {
+    // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3760
+    //
+    // The inner loop walks a child chain; a node that has both a child and a
+    // jump-addressed sibling pushes that sibling subtree onto an explicit
+    // stack, so stack frames stay bounded by namespace depth (the child
+    // chain) while namespace width fans out through the queue. C++
+    // `_BuildDecompressedPathsImpl` does the same, dispatching each sibling
+    // subtree to a `WorkDispatcher` task.
+    //
+    // TODO(rayon): this decoder is performance-critical — it runs for every
+    // loaded layer and dominates open time on large scenes. The deferred
+    // sibling subtrees are independent and should be decoded in parallel, as
+    // the C++ WorkDispatcher does.
+    //
+    // TODO(perf): the append_property / append_variant_segment calls below
+    // validate each element token; if the PATHS decode shows in large-scene
+    // profiles, add a pub(crate) unchecked single-element append for
+    // machine-written crate files.
+    //
+    // TODO(diagnostics): a single malformed element token fails the whole
+    // file load. C++ posts an error and skips the unaddressable subtree;
+    // matching that needs a layer-open diagnostics channel to carry the
+    // partial-load errors. The same channel would let the traversals that
+    // today skip unaddressable authored names silently — the connection
+    // graph and collection walks in `usd`, and the layer-registry variant
+    // walk — surface each skipped entry as a warning.
+    // Nothing to decode when the PATHS section is empty.
+    if path_indexes.is_empty() {
+        return Ok(());
+    }
+
+    let mut pending = vec![(0usize, sdf::Path::default())];
+
+    while let Some((mut current_index, mut parent_path)) = pending.pop() {
+        loop {
+            let index = current_index;
+            current_index += 1;
+
+            if parent_path.is_empty() {
+                parent_path = sdf::Path::new("/")?;
+                checked_path_slot(paths, index)?;
+                paths[index] = parent_path.clone();
+            } else {
+                let token_index = *indexed(element_token_indexes, index, "path element")?;
+                let is_prim_property_path = token_index < 0;
+                let token_index = token_index.unsigned_abs() as usize;
+                let element_token = indexed(tokens, token_index, "token")?.as_str();
+
+                let slot = *indexed(path_indexes, index, "path")? as usize;
+                checked_path_slot(paths, slot)?;
+                paths[slot] = if is_prim_property_path {
+                    parent_path.append_property(element_token)?
+                } else if element_token.starts_with('{') {
+                    // Variant segments are appended directly without a separator
+                    // to produce canonical paths like /Prim{set=sel}.
+                    parent_path.append_variant_segment(element_token)?
+                } else {
+                    parent_path.append_path(element_token)?
+                };
+            }
+
+            let jump = *indexed(jumps, index, "path jump")?;
+            let has_child = jump > 0 || jump == -1;
+            let has_sibling = jump >= 0;
+
+            if has_child {
+                if has_sibling {
+                    let sibling_index = index + jump as usize;
+                    // Siblings share this node's parent; defer the subtree.
+                    pending.push((sibling_index, parent_path.clone()));
+                }
+
+                // Descend into the child (the next sequential entry) under
+                // this node's path.
+                let slot = *indexed(path_indexes, index, "path")? as usize;
+                parent_path = indexed(paths, slot, "path")?.clone();
+            }
+
+            if !has_child && !has_sibling {
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The section called `name` among `sections`.
@@ -1855,7 +1775,9 @@ mod tests {
     fn empty_path_slot() -> Result<()> {
         let (mut bytes, _) = compact_paths()?;
         let file = CrateFile::open(bytes.clone())?;
-        let start = file.find_section(Section::PATHS).expect("paths section").start as usize;
+        let start = section_named(&file.sections, Section::PATHS)
+            .expect("paths section")
+            .start as usize;
         let count = file.paths.len();
         bytes[start..start + 8].copy_from_slice(&((count + 1) as u64).to_le_bytes());
         let decoded = CrateFile::open(bytes)?;
@@ -1868,7 +1790,9 @@ mod tests {
     fn invalid_path_counts() -> Result<()> {
         let (bytes, _) = compact_paths()?;
         let file = CrateFile::open(bytes.clone())?;
-        let start = file.find_section(Section::PATHS).expect("paths section").start as usize;
+        let start = section_named(&file.sections, Section::PATHS)
+            .expect("paths section")
+            .start as usize;
         for count in [0, file.paths.len() as u64 + 2, u64::MAX] {
             let mut damaged = bytes.clone();
             damaged[start..start + 8].copy_from_slice(&count.to_le_bytes());
@@ -1954,7 +1878,7 @@ mod tests {
             stream: Stream::new(&block),
             unpacking: Vec::new(),
         };
-        let error = decoder.value(samples).expect_err("a self-referencing time sample");
+        let error = decoder.decode(samples).expect_err("a self-referencing time sample");
         assert!(format!("{error:?}").contains("recursively"), "{error:?}");
         Ok(())
     }

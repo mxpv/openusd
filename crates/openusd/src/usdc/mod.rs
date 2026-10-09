@@ -18,6 +18,15 @@ use crate::{ar, sdf, tf};
 /// USDC binary format magic bytes (`PXR-USDC`).
 pub const MAGIC: &[u8] = b"PXR-USDC";
 
+/// How deep a value may nest inside another (a dictionary in a dictionary, an
+/// item of an unregistered list op) in a crate file this library reads or
+/// writes. The reader refuses a deeper file: a long but acyclic chain over
+/// file-controlled data cannot exhaust the stack, which each level of the
+/// decoder takes a few kilobytes of in a release build and tens in a debug
+/// build. The writer refuses deeper data: a layer it writes always reads
+/// back.
+pub const MAX_NESTING: usize = 32;
+
 /// Error reading crate data: [`CrateFile::open`], [`CrateData::open`], and the
 /// value decoder.
 #[derive(Debug, thiserror::Error)]
@@ -199,6 +208,11 @@ impl CrateData {
 }
 
 impl sdf::AbstractData for CrateData {
+    /// Every value decodes from the file's bytes on demand.
+    fn is_lazy(&self) -> bool {
+        true
+    }
+
     #[inline]
     fn has_spec(&self, path: &sdf::Path) -> bool {
         self.data.contains_key(path)
@@ -393,7 +407,7 @@ mod tests {
 
     use super::*;
     use crate::Result;
-    use crate::sdf::FileFormat;
+    use crate::sdf::{AbstractData, FileFormat};
 
     /// A crate layer read from an asset that shares its bytes decodes from
     /// those bytes and keeps a reference to them.
@@ -407,13 +421,48 @@ mod tests {
 
         let resolver = ar::tests::TestResolver({
             let bytes = bytes.clone();
-            move || -> io::Result<Box<dyn ar::Asset>> { Ok(Box::new(io::Cursor::new(bytes.clone()))) }
+            move || -> io::Result<Box<dyn ar::Asset>> {
+                Ok(Box::new(io::Cursor::new(ar::AssetBuffer::from(bytes.clone()))))
+            }
         });
         let data = UsdcFileFormat.read(&resolver, &ar::ResolvedPath::new("shared.usdc"))?;
         assert!(data.has_spec(&sdf::Path::abs_root()));
         assert_eq!(Arc::strong_count(&bytes), 3);
         drop(data);
         assert_eq!(Arc::strong_count(&bytes), 2);
+        Ok(())
+    }
+
+    /// A value nested `MAX_NESTING` deep writes and reads back; one level
+    /// deeper is refused by the writer, as the reader would refuse it.
+    #[test]
+    fn nesting_limit() -> Result<()> {
+        fn nested(depth: usize) -> sdf::Value {
+            let mut value = sdf::Value::Int(1);
+            for _ in 0..depth {
+                value = sdf::Value::Dictionary(HashMap::from([("inner".to_owned(), value)]));
+            }
+            value
+        }
+        let write = |depth| -> Result<Vec<u8>> {
+            let mut layer = sdf::Data::new();
+            layer
+                .create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot)
+                .add("customData", nested(depth));
+            let mut bytes = io::Cursor::new(Vec::new());
+            CrateWriter::write(&layer, &mut bytes)?;
+            Ok(bytes.into_inner())
+        };
+
+        let data = CrateData::open(write(MAX_NESTING)?, true)?;
+        assert_eq!(
+            data.try_field(&sdf::Path::abs_root(), "customData")?
+                .expect("the field is authored")
+                .into_owned(),
+            nested(MAX_NESTING)
+        );
+        let error = write(MAX_NESTING + 1).expect_err("one level too deep");
+        assert!(error.to_string().contains("nested more than"), "{error}");
         Ok(())
     }
 

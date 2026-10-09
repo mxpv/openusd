@@ -9,9 +9,10 @@
 //! decoded arrays hold, beside what the stage keeps once they are dropped.
 //!
 //! The heap is tracked by a wrapping global allocator, so file bytes a layer
-//! holds count while mapped pages, which belong to the OS, do not. Resident
-//! memory, bytes read and page faults are measured around the process with
-//! the platform's tools.
+//! holds count while mapped pages, which belong to the OS, do not. The
+//! tracking costs an atomic update per allocation, which the phase times
+//! include. Resident memory, bytes read and page faults are measured around
+//! the process with the platform's tools.
 //!
 //! # Usage
 //! ```bash
@@ -24,11 +25,16 @@
 //! on a copy of a single-file root in the temporary directory, so the file
 //! named on the command line is never written. `--no-arrays` skips the
 //! array phase, for measuring what a stage that never reads its arrays
-//! holds. `--mmap` opens the scene through a resolver that maps files (the
-//! `mmap` feature), which asks that nothing write the scene's files while
-//! the benchmark runs.
+//! holds. `--proxies` walks instance subtrees as instance proxies and
+//! `--all` walks every composed prim whatever its status, where the default
+//! traversal stops at instances and skips inactive, unloaded, undefined and
+//! abstract prims. `--mmap` opens the scene through a resolver that maps
+//! files (the `mmap` feature), which asks that nothing write the scene's
+//! files while the benchmark runs.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(not(feature = "mmap"))]
+use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -43,25 +49,29 @@ use openusd::{Error, Result, sdf};
 
 fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
-        eprintln!("usage: open_bench [--time <t>] [--save] [--no-arrays] [--mmap] <root.usd[a|c|z]>");
+        eprintln!(
+            "usage: open_bench [--time <t>] [--save] [--no-arrays] [--proxies | --all] [--mmap] <root.usd[a|c|z]>"
+        );
         process::exit(2);
     };
-    let root = match args.save {
-        true => copy_to_temp(&args.root)?,
-        false => args.root.clone(),
+    let copy = if args.save {
+        Some(copy_to_temp(&args.root)?)
+    } else {
+        None
     };
-    let root = root.to_str().expect("a UTF-8 path");
+    let root = copy.as_deref().unwrap_or(&args.root).to_str().expect("a UTF-8 path");
 
     let phase = Phase::start("open");
-    let stage = match args.mmap {
-        true => open_mapped(root)?,
-        false => Stage::open(root)?,
+    let stage = if args.mmap {
+        open_mapped(root)?
+    } else {
+        Stage::open(root)?
     };
     phase.end("");
 
     let phase = Phase::start("metadata");
     let mut prims = Vec::new();
-    stage.traverse(PrimPredicate::DEFAULT, |path| prims.push(path.clone()))?;
+    stage.traverse(args.predicate, |path| prims.push(path.clone()))?;
     for path in &prims {
         stage.prim(path.clone())?.type_name()?;
     }
@@ -98,6 +108,10 @@ fn main() -> Result<()> {
     }
 
     eprintln!("heap peak: {}", mib(PEAK.load(Ordering::Relaxed)));
+    drop(stage);
+    if let Some(copy) = copy {
+        fs::remove_file(copy)?;
+    }
     Ok(())
 }
 
@@ -107,6 +121,7 @@ struct Args {
     time: Option<f64>,
     save: bool,
     no_arrays: bool,
+    predicate: PrimPredicate,
     mmap: bool,
 }
 
@@ -119,6 +134,7 @@ impl Args {
             time: None,
             save: false,
             no_arrays: false,
+            predicate: PrimPredicate::DEFAULT,
             mmap: false,
         };
         while let Some(arg) = args.next() {
@@ -126,6 +142,8 @@ impl Args {
                 "--time" => parsed.time = Some(args.next()?.parse().ok()?),
                 "--save" => parsed.save = true,
                 "--no-arrays" => parsed.no_arrays = true,
+                "--proxies" => parsed.predicate = PrimPredicate::DEFAULT_PROXIES,
+                "--all" => parsed.predicate = PrimPredicate::ALL,
                 "--mmap" => parsed.mmap = true,
                 _ => parsed.root = PathBuf::from(arg),
             }
@@ -149,8 +167,7 @@ fn open_mapped(root: &str) -> Result<Stage> {
 /// `--mmap` without the feature that provides it.
 #[cfg(not(feature = "mmap"))]
 fn open_mapped(_root: &str) -> Result<Stage> {
-    eprintln!("--mmap needs the mmap feature");
-    process::exit(2);
+    Err(io::Error::other("--mmap needs the mmap feature").into())
 }
 
 /// Copies the single-file root at `root` into the temporary directory, where
@@ -159,6 +176,16 @@ fn copy_to_temp(root: &Path) -> Result<PathBuf> {
     let name = root.file_name().expect("a root with a file name");
     let copy = env::temp_dir().join(format!("open_bench-{}-{}", process::id(), name.to_string_lossy()));
     fs::copy(root, &copy)?;
+    // The copy is saved over, which a read-only attribute copied from the
+    // source would refuse. Windows permissions are that one attribute, so
+    // clearing it widens nothing else.
+    #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)]
+    {
+        let mut permissions = fs::metadata(&copy)?.permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&copy, permissions)?;
+    }
     Ok(copy)
 }
 
@@ -187,9 +214,10 @@ impl Phase {
         let elapsed = self.start.elapsed().as_secs_f64();
         let live = LIVE.load(Ordering::Relaxed);
         let peak = PHASE_PEAK.load(Ordering::Relaxed).saturating_sub(self.live);
-        let (sign, retained) = match live >= self.live {
-            true => ("+", live - self.live),
-            false => ("-", self.live - live),
+        let (sign, retained) = if live >= self.live {
+            ("+", live - self.live)
+        } else {
+            ("-", self.live - live)
         };
         eprintln!(
             "{:<9} {elapsed:>8.3}s  retained {sign}{:>10}  peak {:>10}  {detail}",
@@ -260,11 +288,16 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 static PHASE_PEAK: AtomicUsize = AtomicUsize::new(0);
 
 impl Tracking {
-    /// Records `delta` more live bytes and bumps both high-water marks.
+    /// Records `delta` more live bytes and bumps both high-water marks. A
+    /// mark is written only when passed, so an allocation below it costs
+    /// one atomic update and two loads.
     fn add(delta: usize) {
         let live = LIVE.fetch_add(delta, Ordering::Relaxed) + delta;
-        PEAK.fetch_max(live, Ordering::Relaxed);
-        PHASE_PEAK.fetch_max(live, Ordering::Relaxed);
+        for mark in [&PEAK, &PHASE_PEAK] {
+            if live > mark.load(Ordering::Relaxed) {
+                mark.fetch_max(live, Ordering::Relaxed);
+            }
+        }
     }
 }
 

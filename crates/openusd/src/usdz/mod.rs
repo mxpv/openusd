@@ -214,6 +214,7 @@ mod tests {
     use crate::ar::tests::TestResolver;
     use crate::sdf::FileFormat;
     use crate::usd::{PrimPredicate, Stage, TimeCode};
+    use std::fs;
     use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -381,14 +382,16 @@ mod tests {
         let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()));
         writer.add_layer("root.usda", layer)?;
         let package = writer.finish()?.into_inner();
-        let (base, len) = (package.as_ptr().addr(), package.len());
+        let bounds = package.as_ptr_range();
 
         let mut archive = Archive::from_bytes(package)?;
         let ar::AssetBuffer::Shared(view) = archive.entry("root.usda")? else {
             panic!("a package in hand serves views");
         };
-        let offset = view.as_ptr().addr() - base;
-        assert!(offset + view.len() <= len, "the view lies inside the package");
+        assert!(
+            bounds.start <= view.as_ptr() && view.as_ptr_range().end <= bounds.end,
+            "the view lies inside the package"
+        );
         assert_eq!(&*view, layer);
         Ok(())
     }
@@ -397,7 +400,7 @@ mod tests {
     /// alone and reads an entry's range through the ZIP reader: the
     /// directory, one local header and the entry, not the package.
     #[test]
-    fn entry_is_read_without_view() -> Result<()> {
+    fn entry_bounded_read() -> Result<()> {
         let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()));
         writer.add_layer("root.usda", b"#usda 1.0\n")?;
         writer.add_layer("texture.bin", &vec![0; 1 << 20])?;
@@ -479,15 +482,17 @@ mod tests {
         outer.add_layer("root.usda", b"#usda 1.0\n")?;
         outer.add_layer("inner.usdz", &inner)?;
         let outer = outer.finish()?.into_inner();
-        let (base, len) = (outer.as_ptr().addr(), outer.len());
+        let bounds = outer.as_ptr_range();
 
         let mut archive = Archive::from_bytes(outer)?;
         let mut nested = Archive::from_bytes(archive.entry("inner.usdz")?)?;
         let ar::AssetBuffer::Shared(view) = nested.entry("inner.usda")? else {
             panic!("a nested package serves views");
         };
-        let offset = view.as_ptr().addr() - base;
-        assert!(offset + view.len() <= len, "the view lies inside the outer package");
+        assert!(
+            bounds.start <= view.as_ptr() && view.as_ptr_range().end <= bounds.end,
+            "the view lies inside the outer package"
+        );
         assert_eq!(&*view, b"#usda 1.0\n");
         Ok(())
     }
@@ -499,7 +504,7 @@ mod tests {
             env!("CARGO_WORKSPACE_DIR"),
             "vendor/usd-wg-assets/full_assets/CarbonFrameBike/CarbonFrameBike.usdz"
         );
-        if std::fs::metadata(path).is_err() {
+        if fs::metadata(path).is_err() {
             eprintln!("Skipping stage_over_package: fixture not available at {path}");
             return Ok(());
         }

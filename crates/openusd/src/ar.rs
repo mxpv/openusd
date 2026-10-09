@@ -112,13 +112,7 @@ pub trait Asset: Read + Seek + Send {
 
     /// Reads the entire asset into a byte buffer.
     fn read_all(&mut self) -> io::Result<Vec<u8>> {
-        let size = usize::try_from(self.size()?).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                "the asset is larger than this platform addresses",
-            )
-        })?;
-        let mut buf = Vec::with_capacity(size);
+        let mut buf = Vec::with_capacity(usize::try_from(self.size()?).unwrap_or(0));
         self.read_to_end(&mut buf)?;
         Ok(buf)
     }
@@ -153,22 +147,19 @@ pub trait Asset: Read + Seek + Send {
 /// it keeps.
 #[derive(Debug, Clone)]
 pub enum AssetBuffer {
-    /// Bytes compiled into the program.
-    Static(&'static [u8]),
     /// Bytes the caller owns outright.
     Owned(Vec<u8>),
     /// A view of bytes somebody else holds: a buffer a host resolver keeps,
-    /// or a mapped file.
+    /// bytes compiled into the program, or a mapped file.
     Shared(SharedBuffer),
 }
 
 impl AssetBuffer {
-    /// This buffer as a view, sharing its bytes from then on: a `Static` or
-    /// `Owned` buffer becomes the source of a view over all of it, without
-    /// copying, and a `Shared` one is returned as it is.
+    /// This buffer as a view, sharing its bytes from then on: an `Owned`
+    /// buffer becomes the source of a view over all of it, without copying,
+    /// and a `Shared` one is returned as it is.
     pub fn into_shared(self) -> SharedBuffer {
         match self {
-            AssetBuffer::Static(bytes) => SharedBuffer::new(bytes),
             AssetBuffer::Owned(bytes) => SharedBuffer::new(bytes),
             AssetBuffer::Shared(view) => view,
         }
@@ -180,7 +171,6 @@ impl Deref for AssetBuffer {
 
     fn deref(&self) -> &[u8] {
         match self {
-            AssetBuffer::Static(bytes) => bytes,
             AssetBuffer::Owned(bytes) => bytes,
             AssetBuffer::Shared(view) => view,
         }
@@ -193,9 +183,10 @@ impl AsRef<[u8]> for AssetBuffer {
     }
 }
 
+/// Bytes compiled into the program are shared as they are.
 impl From<&'static [u8]> for AssetBuffer {
     fn from(bytes: &'static [u8]) -> Self {
-        AssetBuffer::Static(bytes)
+        AssetBuffer::Shared(SharedBuffer::new(bytes))
     }
 }
 
@@ -246,9 +237,7 @@ impl SharedBuffer {
     /// The view of `range` within this view, sharing the source, or `None`
     /// when `range` reaches past it.
     pub fn slice(&self, range: Range<usize>) -> Option<SharedBuffer> {
-        if range.start > range.end || range.end > self.range.len() {
-            return None;
-        }
+        self.get(range.clone())?;
         Some(SharedBuffer {
             source: Arc::clone(&self.source),
             range: self.range.start + range.start..self.range.start + range.end,
@@ -343,20 +332,8 @@ impl Asset for io::Cursor<Vec<u8>> {
     }
 }
 
-/// An asset over bytes its resolver shares, as a resolver that keeps its
-/// assets in memory serves them.
-impl Asset for io::Cursor<Arc<[u8]>> {
-    fn size(&self) -> io::Result<u64> {
-        Ok(self.get_ref().len() as u64)
-    }
-
-    fn shared_buffer(&self) -> Option<SharedBuffer> {
-        Some(SharedBuffer::new(Arc::clone(self.get_ref())))
-    }
-}
-
-/// An asset over a buffer already in hand, as a package entry or a layer a
-/// host hands over is served.
+/// An asset over a buffer already in hand, as a package entry, a mapped file
+/// or the bytes a host keeps in memory are served.
 impl Asset for io::Cursor<AssetBuffer> {
     fn size(&self) -> io::Result<u64> {
         Ok(self.get_ref().len() as u64)
@@ -365,7 +342,7 @@ impl Asset for io::Cursor<AssetBuffer> {
     fn shared_buffer(&self) -> Option<SharedBuffer> {
         match self.get_ref() {
             AssetBuffer::Shared(view) => Some(view.clone()),
-            AssetBuffer::Static(_) | AssetBuffer::Owned(_) => None,
+            AssetBuffer::Owned(_) => None,
         }
     }
 
@@ -481,7 +458,7 @@ impl DefaultResolver {
     /// Serves every file asset from a read-only memory mapping of it. A
     /// layer then holds no copy of its file, and only the pages a read
     /// touches are loaded. An empty file, or one the platform cannot map, is
-    /// read as before.
+    /// read into memory.
     ///
     /// # Safety
     ///
@@ -492,12 +469,12 @@ impl DefaultResolver {
     /// file it holds a view of: [`Layer::save`](crate::sdf::Layer::save)
     /// writes beside the file and renames over it, which unlinks the mapped
     /// file and leaves its bytes as they are. On Windows the mapped file is
-    /// opened with write sharing denied, which keeps other processes from
-    /// opening it for writing meanwhile, and with delete sharing allowed,
-    /// which lets a rename over it go through. Neither establishes the
-    /// guarantee. If it is
-    /// broken, a read faults the process when the file has shrunk and is
-    /// undefined behaviour otherwise.
+    /// opened with write sharing denied, which keeps other handles from
+    /// opening it for writing meanwhile and refuses to open a file a handle
+    /// already has open for writing, and with delete sharing allowed, which
+    /// lets a rename over it go through. Neither establishes the guarantee.
+    /// If it is broken, a read faults the process when the file has shrunk
+    /// and is undefined behaviour otherwise.
     #[cfg(feature = "mmap")]
     // Declaring the opt-in `unsafe` is what puts the promise on the caller;
     // the method itself does nothing unsafe, which is why the crate's ban on
@@ -516,12 +493,9 @@ impl DefaultResolver {
     /// directories named equivalently resolve, and render via
     /// [`identity`](Self::identity), identically.
     pub fn with_search_paths(paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
-        let search_paths = paths.into_iter().map(|p| normalize_search_path(p.into())).collect();
-        Self {
-            search_paths,
-            #[cfg(feature = "mmap")]
-            map_files: false,
-        }
+        let mut resolver = Self::new();
+        resolver.search_paths = paths.into_iter().map(|p| normalize_search_path(p.into())).collect();
+        resolver
     }
 
     /// Searches for an asset by trying the path against the resolver's search
@@ -647,7 +621,7 @@ impl Resolver for DefaultResolver {
         if is_package_relative_path(asset_path) {
             let (package, inner) = split_package_relative_path_outer(asset_path)?;
             let resolved_package = self.resolve_with_search_paths(&package)?;
-            if !package_contains(&resolved_package, &inner) {
+            if !self.package_contains(&resolved_package, &inner) {
                 return None;
             }
             let package_str = resolved_package.to_string_lossy();
@@ -690,6 +664,12 @@ impl Resolver for DefaultResolver {
         let path_str = resolved_path.to_str().unwrap_or_default();
 
         // Handle package-relative paths by extracting from the archive.
+        // TODO(ar-package-resolver): the resolver reads a package through
+        // `usdz::Archive` directly, so `ar` depends on the one package
+        // format. C++ keeps `Ar` format-agnostic behind `ArPackageResolver`,
+        // a per-extension trait the usdz resolver implements; `open_asset`
+        // and `package_contains` would dispatch to it by the package's
+        // extension.
         if is_package_relative_path(path_str) {
             let (package, inner) = split_package_relative_path_outer(path_str).ok_or_else(|| {
                 io::Error::new(
@@ -713,12 +693,46 @@ impl DefaultResolver {
     /// Opens the file at `path` as an asset: over a mapping of it when the
     /// resolver maps files, over the file itself otherwise. A package is
     /// opened the same way, so its entries are views of the mapping too.
+    // Without the feature there is no mapping policy to consult.
+    #[cfg_attr(not(feature = "mmap"), allow(clippy::unused_self))]
     fn open_file(&self, path: &Path) -> io::Result<Box<dyn Asset>> {
         #[cfg(feature = "mmap")]
         if self.map_files {
             return open_mapped(path);
         }
         Ok(Box::new(fs::File::open(path)?))
+    }
+
+    /// Whether `inner` should be treated as present in the package at
+    /// `package`.
+    ///
+    /// Reading only the archive's central directory — not its entry data — a
+    /// readable archive that genuinely lacks a flat entry reports it absent,
+    /// so [`resolve`](Resolver::resolve) reports a missing inner layer as
+    /// unresolved rather than as a layer that exists but cannot be read. A
+    /// nested packaged path (`inner.usdz[deep.usd]`) is checked one bracket
+    /// at a time, the inner package read from its entry, as C++ `ArResolver`
+    /// resolves each level with the package resolver. A `package` that cannot
+    /// be opened right now (a transient IO error or a corrupt archive —
+    /// distinct from a genuinely absent entry) is deliberately treated as
+    /// present so the eventual open surfaces the accurate error instead of a
+    /// misleading "missing asset".
+    ///
+    /// TODO(perf): parses the package's central directory on every
+    /// package-relative resolve (per in-package arc, re-run each composition
+    /// pass), and [`open_asset`](Resolver::open_asset) parses it again per
+    /// entry, each time over its own open of the package (its own mapping
+    /// when the resolver maps files). A per-resolver cache of
+    /// [`usdz::Archive`]s keyed by resolved package path would let the
+    /// probes and the loads share one parse and one mapping.
+    fn package_contains(&self, package: &Path, inner: &str) -> bool {
+        let Ok(asset) = self.open_file(package) else {
+            return true;
+        };
+        match usdz::Archive::from_asset(asset) {
+            Ok(archive) => archive_contains(archive, inner),
+            Err(_) => true,
+        }
     }
 }
 
@@ -732,34 +746,25 @@ impl DefaultResolver {
 // promise the caller of `DefaultResolver::map_files` makes.
 #[allow(unsafe_code)]
 fn open_mapped(path: &Path) -> io::Result<Box<dyn Asset>> {
-    let file = open_for_mapping(path)?;
-    if file.metadata()?.len() == 0 {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // `FILE_SHARE_READ | FILE_SHARE_DELETE` from the Windows SDK: readers
+        // and a rename may share the file, a writer may not, for as long as
+        // the handle or a mapping made from it lives.
+        fs::OpenOptions::new().read(true).share_mode(0x1 | 0x4).open(path)?
+    };
+    #[cfg(not(windows))]
+    let file = fs::File::open(path)?;
+    let Some(len) = usize::try_from(file.metadata()?.len()).ok().filter(|&len| len > 0) else {
         return Ok(Box::new(file));
-    }
+    };
     // SAFETY: the mapping is read-only, and `DefaultResolver::map_files`, the
     // only way here, is `unsafe` so that its caller promises the file is not
     // modified while anything read from it is alive.
-    match unsafe { memmap2::Mmap::map(&file) } {
+    match unsafe { memmap2::MmapOptions::new().len(len).map(&file) } {
         Ok(map) => Ok(Box::new(io::Cursor::new(AssetBuffer::Shared(SharedBuffer::new(map))))),
         Err(_) => Ok(Box::new(file)),
-    }
-}
-
-/// Opens `path` for reading; on Windows with write sharing denied, which
-/// keeps any other process from opening the file for writing while the
-/// handle, or a mapping made from it, lives.
-#[cfg(feature = "mmap")]
-fn open_for_mapping(path: &Path) -> io::Result<fs::File> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // `FILE_SHARE_READ | FILE_SHARE_DELETE` from the Windows SDK: readers
-        // and a rename may share the file, a writer may not.
-        fs::OpenOptions::new().read(true).share_mode(0x1 | 0x4).open(path)
-    }
-    #[cfg(not(windows))]
-    {
-        fs::File::open(path)
     }
 }
 
@@ -854,30 +859,6 @@ fn package_entry(archive: &mut usdz::Archive, inner: &str) -> io::Result<AssetBu
             package_entry(&mut nested, &rest)
         }
         None => Ok(bytes),
-    }
-}
-
-/// Whether `inner` should be treated as present in the package at `package`.
-///
-/// Reading only the archive's central directory — not its entry data — a
-/// readable archive that genuinely lacks a flat entry reports it absent, so
-/// [`DefaultResolver::resolve`] reports a missing inner layer as unresolved
-/// rather than as a layer that exists but cannot be read. A nested packaged
-/// path (`inner.usdz[deep.usd]`) is checked one bracket at a time, the inner
-/// package read from its entry, as C++ `ArResolver` resolves each level with
-/// the package resolver. A `package` that cannot be opened right now (a
-/// transient IO error or a corrupt archive — distinct from a genuinely absent
-/// entry) is deliberately treated as present so the eventual open surfaces the
-/// accurate error instead of a misleading "missing asset".
-///
-/// TODO(perf): parses the package's central directory on every
-/// package-relative resolve (per in-package arc, re-run each composition
-/// pass). A per-resolver cache of [`usdz::Archive`]s keyed by resolved package
-/// path would let repeated probes and the eventual load share one parse.
-fn package_contains(package: &Path, inner: &str) -> bool {
-    match usdz::Archive::open(package) {
-        Ok(archive) => archive_contains(archive, inner),
-        Err(_) => true,
     }
 }
 
@@ -1487,7 +1468,7 @@ pub(crate) mod tests {
         assert_eq!(moved.as_ptr(), pointer);
 
         let shared: Arc<[u8]> = b"hello world".to_vec().into();
-        let asset: Box<dyn Asset> = Box::new(io::Cursor::new(shared.clone()));
+        let asset: Box<dyn Asset> = Box::new(io::Cursor::new(AssetBuffer::from(shared.clone())));
         let AssetBuffer::Shared(view) = asset.into_buffer().unwrap() else {
             panic!("a shared cursor shares its buffer");
         };
@@ -1567,7 +1548,7 @@ pub(crate) mod tests {
         assert_eq!(&*view, b"hello world");
 
         let shared: Arc<[u8]> = b"hello world".to_vec().into();
-        let mut asset = io::Cursor::new(shared.clone());
+        let mut asset = io::Cursor::new(AssetBuffer::from(shared.clone()));
         asset.seek(io::SeekFrom::Start(6)).unwrap();
         let view = asset.shared_buffer().expect("a shared cursor offers its bytes");
         asset.seek(io::SeekFrom::Start(0)).unwrap();

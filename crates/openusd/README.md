@@ -69,6 +69,7 @@ openusd = { git = "https://github.com/mxpv/openusd.git", rev = "4c02084" }
 
 | Feature | Enables |
 |---------|---------|
+| `mmap` (default) | Memory-mapped reads of layer files, enabled per resolver with `ar::DefaultResolver::map_files` |
 | `serde` | `serde` support for serializing core types |
 
 ## Example

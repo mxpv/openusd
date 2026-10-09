@@ -79,29 +79,45 @@ impl Archive {
     /// package without shared bytes reads the entry's range through the ZIP
     /// reader, which checks the entry's checksum on the way.
     pub fn entry(&mut self, name: &str) -> Result<ar::AssetBuffer, ArchiveError> {
-        let index = self.index(name)?;
-        let (start, size, method, encrypted) = {
+        let index = self
+            .archive
+            .index_for_name(name)
+            .ok_or_else(|| ArchiveError::entry(name, zip::result::ZipError::FileNotFound))?;
+        let (start, size) = {
             let file = self
                 .archive
                 .by_index_raw(index)
                 .map_err(|error| ArchiveError::entry(name, error))?;
-            (file.data_start(), file.size(), file.compression(), file.encrypted())
+            if file.encrypted() {
+                return Err(ArchiveError::Encrypted { name: name.to_owned() });
+            }
+            if file.compression() != CompressionMethod::Stored {
+                return Err(ArchiveError::Compressed {
+                    name: name.to_owned(),
+                    method: file.compression(),
+                });
+            }
+            // A stored entry's data is its size as stored; a directory whose
+            // two sizes disagree would have a view reach into the next entry.
+            if file.compressed_size() != file.size() {
+                return Err(ArchiveError::entry(
+                    name,
+                    io::Error::new(io::ErrorKind::InvalidData, "stored entry sizes disagree"),
+                ));
+            }
+            (file.data_start(), file.size())
         };
-        if encrypted {
-            return Err(ArchiveError::Encrypted { name: name.to_owned() });
-        }
-        if method != CompressionMethod::Stored {
-            return Err(ArchiveError::Compressed {
-                name: name.to_owned(),
-                method,
-            });
-        }
         let Some(bytes) = &self.bytes else {
             let mut file = self
                 .archive
-                .by_index(index)
+                .by_name(name)
                 .map_err(|error| ArchiveError::entry(name, error))?;
+            // The directory's size reserves the buffer once; a size the
+            // package lies about fails here, before anything is read.
             let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(usize::try_from(size).unwrap_or(usize::MAX))
+                .map_err(|_| ArchiveError::entry(name, io::Error::from(io::ErrorKind::OutOfMemory)))?;
             file.read_to_end(&mut buffer)
                 .map_err(|error| ArchiveError::entry(name, error))?;
             return Ok(ar::AssetBuffer::Owned(buffer));
@@ -122,10 +138,9 @@ impl Archive {
     /// Reads the entry `name` through the ZIP reader, which checks its
     /// checksum, for a caller that wants the check a view skips.
     pub fn verify(&mut self, name: &str) -> Result<(), ArchiveError> {
-        let index = self.index(name)?;
         let mut file = self
             .archive
-            .by_index(index)
+            .by_name(name)
             .map_err(|error| ArchiveError::entry(name, error))?;
         io::copy(&mut file, &mut io::sink()).map_err(|error| ArchiveError::entry(name, error))?;
         Ok(())
@@ -166,13 +181,6 @@ impl Archive {
             let data = usda::parse(content).map_err(|error| error.with_source_name(file_path))?;
             Ok(Box::new(data))
         }
-    }
-
-    /// The directory index of the entry `name`.
-    fn index(&self, name: &str) -> Result<usize, ArchiveError> {
-        self.archive
-            .index_for_name(name)
-            .ok_or_else(|| ArchiveError::entry(name, zip::result::ZipError::FileNotFound))
     }
 }
 
