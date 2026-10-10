@@ -356,8 +356,8 @@ Key external dependencies:
 - `half` - 16-bit floating point support (re-exported as `f16`)
 - `logos` - Lexer generator for USDA tokenization
 - `lz4_flex` - Compression for binary format
-- `memmap2` (optional, `mmap` feature, on by default) - Read-only file
-  mappings a resolver opts into with `ar::DefaultResolver::map_files`
+- `memmap2` (optional, `mmap` feature) - Read-only file mappings a resolver
+  opts into with `ar::DefaultResolver::map_files`
 - `num-traits` - Numeric traits
 - `regex-lite` - Lightweight regex engine for the `matches_regex` expression
   function

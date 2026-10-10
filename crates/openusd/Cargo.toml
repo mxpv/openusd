@@ -12,7 +12,6 @@ license.workspace = true
 categories.workspace = true
 
 [features]
-default = ["mmap"]
 # A file asset can be served from a read-only memory mapping of it, which
 # `ar::DefaultResolver::map_files` opts into; the feature compiles the
 # capability and nothing maps without the opt-in.

@@ -77,7 +77,7 @@ one feature per schema family:
 
 ```toml
 [dependencies]
-openusd = "0.7"
+openusd = { version = "0.7", features = ["mmap"] }
 openusd-schemas = { version = "0.7", features = ["geom", "shade"] }
 ```
 

@@ -27,16 +27,12 @@ jobs:
       - name: Check
         shell: bash
         run: |
-          cargo check --workspace --examples --tests
-          cargo check -p openusd --no-default-features --all-targets
+          cargo check --workspace --all-targets
+          cargo check --workspace --all-targets --all-features
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo fmt --all -- --check --files-with-diff
       - run: cargo doc --workspace --no-deps --all-features
-      - name: Test
-        shell: bash
-        run: |
-          cargo test --workspace --all-targets --all-features
-          cargo test -p openusd --no-default-features --lib
+      - run: cargo test --workspace --all-targets --all-features
 
       # The members require each other by version, and a stale value there
       # publishes a crate pinned to the previous release. Nothing else catches
