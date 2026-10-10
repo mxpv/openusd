@@ -1,0 +1,26 @@
+#usda 1.0
+
+class "Class"
+{
+    over "A"
+    {
+        def Sphere "Geo"
+        {
+            double radius = 5
+        }
+    }
+}
+
+def Xform "Set" (
+    inherits = </Class>
+)
+{
+    def Xform "A" (
+        instanceable = true
+    )
+    {
+        def Sphere "Local"
+        {
+        }
+    }
+}

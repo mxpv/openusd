@@ -1957,12 +1957,21 @@ impl IndexCache {
     /// arc had culled as empty now composes — so the caller reports them as
     /// resynced. Which of the two partitions a prim landed in says how the cache
     /// caught up, not whether a consumer must.
+    ///
+    /// A node an arc introduced that gains or loses its specs enters or leaves
+    /// its prim's instance key (C++ `Pcp_ChildNodeInstanceableChanged`). The
+    /// key an instance registered under then differs from the one its index
+    /// gives, and a prototype seeded from that instance carries a node its
+    /// other instances do not share. The rescan retires the prototype of every
+    /// registered instance and prototype root it reached that way, and the
+    /// retired roots join the returned paths.
     pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, sites: &[(LayerId, Path)]) -> Vec<Path> {
         let mut refreshed: HashMap<Path, NodeRuns> = HashMap::new();
         let mut rebuild: HashSet<Path> = HashSet::new();
+        let mut rekeyed: HashSet<Path> = HashSet::new();
         for (layer, path) in sites {
             self.store
-                .refresh_specs(graph, *layer, path, &mut refreshed, &mut rebuild);
+                .refresh_specs(graph, *layer, path, &mut refreshed, &mut rebuild, &mut rekeyed);
         }
         for prim in &rebuild {
             self.store.remove(prim);
@@ -1970,7 +1979,18 @@ impl IndexCache {
         // An index condemned after an earlier site had already refreshed it kept
         // its runs out of the map, so the two sets are disjoint by construction.
         let touched = self.store.splice_spec_stacks(graph, refreshed);
-        rebuild.into_iter().chain(touched).collect()
+        // Only a registered instance or a prototype root has a key to go stale;
+        // any other prim's flip is caught up by the refresh alone.
+        let rekeyed: Vec<Path> = rekeyed
+            .into_iter()
+            .filter(|prim| self.prototypes.is_registered(prim))
+            .collect();
+        let retired = if rekeyed.is_empty() {
+            Vec::new()
+        } else {
+            self.invalidate_prototypes(&rekeyed)
+        };
+        rebuild.into_iter().chain(touched).chain(retired).collect()
     }
 
     /// Drop a prim's cached index and every namespace descendant. Used by
@@ -2831,7 +2851,7 @@ impl IndexCache {
 
         // An instance prim's children come only from its composition arcs;
         // opinions authored at the instance's own namespace — the local root and
-        // the ancestral references above the instanceable arc — are discarded
+        // the ancestral arcs the instance is nested under — are discarded
         // (spec 11.3.3). The instance prim's own index is otherwise left intact.
         let drop_local = self.is_instance(graph, &path)?;
 
@@ -3305,25 +3325,25 @@ impl IndexCache {
         // `within_instance`, so the local arcs are never followed — rather than
         // pruned afterwards, which would leave the nodes those local arcs spawned.
 
-        // Inside an instance, the ancestral references the instance prim is
-        // nested under contribute opinions at the instance's own namespace that
-        // must not leak into the shared subtree (spec 11.3.3). The indexer
-        // already inerted the local root for an instance descendant; this inerts
-        // those outer references too (the C++ `!HasTransitiveDirectDependency`
-        // nodes), leaving only the instanceable arc, its descendants, and the
-        // implied classes. Runs before deriving instance state below so the
+        // Inside an instance, the ancestral arcs the instance prim is nested
+        // under contribute opinions at the instance's own namespace that must
+        // not leak into the shared subtree (spec 11.3.3). The indexer already
+        // inerted the local root for an instance descendant; this inerts those
+        // outer arcs too (the C++ `!HasTransitiveDirectDependency` nodes),
+        // leaving only the arcs introduced at the instance and their subtrees.
+        // Runs before deriving instance state below so the
         // suppressed opinions are already inert.
         if let Some(depth) = parent_ctx.instance_depth {
             index.mark_instance_local_inert(path.prim_element_count() as u16, depth);
         }
 
         // This prim is an instance when its composition declares
-        // `instanceable = true` and carries an arc; its descendants then
+        // `instanceable = true` and has an instanceable node; its descendants then
         // inherit `within_instance`. A nested instance therefore re-arms the
         // flag for its own subtree. Computed from the freshly built index so it
         // agrees with a later `Prim::is_instance`, avoiding re-entering
         // `ensure_index` for `path`.
-        let is_instance = index.has_composition_arc()
+        let is_instance = index.has_instanceable_node(path.prim_element_count() as u16)
             && matches!(
                 index.resolve_field(FieldKey::Instanceable.as_str(), graph, None)?,
                 Some(Value::Bool(true))

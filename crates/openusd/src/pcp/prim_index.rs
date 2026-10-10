@@ -167,6 +167,10 @@ pub(crate) struct SpecRefresh {
     /// contributing arc target lost its last spec (cull it like an always-empty
     /// target).
     pub needs_rebuild: bool,
+    /// A node an arc introduced gained its first spec or lost its last. Such a
+    /// node enters or leaves an instance's key (C++
+    /// `Pcp_ChildNodeInstanceableChanged`).
+    pub arc_specs_changed: bool,
 }
 
 /// The spec runs a change round refreshed on one index: one entry per node the
@@ -543,6 +547,7 @@ impl PrimIndex {
                 let cullable = node.arc != ArcType::Root && !node.is_inert();
                 refresh.needs_rebuild |= lost_last_spec && cullable;
             }
+            refresh.arc_specs_changed |= node.arc != ArcType::Root && node.has_specs != has_specs;
             node.has_specs = has_specs;
         }
         refresh
@@ -775,6 +780,31 @@ impl PrimIndex {
             };
         }
         local
+    }
+
+    /// Classifies each node as instanceable (`true`) or not for an instance prim
+    /// at `instance_depth` whose index this is (C++
+    /// `Pcp_ChildNodeIsInstanceable`), indexed by [`NodeId`] arena position. An
+    /// instanceable node is shared
+    /// ([`instance_local_nodes`](Self::instance_local_nodes)), able to
+    /// contribute opinions, and authors a spec at its site: the nodes that bring
+    /// a prototype its content.
+    pub(crate) fn instanceable_nodes(&self, instance_depth: u16) -> Vec<bool> {
+        let local = self.instance_local_nodes(instance_depth, instance_depth);
+        self.graph
+            .nodes
+            .iter()
+            .zip(local)
+            .map(|(node, local)| !local && !node.is_inert() && !node.is_culled() && node.has_specs())
+            .collect()
+    }
+
+    /// Whether this index, composing a prim at `depth`, has any instanceable
+    /// node ([`instanceable_nodes`](Self::instanceable_nodes)). The structural
+    /// half of C++ `Pcp_PrimIndexIsInstanceable`: a prim whose only arcs are
+    /// ancestral, or bring no opinions, has nothing a prototype could share.
+    pub(crate) fn has_instanceable_node(&self, depth: u16) -> bool {
+        self.instanceable_nodes(depth).contains(&true)
     }
 
     /// Inerts the instance-namespace opinions on a prim composed inside an
