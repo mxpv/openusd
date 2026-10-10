@@ -4,13 +4,11 @@ use super::{MIN_VECTOR_LENGTH, Quatd, Vec3d};
 
 /// A rotation of `angle` degrees about a unit `axis` (C++ `GfRotation`).
 ///
-/// `UsdGeomXformOp` builds every rotation op through this type, so a matrix
-/// made with [`Matrix4d::from_quat`](super::Matrix4d::from_quat) of
+/// A matrix made with [`Matrix4d::from_quat`](super::Matrix4d::from_quat) of
 /// [`quat`](Self::quat) is the one C++ `GfMatrix4d(rotation, translate)`
-/// makes. The arithmetic follows C++ operation for operation, so a
-/// quaternion of any length gives the matrix C++ gives, to the bit where the
-/// two share a math library (`acos`, `sin` and `cos` may round differently
-/// from one platform's libm to another's).
+/// makes. The arithmetic follows C++ operation for operation, for a
+/// quaternion of any length. `acos`, `sin` and `cos` come from the platform's
+/// math library, so a result can differ from C++'s in its last bits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rotation {
     axis: Vec3d,
@@ -42,16 +40,17 @@ impl Rotation {
     /// The angle is `2·acos(w)`, with `w` clamped to `[-1, 1]`, and the axis
     /// the imaginary part made unit length. The quaternion as a whole is not
     /// normalized, so for one off unit length the real part decides the
-    /// angle. A quaternion whose imaginary part is shorter than
-    /// [`MIN_VECTOR_LENGTH`] is the identity.
+    /// angle. A quaternion is the identity when its imaginary part is at
+    /// most [`MIN_VECTOR_LENGTH`] long or that length is NaN.
     pub fn from_quat(q: Quatd) -> Self {
         let imaginary = Vec3d { x: q.x, y: q.y, z: q.z };
         let length = imaginary.length();
-        if length <= MIN_VECTOR_LENGTH {
-            return Self::IDENTITY;
+        if length > MIN_VECTOR_LENGTH {
+            let half_angle = q.w.clamp(-1.0, 1.0).acos();
+            Self::new(imaginary * (1.0 / length), 2.0 * half_angle.to_degrees())
+        } else {
+            Self::IDENTITY
         }
-        let half_angle = q.w.clamp(-1.0, 1.0).acos();
-        Self::new(imaginary * (1.0 / length), 2.0 * half_angle.to_degrees())
     }
 
     /// The unit axis the rotation turns about.
@@ -110,6 +109,33 @@ mod tests {
     fn short_imaginary_is_identity() {
         assert_eq!(Rotation::from_quat(gf::quatd(1.0, 0.0, 0.0, 0.0)), Rotation::IDENTITY);
         assert_eq!(Rotation::from_quat(gf::quatd(0.5, 1e-11, 0.0, 0.0)), Rotation::IDENTITY);
+    }
+
+    /// An imaginary part exactly [`MIN_VECTOR_LENGTH`] long is the identity;
+    /// the next one up is a rotation.
+    #[test]
+    fn imaginary_length_threshold() {
+        let at = Rotation::from_quat(gf::quatd(0.5, MIN_VECTOR_LENGTH, 0.0, 0.0));
+        assert_eq!(at, Rotation::IDENTITY);
+        let above = Rotation::from_quat(gf::quatd(0.5, 1.0000001e-10, 0.0, 0.0));
+        assert_eq!(above.axis(), gf::vec3d(1.0, 0.0, 0.0));
+        assert!((above.angle() - 120.0).abs() < 1e-12);
+    }
+
+    /// A quaternion with a NaN in its imaginary part is the identity, as in
+    /// C++. A NaN real part keeps the axis and makes the angle NaN.
+    #[test]
+    fn nan_components() {
+        for q in [
+            gf::quatd(0.5, f64::NAN, 0.0, 0.0),
+            gf::quatd(0.5, 0.0, f64::NAN, 1.0),
+            gf::quatd(0.5, 1.0, 0.0, f64::NAN),
+        ] {
+            assert_eq!(Rotation::from_quat(q), Rotation::IDENTITY);
+        }
+        let r = Rotation::from_quat(gf::quatd(f64::NAN, 1.0, 0.0, 0.0));
+        assert_eq!(r.axis(), gf::vec3d(1.0, 0.0, 0.0));
+        assert!(r.angle().is_nan());
     }
 
     #[test]

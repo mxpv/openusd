@@ -382,7 +382,7 @@ mod tests {
     /// angle from the real part, so neither matrix is the normalized
     /// quaternion's. Entries agree to 1e-14, which leaves room for another
     /// platform's libm rounding `acos`, `sin` and `cos` differently in the
-    /// last bit, far below the 3e-8 a normalized quaternion is off by.
+    /// last bit.
     #[test]
     fn rotation_matches_cpp() {
         let quarter = sdf::Value::Quatf(gf::quatf(0.70710677, 0.70710677, 0.0, 0.0));

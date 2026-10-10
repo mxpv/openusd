@@ -133,8 +133,10 @@ source of truth for specifics.
 - **`gf/`** - Graphics Foundations (C++ `Gf`): `bytemuck::Pod` vector /
   quaternion / matrix types for bulk binary serialization, row-major /
   row-vector convention, each bridging to `sdf::Value` via `From` / `TryFrom`;
-  and `gf::Interval` (C++ `GfInterval`), the open-or-closed-ended span a
-  time-sample query is asked over. See `gf/mod.rs` for the conventions.
+  `gf::Rotation` (C++ `GfRotation`), the axis-and-angle rotation the xformOp
+  rotations are built through; and `gf::Interval` (C++ `GfInterval`), the
+  open-or-closed-ended span a time-sample query is asked over. See `gf/mod.rs`
+  for the conventions.
 
 ## Development Commands
 

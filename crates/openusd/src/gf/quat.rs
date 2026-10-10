@@ -31,14 +31,25 @@ impl Quatf {
     };
 
     /// Returns a normalized copy, or the identity quaternion if the
-    /// magnitude is zero.
+    /// magnitude is below [`MIN_VECTOR_LENGTH`] (C++ `GetNormalized`).
+    ///
+    /// The arithmetic is C++'s. The length is taken in single precision,
+    /// summing the imaginary components before the real one, so a component
+    /// whose square leaves the `f32` range takes the length to zero or
+    /// infinity. The real part is divided by the length and the imaginary
+    /// part scaled by its double-precision reciprocal.
     pub fn normalize(self) -> Self {
-        let n = normalize([self.w as f64, self.x as f64, self.y as f64, self.z as f64]);
+        let length = (self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w).sqrt();
+        if length < MIN_VECTOR_LENGTH as f32 {
+            return Self::IDENTITY;
+        }
+        let reciprocal = 1.0 / f64::from(length);
+        let scale = |c: f32| (f64::from(c) * reciprocal) as f32;
         Self {
-            w: n[0] as f32,
-            x: n[1] as f32,
-            y: n[2] as f32,
-            z: n[3] as f32,
+            w: self.w / length,
+            x: scale(self.x),
+            y: scale(self.y),
+            z: scale(self.z),
         }
     }
 
@@ -300,5 +311,103 @@ mod tests {
         };
         let out = id.slerp(neg_id, 0.5);
         assert!((out.w.abs() - 1.0).abs() < 1e-9);
+    }
+
+    fn quatf(w: f32, x: f32, y: f32, z: f32) -> Quatf {
+        Quatf { w, x, y, z }
+    }
+
+    fn quatd(w: f64, x: f64, y: f64, z: f64) -> Quatd {
+        Quatd { w, x, y, z }
+    }
+
+    /// `Quatf::normalize` gives the bits of C++ `GfQuatf::GetNormalized`
+    /// (OpenUSD 26.08); only IEEE-exact operations are involved.
+    #[test]
+    fn quatf_normalize_cpp_bits() {
+        let cases = [
+            (
+                quatf(0.9511514, 0.04662174, -0.28952447, 0.096504346),
+                [0x3f737ea8, 0x3d3ef670, 0xbe943c8d, 0x3dc5a412],
+            ),
+            (
+                quatf(0.5, 1.0, 0.25, -0.75),
+                [0x3ebaf4ba, 0x3f3af4ba, 0x3e3af4ba, 0xbf0c378b],
+            ),
+            (
+                quatf(3.0, -7.0, 11.0, 2.0),
+                [0x3e6316ba, 0xbf0477ed, 0x3f502a2b, 0x3e17647c],
+            ),
+            (
+                quatf(300.0, 1.0, 2.0, 3.0),
+                [0x3f7ffae7, 0x3b5a6fb4, 0x3bda6fb4, 0x3c23d3c7],
+            ),
+            (
+                quatf(0.001, 0.002, -0.003, 0.004),
+                [0x3e3af4ba, 0x3ebaf4ba, 0xbf0c378b, 0x3f3af4ba],
+            ),
+            (
+                quatf(100.0, 200.0, -50.0, 25.0),
+                [0x3ede2304, 0x3f5e2304, 0xbe5e2304, 0x3dde2304],
+            ),
+        ];
+        for (q, want) in cases {
+            let n = q.normalize();
+            assert_eq!([n.w, n.x, n.y, n.z].map(f32::to_bits), want, "{q:?}");
+        }
+    }
+
+    /// The `f32` length decides the outcome at the edges, as in C++: below
+    /// the threshold, or with squares that underflow, the identity; at the
+    /// threshold, a unit quaternion; with squares that overflow, zero.
+    #[test]
+    fn quatf_normalize_edges() {
+        assert_eq!(quatf(0.0, 0.0, 0.0, 0.0).normalize(), Quatf::IDENTITY);
+        assert_eq!(quatf(4e-11, 4e-11, 4e-11, 4e-11).normalize(), Quatf::IDENTITY);
+        assert_eq!(quatf(1e-25, 1e-25, 0.0, 0.0).normalize(), Quatf::IDENTITY);
+        assert_eq!(quatf(5e-11, 5e-11, 5e-11, 5e-11).normalize(), quatf(0.5, 0.5, 0.5, 0.5));
+        assert_eq!(quatf(2e-10, 0.0, 0.0, 0.0).normalize(), Quatf::IDENTITY);
+        assert_eq!(quatf(1e20, 1e20, 1e20, 1e20).normalize(), quatf(0.0, 0.0, 0.0, 0.0));
+    }
+
+    /// `Quatd::normalize` gives the bits of C++ `GfQuatd::GetNormalized`
+    /// (OpenUSD 26.08); only IEEE-exact operations are involved.
+    #[test]
+    fn quatd_normalize_cpp_bits() {
+        let cases: [(Quatd, [u64; 4]); 3] = [
+            (
+                quatd(0.5, 1.0, 0.25, -0.75),
+                [
+                    0x3fd75e9746a0b098,
+                    0x3fe75e9746a0b098,
+                    0x3fc75e9746a0b098,
+                    0xbfe186f174f88472,
+                ],
+            ),
+            (
+                quatd(3.0, -7.0, 11.0, 2.0),
+                [
+                    0x3fcc62d73d7d15fd,
+                    0xbfe08efd8e88f77e,
+                    0x3fea05454db2a97d,
+                    0x3fc2ec8f7e5363fe,
+                ],
+            ),
+            (
+                quatd(0.001, 0.002, -0.003, 0.004),
+                [
+                    0x3fc75e9746a0b098,
+                    0x3fd75e9746a0b099,
+                    0xbfe186f174f88473,
+                    0x3fe75e9746a0b099,
+                ],
+            ),
+        ];
+        for (q, want) in cases {
+            let n = q.normalize();
+            assert_eq!([n.w, n.x, n.y, n.z].map(f64::to_bits), want, "{q:?}");
+        }
+        assert_eq!(quatd(4e-11, 4e-11, 4e-11, 4e-11).normalize(), Quatd::IDENTITY);
+        assert_eq!(quatd(5e-11, 5e-11, 5e-11, 5e-11).normalize(), quatd(0.5, 0.5, 0.5, 0.5));
     }
 }
