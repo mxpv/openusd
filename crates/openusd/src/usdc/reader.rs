@@ -33,6 +33,17 @@ macro_rules! corrupt {
 /// (Saturates on 32-bit targets.)
 const MAX_DECOMPRESSED_BYTES: usize = if usize::BITS > 32 { 4 << 30 } else { usize::MAX };
 
+/// The shortest crate whose bytes are advised around the structural read.
+/// A platform reads ahead by default in windows of about this size, which
+/// brings in a shorter crate whole on its first faults; three advice calls
+/// per layer would then be cost with nothing to gain, and a scene can hold
+/// tens of thousands of short layers.
+///
+/// TODO(perf): the size is reasoned from the read-ahead window, not
+/// measured. A cold open of a scene of many layers, with the threshold
+/// moved either way, would say where it belongs.
+const MIN_ADVISED_BYTES: usize = 1 << 20;
+
 // Maximum supported USDC crate version.
 // See USD Core Specification v1.0.1 §16.3.8.2 for version history:
 //   0.10.0 — Path Expression value types
@@ -65,6 +76,52 @@ pub struct CrateFile {
     pub paths: Vec<sdf::Path>,
     // All specs.
     pub specs: Vec<Spec>,
+}
+
+/// The advice a crate's bytes are under while its structural sections are
+/// read: random access from [`begin`](Self::begin) until the value drops,
+/// which restores the default on every way out of the read.
+///
+/// A crate shorter than [`MIN_ADVISED_BYTES`] is read under the default
+/// advice it already has.
+struct StructuralRead(Option<ar::SharedBuffer>);
+
+impl StructuralRead {
+    /// Advises `bytes` for random access when they are a shared view long
+    /// enough for advice to matter.
+    fn begin(bytes: &ar::AssetBuffer) -> Self {
+        let view = match bytes {
+            ar::AssetBuffer::Shared(view) if view.len() >= MIN_ADVISED_BYTES => Some(view.clone()),
+            _ => None,
+        };
+        if let Some(view) = &view {
+            view.advise(0..view.len(), ar::Advice::Random);
+        }
+        StructuralRead(view)
+    }
+
+    /// Advises the one span from the first of `sections` to the end of the
+    /// last as needed soon (C++ `_PrefetchStructuralSections`).
+    fn prefetch(&self, sections: &[Section]) {
+        let Some(view) = &self.0 else { return };
+        let offset = |offset: u64| usize::try_from(offset).unwrap_or(usize::MAX);
+        let start = sections.iter().map(|section| offset(section.start)).min();
+        let end = sections
+            .iter()
+            .map(|section| offset(section.start.saturating_add(section.size)))
+            .max();
+        if let (Some(start), Some(end)) = (start, end) {
+            view.advise(start..end, ar::Advice::WillNeed);
+        }
+    }
+}
+
+impl Drop for StructuralRead {
+    fn drop(&mut self) {
+        if let Some(view) = &self.0 {
+            view.advise(0..view.len(), ar::Advice::Normal);
+        }
+    }
 }
 
 /// A cursor over crate bytes: the read primitives every decode is built on.
@@ -107,9 +164,18 @@ impl CrateFile {
 
     /// Read the structural sections of the crate file in `bytes`, which the
     /// file keeps and decodes values from on demand.
+    ///
+    /// Bytes that are a view of a mapped file are advised around the read as
+    /// C++ `CrateFile::_InitMMap` advises its mapping: random access over the
+    /// whole crate while the header and section table are read, then the one
+    /// span holding every section as needed soon, and the default again once
+    /// the sections are read or the read fails. A crate inside a package
+    /// advises its own range of the package's mapping.
     pub fn open(bytes: impl Into<ar::AssetBuffer>) -> Result<Self, ReadError> {
         let bytes = bytes.into();
+        let advised = StructuralRead::begin(&bytes);
         let mut loader = Loader::new(&bytes)?;
+        advised.prefetch(&loader.sections);
         let tokens = loader.read_tokens().ctx("TOKENS section")?;
         let strings = loader.read_strings().ctx("STRINGS section")?;
         let fields = loader.read_fields().ctx("FIELDS section")?;
@@ -1735,6 +1801,7 @@ mod tests {
     use crate::usdc;
     use std::fs;
     use std::io;
+    use std::ops::Range;
 
     /// A relationship with a deeply nested target compresses to fewer bytes
     /// than the number of entries in its path table.
@@ -1926,5 +1993,124 @@ mod tests {
         assert_eq!(file.specs.len(), 248);
 
         assert!(file.validate().is_ok());
+    }
+
+    /// The span from the first section of `file` to the end of its last.
+    fn section_span(file: &CrateFile) -> Range<usize> {
+        let start = file.sections.iter().map(|section| section.start).min().unwrap();
+        let end = file
+            .sections
+            .iter()
+            .map(|section| section.start + section.size)
+            .max()
+            .unwrap();
+        start as usize..end as usize
+    }
+
+    /// A crate long enough for its bytes to be advised when it is opened:
+    /// one attribute holding an array past [`MIN_ADVISED_BYTES`].
+    fn long_crate() -> Result<Vec<u8>> {
+        let mut data = sdf::Data::new();
+        data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot)
+            .add("primChildren", sdf::Value::token_vec(["P"]));
+        let prim = data.create_spec(sdf::Path::new("/P")?, sdf::SpecType::Prim);
+        prim.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
+        prim.add("propertyChildren", sdf::Value::token_vec(["weights"]));
+        let attribute = data.create_spec(sdf::Path::new("/P.weights")?, sdf::SpecType::Attribute);
+        attribute.add("typeName", sdf::Value::Token("float[]".into()));
+        attribute.add("default", sdf::Value::FloatVec(vec![0.5; MIN_ADVISED_BYTES / 4 + 1]));
+        let mut output = io::Cursor::new(Vec::new());
+        usdc::CrateWriter::write(&data, &mut output)?;
+        Ok(output.into_inner())
+    }
+
+    /// A crate shorter than the threshold is opened without advice.
+    #[test]
+    fn short_crate_not_advised() -> Result<()> {
+        let (bytes, _) = compact_paths()?;
+        assert!(bytes.len() < MIN_ADVISED_BYTES);
+        let (buffer, log) = ar::tests::recording_source(bytes, true);
+        CrateFile::open(buffer)?;
+        assert!(log.lock().unwrap().is_empty());
+        Ok(())
+    }
+
+    /// Opening a crate over shared bytes advises them: random access over
+    /// the crate, the span of its sections as needed, then the default.
+    #[test]
+    fn open_advises_sections() -> Result<()> {
+        let bytes = long_crate()?;
+        let len = bytes.len();
+        let (buffer, log) = ar::tests::recording_source(bytes.clone(), true);
+        let file = CrateFile::open(buffer)?;
+        let span = section_span(&file);
+        assert!(span.start > 0 && span.end <= len);
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                (0..len, ar::Advice::Random),
+                (span, ar::Advice::WillNeed),
+                (0..len, ar::Advice::Normal),
+            ]
+        );
+        assert_eq!(file.tokens, CrateFile::open(bytes)?.tokens);
+        Ok(())
+    }
+
+    /// A crate inside a larger buffer, as a package entry is, advises its
+    /// own range of the buffer.
+    #[test]
+    fn open_advises_own_range() -> Result<()> {
+        let bytes = long_crate()?;
+        let len = bytes.len();
+        let mut package = vec![0u8; 64];
+        package.extend_from_slice(&bytes);
+        package.extend_from_slice(&[0u8; 32]);
+        let (buffer, log) = ar::tests::recording_source(package, true);
+        let file = CrateFile::open(buffer.slice(64..64 + len).expect("in range"))?;
+        let span = section_span(&file);
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                (64..64 + len, ar::Advice::Random),
+                (64 + span.start..64 + span.end, ar::Advice::WillNeed),
+                (64..64 + len, ar::Advice::Normal),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A crate that fails to open leaves its bytes under the default advice,
+    /// whether the read fails before the sections are located or after.
+    #[test]
+    fn failed_open_restores_advice() -> Result<()> {
+        let bytes = long_crate()?;
+        let span = section_span(&CrateFile::open(bytes.clone())?);
+
+        // The section table is past the end: the read fails locating it.
+        let truncated = bytes[..bytes.len() - 8].to_vec();
+        let len = truncated.len();
+        let (buffer, log) = ar::tests::recording_source(truncated, true);
+        assert!(CrateFile::open(buffer).is_err());
+        assert_eq!(
+            *log.lock().unwrap(),
+            [(0..len, ar::Advice::Random), (0..len, ar::Advice::Normal)]
+        );
+
+        // The first section's bytes are garbage: the read fails inside it.
+        let mut garbled = bytes;
+        garbled[span.start..span.start + 16].fill(0xFF);
+        let len = garbled.len();
+        let (buffer, log) = ar::tests::recording_source(garbled, true);
+        assert!(CrateFile::open(buffer).is_err());
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                (0..len, ar::Advice::Random),
+                (span, ar::Advice::WillNeed),
+                (0..len, ar::Advice::Normal),
+            ]
+        );
+        Ok(())
     }
 }

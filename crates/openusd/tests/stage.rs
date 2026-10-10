@@ -12287,8 +12287,8 @@ fn save_quiet() -> Result<()> {
     quiet_save(Stage::open(&root)?, &root)
 }
 
-/// The same through a resolver that maps files: the save releases the
-/// layer's view of its file and rebinds to the written bytes.
+/// The same through a resolver that maps files: the save moves the layer
+/// from its view of the old file to a mapping of the one it wrote.
 #[cfg(feature = "mmap")]
 #[test]
 // The mapping opt-in is `unsafe` by contract, and this test, the only writer
@@ -12347,5 +12347,80 @@ fn quiet_save(stage: Stage, root: &str) -> Result<()> {
     let reopened = Stage::open(root)?;
     assert_eq!(reopened.attribute("/World.answer")?.get::<i32>()?, Some(42));
     assert_eq!(reopened.attribute("/World.sizes")?.get::<Vec<f32>>()?, sizes);
+    Ok(())
+}
+
+/// A reference to a file that is not there is reported unresolved and its
+/// prim composes without it. Once the file appears, the next prim composed
+/// against it finds it, and the prim that reported it missing recomposes
+/// with it too.
+#[test]
+fn missing_target_found_later() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"A\" (references = @./late.usda@</Model>) {}\ndef \"Other\" { def \"B\" (references = @./late.usda@</Model>) {} }\n",
+    )?;
+    let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+
+    assert!(!stage.prim("/A/Child")?.is_valid()?);
+    assert!(
+        stage
+            .composition_errors()
+            .iter()
+            .any(|error| matches!(error, pcp::CompositionDiagnostic::UnresolvedLayer { .. })),
+        "the missing target is reported"
+    );
+
+    fs::write(
+        dir.path().join("late.usda"),
+        "#usda 1.0\ndef \"Model\" { def \"Child\" {} }\n",
+    )?;
+    assert!(
+        stage.prim("/Other/B/Child")?.is_valid()?,
+        "a prim composed now finds the file"
+    );
+    assert!(
+        stage.prim("/A/Child")?.is_valid()?,
+        "and the prim that missed it recomposes"
+    );
+    Ok(())
+}
+
+/// A missing target that appears with contents that cannot be read is
+/// reported as malformed from then on, by the prim composed after it
+/// appeared and by the one that had reported it missing.
+#[test]
+fn missing_target_found_malformed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"A\" (references = @./late.usda@</Model>) {}\ndef \"Other\" { def \"B\" (references = @./late.usda@</Model>) {} }\n",
+    )?;
+    let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+    assert!(!stage.prim("/A/Child")?.is_valid()?);
+    let count = |stage: &Stage, malformed: bool| {
+        stage
+            .composition_errors()
+            .iter()
+            .filter(|error| match error {
+                pcp::CompositionDiagnostic::MalformedLayer { .. } => malformed,
+                pcp::CompositionDiagnostic::UnresolvedLayer { .. } => !malformed,
+                _ => false,
+            })
+            .count()
+    };
+    assert_eq!((count(&stage, false), count(&stage, true)), (1, 0));
+
+    fs::write(dir.path().join("late.usda"), "not a layer")?;
+    assert!(!stage.prim("/Other/B/Child")?.is_valid()?);
+    assert!(!stage.prim("/A/Child")?.is_valid()?);
+    assert_eq!(
+        (count(&stage, false), count(&stage, true)),
+        (0, 2),
+        "both prims report the read failure"
+    );
     Ok(())
 }

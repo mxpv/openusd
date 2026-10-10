@@ -19,6 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use crate::ar;
 use crate::sdf::{self, expr};
@@ -144,7 +145,7 @@ impl From<LoadError> for crate::Error {
 /// grow a ref-counted loaded-layer cache (`find_or_open` dedup) and custom
 /// format registration.
 pub struct LayerRegistry {
-    resolver: Box<dyn ar::Resolver>,
+    resolver: Rc<dyn ar::Resolver>,
 }
 
 /// A layer as [`LayerRegistry::open`] reads it: its canonical identifier,
@@ -171,7 +172,18 @@ impl Default for LayerRegistry {
 impl LayerRegistry {
     /// A registry resolving asset paths through `resolver`.
     pub fn new(resolver: Box<dyn ar::Resolver>) -> Self {
-        Self { resolver }
+        Self {
+            resolver: Rc::from(resolver),
+        }
+    }
+
+    /// Begins a cache scope on the resolver
+    /// ([`ar::Resolver::begin_cache_scope`]), which ends when the guard
+    /// drops. An operation that asks the resolver about the same package
+    /// several times holds one across those calls; a scope begun while
+    /// another is open on the thread shares its cache.
+    pub fn cache_scope(&self) -> ar::CacheScope<'static> {
+        ar::CacheScope::begin_shared(Rc::clone(&self.resolver), None)
     }
 
     /// Canonicalizes `asset_path` into a stable identifier, anchoring a relative
@@ -320,6 +332,7 @@ impl LayerRegistry {
     /// [`open_layer`](Self::open_layer) builds the [`sdf::Layer`] that keeps
     /// it.
     pub(crate) fn open(&self, identifier: &str) -> Result<Option<PreparedLayer>, LoadError> {
+        let _scope = self.cache_scope();
         let Some(resolved) = self.resolve_layer(identifier) else {
             return Ok(None);
         };
@@ -337,7 +350,7 @@ impl LayerRegistry {
     pub(crate) fn open_layer(&self, identifier: &str) -> Result<Option<sdf::Layer>, LoadError> {
         Ok(self
             .open(identifier)?
-            .map(|layer| sdf::Layer::new_resolved(identifier, &layer.resolved, layer.data)))
+            .map(|layer| sdf::Layer::new_resolved(identifier, &layer.resolved, layer.data, Rc::clone(&self.resolver))))
     }
 
     /// Reads the single layer at `asset_path` (anchored against `anchor`)
@@ -556,7 +569,12 @@ impl LayerRegistry {
         // reload pass an already-interned layer is re-walked (to reach a `${VAR}`
         // sublayer the new context now resolves) but not re-emitted.
         if !already_present(&identifier) {
-            layers.push(sdf::Layer::new_resolved(identifier.clone(), &resolved, data));
+            layers.push(sdf::Layer::new_resolved(
+                identifier.clone(),
+                &resolved,
+                data,
+                Rc::clone(&self.resolver),
+            ));
         }
 
         // Failed sublayer identifiers already reported for *this* layer, so a layer
@@ -723,7 +741,12 @@ pub(crate) mod tests {
             };
             collect_with_arcs_in(registry, &dep_asset, Some(&resolved), &stack_vars, layers, visited)?;
         }
-        layers.push(sdf::Layer::new_resolved(identifier, &resolved, data));
+        layers.push(sdf::Layer::new_resolved(
+            identifier,
+            &resolved,
+            data,
+            Rc::clone(&registry.resolver),
+        ));
         Ok(())
     }
 

@@ -71,7 +71,7 @@ impl CrateWriter {
             ..
         } = packer;
         Ok(CrateFile {
-            bytes: ar::AssetBuffer::from(out.into_inner()),
+            bytes: ar::AssetBuffer::Shared(ar::SharedBuffer::new(out.into_inner())),
             bootstrap,
             sections,
             tokens: tokens.items,

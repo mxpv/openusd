@@ -29,6 +29,7 @@
 
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
+use std::mem;
 
 use crate::{Result, pcp, sdf, tf};
 
@@ -544,6 +545,9 @@ impl StageComposition {
     /// newly marked failed — so the caller recomposes once more; a demanded path
     /// already loaded or already known unreadable is skipped.
     fn load_demanded(&self, pending: &[pcp::Demand], hooks: &dyn CompositionHooks) -> bool {
+        // One cache scope spans the pass. Every probe and load of a package
+        // within it shares one open of that package.
+        let _scope = self.layer_registry().cache_scope();
         let before = self.layers.borrow().len();
         let mut newly_failed = false;
         let mut newly_interned = false;
@@ -622,15 +626,38 @@ impl StageComposition {
                 };
                 if let Some(failure) = failure {
                     let mut graph = self.layers.borrow_mut();
-                    // Only a first failure counts as progress: re-marking an
-                    // asset that failed the same way on an earlier pass must
-                    // not keep the caller recomposing forever.
-                    newly_failed |= graph.load_failure(asset_path).is_none();
+                    // A first failure counts as progress, and so does one of
+                    // another kind than the asset failed with before: a
+                    // target that was missing and is now there but cannot
+                    // be read. Re-marking an asset that failed the same way
+                    // on an earlier pass must not keep the caller recomposing
+                    // forever, and a read failure is never retried, so the
+                    // kind changes at most once.
+                    let prior = graph.load_failure(asset_path).map(mem::discriminant);
+                    let changed = prior != Some(mem::discriminant(&failure));
                     graph.mark_load_failed(asset_path, failure);
+                    // The indices built since the earlier failure reported
+                    // it; they recompose to report this one.
+                    if changed && prior.is_some() {
+                        self.cache.borrow_mut().drop_load_failed_indices();
+                    }
+                    newly_failed |= changed;
                 }
             }
         }
         let grew = self.layers.borrow().len() != before;
+        // A layer joined, and an asset may have appeared: one recorded as
+        // unresolved that the resolver now finds is forgotten, and the
+        // indices that reported a failed target recompose and demand it.
+        // The failure is looked up by the identifier it was recorded under,
+        // which an asset that did not exist then need not share with the
+        // one it has now.
+        if grew {
+            let mut graph = self.layers.borrow_mut();
+            if graph.forget_resolvable_failures() {
+                self.cache.borrow_mut().drop_load_failed_indices();
+            }
+        }
         // Newly joined layers need their plain sublayer edges (and relocates) wired
         // before any stack is composed against them.
         if grew {
@@ -709,6 +736,9 @@ impl StageComposition {
     ///
     /// Returns whether any layer joined the graph.
     fn resolve_sublayer_demands(&self, mut demands: Vec<pcp::SublayerDemand>, hooks: &dyn CompositionHooks) -> bool {
+        // One cache scope spans the pass. Every probe and load of a package
+        // within it shares one open of that package.
+        let _scope = self.layer_registry().cache_scope();
         let mut attempted: HashSet<(String, pcp::LayerStackId)> = HashSet::new();
         let mut recomposed: HashSet<(pcp::LayerId, String)> = HashSet::new();
         let mut reported: HashSet<(String, pcp::LayerStackId, pcp::LayerId)> = HashSet::new();
@@ -831,6 +861,11 @@ impl StageComposition {
         // Reused across passes: swapped with the cache's queue so neither
         // reallocates once warmed up.
         let mut pending: Vec<pcp::Demand> = Vec::new();
+        // A cache scope from the first pass that demands a layer to the end
+        // of the query. The loads and the passes that follow them share one
+        // open of each package. A query that demands nothing, the usual one,
+        // begins no scope.
+        let mut scope = None;
         loop {
             let result = self.query_pass(&mut query, &mut pending);
             // The pass left a reference/payload arc uncomposed pending these
@@ -838,7 +873,11 @@ impl StageComposition {
             // pass neither loads a layer nor newly marks one failed, so the loop
             // ends after an unopenable target is marked failed and the following
             // pass recomposes its prim — recording the arc unresolved — without it.
-            if pending.is_empty() || !self.load_demanded(&pending, hooks) {
+            if pending.is_empty() {
+                return result;
+            }
+            scope.get_or_insert_with(|| self.layer_registry().cache_scope());
+            if !self.load_demanded(&pending, hooks) {
                 return result;
             }
             pending.clear();
@@ -967,6 +1006,9 @@ impl StageComposition {
         failures: Vec<(String, String, pcp::LoadFailure)>,
         hooks: &dyn CompositionHooks,
     ) {
+        // One cache scope spans the pass. Every probe and load of a package
+        // within it shares one open of that package.
+        let _scope = self.layer_registry().cache_scope();
         // Every layer joins through the one intern seam, so each gets its change
         // aggregator as it joins.
         let mut root = None;

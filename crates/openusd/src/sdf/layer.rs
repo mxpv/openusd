@@ -44,6 +44,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Cursor, Write};
 use std::path::Path as FsPath;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{ar, sdf, tf};
@@ -106,6 +107,9 @@ pub struct Layer {
     /// change pipeline, where a stage installs an aggregator so it stays in sync
     /// with any edit. Empty by default.
     sinks: sink::Set<dyn LayerSink>,
+    /// The resolver the layer was opened through, which a save reopens the
+    /// saved file with. `None` for a layer that was not read from an asset.
+    resolver: Option<Rc<dyn ar::Resolver>>,
 }
 
 impl Layer {
@@ -162,13 +166,21 @@ impl Layer {
     /// layer to: it equals `identifier` for an ordinary layer, but a package
     /// opens under its bare identifier while its real path is the
     /// package-relative default layer, so the paths it authors anchor
-    /// in-package. Only a real path that differs from the identifier is stored;
-    /// otherwise this is [`new`](Self::new).
-    pub(crate) fn new_resolved(identifier: impl Into<String>, real_path: &ar::ResolvedPath, data: LayerData) -> Self {
+    /// in-package. Only a real path that differs from the identifier is
+    /// stored. The layer keeps `resolver`, the one it was read through, for
+    /// [`save`](Self::save) to reopen its file with.
+    pub(crate) fn new_resolved(
+        identifier: impl Into<String>,
+        real_path: &ar::ResolvedPath,
+        data: LayerData,
+        resolver: Rc<dyn ar::Resolver>,
+    ) -> Self {
         let identifier = identifier.into();
         let real_path = real_path.to_string();
         let real_path = (real_path != identifier).then_some(real_path);
-        Self::build(identifier, real_path, data)
+        let mut layer = Self::build(identifier, real_path, data);
+        layer.resolver = Some(resolver);
+        layer
     }
 
     /// Shared constructor backing [`new`](Self::new) and
@@ -180,6 +192,7 @@ impl Layer {
             data: CowData::new(data),
             changes: ChangeList::new(),
             sinks: sink::Set::default(),
+            resolver: None,
         }
     }
 
@@ -404,24 +417,36 @@ impl Layer {
     ///
     /// A save is three steps, each leaving the layer whole if it fails. The
     /// layer is serialized in memory and written to a temporary file beside
-    /// its own; a failure there changes nothing. A layer whose data decodes
-    /// from its bytes on demand (the crate format) then rebinds to the data
-    /// its format built over the bytes it serialized
+    /// its own; a failure there changes nothing. The temporary file is then
+    /// renamed over the layer's own, which replaces it atomically. Last, a
+    /// layer whose data decodes from its bytes on demand (the crate format)
+    /// rebinds to the data its format built over the bytes it serialized
     /// ([`FileFormat::write_bytes`](super::FileFormat::write_bytes)),
     /// dropping the bytes it read before, which releases any view of its own
     /// file it held. Data that copied everything out of its bytes stays as
-    /// it is. Last the
-    /// temporary file is renamed over the layer's own, which replaces it
-    /// atomically; a rename that fails (a destination that is no longer a
-    /// file, a filesystem that refuses it) is [`ExportError::Replace`]: the
-    /// temporary file is removed and the layer keeps the rebound bytes, which
-    /// holds its edits in memory for a later save to retry. Rebinding is not
-    /// an edit: no change list is derived and no sink fires. The rebound
-    /// bytes are a heap buffer whatever the layer read from before; a layer
-    /// that reads through a mapping maps its file again on its next open
-    /// through the resolver. A view another layer holds of the file does not
-    /// block the replacement: that layer goes on reading the file it mapped,
-    /// which the rename unlinks and leaves as it was.
+    /// it is.
+    ///
+    /// A rename that fails (a destination that is no longer a file, a
+    /// filesystem that refuses it) is [`ExportError::Replace`]: the temporary
+    /// file is removed and the layer still rebinds, which holds its edits in
+    /// memory for a later save to retry. Rebinding is not an edit: no change
+    /// list is derived and no sink fires.
+    ///
+    /// A layer opened through a resolver that maps files goes back onto a
+    /// mapping of the file it saved, and holds no heap copy of it (C++
+    /// `CrateFile::Packer::Close` reopens the saved asset through the resolver
+    /// and maps it again). The layer moves to the asset its resolver opens
+    /// only when that asset shares its bytes, the bytes are a file mapping,
+    /// and they equal the bytes just written. A resolver is free to answer
+    /// with something older than the file the save replaced, and data decoded
+    /// from that would put superseded values back in the layer; equal bytes
+    /// are what show the mapping to be the saved file. In every other case, a
+    /// failed open among them, the asset is dropped unread and the layer
+    /// stays on the bytes it serialized. The save has succeeded either way.
+    ///
+    /// A view another layer holds of the file does not block the
+    /// replacement: that layer goes on reading the file it mapped, which the
+    /// rename unlinks and leaves as it was.
     pub fn save(&mut self) -> Result<(), ExportError> {
         if self.is_anonymous() {
             return Err(ExportError::Anonymous {
@@ -453,7 +478,11 @@ impl Layer {
         // filesystem path. A layer loaded through a custom resolver may carry a
         // logical identifier (e.g. `scheme://…`); save should resolve it through
         // the owning resolver and write via a resolver write API. The
-        // absolute-path guard above refuses such identifiers for now.
+        // absolute-path guard above refuses such identifiers for now. With
+        // the write and the reopen going through the one resolver, as C++
+        // `OpenAssetForWrite` then `OpenAsset` do, the reopen below would
+        // know the asset it opens is the one it wrote, and its byte
+        // comparison would have nothing left to prove.
         // TODO(layer-registry): save re-selects the format from the identifier's
         // extension, so a textual `.usd` layer is rewritten as binary. Once the
         // load path records the FileFormat a layer was read with (C++
@@ -466,13 +495,32 @@ impl Layer {
         };
         let mut temp = tf::SafeOutputFile::create(path).map_err(create)?;
         temp.file().write_all(&written.bytes).map_err(create)?;
-        if let Some(data) = written.data {
-            self.data = CowData::new(data);
-        }
-        temp.persist().map_err(|source| ExportError::Replace {
+        let replaced = temp.persist().map_err(|source| ExportError::Replace {
             filename: self.identifier.clone(),
             source,
-        })
+        });
+        if let Some(serialized) = written.data {
+            let reopened = match &replaced {
+                Ok(()) => self.reopen_saved(&written.bytes, format),
+                Err(_) => None,
+            };
+            self.data = CowData::new(reopened.unwrap_or(serialized));
+        }
+        replaced
+    }
+
+    /// The layer's data read from a mapping of its saved file, when the
+    /// resolver it was opened through serves one whose bytes are `written`,
+    /// the bytes just saved.
+    fn reopen_saved(&self, written: &ar::SharedBuffer, format: &dyn super::FileFormat) -> Option<LayerData> {
+        let resolved = ar::ResolvedPath::new(self.real_path());
+        let saved = self.resolver.as_ref()?.open_asset(&resolved).ok()?.shared_buffer()?;
+        if !saved.is_mapping() || saved[..] != written[..] {
+            return None;
+        }
+        format
+            .read_bytes(ar::AssetBuffer::Shared(saved), &resolved.to_string())
+            .ok()
     }
 }
 
@@ -1157,8 +1205,13 @@ mod tests {
     use super::*;
     use crate::Result;
 
+    use std::cell::{Cell, RefCell};
     use std::fs;
+    use std::io;
     use std::path::PathBuf;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::sdf;
     use crate::usda;
@@ -2530,6 +2583,234 @@ mod tests {
             vec![sdf::path("/World/Material.outputs:surface")?]
         );
         let _ = std::fs::remove_file(&tmp);
+        Ok(())
+    }
+
+    /// Puts `layer` behind a resolver that opens every asset to what `open`
+    /// gives, as if the layer had been read through it.
+    fn opened_through(layer: &mut Layer, open: impl Fn() -> io::Result<Box<dyn ar::Asset>> + 'static) {
+        layer.resolver = Some(Rc::new(ar::tests::TestResolver(open)));
+    }
+
+    /// The crate fixture in `dir`, read into memory and edited, with its
+    /// path.
+    fn edited_fixture(dir: &FsPath) -> Result<(PathBuf, Layer)> {
+        let path = crate_fixture(dir)?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        set_component(&mut layer);
+        Ok((path, layer))
+    }
+
+    /// An asset over `bytes` that shares them through a source standing in
+    /// for a mapping when `mapping` is set, and for bytes in memory
+    /// otherwise. `sources` collects a handle that is shared with each
+    /// source made; its count tells whether a view of the source lives.
+    fn shared_asset(bytes: Vec<u8>, mapping: bool, sources: &RefCell<Vec<ar::tests::AdviceLog>>) -> Box<dyn ar::Asset> {
+        let (buffer, log) = ar::tests::recording_source(bytes, mapping);
+        sources.borrow_mut().push(log);
+        Box::new(io::Cursor::new(ar::AssetBuffer::Shared(buffer)))
+    }
+
+    /// How many of `sources` a view still holds alive.
+    fn live_sources(sources: &RefCell<Vec<ar::tests::AdviceLog>>) -> usize {
+        sources.borrow().iter().filter(|log| Arc::strong_count(log) > 1).count()
+    }
+
+    /// A save through the registry puts the layer on the mapping the
+    /// resolver opens of the saved file, and the layer decodes from it.
+    #[test]
+    fn save_remaps() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (path, mut layer) = edited_fixture(dir.path())?;
+        let sources = Rc::new(RefCell::new(Vec::new()));
+        opened_through(&mut layer, {
+            let (path, sources) = (path.clone(), Rc::clone(&sources));
+            move || Ok(shared_asset(fs::read(&path)?, true, &sources))
+        });
+
+        layer.save()?;
+        assert_eq!(sources.borrow().len(), 1, "the saved file is opened once");
+        assert_eq!(live_sources(&sources), 1, "the layer holds the mapping");
+        assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
+        let size = layer.data().get_field(&Path::new("/World.size")?, "default")?;
+        assert_eq!(size.into_owned(), Value::from(vec![1.0_f32; 64]));
+        Ok(())
+    }
+
+    /// A resolver that answers with a mapping of the file as it was before
+    /// the save leaves the layer on the bytes it wrote: the saved values
+    /// stay, and nothing reports a change.
+    #[test]
+    fn save_refuses_stale() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (path, mut layer) = edited_fixture(dir.path())?;
+        let fired = Rc::new(Cell::new(0));
+        layer.add_sink({
+            let fired = Rc::clone(&fired);
+            move |_: &str, _: &ChangeList| fired.set(fired.get() + 1)
+        });
+        let before = fs::read(&path)?;
+        let sources = Rc::new(RefCell::new(Vec::new()));
+        opened_through(&mut layer, {
+            let sources = Rc::clone(&sources);
+            move || Ok(shared_asset(before.clone(), true, &sources))
+        });
+
+        layer.save()?;
+        assert_eq!(sources.borrow().len(), 1);
+        assert_eq!(live_sources(&sources), 0, "the stale mapping is let go");
+        assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
+        assert_eq!(fired.get(), 0, "a save is not a layer change");
+        assert_eq!(
+            world_kind(&Layer::open(path.to_string_lossy())?),
+            Some(tf::Token::from("component"))
+        );
+        Ok(())
+    }
+
+    /// Shared bytes that are held in memory are not adopted, though they
+    /// equal the file: the layer already holds those bytes.
+    #[test]
+    fn save_skips_heap() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (path, mut layer) = edited_fixture(dir.path())?;
+        let sources = Rc::new(RefCell::new(Vec::new()));
+        opened_through(&mut layer, {
+            let sources = Rc::clone(&sources);
+            move || Ok(shared_asset(fs::read(&path)?, false, &sources))
+        });
+
+        layer.save()?;
+        assert_eq!(sources.borrow().len(), 1);
+        assert_eq!(live_sources(&sources), 0);
+        assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
+        Ok(())
+    }
+
+    /// An asset that shares no bytes is opened and dropped without a byte
+    /// being read from it.
+    #[test]
+    fn save_reads_nothing() -> Result<()> {
+        /// An asset that counts the reads made of it.
+        struct Counting(io::Cursor<Vec<u8>>, Arc<AtomicUsize>);
+
+        impl io::Read for Counting {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.1.fetch_add(1, Ordering::Relaxed);
+                self.0.read(buffer)
+            }
+        }
+
+        impl io::Seek for Counting {
+            fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+                self.0.seek(position)
+            }
+        }
+
+        impl ar::Asset for Counting {
+            fn size(&self) -> io::Result<u64> {
+                Ok(self.0.get_ref().len() as u64)
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let (path, mut layer) = edited_fixture(dir.path())?;
+        let (opens, reads) = (Rc::new(Cell::new(0)), Arc::new(AtomicUsize::new(0)));
+        opened_through(&mut layer, {
+            let (opens, reads) = (Rc::clone(&opens), Arc::clone(&reads));
+            move || {
+                opens.set(opens.get() + 1);
+                Ok(Box::new(Counting(
+                    io::Cursor::new(fs::read(&path)?),
+                    Arc::clone(&reads),
+                )))
+            }
+        });
+
+        layer.save()?;
+        assert_eq!(opens.get(), 1);
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
+        Ok(())
+    }
+
+    /// A saved file the resolver cannot open afterwards is still a save: the
+    /// layer stays on the bytes it wrote.
+    #[test]
+    fn save_survives_reopen() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (path, mut layer) = edited_fixture(dir.path())?;
+        opened_through(&mut layer, || Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+
+        layer.save()?;
+        let component = Some(tf::Token::from("component"));
+        assert_eq!(world_kind(&layer), component);
+        assert_eq!(world_kind(&Layer::open(path.to_string_lossy())?), component);
+        Ok(())
+    }
+
+    /// A replacement that fails through the registry keeps the edit in
+    /// memory as a plain save does, and asks the resolver for nothing.
+    #[test]
+    fn save_replace_failure() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (path, mut layer) = edited_fixture(dir.path())?;
+        let opens = Rc::new(Cell::new(0));
+        opened_through(&mut layer, {
+            let opens = Rc::clone(&opens);
+            move || {
+                opens.set(opens.get() + 1);
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            }
+        });
+        fs::remove_file(&path)?;
+        fs::create_dir(&path)?;
+
+        let error = layer.save().expect_err("the replacement fails");
+        assert!(matches!(error, ExportError::Replace { .. }), "{error:?}");
+        assert_eq!(opens.get(), 0);
+        assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
+        Ok(())
+    }
+
+    /// Through a resolver that maps files, the saved layer reads the new
+    /// file through a mapping, a layer that viewed the old file goes on
+    /// reading it, and a fresh open sees the edit.
+    #[cfg(feature = "mmap")]
+    #[test]
+    // The mapping opt-in is `unsafe` by contract, and this test, the only
+    // writer of its directory, can make the promise.
+    #[allow(unsafe_code)]
+    fn save_mapped() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = crate_fixture(dir.path())?;
+        // SAFETY: only the save below writes the files in this directory, and
+        // a save never writes into a file it holds a view of: it replaces the
+        // file beside it.
+        let resolver = unsafe { ar::DefaultResolver::new().map_files() };
+        let registry = sdf::LayerRegistry::new(Box::new(resolver));
+        let identifier = registry.create_identifier(&path.to_string_lossy(), None);
+        let mut editing = registry.open_layer(&identifier)?.expect("the layer resolves");
+        let other = registry.open_layer(&identifier)?.expect("the layer resolves");
+        set_component(&mut editing);
+
+        editing.save()?;
+        let component = Some(tf::Token::from("component"));
+        assert_eq!(world_kind(&editing), component);
+        assert_eq!(world_kind(&other), None, "the other view reads the file it mapped");
+        assert_eq!(world_kind(&Layer::open(path.to_string_lossy())?), component);
+        let size = editing.data().get_field(&Path::new("/World.size")?, "default")?;
+        assert_eq!(size.into_owned(), Value::from(vec![1.0_f32; 64]));
+
+        // A mapped file is open with write sharing denied. The new file
+        // refuses a writer for as long as the saved layer views it.
+        #[cfg(windows)]
+        {
+            let write = || fs::OpenOptions::new().write(true).open(&path);
+            assert!(write().is_err(), "the saved layer maps its file");
+            drop(editing);
+            assert!(write().is_ok(), "the mapping went with the layer");
+        }
         Ok(())
     }
 }

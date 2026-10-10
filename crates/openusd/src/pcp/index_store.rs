@@ -373,14 +373,16 @@ impl IndexStore {
     /// the index should be dropped and re-demanded. Such an index carries no
     /// dependency on the failed target, so an ordinary layer-stack invalidation
     /// misses it.
-    pub(super) fn paths_with_malformed_layer(&self) -> Vec<Path> {
+    pub(super) fn paths_with_failed_layer(&self) -> Vec<Path> {
         self.entries
             .iter()
             .filter(|(_, entry)| {
-                entry
-                    .errors
-                    .iter()
-                    .any(|e| matches!(e, CompositionDiagnostic::MalformedLayer { .. }))
+                entry.errors.iter().any(|e| {
+                    matches!(
+                        e,
+                        CompositionDiagnostic::MalformedLayer { .. } | CompositionDiagnostic::UnresolvedLayer { .. }
+                    )
+                })
             })
             .map(|(path, _)| path.clone())
             .collect()

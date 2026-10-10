@@ -2770,39 +2770,44 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     });
                     return Ok(());
                 }
-                // A resolvable-but-not-yet-loaded target is demanded, not an
-                // error: record it in `pending_loads` and leave the arc
-                // uncomposed this pass. The stage's query loop opens the layer
-                // and recomposes, so composition drives layer loading and an
-                // un-visited subtree never loads. A target a prior load attempt
-                // could not read is not re-demanded — it falls through to the
-                // malformed-layer error below so the prim's index can finally
-                // cache; a prior resolve failure gates nothing once the asset
-                // resolves (the file has since appeared), and while it stays
-                // unresolvable the arc reports it unresolved below.
-                let failure = self.inputs.stack.load_failure(asset_path);
-                let unreadable = match failure {
-                    Some(LoadFailure::Unreadable(reason)) => Some(reason.clone()),
-                    _ => None,
-                };
-                if self.inputs.stack.layer_registry().resolve(asset_path).is_some() && unreadable.is_none() {
-                    self.pending_loads.push(Demand {
+                // A target not yet loaded is demanded, not an error: record it
+                // in `pending_loads` and leave the arc uncomposed this pass.
+                // The stage's load barrier opens the layer and the query
+                // recomposes, so composition drives layer loading and an
+                // un-visited subtree never loads. Whether the asset resolves
+                // at all is the barrier's to find out; the build reads only
+                // what an earlier attempt recorded.
+                match self.inputs.stack.load_failure(asset_path) {
+                    None => {
+                        self.pending_loads.push(Demand {
+                            asset_path: asset_path.to_string(),
+                            context,
+                            recheck: false,
+                        });
+                        return Ok(());
+                    }
+                    // A target the barrier resolved but could not read or
+                    // parse is not demanded again: report it with the
+                    // underlying reason and skip the arc, which lets the
+                    // prim's index cache.
+                    Some(LoadFailure::Unreadable(reason)) => {
+                        self.errors.report(CompositionDiagnostic::MalformedLayer {
+                            asset_path: asset_path.to_string(),
+                            arc,
+                            introduced_by: self.introducing_layer(parent),
+                            site_path: parent_path,
+                            reason: reason.clone(),
+                        });
+                        return Ok(());
+                    }
+                    // A target that did not resolve is reported below, and
+                    // the barrier is asked to look once more: the asset may
+                    // have appeared since.
+                    Some(LoadFailure::Unresolved) => self.pending_loads.push(Demand {
                         asset_path: asset_path.to_string(),
                         context,
-                    });
-                    return Ok(());
-                }
-                // A target the load barrier resolved but could not read or
-                // parse: report it with the underlying reason and skip the arc.
-                if let Some(reason) = unreadable {
-                    self.errors.report(CompositionDiagnostic::MalformedLayer {
-                        asset_path: asset_path.to_string(),
-                        arc,
-                        introduced_by: self.introducing_layer(parent),
-                        site_path: parent_path,
-                        reason,
-                    });
-                    return Ok(());
+                        recheck: true,
+                    }),
                 }
                 // An unresolvable asset is a recoverable error (C++ "Could not
                 // open asset … for {arc}"): record it and skip the arc so the
@@ -2830,6 +2835,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     self.pending_loads.push(Demand {
                         asset_path: asset_path.to_string(),
                         context,
+                        recheck: false,
                     });
                     return Ok(());
                 }

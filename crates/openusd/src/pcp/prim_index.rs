@@ -223,6 +223,11 @@ pub(crate) struct Demand {
     /// The demanding node's layer stack, whose composed expression variables are
     /// the arc's full inherited context.
     pub context: LayerStackId,
+    /// Whether the build composed without waiting for the target: a target
+    /// that failed to resolve before is reported unresolved, and this asks
+    /// the barrier to look for it once more. The index such a build produced
+    /// is complete as it stands; one from a build that waits is not.
+    pub recheck: bool,
 }
 
 impl PrimIndex {
@@ -2522,15 +2527,27 @@ def "Prim" (
 "#,
         );
         let layers = vec![sdf::Layer::new("test.usda", layer)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let build = |stack: &LayerGraph| {
+            PrimIndex::build_with_cache(
+                &Path::new("/Prim").unwrap(),
+                stack,
+                &CompositionContext::default(),
+                &sdf::PathTable::new(),
+                true,
+            )
+        };
 
-        let (index, errors, _pending, _deps) = PrimIndex::build_with_cache(
-            &Path::new("/Prim").unwrap(),
-            &stack,
-            &CompositionContext::default(),
-            &sdf::PathTable::new(),
-            true,
-        )?;
+        // The first build demands the target and waits on it. The load
+        // barrier finds no such asset and records that, which the build that
+        // follows reports, asking only that the barrier look again.
+        let (_, errors, pending, _deps) = build(&stack)?;
+        assert!(errors.is_empty(), "nothing is reported while the target is demanded");
+        assert!(matches!(pending.as_slice(), [demand] if !demand.recheck));
+        assert!(stack.intern_demanded(&pending));
+
+        let (index, errors, pending, _deps) = build(&stack)?;
+        assert!(matches!(pending.as_slice(), [demand] if demand.recheck));
         assert!(
             errors
                 .iter()

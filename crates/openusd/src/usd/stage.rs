@@ -2077,6 +2077,19 @@ impl Stage {
         self.cache().indexed_count()
     }
 
+    /// Begins a cache scope on the stage's resolver (C++
+    /// `ArResolverScopedCache`), which ends when the guard drops.
+    ///
+    /// The stage opens one around each of its own operations. A caller
+    /// holds one across a run of reads, such as a traversal that resolves
+    /// the asset paths of a packaged scene, and every read in the run then
+    /// shares one open of each package. The packages opened stay open until
+    /// the guard drops, and a package replaced meanwhile is read as it was
+    /// opened: drop the guard before rewriting one.
+    pub fn cache_scope(&self) -> ar::CacheScope<'static> {
+        self.composition.layer_registry().cache_scope()
+    }
+
     /// Returns the identifiers of the layers loaded so far, in collection order
     /// (session and root layer stack first, then arc-target layers in the order
     /// composition opened them).
@@ -3698,6 +3711,9 @@ impl StageBuilder {
     /// Session layers (if any) are prepended at the front of the layer stack
     /// so they hold the strongest opinions.
     pub fn open(self, root_path: &str) -> Result<Stage> {
+        // One cache scope spans the open. A packaged root is opened once for
+        // its default-layer lookup, its probes and its entry reads.
+        let _scope = self.registry.cache_scope();
         // The stage root stack is one layer stack whose single expression-variable
         // context (C++ `PcpExpressionVariables`) — the root layer's own variables
         // overlaid by the session root's own — resolves the `${VAR}` sublayers of

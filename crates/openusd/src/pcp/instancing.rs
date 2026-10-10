@@ -460,7 +460,7 @@ impl IndexCache {
     ///   the root turns "composes nothing" into shared content
     ///   ([`Self::in_unregistered_prototype`]).
     pub(super) fn provisional(&self, path: &Path, pending_before: usize) -> bool {
-        self.pending_loads.len() != pending_before || self.in_unregistered_prototype(path)
+        self.awaits_load(pending_before) || self.in_unregistered_prototype(path)
     }
 
     /// Whether `path` sits in the reserved prototype namespace with no

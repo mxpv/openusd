@@ -1110,6 +1110,16 @@ impl IndexCache {
         mem::swap(&mut self.pending_loads, buf);
     }
 
+    /// Whether work done since the demand queue held `pending_before`
+    /// entries is waiting on a layer: it demanded one that is not loaded. A
+    /// demand that only asks the barrier to look again for a target already
+    /// reported unresolved leaves the work complete.
+    pub(super) fn awaits_load(&self, pending_before: usize) -> bool {
+        self.pending_loads[pending_before..]
+            .iter()
+            .any(|demand| !demand.recheck)
+    }
+
     /// Marks every layer stack the cache holds live for a registry sweep
     /// (`LayerGraph::sweep_stacks`): each cached prim index's nodes and the
     /// contexts of pending arc-load demands, whose stacks the load barrier is
@@ -1901,19 +1911,23 @@ impl IndexCache {
         self.store.remove(path);
     }
 
-    /// Drops every cached index that recorded a
-    /// [`MalformedLayer`](CompositionDiagnostic::MalformedLayer) error so it recomposes and
-    /// re-demands the target. The arc to an unreadable target was dropped, so
-    /// these indices carry no dependency on it and an ordinary layer-stack
-    /// invalidation misses them; the stage calls this when an edit clears the
-    /// graph's recorded load failures, since the target may now be readable.
+    /// Drops every cached index that recorded a failed target, a
+    /// [`MalformedLayer`](CompositionDiagnostic::MalformedLayer) or an
+    /// [`UnresolvedLayer`](CompositionDiagnostic::UnresolvedLayer). Each
+    /// recomposes and demands the target afresh. The arc to a failed target
+    /// was dropped, so these indices carry no dependency on it and an
+    /// ordinary layer-stack invalidation misses them; the stage calls this
+    /// when a target may have become loadable: an edit cleared the graph's
+    /// recorded load failures, or an asset that did not resolve now does.
     pub(crate) fn drop_load_failed_indices(&mut self) {
-        let failed = self.store.paths_with_malformed_layer();
+        let failed = self.store.paths_with_failed_layer();
         if failed.is_empty() {
             return;
         }
+        // The prims beneath one composed without the target too, and
+        // recompose with it.
         for path in failed {
-            self.store.remove(&path);
+            self.store.remove_subtree(&path);
         }
         self.retire_query_errors();
         // A target that failed to read hid whatever it would have composed, so
@@ -3256,7 +3270,7 @@ impl IndexCache {
         // loop to load and recompose. Returning before `cache_index` keeps a
         // partial index — and the transient errors composed without the missing
         // layer — out of the cache entirely.
-        if self.pending_loads.len() > pending_before {
+        if self.awaits_load(pending_before) {
             return Ok(());
         }
         // Retain recoverable composition errors recorded during the build (e.g.
@@ -3599,6 +3613,22 @@ def "Unrelated"
             );
         }
         Ok(())
+    }
+
+    /// `ensure_index` with the demand drain the stage's load barrier
+    /// provides: a build that demands a layer is run again once the demand is
+    /// answered, until a pass demands nothing new. A demand for an asset no
+    /// fixture holds is answered by recording it unresolved, which the next
+    /// build reports.
+    fn settled_index(graph: &mut LayerGraph, cache: &mut IndexCache, path: &Path) -> Result<()> {
+        loop {
+            cache.ensure_index(graph, path)?;
+            let mut pending = Vec::new();
+            cache.swap_pending_loads(&mut pending);
+            if !graph.intern_demanded(&pending) {
+                return Ok(());
+            }
+        }
     }
 
     /// `value_at` with the demand drain the stage's load barrier provides: a
@@ -4230,11 +4260,11 @@ def "A" (
 "#;
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
-        let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
+        let mut graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
         let mut cache = fresh_cache();
 
         let child = sdf::path("/A/B")?;
-        cache.ensure_index(&graph, &child)?;
+        settled_index(&mut graph, &mut cache, &child)?;
         assert!(
             !cache.cached(&child).is_empty(),
             "child local opinion must survive the ancestor's unresolved reference"
@@ -4255,7 +4285,7 @@ def "A" (
     /// composes cleanly leaves no stale error behind.
     #[test]
     fn prim_errors_replace_on_rebuild() -> Result<()> {
-        let (graph, mut cache) =
+        let (mut graph, mut cache) =
             in_memory_stack("#usda 1.0\ndef \"A\" (\n    references = @nonexistent.usd@\n)\n{\n}\n");
         let a = sdf::path("/A")?;
         let unresolved = |c: &IndexCache| {
@@ -4265,13 +4295,13 @@ def "A" (
                 .count()
         };
 
-        cache.ensure_index(&graph, &a)?;
+        settled_index(&mut graph, &mut cache, &a)?;
         assert_eq!(unresolved(&cache), 1, "the unresolved reference is recorded once");
 
         // Drop and rebuild — the bookkeeping a SIGNIFICANT layer-stack edit
         // performs (a scoped drop then a re-query). The error must not double.
         cache.drop_index(&a);
-        cache.ensure_index(&graph, &a)?;
+        settled_index(&mut graph, &mut cache, &a)?;
         assert_eq!(
             unresolved(&cache),
             1,

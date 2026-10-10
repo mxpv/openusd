@@ -1374,6 +1374,17 @@ impl LayerGraph {
         self.failed_loads.insert(asset_path.to_string(), failure);
     }
 
+    /// Forgets each recorded resolve failure whose asset the resolver now
+    /// finds, returning whether there was one.
+    pub(crate) fn forget_resolvable_failures(&mut self) -> bool {
+        let before = self.failed_loads.len();
+        let registry = &self.registry;
+        self.failed_loads.retain(|asset_path, failure| {
+            !matches!(failure, LoadFailure::Unresolved) || registry.resolve(asset_path).is_none()
+        });
+        self.failed_loads.len() != before
+    }
+
     /// The layer stack a reference/payload arc to external `root` should compose
     /// against, given the arc-carrying stack `context`. Every target stack is
     /// keyed by the source of the arc-carrying stack's composed expression
@@ -1505,6 +1516,7 @@ impl LayerGraph {
                 return Err(Demand {
                     asset_path: identifier.clone(),
                     context,
+                    recheck: false,
                 });
             };
             context = id;
@@ -2803,17 +2815,23 @@ impl LayerGraph {
     /// The demand drain the test harnesses run in place of the stage's load
     /// barrier (whose own mint loop additionally re-checks contextual opens for
     /// targets that joined mid-pass); their fixtures load every layer up front,
-    /// so a demand only ever needs interning. Returns whether any new instance
-    /// was created, so the caller re-runs the composition pass that recorded
-    /// the demands.
+    /// so a demand for a loaded target only ever needs interning, and one for
+    /// a target no fixture holds is an asset that does not resolve. Returns
+    /// whether anything changed, a new instance or a first recorded failure,
+    /// so the caller re-runs the composition pass that recorded the demands.
     pub(crate) fn intern_demanded(&mut self, demands: &[Demand]) -> bool {
-        let mut newly_interned = false;
+        let mut progressed = false;
         for demand in demands {
-            if let Some(root) = self.id_of(demand.asset_path.as_str()) {
-                newly_interned |= self.intern_external(root, demand.context).1;
+            match self.id_of(demand.asset_path.as_str()) {
+                Some(root) => progressed |= self.intern_external(root, demand.context).1,
+                None if !self.load_failed(&demand.asset_path) => {
+                    self.mark_load_failed(&demand.asset_path, LoadFailure::Unresolved);
+                    progressed = true;
+                }
+                None => {}
             }
         }
-        newly_interned
+        progressed
     }
 
     /// Whether the registry still holds the stack's instance, for tests
@@ -3857,6 +3875,7 @@ mod tests {
         let demand = Demand {
             asset_path: "target.usda".to_string(),
             context: src_stack,
+            recheck: false,
         };
         assert!(graph.intern_demanded(&[demand]), "the re-mint reports progress");
         let (reminted, fresh) = graph.intern_external(target_id, src_stack);
