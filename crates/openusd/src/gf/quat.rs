@@ -7,6 +7,7 @@
 //! `From<[T; 4]>` and `From<Quat*> for [T; 4]` bridge to the raw array
 //! representation used by `sdf::Value`.
 
+use super::MIN_VECTOR_LENGTH;
 use super::f16;
 
 /// Single-precision quaternion (`GfQuatf`). Layout: `(w, x, y, z)`.
@@ -97,14 +98,22 @@ impl Quatd {
     };
 
     /// Returns a normalized copy, or the identity quaternion if the
-    /// magnitude is zero.
+    /// magnitude is below [`MIN_VECTOR_LENGTH`] (C++ `GetNormalized`).
+    ///
+    /// The arithmetic is C++'s: the squared length sums the imaginary
+    /// components before the real one, the real part is divided by the length
+    /// and the imaginary part scaled by its reciprocal.
     pub fn normalize(self) -> Self {
-        let n = normalize([self.w, self.x, self.y, self.z]);
+        let length = (self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w).sqrt();
+        if length < MIN_VECTOR_LENGTH {
+            return Self::IDENTITY;
+        }
+        let reciprocal = 1.0 / length;
         Self {
-            w: n[0],
-            x: n[1],
-            y: n[2],
-            z: n[3],
+            w: self.w / length,
+            x: self.x * reciprocal,
+            y: self.y * reciprocal,
+            z: self.z * reciprocal,
         }
     }
 
