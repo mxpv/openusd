@@ -23,7 +23,8 @@ Each library produces a single Rust file containing:
 - A `tokens` module with constants for schema names, property names, and token
   values.
 - A `SCHEMAS` constant with schema declarations, including property fallbacks,
-  allowed tokens, and inheritance. The registry accepts these declarations
+  allowed tokens, and inheritance, plus the metadata fields and kinds the
+  library's `plugInfo.json` declares. The registry accepts these declarations
   directly, without parsing schema files at runtime.
 - Typed schema views with accessors for declared and inherited properties.
 - Optional Rust enums generated from token properties' `allowedTokens`.

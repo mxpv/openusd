@@ -1,18 +1,20 @@
-//! The metadata fields a library registers beside its schemas.
+//! The metadata fields and kinds a plugin declares beside its schemas.
 //!
-//! C++ reads them from the `SdfMetadata` block of every plugin's
+//! C++ reads the fields from the `SdfMetadata` block of every plugin's
 //! `plugInfo.json` before it opens a layer (`SdfSchemaBase::_AddFieldsFromPlugins`),
-//! so a layer authoring one is authoring a registered field. A file holds one
-//! or more plugins, each named after the library whose fields it declares.
+//! so a layer authoring one is authoring a registered field, and the kinds
+//! from its `Kinds` block when the kind registry is first asked
+//! (`KindRegistry::_RegisterDefaults`). A file holds one or more plugins, each
+//! named after the library whose declarations it carries.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use openusd::{sdf, tf, usd};
+use openusd::{kind, sdf, tf, usd};
 use serde_json::Value as Json;
 
 use crate::error::Error;
-use crate::model::MetadataField;
+use crate::model::{KindDecl, MetadataField};
 
 /// One plugin a `plugInfo.json` declares.
 #[derive(Debug)]
@@ -24,6 +26,8 @@ pub struct Plugin {
     pub path: PathBuf,
     /// The fields its `SdfMetadata` block declares.
     pub fields: Vec<MetadataField>,
+    /// The kinds its `Kinds` block declares, in name order.
+    pub kinds: Vec<KindDecl>,
 }
 
 /// Every plugin the `plugInfo.json` at `path` declares, in the order the file
@@ -52,22 +56,58 @@ pub fn read(path: &Path) -> Result<Vec<Plugin>, Error> {
                 .get("Name")
                 .and_then(Json::as_str)
                 .ok_or_else(|| invalid(path, "a plugin has no `Name`".to_owned()))?;
-            let fields = match plugin.get("Info").and_then(|info| info.get("SdfMetadata")) {
-                None => Vec::new(),
-                Some(Json::Object(fields)) => fields
-                    .iter()
-                    .map(|(field, declaration)| self::field(field, declaration))
-                    .collect::<Result<_, String>>()
-                    .map_err(|cause| invalid(path, format!("{name}: {cause}")))?,
-                Some(_) => return Err(invalid(path, format!("{name}: `SdfMetadata` is not an object"))),
-            };
+            let refused = |cause| invalid(path, format!("{name}: {cause}"));
             Ok(Plugin {
                 name: name.to_owned(),
                 path: path.to_path_buf(),
-                fields,
+                fields: declarations(plugin, "SdfMetadata", field).map_err(refused)?,
+                kinds: declarations(plugin, "Kinds", kind_decl).map_err(refused)?,
             })
         })
         .collect()
+}
+
+/// What the block called `key` of a plugin's `Info` declares, each entry read
+/// by `read`. An absent block declares nothing.
+fn declarations<T>(plugin: &Json, key: &str, read: fn(&str, &Json) -> Result<T, String>) -> Result<Vec<T>, String> {
+    match plugin.get("Info").and_then(|info| info.get(key)) {
+        None => Ok(Vec::new()),
+        Some(Json::Object(entries)) => entries
+            .iter()
+            .map(|(name, declaration)| read(name, declaration))
+            .collect(),
+        Some(_) => Err(format!("`{key}` is not an object")),
+    }
+}
+
+/// One kind's declaration. `baseKind` is the only key read, as in C++, and an
+/// absent or empty one declares a root kind.
+fn kind_decl(name: &str, declaration: &Json) -> Result<KindDecl, String> {
+    if !tf::is_valid_identifier(name) {
+        return Err(format!("kind `{name}` is not a valid identifier"));
+    }
+    if matches!(
+        name,
+        kind::tokens::MODEL
+            | kind::tokens::GROUP
+            | kind::tokens::ASSEMBLY
+            | kind::tokens::COMPONENT
+            | kind::tokens::SUBCOMPONENT
+    ) {
+        return Err(format!("kind `{name}` redeclares a built-in kind"));
+    }
+    let Json::Object(declaration) = declaration else {
+        return Err(format!("kind `{name}` is not declared as an object"));
+    };
+    let base = match declaration.get("baseKind") {
+        None => None,
+        Some(Json::String(base)) => Some(base.clone()).filter(|base| !base.is_empty()),
+        Some(_) => return Err(format!("kind `{name}` declares a `baseKind` that is not a string")),
+    };
+    Ok(KindDecl {
+        name: name.to_owned(),
+        base,
+    })
 }
 
 /// One field's declaration.
@@ -312,6 +352,44 @@ mod tests {
             declared("string", r#""say \"hi\"""#),
             sdf::Value::String("say \"hi\"".to_owned())
         );
+    }
+
+    /// A kind reads with its base, and both spellings of no base are a root.
+    #[test]
+    fn kinds_read() {
+        let text = r#"{"Plugins": [{"Name": "p", "Info": {"Kinds": {
+            "chargroup": {"baseKind": "assembly", "description": "ignored"},
+            "absent": {},
+            "empty": {"baseKind": ""}
+        }}}]}"#;
+        let plugins = fields(text).expect("reads");
+        let kinds: Vec<(&str, Option<&str>)> = plugins[0]
+            .kinds
+            .iter()
+            .map(|kind| (kind.name.as_str(), kind.base.as_deref()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [("absent", None), ("chargroup", Some("assembly")), ("empty", None)]
+        );
+        assert!(plugins[0].fields.is_empty());
+    }
+
+    #[test]
+    fn malformed_kinds_refused() {
+        for (kinds, expected) in [
+            (r#"["chargroup"]"#, "`Kinds` is not an object"),
+            (r#"{"chargroup": "assembly"}"#, "is not declared as an object"),
+            (r#"{"chargroup": {"baseKind": 3}}"#, "`baseKind` that is not a string"),
+            (r#"{"char-group": {}}"#, "is not a valid identifier"),
+            (r#"{"group": {"baseKind": "model"}}"#, "redeclares a built-in kind"),
+        ] {
+            let text = format!(r#"{{"Plugins": [{{"Name": "p", "Info": {{"Kinds": {kinds}}}}}]}}"#);
+            match fields(&text) {
+                Err(Error::PlugInfo { cause, .. }) => assert!(cause.contains(expected), "{cause}"),
+                other => panic!("{kinds}: {other:?}"),
+            }
+        }
     }
 
     /// A declaration nothing can use is refused, naming the field.

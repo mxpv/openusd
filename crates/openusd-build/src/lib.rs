@@ -1,4 +1,5 @@
-//! Generates Rust schema views from OpenUSD `schema.usda` files.
+//! Generates Rust schema views from OpenUSD `schema.usda` files, with the
+//! metadata fields and kinds a `plugInfo.json` declares beside them.
 //!
 //! This is the Rust answer to `usdGenSchema`, shaped as a build dependency: a
 //! consumer describes its schema libraries in `build.rs`, and the generated
@@ -23,6 +24,10 @@
 //!
 //! A library's name comes from the `libraryName` its `schema.usda` declares,
 //! not from the path, so the two spellings above name one library.
+//!
+//! [`Builder::plug_info`] adds what a library's plugin declares, and
+//! [`Builder::declaration_family`] generates a plugin that has declarations
+//! and no `schema.usda` at all.
 //!
 //! [`Builder::generate`] reads and checks the schemas it is given and writes
 //! one file per library, carrying both the views and the schema data behind
@@ -64,7 +69,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use openusd::usd;
+use openusd::{tf, usd};
 
 use crate::model::Library;
 
@@ -76,7 +81,8 @@ pub(crate) type Externs = BTreeMap<String, String>;
 pub use error::{Error, TokenEnumError};
 pub use validate::Violation;
 
-/// What generating one schema library produced.
+/// What generating one library produced: a schema library, or the family of a
+/// plugin that declares no schema.
 ///
 /// The declarations are the contract: a registry built from them answers what
 /// a registry built from upstream's own schema data answers. They reach a
@@ -95,12 +101,14 @@ pub struct Output {
     /// The model everything above was generated from, and what
     /// [`with_family`](Self::with_family) lends its declarations out of.
     library: model::Library,
-    /// The schema it was generated from, as configured.
-    schema: PathBuf,
+    /// The file it was generated from: the schema as configured, or the
+    /// `plugInfo.json` of a plugin with no schema.
+    source: PathBuf,
 }
 
 impl Output {
-    /// The `libraryName` the schema declared.
+    /// The library's name: the `libraryName` its schema declared, or the name
+    /// of the plugin a declaration family was generated from.
     pub fn library_name(&self) -> &str {
         &self.library.name
     }
@@ -266,6 +274,7 @@ pub fn configure() -> Builder {
         schemas: Vec::new(),
         token_enums: Vec::new(),
         plug_infos: Vec::new(),
+        declaration_families: Vec::new(),
         shader_defs: Vec::new(),
     }
 }
@@ -283,8 +292,12 @@ pub struct Builder {
     schemas: Vec<(PathBuf, Views)>,
     /// The enums to generate over token properties, in the order declared.
     token_enums: Vec<TokenEnum>,
-    /// The `plugInfo.json` files declaring libraries' metadata fields.
+    /// The `plugInfo.json` files declaring libraries' metadata fields and
+    /// kinds.
     plug_infos: Vec<PathBuf>,
+    /// The plugins to generate as families of their own, with no schema
+    /// library behind them.
+    declaration_families: Vec<String>,
     /// The shader-definition layers to generate node views of, each with the
     /// library name its file is written under.
     shader_defs: Vec<(String, PathBuf)>,
@@ -302,18 +315,37 @@ impl Builder {
         self
     }
 
-    /// Reads the metadata fields a `plugInfo.json` declares in each plugin's
-    /// `SdfMetadata` block, the way C++ registers them.
+    /// Reads what a `plugInfo.json` declares beside its schemas, the way C++
+    /// registers it: the metadata fields of each plugin's `SdfMetadata` block
+    /// and the kinds of its `Kinds` block.
     ///
-    /// Each plugin's fields belong to the library whose `libraryName` is the
-    /// plugin's `Name`: they are registered with that library's schemas,
-    /// named in its `tokens`, and read and written through extension traits
-    /// on the handles they apply to (`AttributeMetadata` and its siblings).
-    /// A plugin naming no configured library is an error when
-    /// [`generate`](Self::generate) runs.
+    /// Each plugin's declarations belong to the library whose `libraryName`
+    /// is the plugin's `Name`. They are registered with that library's
+    /// schemas; a field is also named in its `tokens`, and read and written
+    /// through extension traits on the handles it applies to
+    /// (`AttributeMetadata` and its siblings). A plugin with no schema library
+    /// is named with [`declaration_family`](Self::declaration_family), and one
+    /// file may hold plugins of both sorts. A plugin that is neither is an
+    /// error when [`generate`](Self::generate) runs.
     #[must_use]
     pub fn plug_info(mut self, path: impl Into<PathBuf>) -> Self {
         self.plug_infos.push(path.into());
+        self
+    }
+
+    /// Generates the plugin called `name` as a family of its own, for a
+    /// plugin that declares kinds or metadata fields and has no schema
+    /// library. Repeatable.
+    ///
+    /// The plugin is read from a file [`plug_info`](Self::plug_info) names.
+    /// Its file is written as `<name>.rs` and included with
+    /// [`openusd::include_schema!`](openusd::include_schema) like a schema
+    /// library's, and its `SCHEMAS` registers the declarations and no schema.
+    /// A name no configured `plugInfo.json` declares is an error when
+    /// [`generate`](Self::generate) runs.
+    #[must_use]
+    pub fn declaration_family(mut self, name: impl Into<String>) -> Self {
+        self.declaration_families.push(name.into());
         self
     }
 
@@ -406,9 +438,10 @@ impl Builder {
 
     /// Generates every configured library.
     ///
-    /// Configuring no schemas is not an error and writes nothing: a consumer
-    /// whose families are feature-gated generates none of them when its
-    /// features are off, and its `build.rs` should not have to know that.
+    /// Configuring no schemas, shader definitions or declaration families is
+    /// not an error and writes nothing: a consumer whose families are
+    /// feature-gated generates none of them when its features are off, and its
+    /// `build.rs` should not have to know that.
     ///
     /// Otherwise the output directory must be known, from
     /// [`out_dir`](Self::out_dir) or from the `OUT_DIR` a build script runs
@@ -427,7 +460,7 @@ impl Builder {
     /// are refused before anything is written. A file already holding what
     /// this run generates is left untouched, its modification time with it.
     pub fn generate(self) -> Result<(), Error> {
-        if self.schemas.is_empty() && self.shader_defs.is_empty() {
+        if self.schemas.is_empty() && self.shader_defs.is_empty() && self.declaration_families.is_empty() {
             return Ok(());
         }
 
@@ -453,11 +486,14 @@ impl Builder {
         // a parallel version has to finish with each library inside the worker
         // and return the generated text alone.
         let plugins = self.plugins()?;
-        let outputs = self
+        let mut outputs = self
             .schemas
             .iter()
             .map(|(schema, views)| self.build(schema, *views, &plugins))
             .collect::<Result<Vec<_>, Error>>()?;
+        for family in &self.declaration_families {
+            outputs.push(self.declare(family, &plugins)?);
+        }
 
         // A library this run builds, or one declared so a view can name it: an
         // enum naming anything else matches nothing, ever. A family behind
@@ -481,26 +517,14 @@ impl Builder {
             });
         }
 
-        // Every plugin a `plugInfo.json` declares fields for is one of the
-        // libraries built here, and a field belongs to one library only.
+        // Every plugin a `plugInfo.json` declares is one of the libraries or
+        // declaration families built here.
         for plugin in &plugins {
             if !outputs.iter().any(|output| output.library_name() == plugin.name) {
                 return Err(Error::UnknownPlugin {
                     plugin: plugin.name.clone(),
                     path: plugin.path.clone(),
                 });
-            }
-        }
-        let mut declared: BTreeMap<&str, &str> = BTreeMap::new();
-        for output in &outputs {
-            for field in &output.library.metadata {
-                if let Some(first) = declared.insert(field.name.as_str(), output.library_name()) {
-                    return Err(Error::DuplicateMetadataField {
-                        field: field.name.to_string(),
-                        first: first.to_owned(),
-                        second: output.library_name().to_owned(),
-                    });
-                }
             }
         }
 
@@ -515,7 +539,7 @@ impl Builder {
         let mut destinations: BTreeMap<&str, &Path> = BTreeMap::new();
         let named = outputs
             .iter()
-            .map(|output| (output.library_name(), output.schema.as_path()))
+            .map(|output| (output.library_name(), output.source.as_path()))
             .chain(nodes.iter().map(|(library, path, _)| (*library, *path)));
         for (library, source) in named {
             if let Some(first) = destinations.insert(library, source) {
@@ -525,6 +549,21 @@ impl Builder {
                     second: source.to_path_buf(),
                 });
             }
+        }
+
+        // A field or a kind is declared once. Two plugins of one name are one
+        // library, so a repeat between them names that library twice.
+        let fields = declared_twice(&outputs, |library| {
+            library.metadata.iter().map(|field| field.name.as_str()).collect()
+        });
+        if let Some((field, first, second)) = fields {
+            return Err(Error::DuplicateMetadataField { field, first, second });
+        }
+        let kinds = declared_twice(&outputs, |library| {
+            library.kinds.iter().map(|kind| kind.name.as_str()).collect()
+        });
+        if let Some((kind, first, second)) = kinds {
+            return Err(Error::DuplicateKind { kind, first, second });
         }
         for (library, _, output) in &nodes {
             write(&out_dir.join(format!("{library}.rs")), &output.rust)?;
@@ -564,6 +603,58 @@ impl Builder {
         self.build(schema.as_ref(), views, &self.plugins()?)
     }
 
+    /// Generates the declaration-only family of the plugin called `family`,
+    /// writing nothing: the file [`generate`](Self::generate) writes for a
+    /// name [`declaration_family`](Self::declaration_family) gave.
+    pub fn build_declarations(&self, family: &str) -> Result<Output, Error> {
+        self.declare(family, &self.plugins()?)
+    }
+
+    /// Generates the family of what the plugins called `family` declare, with
+    /// no schema library behind it.
+    fn declare(&self, family: &str, plugins: &[plug_info::Plugin]) -> Result<Output, Error> {
+        // The name is the generated file's, and what `include_schema!` is
+        // given, so it has to be one a path and a Rust string both take whole.
+        if !tf::is_valid_identifier(family) {
+            return Err(Error::InvalidDeclarationFamily {
+                family: family.to_owned(),
+            });
+        }
+        let Some(plugin) = plugins.iter().find(|plugin| plugin.name == family) else {
+            return Err(Error::UnknownDeclarationFamily {
+                family: family.to_owned(),
+            });
+        };
+        let mut library = Library::declarations(family);
+        library.take_declarations(plugins);
+        let warnings = validate::check(&library)?;
+        // The traits a metadata field is read through are emitted with the
+        // views, so the views are asked for.
+        self.emit(library, warnings, &plugin.path, Views::Generate)
+    }
+
+    /// Generates the file of a library read from `source`.
+    fn emit(&self, library: Library, warnings: Vec<String>, source: &Path, views: Views) -> Result<Output, Error> {
+        // Named by file rather than by path: the header reaches whatever the
+        // consumer generates into, and an absolute path would differ on every
+        // machine that built it.
+        let named = source.file_name().unwrap_or(source.as_os_str());
+        let rust = emit::emit(
+            &library,
+            &self.extern_libraries,
+            &named.to_string_lossy(),
+            views,
+            &self.token_enums,
+        )?;
+        Ok(Output {
+            rust,
+            views: views == Views::Generate,
+            warnings,
+            library,
+            source: source.to_path_buf(),
+        })
+    }
+
     /// Every plugin the configured `plugInfo.json` files declare, each file
     /// read once.
     fn plugins(&self) -> Result<Vec<plug_info::Plugin>, Error> {
@@ -598,29 +689,11 @@ impl Builder {
     /// Reads, checks and generates one library.
     fn build(&self, schema: &Path, views: Views, plugins: &[plug_info::Plugin]) -> Result<Output, Error> {
         let (library, warnings) = self.read(schema, plugins)?;
-        // Named by file rather than by path: the header reaches whatever the
-        // consumer generates into, and an absolute path would differ on every
-        // machine that built it.
-        let named = schema.file_name().unwrap_or(schema.as_os_str());
         let views = match library.skip_code_generation {
             true => Views::Skip,
             false => views,
         };
-        let rust = emit::emit(
-            &library,
-            &self.extern_libraries,
-            &named.to_string_lossy(),
-            views,
-            &self.token_enums,
-        )?;
-
-        Ok(Output {
-            rust,
-            views: views == Views::Generate,
-            warnings,
-            library,
-            schema: schema.to_path_buf(),
-        })
+        self.emit(library, warnings, schema, views)
     }
 
     /// Reads one schema into the model every output is generated from, with
@@ -635,12 +708,7 @@ impl Builder {
         let source = load::open(self, schema)?;
         let mut library = resolve::library(&source)?;
 
-        // A plugin's fields are the library's it is named after; the file is
-        // watched like any layer the library read.
-        for plugin in plugins.iter().filter(|plugin| plugin.name == library.name) {
-            library.metadata.extend(plugin.fields.iter().cloned());
-            library.source_layers.push(plugin.path.clone());
-        }
+        library.take_declarations(plugins);
 
         // Prim indices are built on demand, so a diagnostic a class's own
         // composition raises exists only once resolve has read that class.
@@ -650,6 +718,24 @@ impl Builder {
         let warnings = validate::check(&library)?;
         Ok((library, warnings))
     }
+}
+
+/// The first name two of `outputs` both declare, with the library declaring
+/// it first and the one declaring it again. `names` lists what one library
+/// declares.
+fn declared_twice<'a>(
+    outputs: &'a [Output],
+    names: impl Fn(&'a Library) -> Vec<&'a str>,
+) -> Option<(String, String, String)> {
+    let mut declared: BTreeMap<&str, &str> = BTreeMap::new();
+    for output in outputs {
+        for name in names(&output.library) {
+            if let Some(first) = declared.insert(name, output.library_name()) {
+                return Some((name.to_owned(), first.to_owned(), output.library_name().to_owned()));
+            }
+        }
+    }
+    None
 }
 
 /// Writes one generated file, naming the path in anything that goes wrong.
@@ -929,6 +1015,207 @@ class "MissingSuffix" (
         );
         fs::write(&path, text).expect("writes the plugInfo");
         path
+    }
+
+    /// A `plugInfo.json` holding the schema library `testWarn`'s plugin and
+    /// the plugin `siteKinds`, which declares kinds and has no schema library.
+    fn mixed_plug_info(dir: &Path) -> PathBuf {
+        let path = dir.join("mixed.json");
+        fs::write(
+            &path,
+            r#"{"Plugins": [
+                {"Name": "testWarn", "Info": {
+                    "SdfMetadata": {"role": {"type": "token"}},
+                    "Kinds": {"prop": {"baseKind": "component"}}
+                }},
+                {"Name": "siteKinds", "Info": {"Kinds": {
+                    "chargroup": {"baseKind": "assembly"},
+                    "site_root": {}
+                }}}
+            ]}"#,
+        )
+        .expect("writes the plugInfo");
+        path
+    }
+
+    /// The kinds `output`'s family declares, each with its base.
+    fn declared_kinds(output: &Output) -> Vec<(String, Option<String>)> {
+        output.with_family(|family| {
+            family
+                .declared_kinds()
+                .iter()
+                .map(|kind| (kind.name().to_owned(), kind.declared_base().map(str::to_owned)))
+                .collect()
+        })
+    }
+
+    /// One file holds a schema library's plugin and a declaration-only one,
+    /// and each reaches its own generated file.
+    #[test]
+    fn mixed_plugins_generate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = missing_suffix(dir.path());
+        let info = mixed_plug_info(dir.path());
+        let out = dir.path().join("generated");
+
+        configure()
+            .out_dir(&out)
+            .schema(&schema)
+            .plug_info(&info)
+            .declaration_family("siteKinds")
+            .generate()
+            .expect("generates both");
+
+        let library = fs::read_to_string(out.join("testWarn.rs")).expect("the schema library is written");
+        assert!(
+            library.contains(r#"::openusd::kind::Decl::new("prop").base("component")"#),
+            "{library}"
+        );
+        let family = fs::read_to_string(out.join("siteKinds.rs")).expect("the declaration family is written");
+        assert!(
+            family.contains(r#"::openusd::kind::Decl::new("chargroup").base("assembly")"#),
+            "{family}"
+        );
+        assert!(
+            family.contains(r#"::openusd::kind::Decl::new("site_root")"#),
+            "{family}"
+        );
+        assert!(!family.contains("prop"), "{family}");
+    }
+
+    /// A run with no schema at all still writes its declaration families.
+    #[test]
+    fn declarations_alone_generate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let info = mixed_plug_info(dir.path());
+        let out = dir.path().join("generated");
+
+        // Naming the file alone asks for nothing, as configuring no schema does.
+        configure()
+            .out_dir(&out)
+            .plug_info(&info)
+            .generate()
+            .expect("nothing to do");
+        assert!(!out.exists(), "nothing is written");
+
+        let error = configure()
+            .out_dir(&out)
+            .plug_info(&info)
+            .declaration_family("siteKinds")
+            .generate()
+            .expect_err("testWarn has no schema library here");
+        assert!(
+            matches!(&error, Error::UnknownPlugin { plugin, .. } if plugin == "testWarn"),
+            "{error}"
+        );
+
+        let kinds = dir.path().join("kinds.json");
+        fs::write(
+            &kinds,
+            r#"{"Plugins": [{"Name": "siteKinds", "Info": {"Kinds": {"chargroup": {"baseKind": "assembly"}}}}]}"#,
+        )
+        .expect("writes the plugInfo");
+        configure()
+            .out_dir(&out)
+            .plug_info(&kinds)
+            .declaration_family("siteKinds")
+            .generate()
+            .expect("generates the family");
+        assert!(out.join("siteKinds.rs").exists());
+    }
+
+    /// A declaration family carries its plugin's kinds and watches its file.
+    #[test]
+    fn declaration_family_kinds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let info = mixed_plug_info(dir.path());
+
+        let output = configure()
+            .plug_info(&info)
+            .build_declarations("siteKinds")
+            .expect("builds");
+        assert_eq!(output.library_name(), "siteKinds");
+        assert_eq!(output.layers(), [info]);
+        assert_eq!(
+            declared_kinds(&output),
+            [
+                ("chargroup".to_owned(), Some("assembly".to_owned())),
+                ("site_root".to_owned(), None)
+            ]
+        );
+        output.with_family(|family| assert!(family.schemas().is_empty()));
+    }
+
+    /// A declaration family's name is its file's, so one that is no
+    /// identifier is refused before anything is written.
+    #[test]
+    fn declaration_family_name_checked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("generated");
+        for name in ["../kinds", "site/kinds", "my-kinds", ""] {
+            let error = configure()
+                .out_dir(&out)
+                .plug_info(mixed_plug_info(dir.path()))
+                .declaration_family(name)
+                .generate()
+                .expect_err("not an identifier");
+            assert!(
+                matches!(&error, Error::InvalidDeclarationFamily { family } if family == name),
+                "{error}"
+            );
+        }
+        let written = fs::read_dir(&out).expect("the output directory").count();
+        assert_eq!(written, 0, "nothing is written");
+        assert!(!dir.path().join("kinds.rs").exists(), "nor beside it");
+    }
+
+    /// A declaration family no configured file declares a plugin for would
+    /// write an empty file, so generation stops.
+    #[test]
+    fn unknown_declaration_family_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = missing_suffix(dir.path());
+
+        let error = configure()
+            .out_dir(dir.path().join("generated"))
+            .schema(&schema)
+            .plug_info(mixed_plug_info(dir.path()))
+            .declaration_family("siteKindz")
+            .generate()
+            .expect_err("no plugin is called siteKindz");
+        assert!(
+            matches!(&error, Error::UnknownDeclarationFamily { family } if family == "siteKindz"),
+            "{error}"
+        );
+    }
+
+    /// One kind declared by two plugins would be refused by the registry, so
+    /// generation refuses it first.
+    #[test]
+    fn duplicate_kind_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = missing_suffix(dir.path());
+        let info = dir.path().join("twice.json");
+        fs::write(
+            &info,
+            r#"{"Plugins": [
+                {"Name": "testWarn", "Info": {"Kinds": {"prop": {"baseKind": "component"}}}},
+                {"Name": "siteKinds", "Info": {"Kinds": {"prop": {}}}}
+            ]}"#,
+        )
+        .expect("writes the plugInfo");
+
+        let error = configure()
+            .out_dir(dir.path().join("generated"))
+            .schema(&schema)
+            .plug_info(&info)
+            .declaration_family("siteKinds")
+            .generate()
+            .expect_err("both declare prop");
+        assert!(
+            matches!(&error, Error::DuplicateKind { kind, .. } if kind == "prop"),
+            "{error}"
+        );
     }
 
     /// A plugin named after no library this run builds declares fields that

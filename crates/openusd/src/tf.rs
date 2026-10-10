@@ -1,6 +1,7 @@
 //! Tools Foundation (C++ `Tf`): foundational utility types shared across the
-//! crate. [`Token`], the interned-identifier string (C++ `TfToken`), and the
-//! crate's own file-replacing writer (C++ `TfSafeOutputFile`).
+//! crate. [`Token`], the interned-identifier string (C++ `TfToken`),
+//! [`is_valid_identifier`], the rule a declared name is checked against, and
+//! the crate's own file-replacing writer (C++ `TfSafeOutputFile`).
 
 use std::cmp::Ordering;
 use std::convert::Infallible;
@@ -374,6 +375,16 @@ fn real_path(path: &Path) -> PathBuf {
     current
 }
 
+/// Whether `name` is an identifier (C++ `TfIsValidIdentifier`): ASCII letters,
+/// digits and underscores, at least one of them, the first not a digit.
+pub fn is_valid_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first == b'_' || first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
 /// Locks `mutex`, reading through a poisoned lock, for a lock whose state
 /// is whole after every statement that changes it.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -417,6 +428,16 @@ mod tests {
         let mut set = std::collections::HashSet::new();
         set.insert(runtime);
         assert!(set.contains(&KIND));
+    }
+
+    #[test]
+    fn identifier_rule() {
+        for name in ["a", "_", "_9", "chargroup", "Kind_2"] {
+            assert!(is_valid_identifier(name), "{name}");
+        }
+        for name in ["", "9lives", "my:kind", "my-kind", "my kind", "caf\u{e9}"] {
+            assert!(!is_valid_identifier(name), "{name}");
+        }
     }
 
     #[test]

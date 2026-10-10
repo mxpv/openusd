@@ -38,7 +38,7 @@
 
 use bitflags::bitflags;
 
-use crate::sdf;
+use crate::{kind, sdf};
 
 use super::SchemaKind;
 
@@ -53,11 +53,16 @@ pub type InstanceRestriction<'a> = (&'a str, &'a [&'a str]);
 /// The name is the family every schema in it belongs to, matching the
 /// `libraryName` a `schema.usda` declares (`usdGeom`), and is what a
 /// registration failure is reported against.
+///
+/// A family is what one C++ plugin declares, so beside its schemas it carries
+/// the plugin's [`metadata`](Self::metadata) fields and
+/// [`kinds`](Self::kinds).
 #[derive(Debug, Clone, Copy)]
 pub struct SchemaFamily<'a> {
     pub(super) name: &'a str,
     pub(super) schemas: &'a [SchemaDecl<'a>],
     pub(super) metadata: &'a [MetadataDecl<'a>],
+    pub(super) kinds: &'a [kind::Decl<'a>],
 }
 
 /// One metadata field a family registers, as a plugin's `plugInfo.json`
@@ -176,12 +181,15 @@ enum FieldValue<'a> {
 }
 
 impl<'a> SchemaFamily<'a> {
-    /// A family called `name` declaring `schemas`, and no metadata fields.
+    /// A family called `name` declaring `schemas`, and no metadata fields or
+    /// kinds. `schemas` may be empty: a family is whatever one plugin
+    /// declares, and a plugin may declare kinds or metadata fields alone.
     pub const fn new(name: &'a str, schemas: &'a [SchemaDecl<'a>]) -> Self {
         Self {
             name,
             schemas,
             metadata: &[],
+            kinds: &[],
         }
     }
 
@@ -194,6 +202,30 @@ impl<'a> SchemaFamily<'a> {
     /// What [`metadata`](Self::metadata) declared.
     pub const fn declared_metadata(&self) -> &'a [MetadataDecl<'a>] {
         self.metadata
+    }
+
+    /// The kinds the family adds to the built-in model hierarchy, as a
+    /// plugin's `plugInfo.json` declares them in its `Kinds` block.
+    ///
+    /// ```
+    /// use openusd::kind;
+    /// use openusd::usd::{SchemaFamily, SchemaRegistry};
+    ///
+    /// static SITE: &SchemaFamily<'_> =
+    ///     &SchemaFamily::new("site", &[]).kinds(&[kind::Decl::new("chargroup").base("assembly")]);
+    ///
+    /// let registry = SchemaRegistry::builder().register(SITE).build()?;
+    /// assert!(registry.kinds().is_group("chargroup"));
+    /// # Ok::<(), openusd::usd::SchemaRegistryError>(())
+    /// ```
+    pub const fn kinds(mut self, kinds: &'a [kind::Decl<'a>]) -> Self {
+        self.kinds = kinds;
+        self
+    }
+
+    /// What [`kinds`](Self::kinds) declared.
+    pub const fn declared_kinds(&self) -> &'a [kind::Decl<'a>] {
+        self.kinds
     }
 
     /// The family name every schema in it belongs to.

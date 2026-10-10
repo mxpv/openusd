@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use openusd::{sdf, tf, usd};
 
+use crate::plug_info::Plugin;
+
 pub use crate::load::DeclaredToken;
 
 /// The base every typed schema reaches. A schema that reaches it is one a
@@ -71,6 +73,18 @@ pub struct Library {
     pub declared_tokens: Vec<DeclaredToken>,
     /// The metadata fields its `plugInfo.json` registers.
     pub metadata: Vec<MetadataField>,
+    /// The kinds its `plugInfo.json` declares.
+    pub kinds: Vec<KindDecl>,
+}
+
+/// One kind a library declares, as the `Kinds` block of its `plugInfo.json`
+/// declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KindDecl {
+    /// The kind's name.
+    pub name: String,
+    /// The kind it derives from. A root kind has none.
+    pub base: Option<String>,
 }
 
 /// One metadata field a library registers, as its `plugInfo.json` declares it.
@@ -355,6 +369,34 @@ pub struct Origin {
 }
 
 impl Library {
+    /// A library called `name` that declares no schema, for what a plugin
+    /// declares alone.
+    pub fn declarations(name: &str) -> Self {
+        Library {
+            name: name.to_owned(),
+            use_literal_identifiers: true,
+            skip_code_generation: false,
+            classes: Vec::new(),
+            reflected: Vec::new(),
+            inherited: Vec::new(),
+            foreign: Vec::new(),
+            source_layers: Vec::new(),
+            declared_tokens: Vec::new(),
+            metadata: Vec::new(),
+            kinds: Vec::new(),
+        }
+    }
+
+    /// Takes what the plugins named after this library declare: their
+    /// metadata fields and kinds, and each file among the layers to watch.
+    pub fn take_declarations(&mut self, plugins: &[Plugin]) {
+        for plugin in plugins.iter().filter(|plugin| plugin.name == self.name) {
+            self.metadata.extend(plugin.fields.iter().cloned());
+            self.kinds.extend(plugin.kinds.iter().cloned());
+            self.source_layers.push(plugin.path.clone());
+        }
+    }
+
     /// Every class whose accessors this library emits: the ones it generates,
     /// then the ones it holds to reflect.
     pub fn emitted(&self) -> impl Iterator<Item = &Class> {

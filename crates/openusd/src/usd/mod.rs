@@ -16,6 +16,7 @@ mod diff;
 mod editor;
 mod flatten;
 mod interp;
+mod model_api;
 mod prim;
 mod prim_definition;
 mod prim_type_info;
@@ -41,6 +42,7 @@ pub use core_schemas::{
 pub use diff::{ApplyMode, Diff, Edit, FieldValue};
 pub use editor::{NamespaceEditError, NamespaceEditor};
 pub use interp::InterpolationType;
+pub use model_api::KindValidation;
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use prim_definition::{DefProperty, PrimDefinition};
 pub use prim_type_info::{PrimTypeId, PrimTypeInfo};

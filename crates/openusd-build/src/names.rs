@@ -8,6 +8,8 @@
 //! [`screaming_snake`] for constants and [`snake_case`] for methods, which C++
 //! has no counterpart for.
 
+use openusd::tf;
+
 /// Words a token identifier may not be, so one that lands on any of them gains
 /// a trailing underscore (`default` becomes `default_`).
 ///
@@ -192,7 +194,7 @@ pub fn valid_token(name: &str, literal_identifiers: bool) -> String {
     if !literal_identifiers || id.contains(':') {
         id = camel_case(&id);
     }
-    if !is_identifier(&id) {
+    if !tf::is_valid_identifier(&id) {
         id = valid_identifier(&id);
     }
     id
@@ -232,30 +234,21 @@ pub fn camel_case(name: &str) -> String {
     }
 }
 
-/// Whether `name` is already an identifier: a letter or underscore, then
-/// letters, digits or underscores (C++ `TfIsValidIdentifier`).
+/// Whether `name` is an identifier Rust would accept: one
+/// [`tf::is_valid_identifier`] admits, that is not a keyword and not the
+/// placeholder `_`.
 ///
-/// ASCII-strict, where `sdf::Path::is_valid_identifier` admits any character
-/// that is not a control or a space, so that no asset is rejected on read. A
-/// name that passes here reaches generated Rust unchanged, so the strict rule
-/// is the one that applies.
-pub fn is_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    is_identifier_start(first) && chars.all(is_identifier_cont)
-}
-
-/// Whether `name` is an identifier Rust would accept: one this crate's own
-/// rules admit, that is not a keyword and not the placeholder `_`.
+/// That rule is ASCII-strict, where `sdf::Path::is_valid_identifier` admits
+/// any character that is not a control or a space, so that no asset is
+/// rejected on read. A name that passes here reaches generated Rust unchanged,
+/// so the strict rule is the one that applies.
 ///
 /// A schema names its own types and accessors through `className` and
 /// `apiName`, so a name Rust has taken has to be reported against the schema
 /// that wrote it. The list is Rust's own reserved words, the editions'
 /// together, since a generated file is compiled under the consumer's edition.
 pub fn is_rust_identifier(name: &str) -> bool {
-    is_identifier(name) && name != "_" && !RUST_KEYWORDS.contains(&name)
+    tf::is_valid_identifier(name) && name != "_" && !RUST_KEYWORDS.contains(&name)
 }
 
 /// `name` with every character an identifier cannot hold replaced by an
@@ -353,8 +346,8 @@ mod tests {
     /// one to USD.
     #[test]
     fn keywords_are_not_identifiers() {
-        assert!(is_identifier("type") && !is_rust_identifier("type"));
-        assert!(is_identifier("_") && !is_rust_identifier("_"));
+        assert!(tf::is_valid_identifier("type") && !is_rust_identifier("type"));
+        assert!(tf::is_valid_identifier("_") && !is_rust_identifier("_"));
         assert!(is_rust_identifier("Sphere") && is_rust_identifier("type_"));
     }
 
@@ -431,10 +424,6 @@ mod tests {
 
     #[test]
     fn identifier_shape() {
-        assert!(is_identifier("_foo9"));
-        assert!(!is_identifier("9foo"));
-        assert!(!is_identifier("foo:bar"));
-        assert!(!is_identifier(""));
         assert_eq!(valid_identifier(""), "_");
     }
 

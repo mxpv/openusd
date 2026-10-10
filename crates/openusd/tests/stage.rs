@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path as FsPath;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use openusd::Result;
 use openusd::ar::Resolver as _;
@@ -16,7 +17,7 @@ use openusd::usd::{
     StageAuthoringError, StagePopulationMask, StageSink,
 };
 use openusd::usdz::ArchiveWriter;
-use openusd::{ar, gf, pcp, sdf, tf, usd};
+use openusd::{ar, gf, kind, pcp, sdf, tf, usd};
 
 /// A [`StageSink`] for tests: holds optional closures for the composed-change and
 /// lifecycle hooks a test cares about, recording into shared state it inspects
@@ -5232,8 +5233,92 @@ def Scope "A" (
     let child = stage.prim(proto.append_path("Child")?)?;
     assert!(child.is_model()?);
     assert!(child.is_component()?);
-    // In the instance's own namespace the chain of models breaks at /A.
-    assert!(!stage.prim("/A/Child")?.is_model()?);
+    // The proxy answers as that prim does, though the instance above it
+    // authors no kind and is no model itself.
+    let proxy = stage.prim("/A/Child")?;
+    assert!(proxy.is_instance_proxy()?);
+    assert!(proxy.is_model()? && proxy.is_component()?);
+    assert_eq!(model_flags(&stage, "/A")?, NOT_MODEL);
+    Ok(())
+}
+
+/// A proxy under a nested instance answers as the prim in the nested
+/// prototype, whose root is a group, whatever the instances above it author.
+/// `ModelAPI::is_kind` and the `model` status bit follow.
+#[test]
+fn proxy_model_from_prototype() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def Scope "Inner"
+{
+    def Scope "Leaf" (
+        kind = "prop"
+    )
+    {
+        def Scope "Part" (
+            kind = "prop"
+        )
+        {
+        }
+    }
+}
+
+def Scope "Source"
+{
+    def Scope "Squad" (
+        kind = "chargroup"
+    )
+    {
+    }
+
+    def Scope "Nest" (
+        instanceable = true
+        references = </Inner>
+    )
+    {
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    kind = "site_root"
+    references = </Source>
+)
+{
+}
+"#,
+    )?;
+    let stage = Stage::builder()
+        .schema_registry(custom_kinds_registry()?)
+        .open(root.to_str().expect("utf-8 temp path"))?;
+
+    // The instance is classified as any prim is: by its own kind and place.
+    assert_eq!(model_flags(&stage, "/A")?, NOT_MODEL);
+    // Its proxies are classified in the prototype, under a root that is a
+    // group.
+    assert_eq!(model_flags(&stage, "/A/Squad")?, GROUP);
+    // The nested instance authors no kind, so it is no model, and its own
+    // proxies answer from the nested prototype.
+    assert!(stage.prim("/A/Nest")?.is_instance_proxy()?);
+    assert_eq!(model_flags(&stage, "/A/Nest")?, NOT_MODEL);
+    assert_eq!(model_flags(&stage, "/A/Nest/Leaf")?, COMPONENT);
+    // A component holds no model, in a prototype as anywhere.
+    assert_eq!(model_flags(&stage, "/A/Nest/Leaf/Part")?, NOT_MODEL);
+    // The source the instances reference is ordinary namespace.
+    assert_eq!(model_flags(&stage, "/Inner/Leaf")?, NOT_MODEL);
+
+    let leaf = usd::ModelAPI::from_prim_unchecked(stage.prim("/A/Nest/Leaf")?);
+    assert!(leaf.is_kind("component", usd::KindValidation::ModelHierarchy)?);
+    assert!(leaf.is_kind("prop", usd::KindValidation::ModelHierarchy)?);
+    let part = usd::ModelAPI::from_prim_unchecked(stage.prim("/A/Nest/Leaf/Part")?);
+    assert!(!part.is_kind("prop", usd::KindValidation::ModelHierarchy)?);
+    assert!(part.is_kind("prop", usd::KindValidation::None)?);
+
+    assert!(stage.prim_status("/A/Nest/Leaf")?.contains(PrimStatus::MODEL));
+    assert!(!stage.prim_status("/A/Nest")?.contains(PrimStatus::MODEL));
     Ok(())
 }
 
@@ -5615,6 +5700,153 @@ fn model_hierarchy() -> Result<()> {
     );
     assert!(!stage.prim("/World/InvalidComponentParent/Component")?.is_model()?);
     assert!(!stage.prim("/World/InvalidComponentParent/Component")?.is_component()?);
+    Ok(())
+}
+
+/// The three model-hierarchy answers for the prim at `path`.
+fn model_flags(stage: &Stage, path: &str) -> Result<(bool, bool, bool)> {
+    let prim = stage.prim(path)?;
+    Ok((prim.is_model()?, prim.is_group()?, prim.is_component()?))
+}
+
+/// A registry declaring the kinds `fixtures/custom_kinds.usda` authors.
+fn custom_kinds_registry() -> Result<Arc<usd::SchemaRegistry>> {
+    static SITE: &usd::SchemaFamily<'_> = &usd::SchemaFamily::new("site", &[]).kinds(&[
+        kind::Decl::new("chargroup").base("assembly"),
+        kind::Decl::new("prop").base("component"),
+        kind::Decl::new("rig").base("model"),
+        kind::Decl::new("rivet").base("subcomponent"),
+        kind::Decl::new("site_root"),
+    ]);
+    Ok(usd::SchemaRegistry::builder().register(SITE).build()?)
+}
+
+fn open_custom_kinds() -> Result<Stage> {
+    Stage::builder()
+        .schema_registry(custom_kinds_registry()?)
+        .open("fixtures/custom_kinds.usda")
+}
+
+const MODEL: (bool, bool, bool) = (true, false, false);
+const GROUP: (bool, bool, bool) = (true, true, false);
+const COMPONENT: (bool, bool, bool) = (true, false, true);
+const NOT_MODEL: (bool, bool, bool) = (false, false, false);
+
+/// The pseudo-root is a model group, and `kind = "model"` under a group is a
+/// model that is neither a group nor a component (C++
+/// `Usd_PrimData::_ComposeAndCacheFlags`).
+#[test]
+fn model_root_and_base() -> Result<()> {
+    let stage = Stage::open("fixtures/custom_kinds.usda")?;
+    assert_eq!(model_flags(&stage, "/")?, GROUP);
+    assert_eq!(model_flags(&stage, "/BuiltIn")?, GROUP);
+    assert_eq!(model_flags(&stage, "/BuiltIn/Leaf")?, COMPONENT);
+    assert_eq!(model_flags(&stage, "/BuiltIn/Abstract")?, MODEL);
+    Ok(())
+}
+
+#[test]
+fn model_custom_kinds() -> Result<()> {
+    let stage = open_custom_kinds()?;
+
+    // A kind derived from `assembly` is a group, so its children are models.
+    assert_eq!(model_flags(&stage, "/Show")?, GROUP);
+    assert_eq!(model_flags(&stage, "/Show/Hero")?, COMPONENT);
+    assert_eq!(model_flags(&stage, "/Show/Squad")?, GROUP);
+    assert_eq!(model_flags(&stage, "/Show/Squad/Unit")?, COMPONENT);
+    // One derived from `model` itself is a model and nothing more.
+    assert_eq!(model_flags(&stage, "/Show/Rig")?, MODEL);
+
+    // A root kind is no model, and nothing under it is one.
+    assert_eq!(model_flags(&stage, "/Show/Marker")?, NOT_MODEL);
+    assert_eq!(model_flags(&stage, "/Show/Marker/Prop")?, NOT_MODEL);
+
+    // A kind derived from `subcomponent` is one wherever it sits.
+    let rivet = stage.prim("/Show/Hero/Rivet")?;
+    assert!(rivet.is_subcomponent()? && !rivet.is_model()?);
+    assert!(!stage.prim("/Show/Hero")?.is_subcomponent()?);
+    Ok(())
+}
+
+#[test]
+fn model_custom_kind_instance() -> Result<()> {
+    let stage = open_custom_kinds()?;
+    let proto = stage.prim("/Show/Crowd")?.prototype()?.expect("Crowd is an instance");
+    assert_eq!(model_flags(&stage, proto.as_str())?, GROUP);
+
+    let member = proto.append_path("Member")?;
+    assert_eq!(model_flags(&stage, member.as_str())?, COMPONENT);
+    // The instance is a group by its own kind, the referenced `chargroup`,
+    // and the proxy answers as the prototype's prim.
+    assert_eq!(model_flags(&stage, "/Show/Crowd")?, GROUP);
+    assert_eq!(model_flags(&stage, "/Show/Crowd/Member")?, COMPONENT);
+    Ok(())
+}
+
+/// Without the declarations, every answer that rests on one is `false`. What
+/// rests on none keeps its answer: the pseudo-root, a prototype root, and the
+/// built-in kinds under a built-in group.
+#[test]
+fn model_kinds_undeclared() -> Result<()> {
+    let stage = Stage::open("fixtures/custom_kinds.usda")?;
+    for path in [
+        "/Show",
+        "/Show/Hero",
+        "/Show/Rig",
+        "/Show/Marker",
+        "/Show/Marker/Prop",
+        "/Show/Squad",
+        "/Show/Squad/Unit",
+        "/Show/Crowd",
+        "/Show/Crowd/Member",
+    ] {
+        assert_eq!(model_flags(&stage, path)?, NOT_MODEL, "{path}");
+    }
+    assert!(!stage.prim("/Show/Hero/Rivet")?.is_subcomponent()?);
+
+    assert_eq!(model_flags(&stage, "/")?, GROUP);
+    assert_eq!(model_flags(&stage, "/BuiltIn/Leaf")?, COMPONENT);
+    let proto = stage.prim("/Show/Crowd")?.prototype()?.expect("Crowd is an instance");
+    assert_eq!(model_flags(&stage, proto.as_str())?, GROUP);
+    let member = proto.append_path("Member")?;
+    assert_eq!(model_flags(&stage, member.as_str())?, NOT_MODEL);
+    Ok(())
+}
+
+/// An ancestor's `kind` is read live: a descendant leaves the model hierarchy
+/// when the ancestor stops being a group and rejoins it when it is one again.
+#[test]
+fn model_follows_kind_edit() -> Result<()> {
+    let stage = open_custom_kinds()?;
+    assert_eq!(model_flags(&stage, "/Show/Hero")?, COMPONENT);
+    assert_eq!(model_flags(&stage, "/Show/Squad")?, GROUP);
+
+    stage.prim("/Show")?.set_kind("site_root")?;
+    assert_eq!(model_flags(&stage, "/Show")?, NOT_MODEL);
+    assert_eq!(model_flags(&stage, "/Show/Hero")?, NOT_MODEL);
+    assert_eq!(model_flags(&stage, "/Show/Squad")?, NOT_MODEL);
+    assert_eq!(model_flags(&stage, "/Show/Squad/Unit")?, NOT_MODEL);
+
+    stage.prim("/Show")?.set_kind("chargroup")?;
+    assert_eq!(model_flags(&stage, "/Show")?, GROUP);
+    assert_eq!(model_flags(&stage, "/Show/Hero")?, COMPONENT);
+    assert_eq!(model_flags(&stage, "/Show/Squad")?, GROUP);
+    assert_eq!(model_flags(&stage, "/Show/Squad/Unit")?, COMPONENT);
+    Ok(())
+}
+
+/// Two stages over one file, open together, each answer by their own
+/// registry.
+#[test]
+fn model_kinds_per_stage() -> Result<()> {
+    let declared = open_custom_kinds()?;
+    let plain = Stage::open("fixtures/custom_kinds.usda")?;
+    for _ in 0..2 {
+        assert_eq!(model_flags(&declared, "/Show/Hero")?, COMPONENT);
+        assert_eq!(model_flags(&plain, "/Show/Hero")?, NOT_MODEL);
+        assert_eq!(model_flags(&declared, "/Show")?, GROUP);
+        assert_eq!(model_flags(&plain, "/Show")?, NOT_MODEL);
+    }
     Ok(())
 }
 

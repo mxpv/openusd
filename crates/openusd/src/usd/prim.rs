@@ -831,28 +831,36 @@ impl Prim {
     }
 
     /// `true` if the prim is in the contiguous model hierarchy: its `kind` is
-    /// `group` / `assembly` / `component`, and every ancestor below the
-    /// pseudo-root is `group` / `assembly`. Mirrors C++ `UsdPrim::IsModel`.
+    /// a `model` kind, and every ancestor below the pseudo-root is a `group`
+    /// kind. Mirrors C++ `UsdPrim::IsModel`.
+    ///
+    /// Which kinds are models and groups is what the stage's
+    /// [`kind::Registry`](crate::kind::Registry) says, so a kind a schema
+    /// family declares counts as its base kind does. The pseudo-root is a
+    /// model and a group, and so is a prototype root. An instance proxy
+    /// answers as the prototype prim it stands in for, so what is above the
+    /// instance does not reach it.
     pub fn is_model(&self) -> Result<bool> {
-        Ok(self.model_kind()?.is_some())
+        Ok(self.model_flags()?.model)
     }
 
-    /// `true` if the prim is a group-like model (`group` or `assembly`).
-    /// Mirrors C++ `UsdPrim::IsGroup`.
+    /// `true` if the prim is a model whose `kind` is a `group` kind, the only
+    /// models that may hold other models. Mirrors C++ `UsdPrim::IsGroup`.
     pub fn is_group(&self) -> Result<bool> {
-        Ok(matches!(self.model_kind()?, Some("group" | "assembly")))
+        Ok(self.model_flags()?.group)
     }
 
-    /// `true` if the prim is a component model in a valid model hierarchy.
+    /// `true` if the prim is a model whose `kind` is a `component` kind.
     /// Mirrors C++ `UsdPrim::IsComponent`.
     pub fn is_component(&self) -> Result<bool> {
-        Ok(self.model_kind()? == Some("component"))
+        Ok(self.model_flags()?.component)
     }
 
-    /// `true` if the prim has `kind = "subcomponent"`. Mirrors C++
-    /// `UsdPrim::IsSubComponent`.
+    /// `true` if the prim's `kind` is a `subcomponent` kind, wherever the prim
+    /// sits. Mirrors C++ `UsdPrim::IsSubComponent`.
     pub fn is_subcomponent(&self) -> Result<bool> {
-        Ok(self.kind()?.as_deref() == Some("subcomponent"))
+        let kinds = self.stage.schema_registry().kinds();
+        Ok(self.kind()?.is_some_and(|kind| kinds.is_subcomponent(&kind)))
     }
 
     /// Returns the shared prototype path (`/__Prototype_N`) for this prim if it
@@ -921,41 +929,55 @@ impl Prim {
         Ok(path.map(|p| Prim::new(&self.stage, p)))
     }
 
-    /// The model-hierarchy `kind` for the prim — `Some("group" | "assembly" |
-    /// "component")` when the prim and all ancestors form a contiguous model
-    /// hierarchy, else `None`.
+    /// Where the prim stands in the model hierarchy.
     ///
-    /// A prototype root is a group whatever it authors, as C++ `Usd_PrimData`
-    /// sets it, so the walk from one of its descendants ends there.
-    fn model_kind(&self) -> Result<Option<&'static str>> {
-        if self.path.is_abs_root() || !self.stage.has_spec(&self.path)? {
-            return Ok(None);
+    /// The pseudo-root and a prototype root are groups whatever they author,
+    /// as C++ `Usd_PrimData::_ComposeAndCacheFlags` sets them, so the walk
+    /// from a prototype's descendant ends at its root. An instance proxy has
+    /// the flags of the prototype prim it stands in for, the prim C++ reads
+    /// them from. Any other prim, an instance included, is a model only when
+    /// its own `kind` is a model kind and every ancestor's is a group kind.
+    // TODO(perf): each call reads `kind` on the prim and on every ancestor.
+    // C++ caches the three flags per prim and recomposes the prim when `kind`
+    // changes; a memo here needs an epoch a `kind` edit advances, which no
+    // existing epoch does.
+    fn model_flags(&self) -> Result<ModelFlags> {
+        const GROUP: ModelFlags = ModelFlags {
+            model: true,
+            group: true,
+            component: false,
+        };
+        if self.path.is_abs_root() {
+            return Ok(GROUP);
+        }
+        if !self.stage.has_spec(&self.path)? {
+            return Ok(ModelFlags::default());
         }
         if self.stage.cache().is_prototype(&self.path) {
-            return Ok(Some("group"));
+            return Ok(GROUP);
         }
-        let leaf = match self.kind()?.as_deref() {
-            Some("group") => "group",
-            Some("assembly") => "assembly",
-            Some("component") => "component",
-            _ => return Ok(None),
+        if let Some(in_prototype) = self.prim_in_prototype()? {
+            return in_prototype.model_flags();
+        }
+
+        let kinds = self.stage.schema_registry().kinds();
+        let Some(kind) = self.kind()?.filter(|kind| kinds.is_model(kind)) else {
+            return Ok(ModelFlags::default());
         };
-        let Some(parent) = self.path.parent() else {
-            return Ok(Some(leaf));
-        };
-        for ancestor in parent.ancestors_below_root() {
+        for ancestor in self.path.strict_ancestors_below_root() {
             if self.stage.cache().is_prototype(&ancestor) {
                 break;
             }
-            let kind = self
-                .stage
-                .field::<sdf::Value>(&ancestor, sdf::FieldKey::Kind)?
-                .and_then(|v| v.try_as_token());
-            if !matches!(kind.as_deref(), Some("group" | "assembly")) {
-                return Ok(None);
+            let kind = Prim::new(&self.stage, ancestor).kind()?;
+            if !kind.is_some_and(|kind| kinds.is_group(&kind)) {
+                return Ok(ModelFlags::default());
             }
         }
-        Ok(Some(leaf))
+        Ok(ModelFlags {
+            model: true,
+            group: kinds.is_group(&kind),
+            component: kinds.is_component(&kind),
+        })
     }
 
     /// Every spec that contributes a prim spec to this prim, strongest first,
@@ -1234,6 +1256,15 @@ impl Prim {
 /// per-prim check behind [`Prim::is_loaded`].
 pub(super) fn has_payload(stage: &Stage, prim: &sdf::Path) -> Result<bool> {
     Ok(stage.masked_opinions(prim, |g, cache| cache.has_payload(g, prim))?)
+}
+
+/// A prim's place in the model hierarchy: the three answers C++
+/// `Usd_PrimData` keeps as prim flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ModelFlags {
+    model: bool,
+    group: bool,
+    component: bool,
 }
 
 /// Whether the property `name` sits under `namespace`: the name continues past

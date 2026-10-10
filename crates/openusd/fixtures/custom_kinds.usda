@@ -1,0 +1,86 @@
+#usda 1.0
+(
+    doc = """Kinds a site declares beside the built-in ones: chargroup derives
+from assembly, prop from component, rig from model, rivet from subcomponent,
+and site_root from nothing. /BuiltIn uses the built-in kinds alone."""
+    defaultPrim = "Show"
+)
+
+def Scope "Show" (
+    kind = "chargroup"
+)
+{
+    def Scope "Hero" (
+        kind = "prop"
+    )
+    {
+        def Scope "Rivet" (
+            kind = "rivet"
+        )
+        {
+        }
+    }
+
+    def Scope "Rig" (
+        kind = "rig"
+    )
+    {
+    }
+
+    def Scope "Marker" (
+        kind = "site_root"
+    )
+    {
+        def Scope "Prop" (
+            kind = "prop"
+        )
+        {
+        }
+    }
+
+    def Scope "Squad" (
+        kind = "assembly"
+    )
+    {
+        def Scope "Unit" (
+            kind = "component"
+        )
+        {
+        }
+    }
+
+    def Scope "Crowd" (
+        instanceable = true
+        references = </Source>
+    )
+    {
+    }
+}
+
+def Scope "Source" (
+    kind = "chargroup"
+)
+{
+    def Scope "Member" (
+        kind = "prop"
+    )
+    {
+    }
+}
+
+def Scope "BuiltIn" (
+    kind = "group"
+)
+{
+    def Scope "Leaf" (
+        kind = "component"
+    )
+    {
+    }
+
+    def Scope "Abstract" (
+        kind = "model"
+    )
+    {
+    }
+}

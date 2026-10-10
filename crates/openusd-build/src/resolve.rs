@@ -141,6 +141,7 @@ pub fn library(source: &Source) -> Result<Library, Error> {
         source_layers: load::watched_layers(&source.stage),
         declared_tokens: source.tokens.clone(),
         metadata: Vec::new(),
+        kinds: Vec::new(),
     })
 }
 

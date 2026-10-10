@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use openusd::{sdf, tf, usd};
+use openusd::{kind, sdf, tf, usd};
 
 use crate::model::{Class, Library, Property};
 
@@ -58,7 +58,21 @@ pub fn with_family<R>(library: &Library, f: impl FnOnce(&usd::SchemaFamily<'_>) 
         })
         .collect();
 
-    f(&usd::SchemaFamily::new(&library.name, &decls).metadata(&metadata))
+    let kinds: Vec<kind::Decl<'_>> = library
+        .kinds
+        .iter()
+        .map(|declared| {
+            let decl = kind::Decl::new(&declared.name);
+            match &declared.base {
+                Some(base) => decl.base(base),
+                None => decl,
+            }
+        })
+        .collect();
+
+    f(&usd::SchemaFamily::new(&library.name, &decls)
+        .metadata(&metadata)
+        .kinds(&kinds))
 }
 
 /// One class's name lists and field sets, owned so the declaration can borrow

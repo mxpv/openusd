@@ -1,9 +1,17 @@
-# The metadata fields the tiny library registers, one per kind of spec a field
-# can apply to, written the way upstream writes a plugInfo.json.
+# What the tiny library declares beside its schemas, written the way upstream
+# writes a plugInfo.json: one metadata field per kind of spec a field can apply
+# to, and two kinds. The second plugin has no schema library, and declares
+# kinds alone.
 {
     "Plugins": [
         {
             "Info": {
+                "Kinds": {
+                    "tinyGroup": {
+                        "baseKind": "group"
+                    },
+                    "tinyRoot": {}
+                },
                 "SdfMetadata": {
                     "tinyHints": {
                         "appliesTo": ["prims", "properties"],
@@ -23,6 +31,22 @@
                 }
             },
             "Name": "tiny"
+        },
+        {
+            "Info": {
+                "Kinds": {
+                    "tinyCrowd": {
+                        "baseKind": "assembly"
+                    },
+                    "tinyMarker": {
+                        "baseKind": ""
+                    },
+                    "tinyProp": {
+                        "baseKind": "component"
+                    }
+                }
+            },
+            "Name": "tinyKinds"
         }
     ]
 }

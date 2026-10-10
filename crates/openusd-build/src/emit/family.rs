@@ -34,20 +34,28 @@ pub(super) fn declarations(family: &usd::SchemaFamily<'_>) -> Result<TokenStream
         .map(|decl| metadata(family.name(), decl))
         .collect::<Result<Vec<_>, Error>>()?;
     let metadata = (!metadata.is_empty()).then(|| quote! { .metadata(&[#(#metadata),*]) });
+    let kinds = family.declared_kinds().iter().map(|decl| {
+        let name = decl.name();
+        let base = decl.declared_base().map(|base| quote! { .base(#base) });
+        quote! { ::openusd::kind::Decl::new(#name) #base }
+    });
+    let kinds = (!family.declared_kinds().is_empty()).then(|| quote! { .kinds(&[#(#kinds),*]) });
     let schemas_const = ident(items::SCHEMAS);
     let library_name = ident(items::LIBRARY_NAME);
 
     Ok(quote! {
-        /// The schemas this library declares, ready to register.
+        /// What this library declares, ready to register: its schemas, and
+        /// the metadata fields and kinds declared beside them.
         ///
         /// Hand it to
         /// [`SchemaRegistryBuilder::register`](::openusd::usd::SchemaRegistryBuilder::register):
-        /// a stage opened with the resulting registry resolves these schemas'
-        /// fallbacks and answers `is_a` along their inheritance, and one opened
-        /// without it knows nothing about them, so the typed constructors
-        /// answer `None`.
+        /// a stage opened with the resulting registry resolves the fallbacks
+        /// of the schemas and metadata fields declared here, answers `is_a`
+        /// along the schemas' inheritance, and counts a declared kind as its
+        /// base kind. One opened without it knows none of them, so the typed
+        /// constructors answer `None`.
         pub const #schemas_const: &::openusd::usd::SchemaFamily<'static> =
-            &::openusd::usd::SchemaFamily::new(#library_name, &[#(#schemas),*]) #metadata;
+            &::openusd::usd::SchemaFamily::new(#library_name, &[#(#schemas),*]) #metadata #kinds;
     })
 }
 

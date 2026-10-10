@@ -117,10 +117,18 @@ source of truth for specifics.
 
 - **`openusd-build`** - A separate crate (`crates/openusd-build`): the schema
   view generator `openusd-schemas` runs as a build dependency. It loads a schema
-  library's schematics and manifest, resolves and validates them over the
-  composed stage, and emits the Rust views and token tables the schema crate
+  library's schematics and manifest, and the metadata fields and kinds its
+  `plugInfo.json` declares, resolves and validates them over the composed
+  stage, and emits the Rust views and token tables the schema crate
   includes (`load` → `resolve` → `validate` → `emit`; start at its `lib.rs`).
   Its golden tests under `tests/` regenerate with `UPDATE_EXPECTED=1`.
+
+- **`kind`** - Kinds (C++ `Kind`): `kind::Registry` (C++ `KindRegistry`) is
+  the table of known kinds and their base kinds, holding the built-in model
+  hierarchy plus the kinds a site declares as `kind::Decl`s. It is the single
+  file `kind.rs` and depends on `tf` only. A schema family carries the
+  declarations (`usd::SchemaFamily::kinds`), and a stage reads the table
+  through `usd::SchemaRegistry::kinds`.
 
 - **`gf/`** - Graphics Foundations (C++ `Gf`): `bytemuck::Pod` vector /
   quaternion / matrix types for bulk binary serialization, row-major /

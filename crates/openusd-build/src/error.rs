@@ -228,8 +228,8 @@ pub enum Error {
         cause: String,
     },
 
-    /// A `plugInfo.json` does not declare its metadata fields in a form this
-    /// crate reads.
+    /// A `plugInfo.json` does not declare its metadata fields or kinds in a
+    /// form this crate reads.
     #[error("invalid plugInfo {path}: {cause}")]
     PlugInfo {
         /// The file.
@@ -238,14 +238,43 @@ pub enum Error {
         cause: String,
     },
 
-    /// A `plugInfo.json` declares fields for a plugin no configured schema
-    /// declares as its `libraryName`, so they would reach no library.
-    #[error("{path} declares metadata for plugin `{plugin}`, which no configured schema library is called")]
+    /// A `plugInfo.json` declares a plugin that is neither a configured
+    /// schema's `libraryName` nor a requested declaration family, so what it
+    /// declares would reach no generated file.
+    #[error("{path} declares plugin `{plugin}`, which is neither a configured schema library nor a declaration family")]
     UnknownPlugin {
         /// The plugin name.
         plugin: String,
         /// The file declaring it.
         path: PathBuf,
+    },
+
+    /// A declaration family's name is not an identifier, so it could not name
+    /// the file generated for it.
+    #[error("declaration family `{family}` is not a valid identifier")]
+    InvalidDeclarationFamily {
+        /// The requested family.
+        family: String,
+    },
+
+    /// A declaration family was requested for a plugin no configured
+    /// `plugInfo.json` declares.
+    #[error("no configured plugInfo declares a plugin called `{family}`, requested as a declaration family")]
+    UnknownDeclarationFamily {
+        /// The requested family.
+        family: String,
+    },
+
+    /// Two libraries declare one kind, so the registry would refuse the
+    /// second.
+    #[error("kind `{kind}` is declared by both {first} and {second}")]
+    DuplicateKind {
+        /// The kind.
+        kind: String,
+        /// The library declaring it first.
+        first: String,
+        /// The library declaring it again.
+        second: String,
     },
 
     /// Two libraries declare one metadata field, so the registry would refuse

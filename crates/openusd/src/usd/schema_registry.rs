@@ -33,7 +33,7 @@ use std::mem;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use crate::sdf::AbstractData;
-use crate::{ar, pcp, sdf, tf};
+use crate::{ar, kind, pcp, sdf, tf};
 
 use super::prim_definition::{self, FamilyVersions};
 use super::schema_decl::{Field, MetadataTargets, PropertyKind, SchemaDecl, SchemaFamily};
@@ -76,6 +76,8 @@ pub struct SchemaRegistry {
     type_infos: RwLock<HashMap<PrimTypeId, Arc<PrimTypeInfo>>>,
     /// The metadata fields the registered families declare, by name.
     metadata: HashMap<tf::Token, MetadataField>,
+    /// The built-in kinds and the ones the registered families declare.
+    kinds: kind::Registry,
 }
 
 /// One metadata field a registered family declares (C++
@@ -165,6 +167,10 @@ pub struct Schematics {
 /// are stored — [`Layer::open`](sdf::Layer::open) for a family on disk,
 /// [`Layer::from_bytes`](sdf::Layer::from_bytes) for one compiled into the
 /// program — and the registry reads what they hold.
+///
+/// The two layers carry schemas alone. A kind such a family needs is declared
+/// with [`SchemaRegistryBuilder::kind`], and a metadata field through a
+/// declared family ([`SchemaFamily::metadata`]).
 #[derive(Debug, Clone, Copy)]
 pub struct FamilySource<'a> {
     /// Family name, used to attribute read failures and to identify the
@@ -178,16 +184,19 @@ pub struct FamilySource<'a> {
     /// [`Attribute::fallback_value`](super::Attribute::fallback_value).
     pub schematics: &'a sdf::Layer,
 }
+// TODO: a family read from layers cannot declare the metadata fields and kinds
+// a C++ plugin declares beside its schemas in `plugInfo.json`.
 
 /// Accumulates schema families into a [`SchemaRegistry`].
 ///
 /// A family arrives either as a pair of layers ([`family`](Self::family)) or as
 /// declarations a crate holds ([`register`](Self::register)); both take what
 /// they need into the builder's own storage as they are called, so the input
-/// may be dropped straight after. [`build`](Self::build) then composes the prim
-/// definitions that need every family present, such as a typed schema whose
-/// built-in API schema comes from another family, or one an API schema
-/// auto-applies to.
+/// may be dropped straight after. A declared family also carries the metadata
+/// fields and the kinds its plugin declares. [`build`](Self::build) then
+/// composes the prim definitions that need every family present, such as a
+/// typed schema whose built-in API schema comes from another family, or one an
+/// API schema auto-applies to.
 ///
 /// Registration reports nothing, so families chain; the first failure any of
 /// them hit is held and returned by [`build`](Self::build).
@@ -210,6 +219,8 @@ pub struct SchemaRegistryBuilder {
     error: Option<SchemaRegistryError>,
     /// The metadata fields declared so far, by name.
     metadata: HashMap<tf::Token, MetadataField>,
+    /// The kinds declared so far, checked together by [`build`](Self::build).
+    kinds: kind::RegistryBuilder,
 }
 
 /// Which versions of a schema family a query accepts (C++
@@ -310,6 +321,10 @@ pub enum SchemaRegistryError {
         /// The family that declared it again.
         second: tf::Token,
     },
+
+    /// The declared kinds do not form a hierarchy.
+    #[error(transparent)]
+    Kind(Box<kind::RegistryError>),
 
     /// A declaration authors a field the registry derives from the declaration
     /// itself, or one a schematics may not carry at all.
@@ -490,6 +505,13 @@ impl SchemaRegistry {
     /// order.
     pub fn metadata_fields(&self) -> impl Iterator<Item = &MetadataField> {
         self.metadata.values()
+    }
+
+    /// The kinds a prim's `kind` metadata may select: the built-in model
+    /// hierarchy and whatever the registered families declare (C++
+    /// `KindRegistry`, which is a process singleton there).
+    pub fn kinds(&self) -> &kind::Registry {
+        &self.kinds
     }
 
     /// Looks up a schema by identifier (C++ `FindSchemaInfo`).
@@ -1285,7 +1307,8 @@ impl SchemaFamily<'_> {
 
 impl SchemaRegistryBuilder {
     /// A builder with nothing registered at all, not even the core `usd`
-    /// family [`default`](Self::default) seeds.
+    /// family [`default`](Self::default) seeds. The built-in kinds belong to
+    /// no family and are in every registry.
     ///
     /// For a registry that must hold exactly what it is given and no more: a
     /// test over one family in isolation, or a generator reading schema data
@@ -1300,6 +1323,7 @@ impl SchemaRegistryBuilder {
             extra_auto_apply: HashMap::new(),
             error: None,
             metadata: HashMap::new(),
+            kinds: kind::Registry::builder(),
         }
     }
 
@@ -1366,7 +1390,18 @@ impl SchemaRegistryBuilder {
             }
             self.metadata.insert(field.name.clone(), field);
         }
+        self.kinds = mem::take(&mut self.kinds).kinds(family.name, family.kinds);
         Ok(())
+    }
+
+    /// Declares one kind, for a caller with no family to carry it. A family
+    /// declares its own through [`SchemaFamily::kinds`].
+    ///
+    /// The kind may derive from one a family declares, or one declared later:
+    /// [`build`](Self::build) checks every declaration together.
+    pub fn kind(mut self, decl: kind::Decl<'_>) -> Self {
+        self.kinds = self.kinds.kind(decl);
+        self
     }
 
     /// Records `name` as registered, refusing a family already taken.
@@ -1525,6 +1560,9 @@ impl SchemaRegistryBuilder {
         if let Some(error) = self.error.take() {
             return Err(error);
         }
+        let kinds = mem::take(&mut self.kinds)
+            .build()
+            .map_err(|error| SchemaRegistryError::Kind(Box::new(error)))?;
         // TODO: report an auto-apply declaration that resolves to nothing —
         // an API schema name no family registered (dropped here) or one that
         // is not single-apply (ignored by `compute_auto_applied`). C++ lets
@@ -1592,6 +1630,7 @@ impl SchemaRegistryBuilder {
             )),
             type_infos: RwLock::default(),
             metadata: self.metadata,
+            kinds,
         }))
     }
 
@@ -2667,6 +2706,66 @@ mod tests {
             assert_eq!(SchemaKind::from_token(kind.as_str()), Some(kind));
         }
         assert_eq!(SchemaKind::from_token("bogus"), None);
+    }
+
+    #[test]
+    fn family_kinds_any_order() -> Result<(), SchemaRegistryError> {
+        static SITE: &SchemaFamily<'_> =
+            &SchemaFamily::new("site", &[]).kinds(&[kind::Decl::new("chargroup").base("assembly")]);
+        static CHARACTERS: &SchemaFamily<'_> =
+            &SchemaFamily::new("characters", &[]).kinds(&[kind::Decl::new("hero").base("chargroup")]);
+
+        for families in [[SITE, CHARACTERS], [CHARACTERS, SITE]] {
+            let registry = families
+                .into_iter()
+                .fold(SchemaRegistry::builder(), SchemaRegistryBuilder::register)
+                .kind(kind::Decl::new("prop").base("component"))
+                .build()?;
+            let kinds = registry.kinds();
+            assert!(kinds.is_group("hero") && kinds.is_a("hero", "chargroup"));
+            assert!(kinds.is_component("prop"));
+            // A kinds-only family brings no schemas with it.
+            assert_eq!(registry.schema_infos().count(), 8);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn family_kinds_duplicate() {
+        static FIRST: &SchemaFamily<'_> = &SchemaFamily::new("first", &[]).kinds(&[kind::Decl::new("prop")]);
+        static SECOND: &SchemaFamily<'_> =
+            &SchemaFamily::new("second", &[]).kinds(&[kind::Decl::new("prop").base("component")]);
+
+        let error = SchemaRegistry::builder()
+            .register(FIRST)
+            .register(SECOND)
+            .build()
+            .expect_err("a kind declared by two families");
+        assert_eq!(
+            error.to_string(),
+            "kind `prop` is declared by `first` and again by `second`"
+        );
+    }
+
+    #[test]
+    fn family_kinds_unknown_base() {
+        let error = SchemaRegistry::builder()
+            .kind(kind::Decl::new("hero").base("chargroup"))
+            .build()
+            .expect_err("a base no family declares");
+        let SchemaRegistryError::Kind(error) = error else {
+            panic!("not a kind error: {error}");
+        };
+        assert!(matches!(*error, kind::RegistryError::UnknownBase { .. }));
+    }
+
+    #[test]
+    fn global_kinds_built_in() {
+        let kinds = SchemaRegistry::global().kinds();
+        assert_eq!(
+            kinds.all_kinds(),
+            ["assembly", "component", "group", "model", "subcomponent"]
+        );
     }
 
     #[test]

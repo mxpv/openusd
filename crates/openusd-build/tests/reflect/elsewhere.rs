@@ -19,17 +19,20 @@ pub mod tokens {
     pub const TYPED: &str = "Typed";
 }
 
-/// The library these schemas belong to, as their manifest records it.
+/// The library's name, which is the family its declarations register
+/// under.
 pub const LIBRARY_NAME: &str = "testElsewhere";
 
-/// The schemas this library declares, ready to register.
+/// What this library declares, ready to register: its schemas, and
+/// the metadata fields and kinds declared beside them.
 ///
 /// Hand it to
 /// [`SchemaRegistryBuilder::register`](::openusd::usd::SchemaRegistryBuilder::register):
-/// a stage opened with the resulting registry resolves these schemas'
-/// fallbacks and answers `is_a` along their inheritance, and one opened
-/// without it knows nothing about them, so the typed constructors
-/// answer `None`.
+/// a stage opened with the resulting registry resolves the fallbacks
+/// of the schemas and metadata fields declared here, answers `is_a`
+/// along the schemas' inheritance, and counts a declared kind as its
+/// base kind. One opened without it knows none of them, so the typed
+/// constructors answer `None`.
 pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::SchemaFamily::new(
     LIBRARY_NAME,
     &[

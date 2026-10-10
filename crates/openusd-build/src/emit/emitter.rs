@@ -64,7 +64,8 @@ pub fn library(library: &RustLibrary, declarations: &TokenStream) -> TokenStream
 
         #(#enums)*
 
-        /// The library these schemas belong to, as their manifest records it.
+        /// The library's name, which is the family its declarations register
+        /// under.
         pub const #library_name: &str = #name;
 
         #declarations

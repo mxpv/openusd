@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::Result;
 use crate::sdf::path_expr::{
@@ -62,7 +63,7 @@ impl CollectionEvaluator {
     /// [`resolve_complete_membership_expression`] — against the collection
     /// predicate library.
     pub(super) fn build(stage: &Stage, expression: sdf::PathExpression) -> Result<Self> {
-        let eval = PathExpressionEval::build(&expression, &predicate_library())?;
+        let eval = PathExpressionEval::build(&expression, &predicate_library(stage.schema_registry()))?;
         Ok(CollectionEvaluator {
             stage: stage.clone(),
             expression,
@@ -223,8 +224,10 @@ fn resolve_impl(collection: &CollectionAPI, state: &mut ResolveState) -> Result<
 
 /// The predicate functions membership expressions may call (C++
 /// `UsdGetCollectionPredicateLibrary`); each predicate's doc note in the
-/// binder body names its semantics and constancy.
-fn predicate_library() -> PredicateLibrary<CollectionObject> {
+/// binder body names its semantics and constancy. `registry` supplies the
+/// kinds the `kind` predicate knows.
+fn predicate_library(registry: &Arc<SchemaRegistry>) -> PredicateLibrary<CollectionObject> {
+    let registry = registry.clone();
     PredicateLibrary::new()
         // abstract(isAbstract=true): the closest prim's abstractness. An
         // abstract prim's subtree stays abstract, so a `true` answer is
@@ -253,8 +256,9 @@ fn predicate_library() -> PredicateLibrary<CollectionObject> {
             }))
         })
         // model(isModel=true): model-hierarchy membership; non-prims are
-        // plain false. The model hierarchy is contiguous from the root, so a
-        // non-model's subtree stays non-model.
+        // plain false. A prim's answer varies over its subtree either way:
+        // an instance below a non-model has proxies its prototype
+        // classifies, under a root that is a group.
         .define("model", |args| {
             let wanted = flag_argument(args, "isModel")?;
             Some(predicate(move |obj| {
@@ -262,10 +266,7 @@ fn predicate_library() -> PredicateLibrary<CollectionObject> {
                     return PredResult::constant(false);
                 }
                 let is_model = obj.closest_prim().is_model().unwrap_or(false);
-                PredResult {
-                    value: is_model == wanted,
-                    constant: !is_model,
-                }
+                PredResult::varying(is_model == wanted)
             }))
         })
         // group(isGroup=true): like `model`, for groups.
@@ -276,25 +277,37 @@ fn predicate_library() -> PredicateLibrary<CollectionObject> {
                     return PredResult::constant(false);
                 }
                 let is_group = obj.closest_prim().is_group().unwrap_or(false);
-                PredResult {
-                    value: is_group == wanted,
-                    constant: !is_group,
-                }
+                PredResult::varying(is_group == wanted)
             }))
         })
         // kind(k1, ..., kN, strict=false): the prim's kind is one of the
-        // named kinds — exactly under `strict`, else per the built-in kind
-        // hierarchy. Kinds outside the built-in hierarchy still compare by
-        // name (this crate has no kind registry for C++'s known-kind filter).
-        .define("kind", |args| {
+        // named kinds — exactly under `strict`, else as the kind registry
+        // derives it. A named kind the registry does not know is dropped, and
+        // a call naming no known kind refuses to bind. The prim's own kind is
+        // what is read, wherever the prim sits in the model hierarchy.
+        .define("kind", move |args| {
             if !keywords_within(args, &["strict"]) {
                 return None;
             }
             let strict = strict_argument(args)?;
-            let kinds = string_arguments(args)?;
-            if kinds.is_empty() {
+            let kinds = registry.kinds();
+            let mut wanted = string_arguments(args)?;
+            wanted.retain(|kind| kinds.has_kind(kind));
+            if wanted.is_empty() {
                 return None;
             }
+            // The registry is fixed, so every kind the call accepts is known
+            // when it binds.
+            let accepted: Vec<String> = if strict {
+                wanted
+            } else {
+                kinds
+                    .all_kinds()
+                    .into_iter()
+                    .filter(|kind| wanted.iter().any(|wanted| kinds.is_a(kind, wanted)))
+                    .map(str::to_owned)
+                    .collect()
+            };
             Some(predicate(move |obj| {
                 if !obj.is_prim() {
                     return PredResult::constant(false);
@@ -302,14 +315,7 @@ fn predicate_library() -> PredicateLibrary<CollectionObject> {
                 let Ok(Some(kind)) = obj.closest_prim().kind() else {
                     return PredResult::varying(false);
                 };
-                let value = kinds.iter().any(|wanted| {
-                    if strict {
-                        kind.as_str() == wanted
-                    } else {
-                        kind_is_a(kind.as_str(), wanted)
-                    }
-                });
-                PredResult::varying(value)
+                PredResult::varying(accepted.iter().any(|accepted| kind == accepted.as_str()))
             }))
         })
         // specifier(s1, ..., sN): the prim's specifier is one of `over`,
@@ -489,33 +495,247 @@ fn string_arguments(args: &[FnArg]) -> Option<Vec<String>> {
         .collect()
 }
 
-/// Whether `kind` is `ancestor` or descends from it in the built-in kind
-/// hierarchy (C++ `KindRegistry` defaults): `assembly` and `group` are
-/// models, `component` is a model, `subcomponent` stands alone.
-fn kind_is_a(kind: &str, ancestor: &str) -> bool {
-    if kind == ancestor {
-        return true;
-    }
-    matches!(
-        (kind, ancestor),
-        ("assembly", "group" | "model") | ("group" | "component", "model")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::fs;
+
+    use crate::kind;
+    use crate::sdf::path_expr::{PredicateExpression, link_predicate_expression};
+    use crate::usd::SchemaFamily;
+
+    static SITE: &SchemaFamily<'_> = &SchemaFamily::new("site", &[]).kinds(kind::tests::SITE);
+
+    /// A stage authoring the kinds [`SITE`] declares, with them registered
+    /// when `declared`.
+    fn show(declared: bool) -> Result<Stage> {
+        let mut builder = Stage::builder();
+        if declared {
+            builder = builder.schema_registry(SchemaRegistry::builder().register(SITE).build()?);
+        }
+        let stage = builder.in_memory("show.usda")?;
+        stage.define_prim("/Show")?.set_kind("chargroup")?;
+        stage.define_prim("/Show/Hero")?.set_kind("prop")?;
+        stage.define_prim("/Show/Squad")?.set_kind("assembly")?;
+        stage.define_prim("/Show/Squad/Unit")?.set_kind("component")?;
+        Ok(stage)
+    }
+
+    fn evaluator(stage: &Stage, expression: &str) -> Result<CollectionEvaluator> {
+        CollectionEvaluator::build(stage, sdf::PathExpression::parse(expression))
+    }
+
+    /// The paths of `show`'s prims `expression` holds.
+    fn members(stage: &Stage, expression: &str) -> Result<Vec<&'static str>> {
+        let evaluator = evaluator(stage, expression)?;
+        let mut members = Vec::new();
+        for path in ["/Show", "/Show/Hero", "/Show/Squad", "/Show/Squad/Unit"] {
+            if evaluator.match_path(&sdf::path(path)?).value {
+                members.push(path);
+            }
+        }
+        Ok(members)
+    }
+
     #[test]
-    fn kind_hierarchy() {
-        assert!(kind_is_a("assembly", "model"));
-        assert!(kind_is_a("assembly", "group"));
-        assert!(kind_is_a("group", "model"));
-        assert!(kind_is_a("component", "model"));
-        assert!(!kind_is_a("subcomponent", "model"));
-        assert!(!kind_is_a("model", "group"));
-        assert!(kind_is_a("custom", "custom"));
-        assert!(!kind_is_a("custom", "model"));
+    fn kind_derived() -> Result<()> {
+        let stage = show(true)?;
+        assert_eq!(members(&stage, "//{kind(assembly)}")?, ["/Show", "/Show/Squad"]);
+        assert_eq!(members(&stage, "//{kind(assembly, strict=true)}")?, ["/Show/Squad"]);
+        assert_eq!(members(&stage, "//{kind(chargroup)}")?, ["/Show"]);
+        assert_eq!(
+            members(&stage, "//{kind(component)}")?,
+            ["/Show/Hero", "/Show/Squad/Unit"]
+        );
+        assert_eq!(members(&stage, "//{kind(prop, strict=true)}")?, ["/Show/Hero"]);
+        assert_eq!(
+            members(&stage, "//{kind(model)}")?,
+            ["/Show", "/Show/Hero", "/Show/Squad", "/Show/Squad/Unit"]
+        );
+        Ok(())
+    }
+
+    /// A call naming only kinds the registry does not know fails to compile.
+    #[test]
+    fn kind_unknown_refused() -> Result<()> {
+        let unbound = "Invalid arguments to predicate function 'kind'";
+
+        let declared = show(true)?;
+        let error = evaluator(&declared, "//{kind(bogus)}").expect_err("no known kind");
+        assert!(error.to_string().contains(unbound), "{error}");
+
+        // The same kind is unknown to a stage whose registry does not
+        // declare it.
+        let plain = show(false)?;
+        let error = evaluator(&plain, "//{kind(chargroup)}").expect_err("an undeclared kind");
+        assert!(error.to_string().contains(unbound), "{error}");
+        Ok(())
+    }
+
+    /// An unknown kind beside a known one is dropped and the call binds.
+    #[test]
+    fn kind_unknown_dropped() -> Result<()> {
+        let stage = show(true)?;
+        assert_eq!(members(&stage, "//{kind(chargroup, bogus)}")?, ["/Show"]);
+        assert_eq!(members(&stage, "//{kind(bogus, prop, strict=true)}")?, ["/Show/Hero"]);
+        Ok(())
+    }
+
+    #[test]
+    fn model_group_derived() -> Result<()> {
+        let stage = show(true)?;
+        assert_eq!(
+            members(&stage, "//{model}")?,
+            ["/Show", "/Show/Hero", "/Show/Squad", "/Show/Squad/Unit"]
+        );
+        assert_eq!(members(&stage, "//{group}")?, ["/Show", "/Show/Squad"]);
+        Ok(())
+    }
+
+    /// A traversal entering at a prim outside the model hierarchy still finds
+    /// the models among the proxies of an instance below it, which the
+    /// prototype classifies. `model` and `group` answer a prim as varying.
+    #[test]
+    fn searcher_crosses_instance() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("root.usda");
+        fs::write(
+            &root,
+            r#"#usda 1.0
+def Scope "Inner"
+{
+    def Scope "Leaf" (
+        kind = "prop"
+    )
+    {
+        def Scope "Part"
+        {
+        }
+    }
+}
+
+def Scope "Source"
+{
+    def Scope "Squad" (
+        kind = "chargroup"
+    )
+    {
+    }
+
+    def Scope "Nest" (
+        instanceable = true
+        references = </Inner>
+    )
+    {
+    }
+}
+
+def Scope "Container"
+{
+    def Scope "Inst" (
+        instanceable = true
+        references = </Source>
+    )
+    {
+    }
+}
+"#,
+        )?;
+        let stage = Stage::builder()
+            .schema_registry(SchemaRegistry::builder().register(SITE).build()?)
+            .open(root.to_str().expect("utf-8 temp path"))?;
+
+        // Depth-first from the ordinary prim above the instance, through its
+        // proxies and the nested instance.
+        let walk = [
+            "/Container",
+            "/Container/Inst",
+            "/Container/Inst/Squad",
+            "/Container/Inst/Nest",
+            "/Container/Inst/Nest/Leaf",
+            "/Container/Inst/Nest/Leaf/Part",
+        ];
+        // The members an incremental search finds, checked at each step
+        // against the one-shot answer.
+        let search = |expression: &str| -> Result<Vec<&'static str>> {
+            let evaluator = evaluator(&stage, expression)?;
+            let mut searcher = evaluator.incremental_searcher();
+            let mut members = Vec::new();
+            for step in walk {
+                let path = sdf::path(step)?;
+                let found = searcher.next(&path)?.value;
+                assert_eq!(found, evaluator.match_path(&path).value, "{expression} at {step}");
+                if found {
+                    members.push(step);
+                }
+            }
+            Ok(members)
+        };
+        let models = ["/Container/Inst/Squad", "/Container/Inst/Nest/Leaf"];
+        let others = [
+            "/Container",
+            "/Container/Inst",
+            "/Container/Inst/Nest",
+            "/Container/Inst/Nest/Leaf/Part",
+        ];
+        assert_eq!(search("//{model}")?, models);
+        assert_eq!(search("//{group}")?, ["/Container/Inst/Squad"]);
+        assert_eq!(search("//{model(false)}")?, others);
+        assert_eq!(search("//{not model}")?, others);
+
+        let library = predicate_library(stage.schema_registry());
+        for predicate in ["model", "group", "not model", "not group"] {
+            let program = link_predicate_expression(&PredicateExpression::parse(predicate), &library)?;
+            for step in ["/Container", "/Container/Inst", "/Container/Inst/Nest"] {
+                let object = CollectionObject {
+                    stage: stage.clone(),
+                    path: sdf::path(step)?,
+                };
+                assert!(!program.eval(&object).constant, "{predicate} at {step}");
+            }
+        }
+        Ok(())
+    }
+
+    /// An evaluator built before a `kind` edit answers for the edited stage.
+    /// An ancestor's kind moves a descendant's `model` answer and leaves its
+    /// `kind` answer alone, which reads the descendant's own kind.
+    #[test]
+    fn evaluator_follows_kind_edit() -> Result<()> {
+        let stage = show(true)?;
+        let model = evaluator(&stage, "//{model}")?;
+        let prop = evaluator(&stage, "//{kind(prop)}")?;
+        let hero = sdf::path("/Show/Hero")?;
+        assert!(model.match_path(&hero).value && prop.match_path(&hero).value);
+
+        stage.prim("/Show")?.set_kind("site_root")?;
+        assert!(!model.match_path(&hero).value);
+        assert!(prop.match_path(&hero).value);
+
+        stage.prim("/Show")?.set_kind("chargroup")?;
+        assert!(model.match_path(&hero).value);
+        assert!(prop.match_path(&hero).value);
+
+        stage.prim("/Show/Hero")?.set_kind("rivet")?;
+        assert!(!prop.match_path(&hero).value);
+        assert!(!model.match_path(&hero).value);
+        Ok(())
+    }
+
+    /// One expression over two stages answers by each stage's registry.
+    #[test]
+    fn evaluator_per_stage_kinds() -> Result<()> {
+        let declared = show(true)?;
+        let plain = show(false)?;
+        assert_eq!(
+            members(&declared, "//{model}")?,
+            ["/Show", "/Show/Hero", "/Show/Squad", "/Show/Squad/Unit"]
+        );
+        assert!(members(&plain, "//{model}")?.is_empty());
+        assert_eq!(members(&declared, "//{kind(assembly)}")?, ["/Show", "/Show/Squad"]);
+        assert_eq!(members(&plain, "//{kind(assembly)}")?, ["/Show/Squad"]);
+        Ok(())
     }
 
     #[test]
