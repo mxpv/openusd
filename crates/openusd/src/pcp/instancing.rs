@@ -64,9 +64,9 @@ pub(super) struct PrototypeRegistry {
 /// A shared prototype for a set of instances with the same [`InstanceKey`]
 /// (spec 11.3.3). The prototype *root* is composed as an independent
 /// `/__Prototype_N` index, built from the canonical instance's shared subtree —
-/// the instanceable arc, its descendants, and the implied classes — with the
-/// instance-local opinions (the local root override and the ancestral references
-/// above the instanceable arc) inerted (see
+/// the arcs introduced at the instance and everything below them — with the
+/// instance-local opinions (the local root override and the ancestral arcs the
+/// instance is nested under) inerted (see
 /// [`PrimIndex::mark_instance_local_inert`]) and the namespace re-anchored onto
 /// the prototype root (see [`PrimIndex::rebase_root`]). Its descendants compose
 /// in place by deepening that graph, and every sharing instance's proxies
@@ -227,6 +227,13 @@ impl PrototypeRegistry {
         self.by_root.contains_key(path)
     }
 
+    /// Whether `path` is a registered instance, by composed path, or a
+    /// `/__Prototype_N` root: the two paths whose index a prototype's key was
+    /// computed from or materialized into.
+    pub(super) fn is_registered(&self, path: &Path) -> bool {
+        self.by_instance.contains_key(path) || self.by_root.contains_key(path)
+    }
+
     /// Returns the nearest registered `/__Prototype_N` root at or above `path`,
     /// inclusive of `path` itself, or `None` when it is outside every
     /// registered prototype namespace.
@@ -320,14 +327,14 @@ pub(crate) fn is_prototype_namespace(path: &Path) -> bool {
 /// ([`PrimIndex::instance_local_nodes`]).
 ///
 /// The nodes are walked strong to weak, skipping culled subtrees, and a node
-/// joins the key when it is instanceable (C++ `Pcp_ChildNodeIsInstanceable`):
-/// shared rather than instance-local, able to contribute opinions, and
-/// authoring a spec at its site. A node without specs adds nothing to the
+/// joins the key when it is instanceable
+/// ([`PrimIndex::instanceable_nodes`]). A node without specs adds nothing to the
 /// prototype, so two instances whose implied arcs differ only in such nodes —
 /// an ancestor's class implied down to each instance's own path, say — still
-/// share. Below an instanceable node the walk stops unless the index composes
-/// a payload, whose inclusion can differ between instances: the node's site
-/// already determines what lies under it.
+/// share. Below an instanceable node the walk stops unless the index holds a
+/// payload arc anywhere (C++ `PcpPrimIndex::HasAnyPayloads`), whose inclusion
+/// can differ between instances: the node's site already determines what lies
+/// under it.
 ///
 /// Each arc keeps its site path as composed, variant selections included, and
 /// the resolved selection set is folded in as well (see [`InstanceKey`]).
@@ -336,10 +343,8 @@ pub(crate) fn is_prototype_namespace(path: &Path) -> bool {
 /// `PopulationMask::make_relative_to`), so two instances also only share a
 /// prototype when their load state and their exposure agree.
 fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules, mask: PopulationMask) -> InstanceKey {
-    let local = index.instance_local_nodes(instance_depth, instance_depth);
-    let has_payload = index
-        .nodes_with_ids()
-        .any(|(id, node)| node.arc == ArcType::Payload && !local[id.idx()]);
+    let instanceable = index.instanceable_nodes(instance_depth);
+    let has_payload = index.arena().iter().any(|node| node.arc == ArcType::Payload);
     let mut arcs = Vec::new();
     let mut stack: Vec<NodeId> = index.root().into_iter().collect();
     while let Some(id) = stack.pop() {
@@ -347,8 +352,7 @@ fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules, m
         if node.is_culled() {
             continue;
         }
-        let instanceable = node.arc != ArcType::Root && !local[id.idx()] && !node.is_inert() && node.has_specs();
-        if instanceable {
+        if instanceable[id.idx()] {
             arcs.push(InstanceArc {
                 arc: node.arc as u8,
                 layer_stack: node.layer_stack_id(),
@@ -483,7 +487,10 @@ impl IndexCache {
 
     /// Returns `true` if `path` resolves as an instance prim (spec 11.3.3):
     /// the strongest `instanceable` opinion is `true` and the prim has at
-    /// least one composition arc.
+    /// least one instanceable node ([`PrimIndex::has_instanceable_node`]), as
+    /// C++ `Pcp_PrimIndexIsInstanceable` requires. An arc inherited from an
+    /// ancestor does not count: its opinions are the instance's own, so a prim
+    /// with no other arc keeps its local children.
     ///
     /// A `/__Prototype_N` root is never an instance, whatever its composed
     /// `instanceable` opinion says. The opinion is routinely `true` there: an
@@ -520,7 +527,7 @@ impl IndexCache {
         let composed = self.effective_path(graph, path)?;
         self.ensure_index(graph, &composed)?;
         let index = self.cached(&composed);
-        if !index.has_composition_arc() {
+        if !index.has_instanceable_node(composed.prim_element_count() as u16) {
             return Ok(false);
         }
         Ok(matches!(
@@ -579,10 +586,10 @@ impl IndexCache {
     /// Builds and caches the composed index for a freshly minted prototype root
     /// (`/__Prototype_N`) from the canonical instance's shared subtree (spec
     /// 11.3.3). The clone of the canonical index has its instance-local nodes
-    /// inerted at the instance root's own depth, so only the instanceable arc,
-    /// its descendants, and the implied classes contribute — the local root
-    /// override and the ancestral references above the instanceable arc drop out
-    /// — and its namespace is re-anchored onto the prototype root.
+    /// inerted at the instance root's own depth, so only the arcs introduced at
+    /// the instance and their subtrees contribute — the local root override and
+    /// the ancestral arcs the instance is nested under drop out — and its
+    /// namespace is re-anchored onto the prototype root.
     ///
     /// The prototype root's child context is seeded as a namespace root with
     /// `instance_depth` cleared — a prototype root is not an instance (see

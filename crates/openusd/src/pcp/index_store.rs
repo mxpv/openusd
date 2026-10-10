@@ -404,6 +404,10 @@ impl IndexStore {
     /// index via [`splice_spec_stacks`](Self::splice_spec_stacks). An index
     /// reached by several of one round's sites therefore scans each of its nodes
     /// once, and rewrites its stack once.
+    ///
+    /// `rekeyed` collects every index in which a node an arc introduced gained
+    /// or lost its specs ([`SpecRefresh::arc_specs_changed`]), whichever
+    /// partition it landed in.
     pub(super) fn refresh_specs(
         &mut self,
         graph: &LayerGraph,
@@ -411,6 +415,7 @@ impl IndexStore {
         path: &Path,
         refreshed: &mut HashMap<Path, NodeRuns>,
         rebuild: &mut HashSet<Path>,
+        rekeyed: &mut HashSet<Path>,
     ) {
         for prim in self.deps.exact_lookup(layer, path) {
             // An index this round already condemned recomposes from scratch,
@@ -427,6 +432,9 @@ impl IndexStore {
             // the index its revision stamp and its resync report.
             let mut runs = refreshed.remove(&prim).unwrap_or_default();
             let refresh = index.refresh_has_specs_at(layer, path, graph, &mut runs);
+            if refresh.arc_specs_changed {
+                rekeyed.insert(prim.clone());
+            }
             // The local prim is one of its own dependents (it reads its own
             // site). Rebuild it when it carries no contributing node there; rebuild
             // any index whose culled site the spec just filled in.

@@ -3836,6 +3836,68 @@ fn class_arcs_share_prototype() -> Result<()> {
     Ok(())
 }
 
+/// Reads `Geo.radius` under `instance` at the default time.
+fn geo_radius(stage: &Stage, instance: &str) -> Result<Option<sdf::Value>> {
+    stage
+        .attribute(format!("{instance}/Geo.radius"))?
+        .get_at::<sdf::Value>(usd::TimeCode::new(0.0))
+}
+
+/// A class that gains its first spec joins the key of the instance inheriting
+/// it (C++ `Pcp_ChildNodeInstanceableChanged`): `/C` leaves the prototype it
+/// shared, and the opinion reaches `/C` alone, even though `/C` seeded that
+/// prototype. Removing the class again brings `/C` back.
+#[test]
+fn class_spec_rekeys_instance() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_class_arcs.usda"))?;
+    // `/C` registers first, so the shared prototype is seeded from its index.
+    let shared = stage.prim("/C")?.prototype()?.expect("an instance");
+    assert_eq!(stage.prim("/D")?.prototype()?.as_ref(), Some(&shared));
+
+    stage
+        .override_prim("/__class__/C/Geo")?
+        .create_attribute("radius", "double")?
+        .set(sdf::Value::Double(7.0))?;
+
+    let own = stage.prim("/C")?.prototype()?.expect("an instance");
+    assert_eq!(geo_radius(&stage, "/C")?, Some(sdf::Value::Double(7.0)));
+    for instance in ["/D", "/Set/A", "/Set/B"] {
+        let prototype = stage.prim(instance)?.prototype()?.expect("an instance");
+        assert_ne!(prototype, own, "{instance}");
+        assert_eq!(
+            geo_radius(&stage, instance)?,
+            Some(sdf::Value::Double(1.0)),
+            "{instance}"
+        );
+    }
+    assert_eq!(stage.prim(own.clone())?.instances()?, paths(&["/C"]));
+    assert_eq!(stage.prototypes()?.len(), 2);
+
+    assert!(stage.remove_prim("/__class__/C")?);
+    let prototype = stage.prim("/D")?.prototype()?.expect("an instance");
+    assert_eq!(stage.prim("/C")?.prototype()?.as_ref(), Some(&prototype));
+    assert_eq!(geo_radius(&stage, "/C")?, Some(sdf::Value::Double(1.0)));
+    assert_eq!(stage.prototypes()?, vec![prototype]);
+    Ok(())
+}
+
+/// An `instanceable` prim whose only arc is its ancestor's is not an instance,
+/// as in C++ `Pcp_PrimIndexIsInstanceable`: the inherited class's opinions are
+/// the prim's own, so its children stay.
+#[test]
+fn ancestral_arc_not_instance() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_ancestral_arc.usda"))?;
+
+    let prim = stage.prim("/Set/A")?;
+    assert!(!prim.is_instance()?);
+    assert_eq!(prim.prototype()?, None);
+    assert!(stage.prim("/Set/A/Geo")?.is_valid()?);
+    assert!(stage.prim("/Set/A/Local")?.is_valid()?);
+    assert_eq!(geo_radius(&stage, "/Set/A")?, Some(sdf::Value::Double(5.0)));
+    assert!(stage.prototypes()?.is_empty());
+    Ok(())
+}
+
 /// `get_prototype` / `get_instances` group instances by shared composition,
 /// and the prototype namespace is addressable (spec 11.3.3).
 #[test]
