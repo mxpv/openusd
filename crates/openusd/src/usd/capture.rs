@@ -128,6 +128,18 @@ impl UndoStage {
         journal.in_flight.clear();
     }
 
+    /// Discard up to `count` of the oldest recorded transactions, keeping the
+    /// current scene and the newer transactions. Drains any pending edit into
+    /// the stack first, so an undrained direct edit counts. Returns the number
+    /// discarded.
+    pub fn discard_oldest(&self, count: usize) -> usize {
+        self.capture.process_pending();
+        let mut journal = self.capture.log().borrow_mut();
+        let count = count.min(journal.stack.len());
+        journal.stack.drain(..count);
+        count
+    }
+
     /// Whether there is a recorded transaction to [`undo`](Self::undo). Drains any
     /// pending edit into the stack first, so an undrained direct edit counts.
     pub fn can_undo(&self) -> bool {
@@ -565,6 +577,46 @@ mod tests {
         assert!(stage.undo()?);
         assert!(!stage.prim("/B")?.is_valid()?);
         assert!(stage.prim("/A")?.is_valid()?, "the evicted /A edit is permanent");
+        assert!(!stage.undo()?);
+        Ok(())
+    }
+
+    /// `discard_oldest` drops the oldest transactions only: the scene is
+    /// untouched, the newer transactions still undo, and the discarded edits
+    /// become permanent.
+    #[test]
+    fn discard_oldest_keeps_recent_transactions_and_scene() -> Result<()> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        stage.define_prim("/World")?.set_type_name("Xform")?;
+        assert_eq!(stage.discard_oldest(0), 0);
+        assert_eq!(stage.undo_depth(), 2);
+        assert_eq!(stage.discard_oldest(1), 1);
+        assert_eq!(stage.prim("/World")?.type_name()?.as_deref(), Some("Xform"));
+        assert!(stage.undo()?);
+        assert!(stage.prim("/World")?.is_valid()?);
+        assert!(!stage.undo()?);
+        stage.prim("/World")?.set_type_name("Scope")?;
+        assert_eq!(stage.discard_oldest(usize::MAX), 1);
+        assert!(!stage.can_undo());
+        assert_eq!(stage.prim("/World")?.type_name()?.as_deref(), Some("Scope"));
+        stage.prim("/World")?.set_type_name("Xform")?;
+        assert!(stage.undo()?);
+        assert_eq!(stage.prim("/World")?.type_name()?.as_deref(), Some("Scope"));
+        Ok(())
+    }
+
+    /// `discard_oldest` drains a still-pending direct `layer_mut` edit into the
+    /// stack first, so that edit is the one discarded.
+    #[test]
+    fn discard_oldest_drains_pending_direct_edits() -> Result<()> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        let root = stage.root_layer().identifier().to_string();
+        {
+            let mut layer = stage.layer_mut(&root).expect("root layer");
+            layer.edit(|edit| author_prim(edit, "/Direct"))?;
+        }
+        assert_eq!(stage.discard_oldest(1), 1);
+        assert!(stage.prim("/Direct")?.is_valid()?);
         assert!(!stage.undo()?);
         Ok(())
     }
