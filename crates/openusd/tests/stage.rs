@@ -3808,6 +3808,34 @@ fn shared_instances_resolve_identically() -> Result<()> {
     Ok(())
 }
 
+/// Class arcs that add no shared opinions do not split instances, as in C++
+/// `PcpInstanceKey`: `/Set`'s class implied down to `/Set/A` and `/Set/B` is
+/// ancestral, so even its opinion on `A/Geo` neither keys nor reaches the
+/// instance, and `/C` and `/D` inherit classes nothing defines. All four share
+/// one prototype and resolve `Geo.radius` to the referenced asset's value.
+#[test]
+fn class_arcs_share_prototype() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_class_arcs.usda"))?;
+
+    let prototype = first_prototype(&stage)?;
+    for instance in ["/Set/A", "/Set/B", "/C", "/D"] {
+        assert_eq!(
+            stage.prim(instance)?.prototype()?.as_ref(),
+            Some(&prototype),
+            "{instance}"
+        );
+        assert_eq!(
+            stage
+                .attribute(format!("{instance}/Geo.radius"))?
+                .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+            Some(sdf::Value::Double(1.0)),
+            "{instance}"
+        );
+    }
+    assert_eq!(stage.prototypes()?, vec![prototype]);
+    Ok(())
+}
+
 /// `get_prototype` / `get_instances` group instances by shared composition,
 /// and the prototype namespace is addressable (spec 11.3.3).
 #[test]
