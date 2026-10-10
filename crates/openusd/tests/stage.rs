@@ -100,6 +100,13 @@ fn child_names(stage: &Stage, path: impl sdf::IntoPath) -> Result<Vec<String>> {
     Ok(stage.prim(path)?.child_names()?.into_iter().map(String::from).collect())
 }
 
+/// Writes `text` as the root layer of a stage in `dir` and opens it.
+fn open_text(dir: &tempfile::TempDir, text: &str) -> Result<Stage> {
+    let root = dir.path().join("root.usda");
+    fs::write(&root, text)?;
+    Stage::open(root.to_str().unwrap())
+}
+
 fn prop_names(stage: &Stage, path: impl sdf::IntoPath) -> Result<Vec<String>> {
     Ok(stage
         .prim(path)?
@@ -3063,8 +3070,9 @@ def "Inst" (
 #[test]
 fn forwarded_targets_honor_mask() -> Result<()> {
     // Forwarding must not read a relationship on a masked-out prim, so the
-    // chain through /Hidden.rel contributes nothing; a direct prim target
-    // to the masked prim is still returned (raw target value, not a query).
+    // chain stops at /Hidden.rel, which is returned as authored (C++ follows
+    // a relationship only through a valid prim); a direct prim target to the
+    // masked prim is returned too (raw target value, not a query).
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     fs::write(
@@ -3090,7 +3098,10 @@ def "Hidden"
         .open(root.to_str().expect("utf-8 temp path"))?;
 
     // /Hidden is masked out: its relationship is not followed.
-    assert!(fwd_targets(&stage, &sdf::Path::new("/Vis.chain")?)?.is_empty());
+    assert_eq!(
+        fwd_targets(&stage, &sdf::Path::new("/Vis.chain")?)?,
+        paths(&["/Hidden.rel"])
+    );
     // A direct prim target is still returned, matching raw targets.
     assert_eq!(
         fwd_targets(&stage, &sdf::Path::new("/Vis.direct")?)?,
@@ -4284,6 +4295,379 @@ def \"Off\" (
         "the payload under an inactive prim was never demanded: {:?}",
         stage.composition_errors()
     );
+    Ok(())
+}
+
+const INACTIVE_PARENT: &str = "#usda 1.0
+def Xform \"P\" (
+    active = false
+)
+{
+    custom double x = 1
+    def Sphere \"C\"
+    {
+        custom double y = 2
+        def Scope \"D\" {}
+    }
+}
+";
+
+/// An inactive prim stays on the stage and answers its own reads, while its
+/// descendants are off it: no child list or traversal names them and no handle
+/// to one is valid (C++ `UsdStage::_ComposeChildren`). Their prim indices
+/// still compose, the composition tier being outside the stage's population.
+#[test]
+fn inactive_prim_no_descendants() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(&dir, INACTIVE_PARENT)?;
+
+    let p = stage.prim("/P")?;
+    assert!(p.is_valid()?);
+    assert!(!p.is_active()?);
+    assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0));
+    assert!(p.child_names()?.is_empty());
+    assert!(p.children()?.is_empty());
+
+    for below in ["/P/C", "/P/C/D"] {
+        let prim = stage.prim(below)?;
+        assert!(!prim.is_valid()?, "{below}");
+        assert!(prim.child_names()?.is_empty(), "{below}");
+        assert!(prim.prim_stack()?.is_empty(), "{below}");
+        assert_eq!(stage.prim_status(below)?, PrimStatus::empty(), "{below}");
+    }
+    assert_eq!(stage.attribute("/P/C.y")?.get::<f64>()?, None);
+
+    let mut visited = Vec::new();
+    stage.traverse(PrimPredicate::ALL, |path| visited.push(path.clone()))?;
+    assert_eq!(visited, paths(&["/P"]));
+
+    let (children, _) = stage.prim_index("/P")?.child_names()?;
+    assert_eq!(children, vec![tf::Token::new("C")]);
+    assert_eq!(stage.prim_index("/P/C")?.prim_stack()?.len(), 1);
+    Ok(())
+}
+
+/// A direct read below an inactive prim composes nothing there and never
+/// demands the payload authored below it. The same payload under an active
+/// parent reports its missing target.
+#[test]
+fn inactive_subtree_never_loads() -> Result<()> {
+    let scene = |active: bool| {
+        format!(
+            "#usda 1.0
+def \"Parent\" (
+    active = {active}
+)
+{{
+    def \"Deep\" (
+        payload = @missing.usda@
+    ) {{
+        def \"Leaf\" {{}}
+    }}
+}}
+"
+        )
+    };
+
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(&dir, &scene(false))?;
+    assert!(!stage.prim("/Parent/Deep/Leaf")?.is_valid()?);
+    assert!(child_names(&stage, "/Parent/Deep")?.is_empty());
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the payload under an inactive prim was never demanded: {:?}",
+        stage.composition_errors()
+    );
+
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(&dir, &scene(true))?;
+    assert!(stage.prim("/Parent/Deep/Leaf")?.is_valid()?);
+    assert!(
+        !stage.composition_errors().is_empty(),
+        "the same payload under an active prim is demanded"
+    );
+    Ok(())
+}
+
+/// Forwarding keeps a target on a relationship below an inactive prim as it
+/// is authored, without composing the prim that owns it (C++
+/// `UsdRelationship::GetForwardedTargets`, which follows a relationship only
+/// through a valid prim).
+#[test]
+fn forwarding_stops_at_inactive() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        "#usda 1.0
+def \"A\" {
+    rel r = </Off/Deep.r>
+}
+def \"X\" {}
+def \"Off\" (
+    active = false
+)
+{
+    def \"Deep\" (
+        payload = @missing.usda@
+    ) {
+        rel r = </X>
+    }
+}
+",
+    )?;
+
+    assert_eq!(fwd_targets(&stage, &sdf::path("/A.r")?)?, paths(&["/Off/Deep.r"]));
+    assert!(rel_targets(&stage, &sdf::path("/Off/Deep.r")?)?.is_empty());
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the payload under an inactive prim was never demanded: {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// Deactivating a prim takes its descendants off the stage and reactivating
+/// it brings them back, with the answers cached in between retired.
+#[test]
+fn activation_toggles_descendants() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        "#usda 1.0\ndef \"P\" {\n    def \"C\" {\n        def \"D\" {}\n    }\n}\n",
+    )?;
+
+    let on_stage = |stage: &Stage| -> Result<(Vec<String>, bool, bool)> {
+        Ok((
+            child_names(stage, "/P")?,
+            stage.prim("/P/C")?.is_valid()?,
+            stage.prim("/P/C/D")?.is_valid()?,
+        ))
+    };
+    assert_eq!(on_stage(&stage)?, (vec!["C".to_string()], true, true));
+
+    stage.prim("/P")?.set_active(false)?;
+    assert_eq!(on_stage(&stage)?, (Vec::new(), false, false));
+    assert!(stage.prim("/P")?.is_valid()?);
+
+    stage.prim("/P")?.set_active(true)?;
+    assert_eq!(on_stage(&stage)?, (vec!["C".to_string()], true, true));
+    Ok(())
+}
+
+/// Defining a prim below an inactive one authors its spec, but the stage does
+/// not hold the prim: the returned handle is invalid and takes no write until
+/// the parent is reactivated (C++ `UsdStage::DefinePrim`).
+#[test]
+fn define_below_inactive() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(&dir, INACTIVE_PARENT)?;
+
+    let new = stage.define_prim("/P/New")?;
+    assert!(!new.is_valid()?);
+    assert_eq!(
+        stage.prim_index("/P/New")?.prim_stack()?.len(),
+        1,
+        "the spec is authored"
+    );
+    assert!(matches!(
+        new.clone().set_kind("component"),
+        Err(StageAuthoringError::PrimNotValid { .. })
+    ));
+
+    stage.prim("/P")?.set_active(true)?;
+    assert!(new.is_valid()?);
+    assert_eq!(child_names(&stage, "/P")?, ["C", "New"]);
+    new.set_kind("component")?;
+    Ok(())
+}
+
+/// A property write needs a prim the stage holds: below an inactive prim every
+/// creation and every write to an existing property is refused and authors
+/// nothing (C++ authoring through an invalid `UsdPrim`). After reactivation
+/// the write stamps the declaration the weaker layer gives the property.
+#[test]
+fn property_write_below_inactive() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        "#usda 1.0
+def \"P\" {
+    def \"C\" {
+        double radius = 1
+        rel proxy
+    }
+}
+",
+    )?;
+    let stage = open_text(
+        &dir,
+        "#usda 1.0
+(
+    subLayers = [@weak.usda@]
+)
+over \"P\" (
+    active = false
+) {}
+",
+    )?;
+
+    let not_valid = |result: Result<(), StageAuthoringError>| {
+        assert!(
+            matches!(result, Err(StageAuthoringError::PrimNotValid { .. })),
+            "{result:?}"
+        );
+    };
+    not_valid(stage.create_attribute("/P/C.radius", "float").map(drop));
+    not_valid(stage.create_attribute("/P/C.fresh", "float").map(drop));
+    not_valid(stage.create_relationship("/P/C.radius").map(drop));
+    not_valid(stage.create_relationship("/P/C.proxy").map(drop));
+    not_valid(stage.attribute("/P/C.radius")?.set(2.0).map(drop));
+    not_valid(stage.attribute("/P/C.radius")?.clear().map(drop));
+    not_valid(stage.relationship("/P/C.proxy")?.set_targets(["/P"]).map(drop));
+    not_valid(stage.relationship("/P/C.proxy")?.clear_targets().map(drop));
+    assert!(
+        stage.root_layer().prim("/P/C")?.is_none(),
+        "a refused write authors nothing"
+    );
+
+    stage.prim("/P")?.set_active(true)?;
+    let radius = stage.create_attribute("/P/C.radius", "float")?.set(2.0)?;
+    assert_eq!(radius.get::<f64>()?, Some(2.0), "stamped as the weaker layer's double");
+    assert!(matches!(
+        stage.create_relationship("/P/C.radius"),
+        Err(StageAuthoringError::SpecKindMismatch { .. })
+    ));
+    stage.relationship("/P/C.proxy")?.set_targets(["/P"])?;
+    assert_eq!(rel_targets(&stage, &sdf::path("/P/C.proxy")?)?, paths(&["/P"]));
+    Ok(())
+}
+
+/// A property write is refused on a prim the population mask excludes, as it
+/// is below an inactive prim.
+#[test]
+fn property_write_masked_out() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"Vis\" {}\ndef \"Hidden\" {\n    double x = 1\n}\n",
+    )?;
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/Vis"])?)
+        .open(root.to_str().unwrap())?;
+
+    assert!(matches!(
+        stage.create_attribute("/Hidden.x", "double"),
+        Err(StageAuthoringError::PrimNotValid { .. })
+    ));
+    assert!(matches!(
+        stage.attribute("/Hidden.x")?.set(2.0),
+        Err(StageAuthoringError::PrimNotValid { .. })
+    ));
+    stage.create_attribute("/Vis.x", "double")?.set(2.0)?;
+    Ok(())
+}
+
+/// A prim that exists only inside a variant the stage has not selected takes
+/// property writes through an edit target on that variant, at any depth: the
+/// population does not exclude it though nothing composes there.
+#[test]
+fn property_write_unselected_variant() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/World")?;
+    let root = stage.edit_target().layer_identifier().to_string();
+    stage.set_edit_target(EditTarget::for_local_direct_variant(root, "/World{set=sel}")?)?;
+
+    let only = stage.define_prim("/World/Only")?;
+    assert!(!only.is_valid()?, "the variant is not selected");
+    stage.create_attribute("/World/Only.x", "double")?;
+    stage.create_relationship("/World/Only.r")?.set_targets(["/World"])?;
+
+    stage.define_prim("/World/Only/Child")?;
+    stage.create_attribute("/World/Only/Child.x", "double")?;
+    stage
+        .create_relationship("/World/Only/Child.r")?
+        .set_targets(["/World"])?;
+
+    let layer = stage.root_layer();
+    assert!(layer.attribute("/World{set=sel}Only.x")?.is_some());
+    assert!(layer.relationship("/World{set=sel}Only.r")?.is_some());
+    assert!(layer.attribute("/World{set=sel}Only/Child.x")?.is_some());
+    assert!(layer.relationship("/World{set=sel}Only/Child.r")?.is_some());
+    Ok(())
+}
+
+/// A move onto a path below an inactive prim sees the stage, where nothing
+/// occupies the destination, though a reference composes a prim there. The
+/// move is authored, and reactivating the parent composes the moved spec over
+/// the referenced prim.
+#[test]
+fn move_below_inactive_reference() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ref.usda"),
+        "#usda 1.0\ndef \"M\" {\n    def \"C\" {\n        double fromRef = 1\n    }\n}\n",
+    )?;
+    let stage = open_text(
+        &dir,
+        "#usda 1.0
+def \"A\" {
+    double local = 2
+}
+def \"P\" (
+    active = false
+    references = @ref.usda@</M>
+) {}
+",
+    )?;
+    assert_eq!(
+        stage.prim_index("/P/C")?.prim_stack()?.len(),
+        1,
+        "the reference composes /P/C"
+    );
+
+    let mut editor = usd::NamespaceEditor::new(&stage);
+    editor.move_prim("/A", "/P/C").unwrap();
+    editor.apply()?;
+    assert!(!stage.prim("/A")?.is_valid()?);
+    assert!(!stage.prim("/P/C")?.is_valid()?, "/P is still inactive");
+
+    stage.prim("/P")?.set_active(true)?;
+    assert_eq!(stage.attribute("/P/C.local")?.get::<f64>()?, Some(2.0));
+    assert_eq!(stage.attribute("/P/C.fromRef")?.get::<f64>()?, Some(1.0));
+    Ok(())
+}
+
+/// An ancestor whose `active` is not a bool cannot say whether its descendants
+/// are on the stage, so reads below it fail. Repairing the field restores
+/// them, with no failure left cached.
+#[test]
+fn malformed_active_fails_reads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        "#usda 1.0\ndef \"P\" {\n    def \"C\" {\n        double y = 2\n    }\n}\n",
+    )?;
+    let root = stage.root_layer().identifier().to_string();
+    let set_active = |value: sdf::Value| -> Result<()> {
+        stage.layer_mut(&root).expect("root layer").edit(|e| {
+            e.data_mut()
+                .set_field(&sdf::path("/P")?, sdf::FieldKey::Active.as_str(), value);
+            Ok(())
+        })?;
+        Ok(())
+    };
+    assert_eq!(stage.attribute("/P/C.y")?.get::<f64>()?, Some(2.0));
+
+    set_active(sdf::Value::Int(5))?;
+    assert!(stage.prim("/P/C")?.is_valid().is_err());
+    assert!(stage.attribute("/P/C.y")?.get::<f64>().is_err());
+    assert!(stage.prim("/P")?.child_names().is_err());
+
+    set_active(sdf::Value::Bool(true))?;
+    assert!(stage.prim("/P/C")?.is_valid()?);
+    assert_eq!(stage.attribute("/P/C.y")?.get::<f64>()?, Some(2.0));
+    assert_eq!(child_names(&stage, "/P")?, ["C"]);
     Ok(())
 }
 
@@ -5986,7 +6370,7 @@ fn traverse_all_predicate() -> Result<()> {
     stage.traverse(PrimPredicate::ALL, |p| prims.push(p.as_str().to_string()))?;
 
     assert!(prims.contains(&"/World/InactiveParent".to_string()));
-    assert!(prims.contains(&"/World/InactiveParent/Child".to_string()));
+    assert!(!prims.contains(&"/World/InactiveParent/Child".to_string()));
     assert!(prims.contains(&"/World/OverOnly".to_string()));
     assert!(prims.contains(&"/World/OverParent/Child".to_string()));
     assert!(prims.contains(&"/World/ClassParent".to_string()));
@@ -12557,6 +12941,11 @@ fn instancing_edits_refused() -> Result<()> {
     ));
     assert!(matches!(
         stage.define_prim("/Inst/Child/New"),
+        Err(StageAuthoringError::InstanceProxyEdit { .. })
+    ));
+    // Beneath an instance is refused on the path alone, where no prim composes.
+    assert!(matches!(
+        stage.define_prim("/Inst/Missing/New"),
         Err(StageAuthoringError::InstanceProxyEdit { .. })
     ));
     let prototype = proxy

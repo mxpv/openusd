@@ -746,8 +746,9 @@ impl Prim {
 
     /// `true` if the prim and all ancestors are active. Missing `active`
     /// opinions default to `true` and a non-existent prim is inactive, mirroring
-    /// C++ `UsdPrim::IsActive`. A prim the population mask excludes is not on
-    /// this stage at all, and reads back as the gate's "no answer" value, which
+    /// C++ `UsdPrim::IsActive`. A prim the population mask excludes, or one
+    /// below an inactive prim, is not on this stage at all, and reads back as
+    /// the gate's "no answer" value, which
     /// for a `bool` query is `false` — ask [`is_valid`](Self::is_valid) to tell
     /// the two apart.
     pub fn is_active(&self) -> Result<bool> {
@@ -984,7 +985,9 @@ impl Prim {
     /// each with the cumulative layer offset that reaches it. Mirrors C++
     /// `UsdPrim::GetPrimStack`.
     pub fn prim_stack(&self) -> Result<Vec<SpecSite>> {
-        Ok(self.stage.opinions(&self.path, |g, c| c.prim_stack(g, &self.path))?)
+        Ok(self
+            .stage
+            .masked_opinions(&self.path, |g, c| c.prim_stack(g, &self.path))?)
     }
 
     /// Returns a handle to this prim's composition index (C++
@@ -1011,17 +1014,21 @@ impl Prim {
         Relationship::new(&self.stage, self.property_path(name))
     }
 
-    /// Returns the composed child prim names, in strongest-layer order and
-    /// filtered by the stage's population mask. The name-only counterpart of
+    /// Returns the names of this prim's children on the stage, in
+    /// strongest-layer order and filtered by the stage's population mask. An
+    /// inactive prim has none. The name-only counterpart of
     /// [`children`](Self::children).
     pub fn child_names(&self) -> Result<Vec<Token>> {
         Ok(self
             .stage
-            .masked(&self.path, |g, cache| cache.prim_children(g, &self.path))?)
+            .masked(&self.path, |g, cache| cache.populated_children(g, &self.path))?)
     }
 
-    /// Returns the composed child prims, in strongest-layer order and filtered
-    /// by the stage's population mask. Mirrors C++ `UsdPrim::GetChildren`.
+    /// Returns this prim's children on the stage, in strongest-layer order and
+    /// filtered by the stage's population mask. An inactive prim has none, and
+    /// an instance lists its instance proxies. Mirrors C++
+    /// `UsdPrim::GetFilteredChildren` under
+    /// `UsdTraverseInstanceProxies(UsdPrimAllPrimsPredicate)`.
     pub fn children(&self) -> Result<Vec<Prim>> {
         Ok(self
             .child_names()?
@@ -1151,12 +1158,12 @@ impl Prim {
             .collect())
     }
 
-    /// Returns `true` when a prim spec is composed at this path. Mirrors C++
+    /// Returns `true` when the stage holds a prim at this path. Mirrors C++
     /// `UsdPrim::IsValid` for a handle obtained from
-    /// [`Stage::prim`](crate::usd::Stage::prim): a path with no
-    /// contributing spec yields a handle that is not valid.
-    // TODO: C++ never populates a prim beneath an inactive ancestor, so its
-    // `IsValid()` is false there; this answers whether anything composes.
+    /// [`Stage::prim`](crate::usd::Stage::prim): a path with no contributing
+    /// spec yields a handle that is not valid, and so does one the stage's
+    /// population does not reach — outside the population mask, or below an
+    /// inactive prim.
     pub fn is_valid(&self) -> Result<bool> {
         Ok(self.stage.has_spec(&self.path)?)
     }
@@ -1289,6 +1296,10 @@ fn in_namespace(name: &str, namespace: &str) -> bool {
 /// [`graph`](Self::graph). Like [`Prim`], it is a cheap value handle: each query
 /// borrows the cache briefly. Composition diagnostics remain available through
 /// [`Stage::composition_errors`].
+///
+/// Its queries answer at the composition tier, where the stage's population
+/// plays no part: a prim the population mask excludes, or one below an inactive
+/// prim, composes here though the stage does not hold it.
 #[derive(Clone)]
 pub struct PrimIndexRef {
     stage: Stage,
@@ -1330,6 +1341,62 @@ impl PrimIndexRef {
         Ok(self
             .stage
             .opinions(&self.path, |g, c| c.compute_prim_child_names(g, &self.path))?)
+    }
+
+    /// Every spec that contributes a prim spec to this prim, strongest first,
+    /// each with the cumulative layer offset that reaches it (the `primStack`
+    /// of C++ `PcpPrimIndex`).
+    pub fn prim_stack(&self) -> Result<Vec<SpecSite>> {
+        Ok(self.stage.opinions(&self.path, |g, c| c.prim_stack(g, &self.path))?)
+    }
+
+    /// Composes the variant selections in effect on this prim, as `(set,
+    /// selection)` pairs sorted by set name (C++
+    /// `PcpPrimIndex::ComposeAuthoredVariantSelections`).
+    pub fn variant_selections(&self) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .stage
+            .opinions(&self.path, |g, c| c.variant_selections(g, &self.path))?)
+    }
+
+    /// Every spec contributing to the property `name` of this prim, strongest
+    /// first (the property stack of C++ `PcpCache::ComputePropertyIndex`).
+    pub fn property_stack(&self, name: impl Into<Token>) -> Result<Vec<SpecSite>> {
+        let path = self.property_path(name);
+        Ok(self.stage.opinions(&path, |g, c| c.property_stack(g, &path, None))?)
+    }
+
+    /// The spec type of the strongest spec of the property `name`, or `None`
+    /// when no layer authors it.
+    pub fn property_type(&self, name: impl Into<Token>) -> Result<Option<sdf::SpecType>> {
+        let path = self.property_path(name);
+        Ok(self.stage.opinions(&path, |g, c| c.spec_type(g, &path))?)
+    }
+
+    /// Composes the target paths of the relationship `name` together with the
+    /// paths its list-op deletes, as `(targets, deleted)` (C++
+    /// `PcpCache::ComputeRelationshipTargetPaths`).
+    pub fn relationship_target_paths(&self, name: impl Into<Token>) -> Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
+        let path = self.property_path(name);
+        Ok(self
+            .stage
+            .opinions(&path, |g, c| c.compute_relationship_target_paths(g, &path))?)
+    }
+
+    /// Composes the connection paths of the attribute `name` together with the
+    /// paths its list-op deletes, as `(connections, deleted)` (C++
+    /// `PcpCache::ComputeAttributeConnectionPaths`).
+    pub fn attribute_connection_paths(&self, name: impl Into<Token>) -> Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
+        let path = self.property_path(name);
+        Ok(self
+            .stage
+            .opinions(&path, |g, c| c.compute_attribute_connection_paths(g, &path))?)
+    }
+
+    /// The path of the property `name` on this prim, or the empty path for an
+    /// invalid name, which composes nothing.
+    fn property_path(&self, name: impl Into<Token>) -> sdf::Path {
+        self.path.append_property(name).unwrap_or_default()
     }
 
     /// Composes the names of the properties this prim's layers author, in the
@@ -1374,7 +1441,7 @@ impl VariantSets {
     pub fn get_all_variant_selections(&self) -> Result<Vec<(String, String)>> {
         Ok(self
             .stage
-            .opinions(&self.prim, |g, c| c.variant_selections(g, &self.prim))?)
+            .masked_opinions(&self.prim, |g, c| c.variant_selections(g, &self.prim))?)
     }
 }
 

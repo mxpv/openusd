@@ -250,9 +250,9 @@ impl ClipsAPI {
     /// degrades to the clips it can read.
     ///
     /// `None` when the prim is the pseudo-root, when no set of that name
-    /// resolves here, or when the prim lies outside the stage's population mask
-    /// — a masked-out prim is not composed, so no manifest can be derived for
-    /// it.
+    /// resolves here, or when the stage does not hold the prim — it lies
+    /// outside the population mask or below an inactive prim, where nothing is
+    /// composed to derive a manifest from.
     ///
     /// With `write_blocks_for_missing`, the manifest also carries a value block
     /// at each clip's activation time for the attributes that clip has no

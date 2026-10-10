@@ -393,7 +393,8 @@ pub(super) fn author<P: PropertySpecKind>(
 }
 
 /// Runs `edit` on the spec `path` already has on the edit target, and does
-/// nothing where it has none.
+/// nothing where it has none. A property of a prim the stage does not hold is
+/// [`PrimNotValid`](StageAuthoringError::PrimNotValid).
 ///
 /// The path every clear takes. Removing an opinion never stamps a spec to
 /// remove it from, so a layer that says nothing about the property goes on
@@ -404,6 +405,7 @@ pub(super) fn edit_existing<P: PropertySpecKind>(
     path: &sdf::Path,
     edit: impl FnOnce(&mut P::View<'_>) -> Result<(), StageAuthoringError>,
 ) -> Result<(), StageAuthoringError> {
+    stage.require_included(path)?;
     stage
         .with_target_layer_at(path, |layer, spec_path| {
             edit_existing_spec(layer.data_mut(), spec_path, P::KIND, P::view, edit)
@@ -461,7 +463,12 @@ impl EnsurePlan {
 
 /// The read phase of authoring the property at `path` as a `kind` spec.
 ///
-/// In C++ precedence order: a spec of that kind already on the edit target is
+/// A property of a prim the stage does not hold — outside the population mask
+/// or below an inactive prim — is
+/// [`PrimNotValid`](StageAuthoringError::PrimNotValid), as C++ holds no
+/// `UsdPrim` there to author through.
+///
+/// Otherwise, in C++ precedence order: a spec of that kind already on the edit target is
 /// [`EnsurePlan::Existing`]; otherwise the schema declaration, then the
 /// strongest authored spec of any kind, supplies the declaration to stamp; only
 /// when nothing declares the property does `fallback` apply (`None` for an
@@ -477,6 +484,7 @@ pub(super) fn plan_property_spec(
     kind: sdf::SpecType,
     fallback: Option<PropertyDeclaration>,
 ) -> Result<EnsurePlan, StageAuthoringError> {
+    stage.require_included(path)?;
     if let Some(found) = stage.local_spec_type(path)? {
         return if found == kind {
             Ok(EnsurePlan::Existing)

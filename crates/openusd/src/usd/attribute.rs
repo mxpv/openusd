@@ -599,7 +599,7 @@ impl Attribute {
     /// Composed `connectionPaths`, with list-op edits folded across every
     /// contributing layer (prepend / append / add / delete). Returns an empty
     /// vec when no connection is authored, the path is not a property, or the
-    /// owning prim is outside the population mask. Mirrors C++
+    /// stage does not hold the owning prim. Mirrors C++
     /// `UsdAttribute::GetConnections`.
     pub fn connections(&self) -> Result<Vec<sdf::Path>> {
         Ok(self.connections_composed()?)
@@ -615,7 +615,7 @@ impl Attribute {
     /// Composes this attribute's connection paths together with the paths its
     /// list-op deletes, returned as `(connections, deleted)` (C++
     /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). Both are
-    /// empty when the owning prim is outside the population mask.
+    /// empty when the stage does not hold the owning prim.
     pub fn compute_connections(&self) -> Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
         Ok(self.stage.masked_opinions(&self.path, |g, cache| {
             cache.compute_attribute_connection_paths(g, &self.path)

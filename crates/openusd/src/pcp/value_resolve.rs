@@ -174,8 +174,8 @@ pub(crate) enum ValueState {
     ///
     /// [`Attribute::block`]: crate::usd::Attribute::block
     Blocked,
-    /// No value, and nothing blocking one: unauthored, excluded by the
-    /// population mask, or authored only as opinions that withhold samples.
+    /// No value, and nothing blocking one: unauthored, on a prim the stage
+    /// does not hold, or authored only as opinions that withhold samples.
     #[default]
     Absent,
 }

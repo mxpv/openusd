@@ -314,8 +314,8 @@ impl Relationship {
     /// contributing layer (prepend / append / add / delete). These are the raw
     /// targets (spec 12.4); target forwarding is not applied — see
     /// [`Self::forwarded_targets`]. Returns an empty vec for a non-property
-    /// path, an unauthored relationship, or an owning prim outside the
-    /// population mask. Mirrors C++ `UsdRelationship::GetTargets`.
+    /// path, an unauthored relationship, or an owning prim the stage does not
+    /// hold. Mirrors C++ `UsdRelationship::GetTargets`.
     pub fn targets(&self) -> Result<Vec<sdf::Path>> {
         Ok(self
             .stage
@@ -325,8 +325,8 @@ impl Relationship {
     /// Composes this relationship's target paths together with the paths its
     /// list-op deletes, returned as `(targets, deleted)` (C++
     /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). The
-    /// targets match [`Relationship::targets`]; both are empty when the
-    /// owning prim is outside the population mask.
+    /// targets match [`Relationship::targets`]; both are empty when the stage
+    /// does not hold the owning prim.
     pub fn compute_targets(&self) -> Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
         Ok(self.stage.masked_opinions(&self.path, |g, cache| {
             cache.compute_relationship_target_paths(g, &self.path)

@@ -1169,10 +1169,23 @@ impl Stage {
         // Anything beneath an instance is a proxy, whether or not a prim
         // composes there yet (C++ `_IsObjectDescendantOfInstance`).
         if self
-            .masked(&prim, |g, cache| cache.enclosing_instance(g, &prim))?
+            .with_cache(|g, cache| cache.enclosing_instance(g, &prim))?
             .is_some()
         {
             return Err(StageAuthoringError::InstanceProxyEdit { path: prim });
+        }
+        Ok(())
+    }
+
+    /// Refuses a property write on a prim the stage's population excludes: one
+    /// outside the population mask or below an inactive prim, where C++ holds
+    /// no `UsdPrim` to author through. A prim nothing composes yet passes at
+    /// any depth, so an edit target can author inside a variant the stage has
+    /// not selected.
+    pub(super) fn require_included(&self, scene_path: &sdf::Path) -> Result<(), StageAuthoringError> {
+        let prim = scene_path.prim_path();
+        if self.with_cache(|g, c| c.population_excludes(g, &prim))? {
+            return Err(StageAuthoringError::PrimNotValid { path: prim });
         }
         Ok(())
     }
@@ -1369,9 +1382,10 @@ impl Stage {
     /// type). The returned handle lets callers chain field setters (`set_type_name`,
     /// `set_active`, `set_kind`, …) and child-property authoring
     /// (`create_attribute`, `create_relationship`) on a prim the stage
-    /// composes. One it will not compose — outside its population mask, or
-    /// inside a variant it has not selected — takes no setter, and gets its
-    /// type through [`define_typed_prim`](Self::define_typed_prim).
+    /// composes. One it will not compose — outside its population mask, below
+    /// an inactive prim, or inside a variant it has not selected — takes no
+    /// setter, and gets its type through
+    /// [`define_typed_prim`](Self::define_typed_prim).
     pub fn define_prim(&self, path: impl sdf::IntoPath) -> Result<super::Prim, StageAuthoringError> {
         self.define_typed_prim(path, "")
     }
@@ -1421,7 +1435,9 @@ impl Stage {
     /// and `custom = true`, the supplied type being checked (an empty spelling
     /// is rejected) only in that case. A
     /// relationship at the path is
-    /// [`SpecKindMismatch`](StageAuthoringError::SpecKindMismatch).
+    /// [`SpecKindMismatch`](StageAuthoringError::SpecKindMismatch), and a prim
+    /// the stage does not hold — outside the population mask or below an
+    /// inactive prim — is [`PrimNotValid`](StageAuthoringError::PrimNotValid).
     pub fn create_attribute(
         &self,
         path: impl sdf::IntoPath,
@@ -1450,7 +1466,9 @@ impl Stage {
     /// authoring does; a
     /// [`relationship_builder`](Self::relationship_builder) says otherwise. An
     /// attribute at the path is
-    /// [`SpecKindMismatch`](StageAuthoringError::SpecKindMismatch).
+    /// [`SpecKindMismatch`](StageAuthoringError::SpecKindMismatch), and a prim
+    /// the stage does not hold is
+    /// [`PrimNotValid`](StageAuthoringError::PrimNotValid).
     pub fn create_relationship(&self, path: impl sdf::IntoPath) -> Result<super::Relationship, StageAuthoringError> {
         self.relationship_builder(path).build()
     }
@@ -2706,8 +2724,8 @@ impl Stage {
     /// anything reached across an arc.
     ///
     /// Answers [`pcp::TimedValue::Fallback`] when the attribute is
-    /// unauthored, its `default` is blocked, or the queried prim is excluded
-    /// by the stage's population mask, and [`pcp::TimedValue::NoValue`] when
+    /// unauthored, its `default` is blocked, or the stage does not hold the
+    /// queried prim, and [`pcp::TimedValue::NoValue`] when
     /// a blocked sample or a clip answers at `time` without a value.
     ///
     /// `accepts` makes it a typed read, which at the default time passes over
@@ -2794,8 +2812,7 @@ impl Stage {
     ///
     /// Derived from the prim's composed `typeName` and `apiSchemas`, and shared
     /// with every other prim resolving to the same pair. A prim with neither —
-    /// including one the population mask excludes — gets the registry's empty
-    /// type.
+    /// including one the stage does not hold — gets the registry's empty type.
     pub fn prim_type_info(&self, path: impl sdf::IntoPath) -> Result<Arc<PrimTypeInfo>> {
         Ok(self.prim_type_info_composed(path)?)
     }
@@ -2888,7 +2905,7 @@ impl Stage {
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<Token>> {
         let root = sdf::Path::abs_root();
-        Ok(self.with_cache(|g, c| c.prim_children(g, &root))?)
+        Ok(self.with_cache(|g, c| c.populated_children(g, &root))?)
     }
 
     // `has_spec` / `spec_type` below are low-level composed-spec infrastructure
@@ -2898,8 +2915,8 @@ impl Stage {
     // children / property names on `Prim` (`GetChildren` / `GetPropertyNames`),
     // targets / connections on `Relationship` / `Attribute` (`GetTargets` /
     // `GetConnections`). The handles reach the cache through [`Self::cache`]
-    // and [`Self::masked`], which applies the population mask; child lists come
-    // back filtered from [`pcp::IndexCache::prim_children`].
+    // and [`Self::masked`], which applies the stage's population; child lists
+    // come from [`pcp::IndexCache::populated_children`].
 
     /// Returns `true` if any layer has a spec at the given composed path.
     ///
@@ -2963,11 +2980,12 @@ impl Stage {
         super::decode_value(raw)
     }
 
-    /// Runs a composed query at `path` under the population mask: when the
-    /// path's owning prim is outside the working set, resolves to `T::default()`
-    /// without touching the cache; otherwise runs `query` with a short mutable
-    /// cache borrow. This is the mask-gated query runner the composed handles
-    /// ([`Prim`](super::Prim) / [`Attribute`](super::Attribute) /
+    /// Runs a composed query at `path` under the stage's population: when the
+    /// population does not reach the path's owning prim — the mask excludes
+    /// it, or an ancestor is inactive (C++ populates neither) — resolves to
+    /// `T::default()` without composing that prim; otherwise runs `query` with
+    /// a short mutable cache borrow. This is the query runner the composed
+    /// handles ([`Prim`](super::Prim) / [`Attribute`](super::Attribute) /
     /// [`Relationship`](super::Relationship)) build their scene queries on.
     pub(crate) fn masked<T: Default>(
         &self,
@@ -2977,7 +2995,7 @@ impl Stage {
         self.query_at(path, true, Reads::Source, query)
     }
 
-    /// Runs a query that reads a prim's opinions, under the population mask
+    /// Runs a query that reads a prim's opinions, under the stage's population
     /// like [`Self::masked`]. A prototype root answers `T::default()`. C++
     /// reads its opinions through an empty prim index
     /// (`Usd_PrimData::GetPrimIndex`), while its children, validity and flags
@@ -2990,8 +3008,8 @@ impl Stage {
         self.query_at(path, true, Reads::Opinions, query)
     }
 
-    /// [`Self::masked_opinions`] outside the population mask, for the reads
-    /// that answer for a masked-out prim too.
+    /// [`Self::masked_opinions`] outside the stage's population, for the
+    /// composition-tier reads that answer for a prim the stage does not hold.
     pub(crate) fn opinions<T: Default>(
         &self,
         path: &sdf::Path,
@@ -3002,12 +3020,13 @@ impl Stage {
 
     /// The runner behind [`Self::masked`], [`Self::masked_opinions`] and
     /// [`Self::opinions`]: answers `T::default()` without running `query`
-    /// when `masked` is set and the mask excludes the path's prim, or when
-    /// `reads` is [`Reads::Opinions`] and that prim is a prototype root.
+    /// when `gated` is set and the population does not reach the path's prim
+    /// (see [`pcp::IndexCache::population_reaches`]), or when `reads` is
+    /// [`Reads::Opinions`] and that prim is a prototype root.
     fn query_at<T: Default>(
         &self,
         path: &sdf::Path,
-        masked: bool,
+        gated: bool,
         reads: Reads,
         mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
     ) -> Result<T, pcp::QueryError> {
@@ -3017,7 +3036,8 @@ impl Stage {
         // is itself a composed walk.
         self.resolve_prototype_path(&prim)?;
         self.with_cache(move |g, c| {
-            let hidden = (masked && !c.mask_includes(&prim)) || (reads == Reads::Opinions && c.is_prototype(&prim));
+            let hidden =
+                (gated && !c.population_reaches(g, &prim)?) || (reads == Reads::Opinions && c.is_prototype(&prim));
             if hidden { Ok(T::default()) } else { query(g, c) }
         })
     }
@@ -3059,11 +3079,10 @@ impl Stage {
     /// The walk is the same shape as [`Self::walk_loadable`] and is built from
     /// the same primitives [`Self::traverse`] uses, so mask, activeness, and
     /// the stop at instances cannot drift from ordinary traversal. It descends
-    /// only into populated prims — [`Prim::children`](super::Prim::children)
-    /// does not prune on activeness, so without that test the walk would
-    /// compose and load whole inactive subtrees — stops at each instance, whose
-    /// subtree belongs to its prototype, and then walks each newly registered
-    /// prototype's namespace the same way to reach nested instances.
+    /// only into populated prims, so nothing below an inactive one is composed
+    /// or loaded, stops at each instance, whose subtree belongs to its
+    /// prototype, and then walks each newly registered prototype's namespace
+    /// the same way to reach nested instances.
     ///
     /// The pass must be *epoch-stable*. It runs through many separate
     /// [`Self::with_cache`] calls; each settles its own layer loading, but the
@@ -3119,30 +3138,24 @@ impl Stage {
             // [`Self::resolve_prototype_path`] the moment the walk reached a
             // prototype namespace, so the walk sits below that gate rather than
             // guarding against itself.
-            let step = self.with_cache(|g, c| {
-                if path != *root && !c.is_populated(g, &path)? {
-                    return Ok(None);
-                }
-                if let Some(prototype) = c.prototype_of(g, &path)? {
-                    return Ok(Some(Err(prototype)));
-                }
-                Ok(Some(Ok(c.prim_children(g, &path)?)))
+            let step = self.with_cache(|g, c| match c.prototype_of(g, &path)? {
+                Some(prototype) => Ok(Err(prototype)),
+                None => Ok(Ok(c.populated_children(g, &path)?)),
             })?;
             match step {
                 // An instance's subtree belongs to its prototype, so stop here
                 // and walk that namespace in its own right.
-                Some(Err(prototype)) => roots.push(prototype),
+                Err(prototype) => roots.push(prototype),
                 // Reversed, as `traverse` does, so the walk visits children in
-                // namespace order and prototypes mint in stage order.
-                Some(Ok(children)) => {
+                // namespace order and prototypes mint in stage order. A prim
+                // that is not populated has none.
+                Ok(children) => {
                     for name in children.iter().rev() {
                         if let Ok(child) = path.append_path(name.as_str()) {
                             stack.push(child);
                         }
                     }
                 }
-                // Not populated: nothing below it composes either.
-                None => {}
             }
         }
         Ok(())
@@ -3474,8 +3487,10 @@ impl Stage {
     /// Pass [`PrimPredicate::DEFAULT`] for OpenUSD's usual traversal region
     /// (active, loaded, defined, non-abstract). Descendants are pruned when
     /// inherited status bits make it impossible for them to match, such as below
-    /// inactive, unloaded, undefined, or abstract prims when the predicate
-    /// excludes those regions.
+    /// unloaded, undefined, or abstract prims when the predicate excludes those
+    /// regions. An inactive prim has no descendants on the stage. A predicate
+    /// that admits it, [`PrimPredicate::ALL`] included, visits the prim and
+    /// nothing below it (C++ `UsdPrimRange` under `UsdPrimAllPrimsPredicate`).
     pub fn traverse(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&sdf::Path)) -> Result<()> {
         let needed = predicate.consulted_bits();
         // Each prim carries its parent's status and the population epoch it
@@ -3509,7 +3524,7 @@ impl Stage {
                 status
             };
 
-            let children = self.masked(&path, |g, cache| cache.prim_children(g, &path))?;
+            let children = self.masked(&path, |g, cache| cache.populated_children(g, &path))?;
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
                 if let Ok(child) = path.append_path(name.as_str()) {

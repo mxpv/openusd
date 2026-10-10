@@ -113,12 +113,10 @@ fn assert_prims_exist(name: &str, format: Format, baseline: &pcp_json::Baseline,
 
     let stage = open_stage(entry);
 
-    // Collect every prim, including inactive/class/over prims, so the PCP
-    // baselines can validate composition independent of stage traversal policy.
-    let mut prims = Vec::new();
-    stage
-        .traverse(usd::PrimPredicate::ALL, |path| prims.push(path.to_string()))
-        .unwrap();
+    let prims: Vec<String> = pcp_txt::composed_prims(&stage)
+        .iter()
+        .map(|path| path.to_string())
+        .collect();
 
     let mut failures = Vec::new();
 
@@ -303,6 +301,28 @@ mod pcp_txt {
         out.push('\n');
     }
 
+    /// Every prim that composes on `stage`, depth-first in namespace order,
+    /// read at the composition tier as C++ `testPcpCompositionResults` walks
+    /// `PcpPrimIndex` child names. The stage's population plays no part in
+    /// what Pcp composes, so the prims below an inactive one are included.
+    pub fn composed_prims(stage: &usd::Stage) -> Vec<sdf::Path> {
+        let mut prims = Vec::new();
+        let mut pending = vec![sdf::Path::abs_root()];
+        while let Some(path) = pending.pop() {
+            let (children, _) = stage.prim_index(path.clone()).unwrap().child_names().unwrap();
+            pending.extend(
+                children
+                    .iter()
+                    .rev()
+                    .map(|name| path.append_path(name.as_str()).unwrap()),
+            );
+            if !path.is_abs_root() {
+                prims.push(path);
+            }
+        }
+        prims
+    }
+
     /// Regenerates the `pcp.txt` composition dump for a stage in the exact format
     /// of the vendor baselines, so it can be diffed against the baseline
     /// byte-for-byte instead of parsing the baseline into a structure.
@@ -326,20 +346,15 @@ mod pcp_txt {
         }
         out.push('\n');
 
-        let mut prims = Vec::new();
-        stage
-            .traverse(usd::PrimPredicate::ALL, |path| prims.push(path.clone()))
-            .unwrap();
-
-        for path in &prims {
-            let prim = stage.prim(path.clone()).unwrap();
+        for path in &composed_prims(stage) {
+            let index_ref = stage.prim_index(path.clone()).unwrap();
 
             let _ = writeln!(out, "{sep}");
             let _ = writeln!(out, "Results for composing <{path}>");
             out.push('\n');
 
             let _ = writeln!(out, "Prim Stack:");
-            for site in prim.prim_stack().unwrap() {
+            for site in index_ref.prim_stack().unwrap() {
                 site_line(&mut out, base, &site.layer, &site.path);
             }
             out.push('\n');
@@ -347,7 +362,7 @@ mod pcp_txt {
             // Time Offsets: walk the prim index's nodes in tree pre-order, printing
             // each node's cumulative `map_to_root` offset and every non-identity
             // sublayer member offset (C++ `testPcpCompositionResults`'s node walk).
-            let index = prim.prim_index().graph().unwrap();
+            let index = index_ref.graph().unwrap();
             let walk = walk_nodes(&index);
             let has_offsets = walk.iter().any(|&id| {
                 let node = index.node(id);
@@ -394,7 +409,7 @@ mod pcp_txt {
                 out.push('\n');
             }
 
-            let selections = prim.variant_sets().get_all_variant_selections().unwrap();
+            let selections = index_ref.variant_selections().unwrap();
             if !selections.is_empty() {
                 let _ = writeln!(out, "Variant Selections:");
                 for (set, sel) in &selections {
@@ -403,7 +418,7 @@ mod pcp_txt {
                 out.push('\n');
             }
 
-            let (children, prohibited) = prim.prim_index().child_names().unwrap();
+            let (children, prohibited) = index_ref.child_names().unwrap();
             if !children.is_empty() {
                 let _ = writeln!(out, "Child names:");
                 let _ = writeln!(out, "     {}", name_list(&children));
@@ -419,7 +434,7 @@ mod pcp_txt {
             // The dump mirrors the pcp tier, which composes `propertyChildren`
             // without applying `propertyOrder`; the usd tier's property
             // listings do apply it.
-            let properties = prim.prim_index().property_names().unwrap();
+            let properties = index_ref.property_names().unwrap();
             if !properties.is_empty() {
                 let _ = writeln!(out, "Property names:");
                 let _ = writeln!(out, "     {}", name_list(&properties));
@@ -429,10 +444,9 @@ mod pcp_txt {
             // Property stacks list every property with an authored spec.
             let mut stacks: Vec<(sdf::Path, Vec<usd::SpecSite>)> = Vec::new();
             for name in &properties {
-                let prop = prim.attribute(name);
-                let stack = prop.property_stack().unwrap();
+                let stack = index_ref.property_stack(name).unwrap();
                 if !stack.is_empty() {
-                    stacks.push((prop.path().clone(), stack));
+                    stacks.push((path.append_property(name).unwrap(), stack));
                 }
             }
             write_grouped(&mut out, "Property stacks", stacks, |out, site| {
@@ -441,12 +455,6 @@ mod pcp_txt {
 
             // Relationship targets and attribute connections, split by spec type.
             // Deleted target paths from both kinds merge into one map, printed last.
-            let rel_paths: std::collections::HashSet<sdf::Path> = prim
-                .relationships()
-                .unwrap()
-                .iter()
-                .map(|rel| rel.path().clone())
-                .collect();
             let mut rel_targets: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
             let mut attr_conns: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
             let mut deleted: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
@@ -454,8 +462,8 @@ mod pcp_txt {
                 let Some(prop_path) = path.append_property(name).ok() else {
                     continue;
                 };
-                if rel_paths.contains(&prop_path) {
-                    let (targets, del) = prim.relationship(name).compute_targets().unwrap();
+                if index_ref.property_type(name).unwrap() == Some(sdf::SpecType::Relationship) {
+                    let (targets, del) = index_ref.relationship_target_paths(name).unwrap();
                     if !targets.is_empty() {
                         rel_targets.push((prop_path.clone(), targets));
                     }
@@ -463,7 +471,7 @@ mod pcp_txt {
                         deleted.push((prop_path, del));
                     }
                 } else {
-                    let (conns, del) = prim.attribute(name).compute_connections().unwrap();
+                    let (conns, del) = index_ref.attribute_connection_paths(name).unwrap();
                     if !conns.is_empty() {
                         attr_conns.push((prop_path.clone(), conns));
                     }
@@ -907,10 +915,7 @@ fn assert_dump_matches(name: &str, format: Format, test_dir: &Path, baseline: &p
     let canonical_base = std::fs::canonicalize(base).ok();
     // Order the per-prim error sections by traversal order (matching the dump
     // body), since errors may be collected in a different order.
-    let mut order = Vec::new();
-    stage
-        .traverse(usd::PrimPredicate::ALL, |p| order.push(p.clone()))
-        .unwrap();
+    let order = pcp_txt::composed_prims(&stage);
     actual.push_str(&pcp_txt::error_trailer(
         name,
         &stage.composition_errors(),
@@ -1164,6 +1169,60 @@ mod cycle_termination {
 }
 
 #[cfg(test)]
+mod inactive_subtree {
+    use super::*;
+
+    /// The dump covers a prim below an inactive one in full: the composition
+    /// tier composes its property stacks, targets and connections though the
+    /// stage does not hold it.
+    #[test]
+    fn dump_below_inactive() {
+        let stage = usd::Stage::open("fixtures/inactive_subtree.usda").expect("open inactive_subtree fixture");
+        assert!(!stage.prim("/Off/Child").unwrap().is_valid().unwrap());
+
+        let dump = pcp_txt::pcp_dump(
+            "inactive_subtree",
+            "inactive_subtree.usda",
+            Path::new("fixtures"),
+            &stage,
+        );
+        let child = dump
+            .split("Results for composing ")
+            .find(|section| section.starts_with("</Off/Child>"))
+            .expect("the prim below the inactive one is dumped");
+        for expected in [
+            "Prim Stack:
+    inactive_subtree.usda /Off/Child
+",
+            "Property names:
+     ['in', 'keep', 'drop']
+",
+            "Property stacks:
+/Off/Child.drop:
+    inactive_subtree.usda /Off/Child.drop
+",
+            "Relationship targets:
+/Off/Child.keep:
+    /Target
+",
+            "Attribute connections:
+/Off/Child.in:
+    /Target.out
+",
+            "Deleted target paths:
+/Off/Child.drop:
+    /Target
+",
+        ] {
+            assert!(
+                child.contains(expected),
+                "missing {expected:?} in:
+{child}"
+            );
+        }
+    }
+}
+
 mod reorder {
     use super::*;
 

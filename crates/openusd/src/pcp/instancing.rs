@@ -418,12 +418,10 @@ impl IndexCache {
     /// gate, which decides both whether to descend past a prim and whether its
     /// index may register as an instance.
     ///
-    /// This is eligibility for population traversal and instance registration,
-    /// **not** prim existence: an inactive prim still exists and still composes,
-    /// and C++ instantiates it too — what it suppresses is that prim's
-    /// descendants and its instance registration. So the only two callers are
-    /// [`Self::is_instance`] and the stage's discovery walk; it must never gate
-    /// [`Self::has_spec`], `Prim::is_valid`, or any ordinary read.
+    /// This is eligibility for descent and instance registration, **not** prim
+    /// existence: an inactive prim still exists and still composes, and C++
+    /// instantiates it too — what it suppresses is that prim's descendants and
+    /// its instance registration, and never the prim's own reads.
     ///
     /// The steps are ordered so nothing below an excluded or inactive ancestor
     /// is ever composed or loaded: the mask test is pure, the parent is settled
@@ -449,12 +447,10 @@ impl IndexCache {
             return Ok(*hit);
         }
         let pending_before = self.pending_loads.len();
-        let parent = path.parent().expect("a non-root path has a parent");
-        // Short-circuiting is what orders the steps: the mask test composes
-        // nothing, and neither the prim nor its own `active` is reached until
-        // its parent is settled. The redirect is resolved once and both reads
-        // take it, rather than each finding it again.
-        let populated = self.mask_includes(path) && self.is_populated(graph, &parent)? && {
+        // Short-circuiting is what orders the steps: neither the prim nor its
+        // own `active` is reached until the population is known to reach it.
+        // The redirect is resolved once and both reads take it.
+        let populated = self.population_reaches(graph, path)? && {
             let composed = self.effective_path(graph, path)?;
             self.has_spec_at(graph, &composed)? && self.active_at(graph, &composed)?
         };
@@ -462,6 +458,62 @@ impl IndexCache {
             self.populated_prims.insert(path.clone(), populated);
         }
         Ok(populated)
+    }
+
+    /// Whether the stage's population reaches `path`: the mask exposes it and
+    /// its parent is populated. A prim that composes there is on the stage
+    /// whatever its own `active` says, as C++ `UsdStage::_ComposeChildren`
+    /// composes every child of a populated prim. Nothing at `path` itself is
+    /// composed to answer.
+    pub(crate) fn population_reaches(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        if !self.mask_includes(path) {
+            return Ok(false);
+        }
+        // TODO(perf): every gated stage read lands here, and building the
+        // parent path allocates before the memo is probed. A borrowed parent
+        // accessor on `Path`, with the memo keyed to accept it, would make a
+        // memo hit allocation-free.
+        match path.parent() {
+            Some(parent) => self.is_populated(graph, &parent),
+            // The pseudo-root, which nothing can deactivate.
+            None => Ok(true),
+        }
+    }
+
+    /// Whether the stage's population excludes `path`: the mask hides it, or
+    /// an ancestor that composes is inactive. A path below an ancestor nothing
+    /// composes — one inside a variant the stage has not selected — is not
+    /// excluded, since no opinion on the stage keeps a prim from standing
+    /// there.
+    ///
+    /// The ancestors are settled from the root down, so nothing below an
+    /// inactive one is composed to answer.
+    pub(crate) fn population_excludes(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        if !self.mask_includes(path) {
+            return Ok(true);
+        }
+        let mut ancestors: Vec<Path> = path.strict_ancestors_below_root().collect();
+        ancestors.reverse();
+        for ancestor in &ancestors {
+            if !self.is_populated(graph, ancestor)? {
+                // Its own ancestors are populated, so it is either inactive,
+                // which excludes everything below it, or composes nothing.
+                return self.has_spec(graph, ancestor);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The names of the child prims the stage holds below `path`, in
+    /// strongest-layer order: the composed names the population mask exposes,
+    /// and none below a prim that is not populated (C++
+    /// `UsdStage::_ComposeChildren`, which discards the descendants of an
+    /// inactive prim).
+    pub(crate) fn populated_children(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
+        if !self.is_populated(graph, path)? {
+            return Ok(Vec::new());
+        }
+        self.prim_children(graph, path)
     }
 
     /// Whether an answer just computed for `path` may change with no edit to

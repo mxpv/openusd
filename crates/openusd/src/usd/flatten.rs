@@ -76,7 +76,7 @@ impl Stage {
         data.create_spec(root.clone(), sdf::SpecType::PseudoRoot);
         write_fields(&mut data, &root, stage_fields(self)?);
 
-        // Everything the stage composed, whatever its status: a class prim is
+        // Everything the stage holds, whatever its status: a class prim is
         // abstract and the default predicate skips it, yet a schema library is
         // nothing but class prims. Instance proxies stand where an instance's
         // prototype content belongs, so walking through them writes each
@@ -85,6 +85,9 @@ impl Stage {
         // written, because `traverse` borrows the stage for the walk. Each
         // prim's write is independent of every other, so a per-prim sink would
         // let the walk stream — and parallelize.
+        // An inactive prim is written without its descendants, which the
+        // stage does not hold (C++ `UsdStage::Flatten` walks
+        // `UsdPrimRange::AllPrims`).
         let mut paths = Vec::new();
         self.traverse(PrimPredicate::ALL, |path| paths.push(path.clone()))?;
         for path in paths {

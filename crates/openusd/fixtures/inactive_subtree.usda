@@ -1,0 +1,19 @@
+#usda 1.0
+
+def "Target"
+{
+    custom double out
+}
+
+def "Off" (
+    active = false
+)
+{
+    def "Child"
+    {
+        custom double in
+        prepend double in.connect = </Target.out>
+        rel keep = </Target>
+        delete rel drop = </Target>
+    }
+}

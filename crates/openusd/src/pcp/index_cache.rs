@@ -194,7 +194,7 @@ pub(crate) enum AttributeValueSource {
     /// same value resolves at every time code.
     ///
     /// `Static(None)` is the default source — "this attribute resolves to
-    /// nothing" — which is what a query gated out by the population mask
+    /// nothing" — which is what a query on a prim the stage does not hold
     /// returns.
     Static(Option<Value>),
     /// A time-sampled source — the matched map, its node's layer offset, and
@@ -240,9 +240,9 @@ impl Default for AttributeValueSource {
 /// one borrow, so no edit can land between the answer and the token that guards
 /// it.
 ///
-/// The default — no value, no revision — is what a query gated out by the
-/// population mask resolves to (`Stage::masked`): a masked prim composes no
-/// index, so there is nothing to validate against and nothing to memoize.
+/// The default — no value, no revision — is what a query on a prim the stage
+/// does not hold resolves to (`Stage::masked`): such a prim composes no index,
+/// so there is nothing to validate against and nothing to memoize.
 #[derive(Default)]
 pub(crate) struct StampedValueSource {
     /// The composed prim the source resolved from. For an instance proxy this
@@ -1480,8 +1480,8 @@ impl IndexCache {
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Resolution, QueryError> {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
-            // Nothing authored, nothing blocked: what a prim the population mask
-            // excludes resolves to, so the masked path needs no special case.
+            // Nothing authored, nothing blocked: what a prim the stage does
+            // not hold resolves to, so the gated path needs no special case.
             return Ok(Resolution::default());
         };
         let mut resolver = InfoResolver {
@@ -2486,10 +2486,9 @@ impl IndexCache {
     /// [`crate::usd::ConnectionGraph::resolve_chain`]) so a deep relationship
     /// chain cannot overflow the call stack.
     ///
-    /// A target relationship on a prim the population mask excludes is not
-    /// followed — its raw targets would be empty under the mask anyway — so the
-    /// forwarded result never leaks scene the mask excludes (it stays
-    /// consistent with [`Self::relationship_targets`] on that path).
+    /// A target on a prim the stage does not hold — outside the population
+    /// mask, or below an inactive prim — is kept as-is without composing that
+    /// prim, as C++ keeps a target whose `GetPrimAtPath` is invalid.
     pub fn forwarded_relationship_targets(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Path>, QueryError> {
         let mut out = Vec::new();
         let mut emitted = HashSet::new();
@@ -2502,18 +2501,17 @@ impl IndexCache {
         let mut stack: Vec<Path> = self.relationship_targets(graph, path)?.into_iter().rev().collect();
         while let Some(target) = stack.pop() {
             // Only property targets can be relationships; a prim-path target is
-            // always terminal. Classify property targets by composed spec type.
-            // A prototype root has no properties at the stage tier (C++ reads it
-            // through an empty prim index), so a target on one is terminal too.
-            let is_relationship = target.is_property_path()
-                && !self.is_prototype(&target.prim_path())
-                && matches!(self.spec_type(graph, &target)?, Some(SpecType::Relationship));
+            // always terminal. Classify property targets by composed spec type,
+            // once the population is known to reach the prim. A prototype root
+            // has no properties at the stage tier (C++ reads it through an
+            // empty prim index), so a target on one is terminal too.
+            let is_relationship = target.is_property_path() && {
+                let prim = target.prim_path();
+                self.population_reaches(graph, &prim)?
+                    && !self.is_prototype(&prim)
+                    && matches!(self.spec_type(graph, &target)?, Some(SpecType::Relationship))
+            };
             if is_relationship {
-                // Don't follow a relationship the mask excludes; a masked-out
-                // prim contributes no composed targets.
-                if !self.mask_includes(&target.prim_path()) {
-                    continue;
-                }
                 if !followed.insert(target.clone()) {
                     continue; // already followed — break the cycle
                 }
@@ -2816,7 +2814,8 @@ impl IndexCache {
         let names = self.compute_prim_child_names(graph, path)?.0;
         // Filtered here, where the list is produced, so no caller can compose a
         // child list the population mask has not been applied to — C++ masks
-        // inside `_ComposeChildren` for the same reason.
+        // inside `_ComposeChildren` for the same reason. Activeness is applied
+        // by [`Self::populated_children`].
         Ok(self.filter_child_names(path, names))
     }
 
