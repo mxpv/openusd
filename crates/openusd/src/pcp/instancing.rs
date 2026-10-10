@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::sdf;
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{Path, PathElement, Value};
+use crate::sdf::{Path, Value};
 use crate::tf::Token;
 
 use super::diagnostics::Diagnostics;
@@ -28,10 +28,10 @@ use super::index_cache::IndexCache;
 use super::layer_graph::LayerGraph;
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
-use super::prim_graph::ArcType;
+use super::prim_graph::{ArcType, NodeId};
 use super::prim_index::PrimIndex;
 use super::prim_indexer::ExprVarDeps;
-use super::{LayerId, QueryError};
+use super::{LayerStackId, QueryError};
 
 /// The shared-prototype registry (spec 11.3.3): maps each instancing key to its
 /// prototype and tracks the instances that share it. Owns no composition state
@@ -100,17 +100,13 @@ pub(super) struct Prototype {
     pub(super) relative_mask: PopulationMask,
 }
 
-/// Identity of an instance prim's shared composition (spec 11.3.3): the
-/// arc-introduced opinions that determine its subtree, independent of the
-/// instance's own stage path. Instances with equal keys share a prototype.
+/// Identity of an instance prim's shared composition (spec 11.3.3, C++
+/// `Usd_InstanceKey` over `PcpInstanceKey`): the arcs whose opinions determine
+/// its subtree, independent of the instance's own stage path. Instances with
+/// equal keys share a prototype. See `instance_key` for which arcs count.
 ///
-/// Variant selections are folded in explicitly via [`selections`](Self::selections)
-/// rather than left implicit in the arc paths: each arc's path has its variant
-/// selections stripped (so two instances of the same reference produce the same
-/// arc path regardless of which variant they pick) and the resolved selection
-/// set is carried as a separate, path-independent list. Without the explicit
-/// list, two instances of one reference that differ only by a variant selection
-/// would collide once the selection is stripped from the path.
+/// Each arc keeps its site path as composed, variant selections included, and
+/// the resolved selection set is carried as well, as C++ keys both.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) struct InstanceKey {
     arcs: Vec<InstanceArc>,
@@ -138,7 +134,7 @@ pub(super) struct InstanceKey {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct InstanceArc {
     arc: u8,
-    layer: LayerId,
+    layer_stack: LayerStackId,
     path: String,
     layer_offset_bits: (u64, u64),
 }
@@ -316,44 +312,59 @@ pub(crate) fn is_prototype_namespace(path: &Path) -> bool {
             .is_some_and(|name| name.starts_with(PROTOTYPE_PREFIX))
 }
 
-/// Computes the instancing key for an already-built instance index: the
-/// arc-introduced (shared) opinions that define the prototype subtree,
+/// Computes the instancing key for an already-built instance index (C++
+/// `PcpInstanceKey`): the arcs whose opinions define the prototype subtree,
 /// independent of the instance's own stage path (spec 11.3.3).
 /// `instance_depth` is the instance prim's own namespace depth, used to
 /// partition shared from instance-local nodes
 /// ([`PrimIndex::instance_local_nodes`]).
 ///
-/// Each contributing arc's path is stripped of variant selections, and the
-/// resolved selection set is folded into the key explicitly (see
-/// [`InstanceKey`]), so two instances of one reference share a prototype iff
-/// their variant selections also match. `load_rules` and `mask` are the
-/// instance's load rules and population mask, already re-rooted onto its own
-/// path (`LoadRules::make_relative_to`, `PopulationMask::make_relative_to`), so
-/// two instances also only share a prototype when their load state and their
-/// exposure agree.
+/// The nodes are walked strong to weak, skipping culled subtrees, and a node
+/// joins the key when it is instanceable (C++ `Pcp_ChildNodeIsInstanceable`):
+/// shared rather than instance-local, able to contribute opinions, and
+/// authoring a spec at its site. A node without specs adds nothing to the
+/// prototype, so two instances whose implied arcs differ only in such nodes —
+/// an ancestor's class implied down to each instance's own path, say — still
+/// share. Below an instanceable node the walk stops unless the index composes
+/// a payload, whose inclusion can differ between instances: the node's site
+/// already determines what lies under it.
+///
+/// Each arc keeps its site path as composed, variant selections included, and
+/// the resolved selection set is folded in as well (see [`InstanceKey`]).
+/// `load_rules` and `mask` are the instance's load rules and population mask,
+/// already re-rooted onto its own path (`LoadRules::make_relative_to`,
+/// `PopulationMask::make_relative_to`), so two instances also only share a
+/// prototype when their load state and their exposure agree.
 fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules, mask: PopulationMask) -> InstanceKey {
     let local = index.instance_local_nodes(instance_depth, instance_depth);
+    let has_payload = index
+        .nodes_with_ids()
+        .any(|(id, node)| node.arc == ArcType::Payload && !local[id.idx()]);
     let mut arcs = Vec::new();
-    let mut selections = Vec::new();
-    for (id, node) in index.nodes_with_ids() {
-        if local[id.idx()] || node.is_culled() {
+    let mut stack: Vec<NodeId> = index.root().into_iter().collect();
+    while let Some(id) = stack.pop() {
+        let node = index.node(id);
+        if node.is_culled() {
             continue;
         }
-        if node.arc == ArcType::Variant
-            && let Some(PathElement::Variant { set, selection }) = node.path.last_element()
-        {
-            selections.push((set.to_string(), selection.to_string()));
+        let instanceable = node.arc != ArcType::Root && !local[id.idx()] && !node.is_inert() && node.has_specs();
+        if instanceable {
+            arcs.push(InstanceArc {
+                arc: node.arc as u8,
+                layer_stack: node.layer_stack_id(),
+                path: node.path.to_string(),
+                layer_offset_bits: node.map_to_root.time_offset().to_bits(),
+            });
+            if !has_payload {
+                continue;
+            }
         }
-        arcs.push(InstanceArc {
-            arc: node.arc as u8,
-            layer: node.layer_id(),
-            path: node.path.strip_all_variant_selections().to_string(),
-            layer_offset_bits: node.map_to_root.time_offset().to_bits(),
-        });
+        // Children in reverse, so the stack pops them strongest first.
+        stack.extend(node.children.iter().rev());
     }
     InstanceKey {
         arcs,
-        selections,
+        selections: index.variant_selections(),
         load_rules,
         mask,
     }

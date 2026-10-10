@@ -1,0 +1,58 @@
+#usda 1.0
+
+class "__class__"
+{
+    class "Set"
+    {
+        over "A"
+        {
+            over "Geo"
+            {
+                double radius = 5
+            }
+        }
+    }
+}
+
+def Xform "Asset"
+{
+    def Sphere "Geo"
+    {
+        double radius = 1
+    }
+}
+
+def Xform "Set" (
+    inherits = </__class__/Set>
+)
+{
+    def Xform "A" (
+        instanceable = true
+        references = </Asset>
+    )
+    {
+    }
+
+    def Xform "B" (
+        instanceable = true
+        references = </Asset>
+    )
+    {
+    }
+}
+
+def Xform "C" (
+    inherits = </__class__/C>
+    instanceable = true
+    references = </Asset>
+)
+{
+}
+
+def Xform "D" (
+    inherits = </__class__/D>
+    instanceable = true
+    references = </Asset>
+)
+{
+}
