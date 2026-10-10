@@ -134,7 +134,8 @@ pub(super) struct Use {
     /// The source the path names.
     pub source: usize,
     /// For a path into a package that names the source as that package, the
-    /// path inside it, which a rewrite keeps.
+    /// path inside it as the resolver's identifier spells it, which a
+    /// rewrite keeps.
     pub packaged: Option<String>,
 }
 
@@ -391,12 +392,11 @@ impl<'a> Discoverer<'a> {
                     self.record_unresolved(target, kind);
                     return Ok(None);
                 }
-                (
-                    registry.create_identifier(&package, anchor.as_ref()),
-                    package,
-                    AssetKind::Package,
-                    Some(inner),
-                )
+                let identifier = registry.create_identifier(&package, anchor.as_ref());
+                // The packaged path is read back from the resolver's
+                // identifier, which spells it as the entry name it reaches.
+                let packaged = packaged_part(&target, &identifier).unwrap_or(inner);
+                (identifier, package, AssetKind::Package, Some(packaged))
             }
             _ if self.policy.open_packages && kind == AssetKind::Package => {
                 (target, path.to_owned(), AssetKind::Layer, None)
@@ -495,6 +495,17 @@ impl Deref for SourceLayer<'_> {
             Self::Read(layer) => layer,
         }
     }
+}
+
+/// The packaged path the identifier `target` holds inside the package whose
+/// identifier is `package`, or `None` when `target` is not a path into it.
+fn packaged_part(target: &str, package: &str) -> Option<String> {
+    // A package nested in another closes its own brackets after the part.
+    let base = package.trim_end_matches(']');
+    let closing = package.len() - base.len() + 1;
+    let rest = target.strip_prefix(base)?.strip_prefix('[')?;
+    let (part, tail) = rest.split_at_checked(rest.len().checked_sub(closing)?)?;
+    tail.bytes().all(|byte| byte == b']').then(|| part.to_owned())
 }
 
 #[cfg(test)]

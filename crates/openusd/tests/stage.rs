@@ -3,6 +3,7 @@
 //! resolution, prim/attribute/relationship handles, instancing, value
 //! clips, and stage-tier authoring.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs;
@@ -3234,6 +3235,12 @@ impl ar::Resolver for RecordingResolver {
     }
     fn identity(&self) -> String {
         self.inner.identity()
+    }
+    fn is_context_dependent_path(&self, asset_path: &str) -> bool {
+        self.inner.is_context_dependent_path(asset_path)
+    }
+    fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
+        self.inner.in_memory_identifier(asset_path)
     }
 }
 

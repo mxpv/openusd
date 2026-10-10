@@ -36,7 +36,7 @@ use std::fs;
 use std::io::{self, Read, Seek};
 use std::marker::PhantomData;
 use std::ops::{Deref, Range};
-use std::path::{self, Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -455,6 +455,35 @@ pub trait Resolver {
         extension(asset_path)
     }
 
+    /// Whether the asset `asset_path` names depends on more than the path
+    /// itself, such as the directories a search consults or what exists
+    /// beside the layer that authors it (C++
+    /// `ArResolver::IsContextDependentPath`). An identifier made from such a
+    /// path can change while the path stays the same.
+    ///
+    /// The base trait answers `false`: every identifier is stable. A
+    /// resolver that wraps another forwards this to it, or the wrapped
+    /// resolver's context-dependent paths are taken for stable ones.
+    fn is_context_dependent_path(&self, _asset_path: &str) -> bool {
+        false
+    }
+
+    /// The identifier an in-memory layer is interned under when `asset_path`
+    /// names it. A layer that was never read from an asset has no location
+    /// to anchor against, so this is the one spelling it is found by.
+    ///
+    /// It differs from [`create_identifier`](Self::create_identifier) with
+    /// no anchor, which names a location: [`DefaultResolver`] places a
+    /// relative path under the working directory there.
+    ///
+    /// The base trait returns `asset_path` as written, so `./sub.usda` and
+    /// `sub.usda` are two identifiers. A resolver whose paths have segments
+    /// overrides this to give equivalent spellings one identifier, and a
+    /// resolver that wraps another forwards this to it.
+    fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(asset_path)
+    }
+
     /// Returns metadata about a resolved asset.
     fn get_asset_info(&self, _asset_path: &str, _resolved_path: &ResolvedPath) -> AssetInfo {
         AssetInfo::default()
@@ -675,7 +704,7 @@ impl DefaultResolver {
     /// Searches for an asset by trying the path against the resolver's search
     /// directories, then the current working directory.
     fn resolve_with_search_paths(&self, asset_path: &str) -> Option<ResolvedPath> {
-        let rel_path = Path::new(asset_path);
+        let rel_path = &*host_path(asset_path)?;
 
         // If the path is absolute, just check existence.
         if rel_path.is_absolute() {
@@ -718,6 +747,28 @@ impl Resolver for DefaultResolver {
     /// candidate does not exist keeps its bare normalized spelling, so
     /// resolving the identifier goes through the search directories and a
     /// `@usd/schema.usda@` sublayer is found beside any layer that names it.
+    ///
+    /// A relative path is read with `\` as a separator on every host, the
+    /// rule C++ `ArchNormPath` applies on Windows, so a layer authored there
+    /// (`@tex\stone.png@`) names the same asset everywhere. That departs
+    /// from C++ in four ways:
+    ///
+    /// - C++ on a POSIX host keeps `\` as a file-name byte. Here a relative
+    ///   asset path cannot name a file whose name contains `\`, and
+    ///   `tex\stone.png` names `tex/stone.png` when both exist.
+    /// - `.\sub.usda` and `..\sub.usda` are file-relative. C++
+    ///   `_IsFileRelative` recognizes the `/` spellings only, so on Windows
+    ///   it searches for `.\sub.usda`.
+    /// - The packaged path of `pkg.usdz[tex\stone.png]` is normalized to the
+    ///   entry name `tex/stone.png`. C++ leaves it as authored.
+    ///
+    /// - A letter and a colon open a Windows drive on every host, so
+    ///   `a:b.usda` is absolute. C++ on a POSIX host reads it as a relative
+    ///   path to a file of that name. A longer prefix (`ab:c.usda`) is an
+    ///   ordinary file name.
+    ///
+    /// A path absolute for another platform (`C:\tex\a.png` or `a:b.usda` on
+    /// Unix) names no location on this host and is returned unchanged.
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
         if asset_path.is_empty() {
             return String::new();
@@ -727,19 +778,18 @@ impl Resolver for DefaultResolver {
         // outer package path like any other path (so a relative `pkg.usdz` is
         // resolved against the anchor), then nest the inner packaged path back
         // inside the anchored package.
-        if is_package_relative_path(asset_path) {
-            if let Some((package, inner)) = split_package_relative_path_outer(asset_path) {
-                let anchored = self.create_identifier(&package, anchor);
-                return nest_packaged_path(&anchored, &inner);
-            }
-            return asset_path.to_string();
+        if let Some((package, inner)) = split_authored_package(asset_path) {
+            let anchored = self.create_identifier(&package, anchor);
+            return nest_packaged_path(&anchored, &inner);
         }
 
-        let path = Path::new(asset_path);
+        let Some(path) = host_path(asset_path) else {
+            return asset_path.to_string();
+        };
 
         // Absolute paths are their own identifier.
         if path.is_absolute() {
-            return canonical_identifier(path.to_path_buf());
+            return canonical_identifier(path.into_owned());
         }
 
         // Anchor relative paths.
@@ -762,11 +812,11 @@ impl Resolver for DefaultResolver {
                 return join_package_relative_path(&anchor_str, &joined);
             }
             if let Some(dir) = anchor.parent() {
-                let anchored = dir.join(path);
-                if is_search_path(path) {
+                let anchored = dir.join(&path);
+                if is_search_path(asset_path) {
                     return match anchored.canonicalize() {
                         Ok(found) => found.to_string_lossy().into_owned(),
-                        Err(_) => without_dot_segments(asset_path).into_owned(),
+                        Err(_) => path.to_string_lossy().into_owned(),
                     };
                 }
                 return canonical_identifier(anchored);
@@ -792,8 +842,7 @@ impl Resolver for DefaultResolver {
         // entry must actually exist in the archive: a path to a missing entry is
         // unresolved, not merely unreadable, so the caller reports it as such
         // rather than as a malformed layer.
-        if is_package_relative_path(asset_path) {
-            let (package, inner) = split_package_relative_path_outer(asset_path)?;
+        if let Some((package, inner)) = split_authored_package(asset_path) {
             let resolved_package = self.resolve_with_search_paths(&package)?;
             let package_str = resolved_package.to_string_lossy();
             // The levels of a nested path share this call's scope when the
@@ -813,16 +862,47 @@ impl Resolver for DefaultResolver {
             return None;
         }
 
-        let path = Path::new(asset_path);
+        // A new asset inside a package is placed in the new location of
+        // its outer package.
+        if let Some((package, inner)) = split_authored_package(asset_path) {
+            let package = self.resolve_for_new_asset(&package)?;
+            return Some(ResolvedPath::new(join_package_relative_path(
+                &package.to_string_lossy(),
+                &inner,
+            )));
+        }
+
+        let path = host_path(asset_path)?;
 
         if path.is_absolute() {
-            return Some(ResolvedPath::new(path));
+            return Some(ResolvedPath::new(path.into_owned()));
         }
 
         // Resolve relative to the current working directory.
         std::env::current_dir()
             .ok()
             .map(|cwd| ResolvedPath::new(cwd.join(path)))
+    }
+
+    /// Whether `asset_path` is a search path, the one form whose identifier
+    /// follows the filesystem: it stays bare until an asset appears beside
+    /// the layer that authors it (C++
+    /// `ArDefaultResolver::_IsContextDependentPath`).
+    fn is_context_dependent_path(&self, asset_path: &str) -> bool {
+        is_search_path(asset_path)
+    }
+
+    /// A relative `asset_path` in its normalized spelling (`\` read as a
+    /// separator, `.` segments and repeated separators dropped), and the
+    /// packaged part of a package-relative one as the entry name it reaches.
+    /// So `sub\layer.usda`, `./sub/layer.usda` and `sub/layer.usda` all name
+    /// the in-memory layer `sub/layer.usda`. An absolute path is returned
+    /// unchanged.
+    fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
+        match split_authored_package(asset_path) {
+            Some((package, inner)) => Cow::Owned(join_package_relative_path(&normalize_if_relative(&package), &inner)),
+            None => normalize_if_relative(asset_path),
+        }
     }
 
     /// Renders the canonicalized search paths as the resolver's identity token,
@@ -918,41 +998,86 @@ fn open_mapped(path: &Path) -> io::Result<Box<dyn Asset>> {
 /// Lexically normalizes `path`: drops `.` components (including a leading one)
 /// and collapses redundant separators, with no filesystem access. `..` is
 /// preserved, since collapsing it lexically could change meaning across
-/// symlinks. Matches the normalization C++ `TfNormPath` performs.
+/// symlinks. C++ `TfNormPath` collapses it.
 fn lexically_normalize(path: &Path) -> PathBuf {
     path.components().filter(|c| !matches!(c, Component::CurDir)).collect()
 }
 
-/// Whether `path` is a search path (C++ `_IsSearchPath`): relative, and not
-/// file-relative — a path spelled from the anchoring layer's directory with a
-/// leading `.` or `..` component is looked up there and nowhere else. A path
-/// that opens with a root separator or a drive is absolute for this purpose on
-/// every platform, as C++ `TfIsRelativePath` treats it. A search path is also
-/// the one identifier form that depends on the filesystem beside its anchor:
-/// it stays bare until an asset appears there.
-pub(crate) fn is_search_path(path: &Path) -> bool {
-    matches!(path.components().next(), Some(Component::Normal(_)))
+/// The characters that separate the segments of an authored asset path, on
+/// every host.
+const SEPARATORS: [char; 2] = ['/', '\\'];
+
+/// Whether the authored `asset_path` is relative, as C++ `TfIsRelativePath`
+/// reads it on Windows: it opens with neither a separator nor a drive, one
+/// ASCII letter and a colon (`C:`). The answer is the same on every host, so
+/// on Unix a file named `a:b.usda` is not reached by a relative path, while
+/// `ab:c.usda` is.
+fn is_relative_path(asset_path: &str) -> bool {
+    let drive = matches!(asset_path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
+    !asset_path.starts_with(SEPARATORS) && !drive
 }
 
-/// `asset_path` with its `.` (current-directory) segments dropped, rendered with
-/// `/` separators: `./a` and `a/./b` become `a` and `a/b`. Segments are split on
-/// any separator the platform accepts — `/` everywhere, and `\` on Windows — so
-/// this matches the `std::path::Components` normalization
-/// [`lexically_normalize`] applies. It is the bare identifier of a search path
-/// (an asset path the search directories are consulted for, not a location on
-/// this host, so it keeps the separator C++ `TfNormPath` gives it), and the
-/// spelling the composition graph's bare lookup uses for an in-memory layer
-/// interned under the literal name a `./`-relative entry names. A path with no
-/// `.` segment is returned unchanged.
-pub(crate) fn without_dot_segments(asset_path: &str) -> Cow<'_, str> {
-    if !asset_path.split(path::is_separator).any(|segment| segment == ".") {
+/// Whether the authored `asset_path` is file-relative: it opens with a `.`
+/// or `..` segment, so it is spelled from the directory of the layer that
+/// authors it and is looked up there and nowhere else. The segment may end in
+/// either separator: `.\sub.usda` is file-relative here, where C++
+/// `_IsFileRelative` recognizes `./` and `../` alone.
+pub(crate) fn is_file_relative_path(asset_path: &str) -> bool {
+    matches!(asset_path.split(SEPARATORS).next(), Some("." | ".."))
+}
+
+/// Whether the authored `asset_path` is a search path (C++ `_IsSearchPath`):
+/// relative, and not [file-relative](is_file_relative_path).
+fn is_search_path(asset_path: &str) -> bool {
+    is_relative_path(asset_path) && !is_file_relative_path(asset_path)
+}
+
+/// The relative `asset_path` with `/` between its segments, its `.` segments
+/// dropped and its repeated or trailing separators collapsed: `tex\a.png`,
+/// `./tex/a.png` and `tex//a.png` all become `tex/a.png`, as C++ `_NormPath`
+/// collapses them. `..` segments stay, for the reason [`lexically_normalize`]
+/// keeps them. A path already in this spelling is borrowed.
+fn normalize_asset_path(asset_path: &str) -> Cow<'_, str> {
+    let dropped = |segment: &str| segment.is_empty() || segment == ".";
+    if !asset_path.contains('\\') && !asset_path.split('/').any(dropped) {
         return Cow::Borrowed(asset_path);
     }
     let kept: Vec<&str> = asset_path
-        .split(path::is_separator)
-        .filter(|segment| *segment != ".")
+        .split(SEPARATORS)
+        .filter(|segment| !dropped(segment))
         .collect();
     Cow::Owned(kept.join("/"))
+}
+
+/// The authored `asset_path` in the spelling [`DefaultResolver`] gives it
+/// before any anchoring: a relative path normalized, an absolute one as
+/// written.
+fn normalize_if_relative(asset_path: &str) -> Cow<'_, str> {
+    if is_relative_path(asset_path) {
+        normalize_asset_path(asset_path)
+    } else {
+        Cow::Borrowed(asset_path)
+    }
+}
+
+/// The authored `asset_path` as a path on this host, or `None` for one that
+/// is absolute for another platform and names no location here: `C:\tex\a.png`
+/// and `\\server\share\a.png` on Unix, which the host's [`Path`] would read as
+/// a single file name. A relative path comes back normalized
+/// ([`normalize_asset_path`]), and one the host roots keeps its spelling.
+fn host_path(asset_path: &str) -> Option<Cow<'_, Path>> {
+    if is_relative_path(asset_path) {
+        return Some(match normalize_asset_path(asset_path) {
+            Cow::Borrowed(path) => Cow::Borrowed(Path::new(path)),
+            Cow::Owned(path) => Cow::Owned(PathBuf::from(path)),
+        });
+    }
+    let path = Path::new(asset_path);
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(_) | Component::RootDir)
+    )
+    .then_some(Cow::Borrowed(path))
 }
 
 /// Renders `path` as a stable layer identifier: its filesystem-canonical
@@ -1107,7 +1232,7 @@ pub(crate) fn extension(path: &str) -> &str {
 pub(crate) fn split_file_name(path: &str) -> (&str, &str) {
     let span = innermost_span(path);
     let inner = &path[span.clone()];
-    let name = inner.rfind(['/', '\\']).map_or(0, |i| i + 1);
+    let name = inner.rfind(SEPARATORS).map_or(0, |i| i + 1);
     (&path[..span.start + name], &inner[name..])
 }
 
@@ -1122,17 +1247,49 @@ pub(crate) fn split_file_name(path: &str) -> (&str, &str) {
 /// relative path it references. A `..` that would climb above the package root
 /// is dropped, since there is nothing above it inside the archive.
 fn join_packaged_path(dir: &str, rel: &str) -> String {
+    walk_packaged_path(dir, rel).0
+}
+
+/// [`join_packaged_path`] for a reference that must stay inside the package:
+/// `None` when a `..` in `rel` climbs above the package root.
+pub(crate) fn join_within_package(dir: &str, rel: &str) -> Option<String> {
+    let (joined, climbed_out) = walk_packaged_path(dir, rel);
+    (!climbed_out).then_some(joined)
+}
+
+/// The entry name `rel` reaches from the package-internal directory `dir`,
+/// and whether a `..` in it climbed above the package root and was dropped.
+fn walk_packaged_path(dir: &str, rel: &str) -> (String, bool) {
     let mut components: Vec<&str> = dir.split('/').filter(|c| !c.is_empty()).collect();
-    for part in rel.split(['/', '\\']) {
+    let mut climbed_out = false;
+    for part in rel.split(SEPARATORS) {
         match part {
             "" | "." => {}
-            ".." => {
-                components.pop();
-            }
+            ".." => climbed_out |= components.pop().is_none(),
             other => components.push(other),
         }
     }
-    components.join("/")
+    (components.join("/"), climbed_out)
+}
+
+/// Splits the authored package-relative `asset_path` at its outermost
+/// bracket into the package path as written and the packaged path as the
+/// entry name it reaches, or `None` for a path that is not package-relative.
+fn split_authored_package(asset_path: &str) -> Option<(String, String)> {
+    let (package, inner) = split_package_relative_path_outer(asset_path)?;
+    Some((package, normalize_packaged_path(&inner)))
+}
+
+/// The authored packaged path `packaged` as the entry name it reaches from a
+/// package's root, each level of a nested one (`inner.usdz[tex\a.png]`)
+/// normalized on its own. A level that climbs above its package's root
+/// (`../a.png`) names no entry and keeps its spelling.
+fn normalize_packaged_path(packaged: &str) -> String {
+    let entry = |level: &str| join_within_package("", level).unwrap_or_else(|| level.to_owned());
+    match split_authored_package(packaged) {
+        Some((package, inner)) => join_package_relative_path(&entry(&package), &inner),
+        None => entry(packaged),
+    }
 }
 
 /// Attaches `leaf` as a packaged layer inside the deepest package of `base`.
@@ -1430,32 +1587,205 @@ pub(crate) mod tests {
 
     #[test]
     fn search_path_predicate() {
-        assert!(is_search_path(Path::new("lib/sub.usda")));
-        assert!(is_search_path(Path::new("sub.usda")));
-        assert!(!is_search_path(Path::new("./sub.usda")));
-        assert!(!is_search_path(Path::new("../sub.usda")));
-        assert!(!is_search_path(Path::new("/abs/sub.usda")));
+        assert!(is_search_path("lib/sub.usda"));
+        assert!(is_search_path("sub.usda"));
+        assert!(is_search_path(r"tex\a.png"));
+        assert!(!is_search_path("./sub.usda"));
+        assert!(!is_search_path("../sub.usda"));
+        assert!(!is_search_path("/abs/sub.usda"));
+        // File-relative in either separator.
+        assert!(!is_search_path(r".\sub.usda"));
+        assert!(!is_search_path(r"..\sub.usda"));
+        // Absolute on every host.
+        for absolute in [
+            r"C:\a.usda",
+            "C:/a.usda",
+            r"\\server\a.usda",
+            r"\\?\C:\a.usda",
+            "a:b.usda",
+        ] {
+            assert!(!is_relative_path(absolute), "{absolute}");
+        }
+        // Only a single letter before the colon is a drive.
+        assert!(is_search_path("ab:c.usda"));
+        assert!(is_search_path("1:c.usda"));
     }
 
-    /// `.` path segments are dropped, anywhere in an asset path, rendered with
-    /// `/` separators. On Windows a `\`-spelled `.` segment is recognized too,
-    /// since `std::path` treats `\` as a separator there.
+    /// A relative asset path is normalized to `/` separators with its `.`
+    /// segments and repeated separators dropped, on every host.
     #[test]
-    fn dot_segments_normalized() {
-        assert_eq!(&*without_dot_segments("./sub.usda"), "sub.usda");
-        assert_eq!(&*without_dot_segments("././sub.usda"), "sub.usda");
-        assert_eq!(&*without_dot_segments("dir/./sub.usda"), "dir/sub.usda");
-        assert_eq!(&*without_dot_segments("/abs/./path"), "/abs/path");
-        assert_eq!(
-            &*without_dot_segments("sub.usda"),
-            "sub.usda",
-            "no `.` segment is unchanged"
-        );
-        #[cfg(windows)]
-        {
-            assert_eq!(&*without_dot_segments(".\\sub.usda"), "sub.usda");
-            assert_eq!(&*without_dot_segments("dir\\.\\sub.usda"), "dir/sub.usda");
+    fn asset_path_normalized() {
+        assert_eq!(&*normalize_asset_path("./sub.usda"), "sub.usda");
+        assert_eq!(&*normalize_asset_path("././sub.usda"), "sub.usda");
+        assert_eq!(&*normalize_asset_path("dir/./sub.usda"), "dir/sub.usda");
+        assert_eq!(&*normalize_asset_path(r"tex\stone.png"), "tex/stone.png");
+        assert_eq!(&*normalize_asset_path(r".\sub.usda"), "sub.usda");
+        assert_eq!(&*normalize_asset_path(r"dir\.\sub.usda"), "dir/sub.usda");
+        assert_eq!(&*normalize_asset_path("a//b"), "a/b");
+        assert_eq!(&*normalize_asset_path(r"..\a"), "../a");
+        for unchanged in ["sub.usda", "../a", "a/../b.usda"] {
+            assert!(
+                matches!(normalize_asset_path(unchanged), Cow::Borrowed(path) if path == unchanged),
+                "{unchanged} is borrowed as written"
+            );
         }
+    }
+
+    /// The in-memory identifier of a relative path is its normalized
+    /// spelling, an absolute path its own, and a packaged path is normalized
+    /// level by level.
+    #[test]
+    fn in_memory_identifier_normalized() {
+        let resolver = DefaultResolver::new();
+        assert_eq!(resolver.in_memory_identifier(r".\sub\layer.usda"), "sub/layer.usda");
+        assert_eq!(resolver.in_memory_identifier("/abs/./a.usda"), "/abs/./a.usda");
+        assert_eq!(resolver.in_memory_identifier(r"C:\dir\a.usda"), r"C:\dir\a.usda");
+        assert_eq!(
+            resolver.in_memory_identifier(r"pkg\m.usdz[in.usdz[tex\a.png]]"),
+            "pkg/m.usdz[in.usdz[tex/a.png]]"
+        );
+        assert_eq!(
+            resolver.in_memory_identifier(r"C:\dir\m.usdz[tex/a.png]"),
+            r"C:\dir\m.usdz[tex/a.png]"
+        );
+    }
+
+    /// A `\`-spelled relative path names the asset its `/` spelling names:
+    /// beside the anchor when it is there, bare when it is not, and anchored
+    /// regardless when it opens with `.`.
+    #[test]
+    fn backslash_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchor = ResolvedPath::new(dir.path().join("root.usda"));
+        let resolver = DefaultResolver::new();
+
+        assert_eq!(
+            resolver.create_identifier(r"tex\stone.png", Some(&anchor)),
+            "tex/stone.png",
+            "a missing search path keeps its bare normalized spelling"
+        );
+        let colon = resolver.create_identifier("./ab:c.usda", Some(&anchor));
+        assert!(Path::new(&colon).is_absolute(), "a longer prefix is no drive: {colon}");
+        let dot = resolver.create_identifier(r".\tex\stone.png", Some(&anchor));
+        assert!(Path::new(&dot).is_absolute(), "file-relative path anchored: {dot}");
+        assert_eq!(dot, resolver.create_identifier("./tex/stone.png", Some(&anchor)));
+
+        fs::create_dir(dir.path().join("tex")).unwrap();
+        fs::write(dir.path().join("tex").join("stone.png"), b"png").unwrap();
+        let expected = resolver.create_identifier("tex/stone.png", Some(&anchor));
+        assert!(Path::new(&expected).is_absolute());
+        assert_eq!(resolver.create_identifier(r"tex\stone.png", Some(&anchor)), expected);
+        assert_eq!(resolver.create_identifier(r".\tex\stone.png", Some(&anchor)), expected);
+    }
+
+    #[test]
+    fn backslash_search_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("tex")).unwrap();
+        fs::write(dir.path().join("tex").join("stone.png"), b"png").unwrap();
+
+        let resolver = DefaultResolver::with_search_paths([dir.path()]);
+        let resolved = resolver
+            .resolve(r"tex\stone.png")
+            .expect("found in the search directory");
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            dir.path().join("tex/stone.png").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn backslash_new_asset() {
+        let resolver = DefaultResolver::new();
+        let forward = resolver.resolve_for_new_asset("sub/new.usda").unwrap();
+        assert!(forward.is_absolute());
+        assert_eq!(resolver.resolve_for_new_asset(r"sub\new.usda").unwrap(), forward);
+        assert_eq!(resolver.resolve_for_new_asset(r".\sub\new.usda").unwrap(), forward);
+        assert_eq!(
+            resolver.resolve_for_new_asset(r"sub\new.usdz[tex\a.png]").unwrap(),
+            resolver.resolve_for_new_asset("sub/new.usdz[tex/a.png]").unwrap()
+        );
+    }
+
+    /// A path absolute for another platform is its own identifier and
+    /// resolves to nothing, even beside a file whose name is that path.
+    #[cfg(unix)]
+    #[test]
+    fn foreign_absolute_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(r"C:\x\a.png"), b"png").unwrap();
+        fs::write(dir.path().join("root.usda"), "#usda 1.0\n").unwrap();
+        let anchor = ResolvedPath::new(dir.path().join("root.usda"));
+        let resolver = DefaultResolver::with_search_paths([dir.path()]);
+
+        for foreign in [r"C:\x\a.png", "C:/x/a.png", r"\\server\x\a.png"] {
+            assert_eq!(resolver.create_identifier(foreign, Some(&anchor)), foreign);
+            assert_eq!(resolver.create_identifier(foreign, None), foreign);
+            assert!(resolver.resolve(foreign).is_none(), "{foreign}");
+            assert!(resolver.resolve_for_new_asset(foreign).is_none(), "{foreign}");
+        }
+    }
+
+    /// With a file literally named `tex\stone.png` beside `tex/stone.png`,
+    /// the authored `tex\stone.png` names the latter.
+    #[cfg(unix)]
+    #[test]
+    fn backslash_file_name_shadowed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("tex")).unwrap();
+        fs::write(dir.path().join("tex").join("stone.png"), b"nested").unwrap();
+        fs::write(dir.path().join(r"tex\stone.png"), b"literal").unwrap();
+        let anchor = ResolvedPath::new(dir.path().join("root.usda"));
+        let resolver = DefaultResolver::new();
+
+        let id = resolver.create_identifier(r"tex\stone.png", Some(&anchor));
+        let resolved = resolver.resolve(&id).expect("resolves");
+        assert_eq!(fs::read(&*resolved).unwrap(), b"nested");
+    }
+
+    /// Each part of a package-relative path is normalized by its own rule:
+    /// the package as a path beside the anchor, the packaged path as an
+    /// entry name, at every level of nesting.
+    #[test]
+    fn backslash_package_relative() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        fs::create_dir(&packages).unwrap();
+        let mut writer = usdz::ArchiveWriter::create(packages.join("model.usdz")).unwrap();
+        writer.add_layer("root.usda", b"#usda 1.0\n").unwrap();
+        writer.add_layer("tex/stone.png", b"png").unwrap();
+        writer.finish().unwrap();
+
+        let anchor = ResolvedPath::new(dir.path().join("root.usda"));
+        let resolver = DefaultResolver::new();
+        let package = resolver.create_identifier("packages/model.usdz", Some(&anchor));
+        assert!(Path::new(&package).is_absolute());
+
+        let id = resolver.create_identifier(r"packages\model.usdz[tex\stone.png]", Some(&anchor));
+        assert_eq!(id, format!("{package}[tex/stone.png]"));
+        let resolved = resolver.resolve(&id).expect("the entry is in the archive");
+        assert_eq!(resolver.open_asset(&resolved).unwrap().read_all().unwrap(), b"png");
+        assert!(
+            resolver.resolve(&format!(r"{package}[tex\stone.png]")).is_some(),
+            "the packaged path is normalized when resolving too"
+        );
+
+        assert_eq!(
+            resolver.create_identifier(r"outer.usdz[inner.usdz[tex\stone.png]]", Some(&anchor)),
+            "outer.usdz[inner.usdz[tex/stone.png]]",
+            "a missing package keeps its bare spelling around the normalized entry"
+        );
+        assert!(
+            resolver.resolve(&format!("{package}[../root.usda]")).is_none(),
+            "a packaged path leading out of the package names no entry"
+        );
+        assert_eq!(
+            resolver.create_identifier(r".\outer.usdz[inner.usdz[tex\stone.png]]", Some(&anchor)),
+            format!(
+                "{}[inner.usdz[tex/stone.png]]",
+                resolver.create_identifier("./outer.usdz", Some(&anchor))
+            )
+        );
     }
 
     #[test]

@@ -622,6 +622,20 @@ pub enum StageAuthoringError {
         layer: String,
     },
 
+    /// The layer's identifier is not the spelling the stage's resolver gives
+    /// a layer of that name
+    /// ([`in_memory_identifier`](ar::Resolver::in_memory_identifier)), so no
+    /// asset path authored in the stage would reach the layer under it.
+    #[error(
+        "layer identifier {identifier:?} is not canonical under the stage's resolver, which spells it {expected:?}"
+    )]
+    IncompatibleLayerIdentifier {
+        /// The layer's identifier.
+        identifier: String,
+        /// The spelling the stage's resolver gives it.
+        expected: String,
+    },
+
     /// The edit target moved while a [`StageEdit`](super::StageEdit) was open.
     /// Every queued property resolved its spec path, its value and its sample
     /// time through the target the batch planned against, so committing them
@@ -3316,9 +3330,15 @@ impl Stage {
     /// change pipeline an ordinary `subLayers` edit uses. The sublayer therefore
     /// persists on save.
     ///
+    /// `layer` joins the stage under its own identifier, which must be the
+    /// spelling the stage's resolver gives a layer of that name; an anonymous
+    /// identifier always is.
+    ///
     /// Returns [`StageAuthoringError::LayerNotFound`] if `parent` is not in the
-    /// stage and [`StageAuthoringError::Layer`] if `parent` is read-only. In
-    /// both cases the graph is left untouched — `layer` only joins it once the
+    /// stage, [`StageAuthoringError::IncompatibleLayerIdentifier`] if the
+    /// stage's resolver spells `layer`'s identifier another way, and
+    /// [`StageAuthoringError::Layer`] if `parent` is read-only. In
+    /// every case the graph is left untouched — `layer` only joins it once the
     /// parent edit succeeds, so a failed insert never leaves an orphan node.
     ///
     /// If `layer` authors its own `subLayers` naming layers not yet loaded,
@@ -3342,6 +3362,13 @@ impl Stage {
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
             })?;
+            let expected = layers.layer_registry().in_memory_identifier(&identifier);
+            if expected != identifier {
+                return Err(StageAuthoringError::IncompatibleLayerIdentifier {
+                    expected: expected.into_owned(),
+                    identifier,
+                });
+            }
             let node = layers.get_mut(parent_id).expect("id_of returned a live id");
             self.edit_layer(&mut node.layer, None, |l| {
                 l.pseudo_root_mut()

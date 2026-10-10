@@ -56,7 +56,7 @@ that broader spec behavior can be considered fully covered.
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
 | Resource identifiers (URI) | `9.2` | :white_check_mark: | `0.1.1` | Asset paths via `sdf::AssetPath` (`asset` / `asset[]`) |
-| Relative resource identifiers (anchored) | `9.4.1` | :white_check_mark: | `0.2.0` | `./` and `../` resolution relative to containing layer |
+| Relative resource identifiers (anchored) | `9.4.1` | :white_check_mark: | `0.2.0` | `./` and `../` resolution relative to containing layer; `ar::DefaultResolver` reads `\` as a separator on every host |
 | Non-anchored identifiers (search paths) | `9.4.2` | :white_check_mark: | `0.2.0` | `DefaultResolver` with search paths |
 | Resolving identifiers to locations | `9.5` | :white_check_mark: | `0.2.0` | `Resolver` trait |
 | Resolving extensions | `9.6` | :white_check_mark: | `0.2.0` | `.usd`/`.usda`/`.usdc`/`.usdz` dispatch |

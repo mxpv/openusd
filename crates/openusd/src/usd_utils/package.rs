@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Seek, Write};
-use std::path::{Component, Path};
+use std::path::Path;
 
 use super::discover::{Content, Discover, Discovery, Placement, Source, Use, discover};
 use super::walk::{Visit, apply_edits, visit_asset_paths};
@@ -232,12 +232,18 @@ fn rebuild_package(graph: &pcp::LayerGraph, bytes: Vec<u8>, inside: &Discovery<'
 /// The path the layer at `location` reaches the entry of the source it
 /// authored `path` for, when that is not `path` itself; `None` leaves the
 /// path as authored, as it is for one that did not resolve. A path into a
-/// package keeps the part its use records.
+/// package takes the part its use records. A path spelled with `\`, in
+/// either part, is always rewritten, since a reader that keeps `\` as a
+/// file-name byte (C++ on a POSIX host) would not reach the entry by it.
 fn rewrite(location: &str, path: &str, uses: &HashMap<String, Use>, entries: &[String]) -> Option<String> {
     let Use { source, packaged } = uses.get(path)?;
     let entry = &entries[*source];
-    let to_source = ar::split_package_relative_path_outer(path).map_or_else(|| path.to_owned(), |(package, _)| package);
-    if kept_entry(location, &to_source).as_deref() == Some(entry) {
+    let (to_source, authored) = match ar::split_package_relative_path_outer(path) {
+        Some((package, inner)) => (package, Some(inner)),
+        None => (path.to_owned(), None),
+    };
+    let as_authored = !to_source.contains('\\') && (packaged.is_none() || *packaged == authored);
+    if as_authored && kept_entry(location, &to_source).as_deref() == Some(entry) {
         return None;
     }
     let moved = path_to(location, entry);
@@ -251,23 +257,11 @@ fn rewrite(location: &str, path: &str, uses: &HashMap<String, Use>, entries: &[S
 /// `../tex/t.png`) reaches, or `None` for any other path or one leading out
 /// of the package.
 fn kept_entry(location: &str, path: &str) -> Option<String> {
-    let mut components = Path::new(path).components().peekable();
-    if !matches!(components.peek(), Some(Component::CurDir | Component::ParentDir)) {
+    if !ar::is_file_relative_path(path) {
         return None;
     }
-    let mut parts: Vec<&str> = location.split('/').collect();
-    parts.pop();
-    for component in components {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                parts.pop()?;
-            }
-            Component::Normal(part) => parts.push(part.to_str()?),
-            Component::RootDir | Component::Prefix(_) => return None,
-        }
-    }
-    Some(parts.join("/"))
+    let directory = location.rsplit_once('/').map_or("", |(directory, _)| directory);
+    ar::join_within_package(directory, path)
 }
 
 /// The path from the layer at `location` to `entry`.
@@ -849,6 +843,99 @@ def "T"
         let dependencies = compute_all_dependencies(&packaged, output.to_str().unwrap())?;
         assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
         Ok(())
+    }
+
+    /// A texture authored with `\` separators is packaged and still resolves
+    /// from the package: a search path moves to a numbered directory, and a
+    /// `.\` path keeps its place under the entry name its `/` spelling has.
+    #[test]
+    fn backslash_paths_packaged() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let base = dir.path();
+        write(
+            base,
+            "scene/root.usda",
+            "#usda 1.0\ndef \"T\"\n{\n    asset search = @tex\\stone.png@\n    asset kept = @.\\tex\\wood.png@\n}\n",
+        );
+        write(base, "scene/tex/stone.png", "PNG");
+        write(base, "scene/tex/wood.png", "PNG");
+
+        let (root, stage) = open(base, "scene/root.usda")?;
+        let dependencies = compute_all_dependencies(&stage, &root)?;
+        assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+        for texture in ["stone.png", "wood.png"] {
+            let expected = fs::canonicalize(base.join("scene/tex").join(texture))?;
+            assert!(
+                dependencies.assets.iter().any(|asset| Path::new(asset) == expected),
+                "{texture}: {:?}",
+                dependencies.assets
+            );
+        }
+
+        let output = base.join("out.usdz");
+        let skipped = create_new_usdz_package(&stage, &root, &output, None)?;
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let (names, texts) = entries(&output);
+        assert_eq!(names, ["root.usda", "tex/wood.png", "0/stone.png"]);
+        let root_text = &texts["root.usda"];
+        assert!(root_text.contains("@tex/wood.png@"), "{root_text}");
+        assert!(!root_text.contains('\\'), "{root_text}");
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        for (attribute, entry) in [
+            ("/T.search", "out.usdz[0/stone.png]"),
+            ("/T.kept", "out.usdz[tex/wood.png]"),
+        ] {
+            let asset = attribute_value(&packaged, attribute)
+                .and_then(|value| value.try_as_asset_path())
+                .expect("an asset value");
+            let resolved = asset.resolved_path().expect("the packaged texture resolves");
+            assert!(resolved.ends_with(entry), "{attribute}: {resolved}");
+        }
+        Ok(())
+    }
+
+    /// A path into a package with `\` in its packaged part is rewritten to
+    /// the entry name it reaches, and resolves from the new package.
+    #[test]
+    fn backslash_packaged_part() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let base = dir.path();
+        write(
+            base,
+            "scene/root.usda",
+            "#usda 1.0\ndef \"T\"\n{\n    asset tex = @./model.usdz[tex\\stone.png]@\n}\n",
+        );
+        let mut model = ArchiveWriter::create(base.join("scene/model.usdz"))?;
+        model.add_layer("model.usda", b"#usda 1.0\ndef \"M\" {\n}\n")?;
+        model.add_layer("tex/stone.png", b"PNG")?;
+        model.finish()?;
+
+        let (root, stage) = open(base, "scene/root.usda")?;
+        let output = base.join("out.usdz");
+        let skipped = create_new_usdz_package(&stage, &root, &output, None)?;
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let (names, texts) = entries(&output);
+        assert_eq!(names, ["root.usda", "model.usdz"]);
+        let root_text = &texts["root.usda"];
+        assert!(root_text.contains("@model.usdz[tex/stone.png]@"), "{root_text}");
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        let asset = attribute_value(&packaged, "/T.tex")
+            .and_then(|value| value.try_as_asset_path())
+            .expect("an asset value");
+        let resolved = asset.resolved_path().expect("the packaged texture resolves");
+        assert!(resolved.ends_with("out.usdz[model.usdz[tex/stone.png]]"), "{resolved}");
+        Ok(())
+    }
+
+    #[test]
+    fn kept_entry_either_separator() {
+        assert_eq!(kept_entry("root.usda", r".\tex\a.png").as_deref(), Some("tex/a.png"));
+        assert_eq!(kept_entry("sub/a.usda", r"..\tex\a.png").as_deref(), Some("tex/a.png"));
+        assert_eq!(kept_entry("sub/a.usda", "./b/../c.usda").as_deref(), Some("sub/c.usda"));
+        assert_eq!(kept_entry("root.usda", r"..\out.png"), None, "leads out of the package");
+        assert_eq!(kept_entry("root.usda", r"tex\a.png"), None, "a search path");
     }
 
     /// A packaged path is checked whole: a missing packaged layer is left out

@@ -2000,3 +2000,212 @@ fn shared_file_one_layer() {
     assert_eq!(double_at(&stage, "/P.y"), Some(3.0));
     assert_eq!(double_at(&stage, "/P.x"), Some(1.0));
 }
+
+/// A scene directory holding a texture, a sublayer and a model, each in a
+/// directory of its own, for layers that author paths to them in either
+/// separator.
+fn separator_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for sub in ["textures", "sub", "models"] {
+        fs::create_dir(dir.path().join(sub)).expect("create dir");
+    }
+    fs::write(dir.path().join("textures/stone.png"), b"png").expect("write texture");
+    fs::write(dir.path().join("sub/layer.usda"), SUBLAYER).expect("write sublayer");
+    fs::write(
+        dir.path().join("models/model.usda"),
+        "#usda 1.0\ndef \"M\" {\n    custom double z = 5\n}\n",
+    )
+    .expect("write model");
+    dir
+}
+
+/// An asset attribute authored with `\` separators resolves to the file its
+/// `/` spelling names, on every host, and keeps its authored spelling.
+#[test]
+fn backslash_asset_attribute() {
+    let dir = separator_dir();
+    let stage = open_scene(
+        &dir,
+        concat!(
+            "#usda 1.0\n",
+            "def \"A\" {\n",
+            "    asset back = @textures\\stone.png@\n",
+            "    asset forward = @textures/stone.png@\n",
+            "    asset dot = @.\\textures\\stone.png@\n",
+            "}\n",
+        ),
+    );
+
+    let forward = asset_at(&stage, "/A.forward");
+    assert_resolved_under(&forward, "textures/stone.png", "the scene directory");
+    for attribute in ["/A.back", "/A.dot"] {
+        let asset = asset_at(&stage, attribute);
+        assert_eq!(asset.resolved_path(), forward.resolved_path(), "{attribute}");
+    }
+    assert_eq!(
+        asset_at(&stage, "/A.back").asset_path(),
+        r"textures\stone.png",
+        "the authored value keeps its spelling"
+    );
+}
+
+/// A sublayer authored with `\` separators composes as its `/` spelling
+/// does.
+#[test]
+fn backslash_sublayer() {
+    for entry in [r"sub\layer.usda", "sub/layer.usda", r".\sub\layer.usda"] {
+        let dir = separator_dir();
+        let stage = open_scene(&dir, &format!("#usda 1.0\n(\n    subLayers = [@{entry}@]\n)\n"));
+        assert!(
+            stage.composition_errors().is_empty(),
+            "{entry} resolves: {:?}",
+            stage.composition_errors()
+        );
+        assert_eq!(double_at(&stage, "/P.y"), Some(3.0), "{entry}");
+    }
+}
+
+/// A reference and a payload authored with `\` separators load their
+/// target, and every spelling of one file is one layer of the stage.
+#[test]
+fn backslash_arcs_share_layer() {
+    let dir = separator_dir();
+    let stage = open_scene(
+        &dir,
+        concat!(
+            "#usda 1.0\n",
+            "def \"Back\" (\n    references = @models\\model.usda@</M>\n) {}\n",
+            "def \"Forward\" (\n    references = @models/model.usda@</M>\n) {}\n",
+            "def \"Payload\" (\n    payload = @models\\model.usda@</M>\n) {}\n",
+        ),
+    );
+
+    for prim in ["/Back.z", "/Forward.z", "/Payload.z"] {
+        assert_eq!(double_at(&stage, prim), Some(5.0), "{prim}");
+    }
+    assert!(
+        stage.composition_errors().is_empty(),
+        "every target resolves: {:?}",
+        stage.composition_errors()
+    );
+    let models = stage
+        .layer_identifiers()
+        .into_iter()
+        .filter(|id| id.ends_with("model.usda"))
+        .collect::<Vec<_>>();
+    assert_eq!(models.len(), 1, "one file, one layer: {models:?}");
+}
+
+/// Inside a package, and naming one from outside, a `\`-separated path
+/// reaches the entry its `/` spelling names.
+#[test]
+fn backslash_packaged_asset() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("packages")).expect("create dir");
+    {
+        let mut writer = ArchiveWriter::create(dir.path().join("packages/model.usdz")).expect("create archive");
+        writer
+            .add_layer(
+                "root.usda",
+                b"#usda 1.0\ndef \"M\" {\n    asset tex = @tex\\stone.png@\n}\n",
+            )
+            .expect("add root");
+        writer.add_layer("tex/stone.png", b"png").expect("add texture");
+        writer.finish().expect("finish archive");
+    }
+    let stage = open_scene(
+        &dir,
+        concat!(
+            "#usda 1.0\n",
+            "def \"Ref\" (\n    references = @packages\\model.usdz@</M>\n) {}\n",
+            "def \"A\" {\n    asset tex = @packages\\model.usdz[tex\\stone.png]@\n}\n",
+        ),
+    );
+
+    for attribute in ["/Ref.tex", "/A.tex"] {
+        let asset = asset_at(&stage, attribute);
+        assert_resolved_under(&asset, "packages/model.usdz[tex/stone.png]", attribute);
+    }
+}
+
+/// A custom resolver receives every asset path as authored: nothing ahead
+/// of it rewrites a separator or collapses the `//` of a URI.
+#[test]
+fn custom_resolver_path_verbatim() {
+    let scene = concat!(
+        "#usda 1.0\n",
+        "def \"A\" {\n",
+        "    asset uri = @http://host/tex.png@\n",
+        "    asset back = @tex\\stone.png@\n",
+        "    asset dot = @./a/./b.png@\n",
+        "}\n",
+    );
+    let stage = Stage::builder()
+        .resolver(EchoAnchorResolver(scene.as_bytes().to_vec()))
+        .open("vault://scene.usda")
+        .expect("open stage");
+
+    for (attribute, authored) in [
+        ("/A.uri", "http://host/tex.png"),
+        ("/A.back", r"tex\stone.png"),
+        ("/A.dot", "./a/./b.png"),
+    ] {
+        assert_eq!(
+            asset_at(&stage, attribute).resolved_path(),
+            Some(format!("vault://scene.usda|{authored}").as_str()),
+            "{attribute}"
+        );
+    }
+}
+
+/// A layer opened through another resolver under `identifier`.
+fn foreign_layer(identifier: &str) -> sdf::Layer {
+    sdf::Layer::open_with(EchoAnchorResolver(SUBLAYER.as_bytes().to_vec()), identifier).expect("the layer opens")
+}
+
+/// A layer joins a stage under an identifier the stage's resolver spells
+/// the same way, whichever resolver opened it.
+#[test]
+fn insert_layer_compatible_identifier() {
+    let stage = Stage::builder().in_memory("root.usda").expect("stage");
+    let root = stage.root_layer().identifier().to_string();
+
+    stage
+        .insert_layer(&root, 0, foreign_layer("lib/sub.usda"), sdf::LayerOffset::IDENTITY)
+        .expect("a canonical identifier joins");
+    stage
+        .insert_layer(&root, 0, sdf::Layer::new_anonymous("extra"), sdf::LayerOffset::IDENTITY)
+        .expect("an anonymous identifier joins");
+    assert_eq!(double_at(&stage, "/P.y"), Some(3.0));
+    assert_eq!(stage.sub_layers(&root).len(), 3, "the root and both sublayers");
+}
+
+/// A layer whose identifier the stage's resolver spells another way is
+/// refused with both spellings, and the stage is left as it was.
+#[test]
+fn insert_layer_incompatible_identifier() {
+    let stage = Stage::builder().in_memory("root.usda").expect("stage");
+    let root = stage.root_layer().identifier().to_string();
+
+    for (identifier, canonical) in [
+        ("scheme://x.usda", "scheme:/x.usda"),
+        (r"sub\a.usda", "sub/a.usda"),
+        ("./sub.usda", "sub.usda"),
+    ] {
+        let error = stage
+            .insert_layer(&root, 0, foreign_layer(identifier), sdf::LayerOffset::IDENTITY)
+            .expect_err("a non-canonical identifier is refused");
+        assert!(
+            matches!(
+                &error,
+                usd::StageAuthoringError::IncompatibleLayerIdentifier { identifier: found, expected }
+                    if found == identifier && expected == canonical
+            ),
+            "{identifier}: {error}"
+        );
+    }
+    let authored = stage.root_layer().pseudo_root().and_then(|root| root.sublayers());
+    assert!(authored.unwrap_or_default().is_empty(), "nothing was authored");
+    assert_eq!(stage.layer_count(), 1, "nothing joined the stage");
+    assert_eq!(double_at(&stage, "/P.y"), None);
+}

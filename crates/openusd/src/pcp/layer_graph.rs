@@ -29,9 +29,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem;
-use std::path::Path as FsPath;
 
-use crate::ar::{self, ResolvedPath};
+use crate::ar::ResolvedPath;
 use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
@@ -643,6 +642,11 @@ impl LayerGraph {
     /// (its existing node, children, and relocates survive) and reported as not
     /// fresh, so a re-added layer collapses onto its existing id.
     fn intern(&mut self, mut layer: sdf::Layer) -> (LayerId, bool) {
+        debug_assert_eq!(
+            self.registry.in_memory_identifier(layer.identifier()),
+            layer.identifier(),
+            "a layer joins the graph under its canonical identifier"
+        );
         if let Some(&id) = self.by_identifier.get(layer.identifier()) {
             return (id, false);
         }
@@ -861,9 +865,13 @@ impl LayerGraph {
     /// unrelated layer interned under the bare string, while an in-memory layer
     /// keyed under that literal name (no filesystem anchor) still resolves. The
     /// resolver receives the authored spelling, so a leading `./` keeps its
-    /// file-relative meaning; only the bare fallback strips it.
+    /// file-relative meaning; the bare fallback looks up the resolver's
+    /// [`in_memory_identifier`](crate::ar::Resolver::in_memory_identifier)
+    /// for it.
     ///
-    /// An identifier is memoized in `cache` once it is stable — absolute, and
+    /// An identifier is memoized in `cache` once it is stable — made from an
+    /// entry the resolver does not call
+    /// [context dependent](crate::ar::Resolver::is_context_dependent_path), and
     /// naming an interned layer, which nothing removes — so the resolver's
     /// filesystem canonicalize runs once per such `(parent, sub_path)`. A
     /// search-path or unresolved entry is anchored afresh on every rebuild, as
@@ -875,17 +883,18 @@ impl LayerGraph {
         sub_path: &str,
         cache: &mut HashMap<LayerId, HashMap<String, String>>,
     ) -> Result<LayerId, String> {
-        let bare = ar::without_dot_segments(sub_path);
         if let Some(anchored) = cache.get(&parent).and_then(|paths| paths.get(sub_path)) {
-            return self.anchored_or_bare(anchored, &bare).ok_or_else(|| anchored.clone());
+            return self
+                .anchored_or_bare(anchored, sub_path)
+                .ok_or_else(|| anchored.clone());
         }
         let anchored = self
             .registry
             .create_identifier_anchored(sub_path, self.real_path(parent));
-        let Some(sub_id) = self.anchored_or_bare(&anchored, &bare) else {
+        let Some(sub_id) = self.anchored_or_bare(&anchored, sub_path) else {
             return Err(anchored);
         };
-        if !ar::is_search_path(FsPath::new(&anchored)) {
+        if !self.registry.is_context_dependent_path(sub_path) {
             cache.entry(parent).or_default().insert(sub_path.to_string(), anchored);
         }
         Ok(sub_id)
@@ -2302,15 +2311,17 @@ impl LayerGraph {
             .copied()
     }
 
-    /// The layer interned under the resolver-anchored identifier `anchored`, or —
-    /// when nothing is interned there — under the bare authored `normalized` path.
+    /// The layer interned under the resolver-anchored identifier `anchored`,
+    /// or — when nothing is interned there — under the authored `asset_path`'s
+    /// [`in_memory_identifier`](crate::ar::Resolver::in_memory_identifier).
     /// Anchoring wins so a relative path against a filesystem-backed layer never
     /// resolves to an unrelated layer interned under the bare string, while an
     /// in-memory layer keyed under that literal name (no filesystem anchor) still
     /// resolves. The shared lookup behind [`find_relative`](Self::find_relative)
     /// and [`resolve_sublayer`](Self::resolve_sublayer).
-    fn anchored_or_bare(&self, anchored: &str, normalized: &str) -> Option<LayerId> {
-        self.id_of(anchored).or_else(|| self.id_of(normalized))
+    fn anchored_or_bare(&self, anchored: &str, asset_path: &str) -> Option<LayerId> {
+        self.id_of(anchored)
+            .or_else(|| self.id_of(&self.registry.in_memory_identifier(asset_path)))
     }
 
     /// Resolves `asset_path` as authored in `anchor`, anchoring it through the
@@ -2341,8 +2352,7 @@ impl LayerGraph {
         let anchored = self
             .registry
             .create_identifier_anchored(asset_path, self.real_path(anchor));
-        self.anchored_or_bare(&anchored, &ar::without_dot_segments(asset_path))
-            .ok_or(anchored)
+        self.anchored_or_bare(&anchored, asset_path).ok_or(anchored)
     }
 
     /// [`resolve_sublayer`](Self::resolve_sublayer) for a demanded sublayer
@@ -4458,6 +4468,111 @@ mod tests {
         );
     }
 
+    /// A graph over in-memory layers named `names`, the first one the root.
+    fn named_graph(names: &[&str], resolver: impl ar::Resolver + 'static) -> LayerGraph {
+        let layers = names.iter().map(|name| sdf::Layer::new_in_memory(*name)).collect();
+        LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::new(Box::new(resolver)))
+    }
+
+    /// Under a resolver that leaves the trait's defaults, an authored path is
+    /// looked up as written: the two separator spellings name two layers, and
+    /// a `./` entry does not reach the layer named without it.
+    #[test]
+    fn opaque_resolver_keeps_spelling() {
+        let mut graph = named_graph(
+            &["root.usda", r"a\b.usda", "a/b.usda", "sub.usda"],
+            ar::tests::TestResolver(|| Err(io::Error::from(io::ErrorKind::NotFound))),
+        );
+        let root = graph.root_id().unwrap();
+        let back = graph.id_of(r"a\b.usda").unwrap();
+        let forward = graph.id_of("a/b.usda").unwrap();
+        assert_ne!(back, forward);
+
+        assert_eq!(graph.refresh_demanded_sublayer(root, r"a\b.usda"), Ok(back));
+        assert_eq!(graph.refresh_demanded_sublayer(root, "a/b.usda"), Ok(forward));
+        assert!(graph.refresh_demanded_sublayer(root, "./sub.usda").is_err());
+        assert_eq!(graph.find_relative("./sub.usda", root), None);
+    }
+
+    /// A resolver that gives `./sub.usda` the in-memory identifier `sub.usda`
+    /// reaches the layer of that name.
+    #[test]
+    fn in_memory_identifier_override() {
+        let mut graph = named_graph(&["root.usda", "sub.usda"], DotResolver);
+        let root = graph.root_id().unwrap();
+        let sub = graph.id_of("sub.usda").unwrap();
+
+        assert_eq!(graph.refresh_demanded_sublayer(root, "./sub.usda"), Ok(sub));
+        assert_eq!(graph.find_relative("./sub.usda", root), Some(sub));
+    }
+
+    /// Under the default resolver every spelling of a relative path names
+    /// the one in-memory layer, as a sublayer entry of any parent and as an
+    /// arc target.
+    #[test]
+    fn separator_spellings_share_layer() {
+        let mut graph = named_graph(
+            &["root.usda", "p1.usda", "p2.usda", "sub/layer.usda"],
+            ar::DefaultResolver::new(),
+        );
+        let target = graph.id_of("sub/layer.usda").unwrap();
+        let spellings = [r"sub\layer.usda", "sub/layer.usda", r".\sub\layer.usda"];
+        for (parent, spelling) in ["root.usda", "p1.usda", "p2.usda"].into_iter().zip(spellings) {
+            let parent = graph.id_of(parent).unwrap();
+            assert_eq!(
+                graph.refresh_demanded_sublayer(parent, spelling),
+                Ok(target),
+                "{spelling}"
+            );
+            assert_eq!(graph.find_relative(spelling, parent), Some(target), "{spelling}");
+        }
+    }
+
+    /// A resolver that wraps the default one and forwards its identifier
+    /// rules keeps them: every spelling still names the one in-memory layer.
+    #[test]
+    fn wrapper_forwards_identifier_rules() {
+        let mut graph = named_graph(
+            &["root.usda", "sub/layer.usda"],
+            LinkResolver {
+                inner: ar::DefaultResolver::new(),
+            },
+        );
+        let root = graph.root_id().unwrap();
+        let target = graph.id_of("sub/layer.usda").unwrap();
+        for spelling in [r"sub\layer.usda", r".\sub\layer.usda", "./sub/layer.usda"] {
+            assert_eq!(
+                graph.refresh_demanded_sublayer(root, spelling),
+                Ok(target),
+                "{spelling}"
+            );
+        }
+        assert!(graph.layer_registry().is_context_dependent_path("lib/sub.usda"));
+    }
+
+    /// A resolver under which an asset path is its own identifier wherever
+    /// it is authored, and an in-memory layer's identifier is the path
+    /// without its leading `./` segments.
+    struct DotResolver;
+
+    impl ar::Resolver for DotResolver {
+        fn create_identifier(&self, asset_path: &str, _anchor: Option<&ResolvedPath>) -> String {
+            asset_path.to_string()
+        }
+        fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
+            Some(ResolvedPath::new(asset_path))
+        }
+        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
+            self.resolve(asset_path)
+        }
+        fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+            Err(io::Error::new(io::ErrorKind::NotFound, resolved_path.to_string()))
+        }
+        fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
+            Cow::Borrowed(asset_path.trim_start_matches("./"))
+        }
+    }
+
     /// A resolver whose `create_identifier` aliases an authored `link.usda` to a
     /// fixed canonical leaf, modeling a symlinked or repository-aliased asset the
     /// resolver canonicalizes away. Every other path falls through to the default
@@ -4482,6 +4597,12 @@ mod tests {
         }
         fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
             self.inner.open_asset(resolved_path)
+        }
+        fn is_context_dependent_path(&self, asset_path: &str) -> bool {
+            self.inner.is_context_dependent_path(asset_path)
+        }
+        fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
+            self.inner.in_memory_identifier(asset_path)
         }
     }
 }

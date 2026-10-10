@@ -102,8 +102,12 @@ pub struct Layer {
 
 impl Layer {
     /// Construct a layer from a resolved identifier and a backing data store.
-    /// Crate-private — external callers should use [`Layer::new_anonymous`]
-    /// for blank in-memory layers, [`open`](Self::open) for one on disk, or
+    /// `identifier` is used verbatim, so it must already be the canonical
+    /// spelling under the resolver of the graph the layer joins: the one
+    /// [`in_memory_identifier`](ar::Resolver::in_memory_identifier) returns
+    /// for it. Crate-private — external callers should use
+    /// [`Layer::new_anonymous`] for blank in-memory layers,
+    /// [`open`](Self::open) for one on disk, or
     /// [`from_bytes`](Self::from_bytes) for one already in hand.
     pub(crate) fn new(identifier: impl Into<String>, data: LayerData) -> Self {
         Self::build(identifier.into(), None, data)
@@ -736,7 +740,8 @@ impl Layer {
     }
 
     /// Create a blank in-memory writable layer with the given verbatim
-    /// identifier and a pre-populated pseudo-root spec. Backs
+    /// identifier and a pre-populated pseudo-root spec, under the identifier
+    /// contract of [`new`](Self::new). Backs
     /// [`new_anonymous`](Self::new_anonymous) and, within the crate, composes
     /// layers whose identifiers must match an authored `subLayers` entry.
     pub(crate) fn new_in_memory(identifier: impl Into<String>) -> Self {

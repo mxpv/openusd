@@ -16,6 +16,7 @@
 //! opinions to its own namespace and so must be present whenever the layer is
 //! (spec 10.3.1.1).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
@@ -207,6 +208,25 @@ impl LayerRegistry {
     /// `(anchor_location, asset_path)`.
     pub(crate) fn create_identifier_anchored(&self, asset_path: &str, anchor_location: &str) -> String {
         self.create_identifier(asset_path, Some(&ar::ResolvedPath::new(PathBuf::from(anchor_location))))
+    }
+
+    /// The identifier an in-memory layer is interned under when `asset_path`
+    /// names it, by the resolver's
+    /// [`in_memory_identifier`](ar::Resolver::in_memory_identifier). An
+    /// anonymous layer identifier is its own, as it is for
+    /// [`create_identifier`](Self::create_identifier).
+    pub(crate) fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
+        if sdf::Layer::is_anonymous_identifier(asset_path) {
+            return Cow::Borrowed(asset_path);
+        }
+        self.resolver.in_memory_identifier(asset_path)
+    }
+
+    /// Whether the resolver calls `asset_path`
+    /// [context dependent](ar::Resolver::is_context_dependent_path). An
+    /// anonymous layer identifier never is: it names the one layer.
+    pub(crate) fn is_context_dependent_path(&self, asset_path: &str) -> bool {
+        !sdf::Layer::is_anonymous_identifier(asset_path) && self.resolver.is_context_dependent_path(asset_path)
     }
 
     /// Resolves an asset identifier to a physical location, or `None` if it does
