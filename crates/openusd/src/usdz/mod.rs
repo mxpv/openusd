@@ -14,9 +14,11 @@
 //! feature of the `zip` crate stays for `usd_utils` package rebuilding,
 //! which copies entries through the ZIP reader.
 
+mod package;
 mod reader;
 mod writer;
 
+pub use package::{Package, PackageError, PackageStats, open_package, package_contains, package_entry, package_stats};
 pub use reader::Archive;
 pub(crate) use reader::is_layer_name;
 pub use writer::ArchiveWriter;
@@ -112,7 +114,7 @@ impl ArchiveError {
     /// data rather than the destination. Meaningful only where the sink is
     /// real storage — the write seam; on the read side the package is already
     /// in hand, so a nested I/O failure there means truncated content.
-    pub(crate) fn io_kind(&self) -> Option<io::ErrorKind> {
+    fn io_kind(&self) -> Option<io::ErrorKind> {
         match self {
             Self::Io(error) | Self::Zip(zip::result::ZipError::Io(error)) => Some(error.kind()),
             Self::Entry { source, .. } => source.io_kind(),
@@ -163,10 +165,9 @@ impl sdf::FileFormat for UsdzFileFormat {
         // error, rather than being demoted to an unresolved (missing) asset.
         //
         // Only the central directory is read to list the default layer,
-        // whatever the asset, and the package is the one the resolver's
-        // cache scope holds for the entry reads that follow.
-        let first = resolver
-            .open_package(resolved)
+        // whatever the asset, and the package is the one the cache scope
+        // holds for the entry reads that follow.
+        let first = open_package(resolver, resolved)
             .ok()
             .and_then(|package| package.with(|archive| archive.first_layer_name()));
         Some(match first {
@@ -187,7 +188,7 @@ impl sdf::FileFormat for UsdzFileFormat {
     }
 
     /// Reads the default layer of the package at `resolved` from the
-    /// package the resolver opens, which a cache scope shares with the
+    /// package [`open_package`] gives, which a cache scope shares with the
     /// lookups around this read.
     fn read(
         &self,
@@ -197,12 +198,10 @@ impl sdf::FileFormat for UsdzFileFormat {
         // Failing to open the package's file is an I/O failure. Any failure
         // past that, an I/O error from reading the directory among them,
         // means the bytes are not a whole package.
-        let package = resolver
-            .open_package(resolved)
-            .map_err(|error| match error.archive_error() {
-                ArchiveError::Io(_) => sdf::FormatError::Io(error.into()),
-                _ => sdf::FormatError::Decode(Box::new(error)),
-            })?;
+        let package = open_package(resolver, resolved).map_err(|error| match error.archive_error() {
+            ArchiveError::Io(_) => sdf::FormatError::Io(error.into()),
+            _ => sdf::FormatError::Decode(Box::new(error)),
+        })?;
         package
             .with(|archive| archive.read_first_layer())
             .map_err(|error| sdf::FormatError::Decode(Box::new(error)))

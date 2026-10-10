@@ -26,8 +26,9 @@
 //! }
 //! ```
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
@@ -36,13 +37,11 @@ use std::io::{self, Read, Seek};
 use std::marker::PhantomData;
 use std::ops::{Deref, Range};
 use std::path::{self, Component, Path, PathBuf};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::thread::{self, ThreadId};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use crate::usdz;
+use crate::{tf, usdz};
 
 /// A resolved asset path representing the physical location of an asset.
 ///
@@ -487,238 +486,113 @@ pub trait Resolver {
         String::new()
     }
 
-    /// Begins a cache scope (C++ `ArResolver::BeginCacheScope`): a span over
-    /// which the resolver may keep what it opens, such as a package's
-    /// directory, and answer repeated requests from it. Returns the scope's
-    /// id and its cache, or `None` from a resolver that caches nothing.
+    /// An id unique to this resolver among every resolver the process has
+    /// made, under which a [`CacheScope`] keeps what was opened through it,
+    /// or `None` for a resolver nothing is cached for.
     ///
-    /// With a `parent` this resolver made, the scope shares that cache,
-    /// which is how a cache reaches another thread. Otherwise the scope
-    /// shares the cache of the innermost scope still open on the calling
-    /// thread, and starts an empty one when there is none.
-    ///
-    /// Callers go through [`CacheScope::begin`], which ends the scope when
-    /// its guard drops.
-    fn begin_cache_scope(&self, _parent: Option<&CacheHandle>) -> Option<(ScopeId, CacheHandle)> {
+    /// A cache keyed by it never answers one resolver with what another
+    /// opened, whatever the two have in common. A resolver that forwards
+    /// to another may answer with that one's id.
+    fn cache_id(&self) -> Option<u64> {
         None
     }
-
-    /// Ends the cache scope `scope` (C++ `ArResolver::EndCacheScope`). The
-    /// cache it used is released with the last scope sharing it.
-    fn end_cache_scope(&self, _scope: ScopeId) {}
-
-    /// Opens the package at `package`, a resolved path that may itself be
-    /// package-relative for a package nested in another, reading only its
-    /// central directory. A resolver with a cache scope open answers from
-    /// the scope's cache.
-    fn open_package(&self, package: &ResolvedPath) -> Result<Package, PackageError> {
-        let asset = self.open_asset(package).map_err(usdz::ArchiveError::from)?;
-        Ok(Package::new(usdz::Archive::from_asset(asset)?))
-    }
 }
 
-/// The identity of one cache scope, as [`Resolver::begin_cache_scope`]
-/// issues it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ScopeId(pub u64);
-
-/// A cache scope's cache, by reference: clones share the one cache, and
-/// the cache is released when the last of them drops.
+/// A cache scope (C++ `ArResolverScopedCache`): a span, on one thread,
+/// over which work that asks for the same asset several times keeps what
+/// it opened, such as a package's directory. The scope ends when the guard
+/// drops.
 ///
-/// What the cache holds is the business of the resolver that made it, which
-/// is also what tells a resolver its own handle from another's.
-#[derive(Clone)]
-pub struct CacheHandle(Arc<dyn Any + Send + Sync>);
-
-impl CacheHandle {
-    /// A handle on `contents`.
-    pub fn new(contents: impl Any + Send + Sync) -> Self {
-        CacheHandle(Arc::new(contents))
-    }
-
-    /// The cache's contents, when they are a `T`.
-    pub fn contents<T: Any>(&self) -> Option<&T> {
-        self.0.downcast_ref()
-    }
-}
-
-impl fmt::Debug for CacheHandle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CacheHandle").finish_non_exhaustive()
-    }
-}
-
-/// A cache scope held open on a resolver (C++ `ArResolverScopedCache`):
-/// the scope ends when the guard drops.
-///
-/// A resolver answers from the scope's cache for as long as the scope is
-/// open: a package replaced meanwhile is still read as it was opened, and
-/// one that failed to open still fails. A caller that rewrites a package
-/// ends the scope first.
-///
-/// A scope belongs to the thread that began it, and the guard stays on
-/// that thread. [`handle`](Self::handle) gives the cache to share with a
-/// scope begun on another thread.
-pub struct CacheScope<'r> {
-    resolver: ScopedResolver<'r>,
-    scope: Option<(ScopeId, CacheHandle)>,
+/// A scope begun while another is open on the thread shares that scope's
+/// cache: an operation holds one without asking whether its caller does.
+/// A scope belongs to the thread that began it and the guard stays on that
+/// thread; [`handle`](Self::handle) gives the cache for a scope on another
+/// thread to share.
+pub struct CacheScope {
+    handle: CacheHandle,
     /// Keeps the guard on its thread.
     thread: PhantomData<*const ()>,
 }
 
-/// The resolver a [`CacheScope`] is open on, as the guard holds it.
-enum ScopedResolver<'r> {
-    Borrowed(&'r dyn Resolver),
-    Shared(Rc<dyn Resolver>),
-}
-
-impl ScopedResolver<'_> {
-    fn get(&self) -> &dyn Resolver {
-        match self {
-            ScopedResolver::Borrowed(resolver) => *resolver,
-            ScopedResolver::Shared(resolver) => resolver.as_ref(),
-        }
-    }
-}
-
-impl<'r> CacheScope<'r> {
-    /// Begins a scope on `resolver`, sharing `parent`'s cache when given
-    /// one the resolver made.
-    pub fn begin(resolver: &'r dyn Resolver, parent: Option<&CacheHandle>) -> Self {
-        CacheScope {
-            scope: resolver.begin_cache_scope(parent),
-            resolver: ScopedResolver::Borrowed(resolver),
-            thread: PhantomData,
-        }
+impl CacheScope {
+    /// Begins a scope on the calling thread. It shares the cache of the
+    /// innermost scope open on the thread, and starts an empty one when
+    /// there is none.
+    pub fn begin() -> Self {
+        Self::begin_shared(&Self::current().unwrap_or_default())
     }
 
-    /// Begins a scope on a shared `resolver`, for a guard that outlives
-    /// the borrow its holder took the resolver through.
-    pub fn begin_shared(resolver: Rc<dyn Resolver>, parent: Option<&CacheHandle>) -> CacheScope<'static> {
-        CacheScope {
-            scope: resolver.begin_cache_scope(parent),
-            resolver: ScopedResolver::Shared(resolver),
-            thread: PhantomData,
-        }
-    }
-
-    /// The scope's cache, `None` when the resolver caches nothing.
-    pub fn handle(&self) -> Option<CacheHandle> {
-        self.scope.as_ref().map(|(_, handle)| handle.clone())
-    }
-}
-
-impl Drop for CacheScope<'_> {
-    fn drop(&mut self) {
-        if let Some((id, _)) = self.scope {
-            self.resolver.get().end_cache_scope(id);
-        }
-    }
-}
-
-/// A package opened through a resolver: its central directory, parsed
-/// once and shared by every holder (C++ `SdfZipFile` as
-/// `Sdf_UsdzResolverCache` shares it).
-#[derive(Clone)]
-pub struct Package(Arc<Mutex<usdz::Archive>>);
-
-impl Package {
-    /// A package over `archive`.
-    pub fn new(archive: usdz::Archive) -> Self {
-        Package(Arc::new(Mutex::new(archive)))
-    }
-
-    /// Runs `read` on the package's archive. Holders take turns, since
-    /// reading an entry moves the archive's position in its asset.
+    /// Begins a scope on the calling thread that shares `handle`'s cache,
+    /// the cache of a scope open on another thread.
     ///
-    /// TODO(rayon): a reader of one entry holds the package for the whole
-    /// read. Entries are independent ranges of the package: readers on
-    /// several threads could each take a range under the lock and read it
-    /// outside.
-    pub fn with<T>(&self, read: impl FnOnce(&mut usdz::Archive) -> T) -> T {
-        read(&mut lock(&self.0))
+    /// TODO(rayon): nothing shares a cache across threads yet. A parallel
+    /// load would begin each worker's scope with the handle of the scope
+    /// its caller holds.
+    pub fn begin_shared(handle: &CacheHandle) -> Self {
+        SCOPES.with_borrow_mut(|scopes| scopes.push(handle.clone()));
+        CacheScope {
+            handle: handle.clone(),
+            thread: PhantomData,
+        }
+    }
+
+    /// The scope's cache.
+    pub fn handle(&self) -> CacheHandle {
+        self.handle.clone()
+    }
+
+    /// The cache of the innermost scope open on the calling thread.
+    pub fn current() -> Option<CacheHandle> {
+        SCOPES.with_borrow(|scopes| scopes.last().cloned())
     }
 }
 
-/// Why a package could not be opened, or an entry of it read. The failure
-/// is shared, since a cache scope reports one failed open to every caller
-/// that asks for the package within it.
-#[derive(Debug, Clone, thiserror::Error)]
-#[error(transparent)]
-pub struct PackageError(Arc<usdz::ArchiveError>);
-
-impl PackageError {
-    /// The failure underneath.
-    pub fn archive_error(&self) -> &usdz::ArchiveError {
-        &self.0
+impl Drop for CacheScope {
+    fn drop(&mut self) {
+        // The innermost scope sharing this cache is the one removed: scopes
+        // on one cache are interchangeable, which keeps guards dropped out
+        // of the order they were begun in exact. A guard outliving its
+        // thread's storage has nothing left to remove.
+        let _ = SCOPES.try_with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            if let Some(at) = scopes.iter().rposition(|open| Arc::ptr_eq(&open.0, &self.handle.0)) {
+                scopes.remove(at);
+            }
+        });
     }
 }
 
-impl From<usdz::ArchiveError> for PackageError {
-    fn from(error: usdz::ArchiveError) -> Self {
-        PackageError(Arc::new(error))
-    }
+thread_local! {
+    /// The caches of the scopes open on this thread, innermost last.
+    static SCOPES: RefCell<Vec<CacheHandle>> = const { RefCell::new(Vec::new()) };
 }
 
-/// A package failure keeps the kind of the byte I/O failure underneath it
-/// when there is one.
-impl From<PackageError> for io::Error {
-    fn from(error: PackageError) -> Self {
-        io::Error::new(error.0.io_kind().unwrap_or(io::ErrorKind::Other), error)
-    }
-}
+/// The [`cache_id`](Resolver::cache_id) the next [`DefaultResolver`] takes.
+static NEXT_RESOLVER: AtomicU64 = AtomicU64::new(0);
 
-/// Locks `mutex`, reading through a poisoned lock: the state these locks
-/// guard is whole after every statement that changes it.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
+/// A cache scope's cache, by reference: clones share the one cache, and
+/// the cache is released when the last of them drops.
+///
+/// The cache holds one value of each type asked of it. Each kind of work
+/// keeps its own, such as the package cache of [`crate::usdz`].
+#[derive(Clone, Default)]
+pub struct CacheHandle(Arc<Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>>);
 
-/// A shared resolver resolves as the resolver it points to. A caller hands
-/// one to a stage and keeps a handle on it.
-impl<R: Resolver + ?Sized> Resolver for Rc<R> {
-    fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
-        (**self).create_identifier(asset_path, anchor)
-    }
-
-    fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
-        (**self).resolve(asset_path)
-    }
-
-    fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
-        (**self).resolve_for_new_asset(asset_path)
-    }
-
-    fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
-        (**self).open_asset(resolved_path)
-    }
-
-    fn get_extension<'a>(&self, asset_path: &'a str) -> &'a str {
-        (**self).get_extension(asset_path)
-    }
-
-    fn get_asset_info(&self, asset_path: &str, resolved_path: &ResolvedPath) -> AssetInfo {
-        (**self).get_asset_info(asset_path, resolved_path)
-    }
-
-    fn get_modification_timestamp(&self, asset_path: &str, resolved_path: &ResolvedPath) -> Option<SystemTime> {
-        (**self).get_modification_timestamp(asset_path, resolved_path)
-    }
-
-    fn identity(&self) -> String {
-        (**self).identity()
-    }
-
-    fn begin_cache_scope(&self, parent: Option<&CacheHandle>) -> Option<(ScopeId, CacheHandle)> {
-        (**self).begin_cache_scope(parent)
-    }
-
-    fn end_cache_scope(&self, scope: ScopeId) {
-        (**self).end_cache_scope(scope);
-    }
-
-    fn open_package(&self, package: &ResolvedPath) -> Result<Package, PackageError> {
-        (**self).open_package(package)
+impl CacheHandle {
+    /// The cache of type `T` this scope keeps, made empty when first asked
+    /// for.
+    ///
+    /// TODO(rayon): every lookup on every thread sharing the handle takes
+    /// this one lock before the cache's own. A lookup only reads once the
+    /// cache exists; a read lock would let them run together.
+    pub fn cache<T: Any + Default + Send + Sync>(&self) -> Arc<T> {
+        let mut caches = tf::lock(&self.0);
+        let cache = caches
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Arc::new(T::default()));
+        Arc::clone(cache)
+            .downcast()
+            .expect("a cache is kept under its own type")
     }
 }
 
@@ -741,19 +615,8 @@ impl<R: Resolver + ?Sized> Resolver for Rc<R> {
 /// read-only memory mapping and a layer holds no copy of its file.
 pub struct DefaultResolver {
     search_paths: Vec<PathBuf>,
-    /// The package work done so far, which [`package_stats`](Self::package_stats)
-    /// reports.
-    packages: PackageCounters,
-    /// This instance's id, which the caches it makes carry.
+    /// This resolver's [`cache_id`](Resolver::cache_id).
     id: u64,
-    /// The cache scopes open on each thread, innermost last.
-    ///
-    /// TODO(rayon): every package lookup takes this one lock to find its
-    /// thread's scope. The scopes of different threads are independent, so
-    /// a per-thread stack would let lookups run without it.
-    scopes: Mutex<HashMap<ThreadId, Vec<(ScopeId, CacheHandle)>>>,
-    /// The id the next scope takes.
-    next_scope: AtomicU64,
     /// Whether a file asset is served from a memory mapping.
     #[cfg(feature = "mmap")]
     map_files: bool,
@@ -764,10 +627,7 @@ impl DefaultResolver {
     pub fn new() -> Self {
         Self {
             search_paths: Vec::new(),
-            packages: PackageCounters::default(),
             id: NEXT_RESOLVER.fetch_add(1, Ordering::Relaxed),
-            scopes: Mutex::default(),
-            next_scope: AtomicU64::new(0),
             #[cfg(feature = "mmap")]
             map_files: false,
         }
@@ -801,15 +661,6 @@ impl DefaultResolver {
     pub unsafe fn map_files(mut self) -> Self {
         self.map_files = true;
         self
-    }
-
-    /// The package work this resolver has done since it was made.
-    pub fn package_stats(&self) -> PackageStats {
-        PackageStats {
-            opens: self.packages.opens.load(Ordering::Relaxed),
-            directory_parses: self.packages.directory_parses.load(Ordering::Relaxed),
-            cache_hits: self.packages.cache_hits.load(Ordering::Relaxed),
-        }
     }
 
     /// Creates a new default resolver with the given search paths.
@@ -951,8 +802,8 @@ impl Resolver for DefaultResolver {
             let package_str = resolved_package.to_string_lossy();
             // The levels of a nested path share this call's scope when the
             // caller holds none: the outer package is opened once.
-            let _scope = CacheScope::begin(self, None);
-            if !self.package_contains(&package_str, &inner) {
+            let _scope = is_package_relative_path(&inner).then(CacheScope::begin);
+            if !usdz::package_contains(self, &package_str, &inner) {
                 return None;
             }
             return Some(ResolvedPath::new(join_package_relative_path(&package_str, &inner)));
@@ -990,6 +841,10 @@ impl Resolver for DefaultResolver {
         self.search_paths.iter().map(|p| format!("{p:?}")).collect()
     }
 
+    fn cache_id(&self) -> Option<u64> {
+        Some(self.id)
+    }
+
     fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
         let path_str = resolved_path.to_str().unwrap_or_default();
 
@@ -1007,47 +862,13 @@ impl Resolver for DefaultResolver {
                     format!("invalid package-relative path: {}", resolved_path),
                 )
             })?;
-            // The levels of a nested path share this call's scope when the
-            // caller holds none: the outer package is opened once.
-            let _scope = CacheScope::begin(self, None);
-            let bytes = self.package_entry(&package, &inner)?;
-            return Ok(Box::new(io::Cursor::new(bytes)));
+            // The entry's bytes are shared: a package nested here serves
+            // its own entries as views of them.
+            let bytes = usdz::package_entry(self, &package, &inner)?.into_shared();
+            return Ok(Box::new(io::Cursor::new(AssetBuffer::Shared(bytes))));
         }
 
         self.open_file(resolved_path)
-    }
-
-    fn begin_cache_scope(&self, parent: Option<&CacheHandle>) -> Option<(ScopeId, CacheHandle)> {
-        let id = ScopeId(self.next_scope.fetch_add(1, Ordering::Relaxed));
-        let mut scopes = lock(&self.scopes);
-        let open = scopes.entry(thread::current().id()).or_default();
-        let handle = parent
-            .filter(|parent| self.package_cache(parent).is_some())
-            .or_else(|| open.last().map(|(_, handle)| handle))
-            .cloned()
-            .unwrap_or_else(|| {
-                CacheHandle::new(PackageCache {
-                    owner: self.id,
-                    slots: Mutex::default(),
-                })
-            });
-        open.push((id, handle.clone()));
-        Some((id, handle))
-    }
-
-    fn end_cache_scope(&self, scope: ScopeId) {
-        let thread = thread::current().id();
-        let mut scopes = lock(&self.scopes);
-        if let Some(open) = scopes.get_mut(&thread) {
-            open.retain(|(id, _)| *id != scope);
-            if open.is_empty() {
-                scopes.remove(&thread);
-            }
-        }
-    }
-
-    fn open_package(&self, package: &ResolvedPath) -> Result<Package, PackageError> {
-        self.find_or_open_package(&package.to_string_lossy())
     }
 }
 
@@ -1064,149 +885,6 @@ impl DefaultResolver {
         }
         Ok(Box::new(fs::File::open(path)?))
     }
-
-    /// Whether `inner` should be treated as present in the package at
-    /// `package`.
-    ///
-    /// Reading only the archive's central directory — not its entry data — a
-    /// readable archive that genuinely lacks a flat entry reports it absent,
-    /// so [`resolve`](Resolver::resolve) reports a missing inner layer as
-    /// unresolved rather than as a layer that exists but cannot be read. A
-    /// nested packaged path (`inner.usdz[deep.usd]`) is checked one bracket
-    /// at a time, the inner package read from its entry, as C++ `ArResolver`
-    /// resolves each level with the package resolver. A `package` that cannot
-    /// be opened right now (a transient IO error or a corrupt archive —
-    /// distinct from a genuinely absent entry) is deliberately treated as
-    /// present so the eventual open surfaces the accurate error instead of a
-    /// misleading "missing asset".
-    fn package_contains(&self, package: &str, inner: &str) -> bool {
-        let Ok(found) = self.find_or_open_package(package) else {
-            return true;
-        };
-        let Some((nested, rest)) = split_package_relative_path_outer(inner) else {
-            return found.with(|archive| archive.contains(inner));
-        };
-        found.with(|archive| archive.contains(&nested))
-            && self.package_contains(&nest_packaged_path(package, &nested), &rest)
-    }
-
-    /// The bytes of the entry `inner` names in the package at `package`. A
-    /// nested packaged path (`inner.usdz[deep.usd]`) is followed one bracket
-    /// at a time from the outside, as [`package_contains`](Self::package_contains)
-    /// follows it, each level a view of the one around it when the package
-    /// shares its bytes.
-    fn package_entry(&self, package: &str, inner: &str) -> Result<AssetBuffer, PackageError> {
-        match split_package_relative_path_outer(inner) {
-            Some((nested, rest)) => self.package_entry(&nest_packaged_path(package, &nested), &rest),
-            None => Ok(self
-                .find_or_open_package(package)?
-                .with(|archive| archive.entry(inner))?),
-        }
-    }
-
-    /// The package `package` names: from the cache of the calling thread's
-    /// innermost scope when one is open (C++
-    /// `Sdf_UsdzResolverCache::FindOrOpenZipFile`), and opened for this call
-    /// alone otherwise.
-    ///
-    /// Within a scope a package is opened once. Callers that miss on the
-    /// same package at once share the one open, and a failed open is kept
-    /// and reported to each of them.
-    fn find_or_open_package(&self, package: &str) -> Result<Package, PackageError> {
-        let Some(scope) = self.current_scope() else {
-            return self.open_package_uncached(package);
-        };
-        let Some(cache) = self.package_cache(&scope) else {
-            return self.open_package_uncached(package);
-        };
-        // The slot map is locked only to find the package's slot. The open
-        // runs under the slot alone. The open of a nested package, which asks
-        // for the package around it, takes the map afresh.
-        let slot = {
-            let mut slots = lock(&cache.slots);
-            match slots.get(package) {
-                Some(slot) => Arc::clone(slot),
-                None => Arc::clone(slots.entry(package.to_owned()).or_default()),
-            }
-        };
-        if let Some(found) = slot.get() {
-            self.packages.cache_hits.fetch_add(1, Ordering::Relaxed);
-            return found.clone();
-        }
-        slot.get_or_init(|| self.open_package_uncached(package)).clone()
-    }
-
-    /// The package cache behind `handle`, when this resolver made it.
-    fn package_cache<'a>(&self, handle: &'a CacheHandle) -> Option<&'a PackageCache> {
-        handle.contents::<PackageCache>().filter(|cache| cache.owner == self.id)
-    }
-
-    /// The cache of the calling thread's innermost open scope.
-    fn current_scope(&self) -> Option<CacheHandle> {
-        let scopes = lock(&self.scopes);
-        let (_, handle) = scopes.get(&thread::current().id())?.last()?;
-        Some(handle.clone())
-    }
-
-    /// Opens the package `package` names and parses its central directory.
-    /// A package nested in another (`outer.usdz[inner.usdz]`) is opened
-    /// over its entry in the package around it, which is itself found
-    /// through [`find_or_open_package`](Self::find_or_open_package); the
-    /// entry is a view of that package when it shares its bytes.
-    fn open_package_uncached(&self, package: &str) -> Result<Package, PackageError> {
-        let archive = if let Some((outer, entry)) = split_package_relative_path_inner(package) {
-            // The outer archive is held only to take the entry's bytes.
-            let bytes = self
-                .find_or_open_package(&outer)?
-                .with(|archive| archive.entry(&entry))?;
-            self.packages.directory_parses.fetch_add(1, Ordering::Relaxed);
-            usdz::Archive::from_bytes(bytes)?
-        } else {
-            self.packages.opens.fetch_add(1, Ordering::Relaxed);
-            let asset = self.open_file(Path::new(package)).map_err(usdz::ArchiveError::from)?;
-            self.packages.directory_parses.fetch_add(1, Ordering::Relaxed);
-            usdz::Archive::from_asset(asset)?
-        };
-        Ok(Package::new(archive))
-    }
-}
-
-/// The id the next [`DefaultResolver`] takes.
-static NEXT_RESOLVER: AtomicU64 = AtomicU64::new(0);
-
-/// What a [`DefaultResolver`] keeps for a cache scope: the packages opened
-/// within it, each under the package path it was asked for by, one slot per
-/// level of nesting. A slot is filled once, by the open, and holds its
-/// failure when it fails.
-struct PackageCache {
-    /// The id of the resolver that made the cache: a cache answers only
-    /// the configuration it was filled under.
-    owner: u64,
-    slots: Mutex<HashMap<String, PackageSlot>>,
-}
-
-type PackageSlot = Arc<OnceLock<Result<Package, PackageError>>>;
-
-/// The package work a [`DefaultResolver`] has done, as
-/// [`DefaultResolver::package_stats`] reports it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PackageStats {
-    /// How many times a package file was opened.
-    pub opens: u64,
-    /// How many times a package's central directory was parsed, counting
-    /// each level of a package nested in another.
-    pub directory_parses: u64,
-    /// How many requests for a package a cache scope answered with one it
-    /// had already opened.
-    pub cache_hits: u64,
-}
-
-/// The running counts behind [`PackageStats`].
-#[derive(Default)]
-struct PackageCounters {
-    opens: AtomicU64,
-    directory_parses: AtomicU64,
-    cache_hits: AtomicU64,
 }
 
 /// Opens the file at `path` as an asset over a read-only mapping of it, or
@@ -1477,11 +1155,9 @@ pub(crate) fn nest_packaged_path(base: &str, leaf: &str) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::Barrier;
+    use std::thread;
 
     use super::*;
-    use crate::usd;
-    use crate::usdz::tests::package;
 
     /// A resolver under which every asset path resolves to itself and opens
     /// to what `open` gives, standing in for the storage underneath a
@@ -2017,278 +1693,89 @@ pub(crate) mod tests {
 
     // Cache scopes
 
-    /// A directory holding `pkg.usdz` with the layers `a.usda` and `b.usda`,
-    /// and the package's path.
-    fn packaged_dir() -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pkg.usdz");
-        fs::write(
-            &path,
-            package(&[("a.usda", b"#usda 1.0\n"), ("b.usda", b"#usda 1.0\n")]),
-        )
-        .unwrap();
-        let path = path.canonicalize().unwrap().to_string_lossy().into_owned();
-        (dir, path)
+    /// A value a test keeps in a scope's cache.
+    #[derive(Default)]
+    struct Kept(Mutex<Vec<u32>>);
+
+    /// What the scope open on this thread has kept, `None` with no scope.
+    fn kept() -> Option<Vec<u32>> {
+        Some(CacheScope::current()?.cache::<Kept>().0.lock().unwrap().clone())
     }
 
-    /// The opens and directory parses `resolver` has done.
-    fn work(resolver: &DefaultResolver) -> (u64, u64) {
-        let stats = resolver.package_stats();
-        (stats.opens, stats.directory_parses)
+    /// Keeps `value` in the scope open on this thread.
+    fn keep(value: u32) {
+        let handle = CacheScope::current().expect("a scope is open");
+        handle.cache::<Kept>().0.lock().unwrap().push(value);
     }
 
-    /// Resolves and opens the entry `name` of `package`.
-    fn read_entry(resolver: &DefaultResolver, package: &str, name: &str) -> io::Result<Vec<u8>> {
-        let path = join_package_relative_path(package, name);
-        let resolved = resolver
-            .resolve(&path)
-            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        resolver.open_asset(&resolved)?.read_all()
-    }
-
-    /// Within a scope a package is opened and parsed once, whatever is asked
-    /// of it; a scope begun inside shares that, and the next scope does not.
+    /// A scope begun inside another shares its cache; the next scope begun
+    /// with none open starts empty.
     #[test]
-    fn scope_opens_once() {
-        let (_dir, pkg) = packaged_dir();
-        let resolver = DefaultResolver::new();
+    fn nested_scope_shares() {
+        assert_eq!(kept(), None);
         {
-            let _scope = CacheScope::begin(&resolver, None);
-            read_entry(&resolver, &pkg, "a.usda").unwrap();
-            read_entry(&resolver, &pkg, "b.usda").unwrap();
-            assert!(
-                resolver
-                    .resolve(&join_package_relative_path(&pkg, "missing.usda"))
-                    .is_none()
-            );
+            let _scope = CacheScope::begin();
+            keep(1);
             {
-                let _nested = CacheScope::begin(&resolver, None);
-                read_entry(&resolver, &pkg, "a.usda").unwrap();
+                let _nested = CacheScope::begin();
+                keep(2);
             }
-            assert_eq!(work(&resolver), (1, 1));
-            assert!(resolver.package_stats().cache_hits > 0);
+            assert_eq!(kept(), Some(vec![1, 2]));
         }
-        let _sibling = CacheScope::begin(&resolver, None);
-        read_entry(&resolver, &pkg, "a.usda").unwrap();
-        assert_eq!(work(&resolver), (2, 2));
-    }
-
-    /// With no scope open nothing is kept: each request opens the package.
-    #[test]
-    fn no_scope_no_cache() {
-        let (_dir, pkg) = packaged_dir();
-        let resolver = DefaultResolver::new();
-        let path = join_package_relative_path(&pkg, "a.usda");
-        resolver.resolve(&path).unwrap();
-        resolver.resolve(&path).unwrap();
-        assert_eq!(work(&resolver), (2, 2));
-        assert_eq!(resolver.package_stats().cache_hits, 0);
-    }
-
-    /// A package nested in another is one file open and one parse per level.
-    #[test]
-    fn nested_levels_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let inner = package(&[("a.usda", b"#usda 1.0\n")]);
-        let path = dir.path().join("outer.usdz");
-        fs::write(&path, package(&[("root.usda", b"#usda 1.0\n"), ("inner.usdz", &inner)])).unwrap();
-        let outer = path.canonicalize().unwrap().to_string_lossy().into_owned();
-
-        let resolver = DefaultResolver::new();
-        let _scope = CacheScope::begin(&resolver, None);
-        for _ in 0..2 {
-            assert_eq!(
-                read_entry(&resolver, &outer, "inner.usdz[a.usda]").unwrap(),
-                b"#usda 1.0\n"
-            );
-        }
-        read_entry(&resolver, &outer, "root.usda").unwrap();
-        assert_eq!(work(&resolver), (1, 2));
+        assert_eq!(kept(), None);
+        let _sibling = CacheScope::begin();
+        assert_eq!(kept(), Some(vec![]));
     }
 
     /// A scope on another thread has its own cache, and shares one when it
     /// is begun with that cache's handle.
     #[test]
     fn scope_per_thread() {
-        let (_dir, pkg) = packaged_dir();
-        let resolver = DefaultResolver::new();
-        let scope = CacheScope::begin(&resolver, None);
-        read_entry(&resolver, &pkg, "a.usda").unwrap();
-        assert_eq!(work(&resolver), (1, 1));
-
-        let handle = scope.handle().expect("a caching resolver");
+        let scope = CacheScope::begin();
+        keep(1);
+        let handle = scope.handle();
         thread::scope(|threads| {
-            threads
-                .spawn(|| {
-                    let _own = CacheScope::begin(&resolver, None);
-                    read_entry(&resolver, &pkg, "a.usda").unwrap();
-                })
-                .join()
-                .unwrap();
-            assert_eq!(work(&resolver), (2, 2), "an independent scope opens for itself");
+            let own = threads.spawn(|| {
+                let _own = CacheScope::begin();
+                kept()
+            });
+            assert_eq!(own.join().unwrap(), Some(vec![]));
 
-            threads
-                .spawn(|| {
-                    let _shared = CacheScope::begin(&resolver, Some(&handle));
-                    read_entry(&resolver, &pkg, "b.usda").unwrap();
-                })
-                .join()
-                .unwrap();
-            assert_eq!(work(&resolver), (2, 2), "a scope given the handle shares its cache");
+            let shared = threads.spawn(|| {
+                let _shared = CacheScope::begin_shared(&handle);
+                keep(2);
+                kept()
+            });
+            assert_eq!(shared.join().unwrap(), Some(vec![1, 2]));
         });
+        assert_eq!(kept(), Some(vec![1, 2]));
     }
 
-    /// A handle another resolver made is not shared: a cache belongs to the
-    /// configuration it was filled under.
-    #[test]
-    fn foreign_handle_not_shared() {
-        let (_dir, pkg) = packaged_dir();
-        let (first, second) = (DefaultResolver::new(), DefaultResolver::new());
-        let scope = CacheScope::begin(&first, None);
-        read_entry(&first, &pkg, "a.usda").unwrap();
-        let foreign = scope.handle().expect("a caching resolver");
-
-        let _own = CacheScope::begin(&second, Some(&foreign));
-        read_entry(&second, &pkg, "a.usda").unwrap();
-        assert_eq!(work(&second), (1, 1));
-        assert_eq!(work(&first), (1, 1));
-    }
-
-    /// Threads that miss on one package at once, in one cache, share a
-    /// single open of it.
-    #[test]
-    fn concurrent_miss_one_open() {
-        let (_dir, pkg) = packaged_dir();
-        let resolver = DefaultResolver::new();
-        let scope = CacheScope::begin(&resolver, None);
-        let handle = scope.handle().expect("a caching resolver");
-        let start = Barrier::new(8);
-        thread::scope(|threads| {
-            for _ in 0..8 {
-                threads.spawn(|| {
-                    let _shared = CacheScope::begin(&resolver, Some(&handle));
-                    start.wait();
-                    read_entry(&resolver, &pkg, "a.usda").unwrap();
-                });
-            }
-        });
-        assert_eq!(work(&resolver), (1, 1));
-    }
-
-    /// Guards dropped out of the order they were begun in leave no scope
-    /// open.
+    /// Guards dropped out of the order they were begun in leave the
+    /// surviving scope open, and no scope once the last is gone.
     #[test]
     fn scope_drop_order() {
-        let (_dir, pkg) = packaged_dir();
-        let resolver = DefaultResolver::new();
-        let outer = CacheScope::begin(&resolver, None);
-        let inner = CacheScope::begin(&resolver, None);
+        let outer = CacheScope::begin();
+        let inner = CacheScope::begin();
+        keep(1);
         drop(outer);
-        read_entry(&resolver, &pkg, "a.usda").unwrap();
-        read_entry(&resolver, &pkg, "a.usda").unwrap();
-        assert_eq!(work(&resolver), (1, 1), "the surviving scope still caches");
+        assert_eq!(kept(), Some(vec![1]), "the surviving scope keeps the cache");
         drop(inner);
-        assert!(lock(&resolver.scopes).is_empty());
-        read_entry(&resolver, &pkg, "a.usda").unwrap();
-        assert_eq!(
-            work(&resolver),
-            (3, 3),
-            "the resolve and the open each open the package"
-        );
+        assert_eq!(kept(), None);
     }
 
-    /// A package replaced between two scopes is read anew by the second.
+    /// A cache is kept by its type: two kinds of work in one scope each
+    /// have their own.
     #[test]
-    fn replaced_between_scopes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pkg.usdz");
-        fs::write(&path, package(&[("a.usda", b"#usda 1.0\n# old\n")])).unwrap();
-        let pkg = path.canonicalize().unwrap().to_string_lossy().into_owned();
-        let resolver = DefaultResolver::new();
-        {
-            let _scope = CacheScope::begin(&resolver, None);
-            assert_eq!(read_entry(&resolver, &pkg, "a.usda").unwrap(), b"#usda 1.0\n# old\n");
-        }
-        fs::write(&path, package(&[("a.usda", b"#usda 1.0\n# new\n")])).unwrap();
-        let _scope = CacheScope::begin(&resolver, None);
-        assert_eq!(read_entry(&resolver, &pkg, "a.usda").unwrap(), b"#usda 1.0\n# new\n");
-    }
+    fn cache_per_type() {
+        #[derive(Default)]
+        struct Other(Mutex<u32>);
 
-    /// A package that cannot be opened fails the same way each time it is
-    /// asked for within a scope, from the one attempt, and is tried again in
-    /// the next scope.
-    #[test]
-    fn failed_open_keeps_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let corrupt = dir.path().join("corrupt.usdz");
-        fs::write(&corrupt, b"not a package").unwrap();
-        let missing = dir.path().join("missing.usdz");
-
-        for (package, kind) in [(corrupt, io::ErrorKind::Other), (missing, io::ErrorKind::NotFound)] {
-            let resolver = DefaultResolver::new();
-            let entry = ResolvedPath::new(join_package_relative_path(&package.to_string_lossy(), "a.usda"));
-            let failure = |resolver: &DefaultResolver| {
-                let error = resolver.open_asset(&entry).err().expect("an unreadable package");
-                (error.kind(), error.to_string())
-            };
-            {
-                let _scope = CacheScope::begin(&resolver, None);
-                let first = failure(&resolver);
-                assert_eq!(first.0, kind, "{}", first.1);
-                assert!(!first.1.is_empty());
-                assert_eq!(failure(&resolver), first);
-                assert_eq!(resolver.package_stats().opens, 1, "one attempt serves both");
-            }
-            let _scope = CacheScope::begin(&resolver, None);
-            failure(&resolver);
-            assert_eq!(resolver.package_stats().opens, 2, "the next scope tries again");
-        }
-    }
-
-    /// Opening a stage on a bare package opens and parses the package once,
-    /// for the default-layer lookup, the probes and the entry reads
-    /// together, and a caller's scope extends that over the traversal.
-    #[test]
-    fn stage_opens_package_once() -> crate::Result<()> {
-        let dir = tempfile::tempdir().unwrap();
-        let root = b"#usda 1.0\ndef \"A\" (references = @./b.usda@</B>) {}\n";
-        let leaf = b"#usda 1.0\ndef \"B\" { def \"Child\" {} }\n";
-        let path = dir.path().join("pkg.usdz");
-        fs::write(&path, package(&[("root.usda", root), ("b.usda", leaf)])).unwrap();
-        let path = path.to_string_lossy().into_owned();
-
-        let resolver = Rc::new(DefaultResolver::new());
-        let stage = usd::Stage::builder().resolver(Rc::clone(&resolver)).open(&path)?;
-        assert_eq!(work(&resolver), (1, 1));
-        drop(stage);
-
-        let resolver = Rc::new(DefaultResolver::new());
-        let scope = CacheScope::begin(resolver.as_ref(), None);
-        let stage = usd::Stage::builder().resolver(Rc::clone(&resolver)).open(&path)?;
-        assert!(stage.prim("/A/Child")?.is_valid()?);
-        assert_eq!(work(&resolver), (1, 1));
-        drop(scope);
-        Ok(())
-    }
-
-    /// A package whose default layer references into a package nested in it
-    /// costs one file open and one parse per level.
-    #[test]
-    fn stage_opens_nested_once() -> crate::Result<()> {
-        let dir = tempfile::tempdir().unwrap();
-        let inner = package(&[("b.usda", b"#usda 1.0\ndef \"B\" { def \"Child\" {} }\n")]);
-        let root = b"#usda 1.0\ndef \"A\" (references = @./inner.usdz@</B>) {}\n";
-        let path = dir.path().join("pkg.usdz");
-        fs::write(&path, package(&[("root.usda", root), ("inner.usdz", &inner)])).unwrap();
-        let path = path.to_string_lossy().into_owned();
-
-        let resolver = Rc::new(DefaultResolver::new());
-        let scope = CacheScope::begin(resolver.as_ref(), None);
-        let stage = usd::Stage::builder().resolver(Rc::clone(&resolver)).open(&path)?;
-        assert!(stage.prim("/A/Child")?.is_valid()?);
-        assert_eq!(work(&resolver), (1, 2));
-        drop(scope);
-        Ok(())
+        let scope = CacheScope::begin();
+        keep(1);
+        *scope.handle().cache::<Other>().0.lock().unwrap() = 7;
+        assert_eq!(kept(), Some(vec![1]));
+        assert_eq!(*scope.handle().cache::<Other>().0.lock().unwrap(), 7);
     }
 
     // Advice
@@ -2312,7 +1799,7 @@ pub(crate) mod tests {
         }
 
         fn advise(&self, range: Range<usize>, advice: Advice) {
-            lock(&self.log).push((range, advice));
+            self.log.lock().unwrap().push((range, advice));
         }
 
         fn is_mapping(&self) -> bool {
@@ -2344,7 +1831,7 @@ pub(crate) mod tests {
         view.advise(60..70, Advice::Random);
         view.advise(0..40, Advice::Normal);
         assert_eq!(
-            *lock(&log),
+            *log.lock().unwrap(),
             [(15..50, Advice::WillNeed), (10..50, Advice::Normal)],
             "a range wholly past the view is dropped"
         );
@@ -2359,39 +1846,5 @@ pub(crate) mod tests {
         buffer.advise(0..3, Advice::Random);
         assert!(!buffer.is_mapping());
         assert_eq!(&*buffer, [1, 2, 3]);
-    }
-
-    /// An entry whose name holds brackets is one entry, to the open as to
-    /// the resolve.
-    #[test]
-    fn bracketed_entry_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pkg.usdz");
-        fs::write(
-            &path,
-            package(&[("root.usda", b"#usda 1.0\n"), ("textures/tile[0].png", b"pixels")]),
-        )
-        .unwrap();
-        let pkg = path.canonicalize().unwrap().to_string_lossy().into_owned();
-        let resolver = DefaultResolver::new();
-        assert_eq!(read_entry(&resolver, &pkg, "textures/tile[0].png").unwrap(), b"pixels");
-    }
-
-    /// With no scope held, a path into a nested package still opens the
-    /// outer file once per call.
-    #[test]
-    fn nested_unscoped_opens_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let inner = package(&[("a.usda", b"#usda 1.0\n")]);
-        let path = dir.path().join("outer.usdz");
-        fs::write(&path, package(&[("root.usda", b"#usda 1.0\n"), ("inner.usdz", &inner)])).unwrap();
-        let outer = path.canonicalize().unwrap().to_string_lossy().into_owned();
-
-        let resolver = DefaultResolver::new();
-        let nested = join_package_relative_path(&outer, "inner.usdz[a.usda]");
-        let resolved = resolver.resolve(&nested).expect("the entry exists");
-        assert_eq!(work(&resolver), (1, 2), "the resolve");
-        resolver.open_asset(&resolved).unwrap();
-        assert_eq!(work(&resolver), (2, 4), "the open");
     }
 }

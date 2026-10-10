@@ -61,8 +61,8 @@ source of truth for specifics.
 
 - **`ar/`** - Asset Resolution (C++ `Ar`): the `Resolver` trait maps `@...@`
   asset paths to physical locations; `DefaultResolver` searches the filesystem.
-  `CacheScope` (C++ `ArResolverScopedCache`) is the span over which a resolver
-  keeps the packages it opens.
+  `CacheScope` (C++ `ArResolverScopedCache`) is the span, on one thread, over
+  which opened packages are kept.
 
 - **`pcp/`** - Prim Cache Population, the composition engine (C++ `Pcp`):
   LIVERPS strength ordering across layers, kept a pure function of `(graph,

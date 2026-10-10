@@ -165,7 +165,7 @@ impl Content<'_> {
 pub(super) fn discover<'a>(graph: &'a pcp::LayerGraph, asset_path: &str, policy: Discover) -> Result<Discovery<'a>> {
     // One cache scope spans the discovery. Each package it reads into is
     // opened once.
-    let _scope = graph.layer_registry().cache_scope();
+    let _scope = ar::CacheScope::begin();
     let identifier = root_identifier(graph, asset_path);
     let Some(layer) = SourceLayer::open(graph, &identifier)? else {
         return Err(Error::UnresolvedAsset(asset_path.to_owned()));

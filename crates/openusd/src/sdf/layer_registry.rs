@@ -177,15 +177,6 @@ impl LayerRegistry {
         }
     }
 
-    /// Begins a cache scope on the resolver
-    /// ([`ar::Resolver::begin_cache_scope`]), which ends when the guard
-    /// drops. An operation that asks the resolver about the same package
-    /// several times holds one across those calls; a scope begun while
-    /// another is open on the thread shares its cache.
-    pub fn cache_scope(&self) -> ar::CacheScope<'static> {
-        ar::CacheScope::begin_shared(Rc::clone(&self.resolver), None)
-    }
-
     /// Canonicalizes `asset_path` into a stable identifier, anchoring a relative
     /// path against `anchor`. Every canonical-identifier computation — interning a
     /// layer as it loads, anchoring an authored sublayer/arc path for lookup,
@@ -332,7 +323,7 @@ impl LayerRegistry {
     /// [`open_layer`](Self::open_layer) builds the [`sdf::Layer`] that keeps
     /// it.
     pub(crate) fn open(&self, identifier: &str) -> Result<Option<PreparedLayer>, LoadError> {
-        let _scope = self.cache_scope();
+        let _scope = ar::CacheScope::begin();
         let Some(resolved) = self.resolve_layer(identifier) else {
             return Ok(None);
         };

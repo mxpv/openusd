@@ -20,8 +20,8 @@
 //! The peak is a high-water mark of the whole process, printed once at the
 //! end. A phase's own peak is read by comparing runs cut off with `--until`.
 //!
-//! The run ends with the package work the resolver did (package file opens,
-//! central-directory parses and requests its cache answered).
+//! The run ends with the package work done (package file opens,
+//! central-directory parses and requests a cache scope answered).
 //!
 //! # Usage
 //! ```bash
@@ -48,13 +48,12 @@ use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use std::{env, fs};
 
 use openusd::usd::{PrimPredicate, Stage, TimeCode};
-use openusd::{Error, Result, ar, sdf};
+use openusd::{Error, Result, ar, sdf, usdz};
 
 fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
@@ -71,16 +70,16 @@ fn main() -> Result<()> {
     };
     let root = copy.as_deref().unwrap_or(&args.root).to_str().expect("a UTF-8 path");
 
-    let resolver = Rc::new(resolver(args.mmap)?);
+    let resolver = resolver(args.mmap)?;
     let phase = Phase::start("open");
-    let stage = Stage::builder().resolver(Rc::clone(&resolver)).open(root)?;
+    let stage = Stage::builder().resolver(resolver).open(root)?;
     phase.end("");
 
     let mut prims = Vec::new();
     if args.runs("metadata") {
         let phase = Phase::start("metadata");
         // One cache scope over the traversal, as over the array reads below.
-        let _scope = stage.cache_scope();
+        let _scope = ar::CacheScope::begin();
         stage.traverse(args.predicate, |path| prims.push(path.clone()))?;
         for path in &prims {
             stage.prim(path.clone())?.type_name()?;
@@ -92,7 +91,7 @@ fn main() -> Result<()> {
         let phase = Phase::start("arrays");
         // One cache scope over the reads: resolving the asset paths of a
         // packaged scene opens each package once.
-        let _scope = stage.cache_scope();
+        let _scope = ar::CacheScope::begin();
         let time = args.time.map(TimeCode::new);
         let (mut arrays, mut decoded) = (0usize, 0usize);
         for path in &prims {
@@ -125,7 +124,7 @@ fn main() -> Result<()> {
     if let Some(memory) = Memory::read() {
         eprintln!("working set peak: {}", mib(memory.peak_working_set));
     }
-    let packages = resolver.package_stats();
+    let packages = usdz::package_stats();
     eprintln!(
         "packages: opens {}  directory parses {}  cache hits {}",
         packages.opens, packages.directory_parses, packages.cache_hits,

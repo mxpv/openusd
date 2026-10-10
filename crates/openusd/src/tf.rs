@@ -13,8 +13,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{self, AtomicU64};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// An immutable identifier string.
 ///
@@ -375,6 +375,12 @@ fn real_path(path: &Path) -> PathBuf {
         current = current.parent().map_or(target.clone(), |dir| dir.join(target));
     }
     current
+}
+
+/// Locks `mutex`, reading through a poisoned lock, for a lock whose state
+/// is whole after every statement that changes it.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Renders `error` followed by its `source` chain as one `: `-separated line,

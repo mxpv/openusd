@@ -31,7 +31,7 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
 use std::mem;
 
-use crate::{Result, pcp, sdf, tf};
+use crate::{Result, ar, pcp, sdf, tf};
 
 use super::sink::{Payload, Provenance};
 
@@ -547,7 +547,7 @@ impl StageComposition {
     fn load_demanded(&self, pending: &[pcp::Demand], hooks: &dyn CompositionHooks) -> bool {
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
-        let _scope = self.layer_registry().cache_scope();
+        let _scope = ar::CacheScope::begin();
         let before = self.layers.borrow().len();
         let mut newly_failed = false;
         let mut newly_interned = false;
@@ -738,7 +738,7 @@ impl StageComposition {
     fn resolve_sublayer_demands(&self, mut demands: Vec<pcp::SublayerDemand>, hooks: &dyn CompositionHooks) -> bool {
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
-        let _scope = self.layer_registry().cache_scope();
+        let _scope = ar::CacheScope::begin();
         let mut attempted: HashSet<(String, pcp::LayerStackId)> = HashSet::new();
         let mut recomposed: HashSet<(pcp::LayerId, String)> = HashSet::new();
         let mut reported: HashSet<(String, pcp::LayerStackId, pcp::LayerId)> = HashSet::new();
@@ -876,7 +876,7 @@ impl StageComposition {
             if pending.is_empty() {
                 return result;
             }
-            scope.get_or_insert_with(|| self.layer_registry().cache_scope());
+            scope.get_or_insert_with(ar::CacheScope::begin);
             if !self.load_demanded(&pending, hooks) {
                 return result;
             }
@@ -1008,7 +1008,7 @@ impl StageComposition {
     ) {
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
-        let _scope = self.layer_registry().cache_scope();
+        let _scope = ar::CacheScope::begin();
         // Every layer joins through the one intern seam, so each gets its change
         // aggregator as it joins.
         let mut root = None;
