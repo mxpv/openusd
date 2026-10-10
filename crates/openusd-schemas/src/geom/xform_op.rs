@@ -210,8 +210,9 @@ impl XformOpKind {
                 }
             }),
             Self::Orient => value.cast::<[f64; 4]>().ok().map(|q| {
-                let [w, x, y, z]: [f64; 4] = gf::Quatd::from(q).normalize().into();
-                gf::Matrix4d::from_quat([w, sign * x, sign * y, sign * z])
+                let rotation = gf::Rotation::from_quat(gf::Quatd::from(q));
+                let rotation = if inverse { rotation.inverse() } else { rotation };
+                gf::Matrix4d::from_quat(rotation.quat())
             }),
         };
         Some(matrix.unwrap_or(gf::Matrix4d::IDENTITY))
@@ -296,8 +297,8 @@ impl XformOp {
     ///
     /// Each kind inverts in closed form: a translate or rotation negates its
     /// values, a rotation also reverses its axis order, a scale takes the
-    /// reciprocal, and an orient takes the conjugate. Only a `transform` goes
-    /// through a general inverse, and a singular one is
+    /// reciprocal, and an orient negates its rotation's angle. Only a
+    /// `transform` goes through a general inverse, and a singular one is
     /// [`SchemaError::SingularTransform`]. A value of a type the kind does not
     /// take contributes identity.
     pub fn op_transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Matrix4d, SchemaError> {
@@ -326,18 +327,18 @@ impl XformOp {
     }
 }
 
-/// The rotation by `degrees` about `axis` (0 = X, 1 = Y, 2 = Z).
+/// The rotation by `degrees` about `axis` (0 = X, 1 = Y, 2 = Z), as C++
+/// `GfMatrix4d(GfRotation(axis, degrees), GfVec3d(0))` makes it.
 fn rotation(axis: usize, degrees: f64) -> gf::Matrix4d {
-    let radians = degrees.to_radians();
-    match axis {
-        0 => gf::Matrix4d::rotation_x(radians),
-        1 => gf::Matrix4d::rotation_y(radians),
-        _ => gf::Matrix4d::rotation_z(radians),
-    }
+    let mut unit = gf::Vec3d::default();
+    unit[axis] = 1.0;
+    gf::Matrix4d::from_quat(gf::Rotation::new(unit, degrees).quat())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::array;
+
     use super::*;
 
     /// The name's second component is the kind, whatever suffix follows.
@@ -372,6 +373,101 @@ mod tests {
             for (got, want) in product.0.iter().zip(gf::Matrix4d::IDENTITY.0) {
                 assert!((got - want).abs() < 1e-9, "{kind:?}: {product:?}");
             }
+        }
+    }
+
+    /// Rotation ops reproduce C++ `UsdGeomXformOp::GetOpTransform`; the
+    /// expected rows are OpenUSD 26.08's on Linux. The `quatf` orients sit a
+    /// few 1e-8 off unit length and the `quatd` one far from it: C++ takes the
+    /// angle from the real part, so neither matrix is the normalized
+    /// quaternion's. Entries agree to 1e-14, which leaves room for another
+    /// platform's libm rounding `acos`, `sin` and `cos` differently in the
+    /// last bit, far below the 3e-8 a normalized quaternion is off by.
+    #[test]
+    fn rotation_matches_cpp() {
+        let quarter = sdf::Value::Quatf(gf::quatf(0.70710677, 0.70710677, 0.0, 0.0));
+        let euler = sdf::Value::Vec3d(gf::vec3d(10.0, 20.0, 30.0));
+        let cases = [
+            (
+                XformOpKind::Orient,
+                sdf::Value::Quatf(gf::quatf(0.9511514, 0.04662174, -0.28952447, 0.096504346)),
+                false,
+                [
+                    [0.8137250333625328, 0.15658419738533075, 0.559761519942499],
+                    [-0.21057672212979378, 0.9770266546781312, 0.032807928089583355],
+                    [-0.5417647221591828, -0.14456937842313441, 0.8280040341967738],
+                ],
+            ),
+            (
+                XformOpKind::Orient,
+                quarter.clone(),
+                false,
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, -3.422854177870249e-08, 0.9999999999999993],
+                    [0.0, -0.9999999999999993, -3.422854177870249e-08],
+                ],
+            ),
+            (
+                XformOpKind::Orient,
+                quarter,
+                true,
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, -3.422854177870249e-08, -0.9999999999999993],
+                    [0.0, 0.9999999999999993, -3.422854177870249e-08],
+                ],
+            ),
+            (
+                XformOpKind::Orient,
+                sdf::Value::Quatd(gf::quatd(0.5, 1.0, 0.25, -0.75)),
+                false,
+                [
+                    [0.423076923076923, -0.2787554345958372, -0.8621492474293819],
+                    [0.7402938961342989, -0.4423076923076925, 0.5062892974098343],
+                    [-0.5224661371860031, -0.8524431435636806, 0.01923076923076894],
+                ],
+            ),
+            (
+                XformOpKind::RotateX,
+                sdf::Value::Double(30.0),
+                false,
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.8660254037844387, 0.49999999999999994],
+                    [0.0, -0.49999999999999994, 0.8660254037844387],
+                ],
+            ),
+            (
+                XformOpKind::RotateXYZ,
+                euler.clone(),
+                false,
+                [
+                    [0.8137976813493738, 0.46984631039295416, -0.34202014332566877],
+                    [-0.44096961052988237, 0.8825641192593856, 0.16317591116653482],
+                    [0.3785223063697925, 0.01802831123629728, 0.9254165783983234],
+                ],
+            ),
+            (
+                XformOpKind::RotateXYZ,
+                euler,
+                true,
+                [
+                    [0.8137976813493738, -0.44096961052988237, 0.3785223063697925],
+                    [0.46984631039295416, 0.8825641192593856, 0.01802831123629728],
+                    [-0.34202014332566877, 0.16317591116653482, 0.9254165783983234],
+                ],
+            ),
+        ];
+        for (kind, value, inverse, want) in cases {
+            let m = kind.matrix(value, inverse).expect("a rotation is never singular");
+            let got: [[f64; 3]; 3] = array::from_fn(|r| array::from_fn(|c| m.0[r * 4 + c]));
+            let close = got
+                .iter()
+                .flatten()
+                .zip(want.iter().flatten())
+                .all(|(g, w)| (g - w).abs() < 1e-14);
+            assert!(close, "{kind:?} inverse={inverse}: {got:?} != {want:?}");
         }
     }
 }
