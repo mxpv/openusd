@@ -772,14 +772,14 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
     /// Write an integer array, applying the crate format's integer-coding +
     /// LZ4 compression when the array is large enough for the reader to treat
-    /// it as compressed (see [`MIN_COMPRESSED_ARRAY_SIZE`]).
+    /// it as compressed (see [`MIN_COMPRESSED_ARRAY_SIZE`](super::MIN_COMPRESSED_ARRAY_SIZE)).
     fn write_array_ints<T>(&mut self, ty: Type, v: &[T]) -> Result<ValueRep, FormatError>
     where
         T: Pod + PrimInt + 'static + AsPrimitive<i64>,
     {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
-        if v.len() >= MIN_COMPRESSED_ARRAY_SIZE {
+        if v.len() >= super::MIN_COMPRESSED_ARRAY_SIZE {
             let encoded = coding::encode_ints(v);
             self.write_lz4_compressed(&encoded)?;
             Ok(rep_heap_compressed(ty, off))
@@ -1226,18 +1226,13 @@ fn rep_heap(ty: Type, offset: u64, is_array: bool) -> ValueRep {
 }
 
 /// Heap array value with the compressed bit set. Used for integer arrays
-/// large enough to hit [`MIN_COMPRESSED_ARRAY_SIZE`].
+/// large enough to hit [`MIN_COMPRESSED_ARRAY_SIZE`](super::MIN_COMPRESSED_ARRAY_SIZE).
 fn rep_heap_compressed(ty: Type, offset: u64) -> ValueRep {
     let ty_bits = ((ty as u64) & 0xFF) << 48;
     let array_bit = 1_u64 << 63;
     let compressed_bit = 1_u64 << 61;
     ValueRep(ty_bits | array_bit | compressed_bit | (offset & ((1 << 48) - 1)))
 }
-
-/// Minimum element count at which an integer array is compressed. Matches
-/// `CrateFile::MIN_COMPRESSED_ARRAY_SIZE` on the reader side — below this, the
-/// reader forces the uncompressed path regardless of the compressed bit.
-const MIN_COMPRESSED_ARRAY_SIZE: usize = 4;
 
 fn compute_jump(has_child: bool, has_sibling: bool, sibling_offset: i32) -> i32 {
     match (has_child, has_sibling) {

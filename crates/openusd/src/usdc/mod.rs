@@ -27,6 +27,12 @@ pub const MAGIC: &[u8] = b"PXR-USDC";
 /// back.
 pub const MAX_NESTING: usize = 32;
 
+/// The fewest elements a compressed array holds (C++
+/// `MinCompressedArraySize`). The writer stores a shorter integer array
+/// uncompressed, and the reader takes a shorter array as stored
+/// uncompressed whatever its compressed bit says, as the C++ reader does.
+const MIN_COMPRESSED_ARRAY_SIZE: usize = 16;
+
 /// Error reading crate data: [`CrateFile::open`], [`CrateData::open`], and the
 /// value decoder.
 #[derive(Debug, thiserror::Error)]

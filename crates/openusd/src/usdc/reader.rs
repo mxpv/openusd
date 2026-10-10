@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::layout::*;
-use super::{MAX_NESTING, ReadError, ReadResultExt};
+use super::{MAX_NESTING, MIN_COMPRESSED_ARRAY_SIZE, ReadError, ReadResultExt};
 
 /// Returns a [`ReadError::Corrupt`] unless `cond` holds. Without a message the
 /// failed condition itself is the reason.
@@ -738,8 +738,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    const MIN_COMPRESSED_ARRAY_SIZE: usize = 4;
-
     // Implements various logic and compatibility checks to figure out the array length and whether it's compressed.
     fn unpack_array_len(&mut self, value: ValueRep, kind: ArrayKind) -> Result<(usize, bool), ReadError> {
         corrupt!(!value.is_inlined());
@@ -788,7 +786,7 @@ impl<'a> Decoder<'a> {
             self.stream.read_pod::<u64>()? as usize
         };
 
-        if count < Self::MIN_COMPRESSED_ARRAY_SIZE {
+        if count < MIN_COMPRESSED_ARRAY_SIZE {
             compressed = false;
         }
 
@@ -2007,21 +2005,48 @@ mod tests {
         start as usize..end as usize
     }
 
-    /// A crate long enough for its bytes to be advised when it is opened:
-    /// one attribute holding an array past [`MIN_ADVISED_BYTES`].
-    fn long_crate() -> Result<Vec<u8>> {
+    /// A crate holding the prim `/P` with one attribute, `name`, of type
+    /// `type_name` and default `default`.
+    fn attribute_crate(name: &str, type_name: &str, default: sdf::Value) -> Result<Vec<u8>> {
         let mut data = sdf::Data::new();
         data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot)
             .add("primChildren", sdf::Value::token_vec(["P"]));
         let prim = data.create_spec(sdf::Path::new("/P")?, sdf::SpecType::Prim);
         prim.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
-        prim.add("propertyChildren", sdf::Value::token_vec(["weights"]));
-        let attribute = data.create_spec(sdf::Path::new("/P.weights")?, sdf::SpecType::Attribute);
-        attribute.add("typeName", sdf::Value::Token("float[]".into()));
-        attribute.add("default", sdf::Value::FloatVec(vec![0.5; MIN_ADVISED_BYTES / 4 + 1]));
+        prim.add("propertyChildren", sdf::Value::token_vec([name]));
+        let attribute = data.create_spec(sdf::Path::new("/P")?.append_property(name)?, sdf::SpecType::Attribute);
+        attribute.add("typeName", sdf::Value::Token(type_name.into()));
+        attribute.add("default", default);
         let mut output = io::Cursor::new(Vec::new());
         usdc::CrateWriter::write(&data, &mut output)?;
         Ok(output.into_inner())
+    }
+
+    /// An integer array is compressed from sixteen elements on, the size
+    /// below which a C++ reader takes it as stored uncompressed, and both
+    /// forms read back.
+    #[test]
+    fn int_array_compression_threshold() -> Result<()> {
+        for (len, compressed) in [(4, false), (15, false), (16, true), (40, true)] {
+            let values: Vec<i32> = (0..len).collect();
+            let file = CrateFile::open(attribute_crate("ids", "int[]", sdf::Value::IntVec(values.clone()))?)?;
+            let rep = file
+                .fields
+                .iter()
+                .map(|field| field.value_rep)
+                .find(|rep| rep.is_array() && rep.ty().is_ok_and(|ty| ty == Type::Int))
+                .expect("the integer array");
+            assert_eq!(rep.is_compressed(), compressed, "{len} elements");
+            assert_eq!(file.value(rep)?, sdf::Value::IntVec(values), "{len} elements");
+        }
+        Ok(())
+    }
+
+    /// A crate long enough for its bytes to be advised when it is opened:
+    /// one attribute holding an array past [`MIN_ADVISED_BYTES`].
+    fn long_crate() -> Result<Vec<u8>> {
+        let weights = sdf::Value::FloatVec(vec![0.5; MIN_ADVISED_BYTES / 4 + 1]);
+        attribute_crate("weights", "float[]", weights)
     }
 
     /// A crate shorter than the threshold is opened without advice.
