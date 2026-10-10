@@ -203,14 +203,3 @@ Features from the C++ reference implementation not covered by the core specifica
 | [Edit targets](https://openusd.org/release/api/class_usd_edit_target.html) | :white_check_mark: | `0.6.0` | `usd::EditTarget` |
 | [Change notification](https://openusd.org/release/api/class_usd_notice.html) | :white_check_mark: | `0.7.0` | `sdf::LayerSink` (layer commit seam) and `usd::StageSink` (composed changes, incl. `layer_muting_changed` / `load_rules_changed`); transferable `Diff` via `usd::UndoStage` / `usd::ReplayStage` and `Stage::apply_diff`<br>`CommittedChange::asset_paths_resynced` (C++ `GetResolvedAssetPathsResyncedPaths`) |
 | [Property stack queries](https://openusd.org/release/api/class_usd_resolve_info.html) | :white_check_mark: | `main` | `usd::ResolveInfo` / `usd::ResolveInfoSource` / `pcp::ResolveNode`, via `Attribute::resolve_info` / `resolve_info_at`<br>`Attribute::property_stack_at`; the stack queries and `Prim::prim_stack` return `usd::SpecSite`, one offset-bearing spelling where C++ has two<br>Resolved over `pcp::value_resolve`, with value clips placed by `pcp::ClipAnchor` and gated by `pcp::IndexCache::may_have_clips`<br>`usd::ResolveInfo::spec_site` and `usd::ResolveInfo::weaker_sources` (C++ `GetNextWeakerInfo`), built by `pcp::Composing` across the `default`, `timeSamples` and clip sources and closed at the schema fallback by `pcp::Composing::close` |
-
-## Tooling
-
-| Feature | Status | Notes |
-|---|---|---|
-| usdcat (print/convert) | :construction: | The `convert` example (`cargo run -p openusd --example convert`): layer format conversion over `sdf::Layer::export`<br>Remaining — `--flatten` over `Stage::flatten`; printing to stdout; a bin target |
-| usdtree (hierarchy printing) | :white_check_mark: | The `usdtree` example: the composed prim hierarchy, as `usdtree --flatten` prints it<br>Remaining — the uncomposed root-layer mode; a bin target |
-| usddiff (layer diffing) | :thinking: | |
-| usdchecker (validation) | :thinking: | |
-| usdzip (USDZ packaging) | :white_check_mark: | `usd_utils::create_new_usdz_package`: the root first, a dependency kept in place or moved under a numbered directory, a `.usdz` dependency nested whole |
-| [usdGenSchema](https://openusd.org/release/tut_generating_new_schema.html) (schema codegen) | :white_check_mark: | `openusd-build` as a build dependency (`openusd_build::configure`)<br>Remaining — a CLI front-end |
