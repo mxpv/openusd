@@ -13,7 +13,6 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::str::FromStr;
-use std::sync::atomic::{self, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// An immutable identifier string.
@@ -206,10 +205,6 @@ pub(crate) struct SafeOutputFile {
     persisted: bool,
 }
 
-/// Distinguishes the temporary files one process writes beside the same
-/// destination at once.
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
 impl SafeOutputFile {
     /// Creates the file beside `destination`.
     ///
@@ -227,7 +222,9 @@ impl SafeOutputFile {
         let name = destination
             .file_name()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
-        let seq = TEMP_SEQ.fetch_add(1, atomic::Ordering::Relaxed);
+        // Distinguishes the temporary files one process writes beside the
+        // same destination at once.
+        let seq = crate::next_id();
         let path = destination.with_file_name(format!(".{}.{}-{seq}.tmp", name.to_string_lossy(), process::id()));
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);

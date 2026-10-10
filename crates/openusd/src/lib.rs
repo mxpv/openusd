@@ -104,6 +104,8 @@
 // still reaches its own modules through `crate::`.
 extern crate self as openusd;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 pub mod ar;
 mod error;
 pub mod gf;
@@ -117,6 +119,16 @@ pub mod usdc;
 pub mod usdz;
 
 pub use error::{Error, Result};
+
+/// An id no other call in this process returns, each greater than the last
+/// the calling thread was given. Everything in the crate that needs a
+/// process-unique id takes it from here: the ids of unrelated things come
+/// from the one sequence, so each kind sees ids that rise with gaps between
+/// them.
+pub(crate) fn next_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Includes the items `openusd-build` generated for one schema library into
 /// the enclosing module, the way `prost::include_proto!` does. `$library` is

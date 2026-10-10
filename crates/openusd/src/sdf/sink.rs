@@ -7,7 +7,6 @@
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A sink's rejection of a staged edit, returned from a sink's pre-commit hook
 /// to abort and roll the edit back. Shared across the sink tiers.
@@ -36,9 +35,8 @@ pub struct Id<K: ?Sized> {
 impl<K: ?Sized> Id<K> {
     /// A fresh id, unique among the ids minted for kind `K`.
     fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
         Id {
-            raw: NEXT.fetch_add(1, Ordering::Relaxed),
+            raw: crate::next_id(),
             _kind: PhantomData,
         }
     }

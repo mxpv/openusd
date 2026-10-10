@@ -37,7 +37,6 @@ use std::io::{self, Read, Seek};
 use std::marker::PhantomData;
 use std::ops::{Deref, Range};
 use std::path::{self, Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -567,9 +566,6 @@ thread_local! {
     static SCOPES: RefCell<Vec<CacheHandle>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The [`cache_id`](Resolver::cache_id) the next [`DefaultResolver`] takes.
-static NEXT_RESOLVER: AtomicU64 = AtomicU64::new(0);
-
 /// A cache scope's cache, by reference: clones share the one cache, and
 /// the cache is released when the last of them drops.
 ///
@@ -627,7 +623,7 @@ impl DefaultResolver {
     pub fn new() -> Self {
         Self {
             search_paths: Vec::new(),
-            id: NEXT_RESOLVER.fetch_add(1, Ordering::Relaxed),
+            id: crate::next_id(),
             #[cfg(feature = "mmap")]
             map_files: false,
         }

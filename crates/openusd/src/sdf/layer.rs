@@ -45,7 +45,6 @@ use std::fmt;
 use std::io::{self, Cursor, Write};
 use std::path::Path as FsPath;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{ar, sdf, tf};
 
@@ -63,17 +62,6 @@ pub type LayerSinkId = sink::Id<dyn LayerSink>;
 /// Prefix marking an anonymous layer identifier (`anon:<n>:<tag>`), the single
 /// source of truth shared by minting and [`Layer::is_anonymous`].
 const ANONYMOUS_PREFIX: &str = "anon:";
-
-/// Monotonic source of unique anonymous-layer identifiers (the `<n>` in
-/// `anon:<n>:<tag>`). Process-global so that anonymous layers created anywhere
-/// in the process never collide.
-static ANONYMOUS_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Monotonic source of transaction ids stamped onto every [`edit_layers`] group
-/// (see [`PendingLayerChange::generation`]). Process-global so an observer can
-/// tell one atomic transaction's commits from the next regardless of which layer
-/// or stage they land on.
-static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// A single loaded layer in the composition.
 pub struct Layer {
@@ -741,7 +729,9 @@ impl Layer {
     /// A fresh anonymous identifier of the form `anon:<n>:<tag>`. Distinct on
     /// every call, so independent anonymous layers never alias.
     pub(crate) fn anonymous_identifier(tag: impl fmt::Display) -> String {
-        let n = ANONYMOUS_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // The `<n>` in `anon:<n>:<tag>` is unique in the process, so anonymous
+        // layers created anywhere in it never collide.
+        let n = crate::next_id();
         format!("{ANONYMOUS_PREFIX}{n}:{tag}")
     }
 
@@ -1139,7 +1129,7 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
     }
     // One id for the whole atomic group, so an observer sees every layer this
     // transaction commits under a single transaction id.
-    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let generation = crate::next_id();
     // Phase 1: refill each layer's record and offer it to that layer's
     // `before_commit`; a veto aborts before any layer commits.
     for layer in guard.layers.iter_mut() {
