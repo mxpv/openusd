@@ -153,7 +153,7 @@ pub(super) enum PropertyKind<'a> {
 /// [`token`](Self::token) and [`tokens`](Self::tokens) are the shapes a `const`
 /// can hold, and between them they cover a fallback token, an `allowedTokens`
 /// list and the display metadata a schema carries. Anything else — a number, a
-/// vector, a dictionary — arrives through [`make`](Self::make), which a
+/// vector, a dictionary — arrives through [`new`](Self::new), which a
 /// `static` can hold because a non-capturing closure is a function pointer, or
 /// through [`borrowed`](Self::borrowed) when the caller already holds the
 /// value.

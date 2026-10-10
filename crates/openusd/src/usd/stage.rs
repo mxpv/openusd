@@ -892,7 +892,7 @@ impl PrimTypeMemo {
 
 /// A composed USD stage.
 ///
-/// A cheap reference-counted handle to the shared [`StageInner`] (mirroring
+/// A cheap reference-counted handle to the shared `StageInner` (mirroring
 /// C++ `UsdStageRefPtr`). Cloning bumps the refcount; the composed handles
 /// ([`Prim`](super::Prim) and friends) hold a clone, so they can be stored
 /// and outlive the call that produced them. Provides composed access to
@@ -1365,8 +1365,8 @@ impl Stage {
     }
 
     /// Author a `def` prim spec at `path` on the edit target's layer and
-    /// return a [`Prim`] handle (C++ `UsdStage::DefinePrim` with no type).
-    /// The returned handle lets callers chain field setters (`set_type_name`,
+    /// return a [`Prim`](super::Prim) handle (C++ `UsdStage::DefinePrim` with no
+    /// type). The returned handle lets callers chain field setters (`set_type_name`,
     /// `set_active`, `set_kind`, …) and child-property authoring
     /// (`create_attribute`, `create_relationship`) on a prim the stage
     /// composes. One it will not compose — outside its population mask, or
@@ -1377,8 +1377,8 @@ impl Stage {
     }
 
     /// Author a `def` prim spec typed `type_name` at `path` on the edit
-    /// target's layer, in one write, and return a [`Prim`] handle (C++
-    /// `UsdStage::DefinePrim(path, typeName)`). An existing spec is upgraded
+    /// target's layer, in one write, and return a [`Prim`](super::Prim) handle
+    /// (C++ `UsdStage::DefinePrim(path, typeName)`). An existing spec is upgraded
     /// to a `def` and retyped; an empty `type_name` leaves its type alone,
     /// which is [`define_prim`](Self::define_prim).
     pub fn define_typed_prim(
@@ -1399,8 +1399,8 @@ impl Stage {
         Ok(super::Prim::new(self, path))
     }
 
-    /// Ensure a prim spec exists at `path` and return a [`Prim`] handle.
-    /// Mirrors C++ `UsdStage::OverridePrim`. If a spec already exists at
+    /// Ensure a prim spec exists at `path` and return a [`Prim`](super::Prim)
+    /// handle. Mirrors C++ `UsdStage::OverridePrim`. If a spec already exists at
     /// `path` its specifier is left untouched — `override_prim` does not
     /// downgrade an existing `def` or `class` to `over`. Chain fluent
     /// setters on the returned handle to author additional fields.
@@ -1659,36 +1659,41 @@ impl Stage {
             .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })
     }
 
-    /// Authors `startTimeCode` on the current edit target's layer when it is
-    /// the root or session layer (see [`Self::with_stage_metadata_layer`]).
+    /// Authors `startTimeCode` on the current edit target's layer, which must
+    /// be the root or session layer; any other target fails with
+    /// [`StageAuthoringError::StageMetadataTarget`].
     /// Mirrors C++ `UsdStage::SetStartTimeCode`.
     pub fn set_start_time_code(&self, time: f64) -> Result<(), StageAuthoringError> {
         self.with_stage_metadata_layer(|layer| layer.set_start_time_code(time))
     }
 
-    /// Authors `endTimeCode` on the current edit target's layer when it is the
-    /// root or session layer (see [`Self::with_stage_metadata_layer`]). Mirrors
-    /// C++ `UsdStage::SetEndTimeCode`.
+    /// Authors `endTimeCode` on the current edit target's layer, which must be
+    /// the root or session layer; any other target fails with
+    /// [`StageAuthoringError::StageMetadataTarget`].
+    /// Mirrors C++ `UsdStage::SetEndTimeCode`.
     pub fn set_end_time_code(&self, time: f64) -> Result<(), StageAuthoringError> {
         self.with_stage_metadata_layer(|layer| layer.set_end_time_code(time))
     }
 
-    /// Authors `timeCodesPerSecond` on the current edit target's layer when it
-    /// is the root or session layer (see [`Self::with_stage_metadata_layer`]).
+    /// Authors `timeCodesPerSecond` on the current edit target's layer, which
+    /// must be the root or session layer; any other target fails with
+    /// [`StageAuthoringError::StageMetadataTarget`].
     /// Mirrors C++ `UsdStage::SetTimeCodesPerSecond`.
     pub fn set_time_codes_per_second(&self, rate: f64) -> Result<(), StageAuthoringError> {
         self.with_stage_metadata_layer(|layer| layer.set_time_codes_per_second(rate))
     }
 
-    /// Authors `framesPerSecond` on the current edit target's layer when it is
-    /// the root or session layer (see [`Self::with_stage_metadata_layer`]).
+    /// Authors `framesPerSecond` on the current edit target's layer, which
+    /// must be the root or session layer; any other target fails with
+    /// [`StageAuthoringError::StageMetadataTarget`].
     /// Mirrors C++ `UsdStage::SetFramesPerSecond`.
     pub fn set_frames_per_second(&self, rate: f64) -> Result<(), StageAuthoringError> {
         self.with_stage_metadata_layer(|layer| layer.set_frames_per_second(rate))
     }
 
-    /// Authors `expressionVariables` on the current edit target's layer when it
-    /// is the root or session layer (see [`Self::with_stage_metadata_layer`]).
+    /// Authors `expressionVariables` on the current edit target's layer, which
+    /// must be the root or session layer; any other target fails with
+    /// [`StageAuthoringError::StageMetadataTarget`].
     /// The dictionary supplies the values `${VAR}` expressions in sublayer asset
     /// paths and reference/payload targets resolve against; replacing it
     /// recomposes every prim whose composition reads the edited layer stack.
@@ -2646,9 +2651,9 @@ impl Stage {
     /// stage time, or `None` when the source that answers is not a `timeSamples`
     /// opinion.
     ///
-    /// These are the samples the source [`Self::value_at`] reads from, so a
-    /// stronger `default` hiding a weaker layer's samples yields `None` here
-    /// too. A winning value-clip set answers with a schedule rather than a map
+    /// These are the samples the source
+    /// [`Attribute::get_at`](super::Attribute::get_at) reads from, so a stronger
+    /// `default` hiding a weaker layer's samples yields `None` here too. A winning value-clip set answers with a schedule rather than a map
     /// and likewise yields `None`; its times reach
     /// [`Self::time_sample_times`].
     ///
@@ -3536,8 +3541,8 @@ impl Drop for LoadRulesGuard<'_> {
 
 /// Builder for configuring and opening a [`Stage`].
 ///
-/// Created via [`Stage::builder`]. Configures the [`LayerRegistry`] layers load
-/// through (resolver + file formats) and composition options.
+/// Created via [`Stage::builder`]. Configures the [`sdf::LayerRegistry`] layers
+/// load through (resolver + file formats) and composition options.
 pub struct StageBuilder {
     registry: sdf::LayerRegistry,
     variant_fallbacks: pcp::VariantFallbackMap,
@@ -3576,8 +3581,9 @@ impl StageBuilder {
         self
     }
 
-    /// Sets a custom asset resolver, wrapping it in a [`LayerRegistry`] over the
-    /// built-in formats. A convenience over [`registry`](Self::registry).
+    /// Sets a custom asset resolver, wrapping it in a [`sdf::LayerRegistry`]
+    /// over the built-in formats. A convenience over
+    /// [`registry`](Self::registry).
     pub fn resolver<R: ar::Resolver + 'static>(mut self, resolver: R) -> Self {
         self.registry = sdf::LayerRegistry::new(Box::new(resolver));
         self

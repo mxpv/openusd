@@ -989,10 +989,10 @@ struct StackResolver<'a> {
 /// graph's arena handles (C++ `SdfPropertySpecHandle` / `SdfPrimSpecHandle`
 /// paired with its cumulative layer offset).
 ///
-/// The resolved counterpart of the internal [`SpecSite`](super::prim_graph::SpecSite),
-/// which holds handles only meaningful inside the owning graph. C++ splits the
-/// offset-bearing stack queries from the plain ones for compatibility; a site
-/// here always carries its offset, so there is one spelling to keep in step.
+/// The resolved counterpart of the internal `SpecSite`, which holds handles
+/// only meaningful inside the owning graph. C++ splits the offset-bearing stack
+/// queries from the plain ones for compatibility; a site here always carries
+/// its offset, so there is one spelling to keep in step.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpecSiteRecord {
     /// Canonical identifier of the layer holding the spec.

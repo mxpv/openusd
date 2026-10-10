@@ -146,8 +146,8 @@ cargo fmt
 # Check formatting
 cargo fmt --all -- --check --files-with-diff
 
-# Generate documentation
-cargo doc --workspace --no-deps
+# Generate documentation (a broken or private intra-doc link is an error)
+cargo doc --workspace --no-deps --all-features
 
 # Run security/dependency audits
 cargo deny check

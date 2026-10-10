@@ -1,8 +1,8 @@
 //! Per-layer change records and the derivation that produces them.
 //!
 //! A [`ChangeList`] records the edits made to a layer and is handed to
-//! [`pcp::Changes`](crate::pcp::Changes) so the composition cache can
-//! invalidate surgically instead of dropping every cached prim index.
+//! `pcp::Changes` so the composition cache can invalidate surgically instead of
+//! dropping every cached prim index.
 //!
 //! Mirroring C++ `SdfChangeList`, the list is produced natively from a layer's
 //! staged edits: [`ChangeList::from_overlay`] walks a
@@ -42,7 +42,7 @@ pub struct ChangeList {
 ///
 /// Flag fields name shape changes (spec added/removed). `info_changed`
 /// names which metadata fields were authored. The combination drives the
-/// three-tier classification in [`pcp::Changes`](crate::pcp::Changes).
+/// three-tier classification in `pcp::Changes`.
 #[derive(Debug, Default, Clone)]
 pub struct ChangeEntry {
     /// Shape changes — adds/removes of specs and relationship/connection edits.
@@ -60,9 +60,9 @@ pub struct ChangeEntry {
     ///
     /// These are the raw touched fields, including non-composition metadata like
     /// `customData` and the child-name lists; deciding which are significant is
-    /// the consumer's job — [`pcp::Changes`](crate::pcp::Changes) filters them
-    /// against its own structural-field list, so appearing here does not by
-    /// itself imply a composition change.
+    /// the consumer's job — `pcp::Changes` filters them against its own
+    /// structural-field list, so appearing here does not by itself imply a
+    /// composition change.
     fields: BTreeMap<tf::Token, FieldChange>,
 }
 

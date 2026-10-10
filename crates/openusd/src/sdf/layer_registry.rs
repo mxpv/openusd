@@ -135,13 +135,11 @@ impl From<LoadError> for crate::Error {
 }
 
 /// Owns layer loading for a stage: the [`ar::Resolver`] that finds and opens
-/// layers, the built-in [format set](DEFAULT_FORMATS), and whether payload arcs
-/// are expanded.
+/// layers, the built-in format set, and whether payload arcs are expanded.
 ///
-/// The [`LayerGraph`](crate::pcp::LayerGraph) holds one and opens reference and
-/// payload targets on demand through it. The resolver is private — every path
-/// that resolves and reads a layer is a method here, so no caller juggles the
-/// resolver itself. This is the Rust analog of C++ `Sdf_LayerRegistry`; it will
+/// The `pcp::LayerGraph` holds one and opens reference and payload targets on
+/// demand through it. The resolver is private — every path that resolves and
+/// reads a layer is a method here, so no caller juggles the resolver itself. This is the Rust analog of C++ `Sdf_LayerRegistry`; it will
 /// grow a ref-counted loaded-layer cache (`find_or_open` dedup) and custom
 /// format registration.
 pub struct LayerRegistry {

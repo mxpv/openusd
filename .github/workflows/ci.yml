@@ -31,7 +31,7 @@ jobs:
           cargo check -p openusd --no-default-features --all-targets
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo fmt --all -- --check --files-with-diff
-      - run: cargo doc --workspace --no-deps
+      - run: cargo doc --workspace --no-deps --all-features
       - name: Test
         shell: bash
         run: |

@@ -20,10 +20,10 @@ use crate::tf;
 /// `dst_path`, along with the child names.
 ///
 /// A replacement: a prim or property subtree already at `dst_path` is erased
-/// first (via [`remove_spec`](super::spec::remove_spec)), so the destination
-/// ends up an exact copy of the source subtree. A `dst_path` that names a
-/// variant, variant set, or the pseudo-root is not erasable, so the copy
-/// overlays onto it rather than replacing — pre-existing descendants there
+/// first (via `remove_spec`), so the destination ends up an exact copy of the
+/// source subtree. A `dst_path` that names a variant, variant set, or the
+/// pseudo-root is not erasable, so the copy overlays onto it rather than
+/// replacing — pre-existing descendants there
 /// survive. Returns `Ok(true)` when a source spec existed (and was copied),
 /// `Ok(false)` when `src_path` has no spec — nothing is authored in that case.
 ///
@@ -73,7 +73,7 @@ pub fn copy_spec(
 /// `Ok(false)`.
 ///
 /// This copies; it does not remove the source. A move is `copy_spec_within`
-/// followed by [`remove_spec`](super::spec::remove_spec) on `src_path`.
+/// followed by `remove_spec` on `src_path`.
 pub fn copy_spec_within(
     data: &mut dyn sdf::AbstractData,
     src_path: &sdf::Path,

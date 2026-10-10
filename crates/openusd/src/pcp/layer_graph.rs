@@ -95,14 +95,13 @@ pub struct LayerStackIdentifier {
 }
 
 /// A composed layer stack by value — the transferable counterpart of the
-/// graph-local [`LayerStackId`], the value form of C++
-/// `PcpLayerStackIdentifier` with its recursive
-/// `expressionVariablesOverrideSource`. An arc-based edit target carries one so
-/// the stack resolves by content on whichever equal-input stage installs it,
-/// where the numeric handles differ. Total over every stack, the root included,
-/// so capture and resolve sites need no root special case. Captured by
-/// [`stack_identity`](LayerGraph::stack_identity) and resolved by
-/// [`resolve_stack_identity`](LayerGraph::resolve_stack_identity).
+/// graph-local `LayerStackId`, the value form of C++ `PcpLayerStackIdentifier`
+/// with its recursive `expressionVariablesOverrideSource`. An arc-based edit
+/// target carries one so the stack resolves by content on whichever equal-input
+/// stage installs it, where the numeric handles differ. Total over every stack,
+/// the root included, so capture and resolve sites need no root special case.
+/// Captured by `LayerGraph::stack_identity` and resolved by
+/// `LayerGraph::resolve_stack_identity`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StackIdentity {
     /// The stage root layer stack.

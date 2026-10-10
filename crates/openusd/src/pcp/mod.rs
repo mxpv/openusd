@@ -46,11 +46,11 @@
 //! | Item | C++ equivalent | Description |
 //! |------|---------------|-------------|
 //! | `layer_graph` | `PcpLayerStack` | The loaded layers and their sublayer DAG, keyed by the graph-minted [`LayerId`] handle (physical layer storage). Owns the composed-stack registry (`layer_stack`). Owned by [`Stage`](crate::usd::Stage), passed to each build by shared reference. Sublayer edges are always derived from `subLayers` metadata, the single source of truth. |
-//! | `layer_stack` | `PcpLayerStack` identity | Composed-stack identity ([`LayerStackId`]) and the registry of source-keyed instances (`LayerStackRegistry`): a [`LayerId`] names a physical layer, a [`LayerStackId`] a composed view under an expression-variable override source (`VarsSource`, the C++ `PcpExpressionVariablesSource`), so a `${VAR}` sublayer reached from two var-authoring sources resolves independently. |
+//! | `layer_stack` | `PcpLayerStack` identity | Composed-stack identity (`LayerStackId`) and the registry of source-keyed instances (`LayerStackRegistry`): a [`LayerId`] names a physical layer, a `LayerStackId` a composed view under an expression-variable override source (`VarsSource`, the C++ `PcpExpressionVariablesSource`), so a `${VAR}` sublayer reached from two var-authoring sources resolves independently. |
 //! | `index_cache` | `PcpCache` | Lazily-built composition cache (`IndexCache`). Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
 //! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that maps an instance proxy's subtree onto the shared `/__Prototype_N` namespace) as a second `IndexCache` impl. |
 //! | [`CompositionDiagnostic`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
-//! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`) and the [`CompositionContext`](prim_index::CompositionContext) that flows parent-to-child. |
+//! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`) and the `CompositionContext` that flows parent-to-child. |
 //! | `compose_site` | `PcpComposeSite` | Site field composition: the list-op primitives (`compose_references_in`, `collect_payloads_in`, `compose_arc_list_in`) the `prim_indexer` drives to read a node's arc fields across its layer stack, plus the asset-path anchoring and time-codes retiming they fold in. |
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
 //! | `prim_graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. |
@@ -67,12 +67,12 @@
 //! | `dependencies` | `Pcp_Dependencies` | Reverse `(LayerId, site) → prim-index paths` map (`Dependencies`) driving surgical change fanout. |
 //! | `diagnostics` | `PcpErrorVector` | The `Diagnostics` collection every recoverable [`CompositionDiagnostic`] is reported into, holding the one insertion invariant its owners share. |
 //!
-//! Layer loading lives in [`sdf::LayerRegistry`](crate::sdf::LayerRegistry); the
-//! loaded layers and their sublayer DAG are held in [`layer_graph::LayerGraph`].
+//! Layer loading lives in [`sdf::LayerRegistry`]; the
+//! loaded layers and their sublayer DAG are held in `LayerGraph`.
 //!
 //! # Architecture
 //!
-//! Each [`PrimIndex`](prim_index::PrimIndex) is an arena-backed, single-rooted tree
+//! Each [`PrimIndex`] is an arena-backed, single-rooted tree
 //! of [`Node`]s: a synthetic, inert root owns every otherwise-parentless node,
 //! so the graph is one tree rather than a forest. Nodes carry two namespace
 //! mappings: `map_to_parent` (translates paths to the parent node's namespace)
@@ -83,7 +83,7 @@
 //! strength-ordered children followed by the globally-weak specializes band —
 //! so value resolution is a linear scan.
 //!
-//! Composition is driven by a [`CompositionContext`](prim_index::CompositionContext)
+//! Composition is driven by a `CompositionContext`
 //! that flows from parent prims to children. The context carries:
 //!
 //! - Variant selections from all ancestors, so descendant prims resolve
@@ -101,8 +101,8 @@
 //! the set is used; if none match, the set stays unselected. Authored
 //! selections always take priority over fallbacks.
 //!
-//! The [`IndexCache`](index_cache::IndexCache) stores both the [`PrimIndex`](prim_index::PrimIndex)
-//! and the [`CompositionContext`](prim_index::CompositionContext) for each composed
+//! The `IndexCache` stores both the [`PrimIndex`]
+//! and the `CompositionContext` for each composed
 //! prim. During depth-first traversal, parents are always composed before
 //! children, so the context chain is always populated. Each per-prim build
 //! takes only shared references, making it suitable for future parallel
@@ -118,10 +118,10 @@
 //! the write are dropped from the cache. The pipeline mirrors C++
 //! `PcpChanges`:
 //!
-//! 1. The authoring callsite returns an [`sdf::ChangeList`](crate::sdf::ChangeList)
+//! 1. The authoring callsite returns an [`sdf::ChangeList`]
 //!    describing what it just did (the path, flag bits for spec adds/removes,
 //!    field names in `info_changed`).
-//! 2. [`Changes::did_change`] reads the change list and classifies each entry
+//! 2. `Changes::did_change` reads the change list and classifies each entry
 //!    into the effects it has — a set, not a single tier, since one edit can
 //!    restructure composition *and* move a schema identity:
 //!    - Significant — graph topology may be wrong. Drop the index and every
@@ -153,12 +153,12 @@
 //!    *reports* is the C++ set, derived from the field's prior value — see the
 //!    parity notes below.
 //!
-//! 3. [`Changes::apply`] surgically removes the affected entries from the
+//! 3. `Changes::apply` surgically removes the affected entries from the
 //!    cache. Indices rebuild lazily on next access.
 //!
 //! A reverse `(LayerId, site_path) → prim_index_paths` map (the
 //! `Dependencies` table internal to the cache) makes step 2 cheap: every
-//! [`PrimIndex`](prim_index::PrimIndex) registers its observed sites when it
+//! [`PrimIndex`] registers its observed sites when it
 //! finishes building, and the classifier looks up dependents — including
 //! ancestors of the changed site, since an arc at `/Foo` makes `/Foo/Bar`'s
 //! composition transitively dependent on `/Foo`.
@@ -293,7 +293,7 @@
 //! arc grafted at the target's pseudo-root when the field names no prim, so its
 //! site table can find the referrer later. This port records the consultation
 //! directly on the index instead
-//! ([`NonSiteDeps::default_prim`](prim_graph::NonSiteDeps)) and skips the arc,
+//! (`NonSiteDeps::default_prim`) and skips the arc,
 //! which keeps the composed graph free of a node that contributes nothing.
 //!
 //! Two consequences, both deliberate:
@@ -624,7 +624,7 @@ impl From<ClipLoad> for QueryError {
     }
 }
 
-/// An error encountered while building a [`PrimIndex`](prim_index::PrimIndex).
+/// An error encountered while building a [`PrimIndex`].
 ///
 /// These errors represent composition diagnostics. Recoverable failures skip
 /// the broken opinion and are retained by [`Stage`](crate::usd::Stage).

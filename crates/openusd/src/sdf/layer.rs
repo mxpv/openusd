@@ -695,7 +695,7 @@ pub struct PendingLayerChange<'a> {
     /// needs to retain it past the callback clones it ([`ChangeList`] is
     /// [`Clone`]).
     pub change_list: &'a ChangeList,
-    /// The id of the atomic transaction ([`edit_layers`] group) this commit
+    /// The id of the atomic transaction (`edit_layers` group) this commit
     /// belongs to: one id shared by every layer the transaction commits, distinct
     /// from the next transaction's, and monotonically increasing. An observer
     /// keys per-transaction state on it (see [`crate::usd::UndoStage`]).
