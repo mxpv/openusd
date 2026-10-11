@@ -170,7 +170,7 @@ impl PrimvarsAPI {
         }
         // The primvar is defined, so the block stamps the declaration it
         // already has and this one declares nothing.
-        let type_name = primvar.type_name()?.ok_or(sdf::ValueTypeError::Empty)?;
+        let type_name = super::declared_type(primvar.attribute())?.ok_or(sdf::ValueTypeError::Empty)?;
         self.stage().edit(|edit| {
             let prim = edit.prim(self.path().clone())?;
             if type_name.is_array() {
@@ -874,7 +874,10 @@ mod tests {
         mesh.primvar_builder("x", "float[]").set(floats(&[1.0, 2.0])).build()?;
         let primvar = mesh.primvar_builder("x", "float").indices(vec![1]).build()?;
 
-        assert_eq!(primvar.type_name()?, Some(sdf::ValueTypeName::FLOAT_ARRAY));
+        assert_eq!(
+            crate::geom::declared_type(primvar.attribute())?,
+            Some(sdf::ValueTypeName::FLOAT_ARRAY)
+        );
         assert_eq!(primvar.compute_flattened::<Vec<f32>>(None)?, Some(vec![2.0]));
         Ok(())
     }
@@ -887,7 +890,10 @@ mod tests {
             .primvar_builder("displayColor", "color3f")
             .indices(vec![0])
             .build()?;
-        assert_eq!(color.type_name()?, Some(sdf::ValueTypeName::COLOR3F_ARRAY));
+        assert_eq!(
+            crate::geom::declared_type(color.attribute())?,
+            Some(sdf::ValueTypeName::COLOR3F_ARRAY)
+        );
         assert!(color.is_indexed()?);
         Ok(())
     }

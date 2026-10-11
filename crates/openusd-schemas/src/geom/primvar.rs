@@ -179,6 +179,19 @@ impl Primvar {
         self.attribute.has_authored_metadata(tokens::ELEMENT_SIZE)
     }
 
+    /// How the primvar is declared, read in one call (C++
+    /// `GetDeclarationInfo`): its [name](Self::primvar_name), its value
+    /// type, its [`interpolation`](Self::interpolation) and its
+    /// [`element_size`](Self::element_size).
+    pub fn declaration_info(&self) -> Result<PrimvarDeclaration> {
+        Ok(PrimvarDeclaration {
+            name: self.primvar_name().to_owned(),
+            type_name: super::declared_type(&self.attribute)?,
+            interpolation: self.interpolation()?,
+            element_size: self.element_size()?,
+        })
+    }
+
     /// The index that stands for "no authored value" in the primvar's indices
     /// (C++ `GetUnauthoredValuesIndex`), -1 where none is authored, which
     /// says the primvar has no such index.
@@ -350,7 +363,7 @@ impl Primvar {
     /// Only a `string` or `string[]` primvar takes one: any other is
     /// [`SchemaError::IdTargetType`].
     pub fn set_id_target(&self, path: &sdf::Path) -> Result<(), SchemaError> {
-        let type_name = self.type_name()?;
+        let type_name = super::declared_type(&self.attribute)?;
         if !type_name.as_ref().is_some_and(holds_strings) {
             return Err(SchemaError::IdTargetType {
                 primvar: self.attribute.path().clone(),
@@ -396,7 +409,7 @@ impl Primvar {
     // `usd::AttributeQuery` stamps its source, would let a loop over times
     // resolve them once.
     fn id_target(&self) -> Result<Option<(usd::Relationship, bool)>> {
-        let Some(type_name) = self.type_name()?.filter(holds_strings) else {
+        let Some(type_name) = super::declared_type(&self.attribute)?.filter(holds_strings) else {
             return Ok(None);
         };
         let relationship = self.attribute.prim().relationship(self.sibling_name(ID_FROM_SUFFIX));
@@ -449,18 +462,9 @@ impl Primvar {
         Ok(values.gather(positions).unwrap_or(values))
     }
 
-    /// The primvar's composed value type, whatever its spelling, or `None`
-    /// where nothing declares the attribute.
-    pub(super) fn type_name(&self) -> Result<Option<sdf::ValueTypeName>> {
-        Ok(self
-            .attribute
-            .get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?
-            .map(sdf::ValueTypeName::from))
-    }
-
     /// That the primvar is array-valued, which is what lets it be indexed.
     fn require_array(&self) -> Result<(), SchemaError> {
-        let type_name = self.type_name()?;
+        let type_name = super::declared_type(&self.attribute)?;
         if type_name.as_ref().is_some_and(sdf::ValueTypeName::is_array) {
             return Ok(());
         }
@@ -483,6 +487,21 @@ impl Primvar {
     fn sibling_name(&self, suffix: &str) -> String {
         format!("{}{suffix}", self.attribute.name())
     }
+}
+
+/// How a primvar is declared: what [`Primvar::declaration_info`] answers
+/// (the out-parameters of C++ `UsdGeomPrimvar::GetDeclarationInfo`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrimvarDeclaration {
+    /// The primvar's name, with the `primvars:` namespace stripped.
+    pub name: String,
+    /// The primvar's composed value type, or `None` where nothing declares
+    /// the attribute.
+    pub type_name: Option<sdf::ValueTypeName>,
+    /// How the primvar's values lie on the geometry.
+    pub interpolation: Interpolation,
+    /// How many consecutive values make up one element of the primvar.
+    pub element_size: i32,
 }
 
 /// The suffix of the attribute that indexes a primvar: `primvars:st:indices`
@@ -529,7 +548,7 @@ mod tests {
     use openusd::usd::{self, SchemaBase, Stage, TimeCode};
     use openusd::{sdf, tf};
 
-    use super::Primvar;
+    use super::{Primvar, PrimvarDeclaration};
     use crate::geom::{Interpolation, Mesh, PrimvarsAPI, tokens};
     use crate::{PrimvarIndexError, SchemaError};
 
@@ -663,6 +682,63 @@ mod tests {
             .clone()
             .set_metadata(tokens::ELEMENT_SIZE, sdf::Value::Float(2.0))?;
         assert!(primvar.element_size().is_err());
+        Ok(())
+    }
+
+    /// The declaration cases of C++ `testUsdGeomPrimvar`: the four answers
+    /// are the ones the single queries give.
+    #[test]
+    fn declaration_info() -> Result {
+        let api = mesh()?;
+        let u1 = api
+            .primvar_builder("u_1", "float[]")
+            .interpolation(Interpolation::Vertex)
+            .build()?;
+        let v1 = api
+            .primvar_builder("v_1", "float[]")
+            .interpolation(Interpolation::FaceVarying)
+            .build()?;
+        let mats = api.primvar_builder("projMats", "matrix4d[]").element_size(3).build()?;
+
+        for (primvar, name, type_name, interpolation, element_size) in [
+            (u1, "u_1", sdf::ValueTypeName::FLOAT_ARRAY, Interpolation::Vertex, 1),
+            (
+                v1,
+                "v_1",
+                sdf::ValueTypeName::FLOAT_ARRAY,
+                Interpolation::FaceVarying,
+                1,
+            ),
+            (
+                mats,
+                "projMats",
+                sdf::ValueTypeName::MATRIX4D_ARRAY,
+                Interpolation::Constant,
+                3,
+            ),
+        ] {
+            let info = api.primvar(name)?.declaration_info()?;
+            assert_eq!(info.name, primvar.primvar_name());
+            assert_eq!(info.type_name, crate::geom::declared_type(primvar.attribute())?);
+            assert_eq!(info.interpolation, primvar.interpolation()?);
+            assert_eq!(info.element_size, primvar.element_size()?);
+
+            assert_eq!(
+                info,
+                PrimvarDeclaration {
+                    name: name.to_owned(),
+                    type_name: Some(type_name),
+                    interpolation,
+                    element_size,
+                }
+            );
+        }
+
+        // A primvar nothing declares has no type and the fallbacks.
+        let undeclared = api.primvar("nope")?.declaration_info()?;
+        assert_eq!(undeclared.type_name, None);
+        assert_eq!(undeclared.interpolation, Interpolation::Constant);
+        assert_eq!(undeclared.element_size, 1);
         Ok(())
     }
 

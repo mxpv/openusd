@@ -216,6 +216,19 @@ pub enum SchemaError {
         /// it.
         type_name: tf::Token,
     },
+
+    /// A tetrahedron of a tet mesh names a point the mesh does not have.
+    #[error("tetrahedron {tet} of {prim} has vertex index {index}, outside the mesh's {points} points")]
+    TetVertexOutOfRange {
+        /// The tet mesh.
+        prim: sdf::Path,
+        /// The tetrahedron's position in `tetVertexIndices`.
+        tet: usize,
+        /// The first of its four indices that is out of range.
+        index: i32,
+        /// How many points the mesh has at the time read.
+        points: usize,
+    },
 }
 
 /// The indices of an indexed primvar that reach outside its values.

@@ -116,10 +116,13 @@
 
 openusd::include_schema!("usdGeom");
 
+mod gprim;
 mod imageable;
+mod mesh;
 mod motion_api;
 mod primvar;
 mod primvars_api;
+mod tet_mesh;
 mod visibility_api;
 mod xform;
 mod xform_cache;
@@ -132,8 +135,10 @@ use openusd::{sdf, tf, usd};
 // The enums still written by hand name the generated constants directly.
 use tokens::*;
 
+pub use gprim::GprimExt;
 pub use imageable::{ImageableExt, PurposeInfo};
-pub use primvar::Primvar;
+pub use mesh::MeshTopologyError;
+pub use primvar::{Primvar, PrimvarDeclaration};
 pub use primvars_api::PrimvarBuilder;
 pub use xform::{CommonXformOp, CommonXformOps, RotationOrder, XformVectors};
 pub use xform_cache::XformCache;
@@ -245,6 +250,14 @@ fn declared_type(attr: &usd::Attribute) -> Result<Option<sdf::ValueTypeName>> {
     Ok(attr
         .get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?
         .map(sdf::ValueTypeName::from))
+}
+
+/// The length of the array an attribute read, zero where it read no value.
+// TODO(perf): the caller reads the whole array for its length; a composed
+// array-length query on usd::Attribute would answer without copying the
+// value.
+fn array_len<T>(values: Option<Vec<T>>) -> usize {
+    values.map_or(0, |values| values.len())
 }
 
 /// Visit the prim at `path` and then each of its ancestors below the
