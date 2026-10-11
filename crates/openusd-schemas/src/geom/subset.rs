@@ -7,8 +7,9 @@
 //! family's subsets may share elements in a
 //! `subsetFamily:<familyName>:familyType` attribute of its own.
 
-use std::collections::BTreeSet;
-use std::iter;
+use std::cell::OnceCell;
+use std::collections::{BTreeSet, HashSet};
+use std::{iter, mem};
 
 use openusd::Result;
 use openusd::usd::{self, SchemaBase};
@@ -201,7 +202,7 @@ impl Subset {
         if !is_paired(element_type) {
             return Ok(Self::unassigned_indices_in(&subsets, topology.count(), time)?);
         }
-        let Some(possible) = topology.into_pairs() else {
+        let Some(possible) = topology.pairs() else {
             return Ok(Vec::new());
         };
         let ordered = element_type == ElementType::Segment;
@@ -271,12 +272,10 @@ impl Subset {
         let indices_attrs: Vec<_> = subsets.iter().map(|subset| subset.indices_attr()).collect();
 
         let mut reasons = Vec::new();
+        let mut in_family = Seen::new(element_count);
         for time in sampled_times(&indices_attrs)? {
             let at = time_label(time);
-            // TODO(perf): a bitmap over 0..element_count detects repeats and
-            // counts distinct indices without an ordered set; only the first
-            // and last index are needed in order.
-            let mut in_family = BTreeSet::new();
+            in_family.clear();
             for subset in subsets {
                 for index in subset.indices_at(time)?.unwrap_or_default() {
                     if !in_family.insert(index) && family_type != FamilyType::Unrestricted {
@@ -293,7 +292,7 @@ impl Subset {
                     "Number of unique indices at time {at} does not match the element count {element_count}."
                 ));
             }
-            if let (Some(&first), Some(&last)) = (in_family.first(), in_family.last()) {
+            if let Some((first, last)) = in_family.bounds() {
                 index_bounds(first, last, Some(element_count), &at, &mut reasons);
             }
         }
@@ -367,6 +366,11 @@ impl Subset {
         let indices_attrs: Vec<_> = subsets.iter().map(|subset| subset.indices_attr()).collect();
 
         let mut has_indices = false;
+        let mut in_family = Seen::new(earliest_count);
+        // Geometry whose topology does not vary has one topology at the
+        // default time and one at every sample time, each read when first
+        // needed.
+        let mut fixed: [Option<Topology>; 2] = [None, None];
         for time in sampled_times(&indices_attrs)? {
             let at = time_label(time);
             let mut members = Vec::with_capacity(subsets.len());
@@ -376,11 +380,7 @@ impl Subset {
 
             // An index repeats freely among pairs: one point is on several
             // edges, one curve has several segments.
-            //
-            // TODO(perf): a bitmap over 0..element_count detects repeats and
-            // counts distinct indices without an ordered set; only the first
-            // and last index are needed in order.
-            let mut in_family = BTreeSet::new();
+            in_family.clear();
             for (subset, indices) in &members {
                 if paired && indices.len() % 2 != 0 {
                     reasons.push(format!(
@@ -403,18 +403,32 @@ impl Subset {
             // where the element count may change, for that count.
             // Topologically varying geometry may have no elements at some
             // times, which only matters when the family has indices then.
-            // TODO(perf): pairs of a topology that does not vary are the
-            // same at every sample time, so they could be built once for
-            // the sample times and once for the default time.
-            let topology = match paired || count_varies {
-                true => elements.at(time)?,
-                false => Topology::Count(earliest_count),
+            let read;
+            let topology = match (count_varies, paired) {
+                (true, _) => {
+                    read = elements.at(time)?;
+                    &read
+                }
+                (false, true) => {
+                    let slot = &mut fixed[usize::from(time.is_some())];
+                    if slot.is_none() {
+                        *slot = Some(elements.at(time)?);
+                    }
+                    let Some(topology) = slot.as_ref() else {
+                        continue;
+                    };
+                    topology
+                }
+                (false, false) => {
+                    read = Topology::Count(earliest_count);
+                    &read
+                }
             };
             let count = match count_varies {
                 true => topology.count(),
                 false => earliest_count,
             };
-            if !in_family.is_empty() && count_varies && count == 0 {
+            if in_family.len() > 0 && count_varies && count == 0 {
                 reasons.push(format!(
                     "Geometry <{}> has no elements at time {at}, but the \"{family_name}\" GeomSubset family \
                      contains indices.",
@@ -443,7 +457,11 @@ impl Subset {
                 }
 
                 topology.report_missing(&pairs_in_family, family_name, &at, &mut reasons);
-                if partition && !topology.into_pairs().unwrap_or_default().is_subset(&pairs_in_family) {
+                if partition
+                    && topology
+                        .pairs()
+                        .is_some_and(|possible| !possible.is_subset(&pairs_in_family))
+                {
                     reasons.push(incomplete());
                 }
             } else if partition && in_family.len() != count {
@@ -451,7 +469,7 @@ impl Subset {
             }
 
             // A time without indices leaves the family as valid as it was.
-            let (Some(&first), Some(&last)) = (in_family.first(), in_family.last()) else {
+            let Some((first, last)) = in_family.bounds() else {
                 continue;
             };
             has_indices = true;
@@ -525,16 +543,19 @@ impl Elements {
             Self::MeshEdges(mesh) => Topology::Edges(edges(mesh, time)?),
             Self::TetFaces(tets) => Topology::Count(array_len(tets.surface_face_vertex_indices_at(time)?)),
             Self::Tetrahedra(tets) => Topology::Count(array_len(tets.tet_vertex_indices_at(time)?)),
-            Self::Segments(curves) => Topology::Segments(match curves.curve_vertex_counts_at(time)? {
-                Some(counts) => {
-                    // Curves whose type, wrap and basis answer no segment
-                    // counts have no segments on any curve.
-                    let mut segment_counts = curves.segment_counts_of(&counts, time)?;
-                    segment_counts.resize(counts.len(), 0);
-                    Some(segment_counts)
-                }
-                None => None,
-            }),
+            Self::Segments(curves) => {
+                let counts = match curves.curve_vertex_counts_at(time)? {
+                    Some(counts) => {
+                        // Curves whose type, wrap and basis answer no segment
+                        // counts have no segments on any curve.
+                        let mut segment_counts = curves.segment_counts_of(&counts, time)?;
+                        segment_counts.resize(counts.len(), 0);
+                        Some(segment_counts)
+                    }
+                    None => None,
+                };
+                Topology::Segments(counts, OnceCell::new())
+            }
         })
     }
 
@@ -565,8 +586,9 @@ enum Topology {
     /// indices run out before its counts do.
     Edges(Option<BTreeSet<(i32, i32)>>),
     /// The segment count of each curve, or `None` where `curveVertexCounts`
-    /// reads no value.
-    Segments(Option<Vec<i32>>),
+    /// reads no value, and every segment those counts give once
+    /// [`pairs`](Self::pairs) is asked for them.
+    Segments(Option<Vec<i32>>, OnceCell<BTreeSet<(i32, i32)>>),
 }
 
 impl Topology {
@@ -576,18 +598,18 @@ impl Topology {
         match self {
             Self::Count(count) => *count,
             Self::Edges(edges) => edges.as_ref().map_or(0, |edges| edges.len()),
-            Self::Segments(counts) => counts.iter().flatten().map(|&count| non_negative(count)).sum(),
+            Self::Segments(counts, _) => counts.iter().flatten().map(|&count| non_negative(count)).sum(),
         }
     }
 
     /// Every edge or segment as the pair of indices that names it, or `None`
     /// where their topology reads no value and for elements that one index
     /// names.
-    fn into_pairs(self) -> Option<BTreeSet<(i32, i32)>> {
+    fn pairs(&self) -> Option<&BTreeSet<(i32, i32)>> {
         match self {
             Self::Count(_) => None,
-            Self::Edges(edges) => edges,
-            Self::Segments(counts) => counts.as_deref().map(segments),
+            Self::Edges(edges) => edges.as_ref(),
+            Self::Segments(counts, pairs) => counts.as_deref().map(|counts| pairs.get_or_init(|| segments(counts))),
         }
     }
 
@@ -599,9 +621,69 @@ impl Topology {
             Self::Edges(Some(edges)) if !pairs.is_subset(edges) => reasons.push(format!(
                 "At least one edge in family {family_name} at time {at} does not exist on the parent prim."
             )),
-            Self::Segments(Some(counts)) => segment_bounds(counts, pairs, at, reasons),
-            Self::Count(_) | Self::Edges(_) | Self::Segments(None) => {}
+            Self::Segments(Some(counts), _) => segment_bounds(counts, pairs, at, reasons),
+            Self::Count(_) | Self::Edges(_) | Self::Segments(None, _) => {}
         }
+    }
+}
+
+/// The distinct indices a family has been seen to hold at one time: how
+/// many there are and the least and greatest of them.
+struct Seen {
+    /// Whether each index a family should hold, those under the element
+    /// count, has been seen.
+    inside: Vec<bool>,
+    /// The indices seen that no element has: the negative ones and those at
+    /// or past the element count.
+    outside: HashSet<i32>,
+    len: usize,
+    bounds: Option<(i32, i32)>,
+}
+
+impl Seen {
+    /// No indices, among `element_count` elements.
+    fn new(element_count: usize) -> Self {
+        Seen {
+            inside: vec![false; element_count],
+            outside: HashSet::new(),
+            len: 0,
+            bounds: None,
+        }
+    }
+
+    /// Forget every index, for the next time.
+    fn clear(&mut self) {
+        self.inside.fill(false);
+        self.outside.clear();
+        self.len = 0;
+        self.bounds = None;
+    }
+
+    /// Record `index`. Returns `false` for one already seen.
+    fn insert(&mut self, index: i32) -> bool {
+        let slot = usize::try_from(index).ok().and_then(|index| self.inside.get_mut(index));
+        let fresh = match slot {
+            Some(seen) => !mem::replace(seen, true),
+            None => self.outside.insert(index),
+        };
+        if fresh {
+            self.len += 1;
+            self.bounds = Some(match self.bounds {
+                Some((first, last)) => (first.min(index), last.max(index)),
+                None => (index, index),
+            });
+        }
+        fresh
+    }
+
+    /// How many distinct indices have been seen.
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The least and the greatest index seen, or `None` before any.
+    fn bounds(&self) -> Option<(i32, i32)> {
+        self.bounds
     }
 }
 

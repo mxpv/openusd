@@ -41,7 +41,7 @@ pub use core_schemas::{
 };
 pub use diff::{ApplyMode, Diff, Edit, FieldValue};
 pub use editor::{NamespaceEditError, NamespaceEditor};
-pub use interp::InterpolationType;
+pub use interp::{InterpolationType, bracketing_time_samples};
 pub use model_api::KindValidation;
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use prim_definition::{DefProperty, PrimDefinition};
