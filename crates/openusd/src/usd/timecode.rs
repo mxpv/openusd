@@ -52,7 +52,8 @@ impl TimeCode {
     /// A time delta safe to add to or subtract from any numeric time in
     /// `[-max_value, max_value]` so the result stays distinct from the
     /// original under `f64` rounding, with `max_compression` headroom against
-    /// the worst case. Mirrors C++ `UsdTimeCode::SafeStep`.
+    /// the worst case and a safety factor of two. Mirrors C++
+    /// `UsdTimeCode::SafeStep`.
     ///
     /// Returns an `f64` because it is added to a time before a code is built:
     /// authoring two samples bracketing a discontinuity is two writes, e.g.
@@ -61,7 +62,7 @@ impl TimeCode {
     /// `(stageTime, value)` entries in `ClipsAPI::set_clip_active` /
     /// `set_clip_times`.
     pub const fn safe_step(max_value: f64, max_compression: f64) -> f64 {
-        f64::EPSILON * max_value * max_compression
+        f64::EPSILON * max_value * max_compression * 2.0
     }
 
     /// [`safe_step`](Self::safe_step) with C++'s defaults: `max_value = 1e6`,
