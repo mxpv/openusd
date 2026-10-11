@@ -109,6 +109,27 @@ pub enum SchemaError {
         op: String,
     },
 
+    /// A prim's transform is asked for as a translate, a rotate, a scale and
+    /// a pivot, and the prim is not transformable or its `xformOpOrder` is
+    /// not that shape.
+    #[error("{prim} has no transform stack XformCommonAPI can author")]
+    IncompatibleXformable {
+        /// The prim whose stack does not fit.
+        prim: sdf::Path,
+    },
+
+    /// A rotation is authored in one axis order on a prim whose stack
+    /// already rotates in another.
+    #[error("{prim} rotates with `{existing}`, not the `{requested}` asked for")]
+    RotationOrderMismatch {
+        /// The prim whose rotate op is of another order.
+        prim: sdf::Path,
+        /// The op type token of the order asked for.
+        requested: &'static str,
+        /// The op type token of the rotate op the stack lists.
+        existing: &'static str,
+    },
+
     /// A value is set through an inverse xformOp, which reads the value of
     /// the op it inverts and holds none of its own.
     #[error("xformOp `{op}` is an inverse op and takes no value")]

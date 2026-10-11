@@ -93,7 +93,9 @@
 //!
 //! [`XformableExt::add_xform_op`] declares one op of any [`XformOpKind`],
 //! optionally inverted, and hands back the [`XformOp`] to set its value
-//! through.
+//! through. [`XformCommonAPI`] reads and authors the stack as one translate,
+//! one rotate, one scale and a pivot ([`XformVectors`]), for the stacks that
+//! have that shape.
 //!
 //! # Primvars
 //!
@@ -119,6 +121,7 @@ mod motion_api;
 mod primvar;
 mod primvars_api;
 mod visibility_api;
+mod xform;
 mod xform_cache;
 mod xform_op;
 mod xformable;
@@ -132,6 +135,7 @@ use tokens::*;
 pub use imageable::{ImageableExt, PurposeInfo};
 pub use primvar::Primvar;
 pub use primvars_api::PrimvarBuilder;
+pub use xform::{CommonXformOp, CommonXformOps, RotationOrder, XformVectors};
 pub use xform_cache::XformCache;
 pub use xform_op::{XformOp, XformOpKind};
 pub use xformable::{XformOpPrecision, XformQuery, XformableExt};
