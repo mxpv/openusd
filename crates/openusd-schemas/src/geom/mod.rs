@@ -121,6 +121,7 @@ mod gprim;
 mod imageable;
 mod mesh;
 mod motion_api;
+mod point_instancer;
 mod points;
 mod primvar;
 mod primvars_api;

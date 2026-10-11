@@ -138,6 +138,18 @@ pub enum SchemaError {
         op: String,
     },
 
+    /// A mask keeps or drops each element of an array, so it is as long as
+    /// the array has elements.
+    #[error("a mask of {mask} elements does not fit an array of {len} values at element size {element_size}")]
+    MaskSizeMismatch {
+        /// How many elements the mask covers.
+        mask: usize,
+        /// How many values the array holds.
+        len: usize,
+        /// How many values make up one element.
+        element_size: usize,
+    },
+
     /// A shading connection chain exceeds the resolver's depth bound,
     /// indicating a cycle or a pathologically deep graph.
     #[error("connection chain at {attribute} is deeper than {max} hops")]
