@@ -74,7 +74,10 @@
 //! [`ImageableExt::compute_effective_visibility`] and
 //! [`ImageableExt::compute_purpose`] resolve the effective value by walking
 //! imageable ancestors. A purpose visibility counts only where
-//! [`VisibilityAPI`] is applied. The motion settings
+//! [`VisibilityAPI`] is applied. [`ImageableExt::make_visible`] authors
+//! visibility with that inheritance in mind, and
+//! [`ImageableExt::compute_proxy_prim`] finds the `proxy` prim standing in
+//! for a `render` one. The motion settings
 //! ([`MotionAPI::compute_motion_blur_scale`] and its siblings) are inherited
 //! the same way, from the nearest prim that applies [`MotionAPI`].
 //!
@@ -122,7 +125,7 @@ use openusd::{sdf, usd};
 // The enums still written by hand name the generated constants directly.
 use tokens::*;
 
-pub use imageable::ImageableExt;
+pub use imageable::{ImageableExt, PurposeInfo};
 pub use primvar::Primvar;
 pub use primvars_api::PrimvarBuilder;
 pub use xform_cache::XformCache;
@@ -144,6 +147,12 @@ impl SubdivisionScheme {
     pub fn is_subdivision(self) -> bool {
         !matches!(self, SubdivisionScheme::None)
     }
+}
+
+impl Purpose {
+    /// Every purpose, in the order a purpose-driven listing presents them
+    /// (C++ `UsdGeomImageable::GetOrderedPurposeTokens`).
+    pub const ORDERED: [Purpose; 4] = [Purpose::Default, Purpose::Render, Purpose::Proxy, Purpose::Guide];
 }
 
 /// Primvar interpolation modes from UsdGeomPrimvar.

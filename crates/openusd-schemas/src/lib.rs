@@ -373,7 +373,9 @@ where
 pub(crate) mod tests {
     use super::*;
 
+    use std::cell::Cell;
     use std::fs;
+    use std::rc::Rc;
 
     use openusd::Result;
     use openusd::usd::Stage;
@@ -388,6 +390,18 @@ pub(crate) mod tests {
     )]
     pub(crate) fn stage(name: &str) -> Result<Stage> {
         Stage::builder().schema_registry(schema_registry()).in_memory(name)
+    }
+
+    /// How many edits `stage` commits from here on.
+    #[allow(
+        dead_code,
+        reason = "which families' tests reach for it depends on the features enabled"
+    )]
+    pub(crate) fn commits(stage: &Stage) -> Rc<Cell<usize>> {
+        let commits = Rc::new(Cell::new(0));
+        let counted = commits.clone();
+        stage.add_sink(move |_stage: &Stage, _change: &usd::CommittedChange<'_>| counted.set(counted.get() + 1));
+        commits
     }
 
     /// A stage opened from `usda` text written to a fresh directory, carrying

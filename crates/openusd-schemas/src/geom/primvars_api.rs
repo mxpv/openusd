@@ -606,9 +606,7 @@ fn inherit(prim: &usd::Prim, inherited: &[Primvar], accept_all: bool) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::fs;
-    use std::rc::Rc;
 
     use openusd::usd::{self, SchemaBase, Stage};
     use openusd::{sdf, tf};
@@ -634,14 +632,6 @@ mod tests {
 
     fn floats(values: &[f32]) -> sdf::Value {
         sdf::Value::FloatVec(values.to_vec())
-    }
-
-    /// How many edits the stage commits from here on.
-    fn commits(stage: &Stage) -> Rc<Cell<usize>> {
-        let commits = Rc::new(Cell::new(0));
-        let counted = commits.clone();
-        stage.add_sink(move |_stage: &Stage, _change: &usd::CommittedChange<'_>| counted.set(counted.get() + 1));
-        commits
     }
 
     /// The attribute path of each primvar, in the order given.
@@ -696,7 +686,7 @@ mod tests {
     #[test]
     fn builder_one_transaction() -> Result {
         let mesh = mesh()?;
-        let commits = commits(mesh.stage());
+        let commits = crate::tests::commits(mesh.stage());
         let primvar = mesh
             .primvar_builder("st", "float[]")
             .interpolation(Interpolation::FaceVarying)
@@ -759,7 +749,7 @@ mod tests {
     #[test]
     fn scalar_indices_author_nothing() -> Result {
         let mesh = mesh()?;
-        let commits = commits(mesh.stage());
+        let commits = crate::tests::commits(mesh.stage());
         for builder in [
             mesh.primvar_builder("x", "float").set(1.0_f32).indices(vec![0]),
             mesh.primvar_builder("x", "float").set(1.0_f32).unindexed(),
@@ -781,7 +771,7 @@ mod tests {
     #[test]
     fn builder_joins_edit() -> Result {
         let mesh = mesh()?;
-        let commits = commits(mesh.stage());
+        let commits = crate::tests::commits(mesh.stage());
         mesh.stage().edit(|edit| {
             let prim = edit.prim(mesh.path().clone())?;
             prim.attribute_builder("other", "double").set(1.0).build()?;
@@ -1084,7 +1074,7 @@ mod tests {
             .build()?;
         assert!(!primvar.indices_attr().is_defined()?);
 
-        let commits = commits(mesh.stage());
+        let commits = crate::tests::commits(mesh.stage());
         assert!(mesh.block_primvar("x")?);
         assert_eq!(commits.get(), 1);
         assert!(primvar.indices_attr().resolve_info()?.value_is_blocked());
@@ -1106,7 +1096,7 @@ mod tests {
     #[test]
     fn block_undefined_noop() -> Result {
         let mesh = mesh()?;
-        let commits = commits(mesh.stage());
+        let commits = crate::tests::commits(mesh.stage());
         assert!(!mesh.block_primvar("nope")?);
         assert_eq!(commits.get(), 0);
         assert!(!mesh.has_primvar("nope")?);
