@@ -3,7 +3,7 @@
 //! surface, the `Xformable` transform stack, and every concrete prim view.
 
 use openusd::Result;
-use openusd::gf::{Mat4d, Vec2f, Vec3f};
+use openusd::gf::{Mat4d, Vec2f, Vec3d, Vec3f};
 use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::{Attribute, SchemaBase, Stage, TimeCode};
@@ -265,7 +265,7 @@ fn rotate_xyz_matches_pixar_composition() -> Result<(), SchemaError> {
     // +X to -Z.
     let stage = open()?;
     let m = xform(&stage, "/World/EulerXYZ")?.local_transformation(None)?;
-    let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
+    let p = m.transform_affine(Vec3d { x: 1.0, y: 0.0, z: 0.0 });
     assert!(p.x.abs() < 1e-5, "x: {}", p.x);
     assert!(p.y.abs() < 1e-5, "y: {}", p.y);
     assert!((p.z + 1.0).abs() < 1e-5, "z: {} (expected -1)", p.z);
@@ -283,7 +283,7 @@ fn trs_stack_composes_in_authored_order() -> Result<(), SchemaError> {
     //   2. rotate by 90° about Y: (2, 0, 0) → (0, 0, -2)
     //   3. translate by (1, 2, 3): (0, 0, -2) → (1, 2, 1)
     let m = xform(&stage, "/World/TRS")?.local_transformation(None)?;
-    let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
+    let p = m.transform_affine(Vec3d { x: 1.0, y: 0.0, z: 0.0 });
     assert!((p.x - 1.0).abs() < 1e-4, "x: {}", p.x);
     assert!((p.y - 2.0).abs() < 1e-4, "y: {}", p.y);
     assert!((p.z - 1.0).abs() < 1e-4, "z: {}", p.z);

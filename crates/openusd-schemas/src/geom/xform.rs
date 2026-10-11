@@ -453,10 +453,6 @@ fn common_vectors(ops: &CommonXformOps, time: Option<usd::TimeCode>) -> Result<X
     })
 }
 
-fn vec3f(v: gf::Vec3d) -> gf::Vec3f {
-    gf::vec3f(v.x as f32, v.y as f32, v.z as f32)
-}
-
 /// The vectors a local matrix factors into: its translation, its rotation as
 /// XYZ angles, and its scale, about a zero pivot (C++
 /// `_ConvertMatrixToComponents`).
@@ -470,7 +466,7 @@ fn matrix_vectors(matrix: gf::Mat4d) -> XformVectors {
     XformVectors {
         translation: factors.translation,
         rotation: gf::vec3f(angles.z as f32, angles.y as f32, angles.x as f32),
-        scale: vec3f(factors.scale),
+        scale: factors.scale.to_f32(),
         ..XformVectors::default()
     }
 }
@@ -557,7 +553,7 @@ fn accumulate(ops: &[XformOp], time: Option<usd::TimeCode>) -> Result<Option<Xfo
     let rotation_order = rotate_kind.and_then(RotationOrder::from_op_kind).unwrap_or_default();
     Ok(Some(XformVectors {
         translation: matrices[TRANSLATE].extract_translation(),
-        pivot: vec3f(matrices[PIVOT].extract_translation()),
+        pivot: matrices[PIVOT].extract_translation().to_f32(),
         rotation: rotate_slot.map_or(identity.rotation, |index| {
             rotation_order.angles(matrices[index].extract_rotation())
         }),

@@ -592,48 +592,37 @@ impl Mat4d {
     /// The point `p` under this transform (C++ `Transform`): `(p.x, p.y,
     /// p.z, 1) · M`, divided through by the homogeneous coordinate that
     /// gives. A coordinate of zero divides by one.
-    /// [`transform_point`](Self::transform_point) leaves that coordinate
-    /// out.
     pub fn transform(self, p: Vec3d) -> Vec3d {
         let m = &self.0;
-        let along = |c: usize| p.x * m[c] + p.y * m[4 + c] + p.z * m[8 + c] + m[12 + c];
-        let w = match along(3) {
+        let w = match p.x * m[3] + p.y * m[7] + p.z * m[11] + m[15] {
             0.0 => 1.0,
             w => w,
         };
+        self.transform_affine(p) * (1.0 / w)
+    }
+
+    /// The point `p` under this transform, taken to be affine (C++
+    /// `TransformAffine`): the first three components of `(p.x, p.y, p.z, 1)
+    /// · M`, with no division by the fourth.
+    pub fn transform_affine(self, p: Vec3d) -> Vec3d {
+        let m = &self.0;
         Vec3d {
-            x: along(0) / w,
-            y: along(1) / w,
-            z: along(2) / w,
+            x: p.x * m[0] + p.y * m[4] + p.z * m[8] + m[12],
+            y: p.x * m[1] + p.y * m[5] + p.z * m[9] + m[13],
+            z: p.x * m[2] + p.y * m[6] + p.z * m[10] + m[14],
         }
     }
 
-    /// Apply this transform to a position (includes translation), taking
-    /// the matrix to be affine (C++ `TransformAffine`): the first three
-    /// components of `(p.x, p.y, p.z, 1) · M`, with no division by the
-    /// fourth, which [`transform`](Self::transform) divides through by.
-    pub fn transform_point(self, p: Vec3f) -> Vec3f {
-        let (x, y, z) = (p.x as f64, p.y as f64, p.z as f64);
+    /// The direction `v` under the rotation and scale of this transform,
+    /// its translation left out (C++ `TransformDir`). Correct for tangents
+    /// and velocity-like directions. Normals under non-uniform scale require
+    /// the inverse-transpose; for rigid transforms the two are equivalent.
+    pub fn transform_dir(self, v: Vec3d) -> Vec3d {
         let m = &self.0;
-        Vec3f {
-            x: (x * m[0] + y * m[4] + z * m[8] + m[12]) as f32,
-            y: (x * m[1] + y * m[5] + z * m[9] + m[13]) as f32,
-            z: (x * m[2] + y * m[6] + z * m[10] + m[14]) as f32,
-        }
-    }
-
-    /// Apply the rotation/scale part of this transform to a direction
-    /// vector (C++ `TransformDir`; ignores the translation row). Correct for
-    /// tangents and velocity-like directions. Normals under non-uniform
-    /// scale require the inverse-transpose; for rigid transforms the two are
-    /// equivalent.
-    pub fn transform_vec(self, v: Vec3f) -> Vec3f {
-        let (x, y, z) = (v.x as f64, v.y as f64, v.z as f64);
-        let m = &self.0;
-        Vec3f {
-            x: (x * m[0] + y * m[4] + z * m[8]) as f32,
-            y: (x * m[1] + y * m[5] + z * m[9]) as f32,
-            z: (x * m[2] + y * m[6] + z * m[10]) as f32,
+        Vec3d {
+            x: v.x * m[0] + v.y * m[4] + v.z * m[8],
+            y: v.x * m[1] + v.y * m[5] + v.z * m[9],
+            z: v.x * m[2] + v.y * m[6] + v.z * m[10],
         }
     }
 }
@@ -809,10 +798,10 @@ pub(crate) mod tests {
     #[test]
     fn point_transform_applies_translation() {
         let m = translation(10.0, 20.0, 30.0);
-        let p = m.transform_point(Vec3f { x: 1.0, y: 2.0, z: 3.0 });
+        let p = m.transform_affine(Vec3d { x: 1.0, y: 2.0, z: 3.0 });
         assert_eq!(
             p,
-            Vec3f {
+            Vec3d {
                 x: 11.0,
                 y: 22.0,
                 z: 33.0
@@ -823,8 +812,8 @@ pub(crate) mod tests {
     #[test]
     fn vec_transform_ignores_translation() {
         let m = translation(10.0, 20.0, 30.0);
-        let v = m.transform_vec(Vec3f { x: 1.0, y: 2.0, z: 3.0 });
-        assert_eq!(v, Vec3f { x: 1.0, y: 2.0, z: 3.0 });
+        let v = m.transform_dir(Vec3d { x: 1.0, y: 2.0, z: 3.0 });
+        assert_eq!(v, Vec3d { x: 1.0, y: 2.0, z: 3.0 });
     }
 
     #[test]
@@ -861,13 +850,13 @@ pub(crate) mod tests {
             assert!((id2[i] - Mat4d::IDENTITY[i]).abs() < 1e-10, "inv·M off at {i}: {id2:?}");
         }
 
-        let p = Vec3f {
+        let p = Vec3d {
             x: 4.0,
             y: -2.5,
             z: 7.5,
         };
-        let warped = m.transform_point(p);
-        let back = inv.transform_point(warped);
+        let warped = m.transform_affine(p);
+        let back = inv.transform_affine(warped);
         for k in 0..3 {
             assert!((back[k] - p[k]).abs() < 1e-4, "point round-trip off: {back:?} vs {p:?}");
         }
@@ -887,10 +876,10 @@ pub(crate) mod tests {
     fn translation_layout() {
         let m = Mat4d::translation([5.0f64, -2.0, 7.0]);
         assert_eq!(&m.0[12..15], &[5.0, -2.0, 7.0]);
-        let p = m.transform_point(Vec3f { x: 1.0, y: 1.0, z: 1.0 });
+        let p = m.transform_affine(Vec3d { x: 1.0, y: 1.0, z: 1.0 });
         assert_eq!(
             p,
-            Vec3f {
+            Vec3d {
                 x: 6.0,
                 y: -1.0,
                 z: 8.0
@@ -901,14 +890,14 @@ pub(crate) mod tests {
     #[test]
     fn scale_layout() {
         let m = Mat4d::scale([2.0f64, 3.0, 4.0]);
-        let p = m.transform_point(Vec3f { x: 1.0, y: 1.0, z: 1.0 });
-        assert_eq!(p, Vec3f { x: 2.0, y: 3.0, z: 4.0 });
+        let p = m.transform_affine(Vec3d { x: 1.0, y: 1.0, z: 1.0 });
+        assert_eq!(p, Vec3d { x: 2.0, y: 3.0, z: 4.0 });
     }
 
     #[test]
     fn rotation_x_takes_y_to_z() {
         let m = Mat4d::rotation_x(std::f64::consts::FRAC_PI_2);
-        let p = m.transform_point(Vec3f { x: 0.0, y: 1.0, z: 0.0 });
+        let p = m.transform_affine(Vec3d { x: 0.0, y: 1.0, z: 0.0 });
         assert!(p.x.abs() < 1e-6);
         assert!(p.y.abs() < 1e-6);
         assert!((p.z - 1.0).abs() < 1e-6, "z: {}", p.z);
@@ -917,7 +906,7 @@ pub(crate) mod tests {
     #[test]
     fn rotation_y_takes_x_to_neg_z() {
         let m = Mat4d::rotation_y(std::f64::consts::FRAC_PI_2);
-        let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
+        let p = m.transform_affine(Vec3d { x: 1.0, y: 0.0, z: 0.0 });
         assert!(p.x.abs() < 1e-6);
         assert!(p.y.abs() < 1e-6);
         assert!((p.z + 1.0).abs() < 1e-6, "z: {}", p.z);
@@ -926,7 +915,7 @@ pub(crate) mod tests {
     #[test]
     fn rotation_z_takes_x_to_y() {
         let m = Mat4d::rotation_z(std::f64::consts::FRAC_PI_2);
-        let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
+        let p = m.transform_affine(Vec3d { x: 1.0, y: 0.0, z: 0.0 });
         assert!(p.x.abs() < 1e-6, "x: {}", p.x);
         assert!((p.y - 1.0).abs() < 1e-6, "y: {}", p.y);
         assert!(p.z.abs() < 1e-6);
@@ -941,7 +930,7 @@ pub(crate) mod tests {
     fn quat_90_z_takes_x_to_y() {
         let h = std::f32::consts::FRAC_PI_4;
         let m = Mat4d::from_quat([h.cos() as f64, 0.0, 0.0, h.sin() as f64]);
-        let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
+        let p = m.transform_affine(Vec3d { x: 1.0, y: 0.0, z: 0.0 });
         assert!(p.x.abs() < 1e-5);
         assert!((p.y - 1.0).abs() < 1e-5);
         assert!(p.z.abs() < 1e-5);

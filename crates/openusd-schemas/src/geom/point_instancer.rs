@@ -135,7 +135,7 @@ impl<'a> InstanceArrays<'a> {
                 if let Some(&orientation) = self.orientations.get(index) {
                     xform = xform * gf::Mat4d::from_quat(orientation);
                     if let Some(&velocity) = self.angular_velocities.get(index) {
-                        let axis = gf::vec3d(velocity.x.into(), velocity.y.into(), velocity.z.into());
+                        let axis = gf::Vec3d::from(velocity);
                         let degrees = spin_delta * f64::from(velocity.length());
                         xform = xform * gf::Mat4d::from_quat(gf::Rotation::new(axis, degrees).quat());
                     }

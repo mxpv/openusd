@@ -356,6 +356,17 @@ impl From<Vec3d> for [f64; 3] {
     }
 }
 
+impl From<Vec3f> for Vec3d {
+    #[inline]
+    fn from(v: Vec3f) -> Self {
+        Vec3d {
+            x: v.x.into(),
+            y: v.y.into(),
+            z: v.z.into(),
+        }
+    }
+}
+
 impl Index<usize> for Vec3d {
     type Output = f64;
     #[inline]
@@ -382,6 +393,16 @@ impl IndexMut<usize> for Vec3d {
 }
 
 impl Vec3d {
+    /// The vector in single precision, each component rounded to the
+    /// nearest `f32`.
+    pub fn to_f32(self) -> Vec3f {
+        Vec3f {
+            x: self.x as f32,
+            y: self.y as f32,
+            z: self.z as f32,
+        }
+    }
+
     /// The unit vector along X (C++ `GfVec3d::XAxis`).
     pub const X_AXIS: Vec3d = Vec3d { x: 1.0, y: 0.0, z: 0.0 };
     /// The unit vector along Y (C++ `GfVec3d::YAxis`).

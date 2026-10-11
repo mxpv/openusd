@@ -114,8 +114,8 @@ pub fn skin_points_lbs(
 
     let mut out = Vec::with_capacity(points.len());
     for (vi, &p) in points.iter().enumerate() {
-        let skel_p = geom_bind_transform.transform_point(p);
-        let mut acc = gf::Vec3f::default();
+        let skel_p = geom_bind_transform.transform_affine(p.into());
+        let mut acc = gf::Vec3d::default();
         for inf in 0..num_influences {
             let slot = vi * num_influences + inf;
             let w = joint_weights[slot];
@@ -123,9 +123,9 @@ pub fn skin_points_lbs(
                 continue;
             }
             let j = joint_indices[slot] as usize;
-            acc += skinning_xforms[j].transform_point(skel_p) * w;
+            acc += skinning_xforms[j].transform_affine(skel_p) * f64::from(w);
         }
-        out.push(acc);
+        out.push(acc.to_f32());
     }
     out
 }
@@ -149,8 +149,8 @@ pub fn skin_normals_lbs(
     assert!(num_influences >= 1, "num_influences must be >= 1");
     let mut out = Vec::with_capacity(normals.len());
     for (vi, &n) in normals.iter().enumerate() {
-        let skel_n = geom_bind_transform.transform_vec(n);
-        let mut acc = gf::Vec3f::default();
+        let skel_n = geom_bind_transform.transform_dir(n.into());
+        let mut acc = gf::Vec3d::default();
         for inf in 0..num_influences {
             let slot = vi * num_influences + inf;
             let w = joint_weights[slot];
@@ -158,9 +158,9 @@ pub fn skin_normals_lbs(
                 continue;
             }
             let j = joint_indices[slot] as usize;
-            acc += skinning_xforms[j].transform_vec(skel_n) * w;
+            acc += skinning_xforms[j].transform_dir(skel_n) * f64::from(w);
         }
-        out.push(acc.normalize());
+        out.push(acc.normalize().to_f32());
     }
     out
 }
@@ -360,8 +360,8 @@ mod tests {
         let inv_bind = compute_inverse_bind_transforms(&bind);
         let current = vec![translation(1.0, 2.0, 0.0)];
         let skin = compute_skinning_transforms(&current, &inv_bind);
-        let p = skin[0].transform_point(gf::vec3f(1.0, 0.0, 0.0));
-        assert_eq!(p, gf::vec3f(1.0, 2.0, 0.0));
+        let p = skin[0].transform_affine(gf::vec3d(1.0, 0.0, 0.0));
+        assert_eq!(p, gf::vec3d(1.0, 2.0, 0.0));
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
     fn rigid_skinning_combines_weighted_joints_then_geom_bind() {
         let skin = vec![translation(1.0, 0.0, 0.0), translation(0.0, 1.0, 0.0)];
         let m = rigid_skinning_transform(&[0, 1], &[0.5, 0.5], 2, gf::Mat4d::IDENTITY, &skin);
-        let p = m.transform_point(gf::vec3f(0.0, 0.0, 0.0));
-        assert_eq!(p, gf::vec3f(0.5, 0.5, 0.0));
+        let p = m.transform_affine(gf::vec3d(0.0, 0.0, 0.0));
+        assert_eq!(p, gf::vec3d(0.5, 0.5, 0.0));
     }
 }
