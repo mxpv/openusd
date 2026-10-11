@@ -117,9 +117,7 @@ fn field(name: &str, declaration: &Json) -> Result<MetadataField, String> {
         .and_then(Json::as_str)
         .ok_or_else(|| format!("`{name}` declares no `type`"))?;
     let type_name = sdf::ValueTypeName::from(spelling);
-    // A dictionary and the list-op types are metadata-only, so the value-type
-    // table does not know them, and a field may still be declared with one.
-    if type_name.kind().is_none() && spelling != "dictionary" && !spelling.ends_with("listop") {
+    if sdf::MetadataFieldType::from_spelling(spelling).is_none() {
         return Err(format!("`{name}` declares an unknown type `{spelling}`"));
     }
 

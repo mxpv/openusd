@@ -147,12 +147,17 @@ impl<'a> Parser<'a> {
         ];
 
         self.parse_block('(', ')', |this| {
+            let list_op = this.try_list_op()?;
             let next = this
                 .cursor
                 .bump()
                 .context("Unable to fetch next pseudo root property")?;
 
             match next {
+                // Only a field named by an identifier takes an operation.
+                other if list_op.is_some() && !matches!(other, Token::Identifier(_)) => {
+                    bail!("Unexpected token {other:?} after a list op keyword")
+                }
                 Token::String(str) => {
                     root.add(FieldKey::Comment, sdf::Value::String(str.into_owned()));
                 }
@@ -176,15 +181,15 @@ impl<'a> Parser<'a> {
                 Token::Identifier(name) => {
                     this.cursor.expect_punctuation('=')?;
                     if let Some((known_name, ty)) = KNOWN_PROPS.iter().find(|(n, _)| *n == name) {
+                        ensure!(list_op.is_none(), "{name} metadata does not support list ops");
                         let value = types::parse_value(&mut this.cursor, ty)
                             .with_context(|| format!("Unable to parse value for {known_name}"))?;
                         root.add(known_name, value);
-                    } else if sdf::is_registered_field(name) {
-                        let value = parse_registered_metadata(&mut this.cursor, name)
+                    } else if let Some(declared) = sdf::registered_field_type(name) {
+                        this.read_registered_metadata(&mut root, name, &declared, list_op)
                             .with_context(|| format!("Unable to parse pseudo root metadata value for {name}"))?;
-                        root.add(name, value);
                     } else {
-                        record_unregistered_metadata(&mut this.cursor, &mut root, name, None)
+                        record_unregistered_metadata(&mut this.cursor, &mut root, name, list_op.as_ref())
                             .with_context(|| format!("Unable to record pseudo root metadata value for {name}"))?;
                     }
                 }
@@ -586,20 +591,19 @@ impl<'a> Parser<'a> {
 
             this.cursor.expect_punctuation('=')?;
 
-            if !sdf::is_registered_field(&name) {
+            let Some(declared) = sdf::registered_field_type(&name) else {
                 return record_unregistered_metadata(&mut this.cursor, spec, &name, list_op.as_ref())
                     .with_context(|| format!("Unable to record attribute metadata value for {name}"));
-            }
+            };
 
-            ensure!(list_op.is_none(), "{name} metadata does not support list ops");
-            let value = parse_registered_metadata(&mut this.cursor, &name)
+            this.read_registered_metadata(spec, &name, &declared, list_op)
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
 
             // A display unit is one of the names a unit category uses. C++
             // rejects any other rather than carrying it, so a typo is caught
             // where it was written instead of silently measuring in metres.
             if name == FieldKey::DisplayUnit.as_str() {
-                let Some(spelling) = value.try_as_token_ref() else {
+                let Some(spelling) = spec.get(&name).and_then(sdf::Value::try_as_token_ref) else {
                     bail!("A display unit is spelled by name, as `displayUnit = mm`");
                 };
                 ensure!(
@@ -607,8 +611,6 @@ impl<'a> Parser<'a> {
                     "`{spelling}` is not a valid display unit"
                 );
             }
-
-            spec.add(name, value);
             Ok(())
         })?;
 
@@ -833,37 +835,89 @@ impl<'a> Parser<'a> {
                 let list_op = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
                 spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
             }
-            // A field no schema declares - DCC hints like
-            // `hide_in_stage_window` or `no_delete`. The Sdf grammar accepts
-            // any identifier in a metadata block, so the layer still loads and
-            // the field passes through to whatever it is saved as.
-            other if !sdf::is_registered_field(other) => {
-                record_unregistered_metadata(&mut self.cursor, spec, other, list_op.as_ref())
-                    .with_context(|| format!("Unable to record prim metadata value for {other}"))?;
-            }
-            // A registered field none of the productions above claims.
-            other => {
-                ensure!(list_op.is_none(), "{other} metadata does not support list ops");
-                let value = parse_registered_metadata(&mut self.cursor, other)
-                    .with_context(|| format!("Unable to parse prim metadata value for {other}"))?;
-                spec.add(other, value);
-            }
+            other => match sdf::registered_field_type(other) {
+                // A registered field none of the productions above claims.
+                Some(declared) => self
+                    .read_registered_metadata(spec, other, &declared, list_op)
+                    .with_context(|| format!("Unable to parse prim metadata value for {other}"))?,
+                // A field no schema declares - DCC hints like
+                // `hide_in_stage_window` or `no_delete`. The Sdf grammar
+                // accepts any identifier in a metadata block, so the layer
+                // still loads and the field passes through to whatever it is
+                // saved as.
+                None => record_unregistered_metadata(&mut self.cursor, spec, other, list_op.as_ref())
+                    .with_context(|| format!("Unable to record prim metadata value for {other}"))?,
+            },
         }
 
         Ok(())
     }
-}
 
-/// Parse the value of the registered metadata field `name`.
-///
-/// A field some schema declares with a value type is read as that type, as
-/// an attribute's value is: `elementSize` as an `int`, `irIsInvertible` as a
-/// `bool`, `payloadAssetDependencies` as an `asset[]`, empty or not. Every
-/// other registered field is read by the shape of its literal.
-fn parse_registered_metadata(cursor: &mut Cursor<'_>, name: &str) -> Result<sdf::Value, RawError> {
-    match sdf::schema_field_type(name).filter(|ty| ty.kind().is_some()) {
-        Some(ty) => types::parse_value(cursor, &ty),
-        None => types::parse_untyped_value(cursor),
+    /// Parse the value of the registered metadata field `name`, which holds
+    /// what `declared` says, and store it on `spec`. `list_op` is the
+    /// operation keyword the value was authored under, where one was.
+    ///
+    /// A field declared with a value type is read as that type, as an
+    /// attribute's value is: `elementSize` as an `int`, `irIsInvertible` as a
+    /// `bool`, `payloadAssetDependencies` as an `asset[]`, empty or not. An
+    /// untyped field is read by the shape of its literal. Neither takes an
+    /// operation keyword.
+    ///
+    /// A field declared a list op, as `inactiveIds` is an `int64listop`, is
+    /// read as `None`, one item or a bracketed list of them, each in the
+    /// declared element type, and joins the operations `spec` already holds
+    /// for the field.
+    fn read_registered_metadata(
+        &mut self,
+        spec: &mut sdf::SpecData,
+        name: &str,
+        declared: &sdf::MetadataFieldType,
+        list_op: Option<Token<'a>>,
+    ) -> Result<(), RawError> {
+        use sdf::{Value, ValueKind};
+
+        let element = match declared {
+            sdf::MetadataFieldType::ListOp(element) => element,
+            sdf::MetadataFieldType::Value(ty) => {
+                ensure!(list_op.is_none(), "{name} metadata does not support list ops");
+                spec.add(name, types::parse_value(&mut self.cursor, ty)?);
+                return Ok(());
+            }
+            sdf::MetadataFieldType::Untyped => {
+                ensure!(list_op.is_none(), "{name} metadata does not support list ops");
+                spec.add(name, types::parse_untyped_value(&mut self.cursor)?);
+                return Ok(());
+            }
+        };
+        let value = match element.kind() {
+            Some(ValueKind::Int) => self.read_list_op(list_op, types::parse_token::<i32>, Value::IntListOp)?,
+            Some(ValueKind::Int64) => self.read_list_op(list_op, types::parse_token::<i64>, Value::Int64ListOp)?,
+            Some(ValueKind::Uint) => self.read_list_op(list_op, types::parse_token::<u32>, Value::UIntListOp)?,
+            Some(ValueKind::Uint64) => self.read_list_op(list_op, types::parse_token::<u64>, Value::UInt64ListOp)?,
+            Some(ValueKind::Token) => {
+                self.read_list_op(list_op, types::parse_token::<tf::Token>, Value::TokenListOp)?
+            }
+            Some(ValueKind::String) => {
+                let string = |cursor: &mut Cursor<'a>| Ok(cursor.expect_string()?.into_owned());
+                self.read_list_op(list_op, string, Value::StringListOp)?
+            }
+            _ => bail!("{name} is declared a list op of an element type the text format has no list for"),
+        };
+        spec.add_list_op(name, value);
+        Ok(())
+    }
+
+    /// Parse `None`, one item or a bracketed list of them, each read by
+    /// `parse`, as the list op the `op` keyword names, or an explicit one
+    /// where no keyword was authored, and `wrap` it as a value.
+    fn read_list_op<T: Clone + PartialEq + Hash>(
+        &mut self,
+        op: Option<Token<'a>>,
+        parse: impl FnMut(&mut Cursor<'a>) -> Result<T, RawError>,
+        wrap: fn(sdf::ListOp<T>) -> sdf::Value,
+    ) -> Result<sdf::Value, RawError> {
+        let items = self.parse_one_or_list(parse)?;
+        Ok(wrap(apply_list_op(op, items)?))
     }
 }
 
@@ -2889,6 +2943,95 @@ def Xform "Root" (
     fn registered_metadata_stays_typed() {
         let text = "#usda 1.0\ndef \"P\" (\n    hidden = true\n)\n{\n}\n";
         assert_eq!(field(text, "/P", "hidden"), Some(sdf::Value::token("true")));
+    }
+
+    /// A field its schema declares as a list op reads as one, each operation
+    /// in its own bucket, and an assignment as the explicit list.
+    #[test]
+    fn schema_list_op_metadata() {
+        let text = "#usda 1.0
+def \"P\" (
+    delete inactiveIds = [4, -1]
+    append inactiveIds = 7
+)
+{
+}
+                    def \"Q\" (
+    inactiveIds = [1, 2]
+)
+{
+}
+def \"R\" (
+    inactiveIds = None
+)
+{
+}
+";
+        let edited = sdf::Int64ListOp::deleted([4, -1]).with(sdf::ListOpType::Appended, [7]);
+        assert_eq!(field(text, "/P", "inactiveIds"), Some(sdf::Value::Int64ListOp(edited)));
+        assert_eq!(
+            field(text, "/Q", "inactiveIds"),
+            Some(sdf::Value::Int64ListOp(sdf::ListOp::explicit([1, 2])))
+        );
+        assert_eq!(
+            field(text, "/R", "inactiveIds"),
+            Some(sdf::Value::Int64ListOp(sdf::ListOp::explicit([])))
+        );
+    }
+
+    /// A schema list op survives write → re-parse with each operation still
+    /// its own statement.
+    #[test]
+    fn schema_list_op_roundtrip() {
+        let source = "#usda 1.0
+def \"P\" (
+    delete inactiveIds = [4, -1]
+    append inactiveIds = [7, 9]
+)
+{
+}
+def \"Q\" (
+    inactiveIds = [1, 2]
+)
+{
+}
+";
+        let data = crate::usda::parse(source).expect("parses");
+        let text = crate::usda::TextWriter::write_to_string(&data as &dyn sdf::AbstractData).expect("writes");
+        assert!(text.contains("delete inactiveIds = [4, -1]"), "{text}");
+        assert!(text.contains("append inactiveIds = [7, 9]"), "{text}");
+
+        for path in ["/P", "/Q"] {
+            let authored = field(source, path, "inactiveIds");
+            assert!(authored.as_ref().is_some_and(sdf::Value::is_int_64_list_op), "{path}");
+            assert_eq!(field(&text, path, "inactiveIds"), authored, "{path}");
+        }
+    }
+
+    /// Layer metadata reads a list-op field as prim metadata does, and
+    /// records an operation on a field no schema declares.
+    #[test]
+    fn layer_list_op_metadata() {
+        let text = "#usda 1.0
+(
+    delete inactiveIds = [4]
+    append inactiveIds = 7
+    prepend made_up = [1, 2]
+)
+";
+        let edited = sdf::Int64ListOp::deleted([4]).with(sdf::ListOpType::Appended, [7]);
+        assert_eq!(field(text, "/", "inactiveIds"), Some(sdf::Value::Int64ListOp(edited)));
+        assert_eq!(
+            field(text, "/", "made_up"),
+            Some(sdf::Value::UnregisteredValueListOp(sdf::ListOp::prepended([
+                "1, 2".to_owned()
+            ])))
+        );
+
+        for rejected in ["append upAxis = \"Y\"", "delete \"a comment\"", "add subLayers = []"] {
+            let error = parse_error(&format!("#usda 1.0\n(\n    {rejected}\n)\n"));
+            assert!(error.contains("list op"), "{rejected}: {error}");
+        }
     }
 
     /// An operation stores the whole body as one recorded item, brackets

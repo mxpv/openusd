@@ -1,6 +1,6 @@
 use strum::VariantArray;
 
-use super::ValueTypeName;
+use super::{ValueKind, ValueTypeName};
 
 /// The following fields are pre-registered by Sdf.
 ///
@@ -88,7 +88,7 @@ impl FieldKey {
     /// The field `name` denotes, or `None` where this enum does not name it.
     ///
     /// A schema may declare fields of its own, so a `None` here does not mean
-    /// the field is unregistered; [`is_registered_field`] answers that.
+    /// the field is unregistered; [`registered_field_type`] answers that.
     pub fn from_name(name: &str) -> Option<Self> {
         FieldKey::VARIANTS.iter().copied().find(|key| key.as_str() == name)
     }
@@ -252,22 +252,71 @@ const SCHEMA_METADATA: [(&str, &str); 22] = [
     ("weight", "float"),
 ];
 
-/// Whether some schema declares `name` as a metadata field.
+/// What a registered metadata field holds, which decides how a reader takes
+/// its literal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MetadataFieldType {
+    /// A value of a type the value-type table knows, as `elementSize` is an
+    /// `int`.
+    Value(ValueTypeName),
+    /// A list op whose items are of this type, as `inactiveIds` is an
+    /// `int64listop` and so holds `int64` items.
+    ListOp(ValueTypeName),
+    /// A value its declaration gives no value type: a core field
+    /// [`FieldKey`] names, or a schema field declared a `dictionary`.
+    Untyped,
+}
+
+impl MetadataFieldType {
+    /// The field type a schema library's declaration spells: a value type
+    /// the value-type table knows, `dictionary`, or `<element>listop` for a
+    /// list op of `int`, `int64`, `uint`, `uint64`, `string` or `token`
+    /// items, the elements the text format writes a list of (C++
+    /// `_IsGenericMetadataListOpType`). `None` for any other spelling.
+    pub fn from_spelling(spelling: &str) -> Option<Self> {
+        if spelling == "dictionary" {
+            return Some(Self::Untyped);
+        }
+        let Some(element) = spelling.strip_suffix("listop") else {
+            let ty = ValueTypeName::from(spelling);
+            return ty.kind().is_some().then_some(Self::Value(ty));
+        };
+        let element = ValueTypeName::from(element);
+        matches!(
+            element.kind(),
+            Some(
+                ValueKind::Int
+                    | ValueKind::Int64
+                    | ValueKind::Uint
+                    | ValueKind::Uint64
+                    | ValueKind::String
+                    | ValueKind::Token
+            )
+        )
+        .then_some(Self::ListOp(element))
+    }
+}
+
+/// What the metadata field `name` holds, or `None` where neither [`FieldKey`]
+/// nor any schema declares it.
 ///
 /// A layer may author any identifier in a metadata block. One this answers
-/// `false` for is unregistered: nothing gives its literal a type, so a reader
-/// carries the text it was written as rather than a value
+/// `None` for is unregistered: nothing gives its literal a type, so a reader
+/// carries the text it was written as
 /// (C++ `SdfSchemaBase::SpecDefinition::IsValidField`).
 ///
 /// Narrower than C++ in one direction, which is the safe one: C++ also
 /// rejects a field that is registered but is not metadata for the spec type
 /// being read, and without a per-spec-type table this treats such a field as
-/// registered rather than misfiling it as opaque.
+/// registered.
 // TODO(perf): both halves scan their table, once per metadata field read.
 // The lookup wants a map, or a `match` the compiler can turn into one; neither
 // is worth a third copy of the field names before a profile asks for it.
-pub fn is_registered_field(name: &str) -> bool {
-    FieldKey::from_name(name).is_some() || schema_field_spelling(name).is_some()
+pub fn registered_field_type(name: &str) -> Option<MetadataFieldType> {
+    let Some(spelling) = schema_field_spelling(name) else {
+        return FieldKey::from_name(name).map(|_| MetadataFieldType::Untyped);
+    };
+    MetadataFieldType::from_spelling(spelling)
 }
 
 /// The type the schema declaring `name` gives that metadata field, or `None`
@@ -365,11 +414,39 @@ mod tests {
         assert!(!is_vector_field(FieldKey::AllowedTokens.as_str()));
     }
 
+    /// Every spelling the table declares names a field type, and a spelling
+    /// outside the value types, `dictionary` and the six list ops names
+    /// none.
     #[test]
-    fn registered_fields() {
-        assert!(is_registered_field(FieldKey::DisplayUnit.as_str()));
-        assert!(is_registered_field("interpolation"));
-        assert!(!is_registered_field("hide_in_stage_window"));
+    fn field_type_spellings() {
+        for (name, spelling) in SCHEMA_METADATA {
+            assert!(
+                MetadataFieldType::from_spelling(spelling).is_some(),
+                "{name}: {spelling}"
+            );
+        }
+        assert_eq!(
+            MetadataFieldType::from_spelling("tokenlistop"),
+            Some(MetadataFieldType::ListOp(ValueTypeName::TOKEN))
+        );
+        for spelling in ["pathlistop", "doublelistop", "listop", "bogus"] {
+            assert_eq!(MetadataFieldType::from_spelling(spelling), None, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn registered_field_types() {
+        use MetadataFieldType::{ListOp, Untyped, Value};
+        for (name, expected) in [
+            (FieldKey::DisplayUnit.as_str(), Some(Untyped)),
+            ("interpolation", Some(Value(ValueTypeName::TOKEN))),
+            ("elementSize", Some(Value(ValueTypeName::INT))),
+            ("inactiveIds", Some(ListOp(ValueTypeName::INT64))),
+            ("sdrMetadata", Some(Untyped)),
+            ("hide_in_stage_window", None),
+        ] {
+            assert_eq!(registered_field_type(name), expected, "{name}");
+        }
     }
 
     #[test]
