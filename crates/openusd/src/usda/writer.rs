@@ -5,6 +5,7 @@
 //! [`usda::parse`](super::parse) must reproduce the original specs
 //! opinion-for-opinion.
 
+use std::hash::Hash;
 use std::path::Path as FsPath;
 use std::{
     collections::HashMap,
@@ -519,18 +520,18 @@ impl<W: Write> Emitter<'_, W> {
 
         // Non-explicit list ops for rel targets: emit on a separate line below.
         if let Some(Value::PathListOp(op)) = &targets
-            && op.explicit
+            && op.is_explicit()
         {
-            match op.explicit_items.len() {
+            match op.explicit_items().len() {
                 0 => {
                     self.out.write_all(b" = None")?;
                 }
                 1 => {
-                    write!(self.out, " = <{}>", op.explicit_items[0].as_str())?;
+                    write!(self.out, " = <{}>", op.explicit_items()[0].as_str())?;
                 }
                 _ => {
                     self.out.write_all(b" = [")?;
-                    for (i, p) in op.explicit_items.iter().enumerate() {
+                    for (i, p) in op.explicit_items().iter().enumerate() {
                         if i > 0 {
                             self.out.write_all(b", ")?;
                         }
@@ -557,7 +558,7 @@ impl<W: Write> Emitter<'_, W> {
 
         // Non-explicit list op target paths
         if let Some(Value::PathListOp(op)) = &targets
-            && !op.explicit
+            && !op.is_explicit()
         {
             self.emit_listop_statement(&format!("rel {name}"), op, |s, p| {
                 write!(s, "<{}>", p.as_str())?;
@@ -707,7 +708,7 @@ impl<W: Write> Emitter<'_, W> {
         if keyword == "variantSets"
             && let Value::StringListOp(op) = value
         {
-            let names = op.clone().map(Name);
+            let names = op.clone().convert(|_, name| Some(Name(name)));
             self.emit_listop_statement(keyword, &names, |s, name| write_quoted(s, &name.0))?;
             return Ok(());
         }
@@ -815,23 +816,23 @@ impl<W: Write> Emitter<'_, W> {
 
     fn emit_listop_statement<T, F>(&mut self, prefix: &str, op: &ListOp<T>, mut fmt_item: F) -> Result<(), FormatError>
     where
-        T: ListOpItem,
+        T: Bracketed,
         F: FnMut(&mut String, &T) -> Result<(), FormatError>,
     {
-        if op.explicit {
+        if op.is_explicit() {
             self.write_indent()?;
             write!(self.out, "{prefix} = ")?;
-            self.write_listop_items(&op.explicit_items, &mut fmt_item)?;
+            self.write_listop_items(op.explicit_items(), &mut fmt_item)?;
             writeln!(self.out)?;
             return Ok(());
         }
 
         for (kw, items) in [
-            ("delete", &op.deleted_items),
-            ("add", &op.added_items),
-            ("prepend", &op.prepended_items),
-            ("append", &op.appended_items),
-            ("reorder", &op.ordered_items),
+            ("delete", op.deleted_items()),
+            ("add", op.added_items()),
+            ("prepend", op.prepended_items()),
+            ("append", op.appended_items()),
+            ("reorder", op.ordered_items()),
         ] {
             if !items.is_empty() {
                 self.write_indent()?;
@@ -848,7 +849,7 @@ impl<W: Write> Emitter<'_, W> {
     /// (C++ `_WriteListOpList`).
     fn write_listop_items<T, F>(&mut self, items: &[T], fmt_item: &mut F) -> Result<(), FormatError>
     where
-        T: ListOpItem,
+        T: Bracketed,
         F: FnMut(&mut String, &T) -> Result<(), FormatError>,
     {
         if items.is_empty() {
@@ -1129,14 +1130,14 @@ where
 /// (`_ListOpWriter<T>::SingleItemRequiresBrackets`), and for the same reason:
 /// `prepend apiSchemas = "X"` does not read as a list, while
 /// `prepend references = @a.usd@` does.
-trait ListOpItem: Default + Clone + PartialEq {
+trait Bracketed: Clone + PartialEq + Hash {
     fn needs_brackets(&self) -> bool;
 }
 
 /// A lone name or number keeps its brackets: nothing else marks it as a list.
 macro_rules! bracketed_items {
     ($($ty:ty),* $(,)?) => {
-        $(impl ListOpItem for $ty {
+        $(impl Bracketed for $ty {
             fn needs_brackets(&self) -> bool {
                 true
             }
@@ -1148,24 +1149,24 @@ bracketed_items!(Token, String, i32, u32, i64, u64);
 
 /// A name, which writes bare even when alone: the grammar takes a single
 /// name without brackets (C++ `Sdf_FileIOUtility::WriteNameVector`).
-#[derive(Default, Clone, PartialEq)]
+#[derive(Default, Clone, PartialEq, Hash)]
 struct Name(String);
 
-impl ListOpItem for Name {
+impl Bracketed for Name {
     fn needs_brackets(&self) -> bool {
         false
     }
 }
 
 /// A lone path is already delimited by its angle brackets.
-impl ListOpItem for sdf::Path {
+impl Bracketed for sdf::Path {
     fn needs_brackets(&self) -> bool {
         false
     }
 }
 
 /// A lone payload is already delimited by its asset path.
-impl ListOpItem for sdf::Payload {
+impl Bracketed for sdf::Payload {
     fn needs_brackets(&self) -> bool {
         false
     }
@@ -1173,7 +1174,7 @@ impl ListOpItem for sdf::Payload {
 
 /// A reference writes bare like a payload, until custom data gives it a
 /// parenthesised block that would swallow a following item.
-impl ListOpItem for sdf::Reference {
+impl Bracketed for sdf::Reference {
     fn needs_brackets(&self) -> bool {
         !self.custom_data.is_empty()
     }
@@ -1181,16 +1182,16 @@ impl ListOpItem for sdf::Reference {
 
 fn format_inline_listop<T, F>(s: &mut String, op: &ListOp<T>, fmt_item: F) -> Result<(), FormatError>
 where
-    T: Default + Clone + PartialEq,
+    T: Clone + PartialEq + Hash,
     F: FnMut(&mut String, &T) -> Result<(), FormatError>,
 {
     // Only explicit list ops render inline; non-explicit must be broken out by caller.
-    if !op.explicit {
+    if !op.is_explicit() {
         // Best-effort: flatten for inline contexts.
         let items = op.flatten();
         return format_vec(s, &items, fmt_item);
     }
-    format_vec(s, &op.explicit_items, fmt_item)
+    format_vec(s, op.explicit_items(), fmt_item)
 }
 
 fn format_tuple_half<const N: usize>(s: &mut String, a: &[crate::gf::f16; N]) -> Result<(), FormatError> {
@@ -1512,11 +1513,7 @@ mod tests {
     /// body, so the brackets stay even for one item — `[1, 2]`, never `1, 2`.
     #[test]
     fn unregistered_listop_keeps_brackets() {
-        let op = sdf::ListOp::<String> {
-            explicit: true,
-            explicit_items: vec!["1, 2".to_owned()],
-            ..Default::default()
-        };
+        let op = sdf::ListOp::<String>::explicit(["1, 2".to_owned()]);
 
         let mut out = String::new();
         format_value(&mut out, &Value::UnregisteredValueListOp(op)).expect("writes");
@@ -1526,10 +1523,7 @@ mod tests {
     /// An operation with nothing in it still writes a body.
     #[test]
     fn unregistered_listop_empty() {
-        let op = sdf::ListOp::<String> {
-            explicit: true,
-            ..Default::default()
-        };
+        let op = sdf::ListOp::<String>::explicit([]);
 
         let mut out = String::new();
         format_value(&mut out, &Value::UnregisteredValueListOp(op)).expect("writes");
@@ -1620,7 +1614,7 @@ over "R" (
         assert!(!text.contains("offset = 0"), "identity offset written: {text}");
         let reparsed = usda::parse(&text).unwrap_or_else(|e| panic!("re-parses: {e:#}\n{text}"));
         let references = |data: &Data| match data.spec(&path("/R").unwrap()).expect("spec").get("references") {
-            Some(Value::ReferenceListOp(op)) => op.prepended_items.clone(),
+            Some(Value::ReferenceListOp(op)) => op.prepended_items().to_vec(),
             other => panic!("references: {other:?}"),
         };
         let written = references(&reparsed);

@@ -171,11 +171,8 @@ fn unregistered_values_roundtrip() {
     let prim_spec = data.create_spec(prim.clone(), SpecType::Prim);
     prim_spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
 
-    let list_op = sdf::ListOp::<String> {
-        prepended_items: vec!["1, 2".to_owned()],
-        deleted_items: vec!["3".to_owned()],
-        ..Default::default()
-    };
+    let list_op =
+        sdf::ListOp::<String>::prepended(["1, 2".to_owned()]).with(sdf::ListOpType::Deleted, ["3".to_owned()]);
     let dictionary = sdf::Dictionary::from([("myKey".to_owned(), Value::Int(8))]);
     let fields = [
         ("madeUpField", Value::UnregisteredValue("1.50".to_owned())),

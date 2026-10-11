@@ -62,10 +62,7 @@ fn write_scene(path: &str) -> openusd::Result<()> {
     // Declare the "color" variant set and choose "blue" as the default selection.
     sphere_spec.add(
         FieldKey::VariantSetNames,
-        Value::StringListOp(ListOp {
-            prepended_items: vec!["color".to_owned()],
-            ..Default::default()
-        }),
+        Value::StringListOp(ListOp::prepended(vec!["color".to_owned()])),
     );
     sphere_spec.add(
         FieldKey::VariantSelection,
@@ -112,15 +109,12 @@ fn add_variant(
         None => sdf::Path::default(),
     };
 
-    let ref_list = ListOp::<Reference> {
-        prepended_items: vec![Reference {
-            asset_path: "./sphere.usda".into(),
-            prim_path,
-            layer_offset: LayerOffset::IDENTITY,
-            custom_data: HashMap::new(),
-        }],
-        ..Default::default()
-    };
+    let ref_list = ListOp::<Reference>::prepended(vec![Reference {
+        asset_path: "./sphere.usda".into(),
+        prim_path,
+        layer_offset: LayerOffset::IDENTITY,
+        custom_data: HashMap::new(),
+    }]);
     variant_spec.add(FieldKey::References, Value::ReferenceListOp(ref_list));
 
     Ok(())

@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 use crate::gf;
 use crate::sdf::schema::FieldKey;
@@ -634,7 +635,7 @@ impl PrimIndex {
                         Value::$variant(op) => {
                             // An explicit opinion replaces everything weaker,
                             // so the walk stops with it.
-                            let explicit = op.explicit;
+                            let explicit = op.is_explicit();
                             ops.push(op);
                             if explicit {
                                 break;
@@ -708,7 +709,7 @@ impl PrimIndex {
                 Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
                 _ => continue,
             };
-            let is_explicit = list_op.explicit;
+            let is_explicit = list_op.is_explicit();
             // The node's map to the root namespace (C++ `PcpNodeRef::GetMapToRoot`).
             let map = &node.map_to_root;
             let arc = node.arc;
@@ -739,31 +740,20 @@ impl PrimIndex {
                 }
                 None
             };
-            let op = sdf::PathListOp {
-                explicit: list_op.explicit,
-                explicit_items: list_op.explicit_items.into_iter().filter_map(&mut authored).collect(),
-                added_items: list_op.added_items.into_iter().filter_map(&mut authored).collect(),
-                prepended_items: list_op.prepended_items.into_iter().filter_map(&mut authored).collect(),
-                appended_items: list_op.appended_items.into_iter().filter_map(&mut authored).collect(),
+            let op = list_op.convert(|ty, path| {
+                if ty.contributes() {
+                    return authored(path);
+                }
                 // Deletes and reorders translate silently; a deleted composed path
                 // also retracts a matching instance error below.
-                deleted_items: list_op
-                    .deleted_items
-                    .into_iter()
-                    .filter_map(|p| {
-                        let mapped = map.translate_to_target(&query_path.make_absolute(&p));
-                        if let Some(d) = &mapped {
-                            deleted_composed.insert(d.clone());
-                        }
-                        mapped
-                    })
-                    .collect(),
-                ordered_items: list_op
-                    .ordered_items
-                    .into_iter()
-                    .filter_map(|p| map.translate_to_target(&query_path.make_absolute(&p)))
-                    .collect(),
-            };
+                let mapped = map.translate_to_target(&query_path.make_absolute(&path));
+                if ty == sdf::ListOpType::Deleted
+                    && let Some(deleted) = &mapped
+                {
+                    deleted_composed.insert(deleted.clone());
+                }
+                mapped
+            });
             seen_explicit |= is_explicit;
             ops.push(op);
         }
@@ -827,11 +817,11 @@ impl PrimIndex {
             // An explicit opinion fully replaces the composed result and carries
             // no residual deletions (C++ `IsExplicit()`; see `ListOp::combined_with`),
             // so it discards weaker deletions and contributes none of its own.
-            if op.explicit {
+            if op.is_explicit() {
                 deleted.clear();
                 continue;
             }
-            deleted.extend(op.deleted_items.iter().cloned());
+            deleted.extend(op.deleted_items().iter().cloned());
         }
         Ok(deleted)
     }
@@ -844,35 +834,20 @@ impl PrimIndex {
     /// in the same namespace. Unmappable paths are dropped, matching a
     /// namespace map whose source domain does not include the authored target.
     fn map_path_list_op_to_root(op: sdf::PathListOp, anchor: &Path, map: &MapFunction) -> sdf::PathListOp {
-        fn map_paths(paths: Vec<Path>, anchor: &Path, map: &MapFunction) -> Vec<Path> {
-            paths
-                .into_iter()
-                .filter_map(|path| {
-                    // List-op targets are authored in the contributing node's
-                    // namespace; compose them only after translating to the
-                    // stage root namespace so deletes and reorders compare
-                    // like-for-like across layers and arcs. A variant-qualified
-                    // anchor makes the absolute form carry a selection, which
-                    // map functions never do, so it is stripped before mapping
-                    // (as `translate_to_target` does internally).
-                    let mut absolute = anchor.make_absolute(&path);
-                    if absolute.contains_prim_variant_selection() {
-                        absolute = absolute.strip_all_variant_selections();
-                    }
-                    map.map_source_to_target(&absolute)
-                })
-                .collect()
-        }
-
-        sdf::PathListOp {
-            explicit: op.explicit,
-            explicit_items: map_paths(op.explicit_items, anchor, map),
-            added_items: map_paths(op.added_items, anchor, map),
-            prepended_items: map_paths(op.prepended_items, anchor, map),
-            appended_items: map_paths(op.appended_items, anchor, map),
-            deleted_items: map_paths(op.deleted_items, anchor, map),
-            ordered_items: map_paths(op.ordered_items, anchor, map),
-        }
+        op.convert(|_, path| {
+            // List-op targets are authored in the contributing node's
+            // namespace; compose them only after translating to the stage
+            // root namespace so deletes and reorders compare like-for-like
+            // across layers and arcs. A variant-qualified anchor makes the
+            // absolute form carry a selection, which map functions never do,
+            // so it is stripped before mapping (as `translate_to_target` does
+            // internally).
+            let mut absolute = anchor.make_absolute(&path);
+            if absolute.contains_prim_variant_selection() {
+                absolute = absolute.strip_all_variant_selections();
+            }
+            map.map_source_to_target(&absolute)
+        })
     }
 
     /// Maps a path expression authored at a node into the stage's root
@@ -1148,7 +1123,7 @@ impl PrimIndex {
                 // Stop weaker opinions while keeping any stronger composed edits.
                 Value::ValueBlock => break,
                 Value::StringListOp(op) => ops.push(op),
-                Value::TokenListOp(op) => ops.push(op.map(String::from)),
+                Value::TokenListOp(op) => ops.push(op.convert(|_, token| Some(String::from(token)))),
                 Value::StringVec(names) => ops.push(sdf::StringListOp::explicit(names)),
                 Value::TokenVec(names) => ops.push(sdf::StringListOp::explicit(
                     names.into_iter().map(String::from).collect::<Vec<_>>(),
@@ -1512,7 +1487,7 @@ fn evaluate_clip_assets(
 /// resolved list (spec 12.2.6): each weaker op is composed under the stronger
 /// ones. `compose_over` short-circuits on an explicit op, so a stronger
 /// explicit opinion replaces all weaker contributions.
-fn compose_list_ops<T: Default + Clone + PartialEq>(ops: &[sdf::ListOp<T>]) -> Vec<T> {
+fn compose_list_ops<T: Clone + PartialEq + Hash>(ops: &[sdf::ListOp<T>]) -> Vec<T> {
     let mut result = Vec::new();
     for op in ops.iter().rev() {
         result = op.compose_over(&result);

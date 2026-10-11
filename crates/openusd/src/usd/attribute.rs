@@ -2427,10 +2427,13 @@ class Marker "Marker"
             .expect("authored on the root layer")
             .connection_path_list()
             .unwrap();
-        assert!(!op.explicit, "first add_connection must not flip the op to explicit");
-        assert!(op.explicit_items.is_empty());
-        assert_eq!(op.prepended_items, vec![target]);
-        assert!(op.appended_items.is_empty());
+        assert!(
+            !op.is_explicit(),
+            "first add_connection must not flip the op to explicit"
+        );
+        assert!(op.explicit_items().is_empty());
+        assert_eq!(op.prepended_items(), [target]);
+        assert!(op.appended_items().is_empty());
         Ok(())
     }
 
@@ -2450,9 +2453,9 @@ class Marker "Marker"
             .expect("authored on the root layer")
             .connection_path_list()
             .unwrap();
-        assert!(!op.explicit);
-        assert_eq!(op.appended_items, vec![target]);
-        assert!(op.prepended_items.is_empty());
+        assert!(!op.is_explicit());
+        assert_eq!(op.appended_items(), [target]);
+        assert!(op.prepended_items().is_empty());
         Ok(())
     }
 
@@ -2478,8 +2481,8 @@ class Marker "Marker"
             .expect("authored on the root layer")
             .connection_path_list()
             .unwrap();
-        assert!(op.explicit);
-        assert_eq!(op.explicit_items, vec![b, a]);
+        assert!(op.is_explicit());
+        assert_eq!(op.explicit_items(), [b, a]);
         Ok(())
     }
 

@@ -9,6 +9,7 @@
 //! site without touching composition state.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
@@ -85,11 +86,7 @@ pub(super) fn collect_payloads_in(
         FieldKey::Payload.as_str(),
         graph,
         |v| match v {
-            Value::Payload(p) => Some(PayloadListOp {
-                explicit: true,
-                explicit_items: vec![p],
-                ..Default::default()
-            }),
+            Value::Payload(p) => Some(PayloadListOp::explicit([p])),
             Value::PayloadListOp(op) => Some(op),
             _ => None,
         },
@@ -123,7 +120,7 @@ pub(super) fn collect_payloads_in(
 
 /// Composes an offset-free list-op field (inherits, specializes) by decoding
 /// each opinion through `TryInto` and combining across the layer stack.
-pub(super) fn compose_arc_list_in<T: Default + Clone + PartialEq>(
+pub(super) fn compose_arc_list_in<T: Clone + PartialEq + Hash>(
     nodes: &[Node],
     field: FieldKey,
     graph: &LayerGraph,
@@ -158,7 +155,7 @@ fn compose_list_op_in<T, D, R, A>(
     mut anchor: A,
 ) -> Result<Vec<T>, QueryError>
 where
-    T: Default + Clone + PartialEq,
+    T: Clone + PartialEq + Hash,
     D: Fn(Value) -> Option<ListOp<T>>,
     R: FnMut(&mut T, LayerOffset, f64),
     A: FnMut(&mut T, LayerId) -> f64,
@@ -199,12 +196,12 @@ where
             // `sub1/` and `sub2/` are two references, not one). The anchor resolves
             // the path and returns the time-codes scale to fold later — it does not
             // change the offset, so dedup still compares authored values.
-            for item in list_op.iter_mut() {
+            list_op.update(|item| {
                 let scale = anchor(item, layer);
                 if (!sub.is_identity() || scale != 1.0) && !folds.iter().any(|(i, _, _)| i == item) {
                     folds.push((item.clone(), sub, scale));
                 }
-            }
+            });
             combined = Some(match combined {
                 Some(stronger) => stronger.combined_with(&list_op),
                 None => list_op,

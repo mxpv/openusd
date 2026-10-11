@@ -539,7 +539,7 @@ impl Value {
         let remap = &remap;
         match self {
             Value::PathVec(paths) => Value::PathVec(paths.iter().filter_map(remap).collect()),
-            Value::PathListOp(op) => Value::PathListOp(op.clone().filter_map(|p| remap(&p))),
+            Value::PathListOp(op) => Value::PathListOp(op.clone().convert(|_, p| remap(&p))),
             Value::Relocates(relocates) => Value::Relocates(
                 relocates
                     .iter()
@@ -548,13 +548,13 @@ impl Value {
                     .filter_map(|(s, t)| remap(s).map(|s| (s, remap(t).unwrap_or_else(|| t.clone()))))
                     .collect(),
             ),
-            Value::ReferenceListOp(op) => Value::ReferenceListOp(op.clone().filter_map(|mut reference| {
+            Value::ReferenceListOp(op) => Value::ReferenceListOp(op.clone().convert(|_, mut reference| {
                 if reference.asset_path.is_empty() && !reference.prim_path.is_empty() {
                     reference.prim_path = remap(&reference.prim_path)?;
                 }
                 Some(reference)
             })),
-            Value::PayloadListOp(op) => Value::PayloadListOp(op.clone().filter_map(|mut payload| {
+            Value::PayloadListOp(op) => Value::PayloadListOp(op.clone().convert(|_, mut payload| {
                 if payload.asset_path.is_empty() && !payload.prim_path.is_empty() {
                     payload.prim_path = remap(&payload.prim_path)?;
                 }
@@ -1239,7 +1239,7 @@ mod tests {
             .remap_paths(remap)
             .try_as_path_list_op()
             .unwrap()
-            .explicit_items
+            .explicit_items()
             .iter()
             .map(|p| p.as_str().to_owned())
             .collect();

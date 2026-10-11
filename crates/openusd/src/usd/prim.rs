@@ -2296,10 +2296,7 @@ mod tests {
             layer.data_mut().set_field(
                 &path,
                 sdf::FieldKey::ApiSchemas.as_str(),
-                sdf::Value::TokenListOp(sdf::TokenListOp {
-                    appended_items: vec![Token::from("ExistingAPI")],
-                    ..Default::default()
-                }),
+                sdf::Value::TokenListOp(sdf::TokenListOp::appended(vec![Token::from("ExistingAPI")])),
             );
             Ok(())
         })?;
@@ -2315,8 +2312,8 @@ mod tests {
             .expect("authored on the root layer")
             .api_schemas()
             .expect("apiSchemas authored");
-        assert_eq!(op.appended_items, vec![Token::from("ExistingAPI")]);
-        assert_eq!(op.prepended_items, vec![Token::from("NewAPI")]);
+        assert_eq!(op.appended_items(), [Token::from("ExistingAPI")]);
+        assert_eq!(op.prepended_items(), [Token::from("NewAPI")]);
         Ok(())
     }
 

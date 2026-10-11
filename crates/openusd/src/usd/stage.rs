@@ -4728,7 +4728,7 @@ pub(crate) mod tests {
             .expect("delete authored on the root layer")
             .connection_path_list()
             .unwrap();
-        assert_eq!(op.deleted_items, vec![target]);
+        assert_eq!(op.deleted_items(), vec![target]);
         Ok(())
     }
 
@@ -4829,8 +4829,8 @@ pub(crate) mod tests {
             .expect("authored on the root layer")
             .connection_path_list()
             .unwrap();
-        assert!(op.deleted_items.is_empty());
-        assert_eq!(op.prepended_items, vec![target]);
+        assert!(op.deleted_items().is_empty());
+        assert_eq!(op.prepended_items(), vec![target]);
         Ok(())
     }
 

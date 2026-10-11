@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::hash::Hash;
 use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::path::Path as FsPath;
 
@@ -1065,52 +1066,27 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
     fn write_listop<T, F>(&mut self, ty: Type, op: &ListOp<T>, mut write_items: F) -> Result<ValueRep, FormatError>
     where
-        T: Default + Clone + PartialEq,
+        T: Clone + PartialEq + Hash,
         F: FnMut(&mut Self, &[T]) -> Result<(), FormatError>,
     {
         let off = self.pos()?;
 
         let mut bits: u8 = 0;
-        if op.explicit {
+        if op.is_explicit() {
             bits |= ListOpHeader::IS_EXPLICIT;
         }
-        if !op.explicit_items.is_empty() {
-            bits |= ListOpHeader::HAS_EXPLICIT_ITEMS;
-        }
-        if !op.added_items.is_empty() {
-            bits |= ListOpHeader::HAS_ADDED_ITEMS;
-        }
-        if !op.deleted_items.is_empty() {
-            bits |= ListOpHeader::HAS_DELETED_ITEMS;
-        }
-        if !op.ordered_items.is_empty() {
-            bits |= ListOpHeader::HAS_ORDERED_ITEMS;
-        }
-        if !op.prepended_items.is_empty() {
-            bits |= ListOpHeader::HAS_PREPEND_ITEMS;
-        }
-        if !op.appended_items.is_empty() {
-            bits |= ListOpHeader::HAS_APPENDED_ITEMS;
+        for list in sdf::ListOpType::ALL {
+            if !op.items(list).is_empty() {
+                bits |= ListOpHeader::flag(list);
+            }
         }
         self.write_pod(&bits)?;
 
-        if !op.explicit_items.is_empty() {
-            write_items(self, &op.explicit_items)?;
-        }
-        if !op.added_items.is_empty() {
-            write_items(self, &op.added_items)?;
-        }
-        if !op.prepended_items.is_empty() {
-            write_items(self, &op.prepended_items)?;
-        }
-        if !op.appended_items.is_empty() {
-            write_items(self, &op.appended_items)?;
-        }
-        if !op.deleted_items.is_empty() {
-            write_items(self, &op.deleted_items)?;
-        }
-        if !op.ordered_items.is_empty() {
-            write_items(self, &op.ordered_items)?;
+        for list in sdf::ListOpType::ALL {
+            let items = op.items(list);
+            if !items.is_empty() {
+                write_items(self, items)?;
+            }
         }
 
         Ok(rep_heap(ty, off, false))

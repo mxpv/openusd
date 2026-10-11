@@ -1,37 +1,110 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::mem;
+
 /// Value type representing a list-edit operation.
 ///
 /// `ListOp` is a value type representing an operation that edits a list.
 /// It may add or remove items, reorder them, or replace the list entirely.
-#[derive(Default, Debug, Clone, PartialEq)]
+///
+/// The explicit, prepended, appended and deleted items each hold an item at
+/// most once, as C++ `SdfListOp` keeps them: of several equal items the
+/// appended ones keep the last and the others the first. Added and ordered
+/// items are kept as given.
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct ListOp<T: Default + Clone + PartialEq> {
+pub struct ListOp<T> {
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub explicit: bool,
+    explicit: bool,
     #[cfg_attr(feature = "serde", serde(rename = "explicit", skip_serializing_if = "Vec::is_empty"))]
-    pub explicit_items: Vec<T>,
+    explicit_items: Vec<T>,
     #[cfg_attr(feature = "serde", serde(rename = "add", skip_serializing_if = "Vec::is_empty"))]
-    pub added_items: Vec<T>,
+    added_items: Vec<T>,
     #[cfg_attr(feature = "serde", serde(rename = "prepend", skip_serializing_if = "Vec::is_empty"))]
-    pub prepended_items: Vec<T>,
+    prepended_items: Vec<T>,
     #[cfg_attr(feature = "serde", serde(rename = "append", skip_serializing_if = "Vec::is_empty"))]
-    pub appended_items: Vec<T>,
+    appended_items: Vec<T>,
     #[cfg_attr(feature = "serde", serde(rename = "delete", skip_serializing_if = "Vec::is_empty"))]
-    pub deleted_items: Vec<T>,
+    deleted_items: Vec<T>,
     #[cfg_attr(feature = "serde", serde(rename = "order", skip_serializing_if = "Vec::is_empty"))]
-    pub ordered_items: Vec<T>,
+    ordered_items: Vec<T>,
 }
 
-impl<T: Default + Clone + PartialEq> ListOp<T> {
+impl<T> Default for ListOp<T> {
+    fn default() -> Self {
+        Self {
+            explicit: false,
+            explicit_items: Vec::new(),
+            added_items: Vec::new(),
+            prepended_items: Vec::new(),
+            appended_items: Vec::new(),
+            deleted_items: Vec::new(),
+            ordered_items: Vec::new(),
+        }
+    }
+}
+
+/// One of the lists of items a [`ListOp`] holds (C++ `SdfListOpType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListOpType {
+    /// The items that replace the list.
+    Explicit,
+    /// The items appended where the list does not hold them yet.
+    Added,
+    /// The items moved or added to the front of the list.
+    Prepended,
+    /// The items moved or added to the back of the list.
+    Appended,
+    /// The items removed from the list.
+    Deleted,
+    /// The items whose order the list takes.
+    Ordered,
+}
+
+impl ListOpType {
+    /// Every list, in the order the crate format stores them.
+    pub const ALL: [ListOpType; 6] = [
+        ListOpType::Explicit,
+        ListOpType::Added,
+        ListOpType::Prepended,
+        ListOpType::Appended,
+        ListOpType::Deleted,
+        ListOpType::Ordered,
+    ];
+
+    /// Whether the list's items contribute opinions: `true` for the
+    /// explicit, added, prepended and appended items, `false` for the
+    /// deleted and ordered ones, which only remove or reorder.
+    pub fn contributes(self) -> bool {
+        !matches!(self, ListOpType::Deleted | ListOpType::Ordered)
+    }
+
+    /// Which of several equal items the list keeps, or `None` for a list
+    /// that keeps them all.
+    fn keeps(self) -> Option<Keep> {
+        match self {
+            ListOpType::Explicit | ListOpType::Prepended | ListOpType::Deleted => Some(Keep::First),
+            ListOpType::Appended => Some(Keep::Last),
+            ListOpType::Added | ListOpType::Ordered => None,
+        }
+    }
+}
+
+/// Which of several equal items a list keeps.
+#[derive(Clone, Copy)]
+enum Keep {
+    /// The first, where the others are dropped from behind it.
+    First,
+    /// The last, as appending the items one by one would leave them.
+    Last,
+}
+
+impl<T: Clone + PartialEq + Hash> ListOp<T> {
     /// Creates an explicit list op that replaces weaker list opinions.
     pub fn explicit<I>(items: I) -> Self
     where
         I: IntoIterator<Item = T>,
     {
-        Self {
-            explicit: true,
-            explicit_items: items.into_iter().collect(),
-            ..Default::default()
-        }
+        Self::of(ListOpType::Explicit, items)
     }
 
     /// Creates a `prepend` list op.
@@ -39,10 +112,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        Self {
-            prepended_items: items.into_iter().collect(),
-            ..Default::default()
-        }
+        Self::of(ListOpType::Prepended, items)
     }
 
     /// Creates an `append` list op.
@@ -50,10 +120,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        Self {
-            appended_items: items.into_iter().collect(),
-            ..Default::default()
-        }
+        Self::of(ListOpType::Appended, items)
     }
 
     /// Creates an `add` list op.
@@ -61,10 +128,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        Self {
-            added_items: items.into_iter().collect(),
-            ..Default::default()
-        }
+        Self::of(ListOpType::Added, items)
     }
 
     /// Creates a `delete` list op.
@@ -72,10 +136,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        Self {
-            deleted_items: items.into_iter().collect(),
-            ..Default::default()
-        }
+        Self::of(ListOpType::Deleted, items)
     }
 
     /// Creates an `order` list op.
@@ -83,40 +144,153 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        Self {
-            ordered_items: items.into_iter().collect(),
-            ..Default::default()
+        Self::of(ListOpType::Ordered, items)
+    }
+
+    /// A list op holding `items` in the one list `ty` names.
+    fn of(ty: ListOpType, items: impl IntoIterator<Item = T>) -> Self {
+        let mut op = Self::default();
+        op.set_items(ty, items);
+        op
+    }
+
+    /// Whether the op replaces the list with its explicit items (C++
+    /// `IsExplicit`).
+    pub fn is_explicit(&self) -> bool {
+        self.explicit
+    }
+
+    /// Makes the op replace the list or edit it. Every list of items stays
+    /// as it stands.
+    pub fn set_explicit(&mut self, explicit: bool) {
+        self.explicit = explicit;
+    }
+
+    /// The items that replace the list.
+    pub fn explicit_items(&self) -> &[T] {
+        &self.explicit_items
+    }
+
+    /// The items appended where the list does not hold them yet.
+    pub fn added_items(&self) -> &[T] {
+        &self.added_items
+    }
+
+    /// The items moved or added to the front of the list.
+    pub fn prepended_items(&self) -> &[T] {
+        &self.prepended_items
+    }
+
+    /// The items moved or added to the back of the list.
+    pub fn appended_items(&self) -> &[T] {
+        &self.appended_items
+    }
+
+    /// The items removed from the list.
+    pub fn deleted_items(&self) -> &[T] {
+        &self.deleted_items
+    }
+
+    /// The items whose order the list takes.
+    pub fn ordered_items(&self) -> &[T] {
+        &self.ordered_items
+    }
+
+    /// The items of the list `ty` names (C++ `GetItems`).
+    pub fn items(&self, ty: ListOpType) -> &[T] {
+        match ty {
+            ListOpType::Explicit => &self.explicit_items,
+            ListOpType::Added => &self.added_items,
+            ListOpType::Prepended => &self.prepended_items,
+            ListOpType::Appended => &self.appended_items,
+            ListOpType::Deleted => &self.deleted_items,
+            ListOpType::Ordered => &self.ordered_items,
         }
     }
 
-    /// Converts every item to `U`, preserving the list-op structure. Used to
-    /// reconcile encodings that differ only in element type, e.g. a `token`
-    /// list op decoded for a field whose canonical type is `string`.
-    pub fn map<U: Default + Clone + PartialEq>(self, f: impl Fn(T) -> U) -> ListOp<U> {
-        ListOp {
-            explicit: self.explicit,
-            explicit_items: self.explicit_items.into_iter().map(&f).collect(),
-            added_items: self.added_items.into_iter().map(&f).collect(),
-            prepended_items: self.prepended_items.into_iter().map(&f).collect(),
-            appended_items: self.appended_items.into_iter().map(&f).collect(),
-            deleted_items: self.deleted_items.into_iter().map(&f).collect(),
-            ordered_items: self.ordered_items.into_iter().map(&f).collect(),
+    /// The items of the list `ty` names, by value.
+    pub fn into_items(mut self, ty: ListOpType) -> Vec<T> {
+        mem::take(self.items_mut(ty))
+    }
+
+    /// The list `ty` names, for an edit that leaves no repeated item the
+    /// list does not keep.
+    fn items_mut(&mut self, ty: ListOpType) -> &mut Vec<T> {
+        match ty {
+            ListOpType::Explicit => &mut self.explicit_items,
+            ListOpType::Added => &mut self.added_items,
+            ListOpType::Prepended => &mut self.prepended_items,
+            ListOpType::Appended => &mut self.appended_items,
+            ListOpType::Deleted => &mut self.deleted_items,
+            ListOpType::Ordered => &mut self.ordered_items,
         }
     }
 
-    /// Maps every item, dropping those for which `f` returns `None`, while
-    /// preserving the list-op structure. The retaining counterpart of
-    /// [`map`](Self::map) — namespace-edit deletion fixup uses it to drop the
-    /// items that point at a removed object.
-    pub fn filter_map(self, f: impl Fn(T) -> Option<T>) -> ListOp<T> {
+    /// Replaces the items of the list `ty` names, dropping the repeated
+    /// ones that list does not keep (C++ `SetItems`). Explicit items make
+    /// the op explicit, which they are the whole of; items of any other
+    /// list leave that as it stands. Every other list stays as it is.
+    pub fn set_items(&mut self, ty: ListOpType, items: impl IntoIterator<Item = T>) {
+        self.edit_items(ty, |held| *held = items.into_iter().collect());
+        self.explicit |= ty == ListOpType::Explicit;
+    }
+
+    /// The op with the items of the list `ty` names replaced as
+    /// [`set_items`](Self::set_items) replaces them, for an op of several
+    /// lists: `ListOp::prepended([1]).with(ListOpType::Deleted, [2])`.
+    pub fn with(mut self, ty: ListOpType, items: impl IntoIterator<Item = T>) -> Self {
+        self.set_items(ty, items);
+        self
+    }
+
+    /// Edits the items of the list `ty` names in place, then drops the
+    /// repeated ones that list does not keep.
+    pub fn edit_items<R>(&mut self, ty: ListOpType, edit: impl FnOnce(&mut Vec<T>) -> R) -> R {
+        let items = self.items_mut(ty);
+        let result = edit(items);
+        make_unique(items, ty.keeps());
+        result
+    }
+
+    /// Puts `item` at the end of the list `ty` names where that list does
+    /// not hold it yet. Returns whether it was put there.
+    pub fn push(&mut self, ty: ListOpType, item: T) -> bool {
+        let items = self.items_mut(ty);
+        let absent = !items.contains(&item);
+        if absent {
+            items.push(item);
+        }
+        absent
+    }
+
+    /// Converts every item with `f`, which is told the list each item is
+    /// in, dropping those it returns `None` for. Items that convert to equal
+    /// ones are dropped as [`set_items`](Self::set_items) drops them.
+    pub fn convert<U: Clone + PartialEq + Hash>(self, mut f: impl FnMut(ListOpType, T) -> Option<U>) -> ListOp<U> {
+        let mut convert = |ty, items: Vec<T>| -> Vec<U> {
+            let mut items = items.into_iter().filter_map(|item| f(ty, item)).collect();
+            make_unique(&mut items, ty.keeps());
+            items
+        };
         ListOp {
             explicit: self.explicit,
-            explicit_items: self.explicit_items.into_iter().filter_map(&f).collect(),
-            added_items: self.added_items.into_iter().filter_map(&f).collect(),
-            prepended_items: self.prepended_items.into_iter().filter_map(&f).collect(),
-            appended_items: self.appended_items.into_iter().filter_map(&f).collect(),
-            deleted_items: self.deleted_items.into_iter().filter_map(&f).collect(),
-            ordered_items: self.ordered_items.into_iter().filter_map(&f).collect(),
+            explicit_items: convert(ListOpType::Explicit, self.explicit_items),
+            added_items: convert(ListOpType::Added, self.added_items),
+            prepended_items: convert(ListOpType::Prepended, self.prepended_items),
+            appended_items: convert(ListOpType::Appended, self.appended_items),
+            deleted_items: convert(ListOpType::Deleted, self.deleted_items),
+            ordered_items: convert(ListOpType::Ordered, self.ordered_items),
+        }
+    }
+
+    /// Rewrites every item of every list in place, the deleted and ordered
+    /// ones included, so a delete or reorder still matches the item it names
+    /// once rewritten (e.g. retiming a reference's layer offset). Items that
+    /// became equal to another are then dropped as
+    /// [`set_items`](Self::set_items) drops them.
+    pub fn update(&mut self, mut f: impl FnMut(&mut T)) {
+        for ty in ListOpType::ALL {
+            self.edit_items(ty, |items| items.iter_mut().for_each(&mut f));
         }
     }
 
@@ -133,39 +307,9 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             .chain(&self.added_items)
     }
 
-    /// Every bucket, with whether its items contribute opinions: `true` for
-    /// the explicit, added, prepended and appended items, `false` for the
-    /// deleted and ordered ones, which only remove or reorder. Keeps the full
-    /// set of buckets defined in one place.
-    pub fn buckets_mut(&mut self) -> [(&mut Vec<T>, bool); 6] {
-        [
-            (&mut self.explicit_items, true),
-            (&mut self.added_items, true),
-            (&mut self.prepended_items, true),
-            (&mut self.appended_items, true),
-            (&mut self.deleted_items, false),
-            (&mut self.ordered_items, false),
-        ]
-    }
-
-    /// Returns a mutable iterator over the items in **every** bucket so callers
-    /// can rewrite each item in place (e.g. retiming a reference's layer
-    /// offset). Unlike [`iter`](Self::iter), this includes `deleted_items` and
-    /// `ordered_items` — a rewrite must touch every item or a delete/reorder
-    /// would no longer match its retimed counterpart.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.buckets_mut().into_iter().flat_map(|(items, _)| items.iter_mut())
-    }
-
     /// Returns true if this list op has no effect (all fields empty, not explicit).
     pub fn is_empty(&self) -> bool {
-        !self.explicit
-            && self.explicit_items.is_empty()
-            && self.added_items.is_empty()
-            && self.prepended_items.is_empty()
-            && self.appended_items.is_empty()
-            && self.deleted_items.is_empty()
-            && self.ordered_items.is_empty()
+        !self.explicit && ListOpType::ALL.into_iter().all(|ty| self.items(ty).is_empty())
     }
 
     /// Remove `item` so it is absent from the composed result, mirroring C++
@@ -181,15 +325,22 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         if self.explicit {
             return remove_one(&mut self.explicit_items, item);
         }
-        let mut changed = remove_one(&mut self.explicit_items, item);
-        changed |= remove_one(&mut self.added_items, item);
-        changed |= remove_one(&mut self.prepended_items, item);
-        changed |= remove_one(&mut self.appended_items, item);
-        if !self.deleted_items.iter().any(|i| i == item) {
-            self.deleted_items.push(item.clone());
-            changed = true;
-        }
-        changed
+        self.discard(item) | self.push(ListOpType::Deleted, item.clone())
+    }
+
+    /// Drops `item` from the list `ty` names. Returns whether the list held
+    /// it.
+    pub fn remove_item(&mut self, ty: ListOpType, item: &T) -> bool {
+        remove_one(self.items_mut(ty), item)
+    }
+
+    /// Drops `item` from every list that contributes it: the explicit,
+    /// added, prepended and appended items. Returns whether any held it.
+    pub fn discard(&mut self, item: &T) -> bool {
+        remove_one(&mut self.explicit_items, item)
+            | remove_one(&mut self.added_items, item)
+            | remove_one(&mut self.prepended_items, item)
+            | remove_one(&mut self.appended_items, item)
     }
 
     /// Compose this (stronger) list op with a weaker one, producing a single
@@ -215,7 +366,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         }
         // Stronger composable over weaker explicit.
         if weaker.explicit {
-            let explicit_items = self
+            let mut explicit_items: Vec<T> = self
                 .prepended_items
                 .iter()
                 .filter(|e| !self.appended_items.contains(e))
@@ -232,6 +383,8 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
                 }))
                 .cloned()
                 .collect();
+            // The stronger op's added items are held as given, and may repeat.
+            make_unique(&mut explicit_items, Some(Keep::First));
             return Self {
                 explicit: true,
                 explicit_items,
@@ -313,6 +466,8 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
                 ..Default::default()
             };
         }
+        let mut appended_items = self.appended_items.clone();
+        appended_items.extend(self.absent_added());
         Self {
             prepended_items: self
                 .prepended_items
@@ -320,16 +475,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
                 .filter(|e| !self.appended_items.contains(e))
                 .cloned()
                 .collect(),
-            appended_items: self
-                .appended_items
-                .iter()
-                .chain(
-                    self.added_items
-                        .iter()
-                        .filter(|e| !self.prepended_items.contains(e) && !self.appended_items.contains(e)),
-                )
-                .cloned()
-                .collect(),
+            appended_items,
             deleted_items: self
                 .deleted_items
                 .iter()
@@ -377,6 +523,20 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         }
     }
 
+    /// The added items that are neither prepended nor appended, each once at
+    /// its first place: what adding them one by one leaves behind the
+    /// prepended and appended items.
+    fn absent_added(&self) -> Vec<T> {
+        let mut added: Vec<T> = self
+            .added_items
+            .iter()
+            .filter(|e| !self.prepended_items.contains(e) && !self.appended_items.contains(e))
+            .cloned()
+            .collect();
+        make_unique(&mut added, Some(Keep::First));
+        added
+    }
+
     /// Flatten this list op into its final item list.
     pub fn flatten(&self) -> Vec<T> {
         let mut result = if self.explicit {
@@ -392,12 +552,8 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
                 .iter()
                 .filter(|e| !self.appended_items.contains(e))
                 .chain(self.appended_items.iter())
-                .chain(
-                    self.added_items
-                        .iter()
-                        .filter(|e| !self.prepended_items.contains(e) && !self.appended_items.contains(e)),
-                )
                 .cloned()
+                .chain(self.absent_added())
                 .collect()
         };
 
@@ -482,9 +638,65 @@ fn merge_ordered<T: Clone + PartialEq>(stronger: &[T], weaker: &[T]) -> Vec<T> {
         .collect()
 }
 
+/// Drop the items of `items` that repeat an earlier one, or with
+/// [`Keep::Last`] a later one, keeping the rest in order (C++
+/// `SdfListOp::_MakeUnique`). With no `keep`, every item stays.
+fn make_unique<T: PartialEq + Hash>(items: &mut Vec<T>, keep: Option<Keep>) {
+    let Some(keep) = keep else {
+        return;
+    };
+    // Most lists are a few items long, and are compared item by item.
+    const SMALL: usize = 10;
+    if items.len() <= SMALL {
+        let mut index = 0;
+        while index < items.len() {
+            let repeated = match keep {
+                Keep::First => items[..index].contains(&items[index]),
+                Keep::Last => items[index + 1..].contains(&items[index]),
+            };
+            match repeated {
+                true => drop(items.remove(index)),
+                false => index += 1,
+            }
+        }
+        return;
+    }
+
+    // Equal items hash alike, so they sit in one run of the indices sorted
+    // by hash, each run in index order.
+    let mut hashed: Vec<(u64, usize)> = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let mut state = DefaultHasher::new();
+            item.hash(&mut state);
+            (state.finish(), index)
+        })
+        .collect();
+    hashed.sort_unstable();
+    // Items that all hash apart are all different.
+    if hashed.windows(2).all(|pair| pair[0].0 != pair[1].0) {
+        return;
+    }
+
+    let mut repeated = vec![false; items.len()];
+    for run in hashed.chunk_by(|a, b| a.0 == b.0) {
+        for (place, &(_, index)) in run.iter().enumerate() {
+            let rivals = match keep {
+                Keep::First => &run[..place],
+                Keep::Last => &run[place + 1..],
+            };
+            repeated[index] = rivals.iter().any(|&(_, rival)| items[rival] == items[index]);
+        }
+    }
+    let mut repeated = repeated.into_iter();
+    items.retain(|_| !repeated.next().unwrap_or(false));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sdf;
 
     // ListOp composition tests.
     //
@@ -521,6 +733,104 @@ mod tests {
 
         let op = ListOp::ordered([9, 10]);
         assert_eq!(op.ordered_items, vec![9, 10]);
+    }
+
+    /// The explicit, prepended and deleted items keep the first of several
+    /// equal items and the appended items the last, while added and ordered
+    /// items are held as given.
+    #[test]
+    fn items_held_once() {
+        let repeated = [1, 2, 1, 3, 2];
+        assert_eq!(ListOp::explicit(repeated).explicit_items(), [1, 2, 3]);
+        assert_eq!(ListOp::prepended(repeated).prepended_items(), [1, 2, 3]);
+        assert_eq!(ListOp::deleted(repeated).deleted_items(), [1, 2, 3]);
+        assert_eq!(ListOp::appended(repeated).appended_items(), [1, 3, 2]);
+        assert_eq!(ListOp::added(repeated).added_items(), repeated);
+        assert_eq!(ListOp::ordered(repeated).ordered_items(), repeated);
+
+        let op = ListOp::prepended([1]).with(ListOpType::Deleted, [4, 4]);
+        assert_eq!(op.items(ListOpType::Prepended), [1]);
+        assert_eq!(op.items(ListOpType::Deleted), [4]);
+        assert!(!op.is_explicit());
+        // Explicit items are an explicit op's.
+        assert_eq!(ListOp::default().with(ListOpType::Explicit, [5]), ListOp::explicit([5]));
+    }
+
+    /// A list too long to compare pair by pair drops its repeated items in
+    /// the same places.
+    #[test]
+    fn long_list_held_once() {
+        let items: Vec<i32> = (0..1000).chain((0..1000).rev()).collect();
+        let ascending: Vec<i32> = (0..1000).collect();
+        let descending: Vec<i32> = (0..1000).rev().collect();
+        assert_eq!(ListOp::prepended(items.clone()).prepended_items(), ascending);
+        assert_eq!(ListOp::appended(items).appended_items(), descending);
+    }
+
+    /// Items that hash alike without being equal are told apart.
+    #[test]
+    fn unhashed_field_distinguishes() {
+        let reference = |asset: &str, offset: f64| sdf::Reference {
+            asset_path: asset.to_owned(),
+            layer_offset: sdf::LayerOffset { offset, scale: 1.0 },
+            ..Default::default()
+        };
+        // Enough items to hash, three of them equal to an earlier one.
+        let items: Vec<_> = (0..12)
+            .map(|n| reference("a.usda", f64::from(n % 9)))
+            .chain([reference("b.usda", 0.0)])
+            .collect();
+        let op = ListOp::prepended(items);
+        assert_eq!(op.prepended_items().len(), 10);
+        assert_eq!(op.prepended_items()[9], reference("b.usda", 0.0));
+    }
+
+    /// An edit in place, and a rewrite of every item, leave no repeated
+    /// item behind.
+    #[test]
+    fn edits_keep_items_once() {
+        let mut op = ListOp::prepended([1, 2]);
+        let pushed = op.edit_items(ListOpType::Prepended, |items| {
+            items.push(1);
+            items.len()
+        });
+        assert_eq!(pushed, 3);
+        assert_eq!(op.prepended_items(), [1, 2]);
+
+        let mut op = ListOp::appended([1, 2, 3]).with(ListOpType::Added, [5, 6]);
+        op.update(|item| *item /= 2);
+        assert_eq!(op.appended_items(), [0, 1]);
+        assert_eq!(op.added_items(), [2, 3]);
+
+        let op = ListOp::explicit([1, 2, 3]).with(ListOpType::Deleted, [7]);
+        let halved = op.convert(|ty, item| (ty.contributes() || item != 7).then_some(item / 2));
+        assert!(halved.is_explicit());
+        assert_eq!(halved.explicit_items(), [0, 1]);
+        assert!(halved.deleted_items().is_empty());
+    }
+
+    /// A repeated added item lands once, where adding the items one by one
+    /// puts it.
+    #[test]
+    fn repeated_add_keeps_first() {
+        let op = ListOp::appended([1]).with(ListOpType::Added, [2, 3, 2, 1]);
+        assert_eq!(op.flatten(), [1, 2, 3]);
+        assert_eq!(op.reduced().flatten(), [1, 2, 3]);
+        assert_eq!(op.flatten(), op.compose_over(&[]));
+    }
+
+    /// Dropping an item takes it out of every list that contributes it and
+    /// leaves the deletes alone.
+    #[test]
+    fn discard_contributed_item() {
+        let mut op = ListOp::prepended([1, 2])
+            .with(ListOpType::Appended, [2, 3])
+            .with(ListOpType::Deleted, [2]);
+        assert!(op.discard(&2));
+        assert_eq!(op.prepended_items(), [1]);
+        assert_eq!(op.appended_items(), [3]);
+        assert_eq!(op.deleted_items(), [2]);
+        assert!(!op.discard(&2));
     }
 
     /// Explicit mode replaces the weaker list entirely, regardless of its contents.

@@ -1,5 +1,6 @@
 use super::error::{Ctx, RawError, bail, ensure};
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use crate::sdf::{
     self,
@@ -868,16 +869,14 @@ fn parse_registered_metadata(cursor: &mut Cursor<'_>, name: &str) -> Result<sdf:
 
 /// Wrap `items` in the list op the `op` keyword names, or an explicit list when
 /// no keyword was authored.
-fn apply_list_op<T: Default + Clone + PartialEq>(
+fn apply_list_op<T: Clone + PartialEq + Hash>(
     op: Option<Token<'_>>,
     items: Vec<T>,
 ) -> Result<sdf::ListOp<T>, RawError> {
     let Some(op) = op else {
         return Ok(sdf::ListOp::explicit(items));
     };
-    let mut list_op = sdf::ListOp::default();
-    set_list_op_items(&mut list_op, &op, items)?;
-    Ok(list_op)
+    Ok(sdf::ListOp::default().with(list_op_type(&op)?, items))
 }
 
 /// Store a metadata field no schema declares as the text it was authored
@@ -924,33 +923,26 @@ fn record_unregistered_metadata(
     };
 
     match spec.get_mut(name) {
-        Some(sdf::Value::UnregisteredValueListOp(stored)) => set_list_op_items(stored, op, items)?,
+        Some(sdf::Value::UnregisteredValueListOp(stored)) => stored.set_items(list_op_type(op)?, items),
         Some(_) => {}
         None => {
-            let mut stored = sdf::ListOp::default();
-            set_list_op_items(&mut stored, op, items)?;
+            let stored = sdf::ListOp::default().with(list_op_type(op)?, items);
             spec.add(name, sdf::Value::UnregisteredValueListOp(stored));
         }
     }
     Ok(())
 }
 
-/// Replace the items of the one operation `op` names (C++
-/// `SdfListOp::SetItems`), leaving every other operation as it stands.
-fn set_list_op_items<T: Default + Clone + PartialEq>(
-    list_op: &mut sdf::ListOp<T>,
-    op: &Token<'_>,
-    items: Vec<T>,
-) -> Result<(), RawError> {
-    match op {
-        Token::Prepend => list_op.prepended_items = items,
-        Token::Append => list_op.appended_items = items,
-        Token::Add => list_op.added_items = items,
-        Token::Delete => list_op.deleted_items = items,
-        Token::Reorder => list_op.ordered_items = items,
+/// The list of a list op the operation keyword `op` names.
+fn list_op_type(op: &Token<'_>) -> Result<sdf::ListOpType, RawError> {
+    Ok(match op {
+        Token::Prepend => sdf::ListOpType::Prepended,
+        Token::Append => sdf::ListOpType::Appended,
+        Token::Add => sdf::ListOpType::Added,
+        Token::Delete => sdf::ListOpType::Deleted,
+        Token::Reorder => sdf::ListOpType::Ordered,
         other => bail!("Unsupported list op: {other:?}"),
-    }
-    Ok(())
+    })
 }
 
 /// Push a string into a Vec if it's not already present.
@@ -1447,7 +1439,7 @@ def Shader "Image_Texture"
         assert!(matches!(
             output_spec
                 .get(FieldKey::ConnectionPaths.as_str()),
-            Some(sdf::Value::PathListOp(op)) if op.explicit_items.len() == 1
+            Some(sdf::Value::PathListOp(op)) if op.explicit_items().len() == 1
         ));
 
         let props = shader
@@ -1616,8 +1608,8 @@ def Material "Mat"
         // Connection paths are stored on the same spec (not a separate `.connect` spec).
         match output.get(FieldKey::ConnectionPaths.as_str()) {
             Some(sdf::Value::PathListOp(op)) => {
-                assert_eq!(op.explicit_items.len(), 1);
-                assert_eq!(op.explicit_items[0].as_str(), "/Mat/Preview.outputs:surface");
+                assert_eq!(op.explicit_items().len(), 1);
+                assert_eq!(op.explicit_items()[0].as_str(), "/Mat/Preview.outputs:surface");
             }
             other => panic!("unexpected connection paths value: {other:?}"),
         }
@@ -1645,8 +1637,8 @@ def Scope "Root"
             .get(FieldKey::TargetPaths.as_str())
             .and_then(|v| v.try_as_path_list_op_ref())
             .expect("missing targets on relationship");
-        assert_eq!(targets.explicit_items.len(), 1);
-        assert_eq!(targets.explicit_items[0].as_str(), "/Mat");
+        assert_eq!(targets.explicit_items().len(), 1);
+        assert_eq!(targets.explicit_items()[0].as_str(), "/Mat");
     }
 
     #[test]
@@ -1970,8 +1962,8 @@ def Mesh "Mesh_001" (
             .try_as_token_list_op()
             .unwrap();
 
-        assert!(api.explicit_items.is_empty());
-        assert_eq!(api.prepended_items, vec![tf::Token::from("MaterialBindingAPI")]);
+        assert!(api.explicit_items().is_empty());
+        assert_eq!(api.prepended_items(), [tf::Token::from("MaterialBindingAPI")]);
     }
 
     #[test]
@@ -1999,10 +1991,10 @@ def Mesh "visual" (
             .try_as_reference_list_op()
             .unwrap();
 
-        assert!(references.explicit);
-        assert_eq!(references.explicit_items.len(), 1);
+        assert!(references.is_explicit());
+        assert_eq!(references.explicit_items().len(), 1);
 
-        let reference = &references.explicit_items[0];
+        let reference = &references.explicit_items()[0];
         assert_eq!(reference.asset_path, "./visual.usd");
         assert_eq!(reference.prim_path.as_str(), "/visual");
         assert_eq!(reference.layer_offset.offset, 0.0);
@@ -2034,8 +2026,8 @@ def "A" (
             .unwrap();
 
         // The second operator statement must not overwrite the first.
-        assert_eq!(inherits.prepended_items, vec![sdf::path("/Pre").unwrap()]);
-        assert_eq!(inherits.appended_items, vec![sdf::path("/Post").unwrap()]);
+        assert_eq!(inherits.prepended_items(), [sdf::path("/Pre").unwrap()]);
+        assert_eq!(inherits.appended_items(), [sdf::path("/Post").unwrap()]);
     }
 
     #[test]
@@ -2161,7 +2153,7 @@ def Xform "root" {
             .expect("relationship targets stored as path listOp");
         assert_eq!(
             list_op
-                .explicit_items
+                .explicit_items()
                 .first()
                 .expect("relationship target present")
                 .as_str(),
@@ -2607,7 +2599,7 @@ def Xform "Anim"
             .expect("connectionPaths authored")
             .try_as_path_list_op()
             .expect("a path list op");
-        assert!(op.explicit && op.explicit_items.is_empty());
+        assert!(op.is_explicit() && op.explicit_items().is_empty());
         assert_eq!(
             field(text, "/P.a", FieldKey::TypeName.as_str()),
             Some(sdf::Value::token("vector3f"))
@@ -2836,7 +2828,7 @@ def \"P\" (
             .expect("variantSets")
             .try_as_string_list_op()
             .expect("a string list op");
-        assert_eq!(names.prepended_items, vec!["v".to_owned()]);
+        assert_eq!(names.prepended_items(), ["v".to_owned()]);
     }
 
     /// A display unit is written by name, and one no category uses is
@@ -2904,11 +2896,8 @@ def Xform "Root" (
     #[test]
     fn unknown_metadata_list_ops() {
         let text = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = [1, 2]\n    delete madeUpList = 3\n)\n{\n}\n";
-        let expected = sdf::ListOp::<String> {
-            prepended_items: vec!["1, 2".to_owned()],
-            deleted_items: vec!["3".to_owned()],
-            ..Default::default()
-        };
+        let expected =
+            sdf::ListOp::<String>::prepended(["1, 2".to_owned()]).with(sdf::ListOpType::Deleted, ["3".to_owned()]);
         assert_eq!(
             field(text, "/P", "madeUpList"),
             Some(sdf::Value::UnregisteredValueListOp(expected))
@@ -2920,10 +2909,7 @@ def Xform "Root" (
     #[test]
     fn repeated_prepend_replaces() {
         let text = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = [1]\n    prepend madeUpList = [2]\n)\n{\n}\n";
-        let expected = sdf::ListOp::<String> {
-            prepended_items: vec!["2".to_owned()],
-            ..Default::default()
-        };
+        let expected = sdf::ListOp::<String>::prepended(vec!["2".to_owned()]);
         assert_eq!(
             field(text, "/P", "madeUpList"),
             Some(sdf::Value::UnregisteredValueListOp(expected))
@@ -2964,10 +2950,7 @@ def Xform "Root" (
         );
 
         let empty = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = []\n)\n{\n}\n";
-        let expected = sdf::ListOp::<String> {
-            prepended_items: vec![String::new()],
-            ..Default::default()
-        };
+        let expected = sdf::ListOp::<String>::prepended(vec![String::new()]);
         assert_eq!(
             field(empty, "/P", "madeUpList"),
             Some(sdf::Value::UnregisteredValueListOp(expected))

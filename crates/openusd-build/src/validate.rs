@@ -510,12 +510,10 @@ fn check_fields(class: &Class) -> Result<(), Error> {
     }
 
     if let Some(op) = &class.api_schemas_op
-        && (op.explicit
-            || !op.explicit_items.is_empty()
-            || !op.appended_items.is_empty()
-            || !op.added_items.is_empty()
-            || !op.deleted_items.is_empty()
-            || !op.ordered_items.is_empty())
+        && (op.is_explicit()
+            || sdf::ListOpType::ALL
+                .into_iter()
+                .any(|ty| ty != sdf::ListOpType::Prepended && !op.items(ty).is_empty()))
     {
         return Err(class.violation(Violation::ApiSchemasNotPrepended));
     }

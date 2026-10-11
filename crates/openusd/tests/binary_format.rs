@@ -550,8 +550,8 @@ fn variants_values() {
     let names = value(&data, "/root", "variantSetNames")
         .try_as_string_list_op()
         .expect("variantSetNames is not a string list op");
-    assert!(!names.explicit);
-    assert_eq!(names.prepended_items, vec!["foo".to_string()]);
+    assert!(!names.is_explicit());
+    assert_eq!(names.prepended_items(), ["foo".to_string()]);
 }
 
 #[test]
@@ -561,15 +561,15 @@ fn listops_values() {
     let api = value(&data, "/root", "apiSchemas")
         .try_as_token_list_op()
         .expect("apiSchemas is not a token list op");
-    assert!(api.explicit);
-    assert_eq!(api.explicit_items, vec![tf::Token::from("MaterialBindingAPI")]);
+    assert!(api.is_explicit());
+    assert_eq!(api.explicit_items(), [tf::Token::from("MaterialBindingAPI")]);
 
     let refs = value(&data, "/root", "references")
         .try_as_reference_list_op()
         .expect("references is not a reference list op");
-    assert!(!refs.explicit);
-    assert_eq!(refs.prepended_items.len(), 1);
-    let r = &refs.prepended_items[0];
+    assert!(!refs.is_explicit());
+    assert_eq!(refs.prepended_items().len(), 1);
+    let r = &refs.prepended_items()[0];
     assert_eq!(r.asset_path, "./ref.usda");
     assert_eq!(r.prim_path, sdf::path("/Model").unwrap());
     assert_eq!(r.layer_offset, LayerOffset::new(10.0, 1.0));
@@ -577,22 +577,22 @@ fn listops_values() {
     let payloads = value(&data, "/root", "payload")
         .try_as_payload_list_op()
         .expect("payload is not a payload list op");
-    assert!(!payloads.explicit);
-    assert_eq!(payloads.appended_items.len(), 1);
+    assert!(!payloads.is_explicit());
+    assert_eq!(payloads.appended_items().len(), 1);
     let expected = Payload {
         asset_path: "eggs.usda".into(),
         prim_path: sdf::Path::default(),
         layer_offset: LayerOffset::IDENTITY,
     };
-    assert_eq!(payloads.appended_items[0], expected);
+    assert_eq!(payloads.appended_items()[0], expected);
 
     let targets = value(&data, "/root.foo", "targetPaths")
         .try_as_path_list_op()
         .expect("targetPaths is not a path list op");
-    assert!(targets.explicit);
+    assert!(targets.is_explicit());
     assert_eq!(
-        targets.explicit_items,
-        vec![sdf::path("/eggs").unwrap(), sdf::path("/spam").unwrap()]
+        targets.explicit_items(),
+        [sdf::path("/eggs").unwrap(), sdf::path("/spam").unwrap()]
     );
 }
 

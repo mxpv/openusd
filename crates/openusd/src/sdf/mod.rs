@@ -4,6 +4,7 @@
 //! Roughly this correspond to C++ SDF module <https://openusd.org/dev/api/sdf_page_front.html>
 
 use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 use std::{collections::HashMap, fmt::Debug, mem};
 
 use bytemuck::{Pod, Zeroable};
@@ -357,6 +358,15 @@ pub struct Payload {
     pub layer_offset: LayerOffset,
 }
 
+/// Equal payloads name the same asset and prim, which is what is hashed:
+/// the layer offset holds floats.
+impl Hash for Payload {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.asset_path.hash(state);
+        self.prim_path.hash(state);
+    }
+}
+
 /// Represents a reference and all its meta data.
 ///
 /// A reference is expressed on a prim in a given layer and it identifies a
@@ -383,9 +393,18 @@ pub struct Reference {
     pub custom_data: HashMap<String, Value>,
 }
 
+/// Equal references name the same asset and prim, which is what is hashed:
+/// the layer offset holds floats, and the custom data any value.
+impl Hash for Reference {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.asset_path.hash(state);
+        self.prim_path.hash(state);
+    }
+}
+
 mod list_op;
 
-pub use list_op::ListOp;
+pub use list_op::{ListOp, ListOpType};
 
 /// A USD dictionary value (C++ `VtDictionary`): the payload of
 /// [`Value::Dictionary`], keyed by name.

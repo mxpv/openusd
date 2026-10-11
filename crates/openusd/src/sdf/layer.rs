@@ -2562,8 +2562,8 @@ mod tests {
             .into_owned()
             .try_as_path_list_op()
             .expect("relationship targets as PathListOp");
-        assert!(targets.explicit);
-        assert_eq!(targets.explicit_items, vec![material]);
+        assert!(targets.is_explicit());
+        assert_eq!(targets.explicit_items(), vec![material]);
         let connections = parsed
             .get_field(
                 &sdf::path("/World/Sphere.inputs:surface")?,
@@ -2572,9 +2572,9 @@ mod tests {
             .into_owned()
             .try_as_path_list_op()
             .expect("connection paths as PathListOp");
-        assert!(connections.explicit);
+        assert!(connections.is_explicit());
         assert_eq!(
-            connections.explicit_items,
+            connections.explicit_items(),
             vec![sdf::path("/World/Material.outputs:surface")?]
         );
         let _ = std::fs::remove_file(&tmp);

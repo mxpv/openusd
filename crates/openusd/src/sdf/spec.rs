@@ -508,28 +508,24 @@ where
 }
 
 fn add_applied_schema_to_list_op(op: &mut sdf::TokenListOp, name: tf::Token) -> bool {
-    let already_applied = op.explicit_items.iter().any(|n| n == &name)
-        || op.prepended_items.iter().any(|n| n == &name)
-        || op.appended_items.iter().any(|n| n == &name)
+    let already_applied = op.explicit_items().contains(&name)
+        || op.prepended_items().contains(&name)
+        || op.appended_items().contains(&name)
         // Non-explicit `add` opinions already contribute the schema without changing list position.
-        || (!op.explicit && op.added_items.iter().any(|n| n == &name));
+        || (!op.is_explicit() && op.added_items().contains(&name));
 
-    let before = op.deleted_items.len();
-    op.deleted_items.retain(|n| n != &name);
-    let mut changed = op.deleted_items.len() != before;
+    let changed = op.remove_item(sdf::ListOpType::Deleted, &name);
 
     if already_applied {
         return changed;
     }
 
-    if op.explicit {
-        op.explicit_items.push(name);
-    } else {
-        op.prepended_items.push(name);
-    }
-    changed = true;
-
-    changed
+    let ty = match op.is_explicit() {
+        true => sdf::ListOpType::Explicit,
+        false => sdf::ListOpType::Prepended,
+    };
+    op.push(ty, name);
+    true
 }
 
 /// Typed view of the layer's root pseudo-spec. Parallel to C++
@@ -1139,24 +1135,20 @@ where
                 // Re-adding a previously deleted target must first clear the
                 // delete bucket; otherwise the newly authored connection can
                 // still be removed during list-op application.
-                let mut changed = remove_path(&mut op.deleted_items, &path);
+                let mut changed = op.remove_item(sdf::ListOpType::Deleted, &path);
                 if op.iter().any(|p| p == &path) {
                     if changed {
                         self.set(key, sdf::Value::PathListOp(op));
                     }
                     return Ok(changed);
                 }
-                if op.explicit {
-                    // Stay explicit; honour `prepend` to control position.
-                    if prepend {
-                        op.explicit_items.insert(0, path);
-                    } else {
-                        op.explicit_items.push(path);
-                    }
-                } else if prepend {
-                    op.prepended_items.push(path);
-                } else {
-                    op.appended_items.push(path);
+                // An explicit op stays explicit, and `prepend` says which
+                // end of its items the path goes to.
+                match (op.is_explicit(), prepend) {
+                    (true, true) => op.edit_items(sdf::ListOpType::Explicit, |items| items.insert(0, path)),
+                    (true, false) => drop(op.push(sdf::ListOpType::Explicit, path)),
+                    (false, true) => drop(op.push(sdf::ListOpType::Prepended, path)),
+                    (false, false) => drop(op.push(sdf::ListOpType::Appended, path)),
                 }
                 changed = true;
                 self.set(key, sdf::Value::PathListOp(op));
@@ -1192,10 +1184,7 @@ where
         let Some(mut op) = self.get::<sdf::PathListOp>(key) else {
             return false;
         };
-        let removed = remove_path(&mut op.explicit_items, path)
-            | remove_path(&mut op.added_items, path)
-            | remove_path(&mut op.prepended_items, path)
-            | remove_path(&mut op.appended_items, path);
+        let removed = op.discard(path);
         self.set(key, sdf::Value::PathListOp(op));
         removed
     }
@@ -1212,17 +1201,10 @@ where
         };
         Ok(match existing {
             Some(sdf::Value::PathListOp(mut op)) => {
-                let removed = remove_path(&mut op.explicit_items, path)
-                    | remove_path(&mut op.added_items, path)
-                    | remove_path(&mut op.prepended_items, path)
-                    | remove_path(&mut op.appended_items, path);
-                if op.explicit || op.deleted_items.iter().any(|p| p == path) {
-                    self.set(key, sdf::Value::PathListOp(op));
-                    return Ok(removed);
-                }
-                op.deleted_items.push(path.clone());
+                let removed = op.discard(path);
+                let deleted = !op.is_explicit() && op.push(sdf::ListOpType::Deleted, path.clone());
                 self.set(key, sdf::Value::PathListOp(op));
-                true
+                removed || deleted
             }
             Some(other) => {
                 debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
@@ -1345,11 +1327,11 @@ where
         match existing {
             Some(sdf::Value::PathListOp(mut op)) => {
                 if !op.iter().any(|p| p == &path) {
-                    if op.explicit {
-                        op.explicit_items.push(path);
-                    } else {
-                        op.added_items.push(path);
-                    }
+                    let ty = match op.is_explicit() {
+                        true => sdf::ListOpType::Explicit,
+                        false => sdf::ListOpType::Added,
+                    };
+                    op.push(ty, path);
                 }
                 self.set(key, sdf::Value::PathListOp(op));
             }
@@ -1393,14 +1375,6 @@ where
             }
         }
     }
-}
-
-fn remove_path(paths: &mut Vec<sdf::Path>, path: &sdf::Path) -> bool {
-    let Some(idx) = paths.iter().position(|p| p == path) else {
-        return false;
-    };
-    paths.remove(idx);
-    true
 }
 
 /// Create the property spec at `path` (a property path), shared by
@@ -1944,10 +1918,10 @@ mod tests {
         assert!(!prim.add_applied_schema("MaterialBindingAPI")?);
 
         let op = prim.api_schemas().expect("apiSchemas");
-        assert!(!op.explicit);
+        assert!(!op.is_explicit());
         assert_eq!(
-            op.prepended_items,
-            vec![tf::Token::from("MaterialBindingAPI"), tf::Token::from("SkelBindingAPI")]
+            op.prepended_items(),
+            [tf::Token::from("MaterialBindingAPI"), tf::Token::from("SkelBindingAPI")]
         );
         Ok(())
     }
@@ -1990,10 +1964,10 @@ mod tests {
         assert!(prim.add_applied_schema("NewAPI")?);
 
         let op = prim.api_schemas().expect("apiSchemas");
-        assert!(op.explicit);
+        assert!(op.is_explicit());
         assert_eq!(
-            op.explicit_items,
-            vec![tf::Token::from("ExistingAPI"), tf::Token::from("NewAPI")]
+            op.explicit_items(),
+            [tf::Token::from("ExistingAPI"), tf::Token::from("NewAPI")]
         );
         Ok(())
     }
@@ -2004,18 +1978,15 @@ mod tests {
         data.set_field(
             &path,
             sdf::FieldKey::ApiSchemas.as_str(),
-            sdf::Value::TokenListOp(sdf::TokenListOp {
-                added_items: vec![tf::Token::from("ExistingAPI")],
-                ..Default::default()
-            }),
+            sdf::Value::TokenListOp(sdf::TokenListOp::added(vec![tf::Token::from("ExistingAPI")])),
         );
         let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(!prim.add_applied_schema("ExistingAPI")?);
 
         let op = prim.api_schemas().expect("apiSchemas");
-        assert_eq!(op.added_items, vec![tf::Token::from("ExistingAPI")]);
-        assert!(op.prepended_items.is_empty());
+        assert_eq!(op.added_items(), [tf::Token::from("ExistingAPI")]);
+        assert!(op.prepended_items().is_empty());
         Ok(())
     }
 
@@ -2025,18 +1996,15 @@ mod tests {
         data.set_field(
             &path,
             sdf::FieldKey::ApiSchemas.as_str(),
-            sdf::Value::TokenListOp(sdf::TokenListOp {
-                deleted_items: vec![tf::Token::from("RemovedAPI")],
-                ..Default::default()
-            }),
+            sdf::Value::TokenListOp(sdf::TokenListOp::deleted(vec![tf::Token::from("RemovedAPI")])),
         );
         let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(prim.add_applied_schema("RemovedAPI")?);
 
         let op = prim.api_schemas().expect("apiSchemas");
-        assert_eq!(op.prepended_items, vec![tf::Token::from("RemovedAPI")]);
-        assert!(op.deleted_items.is_empty());
+        assert_eq!(op.prepended_items(), [tf::Token::from("RemovedAPI")]);
+        assert!(op.deleted_items().is_empty());
         Ok(())
     }
 
@@ -2048,42 +2016,17 @@ mod tests {
         data.set_field(
             &path,
             sdf::FieldKey::ApiSchemas.as_str(),
-            sdf::Value::TokenListOp(sdf::TokenListOp {
-                explicit: true,
-                added_items: vec![tf::Token::from("StaleAPI")],
-                ..Default::default()
-            }),
+            sdf::Value::TokenListOp(
+                sdf::TokenListOp::explicit([]).with(sdf::ListOpType::Added, [tf::Token::from("StaleAPI")]),
+            ),
         );
         let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(prim.add_applied_schema("StaleAPI")?);
 
         let op = prim.api_schemas().expect("apiSchemas");
-        assert!(op.explicit);
-        assert_eq!(op.explicit_items, vec![tf::Token::from("StaleAPI")]);
-        Ok(())
-    }
-
-    /// A delete listing the same name twice is fully cleared (not just the
-    /// first occurrence).
-    #[test]
-    fn add_api_schema_dup_delete() -> Result<(), SpecError> {
-        let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
-        data.set_field(
-            &path,
-            sdf::FieldKey::ApiSchemas.as_str(),
-            sdf::Value::TokenListOp(sdf::TokenListOp {
-                deleted_items: vec![tf::Token::from("RemovedAPI"), tf::Token::from("RemovedAPI")],
-                ..Default::default()
-            }),
-        );
-        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
-
-        assert!(prim.add_applied_schema("RemovedAPI")?);
-
-        let op = prim.api_schemas().expect("apiSchemas");
-        assert!(op.deleted_items.is_empty());
-        assert_eq!(op.prepended_items, vec![tf::Token::from("RemovedAPI")]);
+        assert!(op.is_explicit());
+        assert_eq!(op.explicit_items(), [tf::Token::from("StaleAPI")]);
         Ok(())
     }
 
@@ -2144,7 +2087,7 @@ mod tests {
         assert!(rel.remove_target(&target));
 
         let stronger = rel.target_path_list().expect("target list op");
-        assert!(stronger.deleted_items.contains(&target));
+        assert!(stronger.deleted_items().contains(&target));
 
         // A weaker layer adds /Target and /Keep; composition drops /Target.
         let weaker = sdf::PathListOp::explicit([target.clone(), sdf::Path::new("/Keep").unwrap()]);
@@ -2165,8 +2108,8 @@ mod tests {
         assert!(rel.remove_target(&a));
 
         let op = rel.target_path_list().expect("target list op");
-        assert!(op.explicit);
-        assert!(op.deleted_items.is_empty());
+        assert!(op.is_explicit());
+        assert!(op.deleted_items().is_empty());
         assert_eq!(op.iter().cloned().collect::<Vec<_>>(), vec![b]);
     }
 
@@ -2176,16 +2119,15 @@ mod tests {
         // still mutates added_items, so it must report a change so relationship
         // change tracking emits an entry.
         let x = sdf::Path::new("/X").unwrap();
-        let mut op = sdf::PathListOp::added([x.clone()]);
-        op.deleted_items.push(x.clone());
+        let op = sdf::PathListOp::added([x.clone()]).with(sdf::ListOpType::Deleted, [x.clone()]);
         let (mut data, path) = data_with_spec("/A.rel", sdf::SpecType::Relationship);
         data.set_field(&path, sdf::FieldKey::TargetPaths.as_str(), sdf::Value::PathListOp(op));
 
         let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
         assert!(rel.remove_target(&x));
         let op = rel.target_path_list().expect("target list op");
-        assert!(op.added_items.is_empty());
-        assert!(op.deleted_items.contains(&x));
+        assert!(op.added_items().is_empty());
+        assert!(op.deleted_items().contains(&x));
     }
 
     #[test]

@@ -151,46 +151,34 @@ pub struct ListOpHeader {
 
 impl ListOpHeader {
     pub(crate) const IS_EXPLICIT: u8 = 1 << 0;
-    pub(crate) const HAS_EXPLICIT_ITEMS: u8 = 1 << 1;
-    pub(crate) const HAS_ADDED_ITEMS: u8 = 1 << 2;
-    pub(crate) const HAS_DELETED_ITEMS: u8 = 1 << 3;
-    pub(crate) const HAS_ORDERED_ITEMS: u8 = 1 << 4;
-    pub(crate) const HAS_PREPEND_ITEMS: u8 = 1 << 5;
-    pub(crate) const HAS_APPENDED_ITEMS: u8 = 1 << 6;
+    const HAS_EXPLICIT_ITEMS: u8 = 1 << 1;
+    const HAS_ADDED_ITEMS: u8 = 1 << 2;
+    const HAS_DELETED_ITEMS: u8 = 1 << 3;
+    const HAS_ORDERED_ITEMS: u8 = 1 << 4;
+    const HAS_PREPEND_ITEMS: u8 = 1 << 5;
+    const HAS_APPENDED_ITEMS: u8 = 1 << 6;
+
+    /// The bit that says the list `ty` names holds items.
+    pub(crate) fn flag(ty: sdf::ListOpType) -> u8 {
+        match ty {
+            sdf::ListOpType::Explicit => Self::HAS_EXPLICIT_ITEMS,
+            sdf::ListOpType::Added => Self::HAS_ADDED_ITEMS,
+            sdf::ListOpType::Prepended => Self::HAS_PREPEND_ITEMS,
+            sdf::ListOpType::Appended => Self::HAS_APPENDED_ITEMS,
+            sdf::ListOpType::Deleted => Self::HAS_DELETED_ITEMS,
+            sdf::ListOpType::Ordered => Self::HAS_ORDERED_ITEMS,
+        }
+    }
+
+    /// Whether the list `ty` names holds items.
+    #[inline]
+    pub fn has(self, ty: sdf::ListOpType) -> bool {
+        self.bits & Self::flag(ty) != 0
+    }
 
     #[inline]
     pub fn is_explicit(self) -> bool {
         self.bits & Self::IS_EXPLICIT != 0
-    }
-
-    #[inline]
-    pub fn has_explicit(self) -> bool {
-        self.bits & Self::HAS_EXPLICIT_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_added(self) -> bool {
-        self.bits & Self::HAS_ADDED_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_deleted(self) -> bool {
-        self.bits & Self::HAS_DELETED_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_ordered(self) -> bool {
-        self.bits & Self::HAS_ORDERED_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_prepend(self) -> bool {
-        self.bits & Self::HAS_PREPEND_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_appended(self) -> bool {
-        self.bits & Self::HAS_APPENDED_ITEMS != 0
     }
 }
 

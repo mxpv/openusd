@@ -808,7 +808,7 @@ mod tests {
             .into_owned()
             .try_as_string_list_op()
             .unwrap();
-        assert_eq!(variant_set_names.prepended_items, vec!["displayVariantSet".to_string()]);
+        assert_eq!(variant_set_names.prepended_items(), ["displayVariantSet".to_string()]);
 
         let variant_selection = data
             .get_field(&sdf::path("/asset1")?, "variantSelection")?
@@ -835,10 +835,10 @@ mod tests {
             .try_as_path_list_op()
             .unwrap();
 
-        assert!(conn.explicit);
+        assert!(conn.is_explicit());
         assert_eq!(
-            conn.explicit_items,
-            vec![sdf::path("/TexModel/boardMat.inputs:frame:stPrimvarName")?]
+            conn.explicit_items(),
+            [sdf::path("/TexModel/boardMat.inputs:frame:stPrimvarName")?]
         );
 
         let conn = data
@@ -847,10 +847,10 @@ mod tests {
             .try_as_path_list_op()
             .unwrap();
 
-        assert!(conn.explicit);
+        assert!(conn.is_explicit());
         assert_eq!(
-            conn.explicit_items,
-            vec![sdf::path("/TexModel/boardMat/PBRShader.outputs:surface")?]
+            conn.explicit_items(),
+            [sdf::path("/TexModel/boardMat/PBRShader.outputs:surface")?]
         );
 
         Ok(())
@@ -866,15 +866,15 @@ mod tests {
             .try_as_reference_list_op()
             .unwrap();
 
-        assert!(references.appended_items.is_empty());
-        assert!(references.deleted_items.is_empty());
-        assert!(references.ordered_items.is_empty());
+        assert!(references.appended_items().is_empty());
+        assert!(references.deleted_items().is_empty());
+        assert!(references.ordered_items().is_empty());
 
-        assert!(references.explicit);
-        assert_eq!(references.explicit_items.len(), 1);
+        assert!(references.is_explicit());
+        assert_eq!(references.explicit_items().len(), 1);
 
-        assert_eq!(references.explicit_items[0].asset_path, "Marble.usd");
-        assert_eq!(references.explicit_items[0].prim_path, sdf::path("/Foo/Bar")?);
+        assert_eq!(references.explicit_items()[0].asset_path, "Marble.usd");
+        assert_eq!(references.explicit_items()[0].prim_path, sdf::path("/Foo/Bar")?);
 
         Ok(())
     }
@@ -900,17 +900,20 @@ mod tests {
             .try_as_payload_list_op()
             .unwrap();
 
-        assert!(!payload_list_op.explicit);
+        assert!(!payload_list_op.is_explicit());
 
-        assert!(payload_list_op.explicit_items.is_empty());
-        assert!(payload_list_op.added_items.is_empty());
-        assert!(payload_list_op.appended_items.is_empty());
-        assert!(payload_list_op.deleted_items.is_empty());
-        assert!(payload_list_op.ordered_items.is_empty());
+        assert!(payload_list_op.explicit_items().is_empty());
+        assert!(payload_list_op.added_items().is_empty());
+        assert!(payload_list_op.appended_items().is_empty());
+        assert!(payload_list_op.deleted_items().is_empty());
+        assert!(payload_list_op.ordered_items().is_empty());
 
-        assert_eq!(payload_list_op.prepended_items.len(), 1);
-        assert_eq!(payload_list_op.prepended_items[0].asset_path, "./cube_payload.usda");
-        assert_eq!(payload_list_op.prepended_items[0].prim_path, sdf::path("/PayloadCube")?);
+        assert_eq!(payload_list_op.prepended_items().len(), 1);
+        assert_eq!(payload_list_op.prepended_items()[0].asset_path, "./cube_payload.usda");
+        assert_eq!(
+            payload_list_op.prepended_items()[0].prim_path,
+            sdf::path("/PayloadCube")?
+        );
 
         Ok(())
     }
@@ -1282,10 +1285,10 @@ mod tests {
             .try_as_path_list_op()
             .unwrap();
 
-        assert!(targets.explicit);
+        assert!(targets.is_explicit());
         assert_eq!(
-            targets.explicit_items,
-            vec![sdf::path("/World/ChildA")?, sdf::path("/World/ChildB")?]
+            targets.explicit_items(),
+            [sdf::path("/World/ChildA")?, sdf::path("/World/ChildB")?]
         );
 
         Ok(())

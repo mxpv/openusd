@@ -1,6 +1,6 @@
 //! Binary crate file reader.
 
-use std::{any::type_name, collections::HashMap, mem, str};
+use std::{any::type_name, collections::HashMap, hash::Hash, mem, str};
 
 use crate::gf::f16;
 use bytemuck::{AnyBitPattern, NoUninit, Pod, bytes_of, cast_slice_mut, pod_read_unaligned};
@@ -862,7 +862,7 @@ impl<'a> Decoder<'a> {
         Ok(vec)
     }
 
-    fn read_list_op<T: Default + Clone + PartialEq>(
+    fn read_list_op<T: Clone + PartialEq + Hash>(
         &mut self,
         value: ValueRep,
         mut read: impl FnMut(&mut Self) -> Result<Vec<T>, ReadError>,
@@ -873,32 +873,11 @@ impl<'a> Decoder<'a> {
 
         let header = self.stream.read_pod::<ListOpHeader>()?;
 
-        if header.is_explicit() {
-            out.explicit = true;
-        }
-
-        if header.has_explicit() {
-            out.explicit_items = read(self)?;
-        }
-
-        if header.has_added() {
-            out.added_items = read(self)?;
-        }
-
-        if header.has_prepend() {
-            out.prepended_items = read(self)?;
-        }
-
-        if header.has_appended() {
-            out.appended_items = read(self)?;
-        }
-
-        if header.has_deleted() {
-            out.deleted_items = read(self)?;
-        }
-
-        if header.has_ordered() {
-            out.ordered_items = read(self)?;
+        out.set_explicit(header.is_explicit());
+        for ty in sdf::ListOpType::ALL {
+            if header.has(ty) {
+                out.set_items(ty, read(self)?);
+            }
         }
 
         Ok(out)
@@ -1837,7 +1816,7 @@ mod tests {
             .expect("relationship targets")
             .value_rep;
         let targets = file.value(value)?.try_as_path_list_op().expect("path list");
-        assert_eq!(targets.explicit_items, vec![target]);
+        assert_eq!(targets.explicit_items(), [target]);
         Ok(())
     }
 

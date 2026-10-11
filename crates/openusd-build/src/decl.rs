@@ -311,8 +311,8 @@ class "Refined" (
             .and_then(sdf::Value::try_as_token_list_op)
             .expect("the built-in list");
         assert_eq!(
-            applied.explicit_items,
-            vec![
+            applied.explicit_items(),
+            [
                 tf::Token::from("MultiApplyAPI:__INSTANCE_NAME__"),
                 tf::Token::from("BuiltinMultiApplyAPI:__INSTANCE_NAME__:builtin"),
             ]

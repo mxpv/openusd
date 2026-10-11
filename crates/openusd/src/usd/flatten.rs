@@ -492,7 +492,7 @@ mod tests {
             .expect("the relationship")
             .get::<sdf::PathListOp>(sdf::FieldKey::TargetPaths.as_str())
             .expect("targets");
-        assert_eq!(targets.explicit_items, vec![sdf::Path::new("/Target").expect("path")]);
+        assert_eq!(targets.explicit_items(), vec![sdf::Path::new("/Target").expect("path")]);
     }
 
     /// A relationship keeps the variability it was declared with, either way.
@@ -586,7 +586,7 @@ mod tests {
             .get::<sdf::PathListOp>(sdf::FieldKey::ConnectionPaths.as_str())
             .expect("connections");
         assert_eq!(
-            connections.explicit_items,
+            connections.explicit_items(),
             vec![sdf::Path::new("/Prim.source").expect("path")]
         );
     }

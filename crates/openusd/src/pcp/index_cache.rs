@@ -2437,7 +2437,7 @@ impl IndexCache {
             .cached(&path)
             .resolve_field(FieldKey::ApiSchemas.as_str(), graph, None)?
         {
-            Some(Value::TokenListOp(op)) => Ok(op.explicit_items),
+            Some(Value::TokenListOp(op)) => Ok(op.into_items(sdf::ListOpType::Explicit)),
             _ => Ok(Vec::new()),
         }
     }

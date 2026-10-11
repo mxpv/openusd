@@ -532,7 +532,7 @@ mod tests {
             .into_owned()
             .try_as_path_list_op()
             .unwrap()
-            .explicit_items
+            .explicit_items()
             .iter()
             .map(|p| p.as_str().to_owned())
             .collect()
@@ -747,9 +747,9 @@ mod tests {
             .into_owned()
             .try_as_reference_list_op()
             .unwrap();
-        assert_eq!(references.prepended_items[0].prim_path.as_str(), "/B/Inner");
-        assert_eq!(references.prepended_items[1].prim_path.as_str(), "/A/Ext");
-        assert!(references.prepended_items[2].prim_path.is_empty());
+        assert_eq!(references.prepended_items()[0].prim_path.as_str(), "/B/Inner");
+        assert_eq!(references.prepended_items()[1].prim_path.as_str(), "/A/Ext");
+        assert!(references.prepended_items()[2].prim_path.is_empty());
     }
 
     #[test]

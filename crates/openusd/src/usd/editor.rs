@@ -1865,7 +1865,7 @@ mod tests {
             .into_owned()
             .try_as_reference_list_op()
             .unwrap();
-        assert_eq!(references.prepended_items[0].prim_path.as_str(), "/B");
+        assert_eq!(references.prepended_items()[0].prim_path.as_str(), "/B");
     }
 
     #[test]
@@ -1899,8 +1899,8 @@ mod tests {
             .into_owned()
             .try_as_path_list_op()
             .unwrap();
-        assert!(op.explicit_items.is_empty());
-        assert_eq!(op.prepended_items, vec![path("/B").unwrap()]);
+        assert!(op.explicit_items().is_empty());
+        assert_eq!(op.prepended_items(), vec![path("/B").unwrap()]);
     }
 
     #[test]
@@ -2275,7 +2275,7 @@ mod tests {
             .into_owned()
             .try_as_path_list_op()
             .expect("connections are a path list op");
-        assert_eq!(connections.explicit_items, vec![path("/Prim/other.in").unwrap()]);
+        assert_eq!(connections.explicit_items(), vec![path("/Prim/other.in").unwrap()]);
     }
 
     /// A variant-target reparent moves the child subtree under another variant
@@ -2544,7 +2544,7 @@ mod tests {
             .into_owned()
             .try_as_path_list_op()
             .expect("targets are a path list op");
-        assert_eq!(op.explicit_items, vec![path("/Model/Renamed").unwrap()]);
+        assert_eq!(op.explicit_items(), vec![path("/Model/Renamed").unwrap()]);
         assert_eq!(rel_targets(&stage, "/Ref/B.rel"), vec!["/Ref/Renamed"]);
     }
 

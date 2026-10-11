@@ -2,6 +2,7 @@
 //! `UsdUtils_LocalizationContext`), and [`modify_asset_paths`] over it.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::mem;
 
 use super::DependencyError;
@@ -301,16 +302,16 @@ impl Walk<'_> {
 
     /// Visits every item of `op` with `item`, removing the ones it reports
     /// emptied, and returns whether that left the list op without an opinion.
-    fn list_op<T: Default + Clone + PartialEq>(
+    fn list_op<T: Clone + PartialEq + Hash>(
         &mut self,
         op: &mut sdf::ListOp<T>,
         mut item: impl FnMut(&mut Self, &mut T) -> Result<bool>,
     ) -> Result<bool> {
         let had = !op.is_empty();
         let applied = self.applied;
-        for (items, bucket_applied) in op.buckets_mut() {
-            self.applied = applied && bucket_applied;
-            self.retain(items, &mut item)?;
+        for ty in sdf::ListOpType::ALL {
+            self.applied = applied && ty.contributes();
+            op.edit_items(ty, |items| self.retain(items, &mut item))?;
         }
         self.applied = applied;
         Ok(had && op.is_empty())

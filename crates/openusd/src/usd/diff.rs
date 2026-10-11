@@ -973,7 +973,7 @@ mod tests {
             .into_owned()
             .try_as_path_list_op()
             .expect("connections are a path list op");
-        assert_eq!(connections.explicit_items, vec![sdf::path("/Prim/other.in")?]);
+        assert_eq!(connections.explicit_items(), vec![sdf::path("/Prim/other.in")?]);
         Ok(())
     }
 
