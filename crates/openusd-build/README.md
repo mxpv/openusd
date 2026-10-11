@@ -33,10 +33,10 @@ Each library produces a single Rust file containing:
 
 ```toml
 [dependencies]
-openusd = "0.7"
+openusd = "0.8"
 
 [build-dependencies]
-openusd-build = "0.7"
+openusd-build = "0.8"
 ```
 
 ```rust

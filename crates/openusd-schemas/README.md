@@ -25,8 +25,8 @@ enable the families you need:
 
 ```toml
 [dependencies]
-openusd = "0.7"
-openusd-schemas = { version = "0.7", features = ["geom", "lux"] }
+openusd = "0.8"
+openusd-schemas = { version = "0.8", features = ["geom", "lux"] }
 ```
 
 Nothing is enabled by default. A family that builds on another's views enables
