@@ -106,6 +106,40 @@ fn stage_metadata_falls_back() {
         None,
         "a field that does not apply to layers is no stage metadata"
     );
+
+    // A fallback is not an authored value, and an authored value equal to
+    // the fallback is.
+    assert!(!stage.has_authored_stage_metadata("unitsPerMeter").expect("reads"));
+    stage.set_stage_metadata("unitsPerMeter", 100.0).expect("authors");
+    assert!(stage.has_authored_stage_metadata("unitsPerMeter").expect("reads"));
+    // A value of another numeric type is stored as the declared one, and
+    // one that is no number is refused.
+    stage.set_stage_metadata("unitsPerMeter", 1_i32).expect("authors");
+    assert_eq!(
+        stage.stage_metadata("unitsPerMeter").expect("reads"),
+        Some(sdf::Value::Double(1.0))
+    );
+    assert!(stage.set_stage_metadata("unitsPerMeter", "one").is_err());
+    assert!(stage.set_stage_metadata("defaultPrim", "World").is_err());
+
+    // A core field converts to its own type too, so the typed reader finds it.
+    stage.set_stage_metadata("startTimeCode", 10_i32).expect("authors");
+    assert_eq!(stage.start_time_code(), 10.0);
+    assert!(stage.set_stage_metadata("startTimeCode", "ten").is_err());
+
+    // Blocking a field is authoring it, though it reads no value.
+    stage
+        .set_stage_metadata("comment", sdf::Value::ValueBlock)
+        .expect("authors");
+    assert!(stage.has_authored_stage_metadata("comment").expect("reads"));
+    assert_eq!(stage.stage_metadata("comment").expect("reads"), None);
+
+    stage.clear_stage_metadata("unitsPerMeter").expect("clears");
+    assert!(!stage.has_authored_stage_metadata("unitsPerMeter").expect("reads"));
+    assert_eq!(
+        stage.stage_metadata("unitsPerMeter").expect("reads"),
+        Some(sdf::Value::Double(100.0))
+    );
 }
 
 /// Two families declaring one field is refused: which declaration would give

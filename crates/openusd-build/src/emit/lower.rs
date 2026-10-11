@@ -57,9 +57,8 @@ pub struct MetadataTrait {
 pub struct MetadataAccessor {
     /// The method reading it.
     pub getter: Ident,
-    /// The method authoring it, where the handle authors metadata: every
-    /// handle but the stage.
-    pub setter: Option<Ident>,
+    /// The method authoring it.
+    pub setter: Ident,
     /// The constant naming the field.
     pub token: TokenStream,
     /// The type its value reads back as.
@@ -444,10 +443,8 @@ fn lower_metadata(model: &Library, by_value: &BTreeMap<&str, &Ident>) -> Result<
         {
             let origin = format!("the {} metadata field `{}`", model.name, field.name);
             let getter = names::method_name(field.name.as_str());
-            // A stage's metadata is its layers', authored on a layer rather
-            // than through the stage, so its trait reads only.
-            let setter = (!stage).then(|| format!("set_{}", names::snake_case(field.name.as_str())));
-            for method in iter::once(&getter).chain(&setter) {
+            let setter = format!("set_{}", names::snake_case(field.name.as_str()));
+            for method in [&getter, &setter] {
                 if let Some(first) = methods.insert(method.clone(), &field.name) {
                     return Err(Error::MetadataMethodCollision {
                         library: model.name.clone(),
@@ -485,7 +482,7 @@ fn lower_metadata(model: &Library, by_value: &BTreeMap<&str, &Ident>) -> Result<
 
             fields.push(MetadataAccessor {
                 getter: identifier(&getter, &origin)?,
-                setter: setter.map(|setter| identifier(&setter, &origin)).transpose()?,
+                setter: identifier(&setter, &origin)?,
                 token: constant_of(by_value, &field.name),
                 rust_type: field
                     .type_name

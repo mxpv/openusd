@@ -660,6 +660,14 @@ pub(super) fn check_reserved(kind: sdf::SpecType, key: &'static str) -> Result<(
             sdf::FieldKey::Variability,
             sdf::FieldKey::Custom,
         ],
+        // The layer stack and the namespace a stage composes are edited
+        // through the operations that validate them.
+        sdf::SpecType::PseudoRoot => &[
+            sdf::FieldKey::DefaultPrim,
+            sdf::FieldKey::SubLayers,
+            sdf::FieldKey::SubLayerOffsets,
+            sdf::FieldKey::LayerRelocates,
+        ],
         _ => &[],
     };
     if reserved.iter().any(|field| field.as_str() == key) {

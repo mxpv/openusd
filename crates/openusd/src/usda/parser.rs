@@ -133,16 +133,11 @@ impl<'a> Parser<'a> {
             return Ok(root);
         }
 
+        // The fields read by type that `sdf::layer_field_type` does not
+        // name: the text format's `doc`, and two a schema declares.
         const KNOWN_PROPS: &[(&str, sdf::ValueTypeName)] = &[
-            (FieldKey::DefaultPrim.as_str(), sdf::ValueTypeName::TOKEN),
-            (FieldKey::StartTimeCode.as_str(), sdf::ValueTypeName::DOUBLE),
-            (FieldKey::HasOwnedSubLayers.as_str(), sdf::ValueTypeName::BOOL),
             ("doc", sdf::ValueTypeName::STRING),
-            ("endTimeCode", sdf::ValueTypeName::DOUBLE),
-            ("framePrecision", sdf::ValueTypeName::INT),
-            ("framesPerSecond", sdf::ValueTypeName::DOUBLE),
             ("metersPerUnit", sdf::ValueTypeName::DOUBLE),
-            ("timeCodesPerSecond", sdf::ValueTypeName::DOUBLE),
             ("upAxis", sdf::ValueTypeName::TOKEN),
         ];
 
@@ -180,11 +175,13 @@ impl<'a> Parser<'a> {
                 }
                 Token::Identifier(name) => {
                     this.cursor.expect_punctuation('=')?;
-                    if let Some((known_name, ty)) = KNOWN_PROPS.iter().find(|(n, _)| *n == name) {
+                    let known = sdf::layer_field_type(name)
+                        .or_else(|| KNOWN_PROPS.iter().find(|(n, _)| *n == name).map(|(_, ty)| ty.clone()));
+                    if let Some(ty) = known {
                         ensure!(list_op.is_none(), "{name} metadata does not support list ops");
-                        let value = types::parse_value(&mut this.cursor, ty)
-                            .with_context(|| format!("Unable to parse value for {known_name}"))?;
-                        root.add(known_name, value);
+                        let value = types::parse_value(&mut this.cursor, &ty)
+                            .with_context(|| format!("Unable to parse value for {name}"))?;
+                        root.add(name, value);
                     } else if let Some(declared) = sdf::registered_field_type(name) {
                         this.read_registered_metadata(&mut root, name, &declared, list_op)
                             .with_context(|| format!("Unable to parse pseudo root metadata value for {name}"))?;

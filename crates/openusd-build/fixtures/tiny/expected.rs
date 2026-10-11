@@ -1019,6 +1019,12 @@ pub trait StageMetadata {
     ///
     /// Where no layer authors it, the stage reads `1.0`.
     fn tiny_units(&self) -> ::openusd::Result<::std::option::Option<f64>>;
+    /// Authors the field on the edit target, which must be the
+    /// stage's root or session layer.
+    fn set_tiny_units(
+        &self,
+        value: f64,
+    ) -> ::std::result::Result<(), ::openusd::usd::StageAuthoringError>;
 }
 
 impl StageMetadata for ::openusd::usd::Stage {
@@ -1027,5 +1033,11 @@ impl StageMetadata for ::openusd::usd::Stage {
             .map(<f64 as ::std::convert::TryFrom<::openusd::sdf::Value>>::try_from)
             .transpose()
             .map_err(::std::convert::Into::into)
+    }
+    fn set_tiny_units(
+        &self,
+        value: f64,
+    ) -> ::std::result::Result<(), ::openusd::usd::StageAuthoringError> {
+        self.set_stage_metadata(tokens::TINY_UNITS, value)
     }
 }

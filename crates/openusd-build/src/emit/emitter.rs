@@ -106,7 +106,8 @@ pub(super) fn tokens_module(constants: &[Constant]) -> TokenStream {
 /// A field's reader and writer are the handle's own generic metadata calls,
 /// named for the field and typed as it is declared, so a caller neither
 /// spells the key nor restates the type. A stage reads its layers' metadata,
-/// with the field's registered default behind them.
+/// with the field's registered default behind them, and authors it on the
+/// edit target's layer.
 fn metadata_trait(generated: &MetadataTrait) -> TokenStream {
     let MetadataTrait {
         name,
@@ -129,25 +130,37 @@ fn metadata_trait(generated: &MetadataTrait) -> TokenStream {
             } = field;
             let documentation = super::doc_lines(documentation);
             let read = quote! { fn #getter(&self) -> ::openusd::Result<::std::option::Option<#rust_type>> };
-            let write: Vec<TokenStream> = setter
-                .iter()
-                .map(|setter| {
+            // A stage is not consumed by an edit, where a prim or property
+            // handle is handed back to chain the next one.
+            let (write, sized, write_doc, writes) = if *stage {
+                (
+                    quote! {
+                        fn #setter(&self, value: #rust_type) -> ::std::result::Result<(), ::openusd::usd::StageAuthoringError>
+                    },
+                    quote! {},
+                    "Authors the field on the edit target, which must be the
+stage's root or session layer.",
+                    quote! { self.set_stage_metadata(#token, value) },
+                )
+            } else {
+                (
                     quote! {
                         fn #setter(self, value: #rust_type) -> ::std::result::Result<Self, ::openusd::usd::StageAuthoringError>
-                    }
-                })
-                .collect();
+                    },
+                    quote! { where Self: ::std::marker::Sized },
+                    "Authors the field on the edit target, and returns the
+handle.",
+                    quote! { self.set_metadata(#token, value) },
+                )
+            };
+            let write_doc = super::doc_lines(write_doc);
             let declaration = quote! {
                 #(#[doc = #documentation])*
                 #read;
 
-                #(
-                    /// Authors the field on the edit target, and returns the
-                    /// handle.
-                    #write
-                    where
-                        Self: ::std::marker::Sized;
-                )*
+                #(#[doc = #write_doc])*
+                #write
+                #sized;
             };
             let reads = if *stage {
                 quote! {
@@ -164,11 +177,9 @@ fn metadata_trait(generated: &MetadataTrait) -> TokenStream {
                     #reads
                 }
 
-                #(
-                    #write {
-                        self.set_metadata(#token, value)
-                    }
-                )*
+                #write {
+                    #writes
+                }
             };
             (declaration, body)
         })

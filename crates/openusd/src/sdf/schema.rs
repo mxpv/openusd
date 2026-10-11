@@ -319,6 +319,23 @@ pub fn registered_field_type(name: &str) -> Option<MetadataFieldType> {
     MetadataFieldType::from_spelling(spelling)
 }
 
+/// The value type of the core field `name` on a layer's pseudo-root, for the
+/// fields that hold a plain value (C++ `SdfSchema`'s registration of each):
+/// the time codes and rates, `framePrecision`, `defaultPrim`,
+/// `hasOwnedSubLayers`, and the `comment` and `documentation` strings. `None`
+/// for any other name.
+pub fn layer_field_type(name: &str) -> Option<ValueTypeName> {
+    use FieldKey as F;
+    Some(match FieldKey::from_name(name)? {
+        F::StartTimeCode | F::EndTimeCode | F::TimeCodesPerSecond | F::FramesPerSecond => ValueTypeName::DOUBLE,
+        F::FramePrecision => ValueTypeName::INT,
+        F::DefaultPrim => ValueTypeName::TOKEN,
+        F::HasOwnedSubLayers => ValueTypeName::BOOL,
+        F::Comment | F::Documentation => ValueTypeName::STRING,
+        _ => return None,
+    })
+}
+
 /// The type the schema declaring `name` gives that metadata field, or `None`
 /// where no schema declares it.
 ///

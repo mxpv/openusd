@@ -1904,16 +1904,7 @@ impl LayerGraph {
     /// blocks weaker opinions.
     pub(crate) fn stage_metadata(&self, field: &str) -> Result<Option<Value>, sdf::DataError> {
         let root = Path::abs_root();
-        // Walk session layers then the root layer so the session opinion wins,
-        // skipping muted session layers (the root is never muted).
-        let layer_ids = self
-            .session_layers()
-            .iter()
-            .copied()
-            .chain(self.root_id())
-            .filter(|&id| !self.is_muted(id))
-            .collect::<Vec<_>>();
-        for id in layer_ids {
+        for id in self.stage_metadata_layers() {
             let layer = self.layer(id);
             match layer.data().try_field(&root, field)? {
                 Some(value) if matches!(value.as_ref(), Value::ValueBlock) => return Ok(None),
@@ -1922,6 +1913,25 @@ impl LayerGraph {
             }
         }
         Ok(None)
+    }
+
+    /// Whether a layer stage metadata resolves from holds an opinion for
+    /// `field`, a [`Value::ValueBlock`] included: blocking a field is
+    /// authoring it.
+    pub(crate) fn has_stage_metadata(&self, field: &str) -> bool {
+        let root = Path::abs_root();
+        self.stage_metadata_layers()
+            .any(|id| self.layer(id).data().has_field(&root, field))
+    }
+
+    /// The layers stage metadata resolves from, strongest first: the session
+    /// layers that are not muted, then the root layer, which is never muted.
+    fn stage_metadata_layers(&self) -> impl Iterator<Item = LayerId> + '_ {
+        self.session_layers()
+            .iter()
+            .copied()
+            .chain(self.root_id())
+            .filter(|&id| !self.is_muted(id))
     }
 
     /// Pseudo-root layer metadata from the root layer only.

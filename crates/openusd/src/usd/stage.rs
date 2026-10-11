@@ -1715,6 +1715,54 @@ impl Stage {
         self.with_stage_metadata_layer(|layer| layer.set_time_codes_per_second(rate))
     }
 
+    /// Authors the pseudo-root metadata `field` on the current edit target's
+    /// layer, which must be the root or session layer; any other target fails
+    /// with [`StageAuthoringError::StageMetadataTarget`]. Mirrors C++
+    /// `UsdStage::SetMetadata`, and [`stage_metadata`](Self::stage_metadata)
+    /// reads it back.
+    ///
+    /// A value of another type than the field is declared with is converted
+    /// to it where the conversion loses nothing, and is
+    /// [`StageAuthoringError::ValueType`] otherwise. `defaultPrim`,
+    /// `subLayers`, `subLayerOffsets` and `layerRelocates` are
+    /// [`StageAuthoringError::ReservedField`]: each is authored through the
+    /// operation that validates it.
+    pub fn set_stage_metadata(
+        &self,
+        field: &'static str,
+        value: impl Into<sdf::Value>,
+    ) -> Result<(), StageAuthoringError> {
+        super::authoring::check_reserved(sdf::SpecType::PseudoRoot, field)?;
+        let declared = match sdf::registered_field_type(field) {
+            Some(sdf::MetadataFieldType::Value(type_name)) => Some(type_name),
+            Some(_) => sdf::layer_field_type(field),
+            None => self
+                .schema_registry()
+                .metadata_field(&Token::new(field))
+                .map(|declared| declared.type_name().clone()),
+        };
+        let value = match declared.filter(|type_name| type_name.kind().is_some()) {
+            Some(type_name) => type_name.coerce(value.into())?,
+            None => value.into(),
+        };
+        self.with_stage_metadata_layer(|layer| {
+            layer.pseudo_root_mut()?.set(field, value);
+            Ok(())
+        })
+    }
+
+    /// Removes the opinion the current edit target's layer holds for the
+    /// pseudo-root metadata `field`, on the terms of
+    /// [`set_stage_metadata`](Self::set_stage_metadata). Mirrors C++
+    /// `UsdStage::ClearMetadata`.
+    pub fn clear_stage_metadata(&self, field: &'static str) -> Result<(), StageAuthoringError> {
+        super::authoring::check_reserved(sdf::SpecType::PseudoRoot, field)?;
+        self.with_stage_metadata_layer(|layer| {
+            layer.pseudo_root_mut()?.erase(field);
+            Ok(())
+        })
+    }
+
     /// Authors `framesPerSecond` on the current edit target's layer, which
     /// must be the root or session layer; any other target fails with
     /// [`StageAuthoringError::StageMetadataTarget`].
@@ -2619,6 +2667,15 @@ impl Stage {
             .and_then(|declared| declared.fallback().cloned()))
     }
 
+    /// Whether the session or root layer authors the pseudo-root metadata
+    /// `field` (C++ `UsdStage::HasAuthoredMetadata`). A fallback counts for
+    /// nothing, and a block counts as an opinion, so this tells a stage that
+    /// states a value equal to the fallback, or blocks the field, from one
+    /// that says nothing.
+    pub fn has_authored_stage_metadata(&self, field: impl AsRef<str>) -> Result<bool> {
+        Ok(self.with_cache(|g, _| Ok(g.has_stage_metadata(field.as_ref())))?)
+    }
+
     /// The stage's `startTimeCode`, or `0.0` when unauthored. The session
     /// layer's opinion wins over the root layer (via [`Stage::stage_metadata`]).
     /// Mirrors C++ `UsdStage::GetStartTimeCode`.
@@ -2635,8 +2692,9 @@ impl Stage {
     /// Whether the stage authors both `startTimeCode` and `endTimeCode`.
     /// Mirrors C++ `UsdStage::HasAuthoredTimeCodeRange`.
     pub fn has_authored_time_code_range(&self) -> bool {
-        self.metadata_double(sdf::FieldKey::StartTimeCode).is_some()
-            && self.metadata_double(sdf::FieldKey::EndTimeCode).is_some()
+        [sdf::FieldKey::StartTimeCode, sdf::FieldKey::EndTimeCode]
+            .into_iter()
+            .all(|field| self.has_authored_stage_metadata(field.as_str()).unwrap_or(false))
     }
 
     /// The stage's `timeCodesPerSecond`. Falls back to the authored
@@ -6229,9 +6287,17 @@ def "T" {
             .expect_err("sublayer target must be rejected");
         assert!(matches!(err, StageAuthoringError::StageMetadataTarget { layer } if layer == sub_id));
 
+        let err = stage
+            .set_stage_metadata("comment", "on a sublayer")
+            .expect_err("sublayer target must be rejected");
+        assert!(matches!(err, StageAuthoringError::StageMetadataTarget { layer } if layer == sub_id));
+        assert!(!stage.has_authored_stage_metadata("comment")?);
+
         stage.set_edit_target(EditTarget::for_layer(root))?;
         stage.set_start_time_code(1.0)?;
         assert_eq!(stage.start_time_code(), 1.0);
+        stage.set_stage_metadata("comment", "on the root")?;
+        assert_eq!(stage.stage_metadata("comment")?, Some(sdf::Value::from("on the root")));
         Ok(())
     }
 
