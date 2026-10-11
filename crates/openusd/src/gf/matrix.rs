@@ -190,8 +190,8 @@ impl Matrix4d {
     /// [`factor`](Self::factor).
     pub const FACTOR_EPSILON: f64 = 1e-10;
 
-    /// Determinant magnitude below which a matrix is treated as singular
-    /// in [`inverse`](Self::inverse). Matches Pixar's reference inverter
+    /// Determinant magnitude at or below which a matrix is treated as
+    /// singular in [`inverse`](Self::inverse). Matches Pixar's reference inverter
     /// threshold for skel bind matrices.
     pub const SINGULAR_DETERMINANT: f64 = 1e-12;
 
@@ -298,9 +298,17 @@ impl Matrix4d {
         ])
     }
 
-    /// Invert using cofactor expansion. Returns `None` when
-    /// `|det| < `[`SINGULAR_DETERMINANT`](Self::SINGULAR_DETERMINANT).
+    /// The inverse, or `None` for a matrix whose determinant is no greater
+    /// in magnitude than
+    /// [`SINGULAR_DETERMINANT`](Self::SINGULAR_DETERMINANT).
     pub fn inverse(self) -> Option<Matrix4d> {
+        self.inverse_above(Self::SINGULAR_DETERMINANT)
+    }
+
+    /// The inverse of a matrix whose determinant is greater than `epsilon`
+    /// in magnitude, by cofactor expansion, and `None` for any other (C++
+    /// `GetInverse` with its `eps` argument).
+    pub fn inverse_above(self, epsilon: f64) -> Option<Matrix4d> {
         let m = &self.0;
         let mut inv = [0.0f64; 16];
 
@@ -364,14 +372,7 @@ impl Matrix4d {
                 - m[8] * m[2] * m[5];
 
         let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
-        if det.abs() < Self::SINGULAR_DETERMINANT {
-            return None;
-        }
-        let inv_det = 1.0 / det;
-        for v in &mut inv {
-            *v *= inv_det;
-        }
-        Some(Matrix4d(inv))
+        (det.abs() > epsilon).then(|| Matrix4d(inv) * (1.0 / det))
     }
 
     /// The transpose of the matrix (C++ `GetTranspose`).
@@ -588,8 +589,29 @@ impl Matrix4d {
         (values, vectors)
     }
 
-    /// Apply this transform to a position (includes translation).
-    /// Equivalent to `(p.x, p.y, p.z, 1) · M`.
+    /// The point `p` under this transform (C++ `Transform`): `(p.x, p.y,
+    /// p.z, 1) · M`, divided through by the homogeneous coordinate that
+    /// gives. A coordinate of zero divides by one.
+    /// [`transform_point`](Self::transform_point) leaves that coordinate
+    /// out.
+    pub fn transform(self, p: Vec3d) -> Vec3d {
+        let m = &self.0;
+        let along = |c: usize| p.x * m[c] + p.y * m[4 + c] + p.z * m[8 + c] + m[12 + c];
+        let w = match along(3) {
+            0.0 => 1.0,
+            w => w,
+        };
+        Vec3d {
+            x: along(0) / w,
+            y: along(1) / w,
+            z: along(2) / w,
+        }
+    }
+
+    /// Apply this transform to a position (includes translation), taking
+    /// the matrix to be affine (C++ `TransformAffine`): the first three
+    /// components of `(p.x, p.y, p.z, 1) · M`, with no division by the
+    /// fourth, which [`transform`](Self::transform) divides through by.
     pub fn transform_point(self, p: Vec3f) -> Vec3f {
         let (x, y, z) = (p.x as f64, p.y as f64, p.z as f64);
         let m = &self.0;
@@ -601,9 +623,10 @@ impl Matrix4d {
     }
 
     /// Apply the rotation/scale part of this transform to a direction
-    /// vector (ignores the translation row). Correct for tangents and
-    /// velocity-like directions. Normals under non-uniform scale require
-    /// the inverse-transpose; for rigid transforms the two are equivalent.
+    /// vector (C++ `TransformDir`; ignores the translation row). Correct for
+    /// tangents and velocity-like directions. Normals under non-uniform
+    /// scale require the inverse-transpose; for rigid transforms the two are
+    /// equivalent.
     pub fn transform_vec(self, v: Vec3f) -> Vec3f {
         let (x, y, z) = (v.x as f64, v.y as f64, v.z as f64);
         let m = &self.0;
@@ -934,6 +957,30 @@ pub(crate) mod tests {
         for i in 0..16 {
             assert!((got[i] - want[i]).abs() < 1e-9, "{got:?} != {want:?}");
         }
+    }
+
+    /// The inverse exists for a determinant above the threshold asked for.
+    #[test]
+    fn inverse_threshold() {
+        let small = Matrix4d::scale([1e-5, 1e-5, 1e-5]);
+        assert_eq!(small.inverse(), None);
+        let inverse = small.inverse_above(1e-16).expect("above the threshold");
+        assert_close(inverse * small, Matrix4d::IDENTITY);
+        assert_eq!(Matrix4d::scale([1.0, 0.0, 1.0]).inverse_above(0.0), None);
+    }
+
+    /// A point takes the translation, and a projective row divides through.
+    #[test]
+    fn transform_double_point() {
+        let m = Matrix4d::scale([2.0, 2.0, 2.0]) * translation(1.0, 0.0, 0.0);
+        let p = Vec3d { x: 1.0, y: 2.0, z: 3.0 };
+        assert_eq!(m.transform(p), Vec3d { x: 3.0, y: 4.0, z: 6.0 });
+
+        let mut projective = Matrix4d::IDENTITY;
+        projective[(3, 3)] = 2.0;
+        assert_eq!(projective.transform(p), Vec3d { x: 0.5, y: 1.0, z: 1.5 });
+        projective[(3, 3)] = 0.0;
+        assert_eq!(projective.transform(p), p);
     }
 
     #[test]

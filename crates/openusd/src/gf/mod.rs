@@ -1,5 +1,6 @@
 //! Graphics foundations — the value types beneath the schema layer: linear
-//! algebra, and the [`Interval`] a time-sample query is asked over.
+//! algebra, the [`Interval`] a time-sample query is asked over, and the
+//! [`Range3d`] and [`BBox3d`] that bound geometry.
 //!
 //! Mirrors Pixar's `Gf` namespace.
 //!
@@ -31,16 +32,20 @@
 //! Quaternion layout — `(w, x, y, z)` with `w` the real (scalar) part,
 //! matching `GfQuatf`'s constructor order.
 
+mod bbox;
 mod interval;
 mod matrix;
 mod quat;
+mod range;
 mod rotation;
 mod vec;
 
+pub use bbox::BBox3d;
 pub use half::f16;
 pub use interval::Interval;
 pub use matrix::{Factors, Mat2d, Mat3d, Matrix4d};
 pub use quat::{Quatd, Quatf, Quath};
+pub use range::Range3d;
 pub use rotation::Rotation;
 pub use vec::{Vec2d, Vec2f, Vec2h, Vec2i, Vec3d, Vec3f, Vec3h, Vec3i, Vec4d, Vec4f, Vec4h, Vec4i};
 

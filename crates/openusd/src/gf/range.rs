@@ -1,0 +1,386 @@
+//! `GfRange3d` — an axis-aligned box in three dimensions.
+
+use std::array;
+use std::ops::{Add, Div, Mul, Sub};
+
+use super::Vec3d;
+
+/// An axis-aligned box given by its minimum and maximum corners (C++
+/// `GfRange3d`).
+///
+/// A range whose minimum exceeds its maximum along any axis is empty: it
+/// holds no point, and the [`Default`] range is one. Extending an empty range
+/// by a point makes it that point.
+///
+/// The arithmetic is interval arithmetic: `a + b` holds every sum of a point
+/// of `a` and a point of `b`, `a - b` every difference, and `a * m` every
+/// point of `a` scaled by `m`. An empty range has no points, so arithmetic
+/// on one gives [`Range3d::EMPTY`], where C++ computes with its corners.
+///
+/// ```
+/// use openusd::gf;
+///
+/// let mut range = gf::Range3d::default();
+/// assert!(range.is_empty());
+///
+/// range.extend_by(gf::vec3d(1.0, 2.0, 3.0));
+/// range.extend_by(gf::vec3d(-1.0, 0.0, 5.0));
+/// assert_eq!(range.min(), gf::vec3d(-1.0, 0.0, 3.0));
+/// assert_eq!(range.size(), gf::vec3d(2.0, 2.0, 2.0));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Range3d {
+    min: Vec3d,
+    max: Vec3d,
+}
+
+impl Range3d {
+    /// The empty range C++ builds by default: the largest `float` as the
+    /// minimum and its negation as the maximum, so that the first point it
+    /// is extended by replaces both.
+    pub const EMPTY: Range3d = Range3d {
+        min: Vec3d {
+            x: f32::MAX as f64,
+            y: f32::MAX as f64,
+            z: f32::MAX as f64,
+        },
+        max: Vec3d {
+            x: -(f32::MAX as f64),
+            y: -(f32::MAX as f64),
+            z: -(f32::MAX as f64),
+        },
+    };
+
+    /// The cube from the origin to `(1, 1, 1)` (C++ `GfRange3d::UnitCube`).
+    pub const UNIT_CUBE: Range3d = Range3d {
+        min: Vec3d { x: 0.0, y: 0.0, z: 0.0 },
+        max: Vec3d { x: 1.0, y: 1.0, z: 1.0 },
+    };
+
+    /// The range from `min` to `max`, which is empty where `min` exceeds
+    /// `max` along any axis.
+    pub const fn new(min: Vec3d, max: Vec3d) -> Self {
+        Range3d { min, max }
+    }
+
+    /// The minimum corner (C++ `GetMin`).
+    pub const fn min(&self) -> Vec3d {
+        self.min
+    }
+
+    /// The maximum corner (C++ `GetMax`).
+    pub const fn max(&self) -> Vec3d {
+        self.max
+    }
+
+    /// The extent along each axis (C++ `GetSize`), negative along an axis
+    /// the range is empty on.
+    pub fn size(&self) -> Vec3d {
+        self.max - self.min
+    }
+
+    /// The point halfway between the corners (C++ `GetMidpoint`). An empty
+    /// range has no meaningful midpoint.
+    pub fn midpoint(&self) -> Vec3d {
+        self.min * 0.5 + self.max * 0.5
+    }
+
+    /// Whether the range holds no point (C++ `IsEmpty`).
+    pub fn is_empty(&self) -> bool {
+        self.min.x > self.max.x || self.min.y > self.max.y || self.min.z > self.max.z
+    }
+
+    /// Grow the range to hold `point` (C++ `ExtendBy`). An empty range
+    /// becomes the point, whatever corners it was empty with, where C++
+    /// keeps the corners of an empty range that is not the default one.
+    pub fn extend_by(&mut self, point: Vec3d) {
+        *self = self.union(Range3d::new(point, point));
+    }
+
+    /// The smallest range holding this one and `other` (C++ `GetUnion`). An
+    /// empty range adds nothing, whatever corners it is empty with, where
+    /// C++ merges the corners of an empty range that is not the default one.
+    pub fn union(self, other: Range3d) -> Range3d {
+        match (self.is_empty(), other.is_empty()) {
+            (true, _) => other,
+            (_, true) => self,
+            _ => Range3d {
+                min: lower(self.min, other.min),
+                max: upper(self.max, other.max),
+            },
+        }
+    }
+
+    /// The range both this one and `other` hold (C++ `GetIntersection`),
+    /// which is empty where they do not overlap.
+    pub fn intersection(self, other: Range3d) -> Range3d {
+        Range3d {
+            min: upper(self.min, other.min),
+            max: lower(self.max, other.max),
+        }
+    }
+
+    /// Whether `point` lies in the range, its faces included (C++
+    /// `Contains`).
+    pub fn contains(&self, point: Vec3d) -> bool {
+        (self.min.x..=self.max.x).contains(&point.x)
+            && (self.min.y..=self.max.y).contains(&point.y)
+            && (self.min.z..=self.max.z).contains(&point.z)
+    }
+
+    /// Whether both corners of `other` lie in the range (C++ `Contains` of a
+    /// range).
+    pub fn contains_range(&self, other: Range3d) -> bool {
+        self.contains(other.min) && self.contains(other.max)
+    }
+
+    /// Whether `other` lies wholly outside the range along some axis (C++
+    /// `IsOutside`).
+    pub fn is_outside(&self, other: Range3d) -> bool {
+        other.max.x < self.min.x
+            || other.min.x > self.max.x
+            || other.max.y < self.min.y
+            || other.min.y > self.max.y
+            || other.max.z < self.min.z
+            || other.min.z > self.max.z
+    }
+
+    /// The squared distance from `point` to the nearest point of the range
+    /// (C++ `GetDistanceSquared`), zero for a point inside.
+    pub fn distance_squared(&self, point: Vec3d) -> f64 {
+        let along = |p: f64, min: f64, max: f64| match p {
+            p if p < min => (min - p) * (min - p),
+            p if p > max => (p - max) * (p - max),
+            _ => 0.0,
+        };
+        along(point.x, self.min.x, self.max.x)
+            + along(point.y, self.min.y, self.max.y)
+            + along(point.z, self.min.z, self.max.z)
+    }
+
+    /// The eight corners (C++ `GetCorner`): corner `i` takes its x from the
+    /// maximum where bit 0 of `i` is set, its y by bit 1 and its z by bit 2,
+    /// so the first is the minimum and the last the maximum.
+    pub fn corners(&self) -> [Vec3d; 8] {
+        let pick = |from_max: bool, min: f64, max: f64| if from_max { max } else { min };
+        array::from_fn(|i| Vec3d {
+            x: pick(i & 1 != 0, self.min.x, self.max.x),
+            y: pick(i & 2 != 0, self.min.y, self.max.y),
+            z: pick(i & 4 != 0, self.min.z, self.max.z),
+        })
+    }
+
+    /// The eight octants the midpoint divides the range into (C++
+    /// `GetOctant`): octant `i` runs from the midpoint to
+    /// [corner](Self::corners) `i`. An empty range has eight empty octants,
+    /// where C++ orders the corners of each into a range that holds points.
+    pub fn octants(&self) -> [Range3d; 8] {
+        if self.is_empty() {
+            return [Range3d::EMPTY; 8];
+        }
+        let middle = self.midpoint();
+        self.corners()
+            .map(|corner| Range3d::new(lower(corner, middle), upper(corner, middle)))
+    }
+}
+
+impl Default for Range3d {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+impl Add for Range3d {
+    type Output = Range3d;
+
+    fn add(self, other: Range3d) -> Range3d {
+        if self.is_empty() || other.is_empty() {
+            return Range3d::EMPTY;
+        }
+        Range3d::new(self.min + other.min, self.max + other.max)
+    }
+}
+
+impl Sub for Range3d {
+    type Output = Range3d;
+
+    fn sub(self, other: Range3d) -> Range3d {
+        if self.is_empty() || other.is_empty() {
+            return Range3d::EMPTY;
+        }
+        Range3d::new(self.min - other.max, self.max - other.min)
+    }
+}
+
+impl Mul<f64> for Range3d {
+    type Output = Range3d;
+
+    /// A negative factor swaps the corners, so the product stays ordered.
+    fn mul(self, factor: f64) -> Range3d {
+        if self.is_empty() {
+            return Range3d::EMPTY;
+        }
+        match factor > 0.0 {
+            true => Range3d::new(self.min * factor, self.max * factor),
+            false => Range3d::new(self.max * factor, self.min * factor),
+        }
+    }
+}
+
+impl Mul<Range3d> for f64 {
+    type Output = Range3d;
+
+    fn mul(self, range: Range3d) -> Range3d {
+        range * self
+    }
+}
+
+impl Div<f64> for Range3d {
+    type Output = Range3d;
+
+    fn div(self, divisor: f64) -> Range3d {
+        self * (1.0 / divisor)
+    }
+}
+
+/// The lesser of `a` and `b` along each axis.
+fn lower(a: Vec3d, b: Vec3d) -> Vec3d {
+    Vec3d {
+        x: a.x.min(b.x),
+        y: a.y.min(b.y),
+        z: a.z.min(b.z),
+    }
+}
+
+/// The greater of `a` and `b` along each axis.
+fn upper(a: Vec3d, b: Vec3d) -> Vec3d {
+    Vec3d {
+        x: a.x.max(b.x),
+        y: a.y.max(b.y),
+        z: a.z.max(b.z),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::Range3d;
+    use crate::gf;
+
+    pub(crate) fn range(min: [f64; 3], max: [f64; 3]) -> Range3d {
+        Range3d::new(min.into(), max.into())
+    }
+
+    /// The default range is empty, and a point makes it that point.
+    #[test]
+    fn empty_until_extended() {
+        let mut r = Range3d::default();
+        assert!(r.is_empty());
+        assert_eq!(r, Range3d::EMPTY);
+        assert!(!r.contains(gf::vec3d(0.0, 0.0, 0.0)));
+
+        r.extend_by(gf::vec3d(1.0, 2.0, 3.0));
+        assert!(!r.is_empty());
+        assert_eq!(r, range([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]));
+
+        // One axis out of order is enough.
+        assert!(range([0.0, 1.0, 0.0], [1.0, 0.0, 1.0]).is_empty());
+        assert!(!Range3d::UNIT_CUBE.is_empty());
+    }
+
+    #[test]
+    fn size_and_midpoint() {
+        let r = range([-1.0, 0.0, 2.0], [3.0, 2.0, 2.0]);
+        assert_eq!(r.size(), gf::vec3d(4.0, 2.0, 0.0));
+        assert_eq!(r.midpoint(), gf::vec3d(1.0, 1.0, 2.0));
+    }
+
+    /// A union holds both ranges and an empty one adds nothing; an
+    /// intersection of ranges that miss each other is empty.
+    #[test]
+    fn union_and_intersection() {
+        let a = range([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+        let b = range([1.0, -1.0, 1.0], [3.0, 1.0, 5.0]);
+        assert_eq!(a.union(b), range([0.0, -1.0, 0.0], [3.0, 2.0, 5.0]));
+        assert_eq!(a.union(Range3d::EMPTY), a);
+        assert_eq!(Range3d::EMPTY.union(a), a);
+        assert_eq!(a.intersection(b), range([1.0, 0.0, 1.0], [2.0, 1.0, 2.0]));
+
+        let apart = range([5.0, 5.0, 5.0], [6.0, 6.0, 6.0]);
+        assert!(a.intersection(apart).is_empty());
+
+        // An empty range adds nothing whatever its corners are.
+        let missed = a.intersection(apart);
+        assert_ne!(missed, Range3d::EMPTY);
+        assert_eq!(missed.union(b), b);
+        assert_eq!(b.union(missed), b);
+        let mut extended = missed;
+        extended.extend_by(gf::vec3d(9.0, 9.0, 9.0));
+        assert_eq!(extended, range([9.0; 3], [9.0; 3]));
+        assert!(a.is_outside(apart));
+        assert!(!a.is_outside(b));
+    }
+
+    /// The faces belong to the range.
+    #[test]
+    fn containment() {
+        let r = Range3d::UNIT_CUBE;
+        assert!(r.contains(gf::vec3d(0.5, 0.5, 0.5)));
+        assert!(r.contains(gf::vec3d(1.0, 0.0, 1.0)));
+        assert!(!r.contains(gf::vec3d(1.0, 0.0, 1.1)));
+        assert!(r.contains_range(range([0.25, 0.25, 0.25], [1.0, 1.0, 1.0])));
+        assert!(!r.contains_range(range([0.25, 0.25, 0.25], [1.0, 2.0, 1.0])));
+    }
+
+    #[test]
+    fn distance_to_point() {
+        let r = Range3d::UNIT_CUBE;
+        assert_eq!(r.distance_squared(gf::vec3d(0.5, 0.5, 0.5)), 0.0);
+        assert_eq!(r.distance_squared(gf::vec3d(3.0, 0.5, 0.5)), 4.0);
+        assert_eq!(r.distance_squared(gf::vec3d(-1.0, -2.0, 3.0)), 1.0 + 4.0 + 4.0);
+    }
+
+    /// Corner `i` reads its axes off the bits of `i`, and octant `i` runs
+    /// from the midpoint to that corner.
+    #[test]
+    fn corners_and_octants() {
+        let r = range([0.0, 0.0, 0.0], [2.0, 4.0, 6.0]);
+        let corners = r.corners();
+        assert_eq!(corners[0], r.min());
+        assert_eq!(corners[7], r.max());
+        assert_eq!(corners[1], gf::vec3d(2.0, 0.0, 0.0));
+        assert_eq!(corners[2], gf::vec3d(0.0, 4.0, 0.0));
+        assert_eq!(corners[5], gf::vec3d(2.0, 0.0, 6.0));
+
+        let octants = r.octants();
+        assert_eq!(octants[0], range([0.0, 0.0, 0.0], [1.0, 2.0, 3.0]));
+        assert_eq!(octants[7], range([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]));
+        assert_eq!(octants[1], range([1.0, 0.0, 0.0], [2.0, 2.0, 3.0]));
+        let whole = octants.into_iter().fold(Range3d::EMPTY, Range3d::union);
+        assert_eq!(whole, r);
+
+        for empty in [Range3d::EMPTY, range([3.0; 3], [1.0; 3])] {
+            assert!(empty.octants().iter().all(Range3d::is_empty));
+        }
+    }
+
+    /// The operators are interval arithmetic, and a negative factor keeps
+    /// the corners in order.
+    #[test]
+    fn arithmetic() {
+        let a = range([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]);
+        let b = range([0.0, 1.0, 2.0], [1.0, 2.0, 3.0]);
+        assert_eq!(a + b, range([1.0, 3.0, 5.0], [5.0, 7.0, 9.0]));
+        assert_eq!(a - b, range([0.0, 0.0, 0.0], [4.0, 4.0, 4.0]));
+        assert_eq!(a * 2.0, range([2.0, 4.0, 6.0], [8.0, 10.0, 12.0]));
+        assert_eq!(2.0 * a, a * 2.0);
+        assert_eq!(a * -1.0, range([-4.0, -5.0, -6.0], [-1.0, -2.0, -3.0]));
+        assert_eq!(a / 2.0, range([0.5, 1.0, 1.5], [2.0, 2.5, 3.0]));
+
+        // Nothing scaled, moved or added to is still nothing.
+        let empty = range([3.0; 3], [1.0; 3]);
+        for result in [empty * 0.0, empty * -2.0, empty + a, a + empty, a - empty, empty / 2.0] {
+            assert_eq!(result, Range3d::EMPTY);
+        }
+        assert_eq!(a * 0.0, range([0.0; 3], [0.0; 3]));
+    }
+}
