@@ -29,6 +29,7 @@ Follow these steps:
    - Then list the detailed changes: group commits by area (composition engine, text parser, binary reader, stage, asset resolution, etc.) and then by type (features, fixes, dependencies). Keep each commit as its own line — do not merge distinct features into one bullet.
    - Filter out noise (formatting, CI, README updates, CLAUDE.md).
    - Wrap code identifiers (types, functions, methods, traits, modules, flags, etc.) and crate names/versions in backticks, e.g. `- Add \`ListOp::compose_over\` for list-edit composition (82845fd)`.
+   - Credit external contributors on their own lines: append `by @<handle>` after the hash of every commit whose author is not the maintainer (`mxpv`), e.g. `- Complete UsdShade NodeDef source queries (e10cd18) by @NicTanghe`. The maintainer's commits carry no credit. List the authors with `git log <prev_tag>..HEAD --format='%h %an'`, and take the handle from GitHub, not from the git author name: `gh api repos/mxpv/openusd/commits/<hash> --jq .author.login`, falling back to the author of the pull request (`gh api repos/mxpv/openusd/commits/<hash>/pulls --jq '.[].user.login'`) when the commit's email is not linked to an account. Ask the user for a handle neither call returns.
    - Write the changelog to a temp file (e.g. `/tmp/CHANGELOG-<version>.md`), NOT to the repo. It is only used for the GitHub release notes.
    - Show the changelog to the user **in full and verbatim** — every section and every
      bullet, exactly as it will appear in the release — and wait for confirmation.
@@ -40,9 +41,10 @@ Follow these steps:
      changelog or deliberately filtered as noise, and that no listed hash is one
      the range does not contain.
 
-4. **Bump version and commit**: The version lives in two places in the root Cargo.toml and both must move together:
+4. **Bump version and commit**: The version lives in three places in the root Cargo.toml and all must move together:
    - `[workspace.package] version` — the version every crate inherits.
    - `[workspace.dependencies] openusd.version` — what `openusd-schemas` requires of `openusd`. A stale value here publishes a crate that depends on the previous release.
+   - `[workspace.dependencies] openusd-build.version` — what `openusd-schemas` requires of its build dependency `openusd-build`, stale in the same way.
 
    Then update the dependency examples to the new version (use the `major.minor` form, e.g. `openusd = "0.5"` for `0.5.0`) in all four READMEs: `README.md`, `crates/openusd/README.md`, `crates/openusd-schemas/README.md` (which pins `openusd` and `openusd-schemas`), and `crates/openusd-build/README.md` (which pins `openusd` and `openusd-build`). Stage the root Cargo.toml and the four READMEs (Cargo.lock is gitignored). Commit with message `Bump crate version to <version>`.
 
