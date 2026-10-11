@@ -5,8 +5,8 @@
 use openusd::usd;
 use openusd::{Result, gf};
 
-use super::sampling::{Motion, time_delta};
-use super::{Interpolation, PointBasedSchema, Points, PointsSchema, array_len, tokens};
+use super::sampling::{Motion, per_element, positions_after, time_delta};
+use super::{Interpolation, PointBased, PointBasedSchema, Points, PointsSchema, array_len, tokens};
 use crate::SchemaError;
 
 /// What every `UsdGeomPointBased` answers about its `normals`.
@@ -83,16 +83,43 @@ pub trait PointBasedExt: PointBasedSchema {
                 continue;
             }
             let delta = time_delta(time, motion.velocities_time, time_codes_per_second);
-            // TODO(rayon): each point is computed from its own position,
-            // velocity and acceleration, so the points of one time, and the
-            // times themselves once the positions are read, are independent.
-            samples.push((0..count).map(|index| motion.position_after(index, delta)).collect());
+            samples.push(positions_after(
+                &motion.positions,
+                &motion.velocities,
+                &motion.accelerations,
+                delta,
+            ));
         }
         Ok(samples)
     }
 }
 
 impl<T: PointBasedSchema> PointBasedExt for T {}
+
+impl PointBased {
+    /// Where `positions` are at `time`, from arrays the caller read (C++
+    /// the static `ComputePointsAtTime`): each moved by its velocity over
+    /// the seconds from `velocities_sample_time`, in time codes, and by
+    /// half its acceleration over them. `time_codes_per_second` is the
+    /// stage's, which C++ reads off a stage argument.
+    ///
+    /// Velocities that are not one for each position move nothing, and
+    /// accelerations that are not one for each velocity are left out, where
+    /// C++ reads past the arrays.
+    pub fn compute_points_from(
+        time: usd::TimeCode,
+        positions: &[gf::Vec3f],
+        velocities: &[gf::Vec3f],
+        velocities_sample_time: f64,
+        accelerations: &[gf::Vec3f],
+        time_codes_per_second: f64,
+    ) -> Vec<gf::Vec3f> {
+        let velocities = per_element(velocities, positions.len());
+        let accelerations = per_element(accelerations, velocities.len());
+        let delta = time_delta(time, velocities_sample_time, time_codes_per_second);
+        positions_after(positions, velocities, accelerations, delta)
+    }
+}
 
 impl Points {
     /// How many points the prim holds at `time`, where `None` is the default
@@ -139,7 +166,7 @@ mod tests {
 
     use super::PointBasedExt;
     use crate::SchemaError;
-    use crate::geom::{Interpolation, PointBasedSchema, Points, PointsSchema, tokens};
+    use crate::geom::{Interpolation, PointBased, PointBasedSchema, Points, PointsSchema, tokens};
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;
 
@@ -290,6 +317,38 @@ mod tests {
 
         points.create_points_attr()?.set(Vec::<gf::Vec3f>::new())?;
         assert_eq!(points.compute_points_at_times(&[time, time], time)?, [vec![], vec![]]);
+        Ok(())
+    }
+
+    /// Arrays the caller read move as the attributes do, and velocities
+    /// that are not one for each position move nothing.
+    #[test]
+    fn points_from_arrays() -> Result {
+        let positions = [gf::vec3f(0.0, 0.0, 0.0), gf::vec3f(1.0, 0.0, 0.0)];
+        let velocities = [gf::vec3f(2.0, 0.0, 0.0); 2];
+        let accelerations = [gf::vec3f(4.0, 0.0, 0.0); 2];
+        let at = |velocities: &[gf::Vec3f], accelerations: &[gf::Vec3f]| {
+            PointBased::compute_points_from(
+                usd::TimeCode::new(12.0),
+                &positions,
+                velocities,
+                0.0,
+                accelerations,
+                24.0,
+            )
+        };
+
+        // Half a second at 24 time codes per second.
+        assert_eq!(
+            at(&velocities, &[]),
+            [gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(2.0, 0.0, 0.0)]
+        );
+        assert_eq!(
+            at(&velocities, &accelerations),
+            [gf::vec3f(1.5, 0.0, 0.0), gf::vec3f(2.5, 0.0, 0.0)]
+        );
+        assert_eq!(at(&velocities[..1], &accelerations), positions);
+        assert_eq!(at(&velocities, &accelerations[..1]), at(&velocities, &[]));
         Ok(())
     }
 

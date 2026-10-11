@@ -20,7 +20,7 @@ use openusd::tf;
 use openusd::usd;
 
 use super::xform_op::{NS_XFORM_OP, TOKEN_INVERT_PREFIX, TOKEN_RESET_XFORM_STACK};
-use super::{XformOp, XformOpKind, Xformable, XformableSchema};
+use super::{XformOp, XformOpKind, Xformable, XformableSchema, tokens};
 
 /// The precision an xform op's value is authored at (C++
 /// `UsdGeomXformOp::Precision`).
@@ -377,6 +377,15 @@ pub trait XformableExt: XformableSchema {
 /// wherever the generated accessors are.
 impl<T: XformableSchema> XformableExt for T {}
 
+impl Xformable {
+    /// Whether an attribute named `name` can change a prim's local
+    /// transform: `xformOpOrder`, or one in the namespace of the ops (C++
+    /// `IsTransformationAffectedByAttrNamed`).
+    pub fn is_transformation_affected_by_attr_named(name: &str) -> bool {
+        name == tokens::XFORM_OP_ORDER || XformOp::is_xform_op(name)
+    }
+}
+
 /// One prim's ordered ops, read once so the local transform can be evaluated
 /// at many times without re-reading `xformOpOrder` (C++
 /// `UsdGeomXformable::XformQuery`).
@@ -623,7 +632,7 @@ fn add_op(
 /// prefix — `xform_op_order` hands back prefixed names, so one fed straight
 /// back in must not be prefixed twice (C++ `_MakeNamespaced`).
 fn op_attr_name(op: &str) -> String {
-    match op.starts_with(NS_XFORM_OP) {
+    match XformOp::is_xform_op(op) {
         true => op.to_string(),
         false => format!("{NS_XFORM_OP}{op}"),
     }
@@ -634,7 +643,7 @@ mod tests {
     use super::{XformOpPrecision, XformQuery, XformableExt};
     use crate::SchemaError;
     use crate::geom::XformableSchema;
-    use crate::geom::{Xform, XformOp, XformOpKind};
+    use crate::geom::{Xform, XformOp, XformOpKind, Xformable};
     use openusd::Result;
     use openusd::gf;
     use openusd::sdf;
@@ -820,6 +829,16 @@ mod tests {
             Some(sdf::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
         );
         Ok(())
+    }
+
+    #[test]
+    fn transform_attr_names() {
+        for name in ["xformOpOrder", "xformOp:translate", "xformOp:rotateXYZ:pivot"] {
+            assert!(Xformable::is_transformation_affected_by_attr_named(name), "{name}");
+        }
+        for name in ["points", "!invert!xformOp:translate", "xformOpOrders"] {
+            assert!(!Xformable::is_transformation_affected_by_attr_named(name), "{name}");
+        }
     }
 
     #[test]

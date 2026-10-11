@@ -70,6 +70,13 @@ impl Primvar {
         name.starts_with(PRIMVARS_NAMESPACE) && !name.ends_with(INDICES_SUFFIX)
     }
 
+    /// `name` without the `primvars:` namespace it starts with, or as it is
+    /// where it is outside that namespace (C++
+    /// `UsdGeomPrimvar::StripPrimvarsName`).
+    pub fn strip_primvars_name(name: &str) -> &str {
+        name.strip_prefix(PRIMVARS_NAMESPACE).unwrap_or(name)
+    }
+
     /// Wrap `attribute` when its name is a primvar's (C++
     /// `UsdGeomPrimvar::IsPrimvar`, without asking whether anything defines
     /// the attribute).
@@ -119,6 +126,12 @@ impl Primvar {
             .name()
             .strip_prefix(PRIMVARS_NAMESPACE)
             .unwrap_or_default()
+    }
+
+    /// Whether the primvar's name has namespaces below `primvars:` (C++
+    /// `NameContainsNamespaces`), as `primvars:skel:jointWeights` has.
+    pub fn name_contains_namespaces(&self) -> bool {
+        self.primvar_name().contains(':')
     }
 
     /// How the primvar's values lie on the geometry (C++ `GetInterpolation`),
@@ -601,9 +614,19 @@ mod tests {
         assert!(!Primvar::is_valid_primvar_name("st"));
         assert!(!Primvar::is_valid_primvar_name("primvars:st:indices"));
 
+        assert_eq!(
+            Primvar::strip_primvars_name("primvars:skel:jointWeights"),
+            "skel:jointWeights"
+        );
+        assert_eq!(Primvar::strip_primvars_name("points"), "points");
+        assert!(PrimvarsAPI::can_contain_property_name("primvars:st:indices"));
+        assert!(!PrimvarsAPI::can_contain_property_name("st"));
+
         let weights = mesh()?.create_primvar("skel:jointWeights", "float[]")?;
         assert_eq!(weights.attribute().name(), "primvars:skel:jointWeights");
         assert_eq!(weights.primvar_name(), "skel:jointWeights");
+        assert!(weights.name_contains_namespaces());
+        assert!(!mesh()?.create_primvar("st", "float[]")?.name_contains_namespaces());
         Ok(())
     }
 

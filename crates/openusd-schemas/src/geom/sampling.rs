@@ -150,21 +150,58 @@ impl Motion {
             accelerations: accelerations.map(|held| held.value).unwrap_or_default(),
         })
     }
+}
 
-    /// Where the position at `index` is `delta` seconds after the
-    /// velocities were sampled: moved by its velocity, and by half its
-    /// acceleration over that time. A position without a velocity stays.
-    pub(super) fn position_after(&self, index: usize, delta: f64) -> gf::Vec3f {
-        let position = self.positions[index];
-        let Some(&velocity) = self.velocities.get(index) else {
-            return position;
-        };
-        let velocity = match self.accelerations.get(index) {
-            Some(&acceleration) => velocity + scaled(scaled(acceleration, delta), 0.5),
-            None => velocity,
-        };
-        position + scaled(velocity, delta)
+/// `values` where they are one for each of `count` elements, and none
+/// otherwise: an array of another length says nothing about the elements.
+pub(super) fn per_element<T>(values: &[T], count: usize) -> &[T] {
+    match values.len() == count {
+        true => values,
+        false => &[],
     }
+}
+
+/// Where each of `positions` is `delta` seconds on, as [`position_after`]
+/// moves one. `velocities` hold one element for each position or none, and
+/// `accelerations` one for each velocity or none.
+pub(super) fn positions_after(
+    positions: &[gf::Vec3f],
+    velocities: &[gf::Vec3f],
+    accelerations: &[gf::Vec3f],
+    delta: f64,
+) -> Vec<gf::Vec3f> {
+    if velocities.is_empty() {
+        return positions.to_vec();
+    }
+    // TODO(rayon): each point is computed from its own position, velocity
+    // and acceleration, so the points are independent.
+    positions
+        .iter()
+        .zip(velocities)
+        .enumerate()
+        .map(|(index, (&position, &velocity))| {
+            position_after(position, Some(velocity), accelerations.get(index).copied(), delta)
+        })
+        .collect()
+}
+
+/// Where `position` is `delta` seconds on: moved by its `velocity`, and by
+/// half its `acceleration` over that time. A position without a velocity
+/// stays.
+pub(super) fn position_after(
+    position: gf::Vec3f,
+    velocity: Option<gf::Vec3f>,
+    acceleration: Option<gf::Vec3f>,
+    delta: f64,
+) -> gf::Vec3f {
+    let Some(velocity) = velocity else {
+        return position;
+    };
+    let velocity = match acceleration {
+        Some(acceleration) => velocity + scaled(scaled(acceleration, delta), 0.5),
+        None => velocity,
+    };
+    position + scaled(velocity, delta)
 }
 
 /// The seconds from `sample_time` to `time`, both in time codes (C++

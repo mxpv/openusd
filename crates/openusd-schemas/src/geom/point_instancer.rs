@@ -10,7 +10,7 @@ use openusd::Result;
 use openusd::usd::{self, SchemaBase};
 use openusd::{gf, sdf};
 
-use super::sampling::{Held, Motion, time_delta};
+use super::sampling::{Held, Motion, per_element, position_after, time_delta};
 use super::{PointInstancer, PointInstancerSchema, PrimMetadata, XformCache, array_len, tokens};
 use crate::SchemaError;
 
@@ -35,6 +35,136 @@ pub enum MaskApplication {
     Apply,
     /// Every instance is computed (C++ `IgnoreMask`).
     Ignore,
+}
+
+/// The arrays instance transforms are built from, one element for each
+/// instance: the values of a point instancer's attributes, or arrays shaped
+/// like them. [`transforms_at`](Self::transforms_at) builds the transforms.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstanceArrays<'a> {
+    /// The index of each instance's prototype among the prototype roots.
+    /// Its length is the number of instances.
+    pub proto_indices: &'a [i32],
+    /// Where each instance is.
+    pub positions: &'a [gf::Vec3f],
+    /// How each instance moves, in units per second, or none.
+    pub velocities: &'a [gf::Vec3f],
+    /// The time, in time codes, the positions move from.
+    pub velocities_sample_time: f64,
+    /// How each velocity changes, in units per second squared, or none.
+    pub accelerations: &'a [gf::Vec3f],
+    /// The scale of each instance, or none.
+    pub scales: &'a [gf::Vec3f],
+    /// The orientation of each instance, or none.
+    pub orientations: &'a [gf::Quatd],
+    /// How each instance turns, in degrees per second about the vector, or
+    /// none. It applies only to instances that have an orientation.
+    pub angular_velocities: &'a [gf::Vec3f],
+    /// The time, in time codes, the orientations turn from.
+    pub angular_velocities_sample_time: f64,
+    /// Which instances are computed, or empty for all of them.
+    pub mask: &'a [bool],
+}
+
+impl<'a> InstanceArrays<'a> {
+    /// The transform of each instance the mask keeps at `time` (C++ the
+    /// static `UsdGeomPointInstancer::ComputeInstanceTransformsAtTime`),
+    /// built as [`PointInstancer::compute_instance_transforms_at_times`]
+    /// states. `stage` gives the time codes per second and the prims at
+    /// `proto_paths`, the prototype roots whose local transforms at `time`
+    /// come before their instances'. With no `proto_paths` the instances
+    /// are placed only, as is an instance whose index names none of them.
+    ///
+    /// Positions that are not one for each instance are
+    /// [`SchemaError::PositionCountMismatch`], and a mask that is neither
+    /// empty nor one entry for each instance is
+    /// [`SchemaError::MaskSizeMismatch`], where C++ reads past the arrays.
+    /// Any other array that is not one element for each instance is left
+    /// out of the transform.
+    pub fn transforms_at(
+        &self,
+        stage: &usd::Stage,
+        time: usd::TimeCode,
+        proto_paths: &[sdf::Path],
+    ) -> Result<Vec<gf::Matrix4d>, SchemaError> {
+        let arrays = self.checked()?;
+        let prototypes = prototype_xforms(&mut XformCache::new(time), &prototype_prims(stage, proto_paths)?)?;
+        Ok(arrays.transforms(time, stage.time_codes_per_second(), &prototypes))
+    }
+
+    /// These arrays as [`transforms`](Self::transforms) takes them: the
+    /// positions and the mask checked against the number of instances, and
+    /// every other array that is not one element for each instance emptied.
+    fn checked(&self) -> Result<Self, SchemaError> {
+        let count = self.proto_indices.len();
+        if self.positions.len() != count {
+            return Err(SchemaError::PositionCountMismatch {
+                found: self.positions.len(),
+                expected: count,
+            });
+        }
+        check_mask(self.mask, count)?;
+        let velocities = per_element(self.velocities, count);
+        let orientations = per_element(self.orientations, count);
+        Ok(Self {
+            velocities,
+            accelerations: per_element(self.accelerations, velocities.len()),
+            scales: per_element(self.scales, count),
+            orientations,
+            angular_velocities: per_element(self.angular_velocities, orientations.len()),
+            ..*self
+        })
+    }
+
+    /// The transform of each instance the mask keeps at `time`, after the
+    /// prototype transform in `prototypes` its index names. The positions
+    /// hold one element for each instance, and the mask and every other
+    /// array either that many or none.
+    fn transforms(
+        &self,
+        time: usd::TimeCode,
+        time_codes_per_second: f64,
+        prototypes: &[gf::Matrix4d],
+    ) -> Vec<gf::Matrix4d> {
+        let delta = time_delta(time, self.velocities_sample_time, time_codes_per_second);
+        let spin_delta = time_delta(time, self.angular_velocities_sample_time, time_codes_per_second);
+        // TODO(rayon): each instance's transform is computed from its own
+        // elements, so the instances are independent.
+        (0..self.proto_indices.len())
+            .filter(|&index| self.mask.get(index).copied().unwrap_or(true))
+            .map(|index| {
+                let mut xform = match self.scales.get(index) {
+                    Some(&scale) => gf::Matrix4d::scale(scale),
+                    None => gf::Matrix4d::IDENTITY,
+                };
+                if let Some(&orientation) = self.orientations.get(index) {
+                    xform = xform * gf::Matrix4d::from_quat(orientation);
+                    if let Some(&velocity) = self.angular_velocities.get(index) {
+                        let axis = gf::vec3d(velocity.x.into(), velocity.y.into(), velocity.z.into());
+                        let degrees = spin_delta * f64::from(velocity.length());
+                        xform = xform * gf::Matrix4d::from_quat(gf::Rotation::new(axis, degrees).quat());
+                    }
+                }
+                let position = position_after(
+                    self.positions[index],
+                    self.velocities.get(index).copied(),
+                    self.accelerations.get(index).copied(),
+                    delta,
+                );
+                xform[(3, 0)] = position.x.into();
+                xform[(3, 1)] = position.y.into();
+                xform[(3, 2)] = position.z.into();
+                // An index that names no prototype places the instance only.
+                let prototype = usize::try_from(self.proto_indices[index])
+                    .ok()
+                    .and_then(|index| prototypes.get(index));
+                match prototype {
+                    Some(&prototype) => prototype * xform,
+                    None => xform,
+                }
+            })
+            .collect()
+    }
 }
 
 /// Instance counting and masking (C++ `UsdGeomPointInstancer`).
@@ -332,13 +462,7 @@ impl PointInstancer {
             MaskApplication::Apply => self.compute_mask_at_time(base_time, None)?,
             MaskApplication::Ignore => Vec::new(),
         };
-        if !mask.is_empty() && mask.len() != count {
-            return Err(SchemaError::MaskSizeMismatch {
-                mask: mask.len(),
-                len: count,
-                element_size: 1,
-            });
-        }
+        check_mask(&mask, count)?;
 
         let positions_attr = self.positions_attr();
         let mut motion = Motion::read(
@@ -384,12 +508,7 @@ impl PointInstancer {
 
         let stage = self.stage();
         let time_codes_per_second = stage.time_codes_per_second();
-        // A target the stage holds no prim for transforms nothing.
-        let mut prototype_prims = Vec::with_capacity(proto_paths.len());
-        for path in &proto_paths {
-            let prototype = stage.prim(path)?;
-            prototype_prims.push(prototype.is_valid()?.then_some(prototype));
-        }
+        let prototype_prims = prototype_prims(stage, &proto_paths)?;
         let mut cache = XformCache::default();
         let interpolated = motion.velocities.is_empty() && spin.is_empty();
         let mut samples = Vec::with_capacity(times.len());
@@ -409,45 +528,20 @@ impl PointInstancer {
             }
 
             cache.set_time(time);
-            let mut prototypes = Vec::with_capacity(prototype_prims.len());
-            for prototype in &prototype_prims {
-                prototypes.push(match prototype {
-                    Some(prototype) => cache.local_transformation(prototype)?.0,
-                    None => gf::Matrix4d::IDENTITY,
-                });
-            }
-
-            let delta = time_delta(time, motion.velocities_time, time_codes_per_second);
-            let spin_delta = time_delta(time, spin_time, time_codes_per_second);
-            // TODO(rayon): each instance's transform is computed from its own
-            // elements, so the instances of one time are independent.
-            let xforms: Vec<gf::Matrix4d> = (0..count)
-                .filter(|&index| mask.get(index).copied().unwrap_or(true))
-                .map(|index| {
-                    let mut xform = match scales.get(index) {
-                        Some(&scale) => gf::Matrix4d::scale(scale),
-                        None => gf::Matrix4d::IDENTITY,
-                    };
-                    if let Some(&orientation) = orientations.get(index) {
-                        xform = xform * gf::Matrix4d::from_quat(orientation);
-                        if let Some(&velocity) = spin.get(index) {
-                            let axis = gf::vec3d(velocity.x.into(), velocity.y.into(), velocity.z.into());
-                            let degrees = spin_delta * f64::from(velocity.length());
-                            xform = xform * gf::Matrix4d::from_quat(gf::Rotation::new(axis, degrees).quat());
-                        }
-                    }
-                    let position = motion.position_after(index, delta);
-                    xform[(3, 0)] = position.x.into();
-                    xform[(3, 1)] = position.y.into();
-                    xform[(3, 2)] = position.z.into();
-                    // `prototype_paths` holds every index inside the paths.
-                    match prototypes.get(proto_indices[index] as usize) {
-                        Some(&prototype) => prototype * xform,
-                        None => xform,
-                    }
-                })
-                .collect();
-            samples.push(xforms);
+            let prototypes = prototype_xforms(&mut cache, &prototype_prims)?;
+            let arrays = InstanceArrays {
+                proto_indices: &proto_indices,
+                positions: &motion.positions,
+                velocities: &motion.velocities,
+                velocities_sample_time: motion.velocities_time,
+                accelerations: &motion.accelerations,
+                scales: &scales,
+                orientations: &orientations,
+                angular_velocities: &spin,
+                angular_velocities_sample_time: spin_time,
+                mask: &mask,
+            };
+            samples.push(arrays.transforms(time, time_codes_per_second, &prototypes));
         }
         Ok(samples)
     }
@@ -491,14 +585,54 @@ impl PointInstancer {
     }
 }
 
-/// Quaternions as the `(w, x, y, z)` a rotation matrix is built from.
-fn quats<Q: Into<[f64; 4]>>(orientations: Vec<Q>) -> Vec<[f64; 4]> {
-    orientations.into_iter().map(Into::into).collect()
+/// A mask that is neither empty nor one entry for each of `count` instances
+/// is [`SchemaError::MaskSizeMismatch`].
+fn check_mask(mask: &[bool], count: usize) -> Result<(), SchemaError> {
+    match mask.is_empty() || mask.len() == count {
+        true => Ok(()),
+        false => Err(SchemaError::MaskSizeMismatch {
+            mask: mask.len(),
+            len: count,
+            element_size: 1,
+        }),
+    }
+}
+
+/// The prim at each of `paths`, `None` where the stage holds none: a
+/// prototype root that is not there transforms nothing.
+fn prototype_prims(stage: &usd::Stage, paths: &[sdf::Path]) -> Result<Vec<Option<usd::Prim>>, SchemaError> {
+    let mut prims = Vec::with_capacity(paths.len());
+    for path in paths {
+        let prim = stage.prim(path)?;
+        prims.push(prim.is_valid()?.then_some(prim));
+    }
+    Ok(prims)
+}
+
+/// The local transform of each prototype root at the time of `cache`, the
+/// identity for a root the stage holds no prim for.
+fn prototype_xforms(
+    cache: &mut XformCache,
+    prototypes: &[Option<usd::Prim>],
+) -> Result<Vec<gf::Matrix4d>, SchemaError> {
+    let mut xforms = Vec::with_capacity(prototypes.len());
+    for prototype in prototypes {
+        xforms.push(match prototype {
+            Some(prototype) => cache.local_transformation(prototype)?.0,
+            None => gf::Matrix4d::IDENTITY,
+        });
+    }
+    Ok(xforms)
+}
+
+/// Quaternions of any precision in double precision.
+fn quats<Q: Into<[f64; 4]>>(orientations: Vec<Q>) -> Vec<gf::Quatd> {
+    orientations.into_iter().map(|q| gf::Quatd::from(q.into())).collect()
 }
 
 /// The quaternion array `attr` holds at the sample at or before
 /// `base_time`, read as an array of `Q`.
-fn held_quats<Q>(attr: &usd::Attribute, base_time: usd::TimeCode) -> Result<Option<Held<Vec<[f64; 4]>>>>
+fn held_quats<Q>(attr: &usd::Attribute, base_time: usd::TimeCode) -> Result<Option<Held<Vec<gf::Quatd>>>>
 where
     Q: Into<[f64; 4]>,
     Vec<Q>: sdf::FromValue,
@@ -508,7 +642,7 @@ where
 }
 
 /// The quaternion array `attr` holds at `time`, read as an array of `Q`.
-fn quats_at<Q>(attr: &usd::Attribute, time: usd::TimeCode) -> Result<Option<Vec<[f64; 4]>>>
+fn quats_at<Q>(attr: &usd::Attribute, time: usd::TimeCode) -> Result<Option<Vec<gf::Quatd>>>
 where
     Q: Into<[f64; 4]>,
     Vec<Q>: sdf::FromValue,
@@ -550,7 +684,7 @@ mod tests {
     use openusd::usd::{SchemaBase, Stage, TimeCode};
     use openusd::{gf, sdf};
 
-    use super::{MaskApplication, ProtoXformInclusion, canonical};
+    use super::{InstanceArrays, MaskApplication, ProtoXformInclusion, canonical};
     use crate::SchemaError;
     use crate::geom::{PointInstancer, PointInstancerSchema, Xform, XformableExt};
 
@@ -732,6 +866,40 @@ mod tests {
         assert!(matches!(
             at(ProtoXformInclusion::Include, MaskApplication::Ignore),
             Err(SchemaError::PrototypeIndexOutOfRange { index: 1, .. })
+        ));
+        Ok(())
+    }
+
+    /// Arrays the caller read build the transforms the attributes do: the
+    /// mask prunes, an array of another length is left out, and positions
+    /// must be one for each instance.
+    #[test]
+    fn transforms_from_arrays() -> Result {
+        let stage = &crate::tests::stage("anon.usda")?;
+        Xform::define(stage, "/Proto")?.set_translate(gf::vec3d(10.0, 0.0, 0.0))?;
+        let proto_paths = [sdf::path("/Proto")?];
+        let positions = [gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(0.0, 2.0, 0.0)];
+        let arrays = InstanceArrays {
+            proto_indices: &[0, 0],
+            positions: &positions,
+            velocities: &[gf::vec3f(0.0, 0.0, 2.0); 2],
+            scales: &[gf::vec3f(3.0, 3.0, 3.0)],
+            mask: &[false, true],
+            ..InstanceArrays::default()
+        };
+        let time = TimeCode::new(12.0);
+        assert_matrices(
+            &arrays.transforms_at(stage, time, &proto_paths)?,
+            &[gf::Matrix4d::translation([10.0, 2.0, 1.0])],
+        );
+
+        let short = InstanceArrays {
+            positions: &positions[..1],
+            ..arrays
+        };
+        assert!(matches!(
+            short.transforms_at(stage, time, &proto_paths),
+            Err(SchemaError::PositionCountMismatch { found: 1, expected: 2 })
         ));
         Ok(())
     }

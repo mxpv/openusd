@@ -262,6 +262,16 @@ pub enum SchemaError {
         expected: usize,
     },
 
+    /// The positions instance transforms are computed from are not one for
+    /// each instance.
+    #[error("{found} positions for {expected} instances")]
+    PositionCountMismatch {
+        /// How many positions there are.
+        found: usize,
+        /// How many instances the prototype indices name.
+        expected: usize,
+    },
+
     /// A point instancer asked for its prototypes' transforms targets no
     /// prototype.
     #[error("{prim} targets no prototypes")]

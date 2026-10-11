@@ -264,6 +264,12 @@ pub struct XformOp {
 }
 
 impl XformOp {
+    /// Whether an attribute named `name` is in the namespace of the ops (C++
+    /// `IsXformOp`), whether or not any op order lists it.
+    pub fn is_xform_op(name: &str) -> bool {
+        name.starts_with(NS_XFORM_OP)
+    }
+
     /// The op over `attr`, applied inverted when `inverse` is set.
     pub fn new(attr: &usd::Attribute, inverse: bool) -> Self {
         Self {

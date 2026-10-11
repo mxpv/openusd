@@ -144,7 +144,7 @@ pub use curves::{CurvesExt, PointAndTangentArrays};
 pub use gprim::GprimExt;
 pub use imageable::{ImageableExt, PurposeInfo};
 pub use mesh::MeshTopologyError;
-pub use point_instancer::{MaskApplication, ProtoXformInclusion};
+pub use point_instancer::{InstanceArrays, MaskApplication, ProtoXformInclusion};
 pub use points::PointBasedExt;
 pub use primvar::{Primvar, PrimvarDeclaration};
 pub use primvars_api::PrimvarBuilder;
