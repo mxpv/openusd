@@ -91,6 +91,10 @@
 //! [`ImageableExt::compute_local_to_world_transform`] answers once, without
 //! a cache.
 //!
+//! [`XformableExt::add_xform_op`] declares one op of any [`XformOpKind`],
+//! optionally inverted, and hands back the [`XformOp`] to set its value
+//! through.
+//!
 //! # Primvars
 //!
 //! A `primvars:*` attribute is read through [`Primvar`], which bundles its
@@ -120,7 +124,7 @@ mod xform_op;
 mod xformable;
 
 use openusd::Result;
-use openusd::{sdf, usd};
+use openusd::{sdf, tf, usd};
 
 // The enums still written by hand name the generated constants directly.
 use tokens::*;
@@ -230,6 +234,14 @@ impl CurveBasis {
 // Bidirectional `From`/`TryFrom<Value>` for each token enum, so they pass
 // straight to `Attribute::set` / `get::<Enum>()`. See the macro's own docs.
 openusd::sdf::impl_token_value!(Interpolation, CurveBasis);
+
+/// The value type `attr` is declared with, whatever its spelling, or `None`
+/// where nothing declares the attribute.
+fn declared_type(attr: &usd::Attribute) -> Result<Option<sdf::ValueTypeName>> {
+    Ok(attr
+        .get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?
+        .map(sdf::ValueTypeName::from))
+}
 
 /// Visit the prim at `path` and then each of its ancestors below the
 /// pseudo-root, seen through `view`, and return the first `Some` that `visit`

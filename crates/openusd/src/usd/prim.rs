@@ -398,41 +398,6 @@ impl Prim {
             .build()
     }
 
-    /// Append `value` to the `uniform token[]` attribute named `name` on this
-    /// prim, preserving insertion order. Reads the composed default across
-    /// layers (so weaker-layer opinions get materialised into the edit target's
-    /// new value), de-duplicates, and writes back via `create_attribute`.
-    ///
-    /// Returns `true` when `value` was appended, `false` when it was already
-    /// present (or the attribute is bound to a non-token-array variant that
-    /// can't be flattened).
-    ///
-    /// Useful for ordered token stacks like `xformOpOrder` or `apiSchemas`.
-    pub fn append_to_uniform_token_array(&self, name: &str, value: impl Into<String>) -> Result<bool> {
-        let value = value.into();
-        let attr_path = self.path.append_property(name)?;
-        self.require_valid()?;
-        let existing: Vec<String> = match self.stage.field::<sdf::Value>(&attr_path, sdf::FieldKey::Default)? {
-            Some(sdf::Value::TokenVec(v)) => v.into_iter().map(Into::into).collect(),
-            Some(sdf::Value::StringVec(v)) => v,
-            Some(sdf::Value::TokenListOp(op)) => op.flatten().into_iter().map(Into::into).collect(),
-            Some(sdf::Value::StringListOp(op)) => op.flatten(),
-            _ => Vec::new(),
-        };
-        if existing.iter().any(|t| t == &value) {
-            return Ok(false);
-        }
-        let mut updated = existing;
-        updated.push(value);
-        self.stage
-            .attribute_builder(attr_path, "token[]")
-            .custom(false)
-            .variability(sdf::Variability::Uniform)
-            .set(sdf::Value::token_vec(updated))
-            .build()?;
-        Ok(true)
-    }
-
     /// Names of the value-clip sets composed onto this prim, sorted by name
     /// (spec 12.3.4, C++ `clipSetNames`). Reads the composed `clips`
     /// dictionary across layers; returns an empty vector when none are

@@ -41,6 +41,19 @@ pub enum XformOpPrecision {
     Half,
 }
 
+impl XformOpPrecision {
+    /// The precision an op declared as `type_name` holds its value at (C++
+    /// `UsdGeomXformOp::GetPrecisionFromValueTypeName`), or `None` for a type
+    /// no op is declared as.
+    pub fn from_value_type(type_name: &sdf::ValueTypeName) -> Option<Self> {
+        [Self::Double, Self::Float, Self::Half].into_iter().find(|precision| {
+            XformOpKind::ALL
+                .iter()
+                .any(|kind| kind.value_type(*precision) == *type_name)
+        })
+    }
+}
+
 /// A prim that carries a transform stack (C++ `UsdGeomXformable`). Inherits
 /// [`XformableSchema`].
 ///
@@ -154,12 +167,101 @@ pub trait XformableExt: XformableSchema {
         Ok(self)
     }
 
+    /// Empty `xformOpOrder`, so the prim has no local transform and inherits
+    /// its parent's (C++ `ClearXformOpOrder`). The op attributes stay.
+    fn clear_xform_op_order(self) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        self.set_xform_op_order([""; 0])
+    }
+
+    /// Author whether the stack resets its parent's transform (C++
+    /// `SetResetXformStack`).
+    ///
+    /// Setting it puts `!resetXformStack!` ahead of the ops `xformOpOrder`
+    /// lists. Unsetting it drops the last `!resetXformStack!` together with
+    /// every entry before it, which are the ones it was discarding. Either
+    /// authors nothing when the stack is already as asked.
+    fn set_reset_xform_stack(self, reset: bool) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        let order = self.xform_op_order()?.unwrap_or_default();
+        let last_reset = order.iter().rposition(|entry| entry == TOKEN_RESET_XFORM_STACK);
+        let order = match (reset, last_reset) {
+            (true, Some(_)) | (false, None) => return Ok(self),
+            (true, None) => [tf::Token::from(TOKEN_RESET_XFORM_STACK)]
+                .into_iter()
+                .chain(order)
+                .collect(),
+            (false, Some(last)) => order[last + 1..].to_vec(),
+        };
+        self.xform_op_order_attr_builder()
+            .set(sdf::Value::TokenVec(order))
+            .build()?;
+        Ok(self)
+    }
+
+    /// Declare an op of `kind` at `precision` and append it to the stack,
+    /// without a value (C++ `AddXformOp`, which `AddTranslateOp` and the
+    /// other per-kind methods call).
+    ///
+    /// `suffix` names one instance of the kind, as `pivot` does in
+    /// `xformOp:translate:pivot`. With `inverse` set the stack lists the op
+    /// behind `!invert!`: the entry applies the inverse of the value the op
+    /// attribute holds, which the op listed without it authors.
+    ///
+    /// An op the stage already declares keeps the precision it was declared
+    /// at. An entry `xformOpOrder` already lists is
+    /// [`SchemaError::XformOpExists`]. The declaration and the new order are
+    /// one edit.
+    fn add_xform_op(
+        &self,
+        kind: XformOpKind,
+        precision: XformOpPrecision,
+        suffix: Option<&str>,
+        inverse: bool,
+    ) -> Result<XformOp, SchemaError> {
+        let order = self.xform_op_order()?.unwrap_or_default();
+        add_op(self.prim(), order, kind, precision, suffix, inverse)
+    }
+
+    /// The op of `kind` that `xformOpOrder` lists with this `suffix` and this
+    /// `inverse` flag (C++ `GetXformOp`, which `GetTranslateOp` and the other
+    /// per-kind methods call), or `None` when it lists no such entry or the
+    /// prim has no attribute for it.
+    fn xform_op(&self, kind: XformOpKind, suffix: Option<&str>, inverse: bool) -> Result<Option<XformOp>> {
+        let entry = kind.op_name(suffix, inverse);
+        if !self.xform_op_order()?.unwrap_or_default().contains(&entry) {
+            return Ok(None);
+        }
+        let attr = self.prim().attribute(kind.op_name(suffix, false).as_str());
+        Ok(attr.is_defined()?.then(|| XformOp::new(&attr, inverse)))
+    }
+
+    /// Reduce the stack to a single `xformOp:transform` and return that op
+    /// (C++ `MakeMatrixXform`).
+    ///
+    /// `xformOpOrder` lists the one op and nothing else, so a reset goes with
+    /// the other entries. The op keeps whatever value it already holds.
+    fn make_matrix_xform(&self) -> Result<XformOp, SchemaError> {
+        add_op(
+            self.prim(),
+            Vec::new(),
+            XformOpKind::Transform,
+            XformOpPrecision::Double,
+            None,
+            false,
+        )
+    }
+
     /// Author `xformOp:<op>` at `precision` and append it to the stack (C++
     /// `UsdGeomXformable::AddXformOp`). `op` is the op token, with or without
     /// the `xformOp:` prefix that [`xform_op_order`](XformableSchema::xform_op_order)
     /// hands back, and may carry a `:suffix` naming one instance of it
     /// (`"translate:pivot"`), which the per-op setters below have no
-    /// spelling for.
+    /// spelling for. The declaration, the value and the order are one edit.
     ///
     /// An op the stage already declares keeps the precision it was declared
     /// at, as C++ does when the two disagree; only an op nothing declares is
@@ -184,8 +286,21 @@ pub trait XformableExt: XformableSchema {
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), op, precision, value.into())?;
-        append_op(self.prim(), op)?;
+        let name = tf::Token::from(op_attr_name(op));
+        let token = name.split(':').nth(1).unwrap_or_default();
+        let kind =
+            XformOpKind::from_token(token).ok_or_else(|| SchemaError::UnknownXformOp { op: token.to_string() })?;
+        let write = OpWrite {
+            name: name.clone(),
+            new_type: kind.value_type(precision),
+            value: Some(value.into()),
+        };
+        let mut order = self.xform_op_order()?.unwrap_or_default();
+        let order = (!order.contains(&name)).then(|| {
+            order.push(name);
+            order
+        });
+        author_stack(self.prim(), vec![write], order, None)?;
         Ok(self)
     }
 
@@ -414,42 +529,94 @@ impl XformQuery {
     }
 }
 
-/// Author a single `xformOp:<kind>` attribute (does not touch
-/// `xformOpOrder`), on the terms [`XformableExt::set_xform_op`] states.
+/// One op attribute a stack edit touches.
+pub(super) struct OpWrite {
+    /// The op attribute's name.
+    pub name: tf::Token,
+    /// The type the op is declared as where nothing declares it yet.
+    pub new_type: sdf::ValueTypeName,
+    /// The value to author on it, if any.
+    pub value: Option<sdf::Value>,
+}
+
+/// Author op attributes and `xformOpOrder` on `prim` as one edit.
 ///
-/// An op the stage already declares keeps that declaration; one nothing
-/// declares takes `precision`. The value is converted to whichever of the two
-/// applies before the attribute is authored, so a value the op cannot hold
-/// leaves the stage untouched rather than a declaration that a later write at
-/// another precision would find and keep.
+/// Each write declares its op where nothing declares it and authors its
+/// value at `time`, and `order`, where given, replaces `xformOpOrder`. With
+/// neither a write to make nor an order, nothing is committed.
 ///
-/// The op's kind is resolved whatever the stage declares, so a token naming
-/// no kind is refused even where a layer already declares an attribute for
-/// it. The declaration is read as the raw spelling it was authored with, so
-/// one the type table does not know is refused by the conversion rather than
-/// mistaken for an op nothing declares.
-fn author_xform_op(
+/// An op the stage already declares keeps that declaration. Every value is
+/// converted to the type its op holds before anything is queued, so a value
+/// an op cannot hold leaves the stage untouched. The declaration is read as
+/// the raw spelling it was authored with, so one the type table does not know
+/// is refused by the conversion.
+pub(super) fn author_stack(
     prim: &usd::Prim,
-    op: &str,
-    precision: XformOpPrecision,
-    value: sdf::Value,
+    writes: Vec<OpWrite>,
+    order: Option<Vec<tf::Token>>,
+    time: Option<usd::TimeCode>,
 ) -> Result<(), SchemaError> {
-    let name = op_attr_name(op);
-    let token = name.split(':').nth(1).unwrap_or_default();
-    let kind = XformOpKind::from_token(token).ok_or_else(|| SchemaError::UnknownXformOp { op: token.to_string() })?;
-    let declared = match prim
-        .attribute(name.as_str())
-        .get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?
-    {
-        Some(token) => sdf::ValueTypeName::from(token),
-        None => kind.value_type(precision),
+    let mut planned = Vec::new();
+    for write in writes {
+        let declared = super::declared_type(&prim.attribute(write.name.as_str()))?;
+        if declared.is_some() && write.value.is_none() {
+            continue;
+        }
+        let type_name = declared.unwrap_or(write.new_type);
+        let value = write.value.map(|value| type_name.coerce(value)).transpose()?;
+        planned.push((write.name, type_name, value));
+    }
+    if planned.is_empty() && order.is_none() {
+        return Ok(());
+    }
+
+    prim.stage().edit(|edit| -> Result<(), SchemaError> {
+        let prim = edit.prim(prim.path())?;
+        for (name, type_name, value) in planned {
+            let builder = prim.attribute_builder(name, type_name).custom(false);
+            match value {
+                Some(value) => builder.set_at(value, time),
+                None => builder,
+            }
+            .build()?;
+        }
+        if let Some(order) = order {
+            prim.attribute_builder(super::tokens::XFORM_OP_ORDER, sdf::ValueTypeName::TOKEN_ARRAY)
+                .custom(false)
+                .variability(sdf::Variability::Uniform)
+                .set(sdf::Value::TokenVec(order))
+                .build()?;
+        }
+        Ok(())
+    })
+}
+
+/// Declare the op of `kind` on `prim` where nothing declares it and author
+/// `order` with the op's entry appended as `xformOpOrder`, on the terms
+/// [`XformableExt::add_xform_op`] states.
+fn add_op(
+    prim: &usd::Prim,
+    mut order: Vec<tf::Token>,
+    kind: XformOpKind,
+    precision: XformOpPrecision,
+    suffix: Option<&str>,
+    inverse: bool,
+) -> Result<XformOp, SchemaError> {
+    let entry = kind.op_name(suffix, inverse);
+    if order.contains(&entry) {
+        return Err(SchemaError::XformOpExists { op: entry.to_string() });
+    }
+    order.push(entry);
+
+    let name = kind.op_name(suffix, false);
+    let op = XformOp::new(&prim.attribute(name.as_str()), inverse);
+    let write = OpWrite {
+        name,
+        new_type: kind.value_type(precision),
+        value: None,
     };
-    let value = declared.coerce(value)?;
-    prim.attribute_builder(name, declared)
-        .custom(false)
-        .set(value)
-        .build()?;
-    Ok(())
+    author_stack(prim, vec![write], Some(order), None)?;
+    Ok(op)
 }
 
 /// The attribute name of `op`, which may already carry the `xformOp:`
@@ -462,18 +629,12 @@ fn op_attr_name(op: &str) -> String {
     }
 }
 
-/// Append `op` to `xformOpOrder`, de-duplicating re-authored ops.
-fn append_op(prim: &usd::Prim, op: &str) -> Result<()> {
-    prim.append_to_uniform_token_array(super::tokens::XFORM_OP_ORDER, op_attr_name(op))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{XformOpPrecision, XformQuery, XformableExt};
     use crate::SchemaError;
     use crate::geom::XformableSchema;
-    use crate::geom::{Xform, XformOp};
+    use crate::geom::{Xform, XformOp, XformOpKind};
     use openusd::Result;
     use openusd::gf;
     use openusd::sdf;
@@ -975,5 +1136,191 @@ class PivotXform "PivotXform"
             gf::Matrix4d::translation([1.0, 2.0, 3.0])
         );
         Ok(())
+    }
+
+    /// Adding an op declares it at the precision asked for, lists it, and
+    /// authors no value, all as one edit.
+    #[test]
+    fn add_op_declares() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+        let commits = crate::tests::commits(&stage);
+
+        let op = x.add_xform_op(XformOpKind::Translate, XformOpPrecision::Double, None, false)?;
+        assert_eq!(commits.get(), 1);
+        assert_eq!(op.name(), "xformOp:translate");
+        assert_eq!(op.precision()?, Some(XformOpPrecision::Double));
+        assert!(!op.attribute().has_authored_value()?);
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
+        assert_eq!(x.local_transformation(None)?, gf::Matrix4d::IDENTITY);
+        Ok(())
+    }
+
+    /// An entry the stack already lists is refused, and nothing is authored.
+    #[test]
+    fn add_op_twice_errors() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+        x.add_xform_op(XformOpKind::Scale, XformOpPrecision::Float, None, false)?;
+
+        let commits = crate::tests::commits(&stage);
+        let again = x.add_xform_op(XformOpKind::Scale, XformOpPrecision::Float, None, false);
+        assert!(matches!(again, Err(SchemaError::XformOpExists { op }) if op == "xformOp:scale"));
+        assert_eq!(commits.get(), 0);
+
+        // The same kind under a suffix is another op.
+        x.add_xform_op(XformOpKind::Scale, XformOpPrecision::Float, Some("tip"), false)?;
+        assert_eq!(
+            x.xform_op_order()?.expect("authored"),
+            vec!["xformOp:scale", "xformOp:scale:tip"]
+        );
+        Ok(())
+    }
+
+    /// An op the stage already declares keeps its precision.
+    #[test]
+    fn add_op_keeps_declared() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+        stage.create_attribute("/X.xformOp:translate", sdf::ValueTypeName::FLOAT3)?;
+
+        let op = x.add_xform_op(XformOpKind::Translate, XformOpPrecision::Double, None, false)?;
+        assert_eq!(op.precision()?, Some(XformOpPrecision::Float));
+        // The value converts to the declared precision.
+        op.set(gf::vec3d(1.0, 2.0, 3.0))?;
+        assert_eq!(
+            op.attribute().get::<sdf::Value>()?,
+            Some(sdf::Value::Vec3f(gf::vec3f(1.0, 2.0, 3.0)))
+        );
+        Ok(())
+    }
+
+    /// A pivot listed on both sides of a scale, once inverted, scales about
+    /// the pivot, and only the forward op takes a value.
+    #[test]
+    fn add_inverse_op() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+        let pivot = x.add_xform_op(XformOpKind::Translate, XformOpPrecision::Double, Some("pivot"), false)?;
+        let scale = x.add_xform_op(XformOpKind::Scale, XformOpPrecision::Float, None, false)?;
+        let unpivot = x.add_xform_op(XformOpKind::Translate, XformOpPrecision::Double, Some("pivot"), true)?;
+
+        assert_eq!(
+            x.xform_op_order()?.expect("authored"),
+            vec![
+                "xformOp:translate:pivot",
+                "xformOp:scale",
+                "!invert!xformOp:translate:pivot"
+            ]
+        );
+        assert!(unpivot.is_inverse_op() && unpivot.has_suffix("pivot"));
+        assert!(matches!(
+            unpivot.set(gf::vec3d(1.0, 0.0, 0.0)),
+            Err(SchemaError::InverseXformOp { .. })
+        ));
+
+        pivot.set(gf::vec3d(1.0, 0.0, 0.0))?;
+        scale.set(gf::vec3f(2.0, 2.0, 2.0))?;
+        assert_eq!(
+            x.local_transformation(None)?,
+            gf::Matrix4d::translation([-1.0, 0.0, 0.0])
+                * gf::Matrix4d::scale([2.0, 2.0, 2.0])
+                * gf::Matrix4d::translation([1.0, 0.0, 0.0])
+        );
+        Ok(())
+    }
+
+    /// An op is found by its kind, suffix and direction, and only while the
+    /// stack lists that entry.
+    #[test]
+    fn xform_op_lookup() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?;
+        x.add_xform_op(XformOpKind::Translate, XformOpPrecision::Double, Some("pivot"), false)?;
+        x.add_xform_op(XformOpKind::RotateZ, XformOpPrecision::Float, None, true)?;
+
+        let found = |kind, suffix, inverse| Ok::<_, SchemaError>(x.xform_op(kind, suffix, inverse)?.is_some());
+        assert!(found(XformOpKind::Translate, Some("pivot"), false)?);
+        assert!(!found(XformOpKind::Translate, None, false)?);
+        assert!(!found(XformOpKind::Translate, Some("pivot"), true)?);
+        assert!(found(XformOpKind::RotateZ, None, true)?);
+        assert!(!found(XformOpKind::RotateZ, None, false)?);
+
+        let x = x.clear_xform_op_order()?;
+        assert!(x.xform_op(XformOpKind::RotateZ, None, true)?.is_none());
+        assert!(stage.attribute("/X.xformOp:rotateZ")?.is_defined()?);
+        Ok(())
+    }
+
+    /// Setting the reset puts it first, and unsetting it drops it along with
+    /// the entries it was discarding.
+    #[test]
+    fn set_reset_stack() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?
+            .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
+            .set_reset_xform_stack(true)?;
+        assert_eq!(
+            x.xform_op_order()?.expect("authored"),
+            vec!["!resetXformStack!", "xformOp:translate"]
+        );
+
+        let commits = crate::tests::commits(&stage);
+        let x = x.set_reset_xform_stack(true)?;
+        assert_eq!(commits.get(), 0);
+
+        let x = x.set_reset_xform_stack(false)?;
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
+        assert_eq!(commits.get(), 1);
+        let x = x.set_reset_xform_stack(false)?;
+        assert_eq!(commits.get(), 1);
+
+        let x = x
+            .set_xform_op_order(["xformOp:scale", "!resetXformStack!", "xformOp:translate"])?
+            .set_reset_xform_stack(false)?;
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
+        Ok(())
+    }
+
+    /// A stack reduced to one matrix lists only the `transform` op.
+    #[test]
+    fn make_matrix_xform() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?
+            .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
+            .set_scale(gf::vec3f(2.0, 2.0, 2.0))?
+            .set_reset_xform_stack(true)?;
+
+        let op = x.make_matrix_xform()?;
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:transform"]);
+        assert_eq!(op.precision()?, Some(XformOpPrecision::Double));
+        assert!(!x.resets_xform_stack()?);
+
+        let matrix = gf::Matrix4d::translation([4.0, 5.0, 6.0]);
+        op.set(matrix)?;
+        assert_eq!(x.local_transformation(None)?, matrix);
+        // Reducing it again keeps the value the op holds.
+        x.make_matrix_xform()?;
+        assert_eq!(x.local_transformation(None)?, matrix);
+        Ok(())
+    }
+
+    /// Only the types an op is declared as name a precision.
+    #[test]
+    fn precision_from_type() {
+        use sdf::ValueTypeName as T;
+
+        for (type_name, precision) in [
+            (T::MATRIX4D, Some(XformOpPrecision::Double)),
+            (T::QUATF, Some(XformOpPrecision::Float)),
+            (T::HALF3, Some(XformOpPrecision::Half)),
+            (T::TOKEN, None),
+        ] {
+            assert_eq!(
+                XformOpPrecision::from_value_type(&type_name),
+                precision,
+                "{type_name:?}"
+            );
+        }
     }
 }

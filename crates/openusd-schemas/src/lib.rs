@@ -102,6 +102,21 @@ pub enum SchemaError {
         op: String,
     },
 
+    /// An xformOp is added to a stack whose `xformOpOrder` already lists it.
+    #[error("xformOp `{op}` is already in xformOpOrder")]
+    XformOpExists {
+        /// The op's `xformOpOrder` entry.
+        op: String,
+    },
+
+    /// A value is set through an inverse xformOp, which reads the value of
+    /// the op it inverts and holds none of its own.
+    #[error("xformOp `{op}` is an inverse op and takes no value")]
+    InverseXformOp {
+        /// The op's `xformOpOrder` entry.
+        op: String,
+    },
+
     /// A shading connection chain exceeds the resolver's depth bound,
     /// indicating a cycle or a pathologically deep graph.
     #[error("connection chain at {attribute} is deeper than {max} hops")]

@@ -65,7 +65,7 @@ pub enum XformOpKind {
 
 impl XformOpKind {
     /// Every kind, in declaration order.
-    const ALL: [XformOpKind; 19] = [
+    pub(super) const ALL: [XformOpKind; 19] = [
         Self::Translate,
         Self::TranslateX,
         Self::TranslateY,
@@ -160,10 +160,23 @@ impl XformOpKind {
         }
     }
 
+    /// The `xformOpOrder` entry of an op of this kind: `xformOp:<kind>`, then
+    /// `:suffix` where one is given, behind `!invert!` when `inverse` is set
+    /// (C++ `UsdGeomXformOp::GetOpName`). With `inverse` unset it is the op's
+    /// attribute name.
+    pub fn op_name(self, suffix: Option<&str>, inverse: bool) -> tf::Token {
+        let invert = if inverse { TOKEN_INVERT_PREFIX } else { "" };
+        let kind = self.as_token();
+        tf::Token::from(match suffix.filter(|suffix| !suffix.is_empty()) {
+            Some(suffix) => format!("{invert}{NS_XFORM_OP}{kind}:{suffix}"),
+            None => format!("{invert}{NS_XFORM_OP}{kind}"),
+        })
+    }
+
     /// The matrix an op of this kind applies for `value`, inverted when
     /// `inverse` is set, on the terms [`XformOp::op_transform`] states. `None`
     /// when the inverse of a singular `transform` is asked for.
-    fn matrix(self, value: sdf::Value, inverse: bool) -> Option<gf::Matrix4d> {
+    pub(super) fn matrix(self, value: sdf::Value, inverse: bool) -> Option<gf::Matrix4d> {
         let sign = if inverse { -1.0 } else { 1.0 };
         // C++ negates the value of an inverted `scaleX` / `scaleY` / `scaleZ`
         // as it does a translate's. The reciprocal is that op's inverse, and
@@ -289,6 +302,52 @@ impl XformOp {
     /// `true` when the stack applies the op inverted (C++ `IsInverseOp`).
     pub fn is_inverse_op(&self) -> bool {
         self.inverse
+    }
+
+    /// `true` when the op's name ends in `suffix` (C++ `HasSuffix`).
+    pub fn has_suffix(&self, suffix: &str) -> bool {
+        self.name().ends_with(suffix)
+    }
+
+    /// The precision the op's value is declared at (C++ `GetPrecision`), or
+    /// `None` when its attribute has a type no op holds.
+    pub fn precision(&self) -> openusd::Result<Option<XformOpPrecision>> {
+        Ok(self
+            .attribute()
+            .type_name()?
+            .and_then(|type_name| XformOpPrecision::from_value_type(&type_name)))
+    }
+
+    /// Author the op's default value (C++ `Set`), on the terms
+    /// [`set_at`](Self::set_at) states.
+    pub fn set(&self, value: impl Into<sdf::Value>) -> Result<(), SchemaError> {
+        self.set_at(value, None)
+    }
+
+    /// Author the op's value at `time`, where `None` is the default time
+    /// (C++ `Set`).
+    ///
+    /// The value is converted to the type the op is declared at, so a
+    /// `float3` authors into a `double3` op. An inverse op is
+    /// [`SchemaError::InverseXformOp`]: its value is the one the op it
+    /// inverts holds.
+    pub fn set_at(
+        &self,
+        value: impl Into<sdf::Value>,
+        time: impl Into<Option<usd::TimeCode>>,
+    ) -> Result<(), SchemaError> {
+        if self.inverse {
+            return Err(SchemaError::InverseXformOp {
+                op: self.op_name().to_string(),
+            });
+        }
+        let attr = self.attribute();
+        let value = match super::declared_type(attr)? {
+            Some(declared) => declared.coerce(value.into())?,
+            None => value.into(),
+        };
+        attr.clone().set_at(value, time).map_err(openusd::Error::from)?;
+        Ok(())
     }
 
     /// The op's matrix at `time`, where `None` is the default time (C++
