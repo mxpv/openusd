@@ -8,7 +8,7 @@ use super::{Mat4d, Range3d, Vec3d};
 /// The matrix is carried beside the box so that the box stays tight through
 /// a hierarchy: an axis-aligned box that is transformed and re-aligned at
 /// each level grows at each one.
-/// [`compute_aligned_range`](Self::compute_aligned_range) projects into world
+/// [`aligned_range`](Self::aligned_range) projects into world
 /// space once, when the answer is needed.
 ///
 /// Two boxes are equal when their ranges and matrices are, whatever
@@ -22,7 +22,7 @@ use super::{Mat4d, Range3d, Vec3d};
 /// let mut bbox = gf::BBox3d::new(unit, gf::Mat4d::scale([2.0, 2.0, 2.0]));
 /// bbox.transform(gf::Mat4d::translation([10.0, 0.0, 0.0]));
 ///
-/// let aligned = bbox.compute_aligned_range();
+/// let aligned = bbox.aligned_range();
 /// assert_eq!(aligned.min(), gf::vec3d(10.0, 0.0, 0.0));
 /// assert_eq!(aligned.max(), gf::vec3d(12.0, 2.0, 2.0));
 /// assert_eq!(bbox.volume(), 8.0);
@@ -106,7 +106,7 @@ impl BBox3d {
 
     /// The axis-aligned range holding the box in world space (C++
     /// `ComputeAlignedRange`), empty for an empty range.
-    pub fn compute_aligned_range(&self) -> Range3d {
+    pub fn aligned_range(&self) -> Range3d {
         aligned_range(self.range, self.matrix)
     }
 
@@ -123,7 +123,7 @@ impl BBox3d {
             (true, _) => *b,
             (_, true) => *a,
             _ => match (a.inverse, b.inverse) {
-                (None, None) => BBox3d::from(a.compute_aligned_range().union(b.compute_aligned_range())),
+                (None, None) => BBox3d::from(a.aligned_range().union(b.aligned_range())),
                 (None, Some(into_b)) => b.extended_by(a, into_b),
                 (Some(into_a), None) => a.extended_by(b, into_a),
                 (Some(into_a), Some(into_b)) => {
@@ -146,7 +146,7 @@ impl BBox3d {
     /// The center of the box in world space (C++ `ComputeCentroid`): the
     /// image of the range's [midpoint](Range3d::midpoint), which means
     /// nothing for an empty range.
-    pub fn compute_centroid(&self) -> Vec3d {
+    pub fn centroid(&self) -> Vec3d {
         self.matrix.transform(self.range.midpoint())
     }
 
@@ -242,7 +242,7 @@ mod tests {
         let bbox = BBox3d::default();
         assert!(bbox.range().is_empty());
         assert_eq!(bbox.matrix(), Mat4d::IDENTITY);
-        assert!(bbox.compute_aligned_range().is_empty());
+        assert!(bbox.aligned_range().is_empty());
         assert_eq!(bbox.volume(), 0.0);
         assert!(!bbox.has_zero_area_primitives());
     }
@@ -287,25 +287,22 @@ mod tests {
     fn aligned_range_projects() {
         let cube = range([-1.0; 3], [1.0; 3]);
         let scaled = BBox3d::new(cube, Mat4d::scale([3.0; 3]));
-        assert_eq!(scaled.compute_aligned_range().size(), gf::vec3d(6.0, 6.0, 6.0));
+        assert_eq!(scaled.aligned_range().size(), gf::vec3d(6.0, 6.0, 6.0));
 
         // A cube turned 30 degrees about X widens along the other two axes.
         let angle = 30f64.to_radians();
         let width = 2.0 * (angle.cos() + angle.sin());
         let turned = BBox3d::new(cube, rotation(gf::Vec3d::X_AXIS, 30.0));
-        let size = turned.compute_aligned_range().size();
+        let size = turned.aligned_range().size();
         assert!((size - gf::vec3d(2.0, width, width)).length() < 1e-6, "{size:?}");
 
         // An aligned range is its own aligned range.
-        let aligned = turned.compute_aligned_range();
-        assert_eq!(BBox3d::from(aligned).compute_aligned_range(), aligned);
+        let aligned = turned.aligned_range();
+        assert_eq!(BBox3d::from(aligned).aligned_range(), aligned);
 
         // A mirror swaps which corner is the minimum.
         let mirrored = BBox3d::new(Range3d::UNIT_CUBE, Mat4d::scale([-2.0, 1.0, 1.0]));
-        assert_eq!(
-            mirrored.compute_aligned_range(),
-            range([-2.0, 0.0, 0.0], [0.0, 1.0, 1.0])
-        );
+        assert_eq!(mirrored.aligned_range(), range([-2.0, 0.0, 0.0], [0.0, 1.0, 1.0]));
     }
 
     /// A combined box holds both boxes and takes the flag from either. These
@@ -317,9 +314,9 @@ mod tests {
         let mut b2 = BBox3d::new(range([1.0; 3], [2.0; 3]), rotation(gf::Vec3d::Y_AXIS, 60.0));
         assert_eq!(BBox3d::combine(&b1, &b2), BBox3d::combine(&b2, &b1));
 
-        let combined = BBox3d::combine(&b1, &b2).compute_aligned_range();
+        let combined = BBox3d::combine(&b1, &b2).aligned_range();
         for part in [b1, b2] {
-            let part = part.compute_aligned_range();
+            let part = part.aligned_range();
             for corner in part.corners() {
                 assert!(
                     combined.distance_squared(corner) < 1e-18,
@@ -354,7 +351,7 @@ mod tests {
 
         for combined in [BBox3d::combine(&flattened, &solid), BBox3d::combine(&solid, &flattened)] {
             assert_eq!(combined.matrix(), solid.matrix());
-            assert_eq!(combined.compute_aligned_range(), range([0.0; 3], [3.0, 2.0, 3.0]));
+            assert_eq!(combined.aligned_range(), range([0.0; 3], [3.0, 2.0, 3.0]));
         }
 
         let other = BBox3d::new(range([-1.0; 3], [0.0; 3]), flat);
@@ -365,13 +362,10 @@ mod tests {
 
     #[test]
     fn centroid() {
-        assert_eq!(
-            BBox3d::from(Range3d::UNIT_CUBE).compute_centroid(),
-            gf::vec3d(0.5, 0.5, 0.5)
-        );
+        assert_eq!(BBox3d::from(Range3d::UNIT_CUBE).centroid(), gf::vec3d(0.5, 0.5, 0.5));
         let turned = BBox3d::new(range([-1.0; 3], [1.0; 3]), rotation(gf::Vec3d::Y_AXIS, 60.0));
-        assert_eq!(turned.compute_centroid(), gf::vec3d(0.0, 0.0, 0.0));
+        assert_eq!(turned.centroid(), gf::vec3d(0.0, 0.0, 0.0));
         let moved = BBox3d::new(Range3d::UNIT_CUBE, Mat4d::translation([10.0, 0.0, 0.0]));
-        assert_eq!(moved.compute_centroid(), gf::vec3d(10.5, 0.5, 0.5));
+        assert_eq!(moved.centroid(), gf::vec3d(10.5, 0.5, 0.5));
     }
 }

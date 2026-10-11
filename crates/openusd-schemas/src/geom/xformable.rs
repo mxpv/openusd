@@ -381,7 +381,7 @@ impl Xformable {
     /// Whether an attribute named `name` can change a prim's local
     /// transform: `xformOpOrder`, or one in the namespace of the ops (C++
     /// `IsTransformationAffectedByAttrNamed`).
-    pub fn is_transformation_affected_by_attr_named(name: &str) -> bool {
+    pub fn affects_transform(name: &str) -> bool {
         name == tokens::XFORM_OP_ORDER || XformOp::is_xform_op(name)
     }
 }
@@ -834,10 +834,10 @@ mod tests {
     #[test]
     fn transform_attr_names() {
         for name in ["xformOpOrder", "xformOp:translate", "xformOp:rotateXYZ:pivot"] {
-            assert!(Xformable::is_transformation_affected_by_attr_named(name), "{name}");
+            assert!(Xformable::affects_transform(name), "{name}");
         }
         for name in ["points", "!invert!xformOp:translate", "xformOpOrders"] {
-            assert!(!Xformable::is_transformation_affected_by_attr_named(name), "{name}");
+            assert!(!Xformable::affects_transform(name), "{name}");
         }
     }
 

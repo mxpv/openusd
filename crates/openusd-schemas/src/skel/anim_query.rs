@@ -30,7 +30,7 @@ use super::{Animation, AnimationSchema};
 
 /// Decomposed joint-local transforms at a stage time: one entry per
 /// joint, holding translation, rotation, and scale. Returned by
-/// [`SkelAnimQuery::compute_joint_local_transform_components`].
+/// [`SkelAnimQuery::joint_local_transform_components`].
 pub type JointTransformComponents = (Vec<gf::Vec3f>, Vec<gf::Quatf>, Vec<gf::Vec3f>);
 
 /// Pre-resolved description of one `Animation` prim: the view itself,
@@ -110,10 +110,7 @@ impl SkelAnimQuery {
     /// vector has `joints.len()` entries. Components fall back to
     /// the spec's identity values when not authored: zero translation,
     /// identity quaternion `(w=1, x=y=z=0)`, unit scale.
-    pub fn compute_joint_local_transform_components(
-        &self,
-        time: impl Into<TimeCode>,
-    ) -> Result<JointTransformComponents> {
+    pub fn joint_local_transform_components(&self, time: impl Into<TimeCode>) -> Result<JointTransformComponents> {
         let time = time.into();
         let n = self.joints.len();
         let translations = array_at(&self.anim.translations_attr(), time, n, gf::Vec3f::default())?;
@@ -125,10 +122,10 @@ impl SkelAnimQuery {
     /// Returns the joint-local 4×4 transform per joint at `time`,
     /// composed `scale · rotation · translation` in USD's row-major
     /// convention. Callers feeding the result into
-    /// [`super::SkeletonResolver::compute_skinning_transforms_from_local`]
+    /// [`super::SkeletonResolver::skinning_transforms_from_local`]
     /// get full skinning transforms out the other side.
-    pub fn compute_joint_local_transforms(&self, time: impl Into<TimeCode>) -> Result<Vec<gf::Mat4d>> {
-        let (translations, rotations, scales) = self.compute_joint_local_transform_components(time.into())?;
+    pub fn joint_local_transforms(&self, time: impl Into<TimeCode>) -> Result<Vec<gf::Mat4d>> {
+        let (translations, rotations, scales) = self.joint_local_transform_components(time.into())?;
         Ok(translations
             .iter()
             .zip(rotations.iter())
@@ -165,7 +162,7 @@ impl SkelAnimQuery {
     /// Blend-shape weight per entry in
     /// [`blend_shape_order`](Self::blend_shape_order) at `time`. Unauthored
     /// weights default to zero (no contribution).
-    pub fn compute_blend_shape_weights(&self, time: impl Into<TimeCode>) -> Result<Vec<f32>> {
+    pub fn blend_shape_weights(&self, time: impl Into<TimeCode>) -> Result<Vec<f32>> {
         array_at(
             &self.anim.blend_shape_weights_attr(),
             time.into(),

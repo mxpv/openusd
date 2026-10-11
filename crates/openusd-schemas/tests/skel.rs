@@ -270,7 +270,7 @@ fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(
     ];
     let identity = Mat4d::IDENTITY;
     let skel_xforms = vec![identity; 3];
-    let out = resolver.compute_skinned_points(&pts, &skel_xforms);
+    let out = resolver.skinned_points(&pts, &skel_xforms);
     // Identity geom-bind + identity joints + weight 1.0 = no movement.
     for (i, p) in out.iter().enumerate() {
         let want = pts[i];
@@ -341,7 +341,7 @@ fn skel_anim_query_time_samples() -> Result<()> {
 fn skel_anim_query_components_at_start_frame() -> Result<()> {
     let stage = open()?;
     let q = anim_query(&stage)?;
-    let (t, r, s) = q.compute_joint_local_transform_components(0.0)?;
+    let (t, r, s) = q.joint_local_transform_components(0.0)?;
     // Authored at t=0: hip is at (0, 1, 0), all rotations identity, scales
     // unauthored so they default to unit.
     assert_eq!(t[1], Vec3f { x: 0.0, y: 1.0, z: 0.0 });
@@ -354,7 +354,7 @@ fn skel_anim_query_components_at_start_frame() -> Result<()> {
 fn skel_anim_query_components_lerp_at_midframe() -> Result<()> {
     let stage = open()?;
     let q = anim_query(&stage)?;
-    let (t, r, _) = q.compute_joint_local_transform_components(5.0)?;
+    let (t, r, _) = q.joint_local_transform_components(5.0)?;
     // Hip translation lerps from (0,1,0) at t=0 to (0,1.5,0) at t=10.
     assert!((t[1].y - 1.25).abs() < 1e-5, "hip y at t=5: got {}", t[1].y);
     // Hip rotation slerps from identity to ~45° about +Z; at t=5 ~22.5°.
@@ -369,10 +369,10 @@ fn skel_anim_query_components_lerp_at_midframe() -> Result<()> {
 fn skel_anim_query_blend_shape_weights_lerp() -> Result<()> {
     let stage = open()?;
     let q = anim_query(&stage)?;
-    assert_eq!(q.compute_blend_shape_weights(0.0)?, vec![0.0]);
-    let w_mid = q.compute_blend_shape_weights(5.0)?;
+    assert_eq!(q.blend_shape_weights(0.0)?, vec![0.0]);
+    let w_mid = q.blend_shape_weights(5.0)?;
     assert!((w_mid[0] - 0.5).abs() < 1e-5, "midpoint weight: {}", w_mid[0]);
-    assert_eq!(q.compute_blend_shape_weights(10.0)?, vec![1.0]);
+    assert_eq!(q.blend_shape_weights(10.0)?, vec![1.0]);
     Ok(())
 }
 
@@ -383,13 +383,13 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
     let resolver = SkeletonResolver::from_skeleton(&skl)?;
 
-    let locals = q.compute_joint_local_transforms(0.0)?;
+    let locals = q.joint_local_transforms(0.0)?;
     assert_eq!(locals.len(), 3);
     // Hip's local at t=0 carries the (0,1,0) translation (row-major [12..15]).
     assert_eq!(locals[1].0[12..15], [0.0, 1.0, 0.0]);
 
     let identity_world = Mat4d::IDENTITY;
-    let skinning = resolver.compute_skinning_transforms_from_local(&locals, identity_world);
+    let skinning = resolver.skinning_transforms_from_local(&locals, identity_world);
     assert_eq!(skinning.len(), 3);
     Ok(())
 }

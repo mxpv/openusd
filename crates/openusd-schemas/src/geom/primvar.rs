@@ -130,7 +130,7 @@ impl Primvar {
 
     /// Whether the primvar's name has namespaces below `primvars:` (C++
     /// `NameContainsNamespaces`), as `primvars:skel:jointWeights` has.
-    pub fn name_contains_namespaces(&self) -> bool {
+    pub fn is_namespaced(&self) -> bool {
         self.primvar_name().contains(':')
     }
 
@@ -625,8 +625,8 @@ mod tests {
         let weights = mesh()?.create_primvar("skel:jointWeights", "float[]")?;
         assert_eq!(weights.attribute().name(), "primvars:skel:jointWeights");
         assert_eq!(weights.primvar_name(), "skel:jointWeights");
-        assert!(weights.name_contains_namespaces());
-        assert!(!mesh()?.create_primvar("st", "float[]")?.name_contains_namespaces());
+        assert!(weights.is_namespaced());
+        assert!(!mesh()?.create_primvar("st", "float[]")?.is_namespaced());
         Ok(())
     }
 

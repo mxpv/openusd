@@ -45,11 +45,11 @@ impl BasisCurves {
     ///
     /// The first fit wins, in the order constant, uniform, varying, vertex.
     /// The sizes `n` is measured against are the ones
-    /// [`compute_uniform_data_size`](Self::compute_uniform_data_size),
-    /// [`compute_varying_data_size`](Self::compute_varying_data_size) and
-    /// [`compute_vertex_data_size`](Self::compute_vertex_data_size) answer,
+    /// [`uniform_data_size`](Self::uniform_data_size),
+    /// [`varying_data_size`](Self::varying_data_size) and
+    /// [`vertex_data_size`](Self::vertex_data_size) answer,
     /// which is what C++ reports through its `ComputeInterpolationInfo`.
-    pub fn compute_interpolation_for_size(
+    pub fn interpolation_for_size(
         &self,
         n: usize,
         time: impl Into<Option<usd::TimeCode>>,
@@ -62,15 +62,15 @@ impl BasisCurves {
         if n == counts.len() {
             return Ok(Some(Interpolation::Uniform));
         }
-        if n == self.varying_data_size(&counts, time)? {
+        if n == self.varying_data_size_of(&counts, time)? {
             return Ok(Some(Interpolation::Varying));
         }
-        Ok((n == vertex_data_size(&counts)).then_some(Interpolation::Vertex))
+        Ok((n == vertex_data_size_of(&counts)).then_some(Interpolation::Vertex))
     }
 
     /// How many values a `uniform` primvar holds at `time`, where `None` is
     /// the default time: one for each curve (C++ `ComputeUniformDataSize`).
-    pub fn compute_uniform_data_size(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<usize> {
+    pub fn uniform_data_size(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<usize> {
         self.curve_count(time)
     }
 
@@ -85,18 +85,18 @@ impl BasisCurves {
     /// as a single segment, so it takes two. The size is zero for a curve
     /// type that is neither `linear` nor `cubic`, and for cubic curves of any
     /// other basis. A negative vertex count reads as zero.
-    pub fn compute_varying_data_size(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<usize> {
+    pub fn varying_data_size(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<usize> {
         let time = time.into();
         let counts = self.curve_vertex_counts_at(time)?.unwrap_or_default();
-        self.varying_data_size(&counts, time)
+        self.varying_data_size_of(&counts, time)
     }
 
     /// How many values a `vertex` primvar holds at `time`, where `None` is
     /// the default time: one for each curve vertex (C++
     /// `ComputeVertexDataSize`). A negative vertex count reads as zero.
-    pub fn compute_vertex_data_size(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<usize> {
+    pub fn vertex_data_size(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<usize> {
         let counts = self.curve_vertex_counts_at(time)?.unwrap_or_default();
-        Ok(vertex_data_size(&counts))
+        Ok(vertex_data_size_of(&counts))
     }
 
     /// How many segments each curve has at `time`, where `None` is the
@@ -116,7 +116,7 @@ impl BasisCurves {
     /// `curveVertexCounts`, `type`, `wrap` or `basis` reads no value, as on a
     /// prim that is not a `BasisCurves`, and for any combination outside the
     /// table.
-    pub fn compute_segment_counts(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Vec<i32>> {
+    pub fn segment_counts(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Vec<i32>> {
         let time = time.into();
         match self.curve_vertex_counts_at(time)? {
             Some(counts) => self.segment_counts_of(&counts, time),
@@ -126,7 +126,7 @@ impl BasisCurves {
 
     /// The segment counts of curves with the vertex `counts`, under the
     /// `type`, `wrap` and `basis` read at `time`: what
-    /// [`compute_segment_counts`](Self::compute_segment_counts) answers for
+    /// [`segment_counts`](Self::segment_counts) answers for
     /// the `curveVertexCounts` it reads.
     pub(super) fn segment_counts_of(&self, counts: &[i32], time: Option<usd::TimeCode>) -> Result<Vec<i32>> {
         use CurveBasis::{Bezier, Bspline, CatmullRom};
@@ -153,7 +153,7 @@ impl BasisCurves {
     /// The `varying` data size of curves with the vertex `counts`, under the
     /// `type`, `wrap` and `basis` read at `time` (C++
     /// `_ComputeVaryingDataSize`).
-    fn varying_data_size(&self, counts: &[i32], time: Option<usd::TimeCode>) -> Result<usize> {
+    fn varying_data_size_of(&self, counts: &[i32], time: Option<usd::TimeCode>) -> Result<usize> {
         use CurveBasis::{Bezier, Bspline, CatmullRom};
         use CurveType::{Cubic, Linear};
 
@@ -273,7 +273,7 @@ const BEZIER_VSTEP: i32 = 3;
 
 /// The `vertex` data size of curves with the vertex `counts` (C++
 /// `_ComputeVertexDataSize`).
-fn vertex_data_size(counts: &[i32]) -> usize {
+fn vertex_data_size_of(counts: &[i32]) -> usize {
     counts.iter().map(|&n| non_negative(n)).sum()
 }
 
@@ -321,9 +321,9 @@ mod tests {
         c.create_type_attr()?.set(CurveType::Cubic)?;
         c.create_curve_vertex_counts_attr()?.set(vec![5, 5])?;
 
-        assert_eq!(c.compute_uniform_data_size(None)?, 2);
-        assert_eq!(c.compute_varying_data_size(None)?, 4);
-        assert_eq!(c.compute_vertex_data_size(None)?, 10);
+        assert_eq!(c.uniform_data_size(None)?, 2);
+        assert_eq!(c.varying_data_size(None)?, 4);
+        assert_eq!(c.vertex_data_size(None)?, 10);
         for (n, expected) in [
             (1, Some(Interpolation::Constant)),
             (2, Some(Interpolation::Uniform)),
@@ -332,7 +332,7 @@ mod tests {
             (100, None),
             (0, None),
         ] {
-            assert_eq!(c.compute_interpolation_for_size(n, None)?, expected, "{n}");
+            assert_eq!(c.interpolation_for_size(n, None)?, expected, "{n}");
         }
         Ok(())
     }
@@ -363,7 +363,7 @@ mod tests {
         {
             let c = curves(&stage, &format!("/C{index}"), curve_type, wrap, basis, counts)?;
             assert_eq!(
-                c.compute_varying_data_size(None)?,
+                c.varying_data_size(None)?,
                 expected,
                 "{curve_type:?} {wrap:?} {basis:?} {counts:?}"
             );
@@ -433,7 +433,7 @@ mod tests {
         {
             let c = curves(&stage, &format!("/C{index}"), curve_type, wrap, basis, counts)?;
             assert_eq!(
-                c.compute_segment_counts(usd::TimeCode::EARLIEST)?,
+                c.segment_counts(usd::TimeCode::EARLIEST)?,
                 expected,
                 "{curve_type:?} {wrap:?} {basis:?}"
             );
@@ -454,7 +454,7 @@ mod tests {
             CurveBasis::Hermite,
             &[4, 4],
         )?;
-        assert!(hermite.compute_segment_counts(None)?.is_empty());
+        assert!(hermite.segment_counts(None)?.is_empty());
 
         let bogus = curves(
             &stage,
@@ -465,16 +465,16 @@ mod tests {
             &[3],
         )?;
         bogus.wrap_attr().set(tf::Token::from("bogus"))?;
-        assert!(bogus.compute_segment_counts(None)?.is_empty());
+        assert!(bogus.segment_counts(None)?.is_empty());
 
         let unset = BasisCurves::define(&stage, "/Unset")?;
-        assert!(unset.compute_segment_counts(None)?.is_empty());
+        assert!(unset.segment_counts(None)?.is_empty());
 
         // A mesh declares no curve topology, so there is nothing to read.
         let mesh = Mesh::define(&stage, "/Mesh")?;
         let as_curves = BasisCurves::from_prim_unchecked(mesh.prim().clone());
         as_curves.create_curve_vertex_counts_attr()?.set(vec![3])?;
-        assert!(as_curves.compute_segment_counts(None)?.is_empty());
+        assert!(as_curves.segment_counts(None)?.is_empty());
         Ok(())
     }
 

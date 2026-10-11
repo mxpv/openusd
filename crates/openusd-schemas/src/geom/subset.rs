@@ -64,7 +64,7 @@ impl Subset {
     /// authored on `geom` as [`set_family_type`](Self::set_family_type) does.
     /// The properties, the family type included, are one edit, which follows
     /// the edit that defines a new subset prim.
-    pub fn create_geom_subset(
+    pub fn create(
         geom: &impl ImageableSchema,
         subset_name: &str,
         element_type: ElementType,
@@ -77,13 +77,13 @@ impl Subset {
     }
 
     /// Define a new subset under `geom` and author it as
-    /// [`create_geom_subset`](Self::create_geom_subset) does (C++
+    /// [`create`](Self::create) does (C++
     /// `CreateUniqueGeomSubset`).
     ///
     /// The subset takes `subset_name` where `geom` has no child of that name,
     /// and otherwise the first of `<subset_name>_1`, `<subset_name>_2`, … that
     /// is free.
-    pub fn create_unique_geom_subset(
+    pub fn create_unique(
         geom: &impl ImageableSchema,
         subset_name: &str,
         element_type: ElementType,
@@ -109,17 +109,17 @@ impl Subset {
     /// and itself a `def` or a `class`, whatever specifier `geom` and its
     /// ancestors have. The children of an instance are instance proxies and
     /// count as none; the subsets are those of its prototype.
-    pub fn all_geom_subsets(geom: &impl ImageableSchema) -> Result<Vec<Subset>> {
+    pub fn all(geom: &impl ImageableSchema) -> Result<Vec<Subset>> {
         subsets_of(geom.prim())
     }
 
     /// The subsets of `geom` with the element type and the family name given,
     /// where `None` admits any (C++ `GetGeomSubsets`).
     ///
-    /// The subsets are the ones [`all_geom_subsets`](Self::all_geom_subsets)
+    /// The subsets are the ones [`all`](Self::all)
     /// lists. A `family_name` of `Some("")` selects the subsets that name no
     /// family.
-    pub fn geom_subsets(
+    pub fn in_family(
         geom: &impl ImageableSchema,
         element_type: Option<ElementType>,
         family_name: Option<&str>,
@@ -130,7 +130,7 @@ impl Subset {
     /// The names of the families the subsets of `geom` belong to (C++
     /// `GetAllGeomSubsetFamilyNames`). A subset that names no family
     /// contributes none.
-    pub fn all_geom_subset_family_names(geom: &impl ImageableSchema) -> Result<BTreeSet<tf::Token>> {
+    pub fn family_names(geom: &impl ImageableSchema) -> Result<BTreeSet<tf::Token>> {
         let mut names = BTreeSet::new();
         for subset in subsets_of(geom.prim())? {
             if let Some(name) = subset.family_name()?
@@ -1016,7 +1016,7 @@ mod tests {
                 ),
             ],
         )?;
-        assert_eq!(Subset::geom_subsets(&mesh, Some(Face), Some("materialBind"))?.len(), 3);
+        assert_eq!(Subset::in_family(&mesh, Some(Face), Some("materialBind"))?.len(), 3);
         assert_eq!(Subset::family_type(&mesh, "materialBind")?, Partition);
         assert_valid(&mesh, Face, "materialBind")?;
 
@@ -1366,7 +1366,7 @@ mod tests {
             ],
         )?;
         assert_eq!(
-            Subset::geom_subsets(&curves, Some(Segment), Some("physicsAttachment"))?.len(),
+            Subset::in_family(&curves, Some(Segment), Some("physicsAttachment"))?.len(),
             3
         );
         assert_eq!(Subset::family_type(&curves, "physicsAttachment")?, Partition);
@@ -1624,7 +1624,7 @@ mod tests {
         let mesh = simple_edges(&stage, "/SimpleEdges")?;
         let unassigned = || Subset::unassigned_indices(&mesh, Edge, "testEdgeFamily", EARLIEST);
 
-        let subset = Subset::create_geom_subset(&mesh, "testEdge", Edge, &[], "testEdgeFamily", None)?;
+        let subset = Subset::create(&mesh, "testEdge", Edge, &[], "testEdgeFamily", None)?;
         assert_eq!(subset.indices()?, Some(vec![]));
         assert_eq!(unassigned()?, [0, 1, 0, 3, 0, 4, 1, 2, 1, 5, 2, 3, 4, 5]);
 
@@ -1638,7 +1638,7 @@ mod tests {
 
         // Invalid indices assign nothing.
         let invalid = [0, 1, 0, 3, 0, 4, 1, 2, 2, 3, 4, 5, 7, -1];
-        let again = Subset::create_geom_subset(&mesh, "testEdge", Edge, &invalid, "testEdgeFamily", None)?;
+        let again = Subset::create(&mesh, "testEdge", Edge, &invalid, "testEdgeFamily", None)?;
         assert_eq!(again.path(), subset.path());
         assert_eq!(again.indices()?.as_deref(), Some(&invalid[..]));
         assert_eq!(unassigned()?, [1, 5]);
@@ -1658,7 +1658,7 @@ mod tests {
         curves.create_curve_vertex_counts_attr()?.set(vec![3, 2])?;
         let unassigned = || Subset::unassigned_indices(&curves, Segment, "testSegmentFamily", EARLIEST);
 
-        let subset = Subset::create_geom_subset(&curves, "testSegment", Segment, &[], "testSegmentFamily", None)?;
+        let subset = Subset::create(&curves, "testSegment", Segment, &[], "testSegmentFamily", None)?;
         assert_eq!(unassigned()?, [0, 0, 0, 1, 0, 2, 1, 0, 1, 1]);
 
         subset.indices_attr().set(vec![0, 0, 1, 0])?;
@@ -1668,7 +1668,7 @@ mod tests {
         assert!(unassigned()?.is_empty());
 
         // Invalid indices assign nothing.
-        Subset::create_geom_subset(
+        Subset::create(
             &curves,
             "testSegment",
             Segment,
@@ -1688,11 +1688,11 @@ mod tests {
         let stage = crate::tests::stage("anon.usda")?;
         let mesh = grid(&stage, "/Sphere", 4)?;
         let unassigned = |name: &str| Subset::unassigned_indices(&mesh, Face, name, EARLIEST);
-        let in_family = || Subset::geom_subsets(&mesh, Some(Face), Some("testFamily"));
+        let in_family = || Subset::in_family(&mesh, Some(Face), Some("testFamily"));
 
         // A new subset is its definition and then its properties.
         let commits = crate::tests::commits(&stage);
-        let subset = Subset::create_geom_subset(&mesh, "testSubset", Face, &[], "", None)?;
+        let subset = Subset::create(&mesh, "testSubset", Face, &[], "", None)?;
         assert_eq!(commits.get(), 2);
         assert_eq!(subset.element_type()?, Some(Face));
         assert_eq!(subset.family_name()?.as_deref(), Some(""));
@@ -1711,7 +1711,7 @@ mod tests {
         // and the family type goes in the same edit.
         let commits = crate::tests::commits(&stage);
         let partition = Some(FamilyType::Partition);
-        let same = Subset::create_geom_subset(&mesh, "testSubset", Face, &[0, 1, 2], "testFamily", partition)?;
+        let same = Subset::create(&mesh, "testSubset", Face, &[0, 1, 2], "testFamily", partition)?;
         assert_eq!(commits.get(), 1);
         assert_eq!(same.path(), subset.path());
         assert_eq!(in_family()?.len(), 1);
@@ -1723,24 +1723,23 @@ mod tests {
         // A unique subset is always a new one, and indices past the faces
         // leave nothing unassigned.
         let beyond: Vec<i32> = (3..20).collect();
-        let another = Subset::create_unique_geom_subset(&mesh, "testSubset", Face, &beyond, "testFamily", partition)?;
+        let another = Subset::create_unique(&mesh, "testSubset", Face, &beyond, "testFamily", partition)?;
         assert_eq!(another.path().name(), Some("testSubset_1"));
         assert_eq!(another.indices()?, Some(beyond));
         assert!(unassigned("testFamily")?.is_empty());
         assert_eq!(in_family()?.len(), 2);
 
-        Subset::create_geom_subset(&mesh, "testSubset_1", Face, &rest, "testFamily", partition)?;
+        Subset::create(&mesh, "testSubset_1", Face, &rest, "testFamily", partition)?;
         assert_eq!(in_family()?.len(), 2);
         assert_valid(&mesh, Face, "testFamily")?;
-        assert_eq!(Subset::all_geom_subsets(&mesh)?.len(), 2);
+        assert_eq!(Subset::all(&mesh)?.len(), 2);
 
         // Negative indices assign nothing.
-        let invalid =
-            Subset::create_unique_geom_subset(&mesh, "testSubset", Face, &[-3, -2, 0, 1, 2], "testInvalid", partition)?;
+        let invalid = Subset::create_unique(&mesh, "testSubset", Face, &[-3, -2, 0, 1, 2], "testInvalid", partition)?;
         assert_eq!(invalid.path().name(), Some("testSubset_2"));
         assert_eq!(unassigned("testInvalid")?, (3..16).collect::<Vec<_>>());
 
-        let names = Subset::all_geom_subset_family_names(&mesh)?;
+        let names = Subset::family_names(&mesh)?;
         assert_eq!(
             names.iter().map(|name| name.as_str()).collect::<Vec<_>>(),
             ["testFamily", "testInvalid"]
@@ -1768,15 +1767,15 @@ mod tests {
             Some(FamilyType::Partition),
             &[(Some(&[0]), &[]), (Some(&[1, 2]), &[]), (Some(&[3]), &[])],
         )?;
-        assert_eq!(Subset::geom_subsets(&mesh, Some(Face), Some("materialBind"))?.len(), 3);
+        assert_eq!(Subset::in_family(&mesh, Some(Face), Some("materialBind"))?.len(), 3);
         assert_eq!(Subset::family_type(&mesh, "materialBind")?, FamilyType::Partition);
         assert_valid(&mesh, Face, "materialBind")?;
 
         // Neither filter admits the family under another element type or
         // another name.
-        assert!(Subset::geom_subsets(&mesh, Some(ElementType::Point), None)?.is_empty());
-        assert!(Subset::geom_subsets(&mesh, None, Some("other"))?.is_empty());
-        assert!(Subset::geom_subsets(&mesh, None, Some(""))?.is_empty());
+        assert!(Subset::in_family(&mesh, Some(ElementType::Point), None)?.is_empty());
+        assert!(Subset::in_family(&mesh, None, Some("other"))?.is_empty());
+        assert!(Subset::in_family(&mesh, None, Some(""))?.is_empty());
 
         stage
             .override_prim("/Sphere/Prototypes/pSphere1/undefined")?
@@ -1784,7 +1783,7 @@ mod tests {
         stage
             .prim("/Sphere/Prototypes/pSphere1/materialBind_0")?
             .set_active(false)?;
-        assert_eq!(Subset::all_geom_subsets(&mesh)?.len(), 2);
+        assert_eq!(Subset::all(&mesh)?.len(), 2);
         Ok(())
     }
 
@@ -1826,11 +1825,11 @@ mod tests {
         mesh.create_points_attr()?.set(vec![gf::vec3f(0.0, 0.0, 0.0); 6])?;
         mesh.create_face_vertex_counts_attr()?.set(vec![3])?;
         mesh.create_face_vertex_indices_attr()?.set(vec![3, 4, 5])?;
-        Subset::create_geom_subset(&mesh, "edge", ElementType::Edge, &[3, 4], "fam", None)?;
+        Subset::create(&mesh, "edge", ElementType::Edge, &[3, 4], "fam", None)?;
         assert_valid(&mesh, ElementType::Edge, "fam")?;
 
         // An edge the mesh does not have is still a finding.
-        Subset::create_geom_subset(&mesh, "missing", ElementType::Edge, &[0, 1], "fam", None)?;
+        Subset::create(&mesh, "missing", ElementType::Edge, &[0, 1], "fam", None)?;
         assert_invalid(&mesh, ElementType::Edge, "fam", &["does not exist on the parent prim"])
     }
 
@@ -1846,8 +1845,8 @@ mod tests {
 
         let partition = Some(FamilyType::Partition);
         let commits = crate::tests::commits(&stage);
-        assert!(Subset::create_geom_subset(&mesh, "taken", ElementType::Face, &[0], "bad name", partition).is_err());
-        assert!(Subset::create_geom_subset(&mesh, "fresh", ElementType::Face, &[0], "bad name", partition).is_err());
+        assert!(Subset::create(&mesh, "taken", ElementType::Face, &[0], "bad name", partition).is_err());
+        assert!(Subset::create(&mesh, "fresh", ElementType::Face, &[0], "bad name", partition).is_err());
         assert_eq!(commits.get(), 0);
         assert_eq!(stage.prim("/Mesh/taken")?.type_name()?.as_deref(), Some("Xform"));
         assert!(stage.prim("/Mesh/taken/child")?.is_valid()?);
@@ -1872,10 +1871,10 @@ mod tests {
         stage.define_prim("/Mesh/taken/child")?;
 
         let partition = Some(FamilyType::Partition);
-        assert!(Subset::create_geom_subset(&mesh, "fresh", ElementType::Face, &[0], "fam", partition).is_err());
+        assert!(Subset::create(&mesh, "fresh", ElementType::Face, &[0], "fam", partition).is_err());
         assert!(!stage.prim("/Mesh/fresh")?.is_valid()?);
 
-        assert!(Subset::create_geom_subset(&mesh, "taken", ElementType::Face, &[0], "", None).is_err());
+        assert!(Subset::create(&mesh, "taken", ElementType::Face, &[0], "", None).is_err());
         assert_eq!(taken.type_name()?.as_deref(), Some("GeomSubset"));
         assert!(stage.prim("/Mesh/taken/child")?.is_valid()?);
         Ok(())
@@ -1888,7 +1887,7 @@ mod tests {
     fn validate_unknown_family_type() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         let mesh = grid(&stage, "/Mesh", 1)?;
-        Subset::create_geom_subset(
+        Subset::create(
             &mesh,
             "a",
             ElementType::Face,
@@ -1896,7 +1895,7 @@ mod tests {
             "fam",
             Some(FamilyType::NonOverlapping),
         )?;
-        Subset::create_geom_subset(&mesh, "b", ElementType::Face, &[0], "fam", None)?;
+        Subset::create(&mesh, "b", ElementType::Face, &[0], "fam", None)?;
         mesh.prim()
             .attribute("subsetFamily:fam:familyType")
             .set(tf::Token::from("bogus"))?;
@@ -1922,7 +1921,7 @@ mod tests {
             None,
             &[(Some(&[0, 1]), &[(1.0, &[2, 3])]), (Some(&[2, 3]), &[(1.0, &[0, 1])])],
         )?;
-        let halves = Subset::geom_subsets(&mesh, None, Some("halves"))?;
+        let halves = Subset::in_family(&mesh, None, Some("halves"))?;
         assert!(Subset::validate_subsets(&halves, 4, Partition)?.is_empty());
         assert!(Subset::validate_subsets(&[], 4, Partition)?.is_empty());
         assert_eq!(Subset::unassigned_indices_in(&halves, 6, None)?, [4, 5]);
@@ -1946,7 +1945,7 @@ mod tests {
             None,
             &[(Some(&[0, 1]), &[]), (Some(&[1, -1]), &[])],
         )?;
-        let overlap = Subset::geom_subsets(&mesh, None, Some("overlap"))?;
+        let overlap = Subset::in_family(&mesh, None, Some("overlap"))?;
         let reasons = Subset::validate_subsets(&overlap, 4, NonOverlapping)?;
         assert_eq!(reasons.len(), 2, "{reasons:?}");
         assert!(reasons[0].contains("Found overlapping index 1 in GeomSubset at path </Mesh/overlap_1>"));
@@ -1955,13 +1954,13 @@ mod tests {
 
         // Subsets with nothing in them have nothing out of bounds.
         family(&mesh, Face, "empty", None, &[(None, &[])])?;
-        let empty = Subset::geom_subsets(&mesh, None, Some("empty"))?;
+        let empty = Subset::in_family(&mesh, None, Some("empty"))?;
         assert!(Subset::validate_subsets(&empty, 4, Unrestricted)?.is_empty());
 
         // Subsets of different element types are no family.
         family(&mesh, ElementType::Point, "points", None, &[(Some(&[0]), &[])])?;
         let mut mixed = empty;
-        mixed.extend(Subset::geom_subsets(&mesh, None, Some("points"))?);
+        mixed.extend(Subset::in_family(&mesh, None, Some("points"))?);
         let reasons = Subset::validate_subsets(&mixed, 4, Unrestricted)?;
         assert_eq!(
             reasons,

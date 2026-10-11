@@ -11,15 +11,14 @@
 //! `ComputeSkinningTransforms(time)`, etc.) require evaluating a bound
 //! `Animation` at a specific stage time — see [`super::SkelAnimQuery`].
 //! Feed its pre-evaluated local transforms into
-//! [`SkeletonResolver::compute_skinning_transforms_from_local`] below.
+//! [`SkeletonResolver::skinning_transforms_from_local`] below.
 
 use openusd::Result;
 
 use openusd::gf;
 
 use super::skinning::{
-    compute_inverse_bind_transforms, compute_skinning_transforms as math_skin_xforms, joint_local_to_skel_space,
-    joint_skel_to_world,
+    inverse_bind_transforms, joint_local_to_skel_space, joint_skel_to_world, skinning_transforms as math_skin_xforms,
 };
 use super::topology::Topology;
 use super::{Skeleton, SkeletonSchema};
@@ -47,7 +46,7 @@ impl SkeletonResolver {
         let bind_transforms = skeleton.bind_transforms()?.unwrap_or_default();
         let rest_transforms = skeleton.rest_transforms()?.unwrap_or_default();
         let topology = Topology::from_joint_paths(&joints);
-        let inverse_bind_transforms = compute_inverse_bind_transforms(&bind_transforms);
+        let inverse_bind_transforms = inverse_bind_transforms(&bind_transforms);
         Ok(Self {
             joints,
             bind_transforms,
@@ -74,8 +73,8 @@ impl SkeletonResolver {
     }
 
     /// Pre-computed `inverse(bindTransform)` per joint. Used by
-    /// [`compute_skinning_transforms_from_world`](Self::compute_skinning_transforms_from_world)
-    /// / [`compute_skinning_transforms_from_local`](Self::compute_skinning_transforms_from_local).
+    /// [`skinning_transforms_from_world`](Self::skinning_transforms_from_world)
+    /// / [`skinning_transforms_from_local`](Self::skinning_transforms_from_local).
     pub fn inverse_bind_transforms(&self) -> &[gf::Mat4d] {
         &self.inverse_bind_transforms
     }
@@ -93,7 +92,7 @@ impl SkeletonResolver {
 
     /// Compute skinning transforms (`inverse(bind) · joint_world`) from
     /// world-space joint transforms.
-    pub fn compute_skinning_transforms_from_world(&self, joint_world: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
+    pub fn skinning_transforms_from_world(&self, joint_world: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
         math_skin_xforms(joint_world, &self.inverse_bind_transforms)
     }
 
@@ -101,7 +100,7 @@ impl SkeletonResolver {
     /// compose to skel-space, lift to world, then multiply by the inverse-bind.
     /// Use when you have only local poses (typical after evaluating a
     /// Animation).
-    pub fn compute_skinning_transforms_from_local(
+    pub fn skinning_transforms_from_local(
         &self,
         joint_local: &[gf::Mat4d],
         skel_local_to_world: gf::Mat4d,
@@ -112,7 +111,7 @@ impl SkeletonResolver {
     }
 
     /// The rest-pose joint-local transforms a caller can hand to
-    /// [`compute_skinning_transforms_from_local`](Self::compute_skinning_transforms_from_local)
+    /// [`skinning_transforms_from_local`](Self::skinning_transforms_from_local)
     /// when no Animation is bound (or for a preview / fallback pose).
     pub fn rest_pose_local(&self) -> &[gf::Mat4d] {
         &self.rest_transforms

@@ -12,7 +12,7 @@ use crate::SchemaError;
 impl TetMesh {
     /// The triangles on the surface of the mesh at `time`, where `None` is
     /// the default time (C++ `ComputeSurfaceFaces`):
-    /// [`compute_surface_faces_from`](Self::compute_surface_faces_from) over
+    /// [`surface_faces_from`](Self::surface_faces_from) over
     /// `tetVertexIndices` there. A mesh that reads no tetrahedra has no
     /// surface faces.
     ///
@@ -30,14 +30,14 @@ impl TetMesh {
     ///     .set(vec![gf::vec4i(0, 1, 2, 3)])?;
     ///
     /// // All four faces of a lone tetrahedron are on the surface.
-    /// let faces = mesh.compute_surface_faces(None)?;
+    /// let faces = mesh.surface_faces(None)?;
     /// assert_eq!(faces.len(), 4);
     /// mesh.create_surface_face_vertex_indices_attr()?.set(faces)?;
     /// # Ok::<(), openusd_schemas::SchemaError>(())
     /// ```
-    pub fn compute_surface_faces(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Vec<gf::Vec3i>> {
+    pub fn surface_faces(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Vec<gf::Vec3i>> {
         let tets = self.tet_vertex_indices_at(time)?.unwrap_or_default();
-        Ok(Self::compute_surface_faces_from(&tets))
+        Ok(Self::surface_faces_from(&tets))
     }
 
     /// The triangles on the surface of the tetrahedra `tet_vertex_indices`
@@ -48,7 +48,7 @@ impl TetMesh {
     /// A face keeps the winding its tetrahedron gives it, and the faces are
     /// sorted by their three indices in turn, so the same tetrahedra always
     /// yield the same list.
-    pub fn compute_surface_faces_from(tet_vertex_indices: &[gf::Vec4i]) -> Vec<gf::Vec3i> {
+    pub fn surface_faces_from(tet_vertex_indices: &[gf::Vec4i]) -> Vec<gf::Vec3i> {
         // Keyed by the sorted corners, which is what two tetrahedra sharing a
         // face agree on; the winding is kept beside the count.
         let mut seen: HashMap<[i32; 3], (usize, [i32; 3])> =
@@ -211,12 +211,12 @@ mod tests {
         assert!(mesh.find_inverted_elements(start)?.is_empty());
         assert!(mesh.find_inverted_elements(end)?.is_empty());
 
-        let joined = mesh.compute_surface_faces(start)?;
+        let joined = mesh.surface_faces(start)?;
         assert_eq!(
             joined,
             faces(&[[0, 1, 3], [0, 2, 4], [0, 3, 2], [0, 4, 1], [1, 2, 3], [2, 1, 4]])
         );
-        let apart = mesh.compute_surface_faces(end)?;
+        let apart = mesh.surface_faces(end)?;
         assert_eq!(apart.len(), 8);
 
         mesh.create_surface_face_vertex_indices_attr()?
@@ -246,8 +246,8 @@ mod tests {
     fn surface_no_tets() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         let mesh = two_tets(&stage, 2.0)?;
-        assert!(mesh.compute_surface_faces(None)?.is_empty());
-        assert!(TetMesh::compute_surface_faces_from(&[]).is_empty());
+        assert!(mesh.surface_faces(None)?.is_empty());
+        assert!(TetMesh::surface_faces_from(&[]).is_empty());
         Ok(())
     }
 
@@ -255,8 +255,8 @@ mod tests {
     /// the result does not depend on the order the tetrahedra come in.
     #[test]
     fn surface_order_independent() {
-        let forward = TetMesh::compute_surface_faces_from(&tets(&[[0, 1, 2, 3], [0, 2, 1, 4]]));
-        let backward = TetMesh::compute_surface_faces_from(&tets(&[[0, 2, 1, 4], [0, 1, 2, 3]]));
+        let forward = TetMesh::surface_faces_from(&tets(&[[0, 1, 2, 3], [0, 2, 1, 4]]));
+        let backward = TetMesh::surface_faces_from(&tets(&[[0, 2, 1, 4], [0, 1, 2, 3]]));
         assert_eq!(forward, backward);
         assert!(!forward.contains(&gf::vec3i(0, 2, 1)));
         assert!(!forward.contains(&gf::vec3i(0, 1, 2)));

@@ -285,6 +285,16 @@ When implementing a new feature from the spec:
   `TODO(perf)`) comment in new code and when refactoring existing code, instead
   of optimizing prematurely; say what is independent or parallelizable so the
   seam is actionable later
+- Prefer laconic names. Pick the shortest name that reads clearly beside its
+  siblings, and cite the C++ counterpart in the doc comment; a C++ name is not
+  transliterated into the identifier (`PointInstancer::mask_at` for C++
+  `ComputeMaskAtTime`, `Xformable::affects_transform` for
+  `IsTransformationAffectedByAttrNamed`). A name does not repeat what its type
+  or module already says (`Subset::create`, not `Subset::create_geom_subset`).
+  Drop a `compute_` or `get_` prefix (`BBox3d::centroid`,
+  `TetMesh::surface_faces`),
+  keeping `compute_` only where the plain name is the read of the authored
+  value (`compute_points_at_time` beside the generated `points_at`)
 - Re-export key types from module roots so users can access them without deep
   paths (e.g. `sdf::FieldKey` not `sdf::schema::FieldKey`)
 - Reference types through their module, not a fully-qualified or bare path: `use

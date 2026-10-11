@@ -54,20 +54,20 @@ pub fn joint_skel_to_world(skel: &[gf::Mat4d], skel_local_to_world: gf::Mat4d) -
 /// caller decides which space `jointTransform` is in (skel-space when
 /// `geomBindTransform` is the identity, world-space otherwise — they
 /// must match the space of the bind transforms).
-pub fn compute_skinning_transforms(joint: &[gf::Mat4d], inverse_bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
+pub fn skinning_transforms(joint: &[gf::Mat4d], inverse_bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
     assert_eq!(
         joint.len(),
         inverse_bind.len(),
-        "compute_skinning_transforms: array lengths must match"
+        "skinning_transforms: array lengths must match"
     );
     joint.iter().zip(inverse_bind).map(|(j, b)| *b * *j).collect()
 }
 
 /// Pre-compute the per-joint inverse-bind transforms used by
-/// [`compute_skinning_transforms`]. Joints whose bind transform is
+/// [`skinning_transforms`]. Joints whose bind transform is
 /// singular get [`gf::Mat4d::IDENTITY`] — same fallback as Pixar's
 /// reference implementation.
-pub fn compute_inverse_bind_transforms(bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
+pub fn inverse_bind_transforms(bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
     bind.iter()
         .map(|m| m.inverse().unwrap_or(gf::Mat4d::IDENTITY))
         .collect()
@@ -357,9 +357,9 @@ mod tests {
     #[test]
     fn skinning_transform_is_inverse_bind_times_current() {
         let bind = vec![translation(1.0, 0.0, 0.0)];
-        let inv_bind = compute_inverse_bind_transforms(&bind);
+        let inv_bind = inverse_bind_transforms(&bind);
         let current = vec![translation(1.0, 2.0, 0.0)];
-        let skin = compute_skinning_transforms(&current, &inv_bind);
+        let skin = skinning_transforms(&current, &inv_bind);
         let p = skin[0].transform_affine(gf::vec3d(1.0, 0.0, 0.0));
         assert_eq!(p, gf::vec3d(1.0, 2.0, 0.0));
     }

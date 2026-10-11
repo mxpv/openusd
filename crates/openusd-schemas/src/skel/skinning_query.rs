@@ -80,7 +80,7 @@ impl SkinningResolver {
 
     /// `true` when this prim is authored with `constant` interpolation — every
     /// vertex shares the same joint influences and the mesh can be skinned by a
-    /// single 4×4 (see [`compute_rigid_transform`](Self::compute_rigid_transform)).
+    /// single 4×4 (see [`rigid_transform`](Self::rigid_transform)).
     pub fn is_rigidly_deformed(&self) -> bool {
         self.interpolation == InfluenceInterpolation::Constant
     }
@@ -141,11 +141,11 @@ impl SkinningResolver {
     /// handles the remap to mesh order).
     ///
     /// Panics when called on a rigidly-deformed binding — use
-    /// [`compute_rigid_transform`](Self::compute_rigid_transform) for that case.
-    pub fn compute_skinned_points(&self, points: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Vec<gf::Vec3f> {
+    /// [`rigid_transform`](Self::rigid_transform) for that case.
+    pub fn skinned_points(&self, points: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Vec<gf::Vec3f> {
         assert!(
             !self.is_rigidly_deformed(),
-            "compute_skinned_points called on rigidly-deformed binding"
+            "skinned_points called on rigidly-deformed binding"
         );
         let mesh_xforms = self.remap_skinning_xforms(skel_skinning_xforms);
         skin_points_lbs(
@@ -159,13 +159,13 @@ impl SkinningResolver {
     }
 
     /// Skin normals through the same per-vertex influences as
-    /// [`compute_skinned_points`](Self::compute_skinned_points). Normalises each
+    /// [`skinned_points`](Self::skinned_points). Normalises each
     /// result; see [`super::skinning::skin_normals_lbs`] for the caveat about
     /// inverse-transpose under non-uniform scale.
-    pub fn compute_skinned_normals(&self, normals: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Vec<gf::Vec3f> {
+    pub fn skinned_normals(&self, normals: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Vec<gf::Vec3f> {
         assert!(
             !self.is_rigidly_deformed(),
-            "compute_skinned_normals called on rigidly-deformed binding"
+            "skinned_normals called on rigidly-deformed binding"
         );
         let mesh_xforms = self.remap_skinning_xforms(skel_skinning_xforms);
         skin_normals_lbs(
@@ -182,12 +182,12 @@ impl SkinningResolver {
     /// mesh's local-to-world transform.
     ///
     /// Panics when called on a per-vertex binding — use
-    /// [`compute_skinned_points`](Self::compute_skinned_points) /
-    /// [`compute_skinned_normals`](Self::compute_skinned_normals) there.
-    pub fn compute_rigid_transform(&self, skel_skinning_xforms: &[gf::Mat4d]) -> gf::Mat4d {
+    /// [`skinned_points`](Self::skinned_points) /
+    /// [`skinned_normals`](Self::skinned_normals) there.
+    pub fn rigid_transform(&self, skel_skinning_xforms: &[gf::Mat4d]) -> gf::Mat4d {
         assert!(
             self.is_rigidly_deformed(),
-            "compute_rigid_transform called on per-vertex binding"
+            "rigid_transform called on per-vertex binding"
         );
         let mesh_xforms = self.remap_skinning_xforms(skel_skinning_xforms);
         rigid_skinning_transform(

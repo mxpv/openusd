@@ -69,7 +69,7 @@ pub struct InstanceArrays<'a> {
 impl<'a> InstanceArrays<'a> {
     /// The transform of each instance the mask keeps at `time` (C++ the
     /// static `UsdGeomPointInstancer::ComputeInstanceTransformsAtTime`),
-    /// built as [`PointInstancer::compute_instance_transforms_at_times`]
+    /// built as [`PointInstancer::instance_transforms_at_times`]
     /// states. `stage` gives the time codes per second and the prims at
     /// `proto_paths`, the prototype roots whose local transforms at `time`
     /// come before their instances'. With no `proto_paths` the instances
@@ -184,16 +184,16 @@ impl<'a> InstanceArrays<'a> {
 /// assert_eq!(instancer.instance_count(None)?, 4);
 ///
 /// // Nothing is pruned yet, which an empty mask says.
-/// assert!(instancer.compute_mask_at_time(None, None)?.is_empty());
+/// assert!(instancer.mask_at(None, None)?.is_empty());
 ///
 /// instancer.deactivate_id(1)?;
 /// instancer.invis_id(3, None)?;
-/// let mask = instancer.compute_mask_at_time(None, None)?;
+/// let mask = instancer.mask_at(None, None)?;
 /// assert_eq!(mask, [true, false, true, false]);
 ///
 /// // The mask contracts any per-instance array.
 /// let mut indices = instancer.proto_indices()?.expect("authored above");
-/// geom::PointInstancer::apply_mask_to_array(&mask, &mut indices, 1)?;
+/// geom::PointInstancer::apply_mask(&mask, &mut indices, 1)?;
 /// assert_eq!(indices, [0, 1]);
 /// # Ok::<(), openusd_schemas::SchemaError>(())
 /// ```
@@ -214,11 +214,7 @@ impl PointInstancer {
     /// empty mask says every instance survives: it is what comes back where
     /// nothing is pruned, and where the prim has neither `ids` nor
     /// `protoIndices` to cover.
-    pub fn compute_mask_at_time(
-        &self,
-        time: impl Into<Option<usd::TimeCode>>,
-        ids: Option<&[i64]>,
-    ) -> Result<Vec<bool>> {
+    pub fn mask_at(&self, time: impl Into<Option<usd::TimeCode>>, ids: Option<&[i64]>) -> Result<Vec<bool>> {
         let time = time.into();
         let mut masked: HashSet<i64> = self.composed_inactive_ids()?.into_iter().collect();
         masked.extend(self.invisible_ids_at(time)?.unwrap_or_default());
@@ -256,7 +252,7 @@ impl PointInstancer {
     /// Otherwise the mask must have one entry for each element of `data`,
     /// and one that does not is [`SchemaError::MaskSizeMismatch`], where C++
     /// warns and returns `false`.
-    pub fn apply_mask_to_array<T>(mask: &[bool], data: &mut Vec<T>, element_size: usize) -> Result<(), SchemaError> {
+    pub fn apply_mask<T>(mask: &[bool], data: &mut Vec<T>, element_size: usize) -> Result<(), SchemaError> {
         if mask.is_empty() || data.len() == element_size {
             return Ok(());
         }
@@ -389,15 +385,15 @@ impl PointInstancer {
 
     /// The transform of each instance at `time`, carried there from
     /// `base_time` (C++ `ComputeInstanceTransformsAtTime`); see
-    /// [`compute_instance_transforms_at_times`](Self::compute_instance_transforms_at_times).
-    pub fn compute_instance_transforms_at_time(
+    /// [`instance_transforms_at_times`](Self::instance_transforms_at_times).
+    pub fn instance_transforms_at(
         &self,
         time: usd::TimeCode,
         base_time: usd::TimeCode,
         proto_xforms: ProtoXformInclusion,
         mask: MaskApplication,
     ) -> Result<Vec<gf::Mat4d>, SchemaError> {
-        let mut samples = self.compute_instance_transforms_at_times(&[time], base_time, proto_xforms, mask)?;
+        let mut samples = self.instance_transforms_at_times(&[time], base_time, proto_xforms, mask)?;
         Ok(samples.pop().unwrap_or_default())
     }
 
@@ -433,7 +429,7 @@ impl PointInstancer {
     /// are not one for each instance.
     ///
     /// [`PointBasedExt::compute_points_at_times`]: super::PointBasedExt::compute_points_at_times
-    pub fn compute_instance_transforms_at_times(
+    pub fn instance_transforms_at_times(
         &self,
         times: &[usd::TimeCode],
         base_time: usd::TimeCode,
@@ -454,7 +450,7 @@ impl PointInstancer {
             ProtoXformInclusion::Exclude => Vec::new(),
         };
         let mask = match mask {
-            MaskApplication::Apply => self.compute_mask_at_time(base_time, None)?,
+            MaskApplication::Apply => self.mask_at(base_time, None)?,
             MaskApplication::Ignore => Vec::new(),
         };
         check_mask(&mask, count)?;
@@ -707,7 +703,7 @@ mod tests {
     /// The transforms at `time` from the sample at time 0, of the instances
     /// alone and with nothing masked.
     fn xforms(instancer: &PointInstancer, time: f64) -> Result<Vec<gf::Mat4d>> {
-        instancer.compute_instance_transforms_at_time(
+        instancer.instance_transforms_at(
             TimeCode::new(time),
             START,
             ProtoXformInclusion::Exclude,
@@ -819,7 +815,7 @@ mod tests {
     fn transforms_prototype_and_mask() -> Result {
         let instancer = placed()?;
         let stage = instancer.stage().clone();
-        let at = |inclusion, mask| instancer.compute_instance_transforms_at_time(START, START, inclusion, mask);
+        let at = |inclusion, mask| instancer.instance_transforms_at(START, START, inclusion, mask);
         assert!(matches!(
             at(ProtoXformInclusion::Include, MaskApplication::Apply),
             Err(SchemaError::NoPrototypes { .. })
@@ -1150,7 +1146,7 @@ def PointInstancer "TimeSampledAndDefaultIndices"
         let referencing = PointInstancer::get(&stage, "/Ref")?.expect("a PointInstancer");
         referencing.activate_all_ids()?;
         assert!(inactive(&stage, "/Ref")?.is_empty());
-        assert!(referencing.compute_mask_at_time(None, None)?.is_empty());
+        assert!(referencing.mask_at(None, None)?.is_empty());
 
         referencing.deactivate_id(3)?;
         assert_eq!(inactive(&stage, "/Ref")?, [3]);
@@ -1217,11 +1213,11 @@ def PointInstancer "TimeSampledAndDefaultIndices"
     #[test]
     fn mask_by_index() -> Result {
         let instancer = instancer(4)?;
-        assert!(instancer.compute_mask_at_time(None, None)?.is_empty());
+        assert!(instancer.mask_at(None, None)?.is_empty());
 
         instancer.deactivate_id(1)?;
         instancer.invis_id(3, None)?;
-        assert_eq!(instancer.compute_mask_at_time(None, None)?, [true, false, true, false]);
+        assert_eq!(instancer.mask_at(None, None)?, [true, false, true, false]);
         Ok(())
     }
 
@@ -1233,8 +1229,8 @@ def PointInstancer "TimeSampledAndDefaultIndices"
         instancer.create_ids_attr()?.set(vec![10_i64, 11, 12])?;
         instancer.deactivate_ids(&[1, 12])?;
 
-        assert_eq!(instancer.compute_mask_at_time(None, None)?, [true, true, false]);
-        assert_eq!(instancer.compute_mask_at_time(None, Some(&[1, 2]))?, [false, true]);
+        assert_eq!(instancer.mask_at(None, None)?, [true, true, false]);
+        assert_eq!(instancer.mask_at(None, Some(&[1, 2]))?, [false, true]);
         Ok(())
     }
 
@@ -1243,8 +1239,8 @@ def PointInstancer "TimeSampledAndDefaultIndices"
     fn mask_empty_unpruned() -> Result {
         let instancer = instancer(3)?;
         instancer.deactivate_id(8)?;
-        assert!(instancer.compute_mask_at_time(None, None)?.is_empty());
-        assert!(instancer.compute_mask_at_time(None, Some(&[1, 2]))?.is_empty());
+        assert!(instancer.mask_at(None, None)?.is_empty());
+        assert!(instancer.mask_at(None, Some(&[1, 2]))?.is_empty());
         Ok(())
     }
 
@@ -1253,7 +1249,7 @@ def PointInstancer "TimeSampledAndDefaultIndices"
     fn mask_without_instances() -> Result {
         let instancer = instancer(0)?;
         instancer.deactivate_id(0)?;
-        assert!(instancer.compute_mask_at_time(None, None)?.is_empty());
+        assert!(instancer.mask_at(None, None)?.is_empty());
         Ok(())
     }
 
@@ -1269,8 +1265,8 @@ def PointInstancer "TimeSampledAndDefaultIndices"
         instancer.invis_id(2, two)?;
         instancer.vis_id(1, two)?;
 
-        assert_eq!(instancer.compute_mask_at_time(one, None)?, [false, false, true]);
-        assert_eq!(instancer.compute_mask_at_time(two, None)?, [false, true, false]);
+        assert_eq!(instancer.mask_at(one, None)?, [false, false, true]);
+        assert_eq!(instancer.mask_at(two, None)?, [false, true, false]);
         Ok(())
     }
 
@@ -1278,11 +1274,11 @@ def PointInstancer "TimeSampledAndDefaultIndices"
     fn apply_mask_contracts() -> Result {
         let mask = [true, false, true];
         let mut scalars = vec![10, 11, 12];
-        PointInstancer::apply_mask_to_array(&mask, &mut scalars, 1)?;
+        PointInstancer::apply_mask(&mask, &mut scalars, 1)?;
         assert_eq!(scalars, [10, 12]);
 
         let mut pairs = vec![0, 1, 10, 11, 20, 21];
-        PointInstancer::apply_mask_to_array(&mask, &mut pairs, 2)?;
+        PointInstancer::apply_mask(&mask, &mut pairs, 2)?;
         assert_eq!(pairs, [0, 1, 20, 21]);
         Ok(())
     }
@@ -1292,11 +1288,11 @@ def PointInstancer "TimeSampledAndDefaultIndices"
     #[test]
     fn apply_mask_passes() -> Result {
         let mut data = vec![1, 2, 3];
-        PointInstancer::apply_mask_to_array(&[], &mut data, 1)?;
+        PointInstancer::apply_mask(&[], &mut data, 1)?;
         assert_eq!(data, [1, 2, 3]);
 
         let mut constant = vec![4, 5];
-        PointInstancer::apply_mask_to_array(&[false, true, false], &mut constant, 2)?;
+        PointInstancer::apply_mask(&[false, true, false], &mut constant, 2)?;
         assert_eq!(constant, [4, 5]);
         Ok(())
     }
@@ -1304,8 +1300,7 @@ def PointInstancer "TimeSampledAndDefaultIndices"
     #[test]
     fn apply_mask_mismatch() {
         let mut data = vec![1, 2, 3];
-        let error =
-            PointInstancer::apply_mask_to_array(&[true, false], &mut data, 1).expect_err("two entries for three");
+        let error = PointInstancer::apply_mask(&[true, false], &mut data, 1).expect_err("two entries for three");
         assert!(matches!(
             error,
             SchemaError::MaskSizeMismatch {
