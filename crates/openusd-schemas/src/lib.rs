@@ -239,6 +239,16 @@ pub enum SchemaError {
         /// How many tangents the data holds.
         tangents: usize,
     },
+
+    /// A geom subset query names an element type the geometry has no
+    /// elements of, such as the segments of a mesh.
+    #[error("{prim} has no `{element_type}` elements for a GeomSubset to index")]
+    UnsupportedSubsetElementType {
+        /// The geometry asked about.
+        prim: sdf::Path,
+        /// The element type token asked for.
+        element_type: &'static str,
+    },
 }
 
 /// The indices of an indexed primvar that reach outside its values.
