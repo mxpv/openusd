@@ -229,6 +229,16 @@ pub enum SchemaError {
         /// How many points the mesh has at the time read.
         points: usize,
     },
+
+    /// Hermite curve data that does not pair each point with a tangent:
+    /// arrays of different lengths, or an interleaved array of odd length.
+    #[error("hermite curve data holds {points} points and {tangents} tangents, which do not pair up")]
+    UnpairedHermiteData {
+        /// How many points the data holds.
+        points: usize,
+        /// How many tangents the data holds.
+        tangents: usize,
+    },
 }
 
 /// The indices of an indexed primvar that reach outside its values.

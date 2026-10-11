@@ -116,10 +116,12 @@
 
 openusd::include_schema!("usdGeom");
 
+mod curves;
 mod gprim;
 mod imageable;
 mod mesh;
 mod motion_api;
+mod points;
 mod primvar;
 mod primvars_api;
 mod tet_mesh;
@@ -135,9 +137,11 @@ use openusd::{sdf, tf, usd};
 // The enums still written by hand name the generated constants directly.
 use tokens::*;
 
+pub use curves::{CurvesExt, PointAndTangentArrays};
 pub use gprim::GprimExt;
 pub use imageable::{ImageableExt, PurposeInfo};
 pub use mesh::MeshTopologyError;
+pub use points::PointBasedExt;
 pub use primvar::{Primvar, PrimvarDeclaration};
 pub use primvars_api::PrimvarBuilder;
 pub use xform::{CommonXformOp, CommonXformOps, RotationOrder, XformVectors};
