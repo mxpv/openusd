@@ -124,6 +124,7 @@
 openusd::include_schema!("usdGeom");
 
 mod curves;
+mod extent;
 mod gprim;
 mod imageable;
 mod mesh;
@@ -149,6 +150,7 @@ use openusd::{sdf, tf, usd};
 use tokens::*;
 
 pub use curves::{CurvesExt, PointAndTangentArrays};
+pub use extent::Extent;
 pub use gprim::GprimExt;
 pub use imageable::{ImageableExt, PurposeInfo};
 pub use mesh::MeshTopologyError;

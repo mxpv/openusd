@@ -146,9 +146,7 @@ impl<'a> InstanceArrays<'a> {
                     self.accelerations.get(index).copied(),
                     delta,
                 );
-                xform[(3, 0)] = position.x.into();
-                xform[(3, 1)] = position.y.into();
-                xform[(3, 2)] = position.z.into();
+                xform.set_translation(position.into());
                 // An index that names no prototype places the instance only.
                 let prototype = usize::try_from(self.proto_indices[index])
                     .ok()

@@ -107,7 +107,7 @@ impl BBox3d {
     /// The axis-aligned range holding the box in world space (C++
     /// `ComputeAlignedRange`), empty for an empty range.
     pub fn aligned_range(&self) -> Range3d {
-        aligned_range(self.range, self.matrix)
+        self.range.transformed(self.matrix)
     }
 
     /// A box holding both `a` and `b` (C++ `Combine`), with zero-area
@@ -154,7 +154,7 @@ impl BBox3d {
     /// box's space by `inverse`, the inverse of this box's matrix (C++
     /// `_CombineInOrder`).
     fn extended_by(&self, other: &BBox3d, inverse: Mat4d) -> BBox3d {
-        let projected = aligned_range(other.range, other.matrix * inverse);
+        let projected = other.range.transformed(other.matrix * inverse);
         BBox3d {
             range: self.range.union(projected),
             ..*self
@@ -187,30 +187,6 @@ impl PartialEq for BBox3d {
     fn eq(&self, other: &Self) -> bool {
         self.range == other.range && self.matrix == other.matrix
     }
-}
-
-/// The axis-aligned range holding `range` once `matrix` is applied to it,
-/// empty for an empty range.
-///
-/// Each axis of the result takes, from each axis of the range, whichever of
-/// the two extremes the matrix sends lower for its minimum and the other for
-/// its maximum (James Arvo, Graphics Gems I, pp. 548-550).
-fn aligned_range(range: Range3d, matrix: Mat4d) -> Range3d {
-    if range.is_empty() {
-        return range;
-    }
-    let translation = matrix.extract_translation();
-    let (mut min, mut max) = (translation, translation);
-    let (range_min, range_max) = (range.min(), range.max());
-    for j in 0..3 {
-        for i in 0..3 {
-            let a = range_min[i] * matrix[(i, j)];
-            let b = range_max[i] * matrix[(i, j)];
-            min[j] += a.min(b);
-            max[j] += a.max(b);
-        }
-    }
-    Range3d::new(min, max)
 }
 
 #[cfg(test)]

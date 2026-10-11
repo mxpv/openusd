@@ -3,7 +3,7 @@
 use std::array;
 use std::ops::{Add, Div, Mul, Sub};
 
-use super::Vec3d;
+use super::{Mat4d, Vec3d};
 
 /// An axis-aligned box given by its minimum and maximum corners (C++
 /// `GfRange3d`).
@@ -105,8 +105,8 @@ impl Range3d {
             (true, _) => other,
             (_, true) => self,
             _ => Range3d {
-                min: lower(self.min, other.min),
-                max: upper(self.max, other.max),
+                min: self.min.min(other.min),
+                max: self.max.max(other.max),
             },
         }
     }
@@ -115,8 +115,8 @@ impl Range3d {
     /// which is empty where they do not overlap.
     pub fn intersection(self, other: Range3d) -> Range3d {
         Range3d {
-            min: upper(self.min, other.min),
-            max: lower(self.max, other.max),
+            min: self.min.max(other.min),
+            max: self.max.min(other.max),
         }
     }
 
@@ -158,6 +158,32 @@ impl Range3d {
             + along(point.z, self.min.z, self.max.z)
     }
 
+    /// The axis-aligned range holding this one once `matrix` is applied to
+    /// it, which is this range itself where it is empty.
+    ///
+    /// Each axis of the result takes, from each axis of this range,
+    /// whichever of the two extremes the matrix sends lower for its minimum
+    /// and the other for its maximum (James Arvo, Graphics Gems I, pp.
+    /// 548-550). The matrix is taken to be affine. A range that is turned
+    /// grows. One carried through several transforms is tighter kept as a
+    /// [`BBox3d`](super::BBox3d).
+    pub fn transformed(self, matrix: Mat4d) -> Range3d {
+        if self.is_empty() {
+            return self;
+        }
+        let translation = matrix.extract_translation();
+        let (mut min, mut max) = (translation, translation);
+        for j in 0..3 {
+            for i in 0..3 {
+                let a = self.min[i] * matrix[(i, j)];
+                let b = self.max[i] * matrix[(i, j)];
+                min[j] += a.min(b);
+                max[j] += a.max(b);
+            }
+        }
+        Range3d::new(min, max)
+    }
+
     /// The eight corners (C++ `GetCorner`): corner `i` takes its x from the
     /// maximum where bit 0 of `i` is set, its y by bit 1 and its z by bit 2,
     /// so the first is the minimum and the last the maximum.
@@ -180,7 +206,7 @@ impl Range3d {
         }
         let middle = self.midpoint();
         self.corners()
-            .map(|corner| Range3d::new(lower(corner, middle), upper(corner, middle)))
+            .map(|corner| Range3d::new(corner.min(middle), corner.max(middle)))
     }
 }
 
@@ -240,24 +266,6 @@ impl Div<f64> for Range3d {
 
     fn div(self, divisor: f64) -> Range3d {
         self * (1.0 / divisor)
-    }
-}
-
-/// The lesser of `a` and `b` along each axis.
-fn lower(a: Vec3d, b: Vec3d) -> Vec3d {
-    Vec3d {
-        x: a.x.min(b.x),
-        y: a.y.min(b.y),
-        z: a.z.min(b.z),
-    }
-}
-
-/// The greater of `a` and `b` along each axis.
-fn upper(a: Vec3d, b: Vec3d) -> Vec3d {
-    Vec3d {
-        x: a.x.max(b.x),
-        y: a.y.max(b.y),
-        z: a.z.max(b.z),
     }
 }
 
@@ -361,6 +369,28 @@ pub(crate) mod tests {
         for empty in [Range3d::EMPTY, range([3.0; 3], [1.0; 3])] {
             assert!(empty.octants().iter().all(Range3d::is_empty));
         }
+    }
+
+    /// A range under a matrix is the aligned range of its moved corners,
+    /// and an empty range is left as it is.
+    #[test]
+    fn transformed_holds_corners() {
+        let r = range([0.0, 0.0, 0.0], [1.0, 2.0, 3.0]);
+        let matrix = gf::Mat4d::rotation_z(90f64.to_radians()) * gf::Mat4d::translation([10.0, 0.0, 0.0]);
+        let moved = r.transformed(matrix);
+        let mut expected = Range3d::EMPTY;
+        for corner in r.corners() {
+            expected.extend_by(matrix.transform(corner));
+        }
+        assert!((moved.min() - expected.min()).length() < 1e-12, "{moved:?}");
+        assert!((moved.max() - expected.max()).length() < 1e-12, "{moved:?}");
+        assert_eq!(
+            r.transformed(gf::Mat4d::scale([-1.0, 1.0, 1.0])),
+            range([-1.0, 0.0, 0.0], [0.0, 2.0, 3.0])
+        );
+
+        let empty = range([3.0; 3], [1.0; 3]);
+        assert_eq!(empty.transformed(matrix), empty);
     }
 
     /// The operators are interval arithmetic, and a negative factor keeps

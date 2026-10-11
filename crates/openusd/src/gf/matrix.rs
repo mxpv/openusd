@@ -389,6 +389,16 @@ impl Mat4d {
             - m(0, 2) * m(1, 1) * m(2, 0)
     }
 
+    /// Replace the translation of the transform, its last row, and set the
+    /// homogeneous coordinate of that row to one (C++ `SetTranslateOnly`).
+    /// The rotation and scale stay as they are.
+    pub fn set_translation(&mut self, translation: Vec3d) {
+        self.0[12] = translation.x;
+        self.0[13] = translation.y;
+        self.0[14] = translation.z;
+        self.0[15] = 1.0;
+    }
+
     /// The translation of the transform, its last row (C++
     /// `ExtractTranslation`).
     pub fn extract_translation(self) -> Vec3d {

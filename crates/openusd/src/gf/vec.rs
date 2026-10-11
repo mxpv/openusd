@@ -296,6 +296,26 @@ impl Vec3f {
         self.x * other.x + self.y * other.y + self.z * other.z
     }
 
+    /// The lesser of this vector and `other` along each axis. A component
+    /// that is NaN in one is taken from the other.
+    pub fn min(self, other: Vec3f) -> Vec3f {
+        Vec3f {
+            x: self.x.min(other.x),
+            y: self.y.min(other.y),
+            z: self.z.min(other.z),
+        }
+    }
+
+    /// The greater of this vector and `other` along each axis. A component
+    /// that is NaN in one is taken from the other.
+    pub fn max(self, other: Vec3f) -> Vec3f {
+        Vec3f {
+            x: self.x.max(other.x),
+            y: self.y.max(other.y),
+            z: self.z.max(other.z),
+        }
+    }
+
     /// The cross product `self × other` (C++ `GfCross`).
     ///
     /// ```
@@ -393,6 +413,26 @@ impl IndexMut<usize> for Vec3d {
 }
 
 impl Vec3d {
+    /// The lesser of this vector and `other` along each axis. A component
+    /// that is NaN in one is taken from the other.
+    pub fn min(self, other: Vec3d) -> Vec3d {
+        Vec3d {
+            x: self.x.min(other.x),
+            y: self.y.min(other.y),
+            z: self.z.min(other.z),
+        }
+    }
+
+    /// The greater of this vector and `other` along each axis. A component
+    /// that is NaN in one is taken from the other.
+    pub fn max(self, other: Vec3d) -> Vec3d {
+        Vec3d {
+            x: self.x.max(other.x),
+            y: self.y.max(other.y),
+            z: self.z.max(other.z),
+        }
+    }
+
     /// The vector in single precision, each component rounded to the
     /// nearest `f32`.
     pub fn to_f32(self) -> Vec3f {

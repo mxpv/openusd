@@ -262,6 +262,15 @@ pub enum SchemaError {
         expected: usize,
     },
 
+    /// The widths an extent is computed from are not one for each point.
+    #[error("{found} widths for {expected} points")]
+    WidthCountMismatch {
+        /// How many widths there are.
+        found: usize,
+        /// How many points there are.
+        expected: usize,
+    },
+
     /// The positions instance transforms are computed from are not one for
     /// each instance.
     #[error("{found} positions for {expected} instances")]
