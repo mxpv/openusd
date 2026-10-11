@@ -1,11 +1,13 @@
 //! What `UsdGeomPointBased` and `UsdGeomPoints` answer beyond their own
-//! properties: how many points a `Points` prim holds, and how `normals` and
-//! `widths` lie on the geometry.
+//! properties: how many points a `Points` prim holds, how `normals` and
+//! `widths` lie on the geometry, and where velocities carry the points.
 
-use openusd::Result;
 use openusd::usd;
+use openusd::{Result, gf};
 
+use super::sampling::{Motion, time_delta};
 use super::{Interpolation, PointBasedSchema, Points, PointsSchema, array_len, tokens};
+use crate::SchemaError;
 
 /// What every `UsdGeomPointBased` answers about its `normals`.
 ///
@@ -25,6 +27,68 @@ pub trait PointBasedExt: PointBasedSchema {
     /// yet.
     fn set_normals_interpolation(&self, interpolation: Interpolation) -> Result<()> {
         set_interpolation(self.normals_attr_builder(), interpolation)
+    }
+
+    /// Where the points are at `time`, carried there from `base_time` (C++
+    /// `ComputePointsAtTime`); see
+    /// [`compute_points_at_times`](Self::compute_points_at_times).
+    fn compute_points_at_time(
+        &self,
+        time: usd::TimeCode,
+        base_time: usd::TimeCode,
+    ) -> Result<Vec<gf::Vec3f>, SchemaError> {
+        let mut samples = self.compute_points_at_times(&[time], base_time)?;
+        Ok(samples.pop().unwrap_or_default())
+    }
+
+    /// Where the points are at each of `times`, carried there from
+    /// `base_time` (C++ `ComputePointsAtTimes`). This is what motion blur
+    /// samples: `base_time` is the frame, and `times` are the shutter
+    /// samples around it.
+    ///
+    /// The points are read at the sample at or before `base_time`. Where
+    /// `velocities` has a sample at that same time, with the same samples
+    /// around `base_time` and one velocity for each point, each point moves
+    /// from there by its velocity over the seconds to the time asked for,
+    /// and by half its `accelerations` over them where those are sampled
+    /// alongside. Otherwise the points are the `points` attribute's own
+    /// value at the time asked for, interpolated between its samples. A
+    /// time where that value has another number of points than at
+    /// `base_time` gets the points of the time before it.
+    ///
+    /// [`SchemaError::NoValue`] where `points` reads no value at
+    /// `base_time`.
+    fn compute_points_at_times(
+        &self,
+        times: &[usd::TimeCode],
+        base_time: usd::TimeCode,
+    ) -> Result<Vec<Vec<gf::Vec3f>>, SchemaError> {
+        let motion = Motion::read(
+            &self.points_attr(),
+            &self.velocities_attr(),
+            &self.accelerations_attr(),
+            base_time,
+        )?;
+        let count = motion.positions.len();
+        let time_codes_per_second = self.stage().time_codes_per_second();
+
+        let mut samples = Vec::with_capacity(times.len());
+        for &time in times {
+            if motion.velocities.is_empty() {
+                let points = match self.points_at(time)?.filter(|points| points.len() == count) {
+                    Some(points) => points,
+                    None => samples.last().unwrap_or(&motion.positions).clone(),
+                };
+                samples.push(points);
+                continue;
+            }
+            let delta = time_delta(time, motion.velocities_time, time_codes_per_second);
+            // TODO(rayon): each point is computed from its own position,
+            // velocity and acceleration, so the points of one time, and the
+            // times themselves once the positions are read, are independent.
+            samples.push((0..count).map(|index| motion.position_after(index, delta)).collect());
+        }
+        Ok(samples)
     }
 }
 
@@ -114,6 +178,118 @@ mod tests {
             );
             assert_eq!(schema.point_count(None)?, default, "{}", schema.path());
         }
+        Ok(())
+    }
+
+    /// Points sampled at times 0 and 10, one unit along x per time code.
+    fn moving(stage: &usd::Stage, path: &str) -> Result<Points> {
+        let points = Points::define(stage, path)?;
+        points
+            .create_points_attr()?
+            .set_at(vec![gf::vec3f(0.0, 0.0, 0.0)], usd::TimeCode::new(0.0))?
+            .set_at(vec![gf::vec3f(10.0, 0.0, 0.0)], usd::TimeCode::new(10.0))?;
+        Ok(points)
+    }
+
+    fn at(points: &Points, time: f64, base_time: f64) -> Result<gf::Vec3f> {
+        let computed = points.compute_points_at_time(usd::TimeCode::new(time), usd::TimeCode::new(base_time))?;
+        assert_eq!(computed.len(), 1);
+        Ok(computed[0])
+    }
+
+    fn assert_close(found: gf::Vec3f, expected: [f32; 3]) {
+        let found: [f32; 3] = found.into();
+        for (found, expected) in found.iter().zip(expected) {
+            assert!((found - expected).abs() < 1e-4, "{found} is not {expected}");
+        }
+    }
+
+    /// Without velocities the points are interpolated between their samples.
+    #[test]
+    fn points_interpolated() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        let points = moving(&stage, "/Points")?;
+        assert_close(at(&points, 5.0, 0.0)?, [5.0, 0.0, 0.0]);
+
+        // Velocities with no sample of their own move nothing.
+        points.create_velocities_attr()?.set(vec![gf::vec3f(48.0, 0.0, 0.0)])?;
+        assert_close(at(&points, 5.0, 0.0)?, [5.0, 0.0, 0.0]);
+
+        // Nor do velocities sampled at other times than the points.
+        points
+            .velocities_attr()
+            .set_at(vec![gf::vec3f(48.0, 0.0, 0.0)], usd::TimeCode::new(0.0))?
+            .set_at(vec![gf::vec3f(48.0, 0.0, 0.0)], usd::TimeCode::new(5.0))?;
+        assert_close(at(&points, 5.0, 0.0)?, [5.0, 0.0, 0.0]);
+        Ok(())
+    }
+
+    /// Velocities sampled with the points carry them from the base time's
+    /// sample, at the stage's 24 time codes per second.
+    #[test]
+    fn points_by_velocity() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        let points = moving(&stage, "/Points")?;
+        points
+            .create_velocities_attr()?
+            .set_at(vec![gf::vec3f(48.0, 0.0, 0.0)], usd::TimeCode::new(0.0))?
+            .set_at(vec![gf::vec3f(0.0, 24.0, 0.0)], usd::TimeCode::new(10.0))?;
+
+        assert_close(at(&points, 5.0, 0.0)?, [10.0, 0.0, 0.0]);
+        assert_close(at(&points, -1.0, 0.0)?, [-2.0, 0.0, 0.0]);
+        // A base time between samples holds the sample before it.
+        assert_close(at(&points, 5.0, 4.0)?, [10.0, 0.0, 0.0]);
+        // The last sample carries on past the end.
+        assert_close(at(&points, 12.0, 10.0)?, [10.0, 2.0, 0.0]);
+
+        let times = [usd::TimeCode::new(0.0), usd::TimeCode::new(1.0)];
+        let samples = points.compute_points_at_times(&times, usd::TimeCode::new(0.0))?;
+        assert_eq!(samples.len(), 2);
+        assert_close(samples[0][0], [0.0, 0.0, 0.0]);
+        assert_close(samples[1][0], [2.0, 0.0, 0.0]);
+        Ok(())
+    }
+
+    /// Accelerations sampled with the velocities add half their change over
+    /// the time moved, and one array too short is left out.
+    #[test]
+    fn points_by_acceleration() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        let points = moving(&stage, "/Points")?;
+        for time in [0.0, 10.0] {
+            points
+                .velocities_attr_builder()
+                .set_at(vec![gf::vec3f(48.0, 0.0, 0.0)], usd::TimeCode::new(time))
+                .build()?;
+            points
+                .accelerations_attr_builder()
+                .set_at(vec![gf::vec3f(0.0, 115.2, 0.0)], usd::TimeCode::new(time))
+                .build()?;
+        }
+        // Five time codes are 5/24 s: y = 115.2 * (5/24)^2 / 2.
+        assert_close(at(&points, 5.0, 0.0)?, [10.0, 2.5, 0.0]);
+
+        points
+            .accelerations_attr()
+            .set_at(Vec::<gf::Vec3f>::new(), usd::TimeCode::new(0.0))?;
+        assert_close(at(&points, 5.0, 0.0)?, [10.0, 0.0, 0.0]);
+        Ok(())
+    }
+
+    /// Points with no value at the base time have nowhere to start from,
+    /// and an empty array computes to an empty array for each time.
+    #[test]
+    fn points_missing_or_empty() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        let points = Points::define(&stage, "/Points")?;
+        let time = usd::TimeCode::new(1.0);
+        assert!(matches!(
+            points.compute_points_at_time(time, time),
+            Err(SchemaError::NoValue { .. })
+        ));
+
+        points.create_points_attr()?.set(Vec::<gf::Vec3f>::new())?;
+        assert_eq!(points.compute_points_at_times(&[time, time], time)?, [vec![], vec![]]);
         Ok(())
     }
 

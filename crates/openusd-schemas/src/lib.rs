@@ -242,6 +242,46 @@ pub enum SchemaError {
         points: usize,
     },
 
+    /// An attribute a computation starts from reads no value at the time
+    /// asked about.
+    #[error("{attribute} holds no value to compute from")]
+    NoValue {
+        /// The attribute read.
+        attribute: sdf::Path,
+    },
+
+    /// A per-instance array of a point instancer does not hold one element
+    /// for each instance.
+    #[error("{attribute} holds {found} elements for {expected} instances")]
+    InstanceCountMismatch {
+        /// The attribute read.
+        attribute: sdf::Path,
+        /// How many elements it holds.
+        found: usize,
+        /// How many instances `protoIndices` names.
+        expected: usize,
+    },
+
+    /// A point instancer asked for its prototypes' transforms targets no
+    /// prototype.
+    #[error("{prim} targets no prototypes")]
+    NoPrototypes {
+        /// The point instancer.
+        prim: sdf::Path,
+    },
+
+    /// An element of a point instancer's `protoIndices` names no target of
+    /// its `prototypes` relationship.
+    #[error("{prim} has prototype index {index}, outside its {prototypes} prototypes")]
+    PrototypeIndexOutOfRange {
+        /// The point instancer.
+        prim: sdf::Path,
+        /// The first index that is out of range.
+        index: i32,
+        /// How many prototypes the instancer targets.
+        prototypes: usize,
+    },
+
     /// Hermite curve data that does not pair each point with a tangent:
     /// arrays of different lengths, or an interleaved array of odd length.
     #[error("hermite curve data holds {points} points and {tangents} tangents, which do not pair up")]
