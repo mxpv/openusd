@@ -180,7 +180,7 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> R
 
         sdf::ValueKind::Matrix2d => sdf::Value::Matrix2d(gf::Mat2d(parse_matrix::<2, 4>(cursor)?)),
         sdf::ValueKind::Matrix3d => sdf::Value::Matrix3d(gf::Mat3d(parse_matrix::<3, 9>(cursor)?)),
-        sdf::ValueKind::Matrix4d => sdf::Value::Matrix4d(gf::Matrix4d(parse_matrix::<4, 16>(cursor)?)),
+        sdf::ValueKind::Matrix4d => sdf::Value::Matrix4d(gf::Mat4d(parse_matrix::<4, 16>(cursor)?)),
         sdf::ValueKind::Matrix2dVec => {
             sdf::Value::Matrix2dVec(parse_matrix_array::<2, 4>(cursor)?.into_iter().map(gf::Mat2d).collect())
         }
@@ -190,7 +190,7 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> R
         sdf::ValueKind::Matrix4dVec => sdf::Value::Matrix4dVec(
             parse_matrix_array::<4, 16>(cursor)?
                 .into_iter()
-                .map(gf::Matrix4d)
+                .map(gf::Mat4d)
                 .collect(),
         ),
 

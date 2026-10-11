@@ -164,7 +164,7 @@ pub(super) fn value_expr(value: &sdf::Value) -> Result<TokenStream, sdf::ValueKi
         // The matrix types are not named after the variants that carry them.
         sdf::Value::Matrix2d(value) => matrix(&value.0, "Matrix2d", "Mat2d"),
         sdf::Value::Matrix3d(value) => matrix(&value.0, "Matrix3d", "Mat3d"),
-        sdf::Value::Matrix4d(value) => matrix(&value.0, "Matrix4d", "Matrix4d"),
+        sdf::Value::Matrix4d(value) => matrix(&value.0, "Matrix4d", "Mat4d"),
         sdf::Value::Matrix2dVec(values) => {
             matrices(values.iter().map(|value| value.0.as_slice()), "Matrix2dVec", "Mat2d")
         }
@@ -172,7 +172,7 @@ pub(super) fn value_expr(value: &sdf::Value) -> Result<TokenStream, sdf::ValueKi
             matrices(values.iter().map(|value| value.0.as_slice()), "Matrix3dVec", "Mat3d")
         }
         sdf::Value::Matrix4dVec(values) => {
-            matrices(values.iter().map(|value| value.0.as_slice()), "Matrix4dVec", "Matrix4d")
+            matrices(values.iter().map(|value| value.0.as_slice()), "Matrix4dVec", "Mat4d")
         }
 
         sdf::Value::TimeCodeVec(values) => {

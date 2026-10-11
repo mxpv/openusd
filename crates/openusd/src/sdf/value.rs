@@ -118,10 +118,10 @@ pub enum Value {
 
     Matrix2d(gf::Mat2d),
     Matrix3d(gf::Mat3d),
-    Matrix4d(gf::Matrix4d),
+    Matrix4d(gf::Mat4d),
     Matrix2dVec(Vec<gf::Mat2d>),
     Matrix3dVec(Vec<gf::Mat3d>),
-    Matrix4dVec(Vec<gf::Matrix4d>),
+    Matrix4dVec(Vec<gf::Mat4d>),
 
     Specifier(Specifier),
     Permission(Permission),
@@ -647,7 +647,7 @@ impl_try_from_value!(gf::Quatd, Quatd, "gf::Quatd");
 impl_try_from_value!(gf::Quath, Quath, "gf::Quath");
 impl_try_from_value!(gf::Mat2d, Matrix2d, "gf::Mat2d");
 impl_try_from_value!(gf::Mat3d, Matrix3d, "gf::Mat3d");
-impl_try_from_value!(gf::Matrix4d, Matrix4d, "gf::Matrix4d");
+impl_try_from_value!(gf::Mat4d, Matrix4d, "gf::Mat4d");
 
 // gf array types.
 impl_try_from_value!(Vec<gf::Vec2f>, Vec2fVec, "Vec2fVec");
@@ -667,7 +667,7 @@ impl_try_from_value!(Vec<gf::Quatd>, QuatdVec, "QuatdVec");
 impl_try_from_value!(Vec<gf::Quath>, QuathVec, "QuathVec");
 impl_try_from_value!(Vec<gf::Mat2d>, Matrix2dVec, "Matrix2dVec");
 impl_try_from_value!(Vec<gf::Mat3d>, Matrix3dVec, "Matrix3dVec");
-impl_try_from_value!(Vec<gf::Matrix4d>, Matrix4dVec, "Matrix4dVec");
+impl_try_from_value!(Vec<gf::Mat4d>, Matrix4dVec, "Matrix4dVec");
 
 // Single-variant string and asset extraction. Coercing `token` → `string`
 // is [`Value::cast`]'s job.
@@ -759,7 +759,7 @@ impl From<[i32; 4]> for Value {
 }
 impl From<[f64; 16]> for Value {
     fn from(v: [f64; 16]) -> Self {
-        Value::Matrix4d(gf::Matrix4d(v))
+        Value::Matrix4d(gf::Mat4d(v))
     }
 }
 
@@ -1314,8 +1314,8 @@ mod tests {
         let q = gf::quatf(1.0, 0.0, 0.0, 0.0);
         assert_eq!(gf::Quatf::try_from(Value::Quatf(q)).unwrap(), q);
 
-        let m = gf::Matrix4d::IDENTITY;
-        assert_eq!(gf::Matrix4d::try_from(Value::Matrix4d(m)).unwrap(), m);
+        let m = gf::Mat4d::IDENTITY;
+        assert_eq!(gf::Mat4d::try_from(Value::Matrix4d(m)).unwrap(), m);
     }
 
     #[test]
@@ -1481,7 +1481,7 @@ mod tests {
         let v = gf::vec3f(1.0, 2.0, 3.0);
         assert_eq!(Value::from(v), Value::Vec3f(v));
 
-        let m = gf::Matrix4d::IDENTITY;
+        let m = gf::Mat4d::IDENTITY;
         assert_eq!(Value::from(m), Value::Matrix4d(m));
     }
 

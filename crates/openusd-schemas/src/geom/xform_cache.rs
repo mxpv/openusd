@@ -57,7 +57,7 @@ use crate::SchemaError;
 /// // Answering for the hand caches the matrix of each ancestor. The arm's
 /// // answer comes from the cache.
 /// let mut cache = geom::XformCache::default();
-/// let at = |x, y, z| gf::Matrix4d::translation([x, y, z]);
+/// let at = |x, y, z| gf::Mat4d::translation([x, y, z]);
 /// assert_eq!(cache.local_to_world_transform(&hand)?, at(10.0, 5.0, 1.0));
 /// assert_eq!(cache.local_to_world_transform(&arm)?, at(10.0, 5.0, 0.0));
 /// assert_eq!(cache.parent_to_world_transform(&arm)?, at(10.0, 0.0, 0.0));
@@ -83,7 +83,7 @@ pub struct XformCache {
 /// at the cache's time once computed.
 struct Entry {
     query: XformQuery,
-    ctm: Option<gf::Matrix4d>,
+    ctm: Option<gf::Mat4d>,
 }
 
 impl XformCache {
@@ -123,9 +123,9 @@ impl XformCache {
 
     /// `prim`'s local-to-world transform, its own ops included (C++
     /// `GetLocalToWorldTransform`).
-    pub fn local_to_world_transform(&mut self, prim: &usd::Prim) -> Result<gf::Matrix4d, SchemaError> {
+    pub fn local_to_world_transform(&mut self, prim: &usd::Prim) -> Result<gf::Mat4d, SchemaError> {
         if self.admit(prim)?.is_none() {
-            return Ok(gf::Matrix4d::IDENTITY);
+            return Ok(gf::Mat4d::IDENTITY);
         }
         self.ctm(prim)
     }
@@ -133,27 +133,27 @@ impl XformCache {
     /// The local-to-world transform of `prim`'s parent: where `prim`'s own
     /// ops are applied from (C++ `GetParentToWorldTransform`). Identity for
     /// the pseudo-root.
-    pub fn parent_to_world_transform(&mut self, prim: &usd::Prim) -> Result<gf::Matrix4d, SchemaError> {
+    pub fn parent_to_world_transform(&mut self, prim: &usd::Prim) -> Result<gf::Mat4d, SchemaError> {
         if self.admit(prim)?.is_none() {
-            return Ok(gf::Matrix4d::IDENTITY);
+            return Ok(gf::Mat4d::IDENTITY);
         }
         match prim.parent() {
             Some(parent) => self.ctm(&parent),
-            None => Ok(gf::Matrix4d::IDENTITY),
+            None => Ok(gf::Mat4d::IDENTITY),
         }
     }
 
     /// `prim`'s local transform and whether it resets the transform stack
     /// (C++ `GetLocalTransformation`). The ops are cached; the matrix is
     /// evaluated per call.
-    pub fn local_transformation(&mut self, prim: &usd::Prim) -> Result<(gf::Matrix4d, bool), SchemaError> {
+    pub fn local_transformation(&mut self, prim: &usd::Prim) -> Result<(gf::Mat4d, bool), SchemaError> {
         let time = self.time;
         match self.admit(prim)? {
             Some(entry) => Ok((
                 entry.query.local_transformation(time)?,
                 entry.query.resets_xform_stack(),
             )),
-            None => Ok((gf::Matrix4d::IDENTITY, false)),
+            None => Ok((gf::Mat4d::IDENTITY, false)),
         }
     }
 
@@ -168,8 +168,8 @@ impl XformCache {
         &mut self,
         prim: &usd::Prim,
         ancestor: &usd::Prim,
-    ) -> Result<(gf::Matrix4d, bool), SchemaError> {
-        let mut xform = gf::Matrix4d::IDENTITY;
+    ) -> Result<(gf::Mat4d, bool), SchemaError> {
+        let mut xform = gf::Mat4d::IDENTITY;
         if self.admit(prim)?.is_none() {
             return Ok((xform, false));
         }
@@ -221,9 +221,9 @@ impl XformCache {
     /// Climbs from `prim` until an ancestor with a cached matrix, a prim that
     /// resets the stack, or the pseudo-root, then folds the local transforms
     /// back down, caching each level's matrix on the way.
-    fn ctm(&mut self, prim: &usd::Prim) -> Result<gf::Matrix4d, SchemaError> {
+    fn ctm(&mut self, prim: &usd::Prim) -> Result<gf::Mat4d, SchemaError> {
         let time = self.time;
-        let mut base = gf::Matrix4d::IDENTITY;
+        let mut base = gf::Mat4d::IDENTITY;
         let mut chain = Vec::new();
         let mut current = Some(prim.clone());
         while let Some(p) = current.filter(|p| !p.path().is_abs_root()) {
@@ -324,15 +324,15 @@ def Xform "B" (
         let mut cache = XformCache::default();
         assert_eq!(
             cache.local_to_world_transform(&a)?,
-            gf::Matrix4d::translation([10.0, 0.0, 1.0])
+            gf::Mat4d::translation([10.0, 0.0, 1.0])
         );
         assert_eq!(
             cache.local_to_world_transform(&b)?,
-            gf::Matrix4d::translation([20.0, 0.0, 1.0])
+            gf::Mat4d::translation([20.0, 0.0, 1.0])
         );
         assert_eq!(
             cache.parent_to_world_transform(&b)?,
-            gf::Matrix4d::translation([20.0, 0.0, 0.0])
+            gf::Mat4d::translation([20.0, 0.0, 0.0])
         );
         Ok(())
     }
@@ -346,7 +346,7 @@ def Xform "B" (
         let child = stage.prim("/P/C")?;
 
         let mut cache = XformCache::default();
-        let before = gf::Matrix4d::translation([1.0, 1.0, 0.0]);
+        let before = gf::Mat4d::translation([1.0, 1.0, 0.0]);
         assert_eq!(cache.local_to_world_transform(&child)?, before);
 
         let parent = parent.set_translate(gf::vec3d(5.0, 0.0, 0.0))?;
@@ -358,7 +358,7 @@ def Xform "B" (
         cache.clear();
         assert_eq!(
             cache.local_to_world_transform(&child)?,
-            gf::Matrix4d::translation([5.0, 1.0, 0.0])
+            gf::Mat4d::translation([5.0, 1.0, 0.0])
         );
 
         // An edited op order is likewise fixed in the cached query.
@@ -368,7 +368,7 @@ def Xform "B" (
         assert!(!cache.is_attribute_included_in_local_transform(&stage.prim("/P")?, "xformOp:translate")?);
         assert_eq!(
             cache.local_to_world_transform(&child)?,
-            gf::Matrix4d::translation([0.0, 1.0, 0.0])
+            gf::Mat4d::translation([0.0, 1.0, 0.0])
         );
         Ok(())
     }
@@ -381,17 +381,17 @@ def Xform "B" (
         Xform::define(&stage, "/Parent")?.set_translate(gf::vec3d(1.0, 2.0, 3.0))?;
         let parent = stage.prim("/Parent")?;
         let missing = stage.prim("/Parent/Missing")?;
-        let translate = gf::Matrix4d::translation([1.0, 2.0, 3.0]);
+        let translate = gf::Mat4d::translation([1.0, 2.0, 3.0]);
 
         let mut cache = XformCache::default();
         assert_eq!(cache.local_to_world_transform(&parent)?, translate);
 
-        assert_eq!(cache.local_to_world_transform(&missing)?, gf::Matrix4d::IDENTITY);
-        assert_eq!(cache.parent_to_world_transform(&missing)?, gf::Matrix4d::IDENTITY);
-        assert_eq!(cache.local_transformation(&missing)?, (gf::Matrix4d::IDENTITY, false));
+        assert_eq!(cache.local_to_world_transform(&missing)?, gf::Mat4d::IDENTITY);
+        assert_eq!(cache.parent_to_world_transform(&missing)?, gf::Mat4d::IDENTITY);
+        assert_eq!(cache.local_transformation(&missing)?, (gf::Mat4d::IDENTITY, false));
         assert_eq!(
             cache.compute_relative_transform(&missing, &parent)?,
-            (gf::Matrix4d::IDENTITY, false)
+            (gf::Mat4d::IDENTITY, false)
         );
         assert!(!cache.resets_xform_stack(&missing)?);
         assert!(!cache.transform_might_be_time_varying(&missing)?);
@@ -417,7 +417,7 @@ def Xform "B" (
         let mut cache = XformCache::new(usd::TimeCode::new(1.0));
         assert_eq!(
             cache.local_to_world_transform(&p)?,
-            gf::Matrix4d::translation([1.0, 0.0, 0.0])
+            gf::Mat4d::translation([1.0, 0.0, 0.0])
         );
         cache.set_time(usd::TimeCode::new(1.0));
         assert!(cache.entries[&p].ctm.is_some(), "the same time keeps the matrix");
@@ -427,7 +427,7 @@ def Xform "B" (
         assert!(cache.entries[&p].ctm.is_none() && cache.entries.contains_key(&p));
         assert_eq!(
             cache.local_to_world_transform(&p)?,
-            gf::Matrix4d::translation([2.0, 0.0, 0.0])
+            gf::Mat4d::translation([2.0, 0.0, 0.0])
         );
         Ok(())
     }

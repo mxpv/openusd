@@ -4,7 +4,7 @@
 //! discovery).
 
 use openusd::Result;
-use openusd::gf::{self, Matrix4d, Quatf, Vec3f};
+use openusd::gf::{self, Mat4d, Quatf, Vec3f};
 use openusd::sdf::{self, Value};
 use openusd::usd::{PrimPredicate, SchemaBase, Stage};
 use openusd_schemas::geom::BoundableSchema;
@@ -235,7 +235,7 @@ fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<()> {
     assert_eq!(resolver.joint_order_len(), 2);
     assert_eq!(resolver.skinning_method(), SkinningMethod::ClassicLinear);
 
-    let identity = Matrix4d::IDENTITY;
+    let identity = Mat4d::IDENTITY;
     let skel_xforms = vec![identity; 3];
     let mesh_xforms = resolver.remap_skinning_xforms(&skel_xforms);
     assert_eq!(mesh_xforms.len(), 2);
@@ -268,7 +268,7 @@ fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(
             z: 0.5,
         },
     ];
-    let identity = Matrix4d::IDENTITY;
+    let identity = Mat4d::IDENTITY;
     let skel_xforms = vec![identity; 3];
     let out = resolver.compute_skinned_points(&pts, &skel_xforms);
     // Identity geom-bind + identity joints + weight 1.0 = no movement.
@@ -388,7 +388,7 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
     // Hip's local at t=0 carries the (0,1,0) translation (row-major [12..15]).
     assert_eq!(locals[1].0[12..15], [0.0, 1.0, 0.0]);
 
-    let identity_world = Matrix4d::IDENTITY;
+    let identity_world = Mat4d::IDENTITY;
     let skinning = resolver.compute_skinning_transforms_from_local(&locals, identity_world);
     assert_eq!(skinning.len(), 3);
     Ok(())

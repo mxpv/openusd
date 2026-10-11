@@ -622,7 +622,7 @@ impl ValueKind {
             ValueKind::Quatd => Value::Quatd(gf::Quatd::IDENTITY),
             ValueKind::Matrix2d => Value::Matrix2d(gf::Mat2d::IDENTITY),
             ValueKind::Matrix3d => Value::Matrix3d(gf::Mat3d::IDENTITY),
-            ValueKind::Matrix4d => Value::Matrix4d(gf::Matrix4d::IDENTITY),
+            ValueKind::Matrix4d => Value::Matrix4d(gf::Mat4d::IDENTITY),
             array => return array.empty_array(),
         })
     }
@@ -1217,11 +1217,11 @@ mod tests {
         );
         assert_eq!(
             ValueTypeName::MATRIX4D.default_value(),
-            Some(Value::Matrix4d(gf::Matrix4d::IDENTITY))
+            Some(Value::Matrix4d(gf::Mat4d::IDENTITY))
         );
         assert_eq!(
             ValueTypeName::FRAME4D.default_value(),
-            Some(Value::Matrix4d(gf::Matrix4d::IDENTITY))
+            Some(Value::Matrix4d(gf::Mat4d::IDENTITY))
         );
         assert_eq!(ValueTypeName::FLOAT3.default_value(), Some(Value::vec3f(0.0, 0.0, 0.0)));
         assert_eq!(

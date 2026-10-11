@@ -1535,7 +1535,7 @@ def Xform "X" {
                 assert_eq!(m[(2, 2)], 1.0);
                 assert_eq!(m[(3, 3)], 1.0);
             }
-            other => panic!("expected gf::Matrix4d, got {other:?}"),
+            other => panic!("expected gf::Mat4d, got {other:?}"),
         }
     }
 
@@ -2259,7 +2259,7 @@ def Material "M"
     /// parsed under the property's declared type so typed-tuple forms
     /// (`(w, x, y, z)` for `quatf[]`, `(r, g, b)` for `float3[]`,
     /// matrix rows for `matrix4d`) round-trip into the matching
-    /// `Value::QuatfVec` / `Vec3fVec` / `gf::Matrix4d` variants. Pixar's
+    /// `Value::QuatfVec` / `Vec3fVec` / `gf::Mat4d` variants. Pixar's
     /// `UsdSkelExamples/HumanFemale.walk.usd` is the canonical example
     /// — its rotation samples are arrays of quaternion tuples and
     /// failed with `Unsupported property metadata value token: Punctuation('(')`
@@ -2333,7 +2333,7 @@ def Xform "Anim"
                 assert_eq!(m[10], 1.0);
                 assert_eq!(m[15], 1.0);
             }
-            other => panic!("expected gf::Matrix4d for matrix4d sample, got {other:?}"),
+            other => panic!("expected gf::Mat4d for matrix4d sample, got {other:?}"),
         }
     }
 

@@ -85,7 +85,7 @@ impl XformOpPrecision {
 /// // The last op listed applies to a point first: scale, then translate.
 /// assert_eq!(
 ///     prop.local_transformation(None)?,
-///     gf::Matrix4d::scale([2.0, 2.0, 2.0]) * gf::Matrix4d::translation([1.0, 2.0, 3.0])
+///     gf::Mat4d::scale([2.0, 2.0, 2.0]) * gf::Mat4d::translation([1.0, 2.0, 3.0])
 /// );
 /// # Ok::<(), openusd_schemas::SchemaError>(())
 /// ```
@@ -127,9 +127,9 @@ pub trait XformableExt: XformableSchema {
 
     /// Compose the stack into a single local-to-parent 4×4 matrix at `time`,
     /// where `None` is the default time (C++ `GetLocalTransformation`).
-    /// [`gf::Matrix4d::IDENTITY`] when no stack is authored. An op directly
+    /// [`gf::Mat4d::IDENTITY`] when no stack is authored. An op directly
     /// beside its own inverse is skipped along with it.
-    fn local_transformation(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Matrix4d, SchemaError> {
+    fn local_transformation(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
         XformQuery::new(self)?.local_transformation(time)
     }
 
@@ -365,7 +365,7 @@ pub trait XformableExt: XformableSchema {
 
     /// Author `xformOp:transform` (`matrix4d`, row-major flattened) and
     /// append it — for an exact 4×4 that does not decompose into T·R·S.
-    fn set_transform(self, matrix: gf::Matrix4d) -> Result<Self, SchemaError>
+    fn set_transform(self, matrix: gf::Mat4d) -> Result<Self, SchemaError>
     where
         Self: Sized,
     {
@@ -422,7 +422,7 @@ impl Xformable {
 /// for (time, x) in [(1.0, 0.0), (6.0, 5.0), (11.0, 10.0)] {
 ///     assert_eq!(
 ///         query.local_transformation(usd::TimeCode::new(time))?,
-///         gf::Matrix4d::translation([x, 0.0, 0.0])
+///         gf::Mat4d::translation([x, 0.0, 0.0])
 ///     );
 /// }
 /// # Ok::<(), openusd_schemas::SchemaError>(())
@@ -457,9 +457,9 @@ impl XformQuery {
     ///
     /// An op directly beside its own inverse is skipped along with it. A
     /// singular `transform` paired with its inverse therefore still evaluates.
-    pub fn local_transformation(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Matrix4d, SchemaError> {
+    pub fn local_transformation(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
         let time = time.into();
-        let mut m = gf::Matrix4d::IDENTITY;
+        let mut m = gf::Mat4d::IDENTITY;
         // Row-vector convention: the last listed op is most local and applies
         // first to a point. The walk runs from the back and grows the product
         // on the right.
@@ -680,7 +680,7 @@ mod tests {
             .set_xform_op("scale", XformOpPrecision::Double, gf::vec3f(2.0, 2.0, 2.0))?
             .set_xform_op("rotateX", XformOpPrecision::Half, 90.0_f32)?
             .set_xform_op("orient", XformOpPrecision::Double, gf::Quatf::IDENTITY)?
-            .set_xform_op("transform", XformOpPrecision::Half, gf::Matrix4d::IDENTITY)?;
+            .set_xform_op("transform", XformOpPrecision::Half, gf::Mat4d::IDENTITY)?;
 
         let declared = |path: &str| stage.attribute(path)?.type_name();
         assert_eq!(declared("/X.xformOp:scale")?, Some(sdf::ValueTypeName::DOUBLE3));
@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn transform_writes_matrix4d() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
-        let m = gf::Matrix4d([
+        let m = gf::Mat4d([
             1.0, 0.0, 0.0, 0.0, //
             0.0, 1.0, 0.0, 0.0, //
             0.0, 0.0, 1.0, 0.0, //
@@ -922,13 +922,13 @@ mod tests {
         Xform::define(&stage, "/X")?.set_transform(m)?;
         match stage.field::<sdf::Value>("/X.xformOp:transform", sdf::FieldKey::Default)? {
             Some(sdf::Value::Matrix4d(v)) => assert_eq!(v[12], 5.0),
-            other => panic!("expected gf::Matrix4d, got {other:?}"),
+            other => panic!("expected gf::Mat4d, got {other:?}"),
         }
         Ok(())
     }
 
     /// Every entry of `got` is within rounding of `want`.
-    fn assert_close(got: gf::Matrix4d, want: gf::Matrix4d) {
+    fn assert_close(got: gf::Mat4d, want: gf::Mat4d) {
         for (g, w) in got.0.iter().zip(want.0) {
             assert!((g - w).abs() < 1e-9, "{got:?} != {want:?}");
         }
@@ -951,7 +951,7 @@ mod tests {
             order.push(format!("!invert!{op}"));
         }
         let x = x.set_xform_op_order(order)?;
-        assert_close(x.local_transformation(None)?, gf::Matrix4d::IDENTITY);
+        assert_close(x.local_transformation(None)?, gf::Mat4d::IDENTITY);
         Ok(())
     }
 
@@ -961,7 +961,7 @@ mod tests {
     #[test]
     fn singular_pair_skipped() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
-        let singular = gf::Matrix4d([
+        let singular = gf::Mat4d([
             32.0, 8.0, 11.0, 17.0, //
             8.0, 20.0, 17.0, 23.0, //
             11.0, 17.0, 14.0, 26.0, //
@@ -975,7 +975,7 @@ mod tests {
         assert!(matches!(error, SchemaError::SingularTransform { .. }), "{error:?}");
 
         let x = x.set_xform_op_order(["xformOp:transform", "!invert!xformOp:transform"])?;
-        assert_eq!(x.local_transformation(None)?, gf::Matrix4d::IDENTITY);
+        assert_eq!(x.local_transformation(None)?, gf::Mat4d::IDENTITY);
         Ok(())
     }
 
@@ -991,10 +991,7 @@ mod tests {
         let names: Vec<_> = ops.iter().map(XformOp::op_name).collect();
         assert_eq!(names, vec!["xformOp:translate"]);
         assert!(!resets);
-        assert_eq!(
-            x.local_transformation(None)?,
-            gf::Matrix4d::translation([1.0, 2.0, 3.0])
-        );
+        assert_eq!(x.local_transformation(None)?, gf::Mat4d::translation([1.0, 2.0, 3.0]));
         Ok(())
     }
 
@@ -1011,10 +1008,7 @@ mod tests {
         let (ops, resets) = x.ordered_xform_ops()?;
         assert!(resets);
         assert_eq!(ops.len(), 1);
-        assert_eq!(
-            x.local_transformation(None)?,
-            gf::Matrix4d::translation([0.0, 2.0, 0.0])
-        );
+        assert_eq!(x.local_transformation(None)?, gf::Mat4d::translation([0.0, 2.0, 0.0]));
         Ok(())
     }
 
@@ -1097,7 +1091,7 @@ mod tests {
         let empty = XformQuery::for_prim(&stage.define_prim("/Untyped")?)?;
         assert!(!empty.has_non_empty_xform_op_order());
         assert!(!empty.transform_might_have_effect());
-        assert_eq!(empty.local_transformation(None)?, gf::Matrix4d::IDENTITY);
+        assert_eq!(empty.local_transformation(None)?, gf::Mat4d::IDENTITY);
         Ok(())
     }
 
@@ -1150,10 +1144,7 @@ class PivotXform "PivotXform"
         );
         assert!(x.resets_xform_stack()?);
         assert_eq!(x.ordered_xform_ops()?.0.len(), 1);
-        assert_eq!(
-            x.local_transformation(None)?,
-            gf::Matrix4d::translation([1.0, 2.0, 3.0])
-        );
+        assert_eq!(x.local_transformation(None)?, gf::Mat4d::translation([1.0, 2.0, 3.0]));
         Ok(())
     }
 
@@ -1171,7 +1162,7 @@ class PivotXform "PivotXform"
         assert_eq!(op.precision()?, Some(XformOpPrecision::Double));
         assert!(!op.attribute().has_authored_value()?);
         assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
-        assert_eq!(x.local_transformation(None)?, gf::Matrix4d::IDENTITY);
+        assert_eq!(x.local_transformation(None)?, gf::Mat4d::IDENTITY);
         Ok(())
     }
 
@@ -1242,9 +1233,9 @@ class PivotXform "PivotXform"
         scale.set(gf::vec3f(2.0, 2.0, 2.0))?;
         assert_eq!(
             x.local_transformation(None)?,
-            gf::Matrix4d::translation([-1.0, 0.0, 0.0])
-                * gf::Matrix4d::scale([2.0, 2.0, 2.0])
-                * gf::Matrix4d::translation([1.0, 0.0, 0.0])
+            gf::Mat4d::translation([-1.0, 0.0, 0.0])
+                * gf::Mat4d::scale([2.0, 2.0, 2.0])
+                * gf::Mat4d::translation([1.0, 0.0, 0.0])
         );
         Ok(())
     }
@@ -1315,7 +1306,7 @@ class PivotXform "PivotXform"
         assert_eq!(op.precision()?, Some(XformOpPrecision::Double));
         assert!(!x.resets_xform_stack()?);
 
-        let matrix = gf::Matrix4d::translation([4.0, 5.0, 6.0]);
+        let matrix = gf::Mat4d::translation([4.0, 5.0, 6.0]);
         op.set(matrix)?;
         assert_eq!(x.local_transformation(None)?, matrix);
         // Reducing it again keeps the value the op holds.

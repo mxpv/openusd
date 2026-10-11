@@ -1,10 +1,10 @@
 //! `GfRotation` — a rotation as an axis and an angle in degrees.
 
-use super::{MIN_VECTOR_LENGTH, Matrix4d, Quatd, Vec3d};
+use super::{MIN_VECTOR_LENGTH, Mat4d, Quatd, Vec3d};
 
 /// A rotation of `angle` degrees about a unit `axis` (C++ `GfRotation`).
 ///
-/// A matrix made with [`Matrix4d::from_quat`](super::Matrix4d::from_quat) of
+/// A matrix made with [`Mat4d::from_quat`](super::Mat4d::from_quat) of
 /// [`quat`](Self::quat) is the one C++ `GfMatrix4d(rotation, translate)`
 /// makes. The arithmetic follows C++ operation for operation, for a
 /// quaternion of any length. `acos`, `sin` and `cos` come from the platform's
@@ -80,14 +80,14 @@ impl Rotation {
         const EPSILON: f64 = 1e-6;
         let (n0, n1, n2) = (axis0.normalize(), axis1.normalize(), axis2.normalize());
 
-        let mut axes = Matrix4d::IDENTITY;
+        let mut axes = Mat4d::IDENTITY;
         for (c, axis) in [n0, n1, n2].into_iter().enumerate() {
             axes[(0, c)] = axis.x;
             axes[(1, c)] = axis.y;
             axes[(2, c)] = axis.z;
         }
         // The rotation in the frame whose X, Y and Z are the three axes.
-        let m = axes.transpose() * Matrix4d::from_quat(self.quat()) * axes;
+        let m = axes.transpose() * Mat4d::from_quat(self.quat()) * axes;
 
         // Ken Shoemake's Euler angle conversion (Graphics Gems IV, p. 222).
         let (i, j, k) = (0, 1, 2);
@@ -205,9 +205,9 @@ mod tests {
             gf::vec3d(0.0, 0.0, 1.0),
         );
         let turn = |x_deg: f64, y_deg: f64, z_deg: f64| {
-            Matrix4d::rotation_x(x_deg.to_radians())
-                * Matrix4d::rotation_y(y_deg.to_radians())
-                * Matrix4d::rotation_z(z_deg.to_radians())
+            Mat4d::rotation_x(x_deg.to_radians())
+                * Mat4d::rotation_y(y_deg.to_radians())
+                * Mat4d::rotation_z(z_deg.to_radians())
         };
         let rotation = turn(10.0, 20.0, 30.0).extract_rotation();
 
@@ -217,9 +217,9 @@ mod tests {
         }
         // About X, Y, Z the same rotation is a turn about Z first.
         let xyz = rotation.decompose(x, y, z);
-        let back = Matrix4d::rotation_z(xyz.z.to_radians())
-            * Matrix4d::rotation_y(xyz.y.to_radians())
-            * Matrix4d::rotation_x(xyz.x.to_radians());
+        let back = Mat4d::rotation_z(xyz.z.to_radians())
+            * Mat4d::rotation_y(xyz.y.to_radians())
+            * Mat4d::rotation_x(xyz.x.to_radians());
         crate::gf::matrix::tests::assert_close(back, turn(10.0, 20.0, 30.0));
     }
 

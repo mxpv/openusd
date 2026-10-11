@@ -65,7 +65,7 @@ fn scalar_type(kind: sdf::ValueKind) -> Option<&'static str> {
 
         sdf::ValueKind::Matrix2d => "::openusd::gf::Mat2d",
         sdf::ValueKind::Matrix3d => "::openusd::gf::Mat3d",
-        sdf::ValueKind::Matrix4d => "::openusd::gf::Matrix4d",
+        sdf::ValueKind::Matrix4d => "::openusd::gf::Mat4d",
 
         // `opaque` carries no value, and the rest are metadata kinds no
         // attribute is declared with.

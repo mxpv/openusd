@@ -16,13 +16,13 @@ use super::topology::{NO_PARENT, Topology};
 ///
 /// Root joints (parent == [`NO_PARENT`]) keep their local transform
 /// as their skel-space transform.
-pub fn joint_local_to_skel_space(local: &[gf::Matrix4d], topology: &Topology) -> Vec<gf::Matrix4d> {
+pub fn joint_local_to_skel_space(local: &[gf::Mat4d], topology: &Topology) -> Vec<gf::Mat4d> {
     assert_eq!(
         local.len(),
         topology.num_joints(),
         "joint_local_to_skel_space: local.len() must equal topology.num_joints()"
     );
-    let mut out = vec![gf::Matrix4d::IDENTITY; local.len()];
+    let mut out = vec![gf::Mat4d::IDENTITY; local.len()];
     for i in 0..local.len() {
         let p = topology.parent(i);
         out[i] = if p == NO_PARENT {
@@ -42,7 +42,7 @@ pub fn joint_local_to_skel_space(local: &[gf::Matrix4d], topology: &Topology) ->
 /// Callers supply the skel-root's world transform; this module does
 /// not reach into the Stage for it (UsdSkel intentionally separates
 /// the two so consumers can plug in their own xform cache).
-pub fn joint_skel_to_world(skel: &[gf::Matrix4d], skel_local_to_world: gf::Matrix4d) -> Vec<gf::Matrix4d> {
+pub fn joint_skel_to_world(skel: &[gf::Mat4d], skel_local_to_world: gf::Mat4d) -> Vec<gf::Mat4d> {
     skel.iter().map(|m| *m * skel_local_to_world).collect()
 }
 
@@ -54,7 +54,7 @@ pub fn joint_skel_to_world(skel: &[gf::Matrix4d], skel_local_to_world: gf::Matri
 /// caller decides which space `jointTransform` is in (skel-space when
 /// `geomBindTransform` is the identity, world-space otherwise — they
 /// must match the space of the bind transforms).
-pub fn compute_skinning_transforms(joint: &[gf::Matrix4d], inverse_bind: &[gf::Matrix4d]) -> Vec<gf::Matrix4d> {
+pub fn compute_skinning_transforms(joint: &[gf::Mat4d], inverse_bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
     assert_eq!(
         joint.len(),
         inverse_bind.len(),
@@ -65,11 +65,11 @@ pub fn compute_skinning_transforms(joint: &[gf::Matrix4d], inverse_bind: &[gf::M
 
 /// Pre-compute the per-joint inverse-bind transforms used by
 /// [`compute_skinning_transforms`]. Joints whose bind transform is
-/// singular get [`gf::Matrix4d::IDENTITY`] — same fallback as Pixar's
+/// singular get [`gf::Mat4d::IDENTITY`] — same fallback as Pixar's
 /// reference implementation.
-pub fn compute_inverse_bind_transforms(bind: &[gf::Matrix4d]) -> Vec<gf::Matrix4d> {
+pub fn compute_inverse_bind_transforms(bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
     bind.iter()
-        .map(|m| m.inverse().unwrap_or(gf::Matrix4d::IDENTITY))
+        .map(|m| m.inverse().unwrap_or(gf::Mat4d::IDENTITY))
         .collect()
 }
 
@@ -97,8 +97,8 @@ pub fn skin_points_lbs(
     joint_indices: &[i32],
     joint_weights: &[f32],
     num_influences: usize,
-    geom_bind_transform: gf::Matrix4d,
-    skinning_xforms: &[gf::Matrix4d],
+    geom_bind_transform: gf::Mat4d,
+    skinning_xforms: &[gf::Mat4d],
 ) -> Vec<gf::Vec3f> {
     assert!(num_influences >= 1, "num_influences must be >= 1");
     assert_eq!(
@@ -143,8 +143,8 @@ pub fn skin_normals_lbs(
     joint_indices: &[i32],
     joint_weights: &[f32],
     num_influences: usize,
-    geom_bind_transform: gf::Matrix4d,
-    skinning_xforms: &[gf::Matrix4d],
+    geom_bind_transform: gf::Mat4d,
+    skinning_xforms: &[gf::Mat4d],
 ) -> Vec<gf::Vec3f> {
     assert!(num_influences >= 1, "num_influences must be >= 1");
     let mut out = Vec::with_capacity(normals.len());
@@ -180,13 +180,13 @@ pub fn rigid_skinning_transform(
     joint_indices: &[i32],
     joint_weights: &[f32],
     num_influences: usize,
-    geom_bind_transform: gf::Matrix4d,
-    skinning_xforms: &[gf::Matrix4d],
-) -> gf::Matrix4d {
+    geom_bind_transform: gf::Mat4d,
+    skinning_xforms: &[gf::Mat4d],
+) -> gf::Mat4d {
     assert!(num_influences >= 1, "num_influences must be >= 1");
     assert_eq!(joint_indices.len(), num_influences);
     assert_eq!(joint_weights.len(), num_influences);
-    let mut weighted = gf::Matrix4d([0.0f64; 16]);
+    let mut weighted = gf::Mat4d([0.0f64; 16]);
     for inf in 0..num_influences {
         let w = joint_weights[inf] as f64;
         if w == 0.0 {
@@ -340,8 +340,8 @@ fn lerp_offsets(a: &[gf::Vec3f], b: &[gf::Vec3f], t: f32, len: usize) -> Vec<gf:
 mod tests {
     use super::*;
 
-    fn translation(x: f64, y: f64, z: f64) -> gf::Matrix4d {
-        gf::Matrix4d::translation([x, y, z])
+    fn translation(x: f64, y: f64, z: f64) -> gf::Mat4d {
+        gf::Mat4d::translation([x, y, z])
     }
 
     #[test]
@@ -368,7 +368,7 @@ mod tests {
     fn skin_points_with_single_full_weight_translates_mesh() {
         let skin = vec![translation(0.0, 1.0, 0.0)];
         let pts = vec![gf::vec3f(0.0, 0.0, 0.0), gf::vec3f(1.0, 0.0, 0.0)];
-        let out = skin_points_lbs(&pts, &[0, 0], &[1.0, 1.0], 1, gf::Matrix4d::IDENTITY, &skin);
+        let out = skin_points_lbs(&pts, &[0, 0], &[1.0, 1.0], 1, gf::Mat4d::IDENTITY, &skin);
         assert_eq!(out, vec![gf::vec3f(0.0, 1.0, 0.0), gf::vec3f(1.0, 1.0, 0.0)]);
     }
 
@@ -376,7 +376,7 @@ mod tests {
     fn skin_points_blends_two_joints_50_50() {
         let skin = vec![translation(1.0, 0.0, 0.0), translation(0.0, 1.0, 0.0)];
         let pts = vec![gf::vec3f(0.0, 0.0, 0.0)];
-        let out = skin_points_lbs(&pts, &[0, 1], &[0.5, 0.5], 2, gf::Matrix4d::IDENTITY, &skin);
+        let out = skin_points_lbs(&pts, &[0, 1], &[0.5, 0.5], 2, gf::Mat4d::IDENTITY, &skin);
         assert_eq!(out, vec![gf::vec3f(0.5, 0.5, 0.0)]);
     }
 
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn rigid_skinning_combines_weighted_joints_then_geom_bind() {
         let skin = vec![translation(1.0, 0.0, 0.0), translation(0.0, 1.0, 0.0)];
-        let m = rigid_skinning_transform(&[0, 1], &[0.5, 0.5], 2, gf::Matrix4d::IDENTITY, &skin);
+        let m = rigid_skinning_transform(&[0, 1], &[0.5, 0.5], 2, gf::Mat4d::IDENTITY, &skin);
         let p = m.transform_point(gf::vec3f(0.0, 0.0, 0.0));
         assert_eq!(p, gf::vec3f(0.5, 0.5, 0.0));
     }

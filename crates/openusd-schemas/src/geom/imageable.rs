@@ -298,7 +298,7 @@ pub trait ImageableExt: ImageableSchema {
     fn compute_local_to_world_transform(
         &self,
         time: impl Into<Option<usd::TimeCode>>,
-    ) -> Result<gf::Matrix4d, SchemaError> {
+    ) -> Result<gf::Mat4d, SchemaError> {
         XformCache::new(time).local_to_world_transform(self.prim())
     }
 
@@ -310,7 +310,7 @@ pub trait ImageableExt: ImageableSchema {
     fn compute_parent_to_world_transform(
         &self,
         time: impl Into<Option<usd::TimeCode>>,
-    ) -> Result<gf::Matrix4d, SchemaError> {
+    ) -> Result<gf::Mat4d, SchemaError> {
         XformCache::new(time).parent_to_world_transform(self.prim())
     }
 }

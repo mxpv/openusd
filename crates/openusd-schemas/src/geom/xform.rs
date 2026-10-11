@@ -87,10 +87,10 @@ impl RotationOrder {
 
     /// The matrix that rotates by `rotation`, in degrees, in this order (C++
     /// `GetRotationTransform`).
-    pub fn rotation_transform(self, rotation: gf::Vec3f) -> gf::Matrix4d {
+    pub fn rotation_transform(self, rotation: gf::Vec3f) -> gf::Mat4d {
         self.op_kind()
             .matrix(sdf::Value::Vec3f(rotation), false)
-            .unwrap_or(gf::Matrix4d::IDENTITY)
+            .unwrap_or(gf::Mat4d::IDENTITY)
     }
 }
 
@@ -460,8 +460,8 @@ fn vec3f(v: gf::Vec3d) -> gf::Vec3f {
 /// The vectors a local matrix factors into: its translation, its rotation as
 /// XYZ angles, and its scale, about a zero pivot (C++
 /// `_ConvertMatrixToComponents`).
-fn matrix_vectors(matrix: gf::Matrix4d) -> XformVectors {
-    let factors = matrix.factor(gf::Matrix4d::FACTOR_EPSILON);
+fn matrix_vectors(matrix: gf::Mat4d) -> XformVectors {
+    let factors = matrix.factor(gf::Mat4d::FACTOR_EPSILON);
     let mut rotation = factors.rotation;
     rotation.orthonormalize();
     let angles = rotation
@@ -515,7 +515,7 @@ fn accumulate(ops: &[XformOp], time: Option<usd::TimeCode>) -> Result<Option<Xfo
     slots.push(Some(XformOpKind::Translate));
     let inverse_pivot_slot = slots.len() - 1;
 
-    let mut matrices = vec![gf::Matrix4d::IDENTITY; slots.len()];
+    let mut matrices = vec![gf::Mat4d::IDENTITY; slots.len()];
     let mut remaining = ops.len();
     // One past the slot being folded into, so zero means the slots ran out.
     let mut current = slots.len();
@@ -547,7 +547,7 @@ fn accumulate(ops: &[XformOp], time: Option<usd::TimeCode>) -> Result<Option<Xfo
     // plain translates there, which are the translation.
     if current == inverse_pivot_slot + 1 {
         matrices[TRANSLATE] = matrices[inverse_pivot_slot];
-        matrices[inverse_pivot_slot] = gf::Matrix4d::IDENTITY;
+        matrices[inverse_pivot_slot] = gf::Mat4d::IDENTITY;
     }
     if !reducible || !are_inverses(matrices[PIVOT], matrices[inverse_pivot_slot]) {
         return Ok(None);
@@ -570,11 +570,11 @@ fn accumulate(ops: &[XformOp], time: Option<usd::TimeCode>) -> Result<Option<Xfo
 }
 
 /// `true` when every row of `matrix` is within `1e-6` of the identity's.
-fn is_identity(matrix: gf::Matrix4d) -> bool {
+fn is_identity(matrix: gf::Mat4d) -> bool {
     const TOLERANCE: f64 = 1e-6;
     (0..4).all(|r| {
         let distance_sq: f64 = (0..4)
-            .map(|c| matrix[(r, c)] - gf::Matrix4d::IDENTITY[(r, c)])
+            .map(|c| matrix[(r, c)] - gf::Mat4d::IDENTITY[(r, c)])
             .map(|d| d * d)
             .sum();
         distance_sq.sqrt() < TOLERANCE
@@ -582,7 +582,7 @@ fn is_identity(matrix: gf::Matrix4d) -> bool {
 }
 
 /// `true` when `a · b` is the identity.
-fn are_inverses(a: gf::Matrix4d, b: gf::Matrix4d) -> bool {
+fn are_inverses(a: gf::Mat4d, b: gf::Mat4d) -> bool {
     is_identity(a * b)
 }
 
@@ -1035,9 +1035,9 @@ mod tests {
         let angles = gf::vec3f(10.0, 20.0, 30.0);
         let radians = |degrees: f32| f64::from(degrees).to_radians();
         let (rx, ry, rz) = (
-            gf::Matrix4d::rotation_x(radians(angles.x)),
-            gf::Matrix4d::rotation_y(radians(angles.y)),
-            gf::Matrix4d::rotation_z(radians(angles.z)),
+            gf::Mat4d::rotation_x(radians(angles.x)),
+            gf::Mat4d::rotation_y(radians(angles.y)),
+            gf::Mat4d::rotation_z(radians(angles.z)),
         );
         for (order, want) in [(RotationOrder::XYZ, rx * ry * rz), (RotationOrder::ZYX, rz * ry * rx)] {
             let got = order.rotation_transform(angles);

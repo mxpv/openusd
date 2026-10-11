@@ -86,7 +86,7 @@ impl<'a> InstanceArrays<'a> {
         stage: &usd::Stage,
         time: usd::TimeCode,
         proto_paths: &[sdf::Path],
-    ) -> Result<Vec<gf::Matrix4d>, SchemaError> {
+    ) -> Result<Vec<gf::Mat4d>, SchemaError> {
         let arrays = self.checked()?;
         let prototypes = prototype_xforms(&mut XformCache::new(time), &prototype_prims(stage, proto_paths)?)?;
         Ok(arrays.transforms(time, stage.time_codes_per_second(), &prototypes))
@@ -120,12 +120,7 @@ impl<'a> InstanceArrays<'a> {
     /// prototype transform in `prototypes` its index names. The positions
     /// hold one element for each instance, and the mask and every other
     /// array either that many or none.
-    fn transforms(
-        &self,
-        time: usd::TimeCode,
-        time_codes_per_second: f64,
-        prototypes: &[gf::Matrix4d],
-    ) -> Vec<gf::Matrix4d> {
+    fn transforms(&self, time: usd::TimeCode, time_codes_per_second: f64, prototypes: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
         let delta = time_delta(time, self.velocities_sample_time, time_codes_per_second);
         let spin_delta = time_delta(time, self.angular_velocities_sample_time, time_codes_per_second);
         // TODO(rayon): each instance's transform is computed from its own
@@ -134,15 +129,15 @@ impl<'a> InstanceArrays<'a> {
             .filter(|&index| self.mask.get(index).copied().unwrap_or(true))
             .map(|index| {
                 let mut xform = match self.scales.get(index) {
-                    Some(&scale) => gf::Matrix4d::scale(scale),
-                    None => gf::Matrix4d::IDENTITY,
+                    Some(&scale) => gf::Mat4d::scale(scale),
+                    None => gf::Mat4d::IDENTITY,
                 };
                 if let Some(&orientation) = self.orientations.get(index) {
-                    xform = xform * gf::Matrix4d::from_quat(orientation);
+                    xform = xform * gf::Mat4d::from_quat(orientation);
                     if let Some(&velocity) = self.angular_velocities.get(index) {
                         let axis = gf::vec3d(velocity.x.into(), velocity.y.into(), velocity.z.into());
                         let degrees = spin_delta * f64::from(velocity.length());
-                        xform = xform * gf::Matrix4d::from_quat(gf::Rotation::new(axis, degrees).quat());
+                        xform = xform * gf::Mat4d::from_quat(gf::Rotation::new(axis, degrees).quat());
                     }
                 }
                 let position = position_after(
@@ -401,7 +396,7 @@ impl PointInstancer {
         base_time: usd::TimeCode,
         proto_xforms: ProtoXformInclusion,
         mask: MaskApplication,
-    ) -> Result<Vec<gf::Matrix4d>, SchemaError> {
+    ) -> Result<Vec<gf::Mat4d>, SchemaError> {
         let mut samples = self.compute_instance_transforms_at_times(&[time], base_time, proto_xforms, mask)?;
         Ok(samples.pop().unwrap_or_default())
     }
@@ -444,7 +439,7 @@ impl PointInstancer {
         base_time: usd::TimeCode,
         proto_xforms: ProtoXformInclusion,
         mask: MaskApplication,
-    ) -> Result<Vec<Vec<gf::Matrix4d>>, SchemaError> {
+    ) -> Result<Vec<Vec<gf::Mat4d>>, SchemaError> {
         let proto_indices_attr = self.proto_indices_attr();
         let Some(proto_indices) = Held::<Vec<i32>>::read(&proto_indices_attr, base_time)? else {
             return Err(SchemaError::NoValue {
@@ -611,15 +606,12 @@ fn prototype_prims(stage: &usd::Stage, paths: &[sdf::Path]) -> Result<Vec<Option
 
 /// The local transform of each prototype root at the time of `cache`, the
 /// identity for a root the stage holds no prim for.
-fn prototype_xforms(
-    cache: &mut XformCache,
-    prototypes: &[Option<usd::Prim>],
-) -> Result<Vec<gf::Matrix4d>, SchemaError> {
+fn prototype_xforms(cache: &mut XformCache, prototypes: &[Option<usd::Prim>]) -> Result<Vec<gf::Mat4d>, SchemaError> {
     let mut xforms = Vec::with_capacity(prototypes.len());
     for prototype in prototypes {
         xforms.push(match prototype {
             Some(prototype) => cache.local_transformation(prototype)?.0,
-            None => gf::Matrix4d::IDENTITY,
+            None => gf::Mat4d::IDENTITY,
         });
     }
     Ok(xforms)
@@ -714,7 +706,7 @@ mod tests {
 
     /// The transforms at `time` from the sample at time 0, of the instances
     /// alone and with nothing masked.
-    fn xforms(instancer: &PointInstancer, time: f64) -> Result<Vec<gf::Matrix4d>> {
+    fn xforms(instancer: &PointInstancer, time: f64) -> Result<Vec<gf::Mat4d>> {
         instancer.compute_instance_transforms_at_time(
             TimeCode::new(time),
             START,
@@ -723,11 +715,11 @@ mod tests {
         )
     }
 
-    fn assert_matrices(found: &[gf::Matrix4d], expected: &[gf::Matrix4d]) {
+    fn assert_matrices(found: &[gf::Mat4d], expected: &[gf::Mat4d]) {
         assert_matrices_within(found, expected, 1e-5);
     }
 
-    fn assert_matrices_within(found: &[gf::Matrix4d], expected: &[gf::Matrix4d], tolerance: f64) {
+    fn assert_matrices_within(found: &[gf::Mat4d], expected: &[gf::Mat4d], tolerance: f64) {
         assert_eq!(found.len(), expected.len());
         for (found, expected) in found.iter().zip(expected) {
             for i in 0..16 {
@@ -744,7 +736,7 @@ mod tests {
     #[test]
     fn transforms_by_velocity() -> Result {
         let instancer = placed()?;
-        let translation = gf::Matrix4d::translation;
+        let translation = gf::Mat4d::translation;
         assert_matrices(
             &xforms(&instancer, 12.0)?,
             &[translation([1.0, 0.0, 0.0]), translation([0.0, 2.0, 0.0])],
@@ -772,9 +764,9 @@ mod tests {
         let quarter = gf::quatf(quarter.w as f32, quarter.x as f32, quarter.y as f32, quarter.z as f32);
         instancer.create_orientationsf_attr()?.set_at(vec![quarter; 2], START)?;
         let placed = |position: [f64; 3], degrees: f64| {
-            gf::Matrix4d::scale([2.0, 2.0, 2.0])
-                * gf::Matrix4d::rotation_z(degrees.to_radians())
-                * gf::Matrix4d::translation(position)
+            gf::Mat4d::scale([2.0, 2.0, 2.0])
+                * gf::Mat4d::rotation_z(degrees.to_radians())
+                * gf::Mat4d::translation(position)
         };
         assert_matrices(
             &xforms(&instancer, 12.0)?,
@@ -792,7 +784,7 @@ mod tests {
 
         // Scales that are not one for each instance are left out.
         instancer.scales_attr().set_at(vec![gf::vec3f(2.0, 2.0, 2.0)], START)?;
-        let unscaled = gf::Matrix4d::rotation_z(135f64.to_radians()) * gf::Matrix4d::translation([1.0, 0.0, 0.0]);
+        let unscaled = gf::Mat4d::rotation_z(135f64.to_radians()) * gf::Mat4d::translation([1.0, 0.0, 0.0]);
         assert_matrices(&xforms(&instancer, 12.0)?[..1], &[unscaled]);
         Ok(())
     }
@@ -811,7 +803,7 @@ mod tests {
         let turned = gf::quath(half(turned.w), half(turned.x), half(turned.y), half(turned.z));
         instancer.create_orientations_attr()?.set(vec![turned; 2])?;
 
-        let placed = |position| gf::Matrix4d::rotation_z(90f64.to_radians()) * gf::Matrix4d::translation(position);
+        let placed = |position| gf::Mat4d::rotation_z(90f64.to_radians()) * gf::Mat4d::translation(position);
         // Half precision holds the turn to three places.
         assert_matrices_within(
             &xforms(&instancer, 5.0)?,
@@ -838,7 +830,7 @@ mod tests {
             .prototypes_rel_builder()
             .set_targets(["/Instance/Proto"])
             .build()?;
-        let translation = gf::Matrix4d::translation;
+        let translation = gf::Mat4d::translation;
         assert_matrices(
             &at(ProtoXformInclusion::Include, MaskApplication::Apply)?,
             &[translation([11.0, 20.0, 30.0]), translation([10.0, 22.0, 30.0])],
@@ -890,7 +882,7 @@ mod tests {
         let time = TimeCode::new(12.0);
         assert_matrices(
             &arrays.transforms_at(stage, time, &proto_paths)?,
-            &[gf::Matrix4d::translation([10.0, 2.0, 1.0])],
+            &[gf::Mat4d::translation([10.0, 2.0, 1.0])],
         );
 
         let short = InstanceArrays {

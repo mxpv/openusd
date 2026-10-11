@@ -32,10 +32,10 @@ use super::{Skeleton, SkeletonSchema};
 #[derive(Debug, Clone)]
 pub struct SkeletonResolver {
     joints: Vec<String>,
-    bind_transforms: Vec<gf::Matrix4d>,
-    rest_transforms: Vec<gf::Matrix4d>,
+    bind_transforms: Vec<gf::Mat4d>,
+    rest_transforms: Vec<gf::Mat4d>,
     topology: Topology,
-    inverse_bind_transforms: Vec<gf::Matrix4d>,
+    inverse_bind_transforms: Vec<gf::Mat4d>,
 }
 
 impl SkeletonResolver {
@@ -69,31 +69,31 @@ impl SkeletonResolver {
     }
 
     /// World-space joint bind transforms — verbatim from `Skeleton.bindTransforms`.
-    pub fn joint_world_bind_transforms(&self) -> &[gf::Matrix4d] {
+    pub fn joint_world_bind_transforms(&self) -> &[gf::Mat4d] {
         &self.bind_transforms
     }
 
     /// Pre-computed `inverse(bindTransform)` per joint. Used by
     /// [`compute_skinning_transforms_from_world`](Self::compute_skinning_transforms_from_world)
     /// / [`compute_skinning_transforms_from_local`](Self::compute_skinning_transforms_from_local).
-    pub fn inverse_bind_transforms(&self) -> &[gf::Matrix4d] {
+    pub fn inverse_bind_transforms(&self) -> &[gf::Mat4d] {
         &self.inverse_bind_transforms
     }
 
     /// Compose joint-local transforms into skel-space transforms.
-    pub fn joint_local_to_skel_space(&self, local: &[gf::Matrix4d]) -> Vec<gf::Matrix4d> {
+    pub fn joint_local_to_skel_space(&self, local: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
         joint_local_to_skel_space(local, &self.topology)
     }
 
     /// Lift skel-space joint transforms into world space using the supplied
     /// Root local-to-world matrix.
-    pub fn joint_skel_to_world(&self, skel: &[gf::Matrix4d], skel_local_to_world: gf::Matrix4d) -> Vec<gf::Matrix4d> {
+    pub fn joint_skel_to_world(&self, skel: &[gf::Mat4d], skel_local_to_world: gf::Mat4d) -> Vec<gf::Mat4d> {
         joint_skel_to_world(skel, skel_local_to_world)
     }
 
     /// Compute skinning transforms (`inverse(bind) · joint_world`) from
     /// world-space joint transforms.
-    pub fn compute_skinning_transforms_from_world(&self, joint_world: &[gf::Matrix4d]) -> Vec<gf::Matrix4d> {
+    pub fn compute_skinning_transforms_from_world(&self, joint_world: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
         math_skin_xforms(joint_world, &self.inverse_bind_transforms)
     }
 
@@ -103,9 +103,9 @@ impl SkeletonResolver {
     /// Animation).
     pub fn compute_skinning_transforms_from_local(
         &self,
-        joint_local: &[gf::Matrix4d],
-        skel_local_to_world: gf::Matrix4d,
-    ) -> Vec<gf::Matrix4d> {
+        joint_local: &[gf::Mat4d],
+        skel_local_to_world: gf::Mat4d,
+    ) -> Vec<gf::Mat4d> {
         let skel = self.joint_local_to_skel_space(joint_local);
         let world = self.joint_skel_to_world(&skel, skel_local_to_world);
         math_skin_xforms(&world, &self.inverse_bind_transforms)
@@ -114,14 +114,14 @@ impl SkeletonResolver {
     /// The rest-pose joint-local transforms a caller can hand to
     /// [`compute_skinning_transforms_from_local`](Self::compute_skinning_transforms_from_local)
     /// when no Animation is bound (or for a preview / fallback pose).
-    pub fn rest_pose_local(&self) -> &[gf::Matrix4d] {
+    pub fn rest_pose_local(&self) -> &[gf::Mat4d] {
         &self.rest_transforms
     }
 
     /// Rest pose composed into skel-space — equivalent to feeding
     /// [`rest_pose_local`](Self::rest_pose_local) into
     /// [`joint_local_to_skel_space`](Self::joint_local_to_skel_space).
-    pub fn rest_pose_skel_space(&self) -> Vec<gf::Matrix4d> {
+    pub fn rest_pose_skel_space(&self) -> Vec<gf::Mat4d> {
         joint_local_to_skel_space(&self.rest_transforms, &self.topology)
     }
 }

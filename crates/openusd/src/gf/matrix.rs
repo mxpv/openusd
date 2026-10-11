@@ -176,10 +176,10 @@ impl IndexMut<(usize, usize)> for Mat3d {
 #[derive(Clone, Copy, Debug, PartialEq, Zeroable, Pod)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[[f64; 4]; 4]", into = "[[f64; 4]; 4]"))]
-pub struct Matrix4d(pub [f64; 16]);
+pub struct Mat4d(pub [f64; 16]);
 
-impl Matrix4d {
-    pub const IDENTITY: Matrix4d = Matrix4d([
+impl Mat4d {
+    pub const IDENTITY: Mat4d = Mat4d([
         1.0, 0.0, 0.0, 0.0, //
         0.0, 1.0, 0.0, 0.0, //
         0.0, 0.0, 1.0, 0.0, //
@@ -278,7 +278,7 @@ impl Matrix4d {
         let wx = w * x;
         let wy = w * y;
         let wz = w * z;
-        Matrix4d([
+        Mat4d([
             1.0 - 2.0 * (yy + zz),
             2.0 * (xy + wz),
             2.0 * (xz - wy),
@@ -301,14 +301,14 @@ impl Matrix4d {
     /// The inverse, or `None` for a matrix whose determinant is no greater
     /// in magnitude than
     /// [`SINGULAR_DETERMINANT`](Self::SINGULAR_DETERMINANT).
-    pub fn inverse(self) -> Option<Matrix4d> {
+    pub fn inverse(self) -> Option<Mat4d> {
         self.inverse_above(Self::SINGULAR_DETERMINANT)
     }
 
     /// The inverse of a matrix whose determinant is greater than `epsilon`
     /// in magnitude, by cofactor expansion, and `None` for any other (C++
     /// `GetInverse` with its `eps` argument).
-    pub fn inverse_above(self, epsilon: f64) -> Option<Matrix4d> {
+    pub fn inverse_above(self, epsilon: f64) -> Option<Mat4d> {
         let m = &self.0;
         let mut inv = [0.0f64; 16];
 
@@ -372,12 +372,12 @@ impl Matrix4d {
                 - m[8] * m[2] * m[5];
 
         let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
-        (det.abs() > epsilon).then(|| Matrix4d(inv) * (1.0 / det))
+        (det.abs() > epsilon).then(|| Mat4d(inv) * (1.0 / det))
     }
 
     /// The transpose of the matrix (C++ `GetTranspose`).
-    pub fn transpose(self) -> Matrix4d {
-        Matrix4d(array::from_fn(|i| self.0[(i % 4) * 4 + i / 4]))
+    pub fn transpose(self) -> Mat4d {
+        Mat4d(array::from_fn(|i| self.0[(i % 4) * 4 + i / 4]))
     }
 
     /// The determinant of the upper-left 3×3 (C++ `GetDeterminant3`).
@@ -451,7 +451,7 @@ impl Matrix4d {
     /// Returns `false` when the rows did not settle on an orthonormal basis,
     /// in which case the matrix holds the closest estimate reached.
     pub fn orthonormalize(&mut self) -> bool {
-        let row = |m: &Matrix4d, r: usize| Vec3d {
+        let row = |m: &Mat4d, r: usize| Vec3d {
             x: m[(r, 0)],
             y: m[(r, 1)],
             z: m[(r, 2)],
@@ -494,7 +494,7 @@ impl Matrix4d {
         // The eigenvectors of `a · aᵀ` are the scale orientation, and the
         // roots of its eigenvalues the scales.
         let (eigenvalues, eigenvectors) = (a * a.transpose()).jacobi3();
-        let mut scale_orientation = Matrix4d::IDENTITY;
+        let mut scale_orientation = Mat4d::IDENTITY;
         for (r, vector) in eigenvectors.into_iter().enumerate() {
             for c in 0..3 {
                 scale_orientation[(r, c)] = vector[c];
@@ -502,7 +502,7 @@ impl Matrix4d {
         }
 
         let scale = eigenvalues.map(|value| det_sign * if value < eps { eps } else { value.sqrt() });
-        let rotation = scale_orientation * Matrix4d::scale(scale.map(|s| 1.0 / s)) * scale_orientation.transpose() * a;
+        let rotation = scale_orientation * Mat4d::scale(scale.map(|s| 1.0 / s)) * scale_orientation.transpose() * a;
         Factors {
             scale_orientation,
             scale: Vec3d {
@@ -558,7 +558,7 @@ impl Matrix4d {
                         values[q] += h;
                         a[(p, q)] = 0.0;
 
-                        let rotate = |a: &mut Matrix4d, first: (usize, usize), second: (usize, usize)| {
+                        let rotate = |a: &mut Mat4d, first: (usize, usize), second: (usize, usize)| {
                             let (g, h) = (a[first], a[second]);
                             a[first] = g - s * (h + g * tau);
                             a[second] = h + s * (g - h * tau);
@@ -638,43 +638,43 @@ impl Matrix4d {
     }
 }
 
-/// What [`Matrix4d::factor`] takes a matrix apart into (C++
+/// What [`Mat4d::factor`] takes a matrix apart into (C++
 /// `GfMatrix4d::Factor`): the matrix is `r · s · rᵀ · u · t`, for the scale
 /// orientation `r`, the scale `s`, the rotation `u` and the translation `t`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Factors {
     /// The rotation into the axes the scale applies along.
-    pub scale_orientation: Matrix4d,
+    pub scale_orientation: Mat4d,
     /// The scale along each of those axes, negative for a matrix that flips
     /// handedness.
     pub scale: Vec3d,
     /// The rotation, which keeps any shear the matrix has.
-    pub rotation: Matrix4d,
+    pub rotation: Mat4d,
     /// The translation.
     pub translation: Vec3d,
     /// `true` when the upper-left 3×3 has no inverse.
     pub singular: bool,
 }
 
-impl Default for Matrix4d {
+impl Default for Mat4d {
     fn default() -> Self {
         Self::IDENTITY
     }
 }
 
-impl From<[f64; 16]> for Matrix4d {
+impl From<[f64; 16]> for Mat4d {
     fn from(v: [f64; 16]) -> Self {
-        Matrix4d(v)
+        Mat4d(v)
     }
 }
 
-impl From<Matrix4d> for [f64; 16] {
-    fn from(m: Matrix4d) -> Self {
+impl From<Mat4d> for [f64; 16] {
+    fn from(m: Mat4d) -> Self {
         m.0
     }
 }
 
-impl From<[[f64; 4]; 4]> for Matrix4d {
+impl From<[[f64; 4]; 4]> for Mat4d {
     fn from(v: [[f64; 4]; 4]) -> Self {
         Self([
             v[0][0], v[0][1], v[0][2], v[0][3], v[1][0], v[1][1], v[1][2], v[1][3], v[2][0], v[2][1], v[2][2], v[2][3],
@@ -683,8 +683,8 @@ impl From<[[f64; 4]; 4]> for Matrix4d {
     }
 }
 
-impl From<Matrix4d> for [[f64; 4]; 4] {
-    fn from(m: Matrix4d) -> Self {
+impl From<Mat4d> for [[f64; 4]; 4] {
+    fn from(m: Mat4d) -> Self {
         [
             [m.0[0], m.0[1], m.0[2], m.0[3]],
             [m.0[4], m.0[5], m.0[6], m.0[7]],
@@ -715,9 +715,9 @@ impl From<Quatf> for [f64; 4] {
 }
 
 /// Matrix product `self · rhs` (row-vector convention).
-impl Mul<Matrix4d> for Matrix4d {
-    type Output = Matrix4d;
-    fn mul(self, rhs: Matrix4d) -> Matrix4d {
+impl Mul<Mat4d> for Mat4d {
+    type Output = Mat4d;
+    fn mul(self, rhs: Mat4d) -> Mat4d {
         let (a, b) = (&self.0, &rhs.0);
         let mut out = [0.0f64; 16];
         for r in 0..4 {
@@ -729,23 +729,23 @@ impl Mul<Matrix4d> for Matrix4d {
                 out[r * 4 + c] = v;
             }
         }
-        Matrix4d(out)
+        Mat4d(out)
     }
 }
 
 /// Element-wise addition (used for weighted matrix accumulation in rigid
 /// skinning).
-impl std::ops::Add<Matrix4d> for Matrix4d {
-    type Output = Matrix4d;
-    fn add(self, rhs: Matrix4d) -> Matrix4d {
+impl std::ops::Add<Mat4d> for Mat4d {
+    type Output = Mat4d;
+    fn add(self, rhs: Mat4d) -> Mat4d {
         let mut out = self;
         out += rhs;
         out
     }
 }
 
-impl std::ops::AddAssign for Matrix4d {
-    fn add_assign(&mut self, rhs: Matrix4d) {
+impl std::ops::AddAssign for Mat4d {
+    fn add_assign(&mut self, rhs: Mat4d) {
         for i in 0..16 {
             self.0[i] += rhs.0[i];
         }
@@ -753,39 +753,39 @@ impl std::ops::AddAssign for Matrix4d {
 }
 
 /// Scalar scale (used for weighted matrix accumulation in rigid skinning).
-impl Mul<f64> for Matrix4d {
-    type Output = Matrix4d;
-    fn mul(self, s: f64) -> Matrix4d {
+impl Mul<f64> for Mat4d {
+    type Output = Mat4d;
+    fn mul(self, s: f64) -> Mat4d {
         let mut out = self.0;
         for v in &mut out {
             *v *= s;
         }
-        Matrix4d(out)
+        Mat4d(out)
     }
 }
 
-impl Index<usize> for Matrix4d {
+impl Index<usize> for Mat4d {
     type Output = f64;
     fn index(&self, i: usize) -> &f64 {
         &self.0[i]
     }
 }
 
-impl IndexMut<usize> for Matrix4d {
+impl IndexMut<usize> for Mat4d {
     fn index_mut(&mut self, i: usize) -> &mut f64 {
         &mut self.0[i]
     }
 }
 
 /// `m[(row, col)]` — row-major two-dimensional element access.
-impl Index<(usize, usize)> for Matrix4d {
+impl Index<(usize, usize)> for Mat4d {
     type Output = f64;
     fn index(&self, (r, c): (usize, usize)) -> &f64 {
         &self.0[r * 4 + c]
     }
 }
 
-impl IndexMut<(usize, usize)> for Matrix4d {
+impl IndexMut<(usize, usize)> for Mat4d {
     fn index_mut(&mut self, (r, c): (usize, usize)) -> &mut f64 {
         &mut self.0[r * 4 + c]
     }
@@ -795,15 +795,15 @@ impl IndexMut<(usize, usize)> for Matrix4d {
 pub(crate) mod tests {
     use super::*;
 
-    fn translation(x: f64, y: f64, z: f64) -> Matrix4d {
-        Matrix4d::translation([x, y, z])
+    fn translation(x: f64, y: f64, z: f64) -> Mat4d {
+        Mat4d::translation([x, y, z])
     }
 
     #[test]
     fn mul_identity_is_noop() {
         let m = translation(1.0, 2.0, 3.0);
-        assert_eq!(Matrix4d::IDENTITY * m, m);
-        assert_eq!(m * Matrix4d::IDENTITY, m);
+        assert_eq!(Mat4d::IDENTITY * m, m);
+        assert_eq!(m * Mat4d::IDENTITY, m);
     }
 
     #[test]
@@ -833,17 +833,17 @@ pub(crate) mod tests {
         let inv = m.inverse().unwrap();
         let id = m * inv;
         for i in 0..16 {
-            assert!((id[i] - Matrix4d::IDENTITY[i]).abs() < 1e-10, "row-col {i}: {id:?}");
+            assert!((id[i] - Mat4d::IDENTITY[i]).abs() < 1e-10, "row-col {i}: {id:?}");
         }
     }
 
     #[test]
     fn inverse_round_trips_with_rotation() {
-        let scale = Matrix4d::scale([2.0f64, 3.0, 0.5]);
+        let scale = Mat4d::scale([2.0f64, 3.0, 0.5]);
         let rot_z = {
             let c = 0.8660254037844387_f64;
             let s = 0.5_f64;
-            let mut m = Matrix4d::IDENTITY;
+            let mut m = Mat4d::IDENTITY;
             m[(0, 0)] = c;
             m[(0, 1)] = s;
             m[(1, 0)] = -s;
@@ -857,14 +857,8 @@ pub(crate) mod tests {
         let id1 = m * inv;
         let id2 = inv * m;
         for i in 0..16 {
-            assert!(
-                (id1[i] - Matrix4d::IDENTITY[i]).abs() < 1e-10,
-                "M·inv off at {i}: {id1:?}"
-            );
-            assert!(
-                (id2[i] - Matrix4d::IDENTITY[i]).abs() < 1e-10,
-                "inv·M off at {i}: {id2:?}"
-            );
+            assert!((id1[i] - Mat4d::IDENTITY[i]).abs() < 1e-10, "M·inv off at {i}: {id1:?}");
+            assert!((id2[i] - Mat4d::IDENTITY[i]).abs() < 1e-10, "inv·M off at {i}: {id2:?}");
         }
 
         let p = Vec3f {
@@ -881,17 +875,17 @@ pub(crate) mod tests {
 
     #[test]
     fn inverse_rejects_near_singular() {
-        let mut near_singular = Matrix4d([0.0f64; 16]);
+        let mut near_singular = Mat4d([0.0f64; 16]);
         for i in 0..4 {
             near_singular[(i, i)] = 1e-4;
         }
         assert!(near_singular.inverse().is_none(), "should reject near-singular");
-        assert!(Matrix4d([0.0f64; 16]).inverse().is_none(), "should reject zero matrix");
+        assert!(Mat4d([0.0f64; 16]).inverse().is_none(), "should reject zero matrix");
     }
 
     #[test]
     fn translation_layout() {
-        let m = Matrix4d::translation([5.0f64, -2.0, 7.0]);
+        let m = Mat4d::translation([5.0f64, -2.0, 7.0]);
         assert_eq!(&m.0[12..15], &[5.0, -2.0, 7.0]);
         let p = m.transform_point(Vec3f { x: 1.0, y: 1.0, z: 1.0 });
         assert_eq!(
@@ -906,14 +900,14 @@ pub(crate) mod tests {
 
     #[test]
     fn scale_layout() {
-        let m = Matrix4d::scale([2.0f64, 3.0, 4.0]);
+        let m = Mat4d::scale([2.0f64, 3.0, 4.0]);
         let p = m.transform_point(Vec3f { x: 1.0, y: 1.0, z: 1.0 });
         assert_eq!(p, Vec3f { x: 2.0, y: 3.0, z: 4.0 });
     }
 
     #[test]
     fn rotation_x_takes_y_to_z() {
-        let m = Matrix4d::rotation_x(std::f64::consts::FRAC_PI_2);
+        let m = Mat4d::rotation_x(std::f64::consts::FRAC_PI_2);
         let p = m.transform_point(Vec3f { x: 0.0, y: 1.0, z: 0.0 });
         assert!(p.x.abs() < 1e-6);
         assert!(p.y.abs() < 1e-6);
@@ -922,7 +916,7 @@ pub(crate) mod tests {
 
     #[test]
     fn rotation_y_takes_x_to_neg_z() {
-        let m = Matrix4d::rotation_y(std::f64::consts::FRAC_PI_2);
+        let m = Mat4d::rotation_y(std::f64::consts::FRAC_PI_2);
         let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
         assert!(p.x.abs() < 1e-6);
         assert!(p.y.abs() < 1e-6);
@@ -931,7 +925,7 @@ pub(crate) mod tests {
 
     #[test]
     fn rotation_z_takes_x_to_y() {
-        let m = Matrix4d::rotation_z(std::f64::consts::FRAC_PI_2);
+        let m = Mat4d::rotation_z(std::f64::consts::FRAC_PI_2);
         let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
         assert!(p.x.abs() < 1e-6, "x: {}", p.x);
         assert!((p.y - 1.0).abs() < 1e-6, "y: {}", p.y);
@@ -940,20 +934,20 @@ pub(crate) mod tests {
 
     #[test]
     fn identity_quat_gives_identity_matrix() {
-        assert_eq!(Matrix4d::from_quat([1.0f64, 0.0, 0.0, 0.0]), Matrix4d::IDENTITY);
+        assert_eq!(Mat4d::from_quat([1.0f64, 0.0, 0.0, 0.0]), Mat4d::IDENTITY);
     }
 
     #[test]
     fn quat_90_z_takes_x_to_y() {
         let h = std::f32::consts::FRAC_PI_4;
-        let m = Matrix4d::from_quat([h.cos() as f64, 0.0, 0.0, h.sin() as f64]);
+        let m = Mat4d::from_quat([h.cos() as f64, 0.0, 0.0, h.sin() as f64]);
         let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
         assert!(p.x.abs() < 1e-5);
         assert!((p.y - 1.0).abs() < 1e-5);
         assert!(p.z.abs() < 1e-5);
     }
 
-    pub(crate) fn assert_close(got: Matrix4d, want: Matrix4d) {
+    pub(crate) fn assert_close(got: Mat4d, want: Mat4d) {
         for i in 0..16 {
             assert!((got[i] - want[i]).abs() < 1e-9, "{got:?} != {want:?}");
         }
@@ -962,21 +956,21 @@ pub(crate) mod tests {
     /// The inverse exists for a determinant above the threshold asked for.
     #[test]
     fn inverse_threshold() {
-        let small = Matrix4d::scale([1e-5, 1e-5, 1e-5]);
+        let small = Mat4d::scale([1e-5, 1e-5, 1e-5]);
         assert_eq!(small.inverse(), None);
         let inverse = small.inverse_above(1e-16).expect("above the threshold");
-        assert_close(inverse * small, Matrix4d::IDENTITY);
-        assert_eq!(Matrix4d::scale([1.0, 0.0, 1.0]).inverse_above(0.0), None);
+        assert_close(inverse * small, Mat4d::IDENTITY);
+        assert_eq!(Mat4d::scale([1.0, 0.0, 1.0]).inverse_above(0.0), None);
     }
 
     /// A point takes the translation, and a projective row divides through.
     #[test]
     fn transform_double_point() {
-        let m = Matrix4d::scale([2.0, 2.0, 2.0]) * translation(1.0, 0.0, 0.0);
+        let m = Mat4d::scale([2.0, 2.0, 2.0]) * translation(1.0, 0.0, 0.0);
         let p = Vec3d { x: 1.0, y: 2.0, z: 3.0 };
         assert_eq!(m.transform(p), Vec3d { x: 3.0, y: 4.0, z: 6.0 });
 
-        let mut projective = Matrix4d::IDENTITY;
+        let mut projective = Mat4d::IDENTITY;
         projective[(3, 3)] = 2.0;
         assert_eq!(projective.transform(p), Vec3d { x: 0.5, y: 1.0, z: 1.5 });
         projective[(3, 3)] = 0.0;
@@ -993,9 +987,9 @@ pub(crate) mod tests {
 
     #[test]
     fn determinant3_of_scale() {
-        let m = Matrix4d::scale([2.0, 3.0, 4.0]) * translation(9.0, 9.0, 9.0);
+        let m = Mat4d::scale([2.0, 3.0, 4.0]) * translation(9.0, 9.0, 9.0);
         assert_eq!(m.determinant3(), 24.0);
-        assert_eq!(Matrix4d::rotation_y(0.7).determinant3().round(), 1.0);
+        assert_eq!(Mat4d::rotation_y(0.7).determinant3().round(), 1.0);
     }
 
     /// A rotation matrix reads back as the rotation that made it, whichever
@@ -1008,9 +1002,9 @@ pub(crate) mod tests {
             (Vec3d { x: 0.0, y: 1.0, z: 0.0 }, 170.0),
             (Vec3d { x: 0.0, y: 0.0, z: 1.0 }, 170.0),
         ] {
-            let m = Matrix4d::from_quat(Rotation::new(axis, degrees).quat()) * translation(1.0, 2.0, 3.0);
+            let m = Mat4d::from_quat(Rotation::new(axis, degrees).quat()) * translation(1.0, 2.0, 3.0);
             assert_eq!(m.extract_translation(), Vec3d { x: 1.0, y: 2.0, z: 3.0 });
-            let back = Matrix4d::from_quat(m.extract_rotation().quat()) * translation(1.0, 2.0, 3.0);
+            let back = Mat4d::from_quat(m.extract_rotation().quat()) * translation(1.0, 2.0, 3.0);
             assert_close(back, m);
         }
     }
@@ -1018,7 +1012,7 @@ pub(crate) mod tests {
     /// Rows a little off orthonormal settle onto the basis they are near.
     #[test]
     fn orthonormalize_settles() {
-        let rotation = Matrix4d::rotation_z(0.3) * Matrix4d::rotation_x(1.1);
+        let rotation = Mat4d::rotation_z(0.3) * Mat4d::rotation_x(1.1);
         let mut m = rotation;
         m[(0, 1)] += 1e-4;
         m[(2, 0)] -= 1e-4;
@@ -1028,11 +1022,11 @@ pub(crate) mod tests {
         }
         let product = m * m.transpose();
         for i in 0..16 {
-            assert!((product[i] - Matrix4d::IDENTITY[i]).abs() < 1e-6, "{product:?}");
+            assert!((product[i] - Mat4d::IDENTITY[i]).abs() < 1e-6, "{product:?}");
         }
 
         // Two colinear rows have no basis to settle onto.
-        let mut colinear = Matrix4d::IDENTITY;
+        let mut colinear = Mat4d::IDENTITY;
         colinear[(1, 0)] = 1.0;
         colinear[(1, 1)] = 0.0;
         assert!(!colinear.orthonormalize());
@@ -1050,8 +1044,8 @@ pub(crate) mod tests {
     /// to it.
     #[test]
     fn factor_recomposes() {
-        let rotation = Matrix4d::rotation_x(0.4) * Matrix4d::rotation_y(-1.2) * Matrix4d::rotation_z(2.0);
-        let m = Matrix4d::scale([1.0, 2.0, 3.0]) * rotation * translation(10.0, 20.0, 30.0);
+        let rotation = Mat4d::rotation_x(0.4) * Mat4d::rotation_y(-1.2) * Mat4d::rotation_z(2.0);
+        let m = Mat4d::scale([1.0, 2.0, 3.0]) * rotation * translation(10.0, 20.0, 30.0);
         let f = m.factor(1e-10);
         assert!(!f.singular);
         assert_eq!(
@@ -1069,24 +1063,24 @@ pub(crate) mod tests {
             assert!((got - want).abs() < 1e-9, "{scales:?}");
         }
         let recomposed = f.scale_orientation
-            * Matrix4d::scale(f.scale)
+            * Mat4d::scale(f.scale)
             * f.scale_orientation.transpose()
             * f.rotation
-            * Matrix4d::translation(f.translation);
+            * Mat4d::translation(f.translation);
         assert_close(recomposed, m);
-        assert_close(f.rotation * f.rotation.transpose(), Matrix4d::IDENTITY);
+        assert_close(f.rotation * f.rotation.transpose(), Mat4d::IDENTITY);
     }
 
     /// A mirrored matrix factors with negative scales, and a flattened one
     /// reports that it is singular.
     #[test]
     fn factor_sign_and_singular() {
-        let mirrored = Matrix4d::scale([-1.0, 2.0, 3.0]).factor(1e-10);
+        let mirrored = Mat4d::scale([-1.0, 2.0, 3.0]).factor(1e-10);
         assert!(!mirrored.singular);
         let scales: [f64; 3] = mirrored.scale.into();
         assert!(scales.iter().all(|s| *s < 0.0), "{scales:?}");
 
-        let flat = Matrix4d::scale([1.0, 0.0, 1.0]).factor(1e-10);
+        let flat = Mat4d::scale([1.0, 0.0, 1.0]).factor(1e-10);
         assert!(flat.singular);
     }
 }

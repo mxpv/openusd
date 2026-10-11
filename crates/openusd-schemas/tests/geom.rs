@@ -3,7 +3,7 @@
 //! surface, the `Xformable` transform stack, and every concrete prim view.
 
 use openusd::Result;
-use openusd::gf::{Matrix4d, Vec2f, Vec3f};
+use openusd::gf::{Mat4d, Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::{Attribute, SchemaBase, Stage, TimeCode};
@@ -236,7 +236,7 @@ fn resets_xform_stack_detects_sentinel() -> Result<()> {
 fn unauthored_xform_is_identity() -> Result<(), SchemaError> {
     let stage = open()?;
     let m = xform(&stage, "/World")?.local_transformation(None)?;
-    assert_eq!(m, Matrix4d::IDENTITY);
+    assert_eq!(m, Mat4d::IDENTITY);
     Ok(())
 }
 
@@ -369,13 +369,13 @@ fn xform_cache_stage(shift: f64) -> Result<Stage, SchemaError> {
     Ok(stage)
 }
 
-fn xform_step() -> Matrix4d {
-    Matrix4d::translation([10.0, 20.0, 30.0])
+fn xform_step() -> Mat4d {
+    Mat4d::translation([10.0, 20.0, 30.0])
 }
 
 /// Checks every query of the C++ test against `stage`, whose transforms are
 /// `x` at the cache's time.
-fn verify_xform_cache(stage: &Stage, cache: &mut geom::XformCache, x: Matrix4d) -> Result<(), SchemaError> {
+fn verify_xform_cache(stage: &Stage, cache: &mut geom::XformCache, x: Mat4d) -> Result<(), SchemaError> {
     let prim = |path: &str| stage.prim(path);
     let (root, scope_foo, bar_under_foo, deepest, scope_bar) = (
         prim("/RootPrim")?,
@@ -387,13 +387,13 @@ fn verify_xform_cache(stage: &Stage, cache: &mut geom::XformCache, x: Matrix4d) 
     let pseudo_root = prim("/")?;
 
     // The pseudo-root has no transform.
-    assert_eq!(cache.local_to_world_transform(&pseudo_root)?, Matrix4d::IDENTITY);
+    assert_eq!(cache.local_to_world_transform(&pseudo_root)?, Mat4d::IDENTITY);
     assert!(!cache.transform_might_be_time_varying(&pseudo_root)?);
     assert!(!cache.resets_xform_stack(&pseudo_root)?);
 
     // The Scope passes `/RootPrim` through; `Foo/Bar` starts over.
     for (p, world, parent, resets) in [
-        (&root, x, Matrix4d::IDENTITY, false),
+        (&root, x, Mat4d::IDENTITY, false),
         (&scope_foo, x * x, x, false),
         (&bar_under_foo, x, x * x, true),
         (&deepest, x * x, x, false),
@@ -404,7 +404,7 @@ fn verify_xform_cache(stage: &Stage, cache: &mut geom::XformCache, x: Matrix4d) 
         assert!(cache.transform_might_be_time_varying(p)?, "{}", p.path());
         assert_eq!(cache.resets_xform_stack(p)?, resets, "{}", p.path());
     }
-    assert_eq!(cache.parent_to_world_transform(&pseudo_root)?, Matrix4d::IDENTITY);
+    assert_eq!(cache.parent_to_world_transform(&pseudo_root)?, Mat4d::IDENTITY);
 
     assert_eq!(cache.compute_relative_transform(&root, &pseudo_root)?, (x, false));
     assert_eq!(cache.compute_relative_transform(&scope_foo, &root)?, (x, false));

@@ -176,7 +176,7 @@ impl XformOpKind {
     /// The matrix an op of this kind applies for `value`, inverted when
     /// `inverse` is set, on the terms [`XformOp::op_transform`] states. `None`
     /// when the inverse of a singular `transform` is asked for.
-    pub(super) fn matrix(self, value: sdf::Value, inverse: bool) -> Option<gf::Matrix4d> {
+    pub(super) fn matrix(self, value: sdf::Value, inverse: bool) -> Option<gf::Mat4d> {
         let sign = if inverse { -1.0 } else { 1.0 };
         // C++ negates the value of an inverted `scaleX` / `scaleY` / `scaleZ`
         // as it does a translate's. The reciprocal is that op's inverse, and
@@ -191,12 +191,12 @@ impl XformOpKind {
             Self::TranslateX | Self::TranslateY | Self::TranslateZ => value.cast::<f64>().ok().map(|v| {
                 let mut t = [0.0; 3];
                 t[self.axes()[0]] = sign * v;
-                gf::Matrix4d::translation(t)
+                gf::Mat4d::translation(t)
             }),
             Self::ScaleX | Self::ScaleY | Self::ScaleZ => value.cast::<f64>().ok().map(|v| {
                 let mut s = [1.0; 3];
                 s[self.axes()[0]] = factor(v);
-                gf::Matrix4d::scale(s)
+                gf::Mat4d::scale(s)
             }),
             Self::RotateX | Self::RotateY | Self::RotateZ => {
                 value.cast::<f64>().ok().map(|v| rotation(self.axes()[0], sign * v))
@@ -204,11 +204,8 @@ impl XformOpKind {
             Self::Translate => value
                 .cast::<[f64; 3]>()
                 .ok()
-                .map(|v| gf::Matrix4d::translation(v.map(|c| sign * c))),
-            Self::Scale => value
-                .cast::<[f64; 3]>()
-                .ok()
-                .map(|v| gf::Matrix4d::scale(v.map(factor))),
+                .map(|v| gf::Mat4d::translation(v.map(|c| sign * c))),
+            Self::Scale => value.cast::<[f64; 3]>().ok().map(|v| gf::Mat4d::scale(v.map(factor))),
             Self::RotateXYZ
             | Self::RotateXZY
             | Self::RotateYXZ
@@ -218,17 +215,17 @@ impl XformOpKind {
                 // The inverse applies the negated rotations in reverse order.
                 let rotations = self.axes().iter().map(|&a| rotation(a, sign * degrees[a]));
                 match inverse {
-                    true => rotations.rev().fold(gf::Matrix4d::IDENTITY, |m, r| m * r),
-                    false => rotations.fold(gf::Matrix4d::IDENTITY, |m, r| m * r),
+                    true => rotations.rev().fold(gf::Mat4d::IDENTITY, |m, r| m * r),
+                    false => rotations.fold(gf::Mat4d::IDENTITY, |m, r| m * r),
                 }
             }),
             Self::Orient => value.cast::<[f64; 4]>().ok().map(|q| {
                 let rotation = gf::Rotation::from_quat(gf::Quatd::from(q));
                 let rotation = if inverse { rotation.inverse() } else { rotation };
-                gf::Matrix4d::from_quat(rotation.quat())
+                gf::Mat4d::from_quat(rotation.quat())
             }),
         };
-        Some(matrix.unwrap_or(gf::Matrix4d::IDENTITY))
+        Some(matrix.unwrap_or(gf::Mat4d::IDENTITY))
     }
 
     /// The axes (0 = X, 1 = Y, 2 = Z) the kind acts along, in the order its
@@ -366,12 +363,12 @@ impl XformOp {
     /// `transform` goes through a general inverse, and a singular one is
     /// [`SchemaError::SingularTransform`]. A value of a type the kind does not
     /// take contributes identity.
-    pub fn op_transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Matrix4d, SchemaError> {
+    pub fn op_transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
         let Some(kind) = self.kind else {
-            return Ok(gf::Matrix4d::IDENTITY);
+            return Ok(gf::Mat4d::IDENTITY);
         };
         let Some(value) = self.query.get_at::<sdf::Value>(time)? else {
-            return Ok(gf::Matrix4d::IDENTITY);
+            return Ok(gf::Mat4d::IDENTITY);
         };
         kind.matrix(value, self.inverse)
             .ok_or_else(|| SchemaError::SingularTransform {
@@ -394,10 +391,10 @@ impl XformOp {
 
 /// The rotation by `degrees` about `axis` (0 = X, 1 = Y, 2 = Z), as C++
 /// `GfMatrix4d(GfRotation(axis, degrees), GfVec3d(0))` makes it.
-fn rotation(axis: usize, degrees: f64) -> gf::Matrix4d {
+fn rotation(axis: usize, degrees: f64) -> gf::Mat4d {
     let mut unit = gf::Vec3d::default();
     unit[axis] = 1.0;
-    gf::Matrix4d::from_quat(gf::Rotation::new(unit, degrees).quat())
+    gf::Mat4d::from_quat(gf::Rotation::new(unit, degrees).quat())
 }
 
 #[cfg(test)]
@@ -425,7 +422,7 @@ mod tests {
     fn inverse_undoes_kind() {
         let value = |kind: XformOpKind| match kind {
             XformOpKind::Transform => {
-                sdf::Value::Matrix4d(gf::Matrix4d::translation([1.0, 2.0, 3.0]) * gf::Matrix4d::scale([2.0, 3.0, 4.0]))
+                sdf::Value::Matrix4d(gf::Mat4d::translation([1.0, 2.0, 3.0]) * gf::Mat4d::scale([2.0, 3.0, 4.0]))
             }
             XformOpKind::Orient => sdf::Value::Quatd(gf::quatd(0.5, 0.5, 0.5, 0.5)),
             k if k.value_type(XformOpPrecision::Double) == sdf::ValueTypeName::DOUBLE => sdf::Value::Double(30.0),
@@ -435,7 +432,7 @@ mod tests {
             let v = value(kind);
             let forward = kind.matrix(v.clone(), false).expect("a forward op is never singular");
             let product = forward * kind.matrix(v, true).expect("the value is invertible");
-            for (got, want) in product.0.iter().zip(gf::Matrix4d::IDENTITY.0) {
+            for (got, want) in product.0.iter().zip(gf::Mat4d::IDENTITY.0) {
                 assert!((got - want).abs() < 1e-9, "{kind:?}: {product:?}");
             }
         }

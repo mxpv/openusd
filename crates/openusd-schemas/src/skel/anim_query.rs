@@ -127,13 +127,13 @@ impl SkelAnimQuery {
     /// convention. Callers feeding the result into
     /// [`super::SkeletonResolver::compute_skinning_transforms_from_local`]
     /// get full skinning transforms out the other side.
-    pub fn compute_joint_local_transforms(&self, time: impl Into<TimeCode>) -> Result<Vec<gf::Matrix4d>> {
+    pub fn compute_joint_local_transforms(&self, time: impl Into<TimeCode>) -> Result<Vec<gf::Mat4d>> {
         let (translations, rotations, scales) = self.compute_joint_local_transform_components(time.into())?;
         Ok(translations
             .iter()
             .zip(rotations.iter())
             .zip(scales.iter())
-            .map(|((t, r), s)| gf::Matrix4d::from_trs(*t, *r, *s))
+            .map(|((t, r), s)| gf::Mat4d::from_trs(*t, *r, *s))
             .collect())
     }
 
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn from_trs_identity_rotation_unit_scale() {
-        let m = gf::Matrix4d::from_trs(gf::vec3f(1.0, 2.0, 3.0), gf::Quatf::IDENTITY, gf::vec3f(1.0, 1.0, 1.0));
+        let m = gf::Mat4d::from_trs(gf::vec3f(1.0, 2.0, 3.0), gf::Quatf::IDENTITY, gf::vec3f(1.0, 1.0, 1.0));
         assert_eq!(m.0[12..16], [1.0, 2.0, 3.0, 1.0]);
         assert_eq!(m[(0, 0)], 1.0);
         assert_eq!(m[(1, 1)], 1.0);
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn from_trs_scale_then_translation() {
-        let m = gf::Matrix4d::from_trs(gf::vec3f(10.0, 0.0, 0.0), gf::Quatf::IDENTITY, gf::vec3f(2.0, 3.0, 4.0));
+        let m = gf::Mat4d::from_trs(gf::vec3f(10.0, 0.0, 0.0), gf::Quatf::IDENTITY, gf::vec3f(2.0, 3.0, 4.0));
         assert_eq!(m[(0, 0)], 2.0);
         assert_eq!(m[(1, 1)], 3.0);
         assert_eq!(m[(2, 2)], 4.0);

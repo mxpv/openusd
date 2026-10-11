@@ -377,7 +377,7 @@ class Box "Box" (
             // The three matrices, each through the `gf` type that carries it.
             "::openusd::gf::Mat2d([",
             "::openusd::gf::Mat3d([",
-            "::openusd::gf::Matrix4d([",
+            "::openusd::gf::Mat4d([",
             "::openusd::gf::quath(",
             "::openusd::sdf::TimeCode(",
             "::openusd::gf::f16::from_bits(",

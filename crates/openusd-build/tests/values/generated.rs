@@ -83,7 +83,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 ::openusd::usd::Field::new(
                                     "default",
                                     || ::openusd::sdf::Value::Matrix4d(
-                                        ::openusd::gf::Matrix4d([
+                                        ::openusd::gf::Mat4d([
                                             1f64, 0f64, 0f64, 0f64, 0f64, 1f64, 0f64, 0f64, 0f64, 0f64,
                                             1f64, 0f64, 0f64, 0f64, 0f64, 1f64,
                                         ]),

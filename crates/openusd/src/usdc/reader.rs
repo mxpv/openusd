@@ -1259,7 +1259,7 @@ impl<'a> Decoder<'a> {
             //
             Type::Matrix2d if value.is_array() => Value::Matrix2dVec(self.read_array::<gf::Mat2d>(value)?),
             Type::Matrix3d if value.is_array() => Value::Matrix3dVec(self.read_array::<gf::Mat3d>(value)?),
-            Type::Matrix4d if value.is_array() => Value::Matrix4dVec(self.read_array::<gf::Matrix4d>(value)?),
+            Type::Matrix4d if value.is_array() => Value::Matrix4dVec(self.read_array::<gf::Mat4d>(value)?),
 
             Type::Matrix2d if value.is_inlined() => {
                 sdf::Value::Matrix2d(gf::Mat2d(to_mat_diag::<2, 4>(self.unpack_value(value)?)))
@@ -1268,12 +1268,12 @@ impl<'a> Decoder<'a> {
                 sdf::Value::Matrix3d(gf::Mat3d(to_mat_diag::<3, 9>(self.unpack_value(value)?)))
             }
             Type::Matrix4d if value.is_inlined() => {
-                sdf::Value::Matrix4d(gf::Matrix4d(to_mat_diag::<4, 16>(self.unpack_value(value)?)))
+                sdf::Value::Matrix4d(gf::Mat4d(to_mat_diag::<4, 16>(self.unpack_value(value)?)))
             }
 
             Type::Matrix2d => sdf::Value::Matrix2d(gf::Mat2d(self.unpack_value::<[f64; 4]>(value)?)),
             Type::Matrix3d => sdf::Value::Matrix3d(gf::Mat3d(self.unpack_value::<[f64; 9]>(value)?)),
-            Type::Matrix4d => sdf::Value::Matrix4d(gf::Matrix4d(self.unpack_value::<[f64; 16]>(value)?)),
+            Type::Matrix4d => sdf::Value::Matrix4d(gf::Mat4d(self.unpack_value::<[f64; 16]>(value)?)),
 
             //
             // Quats

@@ -328,8 +328,8 @@ mod tests {
         a[0] = 1.0;
         b[0] = 3.0;
         let s = vec![
-            (0.0, Value::Matrix4d(gf::Matrix4d(a))),
-            (10.0, Value::Matrix4d(gf::Matrix4d(b))),
+            (0.0, Value::Matrix4d(gf::Mat4d(a))),
+            (10.0, Value::Matrix4d(gf::Mat4d(b))),
         ];
         let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
         if let Value::Matrix4d(m) = out {

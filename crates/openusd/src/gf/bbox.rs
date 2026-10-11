@@ -1,6 +1,6 @@
 //! `GfBBox3d` — a box in a space of its own, placed by a matrix.
 
-use super::{Matrix4d, Range3d, Vec3d};
+use super::{Mat4d, Range3d, Vec3d};
 
 /// A [`Range3d`] and the matrix that takes its space to world space (C++
 /// `GfBBox3d`).
@@ -19,8 +19,8 @@ use super::{Matrix4d, Range3d, Vec3d};
 /// use openusd::gf;
 ///
 /// let unit = gf::Range3d::UNIT_CUBE;
-/// let mut bbox = gf::BBox3d::new(unit, gf::Matrix4d::scale([2.0, 2.0, 2.0]));
-/// bbox.transform(gf::Matrix4d::translation([10.0, 0.0, 0.0]));
+/// let mut bbox = gf::BBox3d::new(unit, gf::Mat4d::scale([2.0, 2.0, 2.0]));
+/// bbox.transform(gf::Mat4d::translation([10.0, 0.0, 0.0]));
 ///
 /// let aligned = bbox.compute_aligned_range();
 /// assert_eq!(aligned.min(), gf::vec3d(10.0, 0.0, 0.0));
@@ -30,10 +30,10 @@ use super::{Matrix4d, Range3d, Vec3d};
 #[derive(Debug, Clone, Copy)]
 pub struct BBox3d {
     range: Range3d,
-    matrix: Matrix4d,
+    matrix: Mat4d,
     /// The inverse of `matrix`, or `None` for a matrix that has none and so
     /// flattens the box.
-    inverse: Option<Matrix4d>,
+    inverse: Option<Mat4d>,
     zero_area_primitives: bool,
 }
 
@@ -43,7 +43,7 @@ impl BBox3d {
     const PRECISION_LIMIT: f64 = 1.0e-13;
 
     /// The box `range` placed by `matrix`.
-    pub fn new(range: Range3d, matrix: Matrix4d) -> Self {
+    pub fn new(range: Range3d, matrix: Mat4d) -> Self {
         let mut bbox = BBox3d::from(range);
         bbox.set_matrix(matrix);
         bbox
@@ -60,18 +60,18 @@ impl BBox3d {
     }
 
     /// The matrix from the box's space to world space (C++ `GetMatrix`).
-    pub const fn matrix(&self) -> Matrix4d {
+    pub const fn matrix(&self) -> Mat4d {
         self.matrix
     }
 
     /// The inverse of the matrix (C++ `GetInverseMatrix`), the identity
     /// where the matrix has none.
-    pub fn inverse_matrix(&self) -> Matrix4d {
-        self.inverse.unwrap_or(Matrix4d::IDENTITY)
+    pub fn inverse_matrix(&self) -> Mat4d {
+        self.inverse.unwrap_or(Mat4d::IDENTITY)
     }
 
     /// Replace the matrix, keeping the box (C++ `SetMatrix`).
-    pub fn set_matrix(&mut self, matrix: Matrix4d) {
+    pub fn set_matrix(&mut self, matrix: Mat4d) {
         self.matrix = matrix;
         self.inverse = matrix.inverse_above(Self::PRECISION_LIMIT);
     }
@@ -100,7 +100,7 @@ impl BBox3d {
     }
 
     /// Apply `matrix` after the box's own (C++ `Transform`).
-    pub fn transform(&mut self, matrix: Matrix4d) {
+    pub fn transform(&mut self, matrix: Mat4d) {
         self.set_matrix(self.matrix * matrix);
     }
 
@@ -153,7 +153,7 @@ impl BBox3d {
     /// This box with its range grown to hold `other`, projected into this
     /// box's space by `inverse`, the inverse of this box's matrix (C++
     /// `_CombineInOrder`).
-    fn extended_by(&self, other: &BBox3d, inverse: Matrix4d) -> BBox3d {
+    fn extended_by(&self, other: &BBox3d, inverse: Mat4d) -> BBox3d {
         let projected = aligned_range(other.range, other.matrix * inverse);
         BBox3d {
             range: self.range.union(projected),
@@ -174,8 +174,8 @@ impl From<Range3d> for BBox3d {
     fn from(range: Range3d) -> Self {
         BBox3d {
             range,
-            matrix: Matrix4d::IDENTITY,
-            inverse: Some(Matrix4d::IDENTITY),
+            matrix: Mat4d::IDENTITY,
+            inverse: Some(Mat4d::IDENTITY),
             zero_area_primitives: false,
         }
     }
@@ -195,7 +195,7 @@ impl PartialEq for BBox3d {
 /// Each axis of the result takes, from each axis of the range, whichever of
 /// the two extremes the matrix sends lower for its minimum and the other for
 /// its maximum (James Arvo, Graphics Gems I, pp. 548-550).
-fn aligned_range(range: Range3d, matrix: Matrix4d) -> Range3d {
+fn aligned_range(range: Range3d, matrix: Mat4d) -> Range3d {
     if range.is_empty() {
         return range;
     }
@@ -217,19 +217,19 @@ fn aligned_range(range: Range3d, matrix: Matrix4d) -> Range3d {
 mod tests {
     use super::BBox3d;
     use crate::gf::range::tests::range;
-    use crate::gf::{self, Matrix4d, Range3d, Rotation};
+    use crate::gf::{self, Mat4d, Range3d, Rotation};
 
-    fn rotation(axis: gf::Vec3d, degrees: f64) -> Matrix4d {
-        Matrix4d::from_quat(Rotation::new(axis, degrees).quat())
+    fn rotation(axis: gf::Vec3d, degrees: f64) -> Mat4d {
+        Mat4d::from_quat(Rotation::new(axis, degrees).quat())
     }
 
     /// Equality reads the range and the matrix, and the flag is left out.
     #[test]
     fn equality() {
         let unit = BBox3d::from(Range3d::UNIT_CUBE);
-        assert_eq!(unit, BBox3d::new(Range3d::UNIT_CUBE, Matrix4d::IDENTITY));
+        assert_eq!(unit, BBox3d::new(Range3d::UNIT_CUBE, Mat4d::IDENTITY));
         assert_ne!(unit, BBox3d::from(range([1.0; 3], [2.0; 3])));
-        assert_ne!(unit, BBox3d::new(Range3d::UNIT_CUBE, Matrix4d::scale([2.0; 3])));
+        assert_ne!(unit, BBox3d::new(Range3d::UNIT_CUBE, Mat4d::scale([2.0; 3])));
 
         let mut flagged = unit;
         flagged.set_has_zero_area_primitives(true);
@@ -241,7 +241,7 @@ mod tests {
     fn default_is_empty() {
         let bbox = BBox3d::default();
         assert!(bbox.range().is_empty());
-        assert_eq!(bbox.matrix(), Matrix4d::IDENTITY);
+        assert_eq!(bbox.matrix(), Mat4d::IDENTITY);
         assert!(bbox.compute_aligned_range().is_empty());
         assert_eq!(bbox.volume(), 0.0);
         assert!(!bbox.has_zero_area_primitives());
@@ -251,14 +251,14 @@ mod tests {
     /// identity.
     #[test]
     fn inverse_follows_matrix() {
-        let scale = Matrix4d::scale([5.0; 3]);
+        let scale = Mat4d::scale([5.0; 3]);
         let mut bbox = BBox3d::default();
         bbox.set_matrix(scale);
         assert_eq!(bbox.matrix(), scale);
         assert_eq!(Some(bbox.inverse_matrix()), scale.inverse());
 
-        bbox.set_matrix(Matrix4d::scale([1.0, 0.0, 1.0]));
-        assert_eq!(bbox.inverse_matrix(), Matrix4d::IDENTITY);
+        bbox.set_matrix(Mat4d::scale([1.0, 0.0, 1.0]));
+        assert_eq!(bbox.inverse_matrix(), Mat4d::IDENTITY);
 
         bbox.set_range(range([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]));
         assert_eq!(bbox.range(), range([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]));
@@ -268,8 +268,8 @@ mod tests {
     fn volume_scales_with_matrix() {
         let two = range([0.0; 3], [2.0; 3]);
         assert_eq!(BBox3d::from(two).volume(), 8.0);
-        assert_eq!(BBox3d::new(two, Matrix4d::scale([1.0, 2.0, 3.0])).volume(), 48.0);
-        assert_eq!(BBox3d::new(two, Matrix4d::scale([-1.0, 1.0, 1.0])).volume(), 8.0);
+        assert_eq!(BBox3d::new(two, Mat4d::scale([1.0, 2.0, 3.0])).volume(), 48.0);
+        assert_eq!(BBox3d::new(two, Mat4d::scale([-1.0, 1.0, 1.0])).volume(), 8.0);
         // Corners out of order hold nothing.
         assert_eq!(BBox3d::from(range([1.0; 3], [0.0; 3])).volume(), 0.0);
     }
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn aligned_range_projects() {
         let cube = range([-1.0; 3], [1.0; 3]);
-        let scaled = BBox3d::new(cube, Matrix4d::scale([3.0; 3]));
+        let scaled = BBox3d::new(cube, Mat4d::scale([3.0; 3]));
         assert_eq!(scaled.compute_aligned_range().size(), gf::vec3d(6.0, 6.0, 6.0));
 
         // A cube turned 30 degrees about X widens along the other two axes.
@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(BBox3d::from(aligned).compute_aligned_range(), aligned);
 
         // A mirror swaps which corner is the minimum.
-        let mirrored = BBox3d::new(Range3d::UNIT_CUBE, Matrix4d::scale([-2.0, 1.0, 1.0]));
+        let mirrored = BBox3d::new(Range3d::UNIT_CUBE, Mat4d::scale([-2.0, 1.0, 1.0]));
         assert_eq!(
             mirrored.compute_aligned_range(),
             range([-2.0, 0.0, 0.0], [0.0, 1.0, 1.0])
@@ -337,8 +337,8 @@ mod tests {
     /// An empty box yields the other as it is.
     #[test]
     fn combine_with_empty() {
-        let empty = BBox3d::new(range([1.0; 3], [0.0; 3]), Matrix4d::scale([2.0; 3]));
-        let full = BBox3d::new(range([1.0; 3], [2.0; 3]), Matrix4d::scale([3.0; 3]));
+        let empty = BBox3d::new(range([1.0; 3], [0.0; 3]), Mat4d::scale([2.0; 3]));
+        let full = BBox3d::new(range([1.0; 3], [2.0; 3]), Mat4d::scale([3.0; 3]));
         assert_eq!(BBox3d::combine(&empty, &full), full);
         assert_eq!(BBox3d::combine(&full, &empty), full);
         assert!(BBox3d::combine(&empty, &empty).range().is_empty());
@@ -348,9 +348,9 @@ mod tests {
     /// and two of them merge as their aligned ranges.
     #[test]
     fn combine_degenerate() {
-        let flat = Matrix4d::scale([1.0, 0.0, 1.0]);
+        let flat = Mat4d::scale([1.0, 0.0, 1.0]);
         let flattened = BBox3d::new(range([2.0; 3], [3.0; 3]), flat);
-        let solid = BBox3d::new(Range3d::UNIT_CUBE, Matrix4d::scale([2.0; 3]));
+        let solid = BBox3d::new(Range3d::UNIT_CUBE, Mat4d::scale([2.0; 3]));
 
         for combined in [BBox3d::combine(&flattened, &solid), BBox3d::combine(&solid, &flattened)] {
             assert_eq!(combined.matrix(), solid.matrix());
@@ -359,7 +359,7 @@ mod tests {
 
         let other = BBox3d::new(range([-1.0; 3], [0.0; 3]), flat);
         let both = BBox3d::combine(&flattened, &other);
-        assert_eq!(both.matrix(), Matrix4d::IDENTITY);
+        assert_eq!(both.matrix(), Mat4d::IDENTITY);
         assert_eq!(both.range(), range([-1.0, 0.0, -1.0], [3.0, 0.0, 3.0]));
     }
 
@@ -371,7 +371,7 @@ mod tests {
         );
         let turned = BBox3d::new(range([-1.0; 3], [1.0; 3]), rotation(gf::Vec3d::Y_AXIS, 60.0));
         assert_eq!(turned.compute_centroid(), gf::vec3d(0.0, 0.0, 0.0));
-        let moved = BBox3d::new(Range3d::UNIT_CUBE, Matrix4d::translation([10.0, 0.0, 0.0]));
+        let moved = BBox3d::new(Range3d::UNIT_CUBE, Mat4d::translation([10.0, 0.0, 0.0]));
         assert_eq!(moved.compute_centroid(), gf::vec3d(10.5, 0.5, 0.5));
     }
 }
