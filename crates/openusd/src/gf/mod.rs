@@ -39,7 +39,7 @@ mod vec;
 
 pub use half::f16;
 pub use interval::Interval;
-pub use matrix::{Mat2d, Mat3d, Matrix4d};
+pub use matrix::{Factors, Mat2d, Mat3d, Matrix4d};
 pub use quat::{Quatd, Quatf, Quath};
 pub use rotation::Rotation;
 pub use vec::{Vec2d, Vec2f, Vec2h, Vec2i, Vec3d, Vec3f, Vec3h, Vec3i, Vec4d, Vec4f, Vec4h, Vec4i};
@@ -47,6 +47,10 @@ pub use vec::{Vec2d, Vec2f, Vec2h, Vec2i, Vec3d, Vec3f, Vec3h, Vec3i, Vec4d, Vec
 /// The length below which a vector or quaternion counts as zero when it is
 /// normalized (C++ `GF_MIN_VECTOR_LENGTH`).
 pub const MIN_VECTOR_LENGTH: f64 = 1e-10;
+
+/// How far from orthogonal the vectors of a basis may be and still count as
+/// orthogonal (C++ `GF_MIN_ORTHO_TOLERANCE`).
+pub const MIN_ORTHO_TOLERANCE: f64 = 1e-6;
 
 // Free-function constructors — shorthand for struct literals.
 pub fn vec2f(x: f32, y: f32) -> Vec2f {

@@ -1,6 +1,6 @@
 //! `GfRotation` — a rotation as an axis and an angle in degrees.
 
-use super::{MIN_VECTOR_LENGTH, Quatd, Vec3d};
+use super::{MIN_VECTOR_LENGTH, Matrix4d, Quatd, Vec3d};
 
 /// A rotation of `angle` degrees about a unit `axis` (C++ `GfRotation`).
 ///
@@ -30,7 +30,7 @@ impl Rotation {
         let length_sq = axis.dot(axis);
         let axis = match (length_sq - 1.0).abs() < 1e-10 {
             true => axis,
-            false => axis * (1.0 / length_sq.sqrt().max(MIN_VECTOR_LENGTH)),
+            false => axis.normalize(),
         };
         Self { axis, angle: degrees }
     }
@@ -67,6 +67,47 @@ impl Rotation {
     /// `GetInverse`).
     pub fn inverse(self) -> Self {
         Self::new(self.axis, -self.angle)
+    }
+
+    /// Decompose the rotation into angles, in degrees, about three axes (C++
+    /// `Decompose`): turning a point about `axis2` by the third angle, then
+    /// `axis1` by the second, then `axis0` by the first, is this rotation.
+    ///
+    /// The axes are normalized and taken to be mutually orthogonal.
+    pub fn decompose(self, axis0: Vec3d, axis1: Vec3d, axis2: Vec3d) -> Vec3d {
+        // Below this the middle angle is at a pole and the other two turn
+        // about one axis.
+        const EPSILON: f64 = 1e-6;
+        let (n0, n1, n2) = (axis0.normalize(), axis1.normalize(), axis2.normalize());
+
+        let mut axes = Matrix4d::IDENTITY;
+        for (c, axis) in [n0, n1, n2].into_iter().enumerate() {
+            axes[(0, c)] = axis.x;
+            axes[(1, c)] = axis.y;
+            axes[(2, c)] = axis.z;
+        }
+        // The rotation in the frame whose X, Y and Z are the three axes.
+        let m = axes.transpose() * Matrix4d::from_quat(self.quat()) * axes;
+
+        // Ken Shoemake's Euler angle conversion (Graphics Gems IV, p. 222).
+        let (i, j, k) = (0, 1, 2);
+        let cy = m[(i, i)].hypot(m[(j, i)]);
+        let mut angles = match cy > EPSILON {
+            true => [
+                m[(k, j)].atan2(m[(k, k)]),
+                (-m[(k, i)]).atan2(cy),
+                m[(j, i)].atan2(m[(i, i)]),
+            ],
+            false => [(-m[(j, k)]).atan2(m[(j, j)]), (-m[(k, i)]).atan2(cy), 0.0],
+        };
+        if n0.cross(n1).dot(n2) >= 0.0 {
+            angles = angles.map(|angle| -angle);
+        }
+        Vec3d {
+            x: angles[0].to_degrees(),
+            y: angles[1].to_degrees(),
+            z: angles[2].to_degrees(),
+        }
     }
 
     /// The rotation as a unit quaternion (C++ `GetQuat`).
@@ -152,5 +193,47 @@ mod tests {
         let r = Rotation::from_quat(gf::quatd(0.70710677_f32 as f64, 0.70710677_f32 as f64, 0.0, 0.0));
         assert!(r.angle() > 90.0 && r.angle() - 90.0 < 3e-6);
         assert_eq!(r.axis(), gf::vec3d(1.0, 0.0, 0.0));
+    }
+
+    /// The angles come back against the axes in the order asked, the last
+    /// axis being the first a point turns about.
+    #[test]
+    fn decompose_euler() {
+        let (x, y, z) = (
+            gf::vec3d(1.0, 0.0, 0.0),
+            gf::vec3d(0.0, 1.0, 0.0),
+            gf::vec3d(0.0, 0.0, 1.0),
+        );
+        let turn = |x_deg: f64, y_deg: f64, z_deg: f64| {
+            Matrix4d::rotation_x(x_deg.to_radians())
+                * Matrix4d::rotation_y(y_deg.to_radians())
+                * Matrix4d::rotation_z(z_deg.to_radians())
+        };
+        let rotation = turn(10.0, 20.0, 30.0).extract_rotation();
+
+        let zyx = rotation.decompose(z, y, x);
+        for (got, want) in [(zyx.x, 30.0), (zyx.y, 20.0), (zyx.z, 10.0)] {
+            assert!((got - want).abs() < 1e-9, "{zyx:?}");
+        }
+        // About X, Y, Z the same rotation is a turn about Z first.
+        let xyz = rotation.decompose(x, y, z);
+        let back = Matrix4d::rotation_z(xyz.z.to_radians())
+            * Matrix4d::rotation_y(xyz.y.to_radians())
+            * Matrix4d::rotation_x(xyz.x.to_radians());
+        crate::gf::matrix::tests::assert_close(back, turn(10.0, 20.0, 30.0));
+    }
+
+    /// At the pole of the middle angle the third angle is zero and the first
+    /// carries the turn.
+    #[test]
+    fn decompose_gimbal_lock() {
+        let (x, y, z) = (
+            gf::vec3d(1.0, 0.0, 0.0),
+            gf::vec3d(0.0, 1.0, 0.0),
+            gf::vec3d(0.0, 0.0, 1.0),
+        );
+        let angles = Rotation::new(y, 90.0).decompose(x, y, z);
+        assert!((angles.y - 90.0).abs() < 1e-6, "{angles:?}");
+        assert_eq!(angles.z, 0.0);
     }
 }

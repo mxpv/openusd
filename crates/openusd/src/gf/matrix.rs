@@ -1,12 +1,14 @@
 //! Row-major double-precision matrix types (`GfMatrix2d`, `GfMatrix3d`,
 //! `GfMatrix4d`).
 
+use std::array;
 use std::ops::{Index, IndexMut, Mul};
 
 use bytemuck::{Pod, Zeroable};
 
-use super::quat::Quatf;
-use super::vec::Vec3f;
+use super::quat::{Quatd, Quatf, Quath};
+use super::vec::{Vec3d, Vec3f};
+use super::{MIN_ORTHO_TOLERANCE, MIN_VECTOR_LENGTH, Rotation};
 
 /// Row-major 2×2 double-precision matrix (`GfMatrix2d`).
 ///
@@ -23,7 +25,7 @@ impl Mat2d {
 
     /// Component-wise linear interpolation.
     pub fn lerp(self, other: Self, t: f64) -> Self {
-        Self(std::array::from_fn(|i| self.0[i] + (other.0[i] - self.0[i]) * t))
+        Self(array::from_fn(|i| self.0[i] + (other.0[i] - self.0[i]) * t))
     }
 }
 
@@ -98,7 +100,7 @@ impl Mat3d {
 
     /// Component-wise linear interpolation.
     pub fn lerp(self, other: Self, t: f64) -> Self {
-        Self(std::array::from_fn(|i| self.0[i] + (other.0[i] - self.0[i]) * t))
+        Self(array::from_fn(|i| self.0[i] + (other.0[i] - self.0[i]) * t))
     }
 }
 
@@ -184,6 +186,10 @@ impl Matrix4d {
         0.0, 0.0, 0.0, 1.0, //
     ]);
 
+    /// The eigenvalue floor C++ `GfMatrix4d::Factor` defaults to, for
+    /// [`factor`](Self::factor).
+    pub const FACTOR_EPSILON: f64 = 1e-10;
+
     /// Determinant magnitude below which a matrix is treated as singular
     /// in [`inverse`](Self::inverse). Matches Pixar's reference inverter
     /// threshold for skel bind matrices.
@@ -246,7 +252,7 @@ impl Matrix4d {
 
     /// Component-wise linear interpolation.
     pub fn lerp(self, other: Self, t: f64) -> Self {
-        Self(std::array::from_fn(|i| self.0[i] + (other.0[i] - self.0[i]) * t))
+        Self(array::from_fn(|i| self.0[i] + (other.0[i] - self.0[i]) * t))
     }
 
     /// Compose a transform from translation, rotation, and scale components.
@@ -368,6 +374,220 @@ impl Matrix4d {
         Some(Matrix4d(inv))
     }
 
+    /// The transpose of the matrix (C++ `GetTranspose`).
+    pub fn transpose(self) -> Matrix4d {
+        Matrix4d(array::from_fn(|i| self.0[(i % 4) * 4 + i / 4]))
+    }
+
+    /// The determinant of the upper-left 3×3 (C++ `GetDeterminant3`).
+    pub fn determinant3(self) -> f64 {
+        let m = |r: usize, c: usize| self[(r, c)];
+        m(0, 0) * m(1, 1) * m(2, 2) + m(0, 1) * m(1, 2) * m(2, 0) + m(0, 2) * m(1, 0) * m(2, 1)
+            - m(0, 0) * m(1, 2) * m(2, 1)
+            - m(0, 1) * m(1, 0) * m(2, 2)
+            - m(0, 2) * m(1, 1) * m(2, 0)
+    }
+
+    /// The translation of the transform, its last row (C++
+    /// `ExtractTranslation`).
+    pub fn extract_translation(self) -> Vec3d {
+        Vec3d {
+            x: self.0[12],
+            y: self.0[13],
+            z: self.0[14],
+        }
+    }
+
+    /// The rotation of the upper-left 3×3 as a quaternion (C++
+    /// `ExtractRotationQuat`). The 3×3 is taken to be a pure rotation: scale
+    /// or shear in it skews the answer.
+    pub fn extract_rotation_quat(self) -> Quatd {
+        let m = |r: usize, c: usize| self[(r, c)];
+        // The largest diagonal entry keeps the divisor away from zero.
+        let i = if m(0, 0) > m(1, 1) {
+            if m(0, 0) > m(2, 2) { 0 } else { 2 }
+        } else if m(1, 1) > m(2, 2) {
+            1
+        } else {
+            2
+        };
+
+        let mut im = [0.0; 3];
+        let real;
+        if m(0, 0) + m(1, 1) + m(2, 2) > m(i, i) {
+            real = 0.5 * (m(0, 0) + m(1, 1) + m(2, 2) + m(3, 3)).sqrt();
+            im = [
+                (m(1, 2) - m(2, 1)) / (4.0 * real),
+                (m(2, 0) - m(0, 2)) / (4.0 * real),
+                (m(0, 1) - m(1, 0)) / (4.0 * real),
+            ];
+        } else {
+            let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+            let q = 0.5 * (m(i, i) - m(j, j) - m(k, k) + m(3, 3)).sqrt();
+            im[i] = q;
+            im[j] = (m(i, j) + m(j, i)) / (4.0 * q);
+            im[k] = (m(k, i) + m(i, k)) / (4.0 * q);
+            real = (m(j, k) - m(k, j)) / (4.0 * q);
+        }
+        Quatd {
+            w: real.clamp(-1.0, 1.0),
+            x: im[0],
+            y: im[1],
+            z: im[2],
+        }
+    }
+
+    /// The rotation of the upper-left 3×3 (C++ `ExtractRotation`), on the
+    /// terms of [`extract_rotation_quat`](Self::extract_rotation_quat).
+    pub fn extract_rotation(self) -> Rotation {
+        Rotation::from_quat(self.extract_rotation_quat())
+    }
+
+    /// Make the rows of the upper-left 3×3 orthogonal and of unit length, and
+    /// divide a homogeneous coordinate other than one or zero out of the
+    /// translation (C++ `Orthonormalize`).
+    ///
+    /// Returns `false` when the rows did not settle on an orthonormal basis,
+    /// in which case the matrix holds the closest estimate reached.
+    pub fn orthonormalize(&mut self) -> bool {
+        let row = |m: &Matrix4d, r: usize| Vec3d {
+            x: m[(r, 0)],
+            y: m[(r, 1)],
+            z: m[(r, 2)],
+        };
+        let (mut r0, mut r1, mut r2) = (row(self, 0), row(self, 1), row(self, 2));
+        let converged = Vec3d::orthogonalize_basis(&mut r0, &mut r1, &mut r2, true, MIN_ORTHO_TOLERANCE);
+        for (r, v) in [r0, r1, r2].into_iter().enumerate() {
+            self[(r, 0)] = v.x;
+            self[(r, 1)] = v.y;
+            self[(r, 2)] = v.z;
+        }
+
+        let w = self.0[15];
+        if w != 1.0 && w.abs() >= MIN_VECTOR_LENGTH {
+            for i in 12..15 {
+                self.0[i] /= w;
+            }
+            self.0[15] = 1.0;
+        }
+        converged
+    }
+
+    /// Factor the matrix into scale, rotation and translation (C++
+    /// `Factor`), reading `self` as `r · s · rᵀ · u · t`.
+    ///
+    /// An eigenvalue of the upper-left 3×3 below `eps` scales by `eps`, so a
+    /// singular matrix still factors; [`Factors::singular`] reports it.
+    pub fn factor(self, eps: f64) -> Factors {
+        // The upper-left 3×3 on its own, and the translation beside it.
+        let mut a = self;
+        for i in 0..3 {
+            a[(3, i)] = 0.0;
+            a[(i, 3)] = 0.0;
+        }
+        a[(3, 3)] = 1.0;
+
+        let det = a.determinant3();
+        let det_sign = if det < 0.0 { -1.0 } else { 1.0 };
+
+        // The eigenvectors of `a · aᵀ` are the scale orientation, and the
+        // roots of its eigenvalues the scales.
+        let (eigenvalues, eigenvectors) = (a * a.transpose()).jacobi3();
+        let mut scale_orientation = Matrix4d::IDENTITY;
+        for (r, vector) in eigenvectors.into_iter().enumerate() {
+            for c in 0..3 {
+                scale_orientation[(r, c)] = vector[c];
+            }
+        }
+
+        let scale = eigenvalues.map(|value| det_sign * if value < eps { eps } else { value.sqrt() });
+        let rotation = scale_orientation * Matrix4d::scale(scale.map(|s| 1.0 / s)) * scale_orientation.transpose() * a;
+        Factors {
+            scale_orientation,
+            scale: Vec3d {
+                x: scale[0],
+                y: scale[1],
+                z: scale[2],
+            },
+            rotation,
+            translation: self.extract_translation(),
+            singular: det * det_sign < eps,
+        }
+    }
+
+    /// The eigenvalues and eigenvectors of the symmetric upper-left 3×3, by
+    /// Jacobi iteration (C++ `_Jacobi3`). Eigenvector `i` is
+    /// `[vectors[0][i], vectors[1][i], vectors[2][i]]`.
+    fn jacobi3(self) -> ([f64; 3], [[f64; 3]; 3]) {
+        let mut values = [self[(0, 0)], self[(1, 1)], self[(2, 2)]];
+        let mut vectors = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut a = self;
+        let mut b = values;
+        let mut z = [0.0; 3];
+
+        for sweep in 0..50 {
+            let off_diagonal = a[(0, 1)].abs() + a[(0, 2)].abs() + a[(1, 2)].abs();
+            if off_diagonal == 0.0 {
+                break;
+            }
+            let threshold = if sweep < 3 { 0.2 * off_diagonal / 9.0 } else { 0.0 };
+
+            for p in 0..3 {
+                for q in p + 1..3 {
+                    let g = 100.0 * a[(p, q)].abs();
+                    if sweep > 3 && values[p].abs() + g == values[p].abs() && values[q].abs() + g == values[q].abs() {
+                        a[(p, q)] = 0.0;
+                    } else if a[(p, q)].abs() > threshold {
+                        let mut h = values[q] - values[p];
+                        // The tangent of the rotation angle.
+                        let t = if h.abs() + g == h.abs() {
+                            a[(p, q)] / h
+                        } else {
+                            let theta = 0.5 * h / a[(p, q)];
+                            let t = 1.0 / (theta.abs() + (1.0 + theta * theta).sqrt());
+                            if theta < 0.0 { -t } else { t }
+                        };
+                        let c = 1.0 / (1.0 + t * t).sqrt();
+                        let s = t * c;
+                        let tau = s / (1.0 + c);
+                        h = t * a[(p, q)];
+                        z[p] -= h;
+                        z[q] += h;
+                        values[p] -= h;
+                        values[q] += h;
+                        a[(p, q)] = 0.0;
+
+                        let rotate = |a: &mut Matrix4d, first: (usize, usize), second: (usize, usize)| {
+                            let (g, h) = (a[first], a[second]);
+                            a[first] = g - s * (h + g * tau);
+                            a[second] = h + s * (g - h * tau);
+                        };
+                        for j in 0..p {
+                            rotate(&mut a, (j, p), (j, q));
+                        }
+                        for j in p + 1..q {
+                            rotate(&mut a, (p, j), (j, q));
+                        }
+                        for j in q + 1..3 {
+                            rotate(&mut a, (p, j), (q, j));
+                        }
+                        for vector in &mut vectors {
+                            let (g, h) = (vector[p], vector[q]);
+                            vector[p] = g - s * (h + g * tau);
+                            vector[q] = h + s * (g - h * tau);
+                        }
+                    }
+                }
+            }
+            for p in 0..3 {
+                b[p] += z[p];
+                values[p] = b[p];
+                z[p] = 0.0;
+            }
+        }
+        (values, vectors)
+    }
+
     /// Apply this transform to a position (includes translation).
     /// Equivalent to `(p.x, p.y, p.z, 1) · M`.
     pub fn transform_point(self, p: Vec3f) -> Vec3f {
@@ -393,6 +613,24 @@ impl Matrix4d {
             z: (x * m[2] + y * m[6] + z * m[10]) as f32,
         }
     }
+}
+
+/// What [`Matrix4d::factor`] takes a matrix apart into (C++
+/// `GfMatrix4d::Factor`): the matrix is `r · s · rᵀ · u · t`, for the scale
+/// orientation `r`, the scale `s`, the rotation `u` and the translation `t`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Factors {
+    /// The rotation into the axes the scale applies along.
+    pub scale_orientation: Matrix4d,
+    /// The scale along each of those axes, negative for a matrix that flips
+    /// handedness.
+    pub scale: Vec3d,
+    /// The rotation, which keeps any shear the matrix has.
+    pub rotation: Matrix4d,
+    /// The translation.
+    pub translation: Vec3d,
+    /// `true` when the upper-left 3×3 has no inverse.
+    pub singular: bool,
 }
 
 impl Default for Matrix4d {
@@ -438,6 +676,12 @@ impl From<Matrix4d> for [[f64; 4]; 4] {
 impl From<Vec3f> for [f64; 3] {
     fn from(v: Vec3f) -> Self {
         [v.x as f64, v.y as f64, v.z as f64]
+    }
+}
+
+impl From<Quath> for [f64; 4] {
+    fn from(q: Quath) -> Self {
+        [q.w.to_f64(), q.x.to_f64(), q.y.to_f64(), q.z.to_f64()]
     }
 }
 
@@ -525,7 +769,7 @@ impl IndexMut<(usize, usize)> for Matrix4d {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn translation(x: f64, y: f64, z: f64) -> Matrix4d {
@@ -684,5 +928,118 @@ mod tests {
         assert!(p.x.abs() < 1e-5);
         assert!((p.y - 1.0).abs() < 1e-5);
         assert!(p.z.abs() < 1e-5);
+    }
+
+    pub(crate) fn assert_close(got: Matrix4d, want: Matrix4d) {
+        for i in 0..16 {
+            assert!((got[i] - want[i]).abs() < 1e-9, "{got:?} != {want:?}");
+        }
+    }
+
+    #[test]
+    fn transpose_swaps_rows() {
+        let m = translation(1.0, 2.0, 3.0);
+        let t = m.transpose();
+        assert_eq!([t[(0, 3)], t[(1, 3)], t[(2, 3)]], [1.0, 2.0, 3.0]);
+        assert_eq!(t.transpose(), m);
+    }
+
+    #[test]
+    fn determinant3_of_scale() {
+        let m = Matrix4d::scale([2.0, 3.0, 4.0]) * translation(9.0, 9.0, 9.0);
+        assert_eq!(m.determinant3(), 24.0);
+        assert_eq!(Matrix4d::rotation_y(0.7).determinant3().round(), 1.0);
+    }
+
+    /// A rotation matrix reads back as the rotation that made it, whichever
+    /// diagonal entry is largest.
+    #[test]
+    fn extract_rotation_round_trips() {
+        for (axis, degrees) in [
+            (Vec3d { x: 1.0, y: 2.0, z: 3.0 }, 40.0),
+            (Vec3d { x: 1.0, y: 0.0, z: 0.0 }, 170.0),
+            (Vec3d { x: 0.0, y: 1.0, z: 0.0 }, 170.0),
+            (Vec3d { x: 0.0, y: 0.0, z: 1.0 }, 170.0),
+        ] {
+            let m = Matrix4d::from_quat(Rotation::new(axis, degrees).quat()) * translation(1.0, 2.0, 3.0);
+            assert_eq!(m.extract_translation(), Vec3d { x: 1.0, y: 2.0, z: 3.0 });
+            let back = Matrix4d::from_quat(m.extract_rotation().quat()) * translation(1.0, 2.0, 3.0);
+            assert_close(back, m);
+        }
+    }
+
+    /// Rows a little off orthonormal settle onto the basis they are near.
+    #[test]
+    fn orthonormalize_settles() {
+        let rotation = Matrix4d::rotation_z(0.3) * Matrix4d::rotation_x(1.1);
+        let mut m = rotation;
+        m[(0, 1)] += 1e-4;
+        m[(2, 0)] -= 1e-4;
+        assert!(m.orthonormalize());
+        for i in 0..16 {
+            assert!((m[i] - rotation[i]).abs() < 1e-3);
+        }
+        let product = m * m.transpose();
+        for i in 0..16 {
+            assert!((product[i] - Matrix4d::IDENTITY[i]).abs() < 1e-6, "{product:?}");
+        }
+
+        // Two colinear rows have no basis to settle onto.
+        let mut colinear = Matrix4d::IDENTITY;
+        colinear[(1, 0)] = 1.0;
+        colinear[(1, 1)] = 0.0;
+        assert!(!colinear.orthonormalize());
+    }
+
+    #[test]
+    fn orthonormalize_divides_w() {
+        let mut m = translation(2.0, 4.0, 6.0);
+        m[(3, 3)] = 2.0;
+        assert!(m.orthonormalize());
+        assert_eq!(m, translation(1.0, 2.0, 3.0));
+    }
+
+    /// The factors of a scaled, rotated and translated matrix multiply back
+    /// to it.
+    #[test]
+    fn factor_recomposes() {
+        let rotation = Matrix4d::rotation_x(0.4) * Matrix4d::rotation_y(-1.2) * Matrix4d::rotation_z(2.0);
+        let m = Matrix4d::scale([1.0, 2.0, 3.0]) * rotation * translation(10.0, 20.0, 30.0);
+        let f = m.factor(1e-10);
+        assert!(!f.singular);
+        assert_eq!(
+            f.translation,
+            Vec3d {
+                x: 10.0,
+                y: 20.0,
+                z: 30.0
+            }
+        );
+
+        let mut scales: [f64; 3] = f.scale.into();
+        scales.sort_by(f64::total_cmp);
+        for (got, want) in scales.into_iter().zip([1.0, 2.0, 3.0]) {
+            assert!((got - want).abs() < 1e-9, "{scales:?}");
+        }
+        let recomposed = f.scale_orientation
+            * Matrix4d::scale(f.scale)
+            * f.scale_orientation.transpose()
+            * f.rotation
+            * Matrix4d::translation(f.translation);
+        assert_close(recomposed, m);
+        assert_close(f.rotation * f.rotation.transpose(), Matrix4d::IDENTITY);
+    }
+
+    /// A mirrored matrix factors with negative scales, and a flattened one
+    /// reports that it is singular.
+    #[test]
+    fn factor_sign_and_singular() {
+        let mirrored = Matrix4d::scale([-1.0, 2.0, 3.0]).factor(1e-10);
+        assert!(!mirrored.singular);
+        let scales: [f64; 3] = mirrored.scale.into();
+        assert!(scales.iter().all(|s| *s < 0.0), "{scales:?}");
+
+        let flat = Matrix4d::scale([1.0, 0.0, 1.0]).factor(1e-10);
+        assert!(flat.singular);
     }
 }

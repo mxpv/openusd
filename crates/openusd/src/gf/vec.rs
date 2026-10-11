@@ -11,6 +11,8 @@
 
 use std::ops::{Index, IndexMut};
 
+use super::MIN_VECTOR_LENGTH;
+
 use bytemuck::{Pod, Zeroable};
 use derive_more::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign, Sum};
 
@@ -294,15 +296,32 @@ impl Vec3f {
         self.x * other.x + self.y * other.y + self.z * other.z
     }
 
+    /// The cross product `self × other` (C++ `GfCross`).
+    ///
+    /// ```
+    /// use openusd::gf;
+    ///
+    /// let (x, y) = (gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(0.0, 1.0, 0.0));
+    /// assert_eq!(x.cross(y), gf::vec3f(0.0, 0.0, 1.0));
+    /// assert_eq!(y.cross(x), gf::vec3f(0.0, 0.0, -1.0));
+    /// ```
+    pub fn cross(self, other: Vec3f) -> Vec3f {
+        Vec3f {
+            x: self.y * other.z - self.z * other.y,
+            y: self.z * other.x - self.x * other.z,
+            z: self.x * other.y - self.y * other.x,
+        }
+    }
+
     pub fn length(self) -> f32 {
         self.dot(self).sqrt()
     }
 
-    /// Returns the unit vector, or `self` unchanged when the length is zero
-    /// (matches `GfVec3f::GetNormalized`'s zero-length behaviour).
+    /// The vector scaled to unit length (C++ `GfVec3f::GetNormalized`). A
+    /// vector shorter than [`MIN_VECTOR_LENGTH`] is divided by that length
+    /// and stays short of unit length.
     pub fn normalize(self) -> Self {
-        let len = self.length();
-        if len > 0.0 { self * (1.0 / len) } else { self }
+        self * (1.0 / self.length().max(MIN_VECTOR_LENGTH as f32))
     }
 
     pub fn lerp(self, other: Self, t: f32) -> Self {
@@ -363,17 +382,81 @@ impl IndexMut<usize> for Vec3d {
 }
 
 impl Vec3d {
+    /// The unit vector along X (C++ `GfVec3d::XAxis`).
+    pub const X_AXIS: Vec3d = Vec3d { x: 1.0, y: 0.0, z: 0.0 };
+    /// The unit vector along Y (C++ `GfVec3d::YAxis`).
+    pub const Y_AXIS: Vec3d = Vec3d { x: 0.0, y: 1.0, z: 0.0 };
+    /// The unit vector along Z (C++ `GfVec3d::ZAxis`).
+    pub const Z_AXIS: Vec3d = Vec3d { x: 0.0, y: 0.0, z: 1.0 };
+
     pub fn dot(self, other: Vec3d) -> f64 {
         self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    /// The cross product `self × other`.
+    pub fn cross(self, other: Vec3d) -> Vec3d {
+        Vec3d {
+            x: self.y * other.z - self.z * other.y,
+            y: self.z * other.x - self.x * other.z,
+            z: self.x * other.y - self.y * other.x,
+        }
+    }
+
+    /// Make three vectors mutually orthogonal by iterating toward the basis
+    /// nearest all three, and of unit length when `normalize` is set (C++
+    /// `GfVec3d::OrthogonalizeBasis`).
+    ///
+    /// Returns `false` when two of the vectors are within `eps` of colinear
+    /// or the iteration does not settle within `eps`, in which case the
+    /// vectors hold its last estimate.
+    pub fn orthogonalize_basis(tx: &mut Vec3d, ty: &mut Vec3d, tz: &mut Vec3d, normalize: bool, eps: f64) -> bool {
+        const MAX_ITERS: usize = 20;
+        let unit = Vec3d::normalize;
+        let close = |a: Vec3d, b: Vec3d| (a - b).dot(a - b) < eps * eps;
+
+        if normalize {
+            (*tx, *ty, *tz) = (unit(*tx), unit(*ty), unit(*tz));
+        }
+        let (mut ax, mut ay, mut az) = (unit(*tx), unit(*ty), unit(*tz));
+        // Colinear vectors leave an iteration unchanged, which the error
+        // below would read as convergence.
+        if close(ax, ay) || close(ax, az) || close(ay, az) {
+            return false;
+        }
+
+        for _ in 0..MAX_ITERS {
+            let (mut bx, mut by, mut bz) = (*tx, *ty, *tz);
+            bx -= ay * ay.dot(bx);
+            bx -= az * az.dot(bx);
+            by -= ax * ax.dot(by);
+            by -= az * az.dot(by);
+            bz -= ax * ax.dot(bz);
+            bz -= ay * ay.dot(bz);
+
+            let (mut cx, mut cy, mut cz) = ((*tx + bx) * 0.5, (*ty + by) * 0.5, (*tz + bz) * 0.5);
+            if normalize {
+                (cx, cy, cz) = (unit(cx), unit(cy), unit(cz));
+            }
+
+            let (dx, dy, dz) = (*tx - cx, *ty - cy, *tz - cz);
+            if dx.dot(dx) + dy.dot(dy) + dz.dot(dz) < eps * eps {
+                return true;
+            }
+            (*tx, *ty, *tz) = (cx, cy, cz);
+            (ax, ay, az) = (unit(cx), unit(cy), unit(cz));
+        }
+        false
     }
 
     pub fn length(self) -> f64 {
         self.dot(self).sqrt()
     }
 
+    /// The vector scaled to unit length (C++ `GfVec3d::GetNormalized`). A
+    /// vector shorter than [`MIN_VECTOR_LENGTH`] is divided by that length
+    /// and stays short of unit length.
     pub fn normalize(self) -> Self {
-        let len = self.length();
-        if len > 0.0 { self * (1.0 / len) } else { self }
+        self * (1.0 / self.length().max(MIN_VECTOR_LENGTH))
     }
 
     pub fn lerp(self, other: Self, t: f64) -> Self {
