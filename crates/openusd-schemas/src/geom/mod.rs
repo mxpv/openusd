@@ -97,6 +97,13 @@
 //! one rotate, one scale and a pivot ([`XformVectors`]), for the stacks that
 //! have that shape.
 //!
+//! # Stage metrics
+//!
+//! The axis a stage calls up and the length of its unit are stage metadata.
+//! [`StageMetadata`] reads and authors them as the token and the number they
+//! are, and [`stage_up_axis`] and [`set_stage_up_axis`] as an [`UpAxis`].
+//! [`linear_units`] names the common units.
+//!
 //! # Primvars
 //!
 //! A `primvars:*` attribute is read through [`Primvar`], which bundles its
@@ -120,6 +127,7 @@ mod curves;
 mod gprim;
 mod imageable;
 mod mesh;
+mod metrics;
 mod motion_api;
 mod point_instancer;
 mod points;
@@ -144,6 +152,7 @@ pub use curves::{CurvesExt, PointAndTangentArrays};
 pub use gprim::GprimExt;
 pub use imageable::{ImageableExt, PurposeInfo};
 pub use mesh::MeshTopologyError;
+pub use metrics::{UpAxis, linear_units, set_stage_up_axis, stage_up_axis};
 pub use point_instancer::{InstanceArrays, MaskApplication, ProtoXformInclusion};
 pub use points::PointBasedExt;
 pub use primvar::{Primvar, PrimvarDeclaration};
