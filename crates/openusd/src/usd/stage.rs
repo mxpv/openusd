@@ -202,14 +202,14 @@ impl Default for PrimPredicate {
 /// that hands each prim's status down composes each prim once, where a
 /// prim asked on its own composes every prim above it.
 ///
-/// The status is that of one prim under the stage's population when it was
-/// read. It is passed over for a fresh read once the population has
-/// changed, and where it is handed to another prim than the one it was read
-/// for.
+/// The status is that of one prim of one stage under the stage's population
+/// when it was read. It is passed over for a fresh read once the population
+/// has changed, and where it is handed to another prim than the one it was
+/// read for.
 #[derive(Debug, Clone)]
 pub struct ComposedStatus {
     /// The prim the status is of.
-    path: sdf::Path,
+    prim: super::Prim,
     /// The prim's inherited bits, and its `INSTANCE` bit where
     /// `instance_known`.
     status: PrimStatus,
@@ -217,6 +217,16 @@ pub struct ComposedStatus {
     instance_known: bool,
     /// The population epoch `status` was read under.
     epoch: u64,
+}
+
+impl ComposedStatus {
+    /// Whether the prim is an instance, or `None` where the listing that
+    /// composed the status did not ask: one under a predicate that
+    /// traverses instance proxies stops at no instance, and has no need to
+    /// know.
+    pub fn is_instance(&self) -> Option<bool> {
+        self.instance_known.then(|| self.status.contains(PrimStatus::INSTANCE))
+    }
 }
 
 /// Initial payload loading behavior for a stage.
@@ -3374,15 +3384,17 @@ impl Stage {
         composed: Option<ComposedStatus>,
     ) -> Result<Vec<(super::Prim, ComposedStatus)>> {
         let epoch = self.population_epoch();
-        let composed = composed.filter(|composed| composed.epoch == epoch && &composed.path == parent);
+        let composed = composed.filter(|composed| {
+            composed.epoch == epoch && composed.prim.path() == parent && composed.prim.stage() == self
+        });
         let status = match &composed {
             _ if parent.is_abs_root() => PrimStatus::ROOT,
             Some(composed) => composed.status,
             None => self.prim_status_masked(parent, PrimStatus::INHERITED)?,
         };
         if !predicate.traverse_instance_proxies {
-            let instance = match composed.filter(|composed| composed.instance_known) {
-                Some(composed) => composed.status.contains(PrimStatus::INSTANCE),
+            let instance = match composed.as_ref().and_then(ComposedStatus::is_instance) {
+                Some(instance) => instance,
                 None => self.masked(parent, |g, cache| cache.is_instance(g, parent))?,
             };
             if instance && !self.masked(parent, |g, cache| cache.is_instance_proxy(g, parent))? {
@@ -3402,13 +3414,14 @@ impl Stage {
             };
             let status = self.child_status_masked(&child, status, needed)?;
             if predicate.matches(status) {
+                let child = super::Prim::new(self, child);
                 let composed = ComposedStatus {
-                    path: child.clone(),
+                    prim: child.clone(),
                     status,
                     instance_known,
                     epoch,
                 };
-                children.push((super::Prim::new(self, child), composed));
+                children.push((child, composed));
             }
         }
         Ok(children)

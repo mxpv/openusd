@@ -13324,6 +13324,26 @@ def "A" (instanceable = true references = </Proto>) {}
         ["/Proto/Child"]
     );
 
+    // Nor is the status of a prim at the same path on another stage taken:
+    // on a stage where `/Root` is inactive, `/Root/Kept` has no active
+    // children whatever its namesake's status says.
+    let other_dir = tempfile::tempdir()?;
+    let other = open_text(
+        &other_dir,
+        "#usda 1.0\n\ndef \"Root\" (active = false)\n{\n    def \"Kept\"\n    {\n        def \"Leaf\" {}\n    }\n}\n",
+    )?;
+    let listed = stage
+        .prim("/Root")?
+        .filtered_children_from(PrimPredicate::DEFAULT, None)?;
+    let (_, of_kept) = listed[0].clone();
+    assert_eq!(of_kept.is_instance(), Some(false));
+    let namesake = other.prim("/Root/Kept")?;
+    assert!(
+        namesake
+            .filtered_children_from(PrimPredicate::DEFAULT, Some(of_kept))?
+            .is_empty()
+    );
+
     // The status of a prim read while it was active does not outlive the
     // edit that deactivates the prim above it.
     let root = stage.prim("/Root")?;
