@@ -639,7 +639,7 @@ fn op_attr_name(op: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{XformOpPrecision, XformQuery, XformableExt};
     use crate::SchemaError;
     use crate::geom::XformableSchema;
@@ -928,7 +928,7 @@ mod tests {
     }
 
     /// Every entry of `got` is within rounding of `want`.
-    fn assert_close(got: gf::Mat4d, want: gf::Mat4d) {
+    pub(crate) fn assert_close(got: gf::Mat4d, want: gf::Mat4d) {
         for (g, w) in got.0.iter().zip(want.0) {
             assert!((g - w).abs() < 1e-9, "{got:?} != {want:?}");
         }

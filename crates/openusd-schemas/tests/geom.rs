@@ -1338,3 +1338,508 @@ fn interpolation_doc_asset() -> Result<(), SchemaError> {
     }
     Ok(())
 }
+
+/// `BBoxCache` against the fixtures of the C++ `testUsdGeomBBoxCache`.
+mod bbox_cache {
+    use openusd::usd::{self, SchemaBase};
+    use openusd::{gf, sdf};
+    use openusd_schemas::SchemaError;
+    use openusd_schemas::geom::{
+        BBoxCache, Boundable, BoundableExt, Imageable, ImageableExt, ImageableSchema, ModelAPI, PointInstancer,
+        PointInstancerSchema, Purpose, Sphere, Visibility, XformCache,
+    };
+
+    type Result<T = ()> = std::result::Result<T, SchemaError>;
+
+    fn open(name: &str) -> Result<usd::Stage> {
+        open_with(name, usd::InitialLoadSet::LoadAll)
+    }
+
+    fn open_with(name: &str, load: usd::InitialLoadSet) -> Result<usd::Stage> {
+        Ok(usd::Stage::builder()
+            .schema_registry(openusd_schemas::schema_registry())
+            .load(load)
+            .open(&format!("fixtures/bbox_cache/{name}"))?)
+    }
+
+    fn range(min: [f64; 3], max: [f64; 3]) -> gf::Range3d {
+        gf::Range3d::new(min.into(), max.into())
+    }
+
+    fn close(a: gf::Vec3d, b: gf::Vec3d) -> bool {
+        (a - b).length() < 1e-5
+    }
+
+    #[track_caller]
+    fn assert_range(found: gf::Range3d, expected: gf::Range3d) {
+        assert!(
+            close(found.min(), expected.min()) && close(found.max(), expected.max()),
+            "{found:?} is not {expected:?}"
+        );
+    }
+
+    /// The world-aligned range around the boundable prims at and beneath
+    /// `root`, each one's extent placed by its own local-to-world
+    /// transform: what a cache bounds, computed with none. The walk leaves
+    /// out what a cache leaves out, and reaches an instance's contents
+    /// through its proxies.
+    fn leaf_union(root: &usd::Prim, time: Option<usd::TimeCode>, purposes: &[Purpose]) -> Result<gf::Range3d> {
+        let children = usd::PrimPredicate::new(
+            usd::PrimStatus::ACTIVE | usd::PrimStatus::DEFINED,
+            usd::PrimStatus::ABSTRACT,
+        )
+        .with_instance_proxies(true);
+        let mut xforms = XformCache::new(time);
+        let mut union = gf::Range3d::EMPTY;
+        let mut stack = vec![root.clone()];
+        while let Some(prim) = stack.pop() {
+            if let Some(boundable) = Boundable::from_prim(prim.clone())? {
+                let included = purposes.contains(&boundable.compute_purpose()?);
+                if let Some(extent) = boundable.compute_extent(time)?.filter(|_| included) {
+                    let bbox = gf::BBox3d::new(extent.into(), xforms.local_to_world_transform(&prim)?);
+                    union = union.union(bbox.aligned_range());
+                }
+                continue;
+            }
+            for child in prim.filtered_children(children)? {
+                let imageable = Imageable::from_prim(child.clone())?;
+                if imageable.is_none() && child.is_a(usd::tokens::TYPED)? {
+                    continue;
+                }
+                let invisible = match &imageable {
+                    Some(imageable) => {
+                        imageable.visibility_attr().get_at::<Visibility>(time)? == Some(Visibility::Invisible)
+                    }
+                    None => false,
+                };
+                if !invisible {
+                    stack.push(child);
+                }
+            }
+        }
+        Ok(union)
+    }
+
+    /// The untransformed, local and world bounds of a component, at the
+    /// default time and at a time its parent has moved by.
+    #[test]
+    fn bounds_three_spaces() -> Result {
+        let stage = open("cubeSbdv.usda")?;
+        let prim = stage.prim("/parent/primWithLocalXform")?;
+        let mut cache = BBoxCache::new(None, [Purpose::Default]);
+
+        for (time, world) in [(None, 0.5), (Some(usd::TimeCode::new(1.0)), 1.5)] {
+            cache.set_time(time);
+            let untransformed = cache.untransformed_bound(&prim)?;
+            assert_eq!(untransformed.matrix(), gf::Mat4d::IDENTITY);
+            assert_range(untransformed.range(), range([-1.5; 3], [-0.5; 3]));
+            assert_range(cache.local_bound(&prim)?.aligned_range(), range([-0.5; 3], [0.5; 3]));
+
+            let found = cache.world_bound(&prim)?;
+            assert_eq!(found, cache.world_bound(&prim)?);
+            assert_range(found.aligned_range(), range([world; 3], [world + 1.0; 3]));
+            assert_range(found.aligned_range(), leaf_union(&prim, time, &[Purpose::Default])?);
+        }
+        Ok(())
+    }
+
+    /// An invisible prim is bounded when it is the prim asked for, and its
+    /// own invisible child is still left out.
+    #[test]
+    fn invisible_queried_directly() -> Result {
+        let stage = open("cubeSbdv.usda")?;
+        let prim = stage.prim("/parent/primWithLocalXform/InvisibleChild")?;
+        let mut cache = BBoxCache::new(None, [Purpose::Default]);
+        let found = cache.world_bound(&prim)?.aligned_range();
+        assert_range(found, range([7.5, 0.5, 0.5], [8.5, 1.5, 1.5]));
+        assert_range(found, leaf_union(&prim, None, &[Purpose::Default])?);
+        Ok(())
+    }
+
+    /// Each purpose has its own box, and several purposes combine theirs.
+    /// Changing the purposes drops nothing.
+    #[test]
+    fn purposes_select_boxes() -> Result {
+        let stage = open("cubeSbdv.usda")?;
+        let prim = stage.prim("/parent/primWithLocalXform")?;
+        let mut cache = BBoxCache::new(None, [Purpose::Default]);
+        let boxes = [
+            (Purpose::Guide, range([-2.5, -2.5, -3.5], [-1.5, -1.5, -2.5])),
+            (Purpose::Render, range([-0.5, -2.5, -3.5], [0.5, -1.5, -2.5])),
+            (Purpose::Proxy, range([1.5, -2.5, -3.5], [2.5, -1.5, -2.5])),
+        ];
+        for (purpose, expected) in boxes {
+            cache.set_included_purposes([purpose]);
+            assert_eq!(cache.included_purposes(), [purpose]);
+            assert_range(cache.untransformed_bound(&prim)?.aligned_range(), expected);
+            let world = cache.world_bound(&prim)?.aligned_range();
+            assert_range(world, leaf_union(&prim, None, &[purpose])?);
+        }
+
+        let several = [Purpose::Default, Purpose::Proxy, Purpose::Render];
+        cache.set_included_purposes(several);
+        assert_range(
+            cache.untransformed_bound(&prim)?.aligned_range(),
+            range([-1.5, -2.5, -3.5], [2.5, -0.5, -0.5]),
+        );
+        assert_range(
+            cache.world_bound(&prim)?.aligned_range(),
+            leaf_union(&prim, None, &several)?,
+        );
+
+        cache.set_included_purposes([]);
+        assert!(cache.world_bound(&prim)?.range().is_empty());
+        Ok(())
+    }
+
+    /// With no component above them, rotated prims are unioned in world
+    /// space, where the cache's range is the union of its leaves'.
+    #[test]
+    fn rotated_bounds() -> Result {
+        let stage = open("cubeSbdv.usda")?;
+        let mut cache = BBoxCache::new(None, [Purpose::Default]);
+        let half = 0.5 * 2f64.sqrt();
+
+        // A unit cube turned an eighth about X, then moved.
+        let turned = stage.prim("/Rotated/Trans")?;
+        let found = cache.world_bound(&turned)?.aligned_range();
+        assert_range(found, range([3.5, -4.0 - half, -half], [4.5, -4.0 + half, half]));
+
+        for path in ["/Rotated", "/Rotated/Rotate135AndTranslate/Rot45", "/Rotated/Rotate90"] {
+            let prim = stage.prim(path)?;
+            let found = cache.world_bound(&prim)?.aligned_range();
+            assert_range(found, leaf_union(&prim, None, &[Purpose::Default])?);
+        }
+        Ok(())
+    }
+
+    /// An instance is bounded as the same prims are with no instancing.
+    #[test]
+    fn instanced_matches_plain() -> Result {
+        let stage = open("cubeSbdv_instanced.usda")?;
+        assert!(stage.prim("/instanced_parent")?.is_instance()?);
+        for use_hint in [false, true] {
+            let mut cache = BBoxCache::new(None, [Purpose::Default]).with_extents_hint(use_hint);
+            for time in [None, Some(usd::TimeCode::new(1.0))] {
+                cache.set_time(time);
+                for name in ["parent", "Rotated"] {
+                    let instanced = stage.prim(format!("/instanced_{name}").as_str())?;
+                    let plain = stage.prim(format!("/uninstanced_{name}").as_str())?;
+                    let found = cache.world_bound(&instanced)?.aligned_range();
+                    assert!(!found.is_empty());
+                    assert_range(found, cache.world_bound(&plain)?.aligned_range());
+                    if !use_hint {
+                        assert_range(found, leaf_union(&instanced, time, &[Purpose::Default])?);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The purpose an instance hands down reaches its prototype's prims,
+    /// whichever of the two levels of instancing is in use.
+    #[test]
+    fn purpose_through_instances() -> Result {
+        let default = gf::BBox3d::from(range([-1.5, -1.5, -1.5], [1.5, 1.5, 10.5]));
+        let render = gf::BBox3d::from(range([-11.0, -1.5, -16.5], [1.5, 1.5, 10.5]));
+        let stages = [
+            ("disableAllInstancing.usda", 0),
+            ("disableInnerInstancing.usda", 1),
+            ("disableOuterInstancing.usda", 1),
+            ("nestedInstanceTest.usda", 2),
+        ];
+        let mut default_cache = BBoxCache::new(None, [Purpose::Default]);
+        let mut render_cache = BBoxCache::new(None, [Purpose::Default, Purpose::Render]);
+        for (name, prototypes) in stages {
+            let stage = open(name)?;
+            let root = stage.prim("/Root")?;
+            assert_eq!(default_cache.world_bound(&root)?, default, "{name}");
+            assert_eq!(render_cache.world_bound(&root)?, render, "{name}");
+            assert_eq!(stage.prototypes()?.len(), prototypes, "{name}");
+        }
+        Ok(())
+    }
+
+    /// A bound follows a child's animated visibility across times.
+    #[test]
+    fn visibility_change_invalidates() -> Result {
+        let stage = open("animVis.usda")?;
+        let root = stage.prim("/")?;
+        let mut cache = BBoxCache::new(usd::TimeCode::new(0.0), [Purpose::Default]);
+        for (time, empty) in [(0.0, true), (1.0, false), (2.0, true), (3.0, false)] {
+            cache.set_time(usd::TimeCode::new(time));
+            assert_eq!(cache.world_bound(&root)?.range().is_empty(), empty, "at {time}");
+        }
+
+        // With visibility ignored the prim is bounded at every time.
+        let mut cache = BBoxCache::new(usd::TimeCode::new(0.0), [Purpose::Default])
+            .with_extents_hint(true)
+            .with_ignore_visibility(true);
+        assert!(cache.ignores_visibility() && cache.uses_extents_hint());
+        assert!(!cache.world_bound(&root)?.range().is_empty());
+        Ok(())
+    }
+
+    /// Extents are the authored ones, or else computed from points and
+    /// widths. Sizes that cannot bound a prim fail the query for it and for
+    /// what holds it.
+    #[test]
+    fn computed_extents() -> Result {
+        let stage = open("pointsAndCurves.usda")?;
+        let mut cache = BBoxCache::new(usd::TimeCode::new(0.0), [Purpose::Default]);
+        let mut bound =
+            |path: &str| -> Result<gf::Range3d> { Ok(cache.untransformed_bound(&stage.prim(path)?)?.range()) };
+
+        assert_eq!(
+            bound("/ValidPrims/extentAuthored")?,
+            range([-3.0, 0.0, -2.0], [1.0, 2.0, 1.0])
+        );
+        assert!(bound("/ValidPrims/empty")?.is_empty());
+        assert!(bound("/ValidPrims/noGeometricDataAuthored")?.is_empty());
+        assert_eq!(bound("/ValidPrims/bezierWExtent")?, range([-1.0; 3], [1.0; 3]));
+
+        assert_eq!(
+            bound("/WarningPrims/fourPointsWWidth")?,
+            range([-5.5, -4.5, -6.5], [6.0, 5.0, 8.0])
+        );
+        assert_eq!(
+            bound("/WarningPrims/pointsNoWidth")?,
+            range([-3.0, -5.0, -3.0], [2.0, 1.0, 3.0])
+        );
+        assert_eq!(
+            bound("/WarningPrims/zeroVolumeExtent")?,
+            range([-6.0, 0.0, 3.0], [-6.0, 0.0, 3.0])
+        );
+        assert!(bound("/WarningPrims/emptyPointsData")?.is_empty());
+        assert_range(
+            bound("/WarningPrims/bezierWwidth")?,
+            range([-1.1, -0.1, -1.1], [0.1, 0.1, 1.1]),
+        );
+
+        // An extent of one corner gives way to the computed one.
+        assert_eq!(
+            bound("/ErrorPrims/illAuthoredExtent")?,
+            range([-2.0, -1.0, 0.0], [-2.0, -1.0, 0.0])
+        );
+        assert_eq!(bound("/ErrorPrims/illAuthoredSphere")?, range([-1.0; 3], [1.0; 3]));
+        for path in ["/ErrorPrims/invalidNumWidthsAndPoints", "/ErrorPrims"] {
+            let refused = bound(path);
+            assert!(
+                matches!(refused, Err(SchemaError::WidthCountMismatch { found: 2, expected: 3 })),
+                "{refused:?}"
+            );
+        }
+        // The failure leaves the cache answering the prims beside it.
+        assert_eq!(bound("/ErrorPrims/illAuthoredSphere")?, range([-1.0; 3], [1.0; 3]));
+        assert!(!bound("/ValidPrims")?.is_empty());
+        Ok(())
+    }
+
+    /// Prims that are undefined, inactive or abstract bound nothing, asked
+    /// for directly or as children, and neither does a prim that does not
+    /// exist.
+    #[test]
+    fn undefined_inactive_abstract() -> Result {
+        let stage = open("cubeSbdv.usda")?;
+        let mut cache = BBoxCache::new(None, [Purpose::Default]);
+        for path in ["/undefinedCube1", "/inactiveCube1", "/_class_UnitCube", "/Missing"] {
+            let bound = cache.world_bound(&stage.prim(path)?)?;
+            assert!(bound.range().is_empty(), "{path}");
+        }
+        assert_range(
+            cache.world_bound(&stage.prim("/pCube1")?)?.aligned_range(),
+            range([3.5, 4.5, 5.5], [4.5, 5.5, 6.5]),
+        );
+        Ok(())
+    }
+
+    /// Prims of no type are walked through to the imageable prims beneath
+    /// them.
+    #[test]
+    fn untyped_ancestors_kept() -> Result {
+        let stage = usd::Stage::builder()
+            .schema_registry(openusd_schemas::schema_registry())
+            .in_memory("anon.usda")?;
+        let world = stage.define_prim("/World")?;
+        stage.define_prim("/World/anim")?;
+        stage.define_prim("/World/anim/char")?;
+        Sphere::define(&stage, "/World/anim/char/sphere")?;
+
+        let mut cache = BBoxCache::new(None, [Purpose::Default]).with_extents_hint(true);
+        assert_range(
+            cache.untransformed_bound(&world)?.aligned_range(),
+            range([-1.0; 3], [1.0; 3]),
+        );
+        Ok(())
+    }
+
+    /// A bound relative to the parent is the prim's extent under its own
+    /// local transform.
+    #[test]
+    fn relative_to_parent() -> Result {
+        let stage = open("testUSD4957.usda")?;
+        let (b, c) = (stage.prim("/A/B")?, stage.prim("/A/B/C")?);
+        let mut cache = BBoxCache::new(None, [Purpose::Default, Purpose::Render]);
+        let relative = cache.relative_bound(&c, &b)?;
+
+        let extent = Boundable::from_prim_unchecked(c.clone())
+            .compute_extent(None)?
+            .expect("a sphere");
+        let local = XformCache::default().local_transform(&c)?.0;
+        assert_range(
+            relative.aligned_range(),
+            gf::BBox3d::new(extent.into(), local).aligned_range(),
+        );
+        assert_range(relative.aligned_range(), range([9.0; 3], [11.0; 3]));
+        Ok(())
+    }
+
+    /// With the hint in use, a component is bounded by its hint, purpose by
+    /// purpose, at the time the hint is sampled at too.
+    #[test]
+    fn hint_bounds_three_spaces() -> Result {
+        let stage = open("cubeSbdv.usda")?;
+        let prim = stage.prim("/parent/primWithLocalXform")?;
+        let model = ModelAPI::from_prim_unchecked(prim.clone());
+        let mut cache = BBoxCache::new(None, [Purpose::Default]).with_extents_hint(true);
+
+        for (time, world) in [(None, 0.5), (Some(usd::TimeCode::new(1.0)), 1.5)] {
+            cache.set_time(time);
+            let hint = model.extents_hint_at(time)?.expect("a hint");
+            assert_eq!(hint.len(), 4);
+            for (purpose, extent) in Purpose::ORDERED.into_iter().zip(hint) {
+                cache.set_included_purposes([purpose]);
+                assert_eq!(
+                    cache.untransformed_bound(&prim)?,
+                    gf::BBox3d::from(gf::Range3d::from(extent))
+                );
+            }
+            cache.set_included_purposes([Purpose::Default]);
+            assert_range(
+                cache.world_bound(&prim)?.aligned_range(),
+                range([world; 3], [world + 1.0; 3]),
+            );
+        }
+
+        // The prims beneath a hinted model are still bounded when asked for.
+        let child = stage.prim("/parent/primWithLocalXform/Child")?;
+        assert_range(cache.untransformed_bound(&child)?.range(), range([-0.5; 3], [0.5; 3]));
+        Ok(())
+    }
+
+    /// A model whose payload is not loaded is bounded by its hint, and by
+    /// nothing with the hint not in use.
+    #[test]
+    fn hint_bounds_unloaded() -> Result {
+        let stage = open_with("unloadedCubeModel.usda", usd::InitialLoadSet::LoadNone)?;
+        assert!(!stage.prim("/World/CubeModel")?.is_loaded()?);
+        let root = stage.prim("/")?;
+        let time = usd::TimeCode::new(0.0);
+
+        let mut without = BBoxCache::new(time, [Purpose::Default]);
+        assert!(without.world_bound(&root)?.range().is_empty());
+        let mut with = BBoxCache::new(time, [Purpose::Default]).with_extents_hint(true);
+        assert_range(with.world_bound(&root)?.aligned_range(), range([-1.0; 3], [1.0; 3]));
+        Ok(())
+    }
+
+    /// A model bounded by its hint leaves nothing behind that a later query
+    /// for a prim beneath it trips on.
+    #[test]
+    fn hint_then_descendant() -> Result {
+        let stage = usd::Stage::builder()
+            .schema_registry(openusd_schemas::schema_registry())
+            .in_memory("anon.usda")?;
+        let model = stage.define_typed_prim("/Model", "Xform")?.set_kind("component")?;
+        stage.define_typed_prim("/Model/Geom", "Xform")?;
+        let ball = Sphere::define(&stage, "/Model/Geom/ball")?;
+        let hint = [gf::vec3f(-5.0, -5.0, -5.0), gf::vec3f(5.0, 5.0, 5.0)];
+        ModelAPI::from_prim_unchecked(model.clone()).set_extents_hint(&[hint], None)?;
+
+        let mut cache = BBoxCache::new(None, [Purpose::Default]).with_extents_hint(true);
+        assert_eq!(cache.untransformed_bound(&model)?.range(), range([-5.0; 3], [5.0; 3]));
+        assert_eq!(
+            cache.untransformed_bound(ball.prim())?.range(),
+            range([-1.0; 3], [1.0; 3])
+        );
+        Ok(())
+    }
+
+    /// The models of the vendor assets are bounded by the hints they author.
+    #[test]
+    fn hint_vendor_assets() -> Result {
+        let assets = "../../vendor/usd-wg-assets/full_assets";
+        for (file, path) in [
+            ("Teapot/Teapot.usd", "/Teapot"),
+            ("OpenChessSet/assets/King/King.usd", "/King"),
+        ] {
+            let stage = usd::Stage::builder()
+                .schema_registry(openusd_schemas::schema_registry())
+                .open(&format!("{assets}/{file}"))?;
+            let prim = stage.prim(sdf::path(path)?)?;
+            assert!(prim.is_model()?, "{path}");
+            let hint = ModelAPI::from_prim_unchecked(prim.clone())
+                .extents_hint_at(None)?
+                .expect("a hint");
+            let mut cache = BBoxCache::new(None, [Purpose::Default]).with_extents_hint(true);
+            assert_eq!(
+                cache.untransformed_bound(&prim)?,
+                gf::BBox3d::from(gf::Range3d::from(hint[0])),
+                "{path}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The pawns of the vendor chess set, one prototype placed eight times:
+    /// each instance's bound is the prototype's, moved to where the
+    /// instance is.
+    #[test]
+    fn chess_set_instances() -> Result {
+        let stage = usd::Stage::builder()
+            .schema_registry(openusd_schemas::schema_registry())
+            .open("../../vendor/usd-wg-assets/full_assets/OpenChessSet/chess_set.usda")?;
+        let pawns = PointInstancer::get(&stage, sdf::path("/ChessSet/Black/Pawns")?)?.expect("an instancer");
+        let pawn = stage.prim("/ChessSet/Black/Pawns/Pawn")?;
+        let positions = pawns.positions()?.expect("positions");
+        let indices: Vec<usize> = (0..positions.len()).collect();
+        assert_eq!(indices.len(), 8);
+
+        let mut cache = BBoxCache::new(None, [Purpose::Default, Purpose::Render]);
+        let prototype = cache.untransformed_bound(&pawn)?;
+        assert!(!prototype.range().is_empty());
+
+        // In the instancer's space an instance is its prototype, under the
+        // prototype's own transform, moved by the instance's position.
+        let mut xforms = XformCache::default();
+        let own = cache.point_instance_untransformed_bounds(&pawns, &indices)?;
+        for (found, position) in own.iter().zip(&positions) {
+            let mut expected = prototype;
+            expected.transform(xforms.local_transform(&pawn)?.0 * gf::Mat4d::translation(gf::Vec3d::from(*position)));
+            assert_range(found.aligned_range(), expected.aligned_range());
+        }
+
+        // The other spaces place those boxes as they place the instancer.
+        let world = cache.point_instance_world_bounds(&pawns, &indices)?;
+        let local = cache.point_instance_local_bounds(&pawns, &indices)?;
+        let board = stage.prim("/ChessSet")?;
+        let relative = cache.point_instance_relative_bounds(&pawns, &indices, &board)?;
+        let ctm = xforms.local_to_world_transform(pawns.prim())?;
+        let to_board = ctm * xforms.local_to_world_transform(&board)?.inverse().expect("an inverse");
+        for (index, own) in own.iter().enumerate() {
+            let placed = |matrix: gf::Mat4d| {
+                let mut bbox = *own;
+                bbox.transform(matrix);
+                bbox.aligned_range()
+            };
+            assert_range(world[index].aligned_range(), placed(ctm));
+            assert_range(
+                local[index].aligned_range(),
+                placed(xforms.local_transform(pawns.prim())?.0),
+            );
+            assert_range(relative[index].aligned_range(), placed(to_board));
+        }
+        Ok(())
+    }
+}

@@ -145,10 +145,9 @@ impl ExtentRegistry {
     ///
     /// Only a type deriving from `Boundable` answers, as in C++: a function
     /// registered for any other type is passed over.
-    // TODO(perf): the answer depends on the schema type and the stage's
-    // schema registry alone, so a cache over one stage, as `BBoxCache` is,
-    // could keep it for each type the way C++ `_FunctionRegistry` does,
-    // types with no function included.
+    ///
+    /// The answer depends on the schema type and the stage's schema registry
+    /// alone.
     pub fn extent_fn(&self, prim: &usd::Prim) -> openusd::Result<Option<ExtentFn>> {
         let info = prim.prim_type_info()?;
         let schema = info.schema_type_name();
@@ -187,18 +186,28 @@ impl ExtentRegistry {
         time: impl Into<Option<usd::TimeCode>>,
     ) -> Result<Option<Extent>, SchemaError> {
         let time = time.into();
-        let authored: Option<Vec<gf::Vec3f>> = crate::authored_at(&boundable.extent_attr(), time)?;
-        match authored.map(Extent::try_from) {
-            Some(Ok(extent)) => Ok(Some(extent)),
-            _ => self.shape_extent(boundable.prim(), time, None),
+        match authored_extent(boundable, time)? {
+            Some(extent) => Ok(Some(extent)),
+            None => self.shape_extent(boundable.prim(), time, None),
         }
     }
+}
+
+/// The `extent` a layer authors for `boundable` at `time`, where `None` is
+/// the default time. `None` is no authored extent to take: none is
+/// authored, or the authored one is blocked or does not hold two corners.
+pub(crate) fn authored_extent(
+    boundable: &(impl BoundableSchema + ?Sized),
+    time: Option<usd::TimeCode>,
+) -> openusd::Result<Option<Extent>> {
+    let authored: Option<Vec<gf::Vec3f>> = crate::authored_at(&boundable.extent_attr(), time)?;
+    Ok(authored.and_then(|corners| Extent::try_from(corners).ok()))
 }
 
 /// Add the extent function of each `UsdGeom` type that has one.
 // TODO: `PointInstancer` has none. Its extent unions the bounds of its
 // prototypes under each instance transform (C++ `ComputeExtentAtTime`),
-// which needs `BBoxCache`.
+// over a `BBoxCache` of its own.
 pub(crate) fn register_extents(registry: &mut ExtentRegistry) {
     registry
         .register(tokens::SPHERE, sphere)
@@ -362,7 +371,7 @@ fn curves(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use openusd::usd::{self, SchemaBase, SchemaDecl, SchemaFamily, SchemaKind, SchemaRegistry};
     use openusd::{gf, tf};
 
@@ -541,7 +550,7 @@ mod tests {
     }
 
     /// A stage that knows this crate's schemas and the family `decls` make.
-    fn stage_with(decls: &[SchemaDecl<'_>]) -> Result<usd::Stage> {
+    pub(crate) fn stage_with(decls: &[SchemaDecl<'_>]) -> Result<usd::Stage> {
         let family = SchemaFamily::new("mine", decls);
         let registry = crate::ALL
             .iter()
@@ -552,7 +561,7 @@ mod tests {
         Ok(usd::Stage::builder().schema_registry(registry).in_memory("anon.usda")?)
     }
 
-    fn typed<'a>(name: &'a str, bases: &'a [&'a str]) -> SchemaDecl<'a> {
+    pub(crate) fn typed<'a>(name: &'a str, bases: &'a [&'a str]) -> SchemaDecl<'a> {
         SchemaDecl::new(name, SchemaKind::ConcreteTyped).bases(bases)
     }
 

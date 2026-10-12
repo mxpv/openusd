@@ -152,15 +152,7 @@ pub trait ImageableExt: ImageableSchema {
     /// every purpose with one read per prim.
     fn purpose_info_from(&self, parent: PurposeInfo) -> Result<PurposeInfo> {
         let ip = Imageable::from_prim(self.prim().clone())?;
-        let authored = match &ip {
-            Some(ip) => authored_purpose(ip)?,
-            None => None,
-        };
-        match authored {
-            Some(purpose) => Ok(PurposeInfo::inheritable(purpose)),
-            None if parent.is_inheritable => Ok(parent),
-            None => fallback_purpose(ip.as_ref()),
-        }
+        purpose_below(ip.as_ref(), parent)
     }
 
     /// Find the prim that stands in for this one under the `proxy` purpose,
@@ -336,6 +328,22 @@ impl PurposeInfo {
     }
 }
 
+/// The purpose of a prim whose parent's is `parent`, where `ip` views the
+/// prim as imageable and `None` is a prim that is not: what
+/// [`ImageableExt::purpose_info_from`] answers, for a caller that already
+/// knows which the prim is.
+pub(super) fn purpose_below(ip: Option<&Imageable>, parent: PurposeInfo) -> Result<PurposeInfo> {
+    let authored = match ip {
+        Some(ip) => authored_purpose(ip)?,
+        None => None,
+    };
+    match authored {
+        Some(purpose) => Ok(PurposeInfo::inheritable(purpose)),
+        None if parent.is_inheritable => Ok(parent),
+        None => fallback_purpose(ip),
+    }
+}
+
 /// The `purpose` a layer authors on `ip`, where an unrecognized token reads
 /// as [`Purpose::Default`].
 fn authored_purpose(ip: &Imageable) -> Result<Option<Purpose>> {
@@ -370,7 +378,7 @@ fn hide_subtree(prim: usd::Prim, writes: &mut Vec<(sdf::Path, Visibility)>) -> R
 }
 
 /// `true` when `ip`'s own `visibility` reads `invisible` at `time`.
-fn is_invisible(ip: &(impl ImageableSchema + ?Sized), time: Option<usd::TimeCode>) -> Result<bool> {
+pub(super) fn is_invisible(ip: &(impl ImageableSchema + ?Sized), time: Option<usd::TimeCode>) -> Result<bool> {
     let token = ip.visibility_attr().get_at::<tf::Token>(time)?;
     Ok(token.as_deref() == Some(tokens::INVISIBLE))
 }

@@ -73,7 +73,7 @@ use crate::SchemaError;
 /// assert_eq!(cache.local_to_world_transform(&hand)?, at(20.0, 5.0, 1.0));
 /// # Ok::<(), openusd_schemas::SchemaError>(())
 /// ```
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct XformCache {
     entries: HashMap<usd::Prim, Entry>,
     time: Option<usd::TimeCode>,
@@ -81,6 +81,7 @@ pub struct XformCache {
 
 /// What the cache holds for one prim: its ops, and its local-to-world matrix
 /// at the cache's time once computed.
+#[derive(Clone)]
 struct Entry {
     query: XformQuery,
     ctm: Option<gf::Mat4d>,

@@ -119,6 +119,13 @@
 //! its `extentsHint`: [`ModelAPI::extents_hint_at`] reads it and
 //! [`ModelAPI::set_extents_hint`] authors it.
 //!
+//! The bound of a prim is the box around the extents at and beneath it. A
+//! [`BBoxCache`] answers it at one time and for a set of purposes, in the
+//! prim's own space, its parent's, an ancestor's or the world's, and keeps
+//! the box of each prim it resolves for the queries that follow. It bounds
+//! the instances of a point instancer one by one, and a model by its hint
+//! where asked to.
+//!
 //! # Primvars
 //!
 //! A `primvars:*` attribute is read through [`Primvar`], which bundles its
@@ -138,6 +145,7 @@
 
 openusd::include_schema!("usdGeom");
 
+mod bbox_cache;
 pub(crate) mod boundable;
 mod curves;
 mod extent;
@@ -166,6 +174,7 @@ use openusd::{sdf, tf, usd};
 // The enums still written by hand name the generated constants directly.
 use tokens::*;
 
+pub use bbox_cache::BBoxCache;
 pub use boundable::{BoundableExt, ExtentFn, ExtentRegistry};
 pub use curves::{CurvesExt, PointsAndTangents};
 pub use extent::Extent;

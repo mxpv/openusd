@@ -303,6 +303,30 @@ pub enum SchemaError {
         prim: sdf::Path,
     },
 
+    /// A prim resets the transform stack beneath a prim whose own transform
+    /// has no inverse, a scale of zero along an axis say. The prim is where
+    /// its own transform puts it, and no point of the flattened space above
+    /// it is there, so a bound in that space cannot hold it. The prim's own
+    /// bound is still answered.
+    #[error("{prim} resets the transform stack beneath {ancestor}, whose transform has no inverse to place it by")]
+    ResetBeneathFlattened {
+        /// The prim that resets the transform stack.
+        prim: sdf::Path,
+        /// The prim whose bound was being computed.
+        ancestor: sdf::Path,
+    },
+
+    /// An index names no instance of a point instancer.
+    #[error("{prim} has no instance at index {index}, among its {instances} instances")]
+    InstanceIndexOutOfRange {
+        /// The point instancer.
+        prim: sdf::Path,
+        /// The index asked for.
+        index: usize,
+        /// How many instances the instancer holds at the times asked for.
+        instances: usize,
+    },
+
     /// A point instancer asked for its prototypes' transforms targets no
     /// prototype.
     #[error("{prim} targets no prototypes")]
