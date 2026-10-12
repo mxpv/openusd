@@ -115,6 +115,10 @@
 //! [`ExtentRegistry`] says which function bounds which type, and takes the
 //! functions of types declared elsewhere.
 //!
+//! A model caches the extent of everything beneath it, for each purpose, in
+//! its `extentsHint`: [`ModelAPI::extents_hint_at`] reads it and
+//! [`ModelAPI::set_extents_hint`] authors it.
+//!
 //! # Primvars
 //!
 //! A `primvars:*` attribute is read through [`Primvar`], which bundles its
@@ -141,6 +145,7 @@ mod gprim;
 mod imageable;
 mod mesh;
 mod metrics;
+mod model_api;
 mod motion_api;
 mod point_instancer;
 mod points;

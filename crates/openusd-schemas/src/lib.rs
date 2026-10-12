@@ -271,6 +271,18 @@ pub enum SchemaError {
         expected: usize,
     },
 
+    /// An extents hint holds an extent for one purpose at least, and for
+    /// each purpose at most.
+    #[error("{prim} takes an extents hint of 1 to {max} extents, not {found}")]
+    ExtentsHintCount {
+        /// The model the hint is authored on.
+        prim: sdf::Path,
+        /// How many extents were given.
+        found: usize,
+        /// How many purposes there are to hold an extent for.
+        max: usize,
+    },
+
     /// The positions instance transforms are computed from are not one for
     /// each instance.
     #[error("{found} positions for {expected} instances")]
