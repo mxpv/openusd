@@ -37,7 +37,7 @@ pub struct SkinningResolver {
     joint_weights: Vec<f32>,
     interpolation: InfluenceInterpolation,
     skinning_method: SkinningMethod,
-    elements_per_element: i32,
+    element_size: i32,
     /// Mapper from the bound skeleton's joint order into the mesh's effective
     /// joint order. Identity (with `is_identity() == true`) when `skel:joints`
     /// isn't authored. Its `target_len()` is the effective mesh-side joint
@@ -67,7 +67,7 @@ impl SkinningResolver {
             joint_weights: joint_weights(binding)?,
             interpolation: binding.interpolation()?,
             skinning_method: binding.skinning_method()?.unwrap_or_default(),
-            elements_per_element: binding.elements_per_element()?,
+            element_size: binding.element_size()?,
             mapper,
             geom_bind_transform: binding.geom_bind_transform()?.unwrap_or(gf::Mat4d::IDENTITY),
         })
@@ -88,8 +88,8 @@ impl SkinningResolver {
     /// Number of `(joint, weight)` pairs per skinned element. For per-vertex
     /// bindings, "element" is a vertex; for rigid bindings, the count applies
     /// to the mesh as a whole.
-    pub fn num_influences_per_component(&self) -> usize {
-        self.elements_per_element.max(1) as usize
+    pub fn influences_per_component(&self) -> usize {
+        self.element_size.max(1) as usize
     }
 
     /// `true` if joint influences and weights were authored (i.e. skinning is
@@ -124,7 +124,7 @@ impl SkinningResolver {
     /// Walks the pre-computed mapper indices once with no intermediate buffers,
     /// so this is cheap to call per frame. Missing joints (a target joint that
     /// isn't in the bound skeleton — rare but legal) get [`gf::Mat4d::IDENTITY`].
-    pub fn remap_skinning_xforms(&self, skel_skinning_xforms: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
+    pub fn remap_transforms(&self, skel_skinning_xforms: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
         if self.mapper.is_identity() {
             return skel_skinning_xforms.to_vec();
         }
@@ -147,12 +147,12 @@ impl SkinningResolver {
             !self.is_rigidly_deformed(),
             "skinned_points called on rigidly-deformed binding"
         );
-        let mesh_xforms = self.remap_skinning_xforms(skel_skinning_xforms);
+        let mesh_xforms = self.remap_transforms(skel_skinning_xforms);
         skin_points_lbs(
             points,
             &self.joint_indices,
             &self.joint_weights,
-            self.num_influences_per_component(),
+            self.influences_per_component(),
             self.geom_bind_transform,
             &mesh_xforms,
         )
@@ -167,12 +167,12 @@ impl SkinningResolver {
             !self.is_rigidly_deformed(),
             "skinned_normals called on rigidly-deformed binding"
         );
-        let mesh_xforms = self.remap_skinning_xforms(skel_skinning_xforms);
+        let mesh_xforms = self.remap_transforms(skel_skinning_xforms);
         skin_normals_lbs(
             normals,
             &self.joint_indices,
             &self.joint_weights,
-            self.num_influences_per_component(),
+            self.influences_per_component(),
             self.geom_bind_transform,
             &mesh_xforms,
         )
@@ -189,11 +189,11 @@ impl SkinningResolver {
             self.is_rigidly_deformed(),
             "rigid_transform called on per-vertex binding"
         );
-        let mesh_xforms = self.remap_skinning_xforms(skel_skinning_xforms);
+        let mesh_xforms = self.remap_transforms(skel_skinning_xforms);
         rigid_skinning_transform(
             &self.joint_indices,
             &self.joint_weights,
-            self.num_influences_per_component(),
+            self.influences_per_component(),
             self.geom_bind_transform,
             &mesh_xforms,
         )

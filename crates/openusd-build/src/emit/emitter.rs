@@ -170,7 +170,7 @@ handle.",
                         .map_err(::std::convert::Into::into)
                 }
             } else {
-                quote! { self.get_metadata::<#rust_type>(#token) }
+                quote! { self.metadata::<#rust_type>(#token) }
             };
             let body = quote! {
                 #read {
@@ -446,7 +446,7 @@ fn view(class: &RustClass) -> TokenStream {
 
     // A multiple-apply view carries the instance name it was applied under
     // beside the prim; every other kind is the prim alone.
-    let (declaration, prim) = match class.kind.is_multiple_apply_api_schema() {
+    let (declaration, prim) = match class.kind.is_multiple_apply() {
         true => (
             quote! {
                 pub struct #name {
@@ -632,7 +632,7 @@ fn constructors(class: &RustClass) -> TokenStream {
             /// Unchecked of the schema, not of memory: nothing here is
             /// `unsafe`, and a prim that does not carry this schema under this
             /// name simply answers nothing for the properties it declares.
-            /// [`get_instance`](Self::get_instance) is the constructor that
+            /// [`from_prim`](Self::from_prim) is the constructor that
             /// asks.
             pub fn from_prim_unchecked(
                 prim: ::openusd::usd::Prim,
@@ -659,7 +659,7 @@ fn constructors(class: &RustClass) -> TokenStream {
 
             /// Views `prim` as this schema applied under `name`, or `None`
             /// where it does not carry it.
-            pub fn get_instance(
+            pub fn from_prim(
                 prim: &::openusd::usd::Prim,
                 name: impl ::std::convert::Into<::openusd::tf::Token>,
             ) -> ::openusd::Result<::std::option::Option<Self>> {
@@ -681,7 +681,7 @@ fn constructors(class: &RustClass) -> TokenStream {
             }
 
             /// Every instance of this schema applied to `prim`.
-            pub fn get_all(prim: &::openusd::usd::Prim) -> ::openusd::Result<::std::vec::Vec<Self>> {
+            pub fn all(prim: &::openusd::usd::Prim) -> ::openusd::Result<::std::vec::Vec<Self>> {
                 prim.api_schema_instance_names(#constant).map(|names| {
                     names
                         .into_iter()
@@ -722,7 +722,7 @@ fn decoding(instancing: &Instancing) -> TokenStream {
     quote! {
         /// Whether `base_name` is one of the property names this schema
         /// declares, which an instance name may therefore not end with.
-        pub fn is_schema_property_base_name(base_name: &str) -> bool {
+        pub fn is_property_base_name(base_name: &str) -> bool {
             ::std::matches!(base_name, #(#base_names)|*)
         }
 
@@ -741,7 +741,7 @@ fn decoding(instancing: &Instancing) -> TokenStream {
             }
             let instance = property.strip_prefix(#prefix)?.strip_prefix(':')?;
             let base_name = instance.rsplit(':').next()?;
-            match Self::is_schema_property_base_name(base_name) {
+            match Self::is_property_base_name(base_name) {
                 true => ::std::option::Option::None,
                 false => ::std::option::Option::Some((prim, ::openusd::tf::Token::from(instance))),
             }
@@ -766,7 +766,7 @@ fn method(accessor: &RustAccessor, inherent: bool) -> TokenStream {
     // fills it in with the instance name it carries.
     let token = match instanced {
         true => quote! {
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(#token, self.name.as_str())
+            ::openusd::usd::SchemaRegistry::make_name_instance(#token, self.name.as_str())
         },
         false => token.clone(),
     };

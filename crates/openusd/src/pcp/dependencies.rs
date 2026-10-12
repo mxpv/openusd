@@ -470,7 +470,7 @@ impl Dependencies {
 fn ancestors_to_variant_boundary(path: &Path) -> impl Iterator<Item = Path> {
     let mut past_boundary = false;
     path.ancestors()
-        .take_while(move |p| !mem::replace(&mut past_boundary, p.is_prim_variant_selection_path()))
+        .take_while(move |p| !mem::replace(&mut past_boundary, p.is_variant_selection()))
 }
 
 /// The prim indices registered under `key`, as an invalidation victim list.

@@ -98,7 +98,7 @@ impl<W: Write> Emitter<'_, W> {
                     self.emit_sub_layers(data, &root)?;
                     continue;
                 }
-                let value = data.get_field(&root, name)?;
+                let value = data.field(&root, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -161,7 +161,7 @@ impl<W: Write> Emitter<'_, W> {
             writeln!(self.out, " (")?;
             self.indent += 1;
             for name in &meta_fields {
-                let value = data.get_field(path, name)?;
+                let value = data.field(path, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -283,7 +283,7 @@ impl<W: Write> Emitter<'_, W> {
             writeln!(self.out)?;
             self.indent += 1;
             for name in &meta_fields {
-                let value = data.get_field(path, name)?;
+                let value = data.field(path, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -546,7 +546,7 @@ impl<W: Write> Emitter<'_, W> {
             writeln!(self.out, " (")?;
             self.indent += 1;
             for name in &meta_fields {
-                let value = data.get_field(path, name)?;
+                let value = data.field(path, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -610,7 +610,7 @@ impl<W: Write> Emitter<'_, W> {
             writeln!(self.out, " (")?;
             self.indent += 1;
             for name in &meta_fields {
-                let value = data.get_field(path, name)?;
+                let value = data.field(path, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -1432,7 +1432,7 @@ fn specifier_keyword(s: Specifier) -> &'static str {
 }
 
 fn get_value(data: &dyn AbstractData, path: &Path, field: &str) -> Option<Value> {
-    data.get_field(path, field).ok().map(|v| v.into_owned())
+    data.field(path, field).ok().map(|v| v.into_owned())
 }
 
 /// Composed `primChildren` / `propertyChildren` name list (`key` selects which),

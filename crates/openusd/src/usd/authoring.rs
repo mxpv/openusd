@@ -328,7 +328,7 @@ impl PropertyWrite {
                     return Ok(());
                 };
                 edit_spec(data, path.clone(), Relationship::KIND, Relationship::view, |spec| {
-                    Ok(spec.set_target_paths(targets)?)
+                    Ok(spec.set_targets(targets)?)
                 })
             }
         }

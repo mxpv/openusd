@@ -876,7 +876,7 @@ impl PrimIndex {
     /// structural harness. The graph is a single rooted tree: the inert
     /// synthetic root is the sole parent-less node, and every contributing node
     /// descends from it.
-    pub fn dump_to_string(&self) -> String {
+    pub fn dump(&self) -> String {
         use std::fmt::Write as _;
 
         let mut rank = vec![0usize; self.graph.nodes.len()];
@@ -1130,7 +1130,7 @@ impl PrimIndex {
     pub(crate) fn variant_selections(&self) -> Vec<(String, String)> {
         let mut selections: HashMap<String, String> = HashMap::new();
         for node in self.all_nodes() {
-            if !node.path.is_prim_variant_selection_path() {
+            if !node.path.is_variant_selection() {
                 continue;
             }
             if let Some(sdf::PathElement::Variant { set, selection }) = node.path.last_element() {
@@ -1359,7 +1359,7 @@ fn resolve_variant_selections_in<'a>(
             if let Ok(value) = graph
                 .layer(layer)
                 .data()
-                .get_field(&node.path, FieldKey::VariantSelection.as_str())
+                .field(&node.path, FieldKey::VariantSelection.as_str())
                 && let Value::VariantSelectionMap(map) = value.into_owned()
             {
                 for (set_name, selection) in map {
@@ -1370,7 +1370,7 @@ fn resolve_variant_selections_in<'a>(
                         continue;
                     };
                     let selection = if expr::is_expression(&selection) {
-                        let vars = graph.stack_expression_variables(node.layer_stack_id());
+                        let vars = graph.stack_variables(node.layer_stack_id());
                         let mut used_vars = HashSet::new();
                         let evaluated = evaluate_expression(
                             &selection,
@@ -1405,7 +1405,7 @@ fn resolve_variant_selections_in<'a>(
     for node in &ordered {
         for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
             let data = graph.layer(layer).data();
-            let Ok(value) = data.get_field(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
+            let Ok(value) = data.field(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
                 continue;
             };
             let Value::TokenVec(set_names) = value.into_owned() else {
@@ -1421,7 +1421,7 @@ fn resolve_variant_selections_in<'a>(
                 let Ok(set_path) = node.path.append_variant_selection(&set_name, "") else {
                     continue;
                 };
-                let Ok(val) = data.get_field(&set_path, ChildrenKey::VariantChildren.as_str()) else {
+                let Ok(val) = data.field(&set_path, ChildrenKey::VariantChildren.as_str()) else {
                     continue;
                 };
                 let Value::TokenVec(variants) = val.into_owned() else {
@@ -1995,7 +1995,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// `dump_to_string` renders the composition tree depth-first with deeper
+    /// `dump` renders the composition tree depth-first with deeper
     /// nesting indented further: the grafted reference sits under the inherit,
     /// which sits under the root.
     #[test]
@@ -2008,7 +2008,7 @@ pub(crate) mod tests {
         let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&mut stack, "/Model");
 
-        let dump = index.dump_to_string();
+        let dump = index.dump();
         let line = |needle: &str| {
             dump.lines()
                 .find(|l| l.contains(needle))

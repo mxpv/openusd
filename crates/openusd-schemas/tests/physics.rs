@@ -125,25 +125,25 @@ fn multi_apply_limits_and_drive() -> Result<()> {
 
     assert!(physics::Joint::get(&stage, generic.clone())?.is_some());
 
-    let lim_x = physics::LimitAPI::get_instance(&stage.prim(generic.clone())?, "transX")?.expect("LimitAPI:transX");
+    let lim_x = physics::LimitAPI::from_prim(&stage.prim(generic.clone())?, "transX")?.expect("LimitAPI:transX");
     // low > high encodes a locked DOF.
     assert_eq!(lim_x.low()?, Some(1.0));
     assert_eq!(lim_x.high()?, Some(0.0));
 
-    let lim_z = physics::LimitAPI::get_instance(&stage.prim(generic.clone())?, "rotZ")?.expect("LimitAPI:rotZ");
+    let lim_z = physics::LimitAPI::from_prim(&stage.prim(generic.clone())?, "rotZ")?.expect("LimitAPI:rotZ");
     assert_eq!(lim_z.low()?, Some(-30.0));
     assert_eq!(lim_z.high()?, Some(30.0));
 
-    // `get_all` enumerates the applied instances: two limits, one drive.
-    let mut limit_dofs: Vec<String> = physics::LimitAPI::get_all(&stage.prim(generic.clone())?)?
+    // `all` enumerates the applied instances: two limits, one drive.
+    let mut limit_dofs: Vec<String> = physics::LimitAPI::all(&stage.prim(generic.clone())?)?
         .iter()
         .map(|l| l.name().to_string())
         .collect();
     limit_dofs.sort();
     assert_eq!(limit_dofs, vec!["rotZ".to_string(), "transX".to_string()]);
-    assert_eq!(physics::DriveAPI::get_all(&stage.prim(generic.clone())?)?.len(), 1);
+    assert_eq!(physics::DriveAPI::all(&stage.prim(generic.clone())?)?.len(), 1);
 
-    let drive = physics::DriveAPI::get_instance(&stage.prim(generic.clone())?, "rotZ")?.expect("DriveAPI:rotZ");
+    let drive = physics::DriveAPI::from_prim(&stage.prim(generic.clone())?, "rotZ")?.expect("DriveAPI:rotZ");
     assert_eq!(drive.name(), "rotZ");
     assert_eq!(drive.type_attr().get::<DriveType>()?, Some(DriveType::Force));
     assert_eq!(drive.target_velocity()?, Some(90.0));
@@ -152,7 +152,7 @@ fn multi_apply_limits_and_drive() -> Result<()> {
     assert_eq!(drive.max_force()?, Some(50.0));
 
     // A DOF instance that wasn't applied is absent.
-    assert!(physics::DriveAPI::get_instance(&stage.prim(generic)?, "transX")?.is_none());
+    assert!(physics::DriveAPI::from_prim(&stage.prim(generic)?, "transX")?.is_none());
     Ok(())
 }
 
@@ -172,12 +172,12 @@ fn group_colliders_collection() -> Result<()> {
     let stage = open()?;
     let group = physics::CollisionGroup::get(&stage, sdf::path("/World/Group")?)?.expect("CollisionGroup");
 
-    let query = group.colliders_collection().compute_membership_query()?;
-    assert!(query.is_path_included(&sdf::path("/World/Base")?));
-    assert!(query.is_path_included(&sdf::path("/World/Arm")?));
-    assert!(!query.is_path_included(&sdf::path("/World/Ball")?));
+    let query = group.colliders_collection().membership_query()?;
+    assert!(query.is_included(&sdf::path("/World/Base")?));
+    assert!(query.is_included(&sdf::path("/World/Arm")?));
+    assert!(!query.is_included(&sdf::path("/World/Ball")?));
 
-    let mut colliders = usd::compute_included_paths(&stage, &query, PrimPredicate::DEFAULT_PROXIES)?;
+    let mut colliders = usd::included_paths(&stage, &query, PrimPredicate::DEFAULT_PROXIES)?;
     colliders.sort();
     assert_eq!(colliders, vec![sdf::path("/World/Arm")?, sdf::path("/World/Base")?]);
     Ok(())
@@ -221,18 +221,18 @@ def Xform "World"
     )?;
 
     let group = physics::CollisionGroup::get(&stage, "/World/Group")?.expect("CollisionGroup");
-    let query = group.colliders_collection().compute_membership_query()?;
+    let query = group.colliders_collection().membership_query()?;
 
-    let proxies = usd::compute_included_paths(&stage, &query, PrimPredicate::DEFAULT_PROXIES)?;
+    let proxies = usd::included_paths(&stage, &query, PrimPredicate::DEFAULT_PROXIES)?;
     assert!(
         proxies.contains(&sdf::path("/World/Inst/Body")?),
         "the collider inside the instance is a member: {proxies:?}"
     );
-    let plain = usd::compute_included_paths(&stage, &query, PrimPredicate::DEFAULT)?;
+    let plain = usd::included_paths(&stage, &query, PrimPredicate::DEFAULT)?;
     assert!(!plain.contains(&sdf::path("/World/Inst/Body")?));
 
     // The group inside the prototype is not one the table knows.
-    let table = physics::compute_collision_group_table(&stage)?;
+    let table = physics::collision_group_table(&stage)?;
     assert_eq!(table.groups(), [sdf::path("/World/Group")?]);
     Ok(())
 }
@@ -242,16 +242,12 @@ fn assert_symmetric(table: &physics::CollisionGroupTable) {
     for (ia, a) in table.groups().iter().enumerate() {
         for (ib, b) in table.groups().iter().enumerate() {
             assert_eq!(
-                table.is_collision_enabled_at(ia, ib),
-                table.is_collision_enabled_at(ib, ia),
+                table.collides_at(ia, ib),
+                table.collides_at(ib, ia),
                 "{a} vs {b} by index"
             );
-            assert_eq!(
-                table.is_collision_enabled(a, b),
-                table.is_collision_enabled(b, a),
-                "{a} vs {b}"
-            );
-            assert_eq!(table.is_collision_enabled(a, b), table.is_collision_enabled_at(ia, ib));
+            assert_eq!(table.collides(a, b), table.collides(b, a), "{a} vs {b}");
+            assert_eq!(table.collides(a, b), table.collides_at(ia, ib));
         }
     }
 }
@@ -274,17 +270,14 @@ fn group_table_filters() -> Result<()> {
     b.create_filtered_groups_rel()?.add_target(c.path().clone())?;
     c.create_filtered_groups_rel()?.add_target(c.path().clone())?;
 
-    let table = physics::compute_collision_group_table(&stage)?;
+    let table = physics::collision_group_table(&stage)?;
     assert_eq!(table.groups().len(), 3);
-    assert!(table.is_collision_enabled(a.path(), a.path()));
-    assert!(table.is_collision_enabled(a.path(), b.path()));
-    assert!(table.is_collision_enabled(a.path(), c.path()));
-    assert!(table.is_collision_enabled(b.path(), b.path()));
-    assert!(!table.is_collision_enabled(b.path(), c.path()));
-    assert!(
-        !table.is_collision_enabled(c.path(), c.path()),
-        "a group filtering itself"
-    );
+    assert!(table.collides(a.path(), a.path()));
+    assert!(table.collides(a.path(), b.path()));
+    assert!(table.collides(a.path(), c.path()));
+    assert!(table.collides(b.path(), b.path()));
+    assert!(!table.collides(b.path(), c.path()));
+    assert!(!table.collides(c.path(), c.path()), "a group filtering itself");
     assert_symmetric(&table);
     Ok(())
 }
@@ -300,13 +293,13 @@ fn group_table_inversion() -> Result<()> {
     a.create_filtered_groups_rel()?.add_target(c.path().clone())?;
     a.create_invert_filtered_groups_attr()?.set(true)?;
 
-    let table = physics::compute_collision_group_table(&stage)?;
-    assert!(!table.is_collision_enabled(a.path(), a.path()));
-    assert!(!table.is_collision_enabled(a.path(), b.path()));
-    assert!(table.is_collision_enabled(a.path(), c.path()));
-    assert!(table.is_collision_enabled(b.path(), b.path()));
-    assert!(table.is_collision_enabled(b.path(), c.path()));
-    assert!(table.is_collision_enabled(c.path(), c.path()));
+    let table = physics::collision_group_table(&stage)?;
+    assert!(!table.collides(a.path(), a.path()));
+    assert!(!table.collides(a.path(), b.path()));
+    assert!(table.collides(a.path(), c.path()));
+    assert!(table.collides(b.path(), b.path()));
+    assert!(table.collides(b.path(), c.path()));
+    assert!(table.collides(c.path(), c.path()));
     assert_symmetric(&table);
     Ok(())
 }
@@ -324,19 +317,19 @@ fn inverted_merge_disables_all() -> Result<()> {
     a.create_filtered_groups_rel()?.add_target(collider.path().clone())?;
 
     // Apart, each group keeps its own rules.
-    let table = physics::compute_collision_group_table(&stage)?;
-    assert!(table.is_collision_enabled(x.path(), collider.path()));
-    assert!(!table.is_collision_enabled(x.path(), others.path()));
-    assert!(!table.is_collision_enabled(a.path(), collider.path()));
+    let table = physics::collision_group_table(&stage)?;
+    assert!(table.collides(x.path(), collider.path()));
+    assert!(!table.collides(x.path(), others.path()));
+    assert!(!table.collides(a.path(), collider.path()));
 
     // Merged, `grpA`'s filter and `grpX`'s inversion together leave nothing.
     x.create_merge_group_name_attr()?.set("mergeTest".to_string())?;
     a.create_merge_group_name_attr()?.set("mergeTest".to_string())?;
-    let table = physics::compute_collision_group_table(&stage)?;
-    assert!(!table.is_collision_enabled(x.path(), collider.path()));
-    assert!(!table.is_collision_enabled(x.path(), others.path()));
-    assert!(!table.is_collision_enabled(a.path(), collider.path()));
-    assert!(!table.is_collision_enabled(a.path(), others.path()));
+    let table = physics::collision_group_table(&stage)?;
+    assert!(!table.collides(x.path(), collider.path()));
+    assert!(!table.collides(x.path(), others.path()));
+    assert!(!table.collides(a.path(), collider.path()));
+    assert!(!table.collides(a.path(), others.path()));
     assert_symmetric(&table);
     Ok(())
 }
@@ -352,12 +345,12 @@ fn group_table_simple_merge() -> Result<()> {
     a.create_merge_group_name_attr()?.set("mergeTest".to_string())?;
     b.create_merge_group_name_attr()?.set("mergeTest".to_string())?;
 
-    let table = physics::compute_collision_group_table(&stage)?;
-    assert!(table.is_collision_enabled(a.path(), a.path()));
-    assert!(table.is_collision_enabled(a.path(), b.path()));
-    assert!(!table.is_collision_enabled(a.path(), c.path()));
-    assert!(!table.is_collision_enabled(b.path(), c.path()), "b inherits a's filter");
-    assert!(table.is_collision_enabled(c.path(), c.path()));
+    let table = physics::collision_group_table(&stage)?;
+    assert!(table.collides(a.path(), a.path()));
+    assert!(table.collides(a.path(), b.path()));
+    assert!(!table.collides(a.path(), c.path()));
+    assert!(!table.collides(b.path(), c.path()), "b inherits a's filter");
+    assert!(table.collides(c.path(), c.path()));
     assert_symmetric(&table);
     Ok(())
 }
@@ -374,15 +367,15 @@ fn group_table_complex_merge() -> Result<()> {
         group.create_merge_group_name_attr()?.set(name.to_string())?;
     }
 
-    let table = physics::compute_collision_group_table(&stage)?;
+    let table = physics::collision_group_table(&stage)?;
     for near in [a, b] {
-        assert!(table.is_collision_enabled(near.path(), a.path()));
-        assert!(table.is_collision_enabled(near.path(), b.path()));
-        assert!(!table.is_collision_enabled(near.path(), c.path()));
-        assert!(!table.is_collision_enabled(near.path(), d.path()));
+        assert!(table.collides(near.path(), a.path()));
+        assert!(table.collides(near.path(), b.path()));
+        assert!(!table.collides(near.path(), c.path()));
+        assert!(!table.collides(near.path(), d.path()));
     }
-    assert!(table.is_collision_enabled(c.path(), d.path()));
-    assert!(table.is_collision_enabled(d.path(), d.path()));
+    assert!(table.collides(c.path(), d.path()));
+    assert!(table.collides(d.path(), d.path()));
     assert_symmetric(&table);
     Ok(())
 }
@@ -405,14 +398,14 @@ fn merged_index_stays_ordered() -> Result<()> {
     }
     all[0].create_filtered_groups_rel()?.add_target(all[2].path().clone())?;
 
-    let table = physics::compute_collision_group_table(&stage)?;
+    let table = physics::collision_group_table(&stage)?;
     assert!(
-        table.is_collision_enabled(all[1].path(), all[1].path()),
+        table.collides(all[1].path(), all[1].path()),
         "the cell a wrong read lands on"
     );
-    assert!(!table.is_collision_enabled(all[0].path(), all[2].path()));
+    assert!(!table.collides(all[0].path(), all[2].path()));
     assert!(
-        !table.is_collision_enabled(all[3].path(), all[2].path()),
+        !table.collides(all[3].path(), all[2].path()),
         "the other member of the same merge group answers alike"
     );
     assert_symmetric(&table);
@@ -429,18 +422,18 @@ fn unknown_filter_target_ignored() -> Result<()> {
     stage.define_prim("/NotAGroup")?.set_type_name("Cube")?;
     b.create_filtered_groups_rel()?.add_target(sdf::path("/NotAGroup")?)?;
 
-    let table = physics::compute_collision_group_table(&stage)?;
-    assert!(table.is_collision_enabled(a.path(), a.path()));
-    assert!(table.is_collision_enabled(a.path(), b.path()));
-    assert!(table.is_collision_enabled(b.path(), b.path()));
+    let table = physics::collision_group_table(&stage)?;
+    assert!(table.collides(a.path(), a.path()));
+    assert!(table.collides(a.path(), b.path()));
+    assert!(table.collides(b.path(), b.path()));
 
     // Inverted, an unknown target is not among what stays enabled either, so
     // the group is left colliding with nothing.
     b.create_invert_filtered_groups_attr()?.set(true)?;
-    let table = physics::compute_collision_group_table(&stage)?;
-    assert!(!table.is_collision_enabled(b.path(), b.path()));
-    assert!(!table.is_collision_enabled(a.path(), b.path()));
-    assert!(table.is_collision_enabled(a.path(), a.path()));
+    let table = physics::collision_group_table(&stage)?;
+    assert!(!table.collides(b.path(), b.path()));
+    assert!(!table.collides(a.path(), b.path()));
+    assert!(table.collides(a.path(), a.path()));
     Ok(())
 }
 
@@ -459,16 +452,16 @@ fn merge_name_authorship() -> Result<()> {
 
     // The filter against `/empty` reaches every group merged under the empty
     // name, and no further.
-    let table = physics::compute_collision_group_table(&stage)?;
+    let table = physics::collision_group_table(&stage)?;
     for merged in [&all[1], &all[2], &all[3]] {
         assert!(
-            !table.is_collision_enabled(merged.path(), all[4].path()),
+            !table.collides(merged.path(), all[4].path()),
             "{} merges under the empty name",
             merged.path()
         );
     }
     assert!(
-        table.is_collision_enabled(all[0].path(), all[4].path()),
+        table.collides(all[0].path(), all[4].path()),
         "an unauthored name merges with nothing"
     );
     assert_symmetric(&table);
@@ -494,12 +487,9 @@ fn inversion_missing_values() -> Result<()> {
             }
             _ => {}
         }
-        let table = physics::compute_collision_group_table(&stage)?;
-        assert!(
-            !table.is_collision_enabled(a.path(), b.path()),
-            "the named pair is filtered"
-        );
-        assert!(table.is_collision_enabled(a.path(), a.path()), "nothing else is");
+        let table = physics::collision_group_table(&stage)?;
+        assert!(!table.collides(a.path(), b.path()), "the named pair is filtered");
+        assert!(table.collides(a.path(), a.path()), "nothing else is");
     }
     Ok(())
 }
@@ -528,13 +518,10 @@ def PhysicsCollisionGroup "C"
 }
 "#,
     )?;
-    let table = physics::compute_collision_group_table(&stage)?;
+    let table = physics::collision_group_table(&stage)?;
     let [a, b, c] = ["/A", "/B", "/C"].map(|p| sdf::path(p).expect("valid path"));
-    assert!(table.is_collision_enabled(&a, &b));
-    assert!(
-        !table.is_collision_enabled(&b, &c),
-        "b merged with a under the empty name"
-    );
+    assert!(table.collides(&a, &b));
+    assert!(!table.collides(&b, &c), "b merged with a under the empty name");
 
     let stage = from_usda(
         r#"#usda 1.0
@@ -550,7 +537,7 @@ def PhysicsCollisionGroup "Group"
 "#,
     )?;
     assert!(!stage.composition_errors().is_empty(), "the sublayer is unresolvable");
-    let table = physics::compute_collision_group_table(&stage)?;
+    let table = physics::collision_group_table(&stage)?;
     assert_eq!(table.groups(), [sdf::path("/Group")?]);
     Ok(())
 }
@@ -608,25 +595,25 @@ fn multi_apply_drive_and_limit() -> Result<()> {
     limit.create_low_attr()?.set(-30.0_f32)?;
     limit.create_high_attr()?.set(30.0_f32)?;
 
-    let drive = DriveAPI::get_instance(&stage.prim("/World/D6")?, "rotX")?.expect("DriveAPI:rotX");
+    let drive = DriveAPI::from_prim(&stage.prim("/World/D6")?, "rotX")?.expect("DriveAPI:rotX");
     assert_eq!(drive.name(), "rotX");
     assert_eq!(drive.type_attr().get::<DriveType>()?, Some(DriveType::Acceleration));
 
-    let limit = LimitAPI::get_instance(&stage.prim("/World/D6")?, "rotX")?.expect("LimitAPI:rotX");
+    let limit = LimitAPI::from_prim(&stage.prim("/World/D6")?, "rotX")?.expect("LimitAPI:rotX");
     assert_eq!(limit.low()?, Some(-30.0));
     assert_eq!(limit.high()?, Some(30.0));
 
-    // `get_all` enumerates every applied instance.
-    let mut drives: Vec<String> = DriveAPI::get_all(&stage.prim("/World/D6")?)?
+    // `all` enumerates every applied instance.
+    let mut drives: Vec<String> = DriveAPI::all(&stage.prim("/World/D6")?)?
         .iter()
         .map(|d| d.name().to_string())
         .collect();
     drives.sort();
     assert_eq!(drives, vec!["rotX".to_string(), "rotY".to_string()]);
-    assert_eq!(LimitAPI::get_all(&stage.prim("/World/D6")?)?.len(), 1);
+    assert_eq!(LimitAPI::all(&stage.prim("/World/D6")?)?.len(), 1);
 
     // A different DOF instance is absent.
-    assert!(DriveAPI::get_instance(&stage.prim("/World/D6")?, "rotZ")?.is_none());
+    assert!(DriveAPI::from_prim(&stage.prim("/World/D6")?, "rotZ")?.is_none());
     Ok(())
 }
 

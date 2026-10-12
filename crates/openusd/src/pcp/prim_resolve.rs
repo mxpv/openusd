@@ -188,7 +188,7 @@ impl Composing {
                     return Folded::Skipped;
                 };
                 let expr = expr.compose_over(&root(weaker));
-                let folded = match expr.contains_weaker_reference() {
+                let folded = match expr.has_weaker_reference() {
                     true => Folded::Composed,
                     false => Folded::Closed,
                 };
@@ -472,7 +472,7 @@ pub(crate) fn composition_rewrites(value: &Value) -> bool {
 pub(crate) fn composes_over_weaker(value: &Value) -> bool {
     match value {
         Value::Dictionary(_) => true,
-        Value::PathExpression(expr) => expr.contains_weaker_reference(),
+        Value::PathExpression(expr) => expr.has_weaker_reference(),
         _ => false,
     }
 }
@@ -843,8 +843,8 @@ impl PrimIndex {
             // so it is stripped before mapping (as `translate_to_target` does
             // internally).
             let mut absolute = anchor.make_absolute(&path);
-            if absolute.contains_prim_variant_selection() {
-                absolute = absolute.strip_all_variant_selections();
+            if absolute.has_variant_selection() {
+                absolute = absolute.strip_variant_selections();
             }
             map.map_source_to_target(&absolute)
         })
@@ -860,8 +860,8 @@ impl PrimIndex {
             // A variant-qualified anchor makes the absolute form carry a
             // selection, which map functions never do.
             let mut absolute = path.clone();
-            if absolute.contains_prim_variant_selection() {
-                absolute = absolute.strip_all_variant_selections();
+            if absolute.has_variant_selection() {
+                absolute = absolute.strip_variant_selections();
             }
             map.map_source_to_target(&absolute)
         })

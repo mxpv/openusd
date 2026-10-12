@@ -15,7 +15,7 @@
 //!
 //! [`SettingsBase`] carries the camera + image-framing attributes shared
 //! by [`Settings`] and [`Product`]. The centrepiece is the computed
-//! *render spec* ([`compute_render_spec`]): a `Settings` prim, its
+//! *render spec* ([`render_spec`]): a `Settings` prim, its
 //! products, vars, and camera are flattened into a self-contained,
 //! fallback-resolved [`RenderSpec`](spec::RenderSpec) (product attributes
 //! overriding settings, the aspect-ratio conform policy applied, vars
@@ -42,7 +42,7 @@
 //!     .create_product_name_attr().unwrap()
 //!     .set(sdf::Value::token("beauty.exr")).unwrap();
 //!
-//! let spec = render::compute_render_spec(&stage, &"/Render/Settings".parse().unwrap(), &[]).unwrap()
+//! let spec = render::render_spec(&stage, &"/Render/Settings".parse().unwrap(), &[]).unwrap()
 //!     .expect("RenderSpec");
 //! assert_eq!(spec.products.len(), 1);
 //! ```
@@ -55,8 +55,8 @@ mod compute;
 mod conform;
 mod settings;
 
-pub use compute::{compute_namespaced_settings, compute_render_spec};
-pub use conform::{ConformedAperture, apply_aspect_ratio_policy};
+pub use compute::{namespaced_settings, render_spec};
+pub use conform::{ConformedAperture, conform_aperture};
 
 // The collections a `RenderPass` carries, each an instance name of
 // `UsdCollectionAPI` rather than a property of the pass.

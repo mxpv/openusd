@@ -233,7 +233,7 @@ impl PrimDefinition {
             Some(instance) => weaker
                 .applied_api_schemas
                 .iter()
-                .map(|name| SchemaRegistry::make_multiple_apply_name_instance(name, instance))
+                .map(|name| SchemaRegistry::make_name_instance(name, instance))
                 .collect(),
             None => weaker.applied_api_schemas.clone(),
         };
@@ -289,7 +289,7 @@ impl PrimDefinition {
 
         for name in names {
             let instanced = match instance {
-                Some(instance) => SchemaRegistry::make_multiple_apply_name_instance(name, instance),
+                Some(instance) => SchemaRegistry::make_name_instance(name, instance),
                 None => name.clone(),
             };
             self.add_or_compose_property(instanced, weaker, &weaker.prop_map[name]);

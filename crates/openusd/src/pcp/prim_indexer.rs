@@ -155,7 +155,7 @@ impl IntoIterator for ExprVarDeps {
 fn find_containing_variant_selection(path: &Path) -> Option<Path> {
     let mut p = path.clone();
     loop {
-        if p.is_prim_variant_selection_path() {
+        if p.is_variant_selection() {
             return Some(p);
         }
         p = p.parent()?;
@@ -174,7 +174,7 @@ fn find_containing_variant_selection(path: &Path) -> Option<Path> {
 fn variant_storage_site(node_path: &Path, stripped: &Path) -> Option<Path> {
     let mut p = node_path.clone();
     loop {
-        if p.strip_all_variant_selections() == *stripped {
+        if p.strip_variant_selections() == *stripped {
             return Some(p);
         }
         p = p.parent()?;
@@ -190,15 +190,15 @@ fn variant_storage_site(node_path: &Path, stripped: &Path) -> Option<Path> {
 /// add a class arc at a variant-selection site we strip the selections before
 /// mapping and re-add the nearest containing selection afterwards.
 fn determine_inherit_path(parent_path: &Path, inherit_map: &MapFunction) -> Option<Path> {
-    if !parent_path.contains_prim_variant_selection() {
+    if !parent_path.has_variant_selection() {
         return inherit_map.map_target_to_source(parent_path);
     }
     let var_path = find_containing_variant_selection(parent_path)?;
-    let stripped = parent_path.strip_all_variant_selections();
+    let stripped = parent_path.strip_variant_selections();
     let mapped = inherit_map.map_target_to_source(&stripped)?;
     Some(
         mapped
-            .replace_prefix(&var_path.strip_all_variant_selections(), &var_path)
+            .replace_prefix(&var_path.strip_variant_selections(), &var_path)
             .unwrap_or(mapped),
     )
 }
@@ -707,7 +707,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A variant selection path takes no ancestral opinions (C++
         // `Pcp_BuildPrimIndex`): composing its parent prim evaluates the
         // variant arc, which already accounts for them.
-        let needs_ancestor = !path.is_prim_variant_selection_path() && matches!(&parent, Some(p) if !p.is_abs_root());
+        let needs_ancestor = !path.is_variant_selection() && matches!(&parent, Some(p) if !p.is_abs_root());
 
         if !needs_ancestor {
             // Root prim or variant selection: synthetic inert root plus a local
@@ -1623,7 +1623,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `node` are its own stack's composed set (C++
         // `node.GetLayerStack()->GetExpressionVariables()`).
         let node_stack = self.node(node).layer_stack_id();
-        let expr_vars = self.inputs.stack.stack_expression_variables(node_stack);
+        let expr_vars = self.inputs.stack.stack_variables(node_stack);
         let site_path = self.node(node).path.clone();
         // Recoverable arc errors (an invalid asset-path expression) and the
         // variable names the `${VAR}` asset paths read are collected locally so
@@ -1692,7 +1692,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // A class arc must target a prim, not a variant selection. A target
             // that resolves to a variant-selection path is left uncomposed (the
             // strip/re-add of selections is future work, see `add_class_based_arc`).
-            if resolved.is_prim_variant_selection_path() {
+            if resolved.is_variant_selection() {
                 continue;
             }
             // Inheriting/specializing a prim that is itself a relocation source —
@@ -1723,8 +1723,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let class_map = self
                 .fold_relocates_into(
                     MapFunction::from_pair(
-                        resolved.strip_all_variant_selections(),
-                        node_path.strip_all_variant_selections(),
+                        resolved.strip_variant_selections(),
+                        node_path.strip_variant_selections(),
                     ),
                     node,
                 )
@@ -1762,7 +1762,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             if self.node_can_contribute_ancestral(node, &p) {
                 self.eval_variant_sets_at_site(node, &p, true)?;
             }
-            if p.is_prim_variant_selection_path() {
+            if p.is_variant_selection() {
                 break;
             }
             path = p.parent();
@@ -1920,7 +1920,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // one variant (`/Ref{v1=a}` authoring `v2`) is read at the `{set=sel}`
             // site: walk the node's variant-bearing path up to the ancestor whose
             // stripped form is `path_in_node`.
-            let path_in_node = site.strip_all_variant_selections();
+            let path_in_node = site.strip_variant_selections();
             let site = if node.arc == ArcType::Variant {
                 variant_storage_site(&node.path, &path_in_node).unwrap_or(path_in_node)
             } else {
@@ -1951,7 +1951,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     let mut used_vars = HashSet::new();
                     let selection = evaluate_expression(
                         sel,
-                        stack.stack_expression_variables(node_stack),
+                        stack.stack_variables(node_stack),
                         ExpressionContext::Variant,
                         stack.identifier(layer),
                         &site,
@@ -1977,7 +1977,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn translate_path_to_root_or_closest(&self, node: NodeId, path: &Path) -> (NodeId, Path) {
         let local_root = self.output.local_root();
         // Namespace mappings never include variant selections.
-        let mut cur_path = path.strip_all_variant_selections();
+        let mut cur_path = path.strip_variant_selections();
         let mut cur_node = node;
         // Walk up one arc at a time via `map_to_parent`, resting at the first arc
         // whose domain does not contain the path (C++ walks the node chain rather
@@ -1998,7 +1998,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // Re-apply a variant selection the resting node carries at introduction,
         // so the storage site lookup hits the right `{set=sel}` namespace.
         let intro = self.output.path_at_introduction(cur_node);
-        let stripped = intro.strip_all_variant_selections();
+        let stripped = intro.strip_variant_selections();
         if intro != stripped
             && let Some(p) = cur_path.replace_prefix(&stripped, &intro)
         {
@@ -2728,7 +2728,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // read time; binary input reaches composition unchecked, and an
         // unchecked selection would land on the arc map's source side, which
         // map functions never carry.
-        if prim_path.contains_prim_variant_selection() {
+        if prim_path.has_variant_selection() {
             self.errors.report(CompositionDiagnostic::InvalidPrimPath {
                 arc,
                 prim_path: prim_path.clone(),
@@ -2927,8 +2927,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `_CreateMapExpressionForArc`) — map functions never carry
         // selections, and a variant node between here and the root maps as
         // the identity, so the stripped target composes through unchanged.
-        let mut map = MapFunction::from_pair(source.clone(), parent_path.strip_all_variant_selections())
-            .with_time_offset(arc_offset);
+        let mut map =
+            MapFunction::from_pair(source.clone(), parent_path.strip_variant_selections()).with_time_offset(arc_offset);
         // Opinions reached across this arc land at their post-relocation paths
         // (folded before the root identity, matching C++ `_CreateMapExpressionForArc`).
         map = self.fold_relocates_into(map, parent);
@@ -3266,7 +3266,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return map;
         }
         let layers = self.node(parent).layer_stack_id();
-        let site = self.node(parent).path.strip_all_variant_selections();
+        let site = self.node(parent).path.strip_variant_selections();
         // A relocate-source sub-index must not fold the relocate that moves its
         // own root: that shift is applied by the relocate arc at graft time, and
         // folding it here would rename the source's class arcs onto the relocated
@@ -3721,7 +3721,7 @@ mod tests {
     /// when resolving a reference's `${VAR}` asset path — a stack's expression
     /// variables come from its root, not its sublayers (C++ `PcpExpressionVariables`).
     /// The root itself authoring it does resolve the reference. Guards the stack's
-    /// stored composed set (`LayerGraph::stack_expression_variables`, the set the
+    /// stored composed set (`LayerGraph::stack_variables`, the set the
     /// arc path evaluates against) against the sublayer semantics diverging from
     /// stack membership.
     #[test]

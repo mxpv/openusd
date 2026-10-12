@@ -153,7 +153,7 @@ pub(super) fn visit_asset_paths(
         let mut fields = data.list_fields(&path).unwrap_or_default();
         fields.sort();
         for field in fields {
-            let value = data.get_field(&path, &field)?;
+            let value = data.field(&path, &field)?;
             // TODO(perf): a crate layer decodes a value to tell its variant,
             // bulk arrays included; a type probe on `AbstractData` would let
             // the walk skip every field that cannot hold an asset path.
@@ -180,7 +180,7 @@ pub(super) fn visit_asset_paths(
                     let offsets = FieldKey::SubLayerOffsets.as_str();
                     if !removed.is_empty()
                         && let Ok(Value::LayerOffsetVec(all)) =
-                            data.get_field(&path, offsets).map(|value| value.into_owned())
+                            data.field(&path, offsets).map(|value| value.into_owned())
                     {
                         let kept: Vec<_> = all
                             .into_iter()
@@ -194,9 +194,7 @@ pub(super) fn visit_asset_paths(
                     sublayers.is_empty()
                 }
                 Value::Dictionary(entries)
-                    if mode.skip_asset_identifier
-                        && field == FieldKey::AssetInfo.as_str()
-                        && !path.is_property_path() =>
+                    if mode.skip_asset_identifier && field == FieldKey::AssetInfo.as_str() && !path.is_property() =>
                 {
                     walk.dictionary(entries, Some("identifier"))?
                 }

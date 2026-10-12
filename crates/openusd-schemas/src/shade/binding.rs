@@ -111,7 +111,7 @@ impl MaterialBindingAPI {
     /// topmost such ancestor then wins). At a single prim, a collection-based
     /// binding whose collection includes the prim beats a direct binding, and
     /// collection bindings resolve in native property order.
-    pub fn compute_bound_material(&self, purpose: &str) -> Result<Option<Path>> {
+    pub fn bound_material(&self, purpose: &str) -> Result<Option<Path>> {
         let prim = self.path();
         // Cache each collection's membership query across the namespace walk.
         let mut cache: HashMap<Path, Option<MembershipQuery>> = HashMap::new();
@@ -265,14 +265,14 @@ fn is_collection_member(
         Entry::Vacant(e) => {
             let query = match CollectionAPI::instance_at_path(collection_path) {
                 Some((prim, name)) => {
-                    Some(CollectionAPI::from_prim_unchecked(stage.prim(prim)?, name).compute_membership_query()?)
+                    Some(CollectionAPI::from_prim_unchecked(stage.prim(prim)?, name).membership_query()?)
                 }
                 None => None,
             };
             e.insert(query)
         }
     };
-    Ok(query.as_ref().is_some_and(|q| q.is_path_included(queried)))
+    Ok(query.as_ref().is_some_and(|q| q.is_included(queried)))
 }
 
 /// Purposes to try in preference order: a restricted purpose first, then the
@@ -371,7 +371,7 @@ mod tests {
 
     fn bound(stage: &Stage, prim: &str, purpose: &str) -> Option<String> {
         MaterialBindingAPI(stage.prim(prim).unwrap())
-            .compute_bound_material(purpose)
+            .bound_material(purpose)
             .unwrap()
             .map(|p| p.as_str().to_string())
     }

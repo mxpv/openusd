@@ -117,7 +117,7 @@ fn field(name: &str, declaration: &Json) -> Result<MetadataField, String> {
         .and_then(Json::as_str)
         .ok_or_else(|| format!("`{name}` declares no `type`"))?;
     let type_name = sdf::ValueTypeName::from(spelling);
-    if sdf::MetadataFieldType::from_spelling(spelling).is_none() {
+    if sdf::FieldType::from_spelling(spelling).is_none() {
         return Err(format!("`{name}` declares an unknown type `{spelling}`"));
     }
 

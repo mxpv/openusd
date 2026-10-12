@@ -301,7 +301,7 @@ impl<'a> ClassNames<'a> {
         let view = class.metadata.class_name.clone();
         // An applied API schema writes its accessors on the view, there being
         // no trait to derive from; everything else puts them on its trait.
-        let qualifier = match class.kind.is_applied_api_schema() {
+        let qualifier = match class.kind.is_applied_api() {
             true => view.clone(),
             false => trait_name(&view),
         };
@@ -902,7 +902,7 @@ fn lower_class(
     Ok(RustClass {
         name: identifier(&mine.view, &origin)?,
         kind: class.kind,
-        accessor_trait: match class.kind.is_applied_api_schema() {
+        accessor_trait: match class.kind.is_applied_api() {
             true => None,
             false => Some(AccessorTrait {
                 name: identifier(&mine.qualifier, &origin)?,
@@ -925,14 +925,11 @@ fn lower_class(
 /// schema that declares any.
 fn instancing(class: &Class) -> Option<Instancing> {
     let prefix = class.metadata.property_namespace_prefix.as_ref()?;
-    class.kind.is_multiple_apply_api_schema().then(|| Instancing {
+    class.kind.is_multiple_apply().then(|| Instancing {
         prefix: prefix.to_string(),
         base_names: class
             .local_properties()
-            .map(|property| {
-                usd::SchemaRegistry::multiple_apply_name_template_base_name(property.schematics_name.as_str())
-                    .to_string()
-            })
+            .map(|property| usd::SchemaRegistry::name_template_base(property.schematics_name.as_str()).to_string())
             .collect(),
     })
 }
@@ -982,7 +979,7 @@ fn lower_accessor(
         typed,
         custom_get: property.api.custom_get,
         token: constant_of(by_value, &property.schematics_name),
-        instanced: class.kind.is_multiple_apply_api_schema(),
+        instanced: class.kind.is_multiple_apply(),
         kind,
         custom: property.shape.custom,
         uniform: property.shape.variability == sdf::Variability::Uniform
@@ -997,7 +994,7 @@ fn lower_accessor(
 /// the ancestor's, and two of one name in a chain make every call ambiguous. An
 /// applied API schema is never inherited from, so nothing of its can shadow.
 fn offers(class: &Class, property: &Property) -> bool {
-    class.kind.is_applied_api_schema() || !shadows_an_ancestor(class, property)
+    class.kind.is_applied_api() || !shadows_an_ancestor(class, property)
 }
 /// Reads the path of every placed library the stack holds, keeping a spelling
 /// Rust cannot read as it was given.
@@ -1391,9 +1388,9 @@ const VIEW_METHODS: &[&str] = &[
     "stage",
     "is_concrete",
     "is_typed",
-    "is_api_schema",
-    "is_applied_api_schema",
-    "is_multiple_apply_api_schema",
+    "is_api",
+    "is_applied_api",
+    "is_multiple_apply",
     "from_prim",
     "from_prim_unchecked",
     "get",
@@ -1401,10 +1398,9 @@ const VIEW_METHODS: &[&str] = &[
     "apply",
     "can_apply",
     "name",
-    "get_all",
-    "get_instance",
+    "all",
     "instance_at_path",
-    "is_schema_property_base_name",
+    "is_property_base_name",
 ];
 
 /// The root trait a view answers to: a prim type and a base of prim types are
@@ -1447,7 +1443,7 @@ pub(super) fn kind_constant(kind: usd::SchemaKind) -> syn::Path {
 /// answers as the root it spells: a class deriving from a versioned `Typed`
 /// reaches [`Typed`](openusd::usd::Typed) like any other.
 fn root_trait(name: &tf::Token) -> syn::Path {
-    let (family, _) = usd::SchemaRegistry::parse_schema_family_and_version(name);
+    let (family, _) = usd::SchemaRegistry::parse_family_and_version(name);
     match family.as_str() {
         TYPED => syn::parse_quote! { ::openusd::usd::Typed },
         API_SCHEMA_BASE => syn::parse_quote! { ::openusd::usd::APISchemaBase },

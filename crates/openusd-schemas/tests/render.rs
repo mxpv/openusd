@@ -9,7 +9,7 @@ use openusd::tf::Token;
 use openusd::usd::{CollectionAPI, SchemaBase, Stage};
 use openusd_schemas::render::{
     AspectRatioConformPolicy, Pass, PassSchema, Product, ProductSchema, ProductType, Settings, SettingsBaseSchema,
-    SettingsSchema, SourceType, Var, VarSchema, compute_render_spec,
+    SettingsSchema, SourceType, Var, VarSchema, render_spec,
 };
 
 const FIXTURE: &str = "fixtures/usdRender_scene.usda";
@@ -94,7 +94,7 @@ fn resolves_stage_settings_path() -> Result<()> {
 #[test]
 fn computes_render_spec_end_to_end() -> Result<()> {
     let stage = open()?;
-    let spec = compute_render_spec(&stage, &sdf::path("/Render/settings")?, &["ri"])?.expect("RenderSpec");
+    let spec = render_spec(&stage, &sdf::path("/Render/settings")?, &["ri"])?.expect("RenderSpec");
 
     // One product, two vars (color + alpha), referenced by index.
     assert_eq!(spec.products.len(), 1);

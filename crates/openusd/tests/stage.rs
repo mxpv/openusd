@@ -5357,7 +5357,7 @@ fn prototype_root_empty() -> Result<()> {
     assert!(!animated.resolve_info()?.has_authored_value());
     assert_eq!(animated.get::<sdf::Value>()?, None);
     assert_eq!(animated.time_samples()?, None);
-    assert!(!animated.value_might_be_time_varying()?);
+    assert!(!animated.might_be_time_varying()?);
     assert!(animated.property_stack()?.is_empty());
     let myrel = root.relationship("myrel");
     assert!(!myrel.has_authored_targets()?);
@@ -5369,7 +5369,7 @@ fn prototype_root_empty() -> Result<()> {
 
     // The prim itself: no stack, selection, arc or index.
     assert!(root.prim_stack()?.is_empty());
-    assert!(root.variant_sets().get_all_variant_selections()?.is_empty());
+    assert!(root.variant_sets().selections()?.is_empty());
     assert!(!root.has_composition_arc()?);
     assert!(root.prim_index().graph()?.is_empty());
     assert_eq!(root.prim_index().child_names()?, (Vec::new(), Vec::new()));
@@ -7108,7 +7108,7 @@ fn default_hides_weaker_samples() -> Result<()> {
     // them.
     assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(1.0));
     assert_eq!(attr.get::<f64>()?, Some(1.0));
-    assert!(!attr.value_might_be_time_varying()?);
+    assert!(!attr.might_be_time_varying()?);
     assert_eq!(attr.num_time_samples()?, 0);
     assert_eq!(attr.time_samples()?, None, "the hidden samples are not the source");
     Ok(())
@@ -7435,7 +7435,7 @@ fn chain_unions_sample_times() -> Result<()> {
     let attr = stage.attribute("/A.e")?;
 
     assert_eq!(attr.time_sample_times()?, vec![0.0, 1.0, 2.0]);
-    assert!(attr.value_might_be_time_varying()?);
+    assert!(attr.might_be_time_varying()?);
     // The composed samples are held by no one authored map, so there is none
     // to report — and no `%_` reaches a reader through one.
     assert_eq!(attr.time_samples()?, None);
@@ -7807,7 +7807,7 @@ fn sample_count_reads_past_ignored() -> Result<()> {
     );
     let times = attr.time_sample_times()?;
     assert_eq!(attr.num_time_samples()?, times.len(), "{times:?}");
-    assert!(attr.value_might_be_time_varying()?);
+    assert!(attr.might_be_time_varying()?);
     Ok(())
 }
 
@@ -9199,8 +9199,8 @@ fn clip_time_samples_gathered() -> Result<()> {
     let size = stage.attribute("/Model.size")?;
     assert_eq!(size.time_sample_times()?, vec![1.0, 2.0]);
     assert_eq!(size.num_time_samples()?, 2);
-    assert!(size.value_might_be_time_varying()?);
-    assert_eq!(size.time_samples_in_interval(1.5..=3.0)?, vec![2.0]);
+    assert!(size.might_be_time_varying()?);
+    assert_eq!(size.time_samples_in(1.5..=3.0)?, vec![2.0]);
     Ok(())
 }
 
@@ -9348,7 +9348,7 @@ def "Model"
     assert_eq!(value_f64(&stage, "/Model.localDefault", 0.0), Some(3.0));
     assert!(attr.time_sample_times()?.is_empty());
     assert_eq!(attr.num_time_samples()?, 0);
-    assert!(!attr.value_might_be_time_varying()?);
+    assert!(!attr.might_be_time_varying()?);
     Ok(())
 }
 
@@ -9384,7 +9384,7 @@ def "Model" (
     assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(3.0));
     assert_eq!(value_f64(&stage, "/Model.size", 12.0), Some(3.0));
     assert!(attr.time_sample_times()?.is_empty());
-    assert!(!attr.value_might_be_time_varying()?);
+    assert!(!attr.might_be_time_varying()?);
     Ok(())
 }
 
@@ -9490,7 +9490,7 @@ fn clip_manifestless_held_boundary() -> Result<()> {
     let size = stage.attribute("/Model.size")?;
     assert_eq!(size.time_sample_times()?, vec![0.0, 10.0]);
     assert_eq!(size.num_time_samples()?, 2);
-    assert!(size.value_might_be_time_varying()?);
+    assert!(size.might_be_time_varying()?);
     assert_eq!(value_f64(&stage, "/Model.size", 5.0), Some(50.0));
     assert_eq!(value_f64(&stage, "/Model.size", 9.999), Some(50.0));
     assert_eq!(value_f64(&stage, "/Model.size", 10.0), None);
@@ -9889,7 +9889,7 @@ fn assert_queries_agree(stage: &Stage, path: &str, time: f64, case: &str) {
             proximal.source()
         );
     }
-    if attr.value_might_be_time_varying().expect("time varying") {
+    if attr.might_be_time_varying().expect("time varying") {
         assert!(
             proximal.value_source_might_be_time_varying(),
             "{where_}: the attribute varies but its source cannot"

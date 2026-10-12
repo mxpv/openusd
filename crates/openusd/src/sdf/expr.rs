@@ -87,9 +87,7 @@ macro_rules! ensure {
 /// `pcp`-level concern (C++ `PcpExpressionVariables`); this is the single
 /// per-layer read both layer collection and arc composition share, overlaid
 /// with [`compose_over`].
-pub fn read_expression_variables(
-    data: &dyn sdf::AbstractData,
-) -> Result<Cow<'_, HashMap<String, sdf::Value>>, sdf::DataError> {
+pub fn read_variables(data: &dyn sdf::AbstractData) -> Result<Cow<'_, HashMap<String, sdf::Value>>, sdf::DataError> {
     let root = sdf::Path::abs_root();
     Ok(
         match data.try_field(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
@@ -127,11 +125,11 @@ pub fn compose_over(base: &mut HashMap<String, sdf::Value>, overlay: &HashMap<St
 /// against empty variables (which would drop every `${VAR}`-dependent sublayer and
 /// reference). Pure-composition callers reading an already-loaded layer discard the
 /// error — the loader already validated the read at open time.
-pub fn stack_expression_variables(
+pub fn stack_variables(
     root_data: &dyn sdf::AbstractData,
     overrides: &HashMap<String, sdf::Value>,
 ) -> Result<HashMap<String, sdf::Value>, sdf::DataError> {
-    let mut vars = read_expression_variables(root_data)?.into_owned();
+    let mut vars = read_variables(root_data)?.into_owned();
     compose_over(&mut vars, overrides);
     Ok(vars)
 }

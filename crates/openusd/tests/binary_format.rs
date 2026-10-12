@@ -43,7 +43,7 @@ fn scene(name: &str) -> CrateData {
 /// Fetch an authored field value, panicking if it is absent.
 fn value(data: &CrateData, path: &str, field: &str) -> Value {
     let p = sdf::path(path).unwrap();
-    data.get_field(&p, field)
+    data.field(&p, field)
         .unwrap_or_else(|e| panic!("get {path}.{field}: {e:#}"))
         .into_owned()
 }

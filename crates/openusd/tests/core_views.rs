@@ -56,12 +56,12 @@ fn color_space_definition_instances() {
         "/World.colorSpaceDefinition:custom:gamma"
     );
 
-    let found = ColorSpaceDefinitionAPI::get_instance(&prim, "custom")
+    let found = ColorSpaceDefinitionAPI::from_prim(&prim, "custom")
         .expect("a read")
         .expect("applied");
     assert_eq!(found.gamma().expect("a read"), Some(2.2));
 
-    let mut names: Vec<String> = ColorSpaceDefinitionAPI::get_all(&prim)
+    let mut names: Vec<String> = ColorSpaceDefinitionAPI::all(&prim)
         .expect("a read")
         .iter()
         .map(|instance| instance.name().to_string())
@@ -69,7 +69,7 @@ fn color_space_definition_instances() {
     names.sort();
     assert_eq!(names, ["custom", "other"]);
     assert!(
-        ColorSpaceDefinitionAPI::get_instance(&prim, "absent")
+        ColorSpaceDefinitionAPI::from_prim(&prim, "absent")
             .expect("a read")
             .is_none()
     );

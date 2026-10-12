@@ -25,7 +25,7 @@ impl Volume {
     /// `field:<name>` relationship (C++ `UsdVolVolume::CreateFieldRelationship`).
     /// `name` must be non-empty, otherwise the property name would end in a
     /// colon (`field:`), which is not a valid USD property name.
-    pub fn create_field_relationship(self, name: &str, target: impl sdf::IntoPath) -> Result<Self, SchemaError> {
+    pub fn create_field_rel(self, name: &str, target: impl sdf::IntoPath) -> Result<Self, SchemaError> {
         if name.is_empty() {
             return Err(SchemaError::EmptyFieldName);
         }
@@ -38,7 +38,7 @@ impl Volume {
 
     /// `true` when a `field:<name>` relationship is authored on this volume
     /// (C++ `UsdVolVolume::HasFieldRelationship`).
-    pub fn has_field_relationship(&self, name: &str) -> Result<bool> {
+    pub fn has_field_rel(&self, name: &str) -> Result<bool> {
         let rel = self.path().append_property(format!("{FIELD_NAMESPACE}{name}"))?;
         Ok(!self.stage().relationship(rel)?.targets()?.is_empty())
     }
@@ -74,11 +74,11 @@ mod tests {
     fn volume_fields_roundtrip() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         Volume::define(&stage, "/V")?
-            .create_field_relationship("density", sdf::path("/V/density")?)?
-            .create_field_relationship("temperature", sdf::path("/V/temperature")?)?;
+            .create_field_rel("density", sdf::path("/V/density")?)?
+            .create_field_rel("temperature", sdf::path("/V/temperature")?)?;
 
         let v = Volume::get(&stage, "/V")?.expect("Volume");
-        assert!(v.has_field_relationship("density")?);
+        assert!(v.has_field_rel("density")?);
         assert_eq!(
             v.field_paths()?,
             vec![
@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn create_field_rejects_empty() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
-        let result = Volume::define(&stage, "/V")?.create_field_relationship("", sdf::path("/V/density")?);
+        let result = Volume::define(&stage, "/V")?.create_field_rel("", sdf::path("/V/density")?);
         assert!(result.is_err());
         Ok(())
     }

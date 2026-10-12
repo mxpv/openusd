@@ -99,8 +99,8 @@ source of truth for specifics.
   and `include_schema!` is the one macro documented at the root itself.
 
 - **`usd_utils/`** - Utilities over layers and stages (C++ `UsdUtils`):
-  `compute_all_dependencies` (C++ `UsdUtilsComputeAllDependencies`),
-  `create_new_usdz_package` (C++ `UsdUtilsCreateNewUsdzPackage`) and
+  `all_dependencies` (C++ `UsdUtilsComputeAllDependencies`),
+  `create_usdz_package` (C++ `UsdUtilsCreateNewUsdzPackage`) and
   `modify_asset_paths` (C++ `UsdUtilsModifyAssetPaths`). `walk.rs` is the walk
   over the asset paths a layer authors, under a `Visit` policy; `discover.rs`
   the breadth-first discovery of the files a root reaches (`Discovery` /

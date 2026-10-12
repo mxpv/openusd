@@ -608,7 +608,7 @@ fn translate_diff<'a>(diff: &'a Diff, target: &EditTarget) -> Result<TranslatedD
     // apply first and the direct — stronger — opinions land last. The sort is
     // stable, so operations sharing a destination keep their recorded order.
     edits.sort_by(|(dst_a, edit_a), (dst_b, edit_b)| {
-        let direct = |edit: &Edit| !edit.path().contains_prim_variant_selection();
+        let direct = |edit: &Edit| !edit.path().has_variant_selection();
         dst_a.cmp(dst_b).then_with(|| direct(edit_a).cmp(&direct(edit_b)))
     });
     let lift_offset = diff
@@ -1558,7 +1558,7 @@ mod tests {
         let resynced = resynced.borrow();
         assert!(resynced.contains(&sdf::path("/Prim/child")?));
         assert!(
-            !resynced.iter().any(|p| p.contains_prim_variant_selection()),
+            !resynced.iter().any(|p| p.has_variant_selection()),
             "the authored variant path must not leak into stage namespace"
         );
         Ok(())

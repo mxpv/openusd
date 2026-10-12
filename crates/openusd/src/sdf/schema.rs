@@ -255,7 +255,7 @@ const SCHEMA_METADATA: [(&str, &str); 22] = [
 /// What a registered metadata field holds, which decides how a reader takes
 /// its literal.
 #[derive(Debug, Clone, PartialEq)]
-pub enum MetadataFieldType {
+pub enum FieldType {
     /// A value of a type the value-type table knows, as `elementSize` is an
     /// `int`.
     Value(ValueTypeName),
@@ -267,7 +267,7 @@ pub enum MetadataFieldType {
     Untyped,
 }
 
-impl MetadataFieldType {
+impl FieldType {
     /// The field type a schema library's declaration spells: a value type
     /// the value-type table knows, `dictionary`, or `<element>listop` for a
     /// list op of `int`, `int64`, `uint`, `uint64`, `string` or `token`
@@ -312,11 +312,11 @@ impl MetadataFieldType {
 // TODO(perf): both halves scan their table, once per metadata field read.
 // The lookup wants a map, or a `match` the compiler can turn into one; neither
 // is worth a third copy of the field names before a profile asks for it.
-pub fn registered_field_type(name: &str) -> Option<MetadataFieldType> {
+pub fn registered_field_type(name: &str) -> Option<FieldType> {
     let Some(spelling) = schema_field_spelling(name) else {
-        return FieldKey::from_name(name).map(|_| MetadataFieldType::Untyped);
+        return FieldKey::from_name(name).map(|_| FieldType::Untyped);
     };
-    MetadataFieldType::from_spelling(spelling)
+    FieldType::from_spelling(spelling)
 }
 
 /// The value type of the core field `name` on a layer's pseudo-root, for the
@@ -437,23 +437,20 @@ mod tests {
     #[test]
     fn field_type_spellings() {
         for (name, spelling) in SCHEMA_METADATA {
-            assert!(
-                MetadataFieldType::from_spelling(spelling).is_some(),
-                "{name}: {spelling}"
-            );
+            assert!(FieldType::from_spelling(spelling).is_some(), "{name}: {spelling}");
         }
         assert_eq!(
-            MetadataFieldType::from_spelling("tokenlistop"),
-            Some(MetadataFieldType::ListOp(ValueTypeName::TOKEN))
+            FieldType::from_spelling("tokenlistop"),
+            Some(FieldType::ListOp(ValueTypeName::TOKEN))
         );
         for spelling in ["pathlistop", "doublelistop", "listop", "bogus"] {
-            assert_eq!(MetadataFieldType::from_spelling(spelling), None, "{spelling}");
+            assert_eq!(FieldType::from_spelling(spelling), None, "{spelling}");
         }
     }
 
     #[test]
     fn registered_field_types() {
-        use MetadataFieldType::{ListOp, Untyped, Value};
+        use FieldType::{ListOp, Untyped, Value};
         for (name, expected) in [
             (FieldKey::DisplayUnit.as_str(), Some(Untyped)),
             ("interpolation", Some(Value(ValueTypeName::TOKEN))),

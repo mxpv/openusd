@@ -95,7 +95,7 @@ fn resolve_recursive(
 fn distinct_sources(connected: &super::ConnectedSources) -> Vec<&ConnectionSource> {
     let mut distinct: Vec<&ConnectionSource> = Vec::new();
     for source in connected.sources() {
-        if !distinct.iter().any(|seen| seen.source_path() == source.source_path()) {
+        if !distinct.iter().any(|seen| seen.path() == source.path()) {
             distinct.push(source);
         }
     }

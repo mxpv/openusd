@@ -401,7 +401,7 @@ impl<D> PredicateLibrary<D> {
 /// Links `expr` against `library`, binding every call (C++
 /// `SdfLinkPredicateExpression`). An empty expression links to an empty
 /// program, which evaluates to a constant `false`.
-pub fn link_predicate_expression<D>(
+pub fn link_predicate<D>(
     expr: &PredicateExpression,
     library: &PredicateLibrary<D>,
 ) -> Result<PredicateProgram<D>, EvalError> {
@@ -531,7 +531,7 @@ mod tests {
     fn eval(text: &str, obj: bool) -> PredResult {
         let expr = PredicateExpression::parse(text);
         assert!(expr.parse_error().is_none(), "{text}: {:?}", expr.parse_error());
-        link_predicate_expression(&expr, &library()).expect("links").eval(&obj)
+        link_predicate(&expr, &library()).expect("links").eval(&obj)
     }
 
     #[test]
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn empty_program_false() {
-        let program = link_predicate_expression(&PredicateExpression::default(), &library()).expect("links");
+        let program = link_predicate(&PredicateExpression::default(), &library()).expect("links");
         assert!(program.is_empty());
         assert_eq!(program.eval(&true), PredResult::constant(false));
     }
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn unknown_predicate_rejected() {
         let expr = PredicateExpression::parse("bogus");
-        let error = link_predicate_expression(&expr, &library()).expect_err("unknown name");
+        let error = link_predicate(&expr, &library()).expect_err("unknown name");
         assert!(error.to_string().contains("bogus"), "{error}");
     }
 

@@ -31,8 +31,8 @@ impl CollisionGroup {
     /// # fn main() -> openusd::Result<()> {
     /// # let stage = usd::Stage::open("scene.usda")?;
     /// let group = CollisionGroup::get(&stage, "/World/Group")?.expect("a group");
-    /// let query = group.colliders_collection().compute_membership_query()?;
-    /// let colliders = usd::compute_included_paths(&stage, &query, PrimPredicate::DEFAULT_PROXIES)?;
+    /// let query = group.colliders_collection().membership_query()?;
+    /// let colliders = usd::included_paths(&stage, &query, PrimPredicate::DEFAULT_PROXIES)?;
     /// # Ok(())
     /// # }
     /// ```
@@ -49,7 +49,7 @@ impl CollisionGroup {
 /// rules on a stage are resolved (C++
 /// `UsdPhysicsCollisionGroup::CollisionGroupTable`).
 ///
-/// A snapshot: [`compute_collision_group_table`] reads the stage once and the
+/// A snapshot: [`collision_group_table`] reads the stage once and the
 /// table answers from what it read. An edit to any group's filters, merge
 /// name or inversion flag does not reach a table already computed, so recompute
 /// after one.
@@ -77,16 +77,16 @@ impl CollisionGroupTable {
     ///
     /// A path the table does not cover collides with everything, which is what
     /// a collider outside every group does.
-    pub fn is_collision_enabled(&self, a: &Path, b: &Path) -> bool {
+    pub fn collides(&self, a: &Path, b: &Path) -> bool {
         let (Some(a), Some(b)) = (self.index_of(a), self.index_of(b)) else {
             return true;
         };
-        self.is_collision_enabled_at(a, b)
+        self.collides_at(a, b)
     }
 
     /// Whether the groups at indices `a` and `b` in [`groups`](Self::groups)
     /// collide. An index past the end collides, as an uncovered path does.
-    pub fn is_collision_enabled_at(&self, a: usize, b: usize) -> bool {
+    pub fn collides_at(&self, a: usize, b: usize) -> bool {
         match a < self.groups.len() && b < self.groups.len() {
             true => self.enabled[slot(a, b, self.groups.len())],
             false => true,
@@ -113,7 +113,7 @@ impl CollisionGroupTable {
 /// collection expansion in
 /// [`colliders_collection`](CollisionGroup::colliders_collection), which does
 /// reach instanced content.
-pub fn compute_collision_group_table(stage: &Stage) -> Result<CollisionGroupTable> {
+pub fn collision_group_table(stage: &Stage) -> Result<CollisionGroupTable> {
     let groups = collision_groups(stage)?;
 
     // Every group gets an index, and a merge name is what makes two groups

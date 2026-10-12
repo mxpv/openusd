@@ -190,19 +190,19 @@ impl BasisCurves {
 }
 
 /// The points and tangents of hermite curves as two arrays of one length
-/// (C++ `UsdGeomHermiteCurves::PointAndTangentArrays`), which is how a
+/// (C++ `UsdGeomHermiteCurves::PointsAndTangents`), which is how a
 /// `HermiteCurves` prim stores them: in `points` and `tangents`.
 ///
 /// [`separate`](Self::separate) and [`interleave`](Self::interleave) convert
 /// from and to the single array that alternates each point with its tangent.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct PointAndTangentArrays {
+pub struct PointsAndTangents {
     points: Vec<gf::Vec3f>,
     tangents: Vec<gf::Vec3f>,
 }
 
-impl PointAndTangentArrays {
-    /// Pair `points` with `tangents` (C++ `PointAndTangentArrays(points,
+impl PointsAndTangents {
+    /// Pair `points` with `tangents` (C++ `PointsAndTangents(points,
     /// tangents)`).
     ///
     /// Arrays of different lengths are [`SchemaError::UnpairedHermiteData`].
@@ -213,7 +213,7 @@ impl PointAndTangentArrays {
                 tangents: tangents.len(),
             });
         }
-        Ok(PointAndTangentArrays { points, tangents })
+        Ok(PointsAndTangents { points, tangents })
     }
 
     /// Split an array that alternates each point with its tangent (C++
@@ -229,7 +229,7 @@ impl PointAndTangentArrays {
             });
         }
         let (points, tangents) = pairs.map(|pair| (pair[0], pair[1])).unzip();
-        Ok(PointAndTangentArrays { points, tangents })
+        Ok(PointsAndTangents { points, tangents })
     }
 
     /// One array alternating each point with its tangent (C++ `Interleave`).
@@ -287,7 +287,7 @@ mod tests {
     use openusd::usd::{self, SchemaBase};
     use openusd::{gf, tf};
 
-    use super::{CurvesExt, PointAndTangentArrays};
+    use super::{CurvesExt, PointsAndTangents};
     use crate::SchemaError;
     use crate::geom::{BasisCurves, BasisCurvesSchema, CurveBasis, CurveType, CurveWrap, CurvesSchema, Interpolation};
     use crate::geom::{HermiteCurves, Mesh, PointBasedExt, PointBasedSchema};
@@ -511,7 +511,7 @@ mod tests {
     /// C++ `testUsdGeomHermiteCurves` `testPointAndTangents`.
     #[test]
     fn point_and_tangents() -> Result {
-        let mismatched = PointAndTangentArrays::new(
+        let mismatched = PointsAndTangents::new(
             vec![gf::vec3f(1.0, 2.0, 3.0)],
             vec![gf::vec3f(1.0, 2.0, 3.0), gf::vec3f(4.0, 5.0, 6.0)],
         );
@@ -520,17 +520,17 @@ mod tests {
             Err(SchemaError::UnpairedHermiteData { points: 1, tangents: 2 })
         ));
 
-        let empty = PointAndTangentArrays::default();
+        let empty = PointsAndTangents::default();
         assert!(empty.is_empty() && empty.points().is_empty() && empty.tangents().is_empty());
 
         let points = vec![gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(-1.0, 0.0, 0.0)];
         let tangents = vec![gf::vec3f(1.0, 2.0, 3.0), gf::vec3f(4.0, 5.0, 6.0)];
-        let arrays = PointAndTangentArrays::new(points.clone(), tangents.clone())?;
+        let arrays = PointsAndTangents::new(points.clone(), tangents.clone())?;
         assert!(!arrays.is_empty());
         assert_eq!(arrays.points(), points);
         assert_eq!(arrays.tangents(), tangents);
 
-        assert_eq!(arrays, PointAndTangentArrays::new(points, tangents)?);
+        assert_eq!(arrays, PointsAndTangents::new(points, tangents)?);
         assert_ne!(arrays, empty);
         Ok(())
     }
@@ -538,7 +538,7 @@ mod tests {
     /// C++ `testUsdGeomHermiteCurves` `testInterleave` and `testSeparate`.
     #[test]
     fn interleave_separate() -> Result {
-        let arrays = PointAndTangentArrays::new(
+        let arrays = PointsAndTangents::new(
             vec![gf::vec3f(0.0, 0.0, 0.0), gf::vec3f(2.0, 0.0, 0.0)],
             vec![gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(0.0, 1.0, 0.0)],
         )?;
@@ -549,12 +549,12 @@ mod tests {
             gf::vec3f(0.0, 1.0, 0.0),
         ];
         assert_eq!(arrays.interleave(), interleaved);
-        assert!(PointAndTangentArrays::default().interleave().is_empty());
+        assert!(PointsAndTangents::default().interleave().is_empty());
 
-        assert_eq!(PointAndTangentArrays::separate(&interleaved)?, arrays);
-        assert!(PointAndTangentArrays::separate(&[])?.is_empty());
+        assert_eq!(PointsAndTangents::separate(&interleaved)?, arrays);
+        assert!(PointsAndTangents::separate(&[])?.is_empty());
         assert!(matches!(
-            PointAndTangentArrays::separate(&interleaved[..3]),
+            PointsAndTangents::separate(&interleaved[..3]),
             Err(SchemaError::UnpairedHermiteData { points: 2, tangents: 1 })
         ));
         Ok(())

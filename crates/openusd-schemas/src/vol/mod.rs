@@ -46,7 +46,7 @@
 //!
 //! // A Volume binds named fields through `field:<name>` relationships.
 //! let volume = vol::Volume::define(&stage, "/Smoke").unwrap()
-//!     .create_field_relationship("density", "/Smoke/density").unwrap();
+//!     .create_field_rel("density", "/Smoke/density").unwrap();
 //!
 //! assert_eq!(
 //!     volume.field_paths().unwrap(),

@@ -87,19 +87,19 @@ pub trait SchemaBase {
     }
 
     /// Whether this schema is an API schema (C++ `IsAPISchema`).
-    fn is_api_schema(&self) -> bool {
-        Self::KIND.is_api_schema()
+    fn is_api(&self) -> bool {
+        Self::KIND.is_api()
     }
 
     /// Whether this is an applied API schema (C++ `IsAppliedAPISchema`).
-    fn is_applied_api_schema(&self) -> bool {
-        Self::KIND.is_applied_api_schema()
+    fn is_applied_api(&self) -> bool {
+        Self::KIND.is_applied_api()
     }
 
     /// Whether this is a multiple-apply API schema
     /// (C++ `IsMultipleApplyAPISchema`).
-    fn is_multiple_apply_api_schema(&self) -> bool {
-        Self::KIND.is_multiple_apply_api_schema()
+    fn is_multiple_apply(&self) -> bool {
+        Self::KIND.is_multiple_apply()
     }
 }
 
@@ -125,7 +125,7 @@ impl SchemaKind {
     }
 
     /// Whether a schema of this kind is an API schema, applied or not.
-    pub fn is_api_schema(self) -> bool {
+    pub fn is_api(self) -> bool {
         matches!(
             self,
             SchemaKind::NonAppliedApi | SchemaKind::SingleApplyApi | SchemaKind::MultipleApplyApi
@@ -134,12 +134,12 @@ impl SchemaKind {
 
     /// Whether a schema of this kind is applied to a prim, and so appears in
     /// its `apiSchemas`.
-    pub fn is_applied_api_schema(self) -> bool {
+    pub fn is_applied_api(self) -> bool {
         matches!(self, SchemaKind::SingleApplyApi | SchemaKind::MultipleApplyApi)
     }
 
     /// Whether a schema of this kind is applied under an instance name.
-    pub fn is_multiple_apply_api_schema(self) -> bool {
+    pub fn is_multiple_apply(self) -> bool {
         matches!(self, SchemaKind::MultipleApplyApi)
     }
 
@@ -233,8 +233,8 @@ mod tests {
         let schema = Marker(stage.define_prim("/World").unwrap());
         assert!(schema.is_concrete());
         assert!(schema.is_typed());
-        assert!(!schema.is_api_schema());
-        assert!(!schema.is_applied_api_schema());
-        assert!(!schema.is_multiple_apply_api_schema());
+        assert!(!schema.is_api());
+        assert!(!schema.is_applied_api());
+        assert!(!schema.is_multiple_apply());
     }
 }

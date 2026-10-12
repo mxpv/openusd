@@ -95,7 +95,7 @@ impl BlendShape {
             }
             let attr = self.attribute(name);
             let offsets = attr.cast()?.unwrap_or_default();
-            let weight = match attr.get_metadata::<Value>(tokens::WEIGHT)? {
+            let weight = match attr.metadata::<Value>(tokens::WEIGHT)? {
                 Some(Value::Float(f)) => Some(f),
                 Some(Value::Double(d)) => Some(d as f32),
                 _ => None,
@@ -155,7 +155,7 @@ impl BindingAPI {
 
     /// `elementSize` on the joint-influence primvars — the number of
     /// `(joint, weight)` pairs per element; 1 where none is authored.
-    pub fn elements_per_element(&self) -> Result<i32> {
+    pub fn element_size(&self) -> Result<i32> {
         Primvar::new(self.joint_indices_attr()).element_size()
     }
 
@@ -165,7 +165,7 @@ impl BindingAPI {
     pub fn interpolation(&self) -> Result<InfluenceInterpolation> {
         Ok(self
             .joint_indices_attr()
-            .get_metadata::<InfluenceInterpolation>(crate::geom::tokens::INTERPOLATION)?
+            .metadata::<InfluenceInterpolation>(crate::geom::tokens::INTERPOLATION)?
             .unwrap_or_default())
     }
 }
@@ -242,13 +242,13 @@ mod tests {
         let body = BindingAPI::apply(&stage.prim("/Body")?)?;
         let indices = body.create_joint_indices_attr()?.set(Value::IntVec(vec![0, 1]))?;
         assert_eq!(body.interpolation()?, InfluenceInterpolation::Constant);
-        assert_eq!(body.elements_per_element()?, 1);
+        assert_eq!(body.element_size()?, 1);
 
         indices
             .set_metadata(crate::geom::tokens::INTERPOLATION, InfluenceInterpolation::Vertex)?
             .set_metadata(crate::geom::tokens::ELEMENT_SIZE, Value::Int(2))?;
         assert_eq!(body.interpolation()?, InfluenceInterpolation::Vertex);
-        assert_eq!(body.elements_per_element()?, 2);
+        assert_eq!(body.element_size()?, 2);
         Ok(())
     }
 

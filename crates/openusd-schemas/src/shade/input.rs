@@ -28,7 +28,7 @@ impl Input {
     pub fn connectability(&self) -> Result<Connectability> {
         Ok(self
             .attribute
-            .get_metadata::<Connectability>(super::tokens::CONNECTABILITY)?
+            .metadata::<Connectability>(super::tokens::CONNECTABILITY)?
             .unwrap_or_default())
     }
 

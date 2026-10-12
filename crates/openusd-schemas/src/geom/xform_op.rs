@@ -174,7 +174,7 @@ impl XformOpKind {
     }
 
     /// The matrix an op of this kind applies for `value`, inverted when
-    /// `inverse` is set, on the terms [`XformOp::op_transform`] states. `None`
+    /// `inverse` is set, on the terms [`XformOp::transform`] states. `None`
     /// when the inverse of a singular `transform` is asked for.
     pub(super) fn matrix(self, value: sdf::Value, inverse: bool) -> Option<gf::Mat4d> {
         let sign = if inverse { -1.0 } else { 1.0 };
@@ -303,7 +303,7 @@ impl XformOp {
     }
 
     /// `true` when the stack applies the op inverted (C++ `IsInverseOp`).
-    pub fn is_inverse_op(&self) -> bool {
+    pub fn is_inverse(&self) -> bool {
         self.inverse
     }
 
@@ -363,7 +363,7 @@ impl XformOp {
     /// `transform` goes through a general inverse, and a singular one is
     /// [`SchemaError::SingularTransform`]. A value of a type the kind does not
     /// take contributes identity.
-    pub fn op_transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
+    pub fn transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
         let Some(kind) = self.kind else {
             return Ok(gf::Mat4d::IDENTITY);
         };
@@ -379,7 +379,7 @@ impl XformOp {
     /// `true` when the op's value might differ between times (C++
     /// `MightBeTimeVarying`).
     pub fn might_be_time_varying(&self) -> openusd::Result<bool> {
-        self.query.value_might_be_time_varying()
+        self.query.might_be_time_varying()
     }
 
     /// `true` when `self` and `other` apply the same attribute and exactly one

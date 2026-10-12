@@ -91,7 +91,7 @@ impl AssetSite {
 
     /// The composed variables an expression authored here evaluates against.
     fn variables<'graph>(&self, graph: &'graph LayerGraph) -> &'graph HashMap<String, Value> {
-        graph.stack_expression_variables(self.stack)
+        graph.stack_variables(self.stack)
     }
 }
 

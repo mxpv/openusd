@@ -9,7 +9,7 @@
 //!
 //! Time-dependent methods (`ComputeJointLocalTransforms(time)`,
 //! `ComputeSkinningTransforms(time)`, etc.) require evaluating a bound
-//! `Animation` at a specific stage time — see [`super::SkelAnimQuery`].
+//! `Animation` at a specific stage time — see [`super::AnimQuery`].
 //! Feed its pre-evaluated local transforms into
 //! [`SkeletonResolver::skinning_transforms_from_local`] below.
 
@@ -68,7 +68,7 @@ impl SkeletonResolver {
     }
 
     /// World-space joint bind transforms — verbatim from `Skeleton.bindTransforms`.
-    pub fn joint_world_bind_transforms(&self) -> &[gf::Mat4d] {
+    pub fn bind_transforms(&self) -> &[gf::Mat4d] {
         &self.bind_transforms
     }
 

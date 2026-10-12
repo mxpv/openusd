@@ -321,7 +321,7 @@ impl EditTarget {
         var_sel_path: impl sdf::IntoPath,
     ) -> Result<Self, sdf::PathParseError> {
         let var_sel_path = sdf::try_into_path(var_sel_path)?;
-        let stripped = var_sel_path.strip_all_variant_selections();
+        let stripped = var_sel_path.strip_variant_selections();
         Ok(Self {
             layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::from_pair_identity(var_sel_path, stripped),
@@ -355,7 +355,7 @@ impl EditTarget {
     /// variant selections, which a target path never carries.
     pub fn map_to_spec_path(&self, scene_path: &sdf::Path) -> Option<sdf::Path> {
         let mapped = self.mapping.map_target_to_source(scene_path)?;
-        match scene_path.embedded_target_path() {
+        match scene_path.embedded_target() {
             None => Some(mapped),
             Some(target) => {
                 let mapped_target = self.map_to_spec_target_path(&target)?;
@@ -374,7 +374,7 @@ impl EditTarget {
         Some(
             self.mapping
                 .map_target_to_source(scene_path)?
-                .strip_all_variant_selections(),
+                .strip_variant_selections(),
         )
     }
 
@@ -787,7 +787,7 @@ pub struct StageInner {
     /// Stage-level interpolation mode for time-sampled attributes
     /// (AOUSD §12.5). Defaults to [`InterpolationType::Linear`] per
     /// spec.
-    interpolation_type: Cell<InterpolationType>,
+    interpolation: Cell<InterpolationType>,
     /// Where authored opinions land. Defaults to the root layer.
     edit_target: RefCell<EditTarget>,
     /// This stage's root layer stack identity (root + session + resolver
@@ -845,7 +845,7 @@ impl Reads {
     /// What a spec query at `path` reads: a property is one of its prim's
     /// opinions, and the prim's own spec is part of its source.
     fn spec_of(path: &sdf::Path) -> Self {
-        match path.is_property_path() {
+        match path.is_property() {
             true => Reads::Opinions,
             false => Reads::Source,
         }
@@ -1559,7 +1559,7 @@ impl Stage {
     /// it.
     pub fn remove_prim(&self, path: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
         let path = sdf::try_into_path(path)?;
-        if path.is_property_path() {
+        if path.is_property() {
             return Err(sdf::AuthoringError::InvalidPath {
                 path,
                 reason: "remove_prim expects a prim path, got a property path",
@@ -1578,7 +1578,7 @@ impl Stage {
     /// the owning prim.
     pub fn remove_property(&self, path: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
         let path = sdf::try_into_path(path)?;
-        if !path.is_property_path() {
+        if !path.is_property() {
             return Err(sdf::AuthoringError::InvalidPath {
                 path,
                 reason: "remove_property expects a property path, got a prim path",
@@ -1734,7 +1734,7 @@ impl Stage {
     ) -> Result<(), StageAuthoringError> {
         super::authoring::check_reserved(sdf::SpecType::PseudoRoot, field)?;
         let declared = match sdf::registered_field_type(field) {
-            Some(sdf::MetadataFieldType::Value(type_name)) => Some(type_name),
+            Some(sdf::FieldType::Value(type_name)) => Some(type_name),
             Some(_) => sdf::layer_field_type(field),
             None => self
                 .schema_registry()
@@ -2538,7 +2538,7 @@ impl Stage {
     }
 
     /// Reduces `path` to an absolute prim path (`prim_path` strips a property
-    /// suffix and `strip_all_variant_selections` collapses any variant
+    /// suffix and `strip_variant_selections` collapses any variant
     /// segment — [`pcp::LoadRules`]' table requires genuinely prim-only
     /// paths), then drops a path in the reserved `/__Prototype_N` namespace,
     /// where load rules are never consulted (see [`pcp::LoadRules`]'s
@@ -2553,7 +2553,7 @@ impl Stage {
     /// [`set_load_rules`](Self::set_load_rules) table this normalization never
     /// sees) passes through.
     fn normalize_load_target(path: &sdf::Path) -> Option<sdf::Path> {
-        let path = sdf::Path::abs_root().make_absolute(&path.prim_path().strip_all_variant_selections());
+        let path = sdf::Path::abs_root().make_absolute(&path.prim_path().strip_variant_selections());
         (!pcp::is_prototype_namespace(&path)).then_some(path)
     }
 
@@ -2727,14 +2727,14 @@ impl Stage {
     /// Returns the stage-level interpolation mode applied when resolving a
     /// value at a time code (see [`Attribute::get`](super::Attribute::get)).
     /// AOUSD §12.5 defaults this to [`InterpolationType::Linear`].
-    pub fn interpolation_type(&self) -> InterpolationType {
-        self.interpolation_type.get()
+    pub fn interpolation(&self) -> InterpolationType {
+        self.interpolation.get()
     }
 
     /// Override the stage-level interpolation mode at runtime.
     /// Cheap — no recomputation, the next value resolution reads the new mode.
-    pub fn set_interpolation_type(&self, mode: InterpolationType) {
-        self.interpolation_type.set(mode);
+    pub fn set_interpolation(&self, mode: InterpolationType) {
+        self.interpolation.set(mode);
     }
 
     /// Returns the `timeSamples` map value resolution answers from, retimed to
@@ -2774,7 +2774,7 @@ impl Stage {
     }
 
     /// Whether an attribute's value may vary over time, the introspection behind
-    /// [`Attribute::value_might_be_time_varying`](super::Attribute::value_might_be_time_varying).
+    /// [`Attribute::might_be_time_varying`](super::Attribute::might_be_time_varying).
     /// Reports `true` when the winning value source has more than one composed
     /// sample, and conservatively when that source is a value-clip set with more
     /// than one active clip — those clips can each contribute a different value
@@ -2810,7 +2810,7 @@ impl Stage {
         accepts: Option<fn(sdf::ValueKind) -> bool>,
     ) -> Result<pcp::TimedValue> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        let interp_type = self.interpolation_type.get();
+        let interp_type = self.interpolation.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
         Ok(self.masked_opinions(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp, accepts))?)
     }
@@ -2840,7 +2840,7 @@ impl Stage {
         let stage_id = self.layer_stack_id().clone();
         // The same policy [`Self::resolve_at`] reads through, so a timed query
         // decides which samples answer exactly as the value read does.
-        let interp_type = self.interpolation_type.get();
+        let interp_type = self.interpolation.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
         Ok(self.masked_opinions(attr_path, |g, c| c.resolve_info(g, &stage_id, attr_path, mode, &interp))?)
     }
@@ -3649,7 +3649,7 @@ pub struct StageBuilder {
     session_layer: Option<String>,
     initial_load_set: InitialLoadSet,
     population_mask: StagePopulationMask,
-    interpolation_type: InterpolationType,
+    interpolation: InterpolationType,
     muted: HashSet<String>,
     schema_registry: Option<Arc<SchemaRegistry>>,
 }
@@ -3668,7 +3668,7 @@ impl StageBuilder {
             session_layer: None,
             initial_load_set: InitialLoadSet::LoadAll,
             population_mask: StagePopulationMask::all(),
-            interpolation_type: InterpolationType::default(),
+            interpolation: InterpolationType::default(),
             muted: HashSet::new(),
             schema_registry: None,
         }
@@ -3692,8 +3692,8 @@ impl StageBuilder {
     /// Sets the stage-level interpolation mode for time-sampled
     /// attribute queries through [`Attribute::get`](super::Attribute::get).
     /// Default per AOUSD §12.5 is [`InterpolationType::Linear`].
-    pub fn interpolation_type(mut self, mode: InterpolationType) -> Self {
-        self.interpolation_type = mode;
+    pub fn interpolation(mut self, mode: InterpolationType) -> Self {
+        self.interpolation = mode;
         self
     }
 
@@ -3933,11 +3933,11 @@ impl StageBuilder {
         root: &sdf::PreparedLayer,
         session: Option<&sdf::PreparedLayer>,
     ) -> Result<HashMap<String, sdf::Value>> {
-        let mut vars = sdf::expr::read_expression_variables(root.data.as_ref())?.into_owned();
+        let mut vars = sdf::expr::read_variables(root.data.as_ref())?.into_owned();
         if let Some(session) = session
             && !self.mutes(&root.resolved, &session.identifier)
         {
-            let session_own = sdf::expr::read_expression_variables(session.data.as_ref())?.into_owned();
+            let session_own = sdf::expr::read_variables(session.data.as_ref())?.into_owned();
             sdf::expr::compose_over(&mut vars, &session_own);
         }
         Ok(vars)
@@ -4014,7 +4014,7 @@ impl StageBuilder {
             ),
             initial_load_set: self.initial_load_set,
             prototypes_discovered: Cell::new(None),
-            interpolation_type: Cell::new(self.interpolation_type),
+            interpolation: Cell::new(self.interpolation),
             edit_target: RefCell::new(edit_target),
             layer_stack_id,
             sinks: RefCell::default(),
@@ -4769,7 +4769,7 @@ pub(crate) mod tests {
                 true,
             )
             .unwrap()
-            .set_connection_paths([target.clone()])
+            .set_connections([target.clone()])
             .unwrap();
         });
 
@@ -4819,7 +4819,7 @@ pub(crate) mod tests {
                 true,
             )
             .unwrap()
-            .set_connection_paths([target.clone()])
+            .set_connections([target.clone()])
             .unwrap();
         });
 
@@ -4869,7 +4869,7 @@ pub(crate) mod tests {
                 true,
             )
             .unwrap()
-            .set_connection_paths([target.clone()])
+            .set_connections([target.clone()])
             .unwrap();
         });
 

@@ -28,7 +28,7 @@ impl VisibilityAPI {
     /// let handle = geom::Scope::define(&stage, "/Rig/Handle")?;
     ///
     /// // With no opinion anywhere, guides are hidden.
-    /// let guide = |scope: &geom::Scope| scope.compute_effective_visibility(Purpose::Guide, None);
+    /// let guide = |scope: &geom::Scope| scope.effective_visibility(Purpose::Guide, None);
     /// assert_eq!(guide(&handle)?, PurposeVisibility::Invisible);
     ///
     /// // The schema applied to the rig carries the purpose attributes. An

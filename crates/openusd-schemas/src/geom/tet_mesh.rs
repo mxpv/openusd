@@ -83,7 +83,7 @@ impl TetMesh {
     /// or no tetrahedra at `time`, where C++ reports failure. A tetrahedron
     /// naming a point the mesh does not have is
     /// [`SchemaError::TetVertexOutOfRange`].
-    pub fn find_inverted_elements(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Vec<usize>, SchemaError> {
+    pub fn inverted_elements(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Vec<usize>, SchemaError> {
         let time = time.into();
         let points = self.points_at(time)?.unwrap_or_default();
         let tets = self.tet_vertex_indices_at(time)?.unwrap_or_default();
@@ -208,8 +208,8 @@ mod tests {
     /// `surfaceFaceVertexIndices`.
     fn check_surface(mesh: &TetMesh) -> Result {
         let (start, end) = (TimeCode::new(0.0), TimeCode::new(10.0));
-        assert!(mesh.find_inverted_elements(start)?.is_empty());
-        assert!(mesh.find_inverted_elements(end)?.is_empty());
+        assert!(mesh.inverted_elements(start)?.is_empty());
+        assert!(mesh.inverted_elements(end)?.is_empty());
 
         let joined = mesh.surface_faces(start)?;
         assert_eq!(
@@ -280,7 +280,7 @@ mod tests {
             mesh.create_orientation_attr()?.set(orientation)?;
             Ok(())
         };
-        let inverted = || mesh.find_inverted_elements(time);
+        let inverted = || mesh.inverted_elements(time);
 
         // A right-handed element under the fallback orientation.
         set_points(-1.0, -1.0)?;
@@ -323,7 +323,7 @@ mod tests {
             [0.0, 0.0, 2.0],
             [0.0, 0.0, -2.0],
         ]))?;
-        assert_eq!(mesh.find_inverted_elements(None)?, vec![0, 2]);
+        assert_eq!(mesh.inverted_elements(None)?, vec![0, 2]);
         Ok(())
     }
 
@@ -332,12 +332,12 @@ mod tests {
     fn inverted_needs_geometry() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         let mesh = TetMesh::define(&stage, "/tetMesh")?;
-        assert!(mesh.find_inverted_elements(None)?.is_empty());
+        assert!(mesh.inverted_elements(None)?.is_empty());
 
         mesh.create_points_attr()?
             .set(points(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))?;
         mesh.create_tet_vertex_indices_attr()?.set(tets(&[[0, 1, 2, 3]]))?;
-        assert!(mesh.find_inverted_elements(None)?.is_empty());
+        assert!(mesh.inverted_elements(None)?.is_empty());
         Ok(())
     }
 
@@ -350,7 +350,7 @@ mod tests {
             mesh.create_tet_vertex_indices_attr()?
                 .set_at(tets(&[[0, 1, 2, 3], [0, 2, bad, 4]]), TimeCode::new(0.0))?;
             let error = mesh
-                .find_inverted_elements(TimeCode::new(0.0))
+                .inverted_elements(TimeCode::new(0.0))
                 .expect_err("an index outside the points");
             assert!(matches!(
                 error,

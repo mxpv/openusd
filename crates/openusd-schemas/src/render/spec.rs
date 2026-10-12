@@ -7,7 +7,7 @@
 //! list referenced by per-product indices.
 //!
 //! These are pure value types; the computation that fills them is built
-//! up across the following commits (`compute_render_spec`).
+//! up across the following commits (`render_spec`).
 
 use openusd::sdf::Value;
 

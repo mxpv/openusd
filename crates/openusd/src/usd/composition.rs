@@ -594,7 +594,7 @@ impl StageComposition {
                     let graph = self.layers.borrow();
                     graph.layer_registry().open_stack(
                         asset_path,
-                        graph.stack_expression_variables(demand.context),
+                        graph.stack_variables(demand.context),
                         reload,
                         &|_| Ok(()),
                         &|id| graph.id_of(id).is_some(),
@@ -787,11 +787,11 @@ impl StageComposition {
                 // `mark_load_failed` take a mutable one, as in `load_demanded`.
                 let opened = {
                     let graph = self.layers.borrow();
-                    graph.layer_registry().open_sublayer_tree(
-                        &identifier,
-                        graph.stack_expression_variables(demand.stack),
-                        &|id| graph.id_of(id).is_some(),
-                    )
+                    graph
+                        .layer_registry()
+                        .open_sublayer_tree(&identifier, graph.stack_variables(demand.stack), &|id| {
+                            graph.id_of(id).is_some()
+                        })
                 };
                 let failure = match opened {
                     Ok(Some(layers)) => {

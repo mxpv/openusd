@@ -463,7 +463,7 @@ impl LayerRegistry {
         // `PcpExpressionVariables`): the root layer's own `expressionVariables`
         // overlaid by the inherited overrides. Sublayers contribute nothing, so it
         // is fixed for the walk.
-        let stack_vars = expr::stack_expression_variables(root.data.as_ref(), ancestor_expr_vars)?;
+        let stack_vars = expr::stack_variables(root.data.as_ref(), ancestor_expr_vars)?;
 
         self.open_sublayers(
             root,
@@ -741,7 +741,7 @@ pub(crate) mod tests {
         // superset of what any one stack references; the `LayerGraph` re-derives the
         // actual per-stack membership with the same stack-level context, so a layer
         // reached here that no stack includes is simply an unused node.
-        let stack_vars = expr::stack_expression_variables(data.as_ref(), ancestor_expr_vars)?;
+        let stack_vars = expr::stack_variables(data.as_ref(), ancestor_expr_vars)?;
         for dep in arc_dependencies(data.as_ref())? {
             // An unevaluable dependency loads nothing, mirroring the graph's
             // drop-the-edge handling.

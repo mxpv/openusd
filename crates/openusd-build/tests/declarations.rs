@@ -43,10 +43,10 @@ fn compiled_family_registers() {
     let kinds = registry.kinds();
     assert!(kinds.is_assembly("tinyCrowd") && kinds.is_group("tinyCrowd"));
     assert!(kinds.is_component("tinyProp") && !kinds.is_group("tinyProp"));
-    assert!(kinds.has_kind("tinyMarker") && !kinds.is_model("tinyMarker"));
-    assert_eq!(kinds.base_kind("tinyMarker"), None, "an empty baseKind is no base");
+    assert!(kinds.contains("tinyMarker") && !kinds.is_model("tinyMarker"));
+    assert_eq!(kinds.base("tinyMarker"), None, "an empty baseKind is no base");
     // The plugin beside it in the file belongs to another family.
-    assert!(!kinds.has_kind("tinyGroup"));
+    assert!(!kinds.contains("tinyGroup"));
     // A kinds-only family brings no schema with it.
     assert_eq!(
         registry.schema_infos().count(),

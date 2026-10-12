@@ -269,7 +269,7 @@ impl XformCommonAPI {
         let xformable = self.xformable();
         match common_ops(xformable.ordered_xform_ops()?.0) {
             Some(ops) => Ok(common_vectors(&ops, time)?),
-            None => Ok(matrix_vectors(xformable.local_transformation(time)?)),
+            None => Ok(matrix_vectors(xformable.local_transform(time)?)),
         }
     }
 
@@ -299,7 +299,7 @@ impl XformCommonAPI {
         }
         match accumulate(&ops, time)? {
             Some(vectors) => Ok(vectors),
-            None => Ok(matrix_vectors(xformable.local_transformation(time)?)),
+            None => Ok(matrix_vectors(xformable.local_transform(time)?)),
         }
     }
 
@@ -416,8 +416,8 @@ fn common_ops(ops: Vec<XformOp>) -> Option<CommonXformOps> {
     let pivot = XformOpKind::Translate.op_name(Some(tokens::PIVOT), false);
     let scale = XformOpKind::Scale.op_name(None, false);
     let is_op =
-        |op: &XformOp, name: &tf::Token, inverse: bool| op.name() == name.as_str() && op.is_inverse_op() == inverse;
-    let is_rotate = |op: &XformOp| !op.is_inverse_op() && op.kind().and_then(RotationOrder::from_op_kind).is_some();
+        |op: &XformOp, name: &tf::Token, inverse: bool| op.name() == name.as_str() && op.is_inverse() == inverse;
+    let is_rotate = |op: &XformOp| !op.is_inverse() && op.kind().and_then(RotationOrder::from_op_kind).is_some();
 
     let mut rest = ops.into_iter().peekable();
     let common = CommonXformOps {
@@ -491,7 +491,7 @@ fn accumulate(ops: &[XformOp], time: Option<usd::TimeCode>) -> Result<Option<Xfo
     let has_scale = ops.iter().any(|op| op.kind() == Some(XformOpKind::Scale));
     let inverse_translates = ops
         .iter()
-        .filter(|op| is_translate(op.kind()) && op.is_inverse_op())
+        .filter(|op| is_translate(op.kind()) && op.is_inverse())
         .count();
 
     // The slots, in order: translate, pivot, then a rotate, an identity
@@ -522,14 +522,14 @@ fn accumulate(ops: &[XformOp], time: Option<usd::TimeCode>) -> Result<Option<Xfo
             current -= 1;
             continue;
         }
-        matrices[index] = matrices[index] * op.op_transform(time)?;
+        matrices[index] = matrices[index] * op.transform(time)?;
         remaining -= 1;
 
         // A rotate slot takes one op of the stack's rotate kind. A translate
         // slot closes on an inverse op, and the pivot slot once it undoes
         // the inverse pivot folded so far.
         let closes_translate = is_translate(slots[index])
-            && (op.is_inverse_op() || (index == PIVOT && are_inverses(matrices[PIVOT], matrices[inverse_pivot_slot])));
+            && (op.is_inverse() || (index == PIVOT && are_inverses(matrices[PIVOT], matrices[inverse_pivot_slot])));
         if slots[index] == rotate_kind || closes_translate {
             current -= 1;
         }
@@ -866,7 +866,7 @@ mod tests {
             ),
             None,
         )?;
-        let matrix = x.local_transformation(None)?;
+        let matrix = x.local_transform(None)?;
 
         let (y, y_api) = xform(&stage, "/Y")?;
         y.make_matrix_xform()?.set(matrix)?;
@@ -876,7 +876,7 @@ mod tests {
 
         let (z, z_api) = xform(&stage, "/Z")?;
         z_api.set_xform_vectors(&factored, None)?;
-        let composed = z.local_transformation(None)?;
+        let composed = z.local_transform(None)?;
         for (got, want) in composed.0.iter().zip(matrix.0) {
             assert!((got - want).abs() < 1e-5, "{composed:?} != {matrix:?}");
         }

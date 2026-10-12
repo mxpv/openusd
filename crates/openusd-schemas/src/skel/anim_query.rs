@@ -30,19 +30,19 @@ use super::{Animation, AnimationSchema};
 
 /// Decomposed joint-local transforms at a stage time: one entry per
 /// joint, holding translation, rotation, and scale. Returned by
-/// [`SkelAnimQuery::joint_local_transform_components`].
+/// [`AnimQuery::joint_transform_components`].
 pub type JointTransformComponents = (Vec<gf::Vec3f>, Vec<gf::Quatf>, Vec<gf::Vec3f>);
 
 /// Pre-resolved description of one `Animation` prim: the view itself,
 /// and the joint and blend-shape orderings as authored on it.
 #[derive(Debug, Clone)]
-pub struct SkelAnimQuery {
+pub struct AnimQuery {
     anim: Animation,
     joints: Vec<String>,
     blend_shapes: Vec<String>,
 }
 
-impl SkelAnimQuery {
+impl AnimQuery {
     /// Build a query over an `Animation`. Returns `None` when neither
     /// joints nor blend shapes are authored on it, there being nothing to
     /// animate.
@@ -82,7 +82,7 @@ impl SkelAnimQuery {
     /// static.
     pub fn joint_transforms_might_be_time_varying(&self) -> Result<bool> {
         for attribute in self.joint_transform_attributes() {
-            if attribute.value_might_be_time_varying()? {
+            if attribute.might_be_time_varying()? {
                 return Ok(true);
             }
         }
@@ -92,7 +92,7 @@ impl SkelAnimQuery {
     /// Whether `blendShapeWeights` may change over time. Mirrors Pixar's
     /// `BlendShapeWeightsMightBeTimeVarying`.
     pub fn blend_shape_weights_might_be_time_varying(&self) -> Result<bool> {
-        self.anim.blend_shape_weights_attr().value_might_be_time_varying()
+        self.anim.blend_shape_weights_attr().might_be_time_varying()
     }
 
     /// The three attributes a joint transform is composed from:
@@ -110,7 +110,7 @@ impl SkelAnimQuery {
     /// vector has `joints.len()` entries. Components fall back to
     /// the spec's identity values when not authored: zero translation,
     /// identity quaternion `(w=1, x=y=z=0)`, unit scale.
-    pub fn joint_local_transform_components(&self, time: impl Into<TimeCode>) -> Result<JointTransformComponents> {
+    pub fn joint_transform_components(&self, time: impl Into<TimeCode>) -> Result<JointTransformComponents> {
         let time = time.into();
         let n = self.joints.len();
         let translations = array_at(&self.anim.translations_attr(), time, n, gf::Vec3f::default())?;
@@ -125,7 +125,7 @@ impl SkelAnimQuery {
     /// [`super::SkeletonResolver::skinning_transforms_from_local`]
     /// get full skinning transforms out the other side.
     pub fn joint_local_transforms(&self, time: impl Into<TimeCode>) -> Result<Vec<gf::Mat4d>> {
-        let (translations, rotations, scales) = self.joint_local_transform_components(time.into())?;
+        let (translations, rotations, scales) = self.joint_transform_components(time.into())?;
         Ok(translations
             .iter()
             .zip(rotations.iter())
@@ -143,8 +143,8 @@ impl SkelAnimQuery {
 
     /// The joint transform sample times within `interval`. Mirrors Pixar's
     /// `GetJointTransformTimeSamplesInInterval`.
-    pub fn joint_transform_time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
-        Attribute::unioned_time_samples_in_interval(&self.joint_transform_attributes(), interval)
+    pub fn joint_transform_time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+        Attribute::unioned_time_samples_in(&self.joint_transform_attributes(), interval)
     }
 
     /// Every time at which `blendShapeWeights` is authored, ascending.
@@ -155,8 +155,8 @@ impl SkelAnimQuery {
 
     /// The blend-shape weight sample times within `interval`. Mirrors Pixar's
     /// `GetBlendShapeWeightTimeSamplesInInterval`.
-    pub fn blend_shape_weight_time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
-        self.anim.blend_shape_weights_attr().time_samples_in_interval(interval)
+    pub fn blend_shape_weight_time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+        self.anim.blend_shape_weights_attr().time_samples_in(interval)
     }
 
     /// Blend-shape weight per entry in

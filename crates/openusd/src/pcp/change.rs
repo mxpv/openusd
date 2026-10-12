@@ -491,7 +491,7 @@ impl Changes {
             effects.report = Some(Report::Info);
             return effects;
         }
-        if path.is_property_path() {
+        if path.is_property() {
             effects.value = Some(ValueScope::Prim);
             effects.targets = Self::target_keys(path, entry);
             // A property spec appearing or vanishing is not a value moving: a
@@ -650,8 +650,8 @@ impl Changes {
         let layer = edit.layer;
         if effects.significant {
             self.fanout_significant(cache, graph, layer, path);
-            if path.contains_prim_variant_selection() {
-                self.fanout_significant(cache, graph, layer, &path.strip_all_variant_selections());
+            if path.has_variant_selection() {
+                self.fanout_significant(cache, graph, layer, &path.strip_variant_selections());
             }
         }
         if effects.spec {
@@ -665,8 +665,8 @@ impl Changes {
             };
             let prim = path.prim_path();
             self.fanout_values(cache, graph, layer, &prim, &work);
-            if prim.contains_prim_variant_selection() {
-                let stripped = prim.strip_all_variant_selections();
+            if prim.has_variant_selection() {
+                let stripped = prim.strip_variant_selections();
                 self.fanout_values(cache, graph, layer, &stripped, &work);
             }
         }

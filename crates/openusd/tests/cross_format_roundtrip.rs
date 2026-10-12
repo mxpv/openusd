@@ -15,7 +15,7 @@ fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
         let mut fields: BTreeMap<String, sdf::Value> = BTreeMap::new();
         if let Some(names) = data.list_fields(&path) {
             for name in names {
-                let v = data.get_field(&path, &name).unwrap().into_owned();
+                let v = data.field(&path, &name).unwrap().into_owned();
                 fields.insert(name, v);
             }
         }

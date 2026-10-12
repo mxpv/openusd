@@ -5,7 +5,7 @@
 //! The reference suite hardcodes its expectations inline rather than shipping
 //! JSON baselines, so each `test_*` method is transcribed here against the
 //! `usd::Stage` value-resolution surface (`Attribute::get_at`, composed
-//! `default` reads, and `Stage::set_interpolation_type`).
+//! `default` reads, and `Stage::set_interpolation`).
 //!
 //! Excluded — not yet supported by the core:
 //! - Attribute type fallbacks and the reference's `ValueResolutionProcess`
@@ -81,7 +81,7 @@ fn timesamples_linear() -> Result<()> {
 #[test]
 fn timesamples_held() -> Result<()> {
     let stage = open("timesamples")?;
-    stage.set_interpolation_type(usd::InterpolationType::Held);
+    stage.set_interpolation(usd::InterpolationType::Held);
     assert_eq!(value_at(&stage, "/Root.root", 15.0), Some(5.0));
     assert_eq!(value_at(&stage, "/Root.root", 30.0), Some(10.0));
     Ok(())

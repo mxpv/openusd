@@ -1096,7 +1096,7 @@ where
 
     /// Set the `connectionPaths` (explicit list op, replacing any prior).
     /// Every path converts (and can fail) before anything is authored.
-    pub fn set_connection_paths(
+    pub fn set_connections(
         &mut self,
         paths: impl IntoIterator<Item: sdf::IntoPath>,
     ) -> Result<(), sdf::PathParseError> {
@@ -1119,11 +1119,7 @@ where
     /// selects without flipping the op out of explicit mode. A
     /// pre-existing non-`PathListOp` value is overwritten — debug
     /// builds assert.
-    pub fn add_connection_path(
-        &mut self,
-        path: impl sdf::IntoPath,
-        prepend: bool,
-    ) -> Result<bool, sdf::PathParseError> {
+    pub fn add_connection(&mut self, path: impl sdf::IntoPath, prepend: bool) -> Result<bool, sdf::PathParseError> {
         let path = sdf::try_into_path(path)?;
         let key = sdf::FieldKey::ConnectionPaths.as_str();
         // An undecodable `connectionPaths` must not be silently overwritten.
@@ -1179,7 +1175,7 @@ where
     }
 
     /// Remove a single connection path. Returns `true` if it was present.
-    pub fn remove_connection_path(&mut self, path: &sdf::Path) -> bool {
+    pub fn remove_connection(&mut self, path: &sdf::Path) -> bool {
         let key = sdf::FieldKey::ConnectionPaths.as_str();
         let Some(mut op) = self.get::<sdf::PathListOp>(key) else {
             return false;
@@ -1192,7 +1188,7 @@ where
     /// Author a removal for a connection path. Local contributions are
     /// stripped first; non-explicit list ops also get a delete opinion so
     /// weaker-layer contributions stay removed in the composed result.
-    pub fn delete_connection_path(&mut self, path: impl sdf::IntoPath) -> Result<bool, sdf::PathParseError> {
+    pub fn delete_connection(&mut self, path: impl sdf::IntoPath) -> Result<bool, sdf::PathParseError> {
         let path = &sdf::try_into_path(path)?;
         let key = sdf::FieldKey::ConnectionPaths.as_str();
         // An undecodable `connectionPaths` must not be silently overwritten.
@@ -1220,7 +1216,7 @@ where
 
     /// Clear all authored `connectionPaths`. Returns `true` if an
     /// opinion was actually removed.
-    pub fn clear_connection_paths(&mut self) -> bool {
+    pub fn clear_connections(&mut self) -> bool {
         let key = sdf::FieldKey::ConnectionPaths.as_str();
         let present = self.has_field(key);
         if present {
@@ -1303,10 +1299,7 @@ where
 {
     /// Replace `targetPaths` with the given list. Every path converts (and
     /// can fail) before anything is authored.
-    pub fn set_target_paths(
-        &mut self,
-        paths: impl IntoIterator<Item: sdf::IntoPath>,
-    ) -> Result<(), sdf::PathParseError> {
+    pub fn set_targets(&mut self, paths: impl IntoIterator<Item: sdf::IntoPath>) -> Result<(), sdf::PathParseError> {
         let paths: Vec<sdf::Path> = paths.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
         self.set(
             sdf::FieldKey::TargetPaths.as_str(),
@@ -1580,7 +1573,7 @@ fn parse_prim_path(
     if !target.is_abs() || target.is_abs_root() {
         return Err(invalid("expected absolute non-root prim path"));
     }
-    if target.is_property_path() {
+    if target.is_property() {
         return Err(invalid("expected prim path, got property path"));
     }
 
@@ -1816,7 +1809,7 @@ fn require_prim_path(path: &sdf::Path) -> Result<(), sdf::AuthoringError> {
 /// *inside* a variant — `/Prim{set=sel}.attr`, `/Prim{set=sel}child` — remain
 /// valid; only the bare variant selection as the leaf is rejected.)
 fn require_prim_leaf(path: &sdf::Path) -> Result<(), sdf::AuthoringError> {
-    if path.is_prim_variant_selection_path() {
+    if path.is_variant_selection() {
         return Err(sdf::AuthoringError::InvalidPath {
             path: path.clone(),
             reason: "expected a prim path, but the leaf is a variant selection",
@@ -1932,9 +1925,9 @@ mod tests {
         let mut attr = AttributeSpecMut::get(&mut data, path).expect("attr spec");
         let target = sdf::Path::new("/A.out").expect("path");
 
-        assert!(attr.add_connection_path(target.clone(), false).unwrap());
+        assert!(attr.add_connection(target.clone(), false).unwrap());
         // Duplicate — must not mutate, must not trip the change tracker.
-        assert!(!attr.add_connection_path(target, false).unwrap());
+        assert!(!attr.add_connection(target, false).unwrap());
     }
 
     #[test]
@@ -1943,12 +1936,12 @@ mod tests {
         let mut attr = AttributeSpecMut::get(&mut data, path).expect("attr spec");
 
         // Nothing authored — clear is a no-op.
-        assert!(!attr.clear_connection_paths());
+        assert!(!attr.clear_connections());
 
-        attr.add_connection_path(sdf::Path::new("/A.out").expect("path"), false)
+        attr.add_connection(sdf::Path::new("/A.out").expect("path"), false)
             .unwrap();
-        assert!(attr.clear_connection_paths());
-        assert!(!attr.clear_connection_paths());
+        assert!(attr.clear_connections());
+        assert!(!attr.clear_connections());
     }
 
     #[test]

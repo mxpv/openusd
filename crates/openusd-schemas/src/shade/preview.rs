@@ -119,7 +119,7 @@ pub fn read_preview_surface(
 /// Resolve the surface terminal: the universal context first, then the
 /// authored render-context terminals in sorted order for a stable choice.
 fn resolve_surface_terminal(material: &Material) -> Result<Option<super::ResolvedTerminal>, SchemaError> {
-    if let Some(terminal) = material.compute_surface_source(&[])? {
+    if let Some(terminal) = material.surface_source(&[])? {
         return Ok(Some(terminal));
     }
     let suffix = format!(":{}", SURFACE);
@@ -134,7 +134,7 @@ fn resolve_surface_terminal(material: &Material) -> Result<Option<super::Resolve
         return Ok(None);
     }
     let contexts: Vec<&str> = contexts.iter().map(String::as_str).collect();
-    material.compute_surface_source(&contexts)
+    material.surface_source(&contexts)
 }
 
 /// If `input` resolves to a `UsdUVTexture`, return that texture's

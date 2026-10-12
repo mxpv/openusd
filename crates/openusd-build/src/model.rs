@@ -557,7 +557,7 @@ pub fn is_root(name: &tf::Token) -> bool {
     // The families are short and a root is spelled unversioned almost always,
     // so the name itself answers before the family has to be parsed out of it.
     matches!(name.as_str(), TYPED | API_SCHEMA_BASE | SCHEMA_BASE) || {
-        let (family, _) = usd::SchemaRegistry::parse_schema_family_and_version(name);
+        let (family, _) = usd::SchemaRegistry::parse_family_and_version(name);
         matches!(family.as_str(), TYPED | API_SCHEMA_BASE | SCHEMA_BASE)
     }
 }

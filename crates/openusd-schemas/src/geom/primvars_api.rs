@@ -30,7 +30,7 @@ use crate::SchemaError;
 ///
 /// To read every prim of a hierarchy, carry the inherited set down the
 /// traversal with
-/// [`find_incrementally_inheritable_primvars`](Self::find_incrementally_inheritable_primvars)
+/// [`inheritable_primvars_from`](Self::inheritable_primvars_from)
 /// and resolve each prim against it with the `_from` queries. The queries
 /// that take no set walk every ancestor of the prim they are asked about.
 ///
@@ -56,7 +56,7 @@ use crate::SchemaError;
 /// // The prop defines no `tint` of its own and inherits the set's.
 /// let prop = PrimvarsAPI::from_prim_unchecked(prop.prim().clone());
 /// assert!(!prop.has_primvar("tint")?);
-/// let tint = prop.find_primvar_with_inheritance("tint")?.expect("inherited");
+/// let tint = prop.primvar_with_inheritance("tint")?.expect("inherited");
 /// assert_eq!(tint.attribute().path().as_str(), "/Set.primvars:tint");
 /// assert_eq!(tint.get_at::<gf::Vec3f>(None)?, Some(gf::vec3f(1.0, 0.5, 0.0)));
 /// # Ok::<(), openusd_schemas::SchemaError>(())
@@ -72,11 +72,11 @@ use crate::SchemaError;
 /// /// Records the primvars that apply to `prim` and to each prim beneath it.
 /// fn visit(prim: &usd::Prim, inherited: &[Primvar], found: &mut Vec<String>) -> openusd::Result<()> {
 ///     let api = PrimvarsAPI::from_prim_unchecked(prim.clone());
-///     for primvar in api.find_primvars_with_inheritance_from(inherited)? {
+///     for primvar in api.primvars_with_inheritance_from(inherited)? {
 ///         found.push(format!("{} <- {}", prim.path(), primvar.attribute().path()));
 ///     }
 ///     // `None` says this prim hands on exactly what reached it.
-///     let handed_down = api.find_incrementally_inheritable_primvars(inherited)?;
+///     let handed_down = api.inheritable_primvars_from(inherited)?;
 ///     let inherited = handed_down.as_deref().unwrap_or(inherited);
 ///     for child in prim.children()? {
 ///         visit(&child, inherited, found)?;
@@ -223,7 +223,7 @@ impl PrimvarsAPI {
     /// ancestors (C++ `FindInheritablePrimvars`), root-most first and, among
     /// the primvars of one prim, in its property order. A primvar a nearer
     /// prim replaces keeps the place of the one it replaced.
-    pub fn find_inheritable_primvars(&self) -> Result<Vec<Primvar>> {
+    pub fn inheritable_primvars(&self) -> Result<Vec<Primvar>> {
         self.inherited_through(false)
     }
 
@@ -233,22 +233,22 @@ impl PrimvarsAPI {
     /// `None` where this prim changes nothing, so the parent's set is the one
     /// to hand on. A set comes back wherever the prim adds, replaces or stops
     /// a primvar, and is empty where it stops the last of them.
-    pub fn find_incrementally_inheritable_primvars(&self, inherited: &[Primvar]) -> Result<Option<Vec<Primvar>>> {
+    pub fn inheritable_primvars_from(&self, inherited: &[Primvar]) -> Result<Option<Vec<Primvar>>> {
         inherit(self.prim(), inherited, false)
     }
 
     /// The primvars that apply to this prim (C++
     /// `FindPrimvarsWithInheritance`): each of its own that has an authored
     /// value, whatever its interpolation, and the ones it inherits, ordered
-    /// as [`find_inheritable_primvars`](Self::find_inheritable_primvars)
+    /// as [`inheritable_primvars`](Self::inheritable_primvars)
     /// orders them.
-    pub fn find_primvars_with_inheritance(&self) -> Result<Vec<Primvar>> {
+    pub fn primvars_with_inheritance(&self) -> Result<Vec<Primvar>> {
         self.inherited_through(true)
     }
 
-    /// [`find_primvars_with_inheritance`](Self::find_primvars_with_inheritance),
+    /// [`primvars_with_inheritance`](Self::primvars_with_inheritance),
     /// given the primvars this prim's parent hands down.
-    pub fn find_primvars_with_inheritance_from(&self, inherited: &[Primvar]) -> Result<Vec<Primvar>> {
+    pub fn primvars_with_inheritance_from(&self, inherited: &[Primvar]) -> Result<Vec<Primvar>> {
         Ok(inherit(self.prim(), inherited, true)?.unwrap_or_else(|| inherited.to_vec()))
     }
 
@@ -261,7 +261,7 @@ impl PrimvarsAPI {
     /// interpolation is not inherited, and hides the ones above it. Where
     /// nothing is inherited, the prim's own primvar if the prim defines it,
     /// which then holds no authored value, and `None` if it does not.
-    pub fn find_primvar_with_inheritance(&self, name: &str) -> Result<Option<Primvar>, SchemaError> {
+    pub fn primvar_with_inheritance(&self, name: &str) -> Result<Option<Primvar>, SchemaError> {
         let local = self.primvar(name)?;
         if local.attribute().has_authored_value()? {
             return Ok(Some(local));
@@ -272,9 +272,9 @@ impl PrimvarsAPI {
         }
     }
 
-    /// [`find_primvar_with_inheritance`](Self::find_primvar_with_inheritance),
+    /// [`primvar_with_inheritance`](Self::primvar_with_inheritance),
     /// given the primvars this prim's parent hands down.
-    pub fn find_primvar_with_inheritance_from(
+    pub fn primvar_with_inheritance_from(
         &self,
         name: &str,
         inherited: &[Primvar],
@@ -535,7 +535,7 @@ fn attribute_name(name: &str) -> Result<Cow<'_, str>, SchemaError> {
         true => Cow::Borrowed(name),
         false => Cow::Owned(format!("{PRIMVARS_NAMESPACE}{name}")),
     };
-    match Primvar::is_valid_primvar_name(&namespaced) {
+    match Primvar::is_valid_name(&namespaced) {
         true => Ok(namespaced),
         false => Err(SchemaError::InvalidPrimvarName { name: name.to_owned() }),
     }
@@ -706,10 +706,7 @@ mod tests {
         assert_eq!(primvar.interpolation()?, Interpolation::FaceVarying);
         assert_eq!(primvar.element_size()?, 2);
         assert_eq!(primvar.indices(None)?, Some(vec![1, 0]));
-        assert_eq!(
-            primvar.compute_flattened::<Vec<f32>>(None)?,
-            Some(vec![1.0, 1.0, 0.0, 0.0])
-        );
+        assert_eq!(primvar.flattened::<Vec<f32>>(None)?, Some(vec![1.0, 1.0, 0.0, 0.0]));
         Ok(())
     }
 
@@ -731,7 +728,7 @@ mod tests {
             .build()?;
         assert!(!primvar.is_indexed()?);
         assert!(primvar.indices_attr().resolve_info()?.value_is_blocked());
-        assert_eq!(primvar.compute_flattened::<Vec<f32>>(None)?, Some(vec![3.0]));
+        assert_eq!(primvar.flattened::<Vec<f32>>(None)?, Some(vec![3.0]));
         Ok(())
     }
 
@@ -747,7 +744,7 @@ mod tests {
         let again = mesh.create_primvar("x", "float[]")?;
         assert!(again.is_indexed()?);
         let reset = mesh.primvar_builder("x", "float[]").set(floats(&[5.0, 6.0])).build()?;
-        assert_eq!(reset.compute_flattened::<Vec<f32>>(None)?, Some(vec![6.0]));
+        assert_eq!(reset.flattened::<Vec<f32>>(None)?, Some(vec![6.0]));
         Ok(())
     }
 
@@ -792,10 +789,7 @@ mod tests {
 
         assert_eq!(commits.get(), 1);
         assert!(mesh.attribute("other").is_defined()?);
-        assert_eq!(
-            mesh.primvar("st")?.compute_flattened::<Vec<f32>>(None)?,
-            Some(vec![2.0])
-        );
+        assert_eq!(mesh.primvar("st")?.flattened::<Vec<f32>>(None)?, Some(vec![2.0]));
         Ok(())
     }
 
@@ -885,7 +879,7 @@ mod tests {
             crate::geom::declared_type(primvar.attribute())?,
             Some(sdf::ValueTypeName::FLOAT_ARRAY)
         );
-        assert_eq!(primvar.compute_flattened::<Vec<f32>>(None)?, Some(vec![2.0]));
+        assert_eq!(primvar.flattened::<Vec<f32>>(None)?, Some(vec![2.0]));
         Ok(())
     }
 
@@ -1150,10 +1144,10 @@ mod tests {
         let s = chain()?;
         valued(&s[1], "u1", None)?;
 
-        assert!(s[0].find_inheritable_primvars()?.is_empty());
+        assert!(s[0].inheritable_primvars()?.is_empty());
         for prim in &s[1..] {
             assert_eq!(
-                paths(&prim.find_inheritable_primvars()?),
+                paths(&prim.inheritable_primvars()?),
                 ["/s0/s1.primvars:u1"],
                 "{}",
                 prim.path()
@@ -1169,8 +1163,8 @@ mod tests {
         valued(&s[1], "u1", None)?;
         valued(&s[3], "u1", None)?;
 
-        assert_eq!(paths(&s[2].find_inheritable_primvars()?), ["/s0/s1.primvars:u1"]);
-        assert_eq!(paths(&s[4].find_inheritable_primvars()?), ["/s0/s1/s2/s3.primvars:u1"]);
+        assert_eq!(paths(&s[2].inheritable_primvars()?), ["/s0/s1.primvars:u1"]);
+        assert_eq!(paths(&s[4].inheritable_primvars()?), ["/s0/s1/s2/s3.primvars:u1"]);
         Ok(())
     }
 
@@ -1185,7 +1179,7 @@ mod tests {
         valued(&s[1], "b", None)?;
 
         assert_eq!(
-            paths(&s[4].find_inheritable_primvars()?),
+            paths(&s[4].inheritable_primvars()?),
             [
                 "/s0/s1.primvars:b",
                 "/s0/s1/s2.primvars:c",
@@ -1206,7 +1200,7 @@ mod tests {
         valued(&s[2], "b", None)?;
 
         assert_eq!(
-            paths(&s[2].find_inheritable_primvars()?),
+            paths(&s[2].inheritable_primvars()?),
             ["/s0/s1.primvars:a", "/s0/s1/s2.primvars:b", "/s0/s1.primvars:c"]
         );
         Ok(())
@@ -1223,10 +1217,10 @@ mod tests {
         valued(&s[2], "b", Some(Interpolation::Varying))?;
         let expected = ["/s0/s1.primvars:a", "/s0/s1.primvars:c", "/s0/s1.primvars:d"];
 
-        assert_eq!(paths(&s[2].find_inheritable_primvars()?), expected);
-        let handed_down = s[1].find_inheritable_primvars()?;
+        assert_eq!(paths(&s[2].inheritable_primvars()?), expected);
+        let handed_down = s[1].inheritable_primvars()?;
         let stepped = s[2]
-            .find_incrementally_inheritable_primvars(&handed_down)?
+            .inheritable_primvars_from(&handed_down)?
             .expect("the prim stops `b`");
         assert_eq!(paths(&stepped), expected);
         Ok(())
@@ -1243,7 +1237,7 @@ mod tests {
             Interpolation::FaceVarying,
         ] {
             valued(&s[1], "u1", Some(interpolation))?;
-            assert!(s[2].find_inheritable_primvars()?.is_empty(), "{interpolation:?}");
+            assert!(s[2].inheritable_primvars()?.is_empty(), "{interpolation:?}");
         }
         Ok(())
     }
@@ -1257,8 +1251,8 @@ mod tests {
         valued(&s[1], "u2", None)?;
         valued(&s[3], "u1", Some(Interpolation::Vertex))?;
 
-        assert_eq!(paths(&s[4].find_inheritable_primvars()?), ["/s0/s1.primvars:u2"]);
-        assert_eq!(s[4].find_primvar_with_inheritance("u1")?, None);
+        assert_eq!(paths(&s[4].inheritable_primvars()?), ["/s0/s1.primvars:u2"]);
+        assert_eq!(s[4].primvar_with_inheritance("u1")?, None);
         assert!(!s[4].has_possibly_inherited_primvar("u1")?);
         Ok(())
     }
@@ -1272,7 +1266,7 @@ mod tests {
         s[3].create_primvar("u1", "float")?
             .set_interpolation(Interpolation::Vertex)?;
 
-        assert_eq!(paths(&s[4].find_inheritable_primvars()?), ["/s0/s1.primvars:u1"]);
+        assert_eq!(paths(&s[4].inheritable_primvars()?), ["/s0/s1.primvars:u1"]);
         assert!(s[4].has_possibly_inherited_primvar("u1")?);
         Ok(())
     }
@@ -1284,11 +1278,11 @@ mod tests {
         let s = chain()?;
         let inherited = valued(&s[1], "u1", None)?;
         valued(&s[3], "u1", Some(Interpolation::Varying))?;
-        assert!(s[4].find_inheritable_primvars()?.is_empty());
+        assert!(s[4].inheritable_primvars()?.is_empty());
 
         assert!(s[3].block_primvar("u1")?);
-        assert_eq!(paths(&s[4].find_inheritable_primvars()?), ["/s0/s1.primvars:u1"]);
-        assert_eq!(s[4].find_primvar_with_inheritance("u1")?, Some(inherited));
+        assert_eq!(paths(&s[4].inheritable_primvars()?), ["/s0/s1.primvars:u1"]);
+        assert_eq!(s[4].primvar_with_inheritance("u1")?, Some(inherited));
         Ok(())
     }
 
@@ -1302,8 +1296,8 @@ mod tests {
             .into_attribute()
             .set_metadata(tokens::INTERPOLATION, sdf::Value::Token(tf::Token::from("frobosity")))?;
 
-        assert!(s[4].find_inheritable_primvars()?.is_empty());
-        assert_eq!(s[4].find_primvar_with_inheritance("u1")?, None);
+        assert!(s[4].inheritable_primvars()?.is_empty());
+        assert_eq!(s[4].primvar_with_inheritance("u1")?, None);
         Ok(())
     }
 
@@ -1314,7 +1308,7 @@ mod tests {
         let s = chain()?;
         crate::skel::BindingAPI::apply(s[1].prim())?;
         assert!(s[1].primvar("skel:skinningMethod")?.attribute().has_value()?);
-        assert!(s[2].find_inheritable_primvars()?.is_empty());
+        assert!(s[2].inheritable_primvars()?.is_empty());
         assert!(!s[2].has_possibly_inherited_primvar("skel:skinningMethod")?);
         Ok(())
     }
@@ -1325,10 +1319,10 @@ mod tests {
         let s = chain()?;
         valued(&s[1], "u1", None)?;
         s[2].create_primvar("declared", "float")?;
-        let handed_down = s[1].find_inheritable_primvars()?;
+        let handed_down = s[1].inheritable_primvars()?;
 
-        assert_eq!(s[2].find_incrementally_inheritable_primvars(&handed_down)?, None);
-        assert_eq!(s[2].find_incrementally_inheritable_primvars(&[])?, None);
+        assert_eq!(s[2].inheritable_primvars_from(&handed_down)?, None);
+        assert_eq!(s[2].inheritable_primvars_from(&[])?, None);
         Ok(())
     }
 
@@ -1339,12 +1333,9 @@ mod tests {
         let s = chain()?;
         valued(&s[1], "u1", None)?;
         valued(&s[2], "u1", Some(Interpolation::Varying))?;
-        let handed_down = s[1].find_inheritable_primvars()?;
+        let handed_down = s[1].inheritable_primvars()?;
 
-        assert_eq!(
-            s[2].find_incrementally_inheritable_primvars(&handed_down)?,
-            Some(Vec::new())
-        );
+        assert_eq!(s[2].inheritable_primvars_from(&handed_down)?, Some(Vec::new()));
         Ok(())
     }
 
@@ -1361,10 +1352,10 @@ mod tests {
 
         let mut carried = Vec::new();
         for prim in &s {
-            if let Some(changed) = prim.find_incrementally_inheritable_primvars(&carried)? {
+            if let Some(changed) = prim.inheritable_primvars_from(&carried)? {
                 carried = changed;
             }
-            assert_eq!(carried, prim.find_inheritable_primvars()?, "{}", prim.path());
+            assert_eq!(carried, prim.inheritable_primvars()?, "{}", prim.path());
         }
         assert_eq!(paths(&carried), ["/s0/s1/s2/s3.primvars:b", "/s0/s1/s2/s3.primvars:c"]);
         Ok(())
@@ -1377,7 +1368,7 @@ mod tests {
         let s = chain()?;
         valued(&s[1], "u1", None)?;
         let local = valued(&s[4], "u1", Some(Interpolation::Vertex))?;
-        assert_eq!(s[4].find_primvar_with_inheritance("u1")?, Some(local));
+        assert_eq!(s[4].primvar_with_inheritance("u1")?, Some(local));
         assert!(s[4].has_possibly_inherited_primvar("u1")?);
         Ok(())
     }
@@ -1388,7 +1379,7 @@ mod tests {
     fn find_binds_ancestor() -> Result {
         let s = chain()?;
         let inherited = valued(&s[1], "u1", None)?;
-        let found = s[4].find_primvar_with_inheritance("primvars:u1")?.expect("inherited");
+        let found = s[4].primvar_with_inheritance("primvars:u1")?.expect("inherited");
         assert_eq!(found, inherited);
         assert_eq!(found.attribute().path().as_str(), "/s0/s1.primvars:u1");
         assert_eq!(found.get_at::<f32>(None)?, Some(1.0));
@@ -1403,7 +1394,7 @@ mod tests {
         valued(&s[1], "u1", None)?;
         valued(&s[2], "u1", Some(Interpolation::Varying))?;
 
-        assert_eq!(s[4].find_primvar_with_inheritance("u1")?, None);
+        assert_eq!(s[4].primvar_with_inheritance("u1")?, None);
         assert!(!s[4].has_possibly_inherited_primvar("u1")?);
         assert!(s[2].has_possibly_inherited_primvar("u1")?);
         Ok(())
@@ -1414,13 +1405,13 @@ mod tests {
     #[test]
     fn find_returns_defined_local() -> Result {
         let s = chain()?;
-        assert_eq!(s[4].find_primvar_with_inheritance("u1")?, None);
+        assert_eq!(s[4].primvar_with_inheritance("u1")?, None);
 
         let declared = s[4].create_primvar("u1", "float")?;
-        assert_eq!(s[4].find_primvar_with_inheritance("u1")?, Some(declared.clone()));
+        assert_eq!(s[4].primvar_with_inheritance("u1")?, Some(declared.clone()));
 
         valued(&s[2], "u1", Some(Interpolation::Varying))?;
-        assert_eq!(s[4].find_primvar_with_inheritance("u1")?, Some(declared));
+        assert_eq!(s[4].primvar_with_inheritance("u1")?, Some(declared));
         Ok(())
     }
 
@@ -1438,11 +1429,11 @@ mod tests {
         s[4].create_primvar("stopped", "float")?;
         s[4].create_primvar("declared", "float")?;
 
-        let handed_down = s[3].find_inheritable_primvars()?;
+        let handed_down = s[3].inheritable_primvars()?;
         for name in ["inherited", "stopped", "overridden", "hidden", "declared", "absent"] {
             assert_eq!(
-                s[4].find_primvar_with_inheritance_from(name, &handed_down)?,
-                s[4].find_primvar_with_inheritance(name)?,
+                s[4].primvar_with_inheritance_from(name, &handed_down)?,
+                s[4].primvar_with_inheritance(name)?,
                 "{name}"
             );
         }
@@ -1465,14 +1456,11 @@ mod tests {
             "/s0/s1/s2/s3/s4.primvars:u3",
         ];
 
-        assert_eq!(paths(&s[4].find_primvars_with_inheritance()?), expected);
-        let handed_down = s[3].find_inheritable_primvars()?;
-        assert_eq!(
-            paths(&s[4].find_primvars_with_inheritance_from(&handed_down)?),
-            expected
-        );
+        assert_eq!(paths(&s[4].primvars_with_inheritance()?), expected);
+        let handed_down = s[3].inheritable_primvars()?;
+        assert_eq!(paths(&s[4].primvars_with_inheritance_from(&handed_down)?), expected);
         // A prim with nothing of its own takes what reaches it.
-        assert_eq!(s[3].find_primvars_with_inheritance_from(&handed_down)?, handed_down);
+        assert_eq!(s[3].primvars_with_inheritance_from(&handed_down)?, handed_down);
         Ok(())
     }
 
@@ -1500,7 +1488,7 @@ mod tests {
             .build()?;
 
         assert!(s[4].has_primvar("displayColor")?);
-        assert_eq!(s[4].find_primvar_with_inheritance("displayColor")?, Some(color));
+        assert_eq!(s[4].primvar_with_inheritance("displayColor")?, Some(color));
         Ok(())
     }
 
@@ -1517,10 +1505,10 @@ mod tests {
         let proxy = api(&proxy);
 
         assert_eq!(
-            paths(&proxy.find_inheritable_primvars()?),
+            paths(&proxy.inheritable_primvars()?),
             ["/World.primvars:u", "/World/inst.primvars:p"]
         );
-        let inherited = proxy.find_primvar_with_inheritance("p")?.expect("the instance's");
+        let inherited = proxy.primvar_with_inheritance("p")?.expect("the instance's");
         assert_eq!(inherited.get_at::<f32>(None)?, Some(2.0));
         Ok(())
     }

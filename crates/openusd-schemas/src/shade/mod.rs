@@ -28,7 +28,7 @@
 //! logical shader outputs or authored interface values behind an attribute,
 //! as far as [`ProducerFilter`] admits. [`NodeGraphInterface`] maps interface
 //! inputs in the reverse direction to their consumers. Specialized consumers
-//! include [`Material::compute_surface_source`] and [`read_preview_surface`].
+//! include [`Material::surface_source`] and [`read_preview_surface`].
 //! [`Shader::implementation_source`] and the source queries interpret the
 //! active `NodeDef` implementation family, which the matching setters
 //! ([`Shader::set_source_asset`] and friends) select. [`SdrMetadata`] carries
@@ -57,7 +57,7 @@
 //!     .connect_to(&terminal).unwrap();
 //!
 //! let mat = shade::Material::get(&stage, "/Mat").unwrap().expect("Material");
-//! let terminal = mat.compute_surface_source(&[]).unwrap().expect("surface terminal");
+//! let terminal = mat.surface_source(&[]).unwrap().expect("surface terminal");
 //! let source = terminal.sources().first().expect("surface source");
 //! let shader = source.shader().expect("shader-typed source");
 //! assert_eq!(shader.id().unwrap().as_deref(), Some("UsdPreviewSurface"));
@@ -175,7 +175,7 @@ macro_rules! impl_shading_attribute {
             /// admits. It must already exist: authoring a connection never
             /// creates the attribute it targets, and a path that identifies
             /// none reads back through
-            /// [`invalid_source_paths`](crate::shade::ConnectedSources::invalid_source_paths).
+            /// [`invalid_paths`](crate::shade::ConnectedSources::invalid_paths).
             pub fn connect_to(
                 self,
                 source: &impl $crate::shade::ConnectionTarget,

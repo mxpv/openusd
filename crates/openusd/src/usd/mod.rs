@@ -32,8 +32,8 @@ mod timecode;
 pub use attribute::{Attribute, AttributeBuilder, AttributeQuery};
 pub use authoring::{PrimEdit, StageEdit};
 pub use capture::{ReplayStage, UndoStage};
-pub use collection::{MembershipQuery, PathExpansionRuleMap, PathRule, apply_collection, compute_included_paths};
-pub use collection_expr::{CollectionEvaluator, CollectionSearcher, resolve_complete_membership_expression};
+pub use collection::{MembershipQuery, PathExpansionRuleMap, PathRule, apply_collection, included_paths};
+pub use collection_expr::{CollectionEvaluator, CollectionSearcher, complete_membership_expression};
 pub use connections::ConnectionGraph;
 pub use core_schemas::{
     ClipsAPI, ClipsAPISchema, CollectionAPI, CollectionMode, ColorSpaceAPI, ColorSpaceDefinitionAPI, ExpansionRule,
@@ -98,7 +98,7 @@ use crate::sdf;
 
 /// Decodes an optionally-composed value to `T`, folding the conversion
 /// failure into the caller's error. The one decode step behind every generic
-/// read accessor ([`Attribute::get_at`], [`Prim::get_metadata`], ...), so a
+/// read accessor ([`Attribute::get_at`], [`Prim::metadata`], ...), so a
 /// future decode nuance lands in one place.
 pub(crate) fn decode_value<T, E>(value: Option<sdf::Value>) -> Result<Option<T>, E>
 where

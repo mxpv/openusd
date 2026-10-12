@@ -441,7 +441,7 @@ impl Payload {
         // collapses.
         let to_stage = |path: &sdf::Path| match provenance {
             Provenance::EditTarget(m) => m.map_source_to_target(path),
-            Provenance::LocalStack => Some(path.strip_all_variant_selections()),
+            Provenance::LocalStack => Some(path.strip_variant_selections()),
             Provenance::DirectLayerEdit => Some(path.clone()),
         };
         // The cache's stage half needs no translation: it is what a dependency

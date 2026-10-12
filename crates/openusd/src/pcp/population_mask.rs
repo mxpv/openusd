@@ -179,8 +179,8 @@ impl PopulationMask {
         // Both normalizations copy the whole path, so borrow the common case:
         // a plain prim path is already in the mask's coordinate space, and the
         // tests that say so only scan.
-        let path = if path.is_property_path() || path.contains_prim_variant_selection() {
-            Cow::Owned(path.prim_path().strip_all_variant_selections())
+        let path = if path.is_property() || path.has_variant_selection() {
+            Cow::Owned(path.prim_path().strip_variant_selections())
         } else {
             Cow::Borrowed(path)
         };
@@ -208,11 +208,11 @@ impl Default for PopulationMask {
 
 /// Parses `path` and accepts it only as an absolute prim path — what C++
 /// `UsdStagePopulationMask` stores. The pseudo-root is a prim path here even
-/// though [`Path::is_prim_path`] excludes it, since it is the spelling of
+/// though [`Path::is_prim`] excludes it, since it is the spelling of
 /// [`PopulationMask::all`].
 fn validate(path: impl sdf::IntoPath) -> Result<Path, PopulationMaskError> {
     let path = sdf::try_into_path(path)?;
-    if path.is_abs() && (path.is_abs_root() || (path.is_prim_path() && !path.contains_prim_variant_selection())) {
+    if path.is_abs() && (path.is_abs_root() || (path.is_prim() && !path.has_variant_selection())) {
         Ok(path)
     } else {
         Err(PopulationMaskError::NotAbsolutePrimPath(path))

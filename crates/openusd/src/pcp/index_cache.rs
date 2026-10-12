@@ -1695,12 +1695,12 @@ impl IndexCache {
     }
 
     /// Whether an attribute's value may vary over time, the introspection behind
-    /// [`Attribute::value_might_be_time_varying`]. True when the winning value
+    /// [`Attribute::might_be_time_varying`]. True when the winning value
     /// source has more than one composed sample, or when that source is a value-
     /// clip set whose schedule alone can vary the value
     /// ([`ClipSet::may_be_time_varying`]).
     ///
-    /// [`Attribute::value_might_be_time_varying`]: crate::usd::Attribute::value_might_be_time_varying
+    /// [`Attribute::might_be_time_varying`]: crate::usd::Attribute::might_be_time_varying
     pub(crate) fn value_might_be_time_varying(
         &mut self,
         graph: &LayerGraph,
@@ -2229,7 +2229,7 @@ impl IndexCache {
     /// through [`Self::effective_path`]. Callers that redirected the path
     /// themselves (e.g. [`Self::value_at`]) use this to avoid redirecting twice.
     pub(super) fn has_spec_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
-        if path.is_property_path() {
+        if path.is_property() {
             return Ok(self
                 .find_property_node(graph, path, |layer, p| layer.data().has_spec(p).then_some(()))?
                 .is_some());
@@ -2246,7 +2246,7 @@ impl IndexCache {
     /// queried is picked up instead of a stale cached `None`.
     pub fn spec_type(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<SpecType>, QueryError> {
         let path = &self.effective_path(graph, path)?;
-        if path.is_property_path() {
+        if path.is_property() {
             return self.find_property_node(graph, path, |layer, p| layer.data().spec_type(p));
         }
         self.ensure_index(graph, path)?;
@@ -2311,10 +2311,10 @@ impl IndexCache {
                 // drop it, since the pair itself carries none — keeping paths
                 // outside the arc's explicit domain visible to the target, as
                 // they are for every other arc whose map has the root identity.
-                let mapping = if node.path.contains_prim_variant_selection() {
+                let mapping = if node.path.has_variant_selection() {
                     let composed = node.map_to_root.compose(&MapFunction::from_pair(
                         node.path.clone(),
-                        node.path.strip_all_variant_selections(),
+                        node.path.strip_variant_selections(),
                     ));
                     if node.map_to_root.has_root_identity() {
                         composed.with_root_identity()
@@ -2358,7 +2358,7 @@ impl IndexCache {
             return Ok(graph.root_layer_field(field)?);
         }
 
-        if path.is_property_path() {
+        if path.is_property() {
             let prim_path = path.prim_path();
             let prop_suffix = path.property_suffix();
             self.ensure_index(graph, &prim_path)?;
@@ -2505,7 +2505,7 @@ impl IndexCache {
             // once the population is known to reach the prim. A prototype root
             // has no properties at the stage tier (C++ reads it through an
             // empty prim index), so a target on one is terminal too.
-            let is_relationship = target.is_property_path() && {
+            let is_relationship = target.is_property() && {
                 let prim = target.prim_path();
                 self.population_reaches(graph, &prim)?
                     && !self.is_prototype(&prim)
@@ -2544,7 +2544,7 @@ impl IndexCache {
         field: FieldKey,
         deleted: bool,
     ) -> Result<Vec<Path>, QueryError> {
-        if !path.is_property_path() {
+        if !path.is_property() {
             return Ok(Vec::new());
         }
         let prim = path.prim_path();
@@ -2706,7 +2706,7 @@ impl IndexCache {
                 // The selection-free form for the within-class test below: a
                 // class defined inside a variant has a qualified introduction
                 // path, while target paths compare selection-free.
-                let class_prefix = class_path.strip_all_variant_selections();
+                let class_prefix = class_path.strip_variant_selections();
                 let members = graph.layer_stack(node.layer_stack_id());
                 let class_layers: Vec<LayerId> = members.iter().map(|(l, _)| *l).collect();
                 // The node's map to the root namespace (C++ `PcpNodeRef::GetMapToRoot`).
@@ -2728,11 +2728,7 @@ impl IndexCache {
                         // target that translates can name an instance. A relative
                         // target anchors at the class node's qualified site, so
                         // both sides compare selection-free.
-                        if target
-                            .prim_path()
-                            .strip_all_variant_selections()
-                            .has_prefix(&class_prefix)
-                        {
+                        if target.prim_path().strip_variant_selections().has_prefix(&class_prefix) {
                             continue;
                         }
                         if !seen.insert((target.clone(), property.clone())) {
@@ -2918,7 +2914,7 @@ impl IndexCache {
                 );
                 if let Ok(Value::TokenVec(order)) = layer_data
                     .data()
-                    .get_field(&node.path, FieldKey::PrimOrder.as_str())
+                    .field(&node.path, FieldKey::PrimOrder.as_str())
                     .map(|v| v.into_owned())
                 {
                     sdf::apply_ordering(&mut name_order, &order);
@@ -3059,7 +3055,7 @@ impl IndexCache {
         time: Option<f64>,
     ) -> Result<Vec<SpecSiteRecord>, QueryError> {
         let path = self.effective_path(graph, path)?;
-        if !path.is_property_path() {
+        if !path.is_property() {
             return Ok(Vec::new());
         }
         let prim_path = path.prim_path();
@@ -3149,7 +3145,7 @@ impl IndexCache {
         let mut targets_to_cache = Vec::new();
         for (scan_path, scan_layer) in &nodes_to_scan {
             for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                let Ok(val) = graph.layer(*scan_layer).data().get_field(scan_path, field.as_str()) else {
+                let Ok(val) = graph.layer(*scan_layer).data().field(scan_path, field.as_str()) else {
                     continue;
                 };
                 let Value::PathListOp(list_op) = val.into_owned() else {
@@ -3442,7 +3438,7 @@ fn append_unseen_names(
     order: &mut Vec<Token>,
     seen: &mut HashSet<Token>,
 ) {
-    if let Ok(Value::TokenVec(names)) = layer.data().get_field(path, field.as_str()).map(|v| v.into_owned()) {
+    if let Ok(Value::TokenVec(names)) = layer.data().field(path, field.as_str()).map(|v| v.into_owned()) {
         for name in names {
             if seen.insert(name.clone()) {
                 order.push(name);
@@ -5129,7 +5125,7 @@ def "Anchor" (inherits = </Rig>) {}
             e.relationship_mut("/P.relA")
                 .unwrap()
                 .expect("relationship spec")
-                .set_target_paths([sdf::path("/Z").unwrap()])
+                .set_targets([sdf::path("/Z").unwrap()])
                 .unwrap();
             Ok(())
         })?;

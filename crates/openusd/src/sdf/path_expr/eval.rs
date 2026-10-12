@@ -15,7 +15,7 @@ use crate::sdf::Path;
 
 use super::glob::GlobPattern;
 use super::pattern::PathPattern;
-use super::predicate::{PredResult, PredicateLibrary, PredicateProgram, link_predicate_expression};
+use super::predicate::{PredResult, PredicateLibrary, PredicateProgram, link_predicate};
 use super::{EvalError, ExprNode, PathExpression, SetOp};
 
 /// A compiled path expression over predicate domain `D` (C++
@@ -149,7 +149,7 @@ impl<D> PathExpressionEval<D> {
     /// A fresh [`IncrementalSearcher`] borrowing this evaluator; `domain`
     /// supplies the predicate domain object for a path, as in
     /// [`match_path`](Self::match_path).
-    pub fn incremental_searcher<F: Fn(&Path) -> D>(&self, domain: F) -> IncrementalSearcher<'_, D, F> {
+    pub fn searcher<F: Fn(&Path) -> D>(&self, domain: F) -> IncrementalSearcher<'_, D, F> {
         IncrementalSearcher {
             eval: self,
             states: self.patterns.iter().map(|_| PatternSearchState::default()).collect(),
@@ -254,7 +254,7 @@ impl<D> PathExpressionEval<D> {
 
 /// A stateful depth-first searcher over one expression (C++
 /// `SdfPathExpressionEval::IncrementalSearcher`), created by
-/// [`PathExpressionEval::incremental_searcher`].
+/// [`PathExpressionEval::searcher`].
 ///
 /// [`next`](Self::next) must be fed paths in depth-first order: each path a
 /// direct child of the previous one, a sibling, or the sibling of one of
@@ -283,7 +283,7 @@ impl<D, F: Fn(&Path) -> D> IncrementalSearcher<'_, D, F> {
         let visit = Visit {
             path,
             depth: path_depth(path),
-            is_property: path.is_property_path(),
+            is_property: path.is_property(),
             addressable: addressable(path),
         };
         // Ascending (or stepping to a sibling) invalidates state gathered at
@@ -385,7 +385,7 @@ impl<D> PatternImpl<D> {
                 Some(index) => {
                     compiled
                         .programs
-                        .push(link_predicate_expression(&pattern.pred_exprs()[index], library)?);
+                        .push(link_predicate(&pattern.pred_exprs()[index], library)?);
                     Some(compiled.programs.len() - 1)
                 }
                 None => None,
@@ -429,7 +429,7 @@ impl<D> PatternImpl<D> {
         // A property pattern cannot match a prim, but the prim's properties
         // still might; a prim pattern can never match a property or anything
         // below it.
-        let is_property = path.is_property_path();
+        let is_property = path.is_property();
         match self.matches {
             ObjectKind::PropertyOnly if !is_property => return PredResult::varying(false),
             ObjectKind::PrimOnly if is_property => return PredResult::constant(false),
@@ -761,13 +761,13 @@ struct Element<'a> {
 /// The depth the matchers measure paths by: the number of [`Element`]s the
 /// path yields — its prim names plus the property tail.
 fn path_depth(path: &Path) -> usize {
-    path.prim_element_count() + usize::from(path.is_property_path())
+    path.prim_element_count() + usize::from(path.is_property())
 }
 
 /// Whether the pattern grammar can address `path` at all; variant
 /// selections and relationship targets are outside it.
 fn addressable(path: &Path) -> bool {
-    !path.contains_prim_variant_selection() && !path.as_str().contains('[')
+    !path.has_variant_selection() && !path.as_str().contains('[')
 }
 
 /// The elements of `path` below `prefix`, root-ward first, the property tail
@@ -1168,7 +1168,7 @@ mod tests {
     /// prunes harder than `_Match` in places) but never lose it.
     fn check_walk(text: &str, walk: &[Path]) {
         let e = eval(text);
-        let mut searcher = e.incremental_searcher(Path::clone);
+        let mut searcher = e.searcher(Path::clone);
         for step in walk {
             let one_shot = e.match_path(step, &Path::clone);
             let incr = searcher.next(step);
@@ -1236,7 +1236,7 @@ mod tests {
         // The trailing `foo/bar` re-lands at every deeper occurrence.
         let walk = dfs_walk(&["/Foo/geom/foo/bar/foo/bar/foo/bar"]);
         let e = eval("//Foo//foo/bar");
-        let mut searcher = e.incremental_searcher(Path::clone);
+        let mut searcher = e.searcher(Path::clone);
         let values: Vec<bool> = walk.iter().map(|p| searcher.next(p).value).collect();
         assert_eq!(
             values,
@@ -1251,11 +1251,11 @@ mod tests {
         // Under a leading stretch, a bare predicate may bind the prefix
         // element itself — on the searcher's very first step.
         let e = eval("/foo//{name:foo}");
-        let mut searcher = e.incremental_searcher(Path::clone);
+        let mut searcher = e.searcher(Path::clone);
         assert_eq!(searcher.next(&path("/foo").unwrap()), PredResult::varying(true));
 
         let miss = eval("/foo//{name:other}");
-        let mut searcher = miss.incremental_searcher(Path::clone);
+        let mut searcher = miss.searcher(Path::clone);
         assert_eq!(searcher.next(&path("/foo").unwrap()), PredResult::varying(false));
     }
 
@@ -1264,7 +1264,7 @@ mod tests {
         // Interior prim segments accumulate at prim visits even though a
         // property pattern can never match the prims themselves.
         let e = eval("//x//*.attr");
-        let mut searcher = e.incremental_searcher(Path::clone);
+        let mut searcher = e.searcher(Path::clone);
         assert_eq!(searcher.next(&path("/x").unwrap()), PredResult::varying(false));
         assert_eq!(searcher.next(&path("/x/q").unwrap()), PredResult::varying(false));
         assert_eq!(searcher.next(&path("/x/q.attr").unwrap()), PredResult::varying(true));
@@ -1276,7 +1276,7 @@ mod tests {
         // the searcher prunes with a constant answer where the one-shot
         // matcher only reports varying false.
         let e = eval("/a/x*");
-        let mut searcher = e.incremental_searcher(Path::clone);
+        let mut searcher = e.searcher(Path::clone);
         assert_eq!(searcher.next(&path("/a").unwrap()), PredResult::varying(false));
         assert_eq!(searcher.next(&path("/a/q").unwrap()), PredResult::varying(false));
         assert_eq!(searcher.next(&path("/a/q/r").unwrap()), PredResult::constant(false));
@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     fn searcher_reset() {
         let e = eval("/r//a/b//c");
-        let mut searcher = e.incremental_searcher(Path::clone);
+        let mut searcher = e.searcher(Path::clone);
         let walk = dfs_walk(&["/r/a/b/a/b/c"]);
         let first: Vec<PredResult> = walk.iter().map(|p| searcher.next(p)).collect();
         searcher.reset();

@@ -18,11 +18,11 @@
 //!
 //! [`Root`] and [`Skeleton`] are [`geom::Boundable`](crate::geom)
 //! prims, so `skel` enables the `geom` feature. Time-sampled Animation
-//! evaluation is handled by [`SkelAnimQuery`], which delegates to
+//! evaluation is handled by [`AnimQuery`], which delegates to
 //! [`openusd::usd::Attribute::get`] and inherits the stage's interpolation mode
 //! (AOUSD §12.5 — linear by default, with per-joint slerp for `rotations`).
 //! The static resolvers ([`SkeletonResolver`] / [`SkinningResolver`]) take
-//! pre-evaluated joint poses, so callers typically wire `SkelAnimQuery` into
+//! pre-evaluated joint poses, so callers typically wire `AnimQuery` into
 //! them at each frame. [`discover_bindings`] walks a `Root` subtree and
 //! resolves every skinnable prim's inherited skeleton + animation source
 //! (C++ `UsdSkelCache::ComputeSkelBindings`).
@@ -50,7 +50,7 @@
 //!
 //! let skel = Skeleton::get(&stage, "/Rig").unwrap().expect("Skeleton");
 //! let resolver = SkeletonResolver::from_skeleton(&skel).unwrap();
-//! assert_eq!(resolver.topology().num_joints(), 2);
+//! assert_eq!(resolver.topology().joint_count(), 2);
 //! ```
 
 openusd::include_schema!("usdSkel");
@@ -65,7 +65,7 @@ mod skinning_query;
 mod topology;
 
 pub use anim_mapper::{AnimMapper, MISSING};
-pub use anim_query::{JointTransformComponents, SkelAnimQuery};
+pub use anim_query::{AnimQuery, JointTransformComponents};
 pub use binding::{SkelBinding, discover_bindings};
 pub use decode::{INBETWEENS_NAMESPACE, Inbetween};
 pub use skeleton_query::SkeletonResolver;

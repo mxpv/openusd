@@ -1101,7 +1101,7 @@ pub fn default_prim_path(token: &str) -> Option<Path> {
     let path = Path::new(token).ok()?;
     // No identifier may begin with `.`, so the only prim paths whose text starts
     // with one are the relative anchors `.`, `..`, and `../…`.
-    if !path.is_prim_path() || path.as_str().starts_with('.') {
+    if !path.is_prim() || path.as_str().starts_with('.') {
         return None;
     }
     Some(Path::abs_root().make_absolute(&path))
@@ -1288,7 +1288,7 @@ mod tests {
         assert_eq!(world_kind(&layer), component);
         let size = layer
             .data()
-            .get_field(&Path::new("/World.size")?, "default")
+            .field(&Path::new("/World.size")?, "default")
             .expect("decoded on demand")
             .into_owned();
         assert_eq!(size, Value::FloatVec(vec![1.0; 64]));
@@ -1434,7 +1434,7 @@ mod tests {
         assert_eq!(world_kind(&other), None, "the other view reads the file it mapped");
         let size = other
             .data()
-            .get_field(&Path::new("/World.size")?, "default")
+            .field(&Path::new("/World.size")?, "default")
             .expect("still decodes from its view")
             .into_owned();
         assert_eq!(size, Value::FloatVec(vec![1.0; 64]));
@@ -1878,7 +1878,7 @@ mod tests {
             .data;
         assert_eq!(round.spec_type(&bar), Some(SpecType::Prim));
         assert_eq!(
-            round.get_field(&bar, "typeName").unwrap().into_owned(),
+            round.field(&bar, "typeName").unwrap().into_owned(),
             sdf::Value::Token("Cube".into())
         );
         Ok(())
@@ -2108,7 +2108,7 @@ mod tests {
 
         let value = layer
             .data()
-            .get_field(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
+            .field(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
             .unwrap()
             .into_owned();
         assert!(matches!(value, sdf::Value::String(value) if value == "bad"));
@@ -2140,7 +2140,7 @@ mod tests {
         assert!(!layer.data().has_spec(&sdf::path("/Mesh.material:binding").unwrap()));
         let value = layer
             .data()
-            .get_field(
+            .field(
                 &sdf::path("/Mesh").unwrap(),
                 sdf::ChildrenKey::PropertyChildren.as_str(),
             )
@@ -2398,7 +2398,7 @@ mod tests {
                 .unwrap_err(),
             sdf::EditError::Author(sdf::AuthoringError::Parse(_))
         ));
-        // Target-bracket property paths slip past `is_property_path` because the
+        // Target-bracket property paths slip past `is_property` because the
         // tail after the last `.` is alphanumeric — split_property_path must reject them.
         assert!(invalid(&mut layer, |e| {
             sdf::AttributeSpec::new(
@@ -2444,7 +2444,7 @@ mod tests {
         );
 
         let token_vec = |path: &str, key: sdf::ChildrenKey| -> Result<Vec<String>> {
-            match layer.data().get_field(&sdf::path(path)?, key.as_str())?.into_owned() {
+            match layer.data().field(&sdf::path(path)?, key.as_str())?.into_owned() {
                 sdf::Value::TokenVec(v) => Ok(v.into_iter().map(Into::into).collect()),
                 other => panic!("expected TokenVec at {path}, got {other:?}"),
             }
@@ -2531,7 +2531,7 @@ mod tests {
             )
             .unwrap();
             surface
-                .set_connection_paths([sdf::path("/World/Material.outputs:surface").unwrap()])
+                .set_connections([sdf::path("/World/Material.outputs:surface").unwrap()])
                 .unwrap();
         });
 
@@ -2550,12 +2550,12 @@ mod tests {
         );
         assert_eq!(
             parsed
-                .get_field(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())?
+                .field(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())?
                 .into_owned(),
             sdf::Value::Token("World".into())
         );
         let targets = parsed
-            .get_field(
+            .field(
                 &sdf::path("/World/Sphere.material:binding")?,
                 sdf::FieldKey::TargetPaths.as_str(),
             )?
@@ -2565,7 +2565,7 @@ mod tests {
         assert!(targets.is_explicit());
         assert_eq!(targets.explicit_items(), vec![material]);
         let connections = parsed
-            .get_field(
+            .field(
                 &sdf::path("/World/Sphere.inputs:surface")?,
                 sdf::FieldKey::ConnectionPaths.as_str(),
             )?
@@ -2627,7 +2627,7 @@ mod tests {
         assert_eq!(sources.borrow().len(), 1, "the saved file is opened once");
         assert_eq!(live_sources(&sources), 1, "the layer holds the mapping");
         assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
-        let size = layer.data().get_field(&Path::new("/World.size")?, "default")?;
+        let size = layer.data().field(&Path::new("/World.size")?, "default")?;
         assert_eq!(size.into_owned(), Value::from(vec![1.0_f32; 64]));
         Ok(())
     }
@@ -2794,7 +2794,7 @@ mod tests {
         assert_eq!(world_kind(&editing), component);
         assert_eq!(world_kind(&other), None, "the other view reads the file it mapped");
         assert_eq!(world_kind(&Layer::open(path.to_string_lossy())?), component);
-        let size = editing.data().get_field(&Path::new("/World.size")?, "default")?;
+        let size = editing.data().field(&Path::new("/World.size")?, "default")?;
         assert_eq!(size.into_owned(), Value::from(vec![1.0_f32; 64]));
 
         // A mapped file is open with write sharing denied. The new file

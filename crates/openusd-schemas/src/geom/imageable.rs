@@ -89,7 +89,7 @@ pub trait ImageableExt: ImageableSchema {
     /// An authored token outside `inherited`, `invisible` and `visible` still
     /// stops the walk. It fails to decode, and the call returns the
     /// conversion error.
-    fn compute_effective_visibility(
+    fn effective_visibility(
         &self,
         purpose: Purpose,
         time: impl Into<Option<usd::TimeCode>>,
@@ -126,7 +126,7 @@ pub trait ImageableExt: ImageableSchema {
     /// authored-but-unrecognized token stops the walk and resolves to
     /// [`Purpose::Default`].
     fn compute_purpose(&self) -> Result<Purpose> {
-        Ok(self.compute_purpose_info()?.purpose)
+        Ok(self.purpose_info()?.purpose)
     }
 
     /// Resolve the effective composed `purpose` together with whether this
@@ -135,7 +135,7 @@ pub trait ImageableExt: ImageableSchema {
     /// The purpose is the one [`compute_purpose`](Self::compute_purpose)
     /// answers. It is inheritable when an opinion authored on this prim or an
     /// imageable ancestor decided it, and not when it is a fallback.
-    fn compute_purpose_info(&self) -> Result<PurposeInfo> {
+    fn purpose_info(&self) -> Result<PurposeInfo> {
         let authored = nearest(self.stage(), self.path(), Imageable::from_prim, authored_purpose)?;
         match authored {
             Some(purpose) => Ok(PurposeInfo::inheritable(purpose)),
@@ -144,13 +144,13 @@ pub trait ImageableExt: ImageableSchema {
     }
 
     /// Resolve the answer of
-    /// [`compute_purpose_info`](Self::compute_purpose_info) from the parent
+    /// [`purpose_info`](Self::purpose_info) from the parent
     /// prim's `parent` info, reading this prim alone (C++
     /// `ComputePurposeInfo(parentPurposeInfo)`).
     ///
     /// A traversal that hands each prim's info down to its children resolves
     /// every purpose with one read per prim.
-    fn compute_purpose_info_from(&self, parent: PurposeInfo) -> Result<PurposeInfo> {
+    fn purpose_info_from(&self, parent: PurposeInfo) -> Result<PurposeInfo> {
         let ip = Imageable::from_prim(self.prim().clone())?;
         let authored = match &ip {
             Some(ip) => authored_purpose(ip)?,
@@ -173,7 +173,7 @@ pub trait ImageableExt: ImageableSchema {
     /// purpose is not `render`, when the relationship does not forward to
     /// exactly one target, when the stage holds no prim at the target, and
     /// when the target's computed purpose is not `proxy`.
-    fn compute_proxy_prim(&self) -> Result<Option<(usd::Prim, usd::Prim)>> {
+    fn proxy_prim(&self) -> Result<Option<(usd::Prim, usd::Prim)>> {
         // Each prim's purpose from its parent's, root-most first, so the
         // chain costs one read per prim.
         let mut chain: Vec<_> = self.path().ancestors_below_root().collect();
@@ -182,7 +182,7 @@ pub trait ImageableExt: ImageableSchema {
         let mut render_root = None;
         for path in chain {
             let prim = self.stage().prim(path)?;
-            info = Imageable::from_prim_unchecked(prim.clone()).compute_purpose_info_from(info)?;
+            info = Imageable::from_prim_unchecked(prim.clone()).purpose_info_from(info)?;
             // The run of `render` prims that reaches this prim starts at
             // the first one after the last prim of another purpose.
             render_root = match info.purpose {
@@ -295,10 +295,7 @@ pub trait ImageableExt: ImageableSchema {
     ///
     /// Each call evaluates every ancestor afresh; for several prims, or one
     /// prim at several times, query an [`XformCache`] instead.
-    fn compute_local_to_world_transform(
-        &self,
-        time: impl Into<Option<usd::TimeCode>>,
-    ) -> Result<gf::Mat4d, SchemaError> {
+    fn local_to_world_transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
         XformCache::new(time).local_to_world_transform(self.prim())
     }
 
@@ -307,10 +304,7 @@ pub trait ImageableExt: ImageableSchema {
     ///
     /// Each call evaluates every ancestor afresh; for several prims, or one
     /// prim at several times, query an [`XformCache`] instead.
-    fn compute_parent_to_world_transform(
-        &self,
-        time: impl Into<Option<usd::TimeCode>>,
-    ) -> Result<gf::Mat4d, SchemaError> {
+    fn parent_to_world_transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
         XformCache::new(time).parent_to_world_transform(self.prim())
     }
 }
@@ -413,7 +407,7 @@ mod tests {
     }
 
     fn effective(view: &impl ImageableSchema, purpose: Purpose) -> Result<PurposeVisibility> {
-        view.compute_effective_visibility(purpose, None)
+        view.effective_visibility(purpose, None)
     }
 
     /// With nothing authored, `guide` is hidden and `proxy` / `render` are
@@ -571,11 +565,7 @@ mod tests {
         ] {
             let time = usd::TimeCode::new(time);
             assert_eq!(child.compute_visibility(time)?, overall, "{time:?}");
-            assert_eq!(
-                child.compute_effective_visibility(Purpose::Render, time)?,
-                render,
-                "{time:?}"
-            );
+            assert_eq!(child.effective_visibility(Purpose::Render, time)?, render, "{time:?}");
         }
         Ok(())
     }
@@ -595,11 +585,7 @@ mod tests {
 
         for (time, expected) in [(1.0, PurposeVisibility::Visible), (2.0, PurposeVisibility::Invisible)] {
             let time = usd::TimeCode::new(time);
-            assert_eq!(
-                root.compute_effective_visibility(Purpose::Guide, time)?,
-                expected,
-                "{time:?}"
-            );
+            assert_eq!(root.effective_visibility(Purpose::Guide, time)?, expected, "{time:?}");
         }
         Ok(())
     }
@@ -632,21 +618,21 @@ mod tests {
         let root = Scope::define(&stage, "/Root")?;
         let child = Scope::define(&stage, "/Root/Child")?;
 
-        let fallback = root.compute_purpose_info()?;
+        let fallback = root.purpose_info()?;
         assert_eq!(fallback, PurposeInfo::default());
         assert_eq!(fallback.inheritable_purpose(), None);
-        assert_eq!(child.compute_purpose_info_from(fallback)?, fallback);
+        assert_eq!(child.purpose_info_from(fallback)?, fallback);
 
         root.create_purpose_attr()?.set(Purpose::Render)?;
-        let authored = root.compute_purpose_info()?;
+        let authored = root.purpose_info()?;
         assert_eq!(authored.inheritable_purpose(), Some(Purpose::Render));
-        assert_eq!(child.compute_purpose_info()?, authored);
-        assert_eq!(child.compute_purpose_info_from(authored)?, authored);
+        assert_eq!(child.purpose_info()?, authored);
+        assert_eq!(child.purpose_info_from(authored)?, authored);
 
         child.create_purpose_attr()?.set(Purpose::Guide)?;
-        let own = child.compute_purpose_info_from(authored)?;
+        let own = child.purpose_info_from(authored)?;
         assert_eq!(own.inheritable_purpose(), Some(Purpose::Guide));
-        assert_eq!(own, child.compute_purpose_info()?);
+        assert_eq!(own, child.purpose_info()?);
         Ok(())
     }
 
@@ -659,11 +645,11 @@ mod tests {
         let untyped = Imageable::from_prim_unchecked(stage.define_prim("/Root/Untyped")?);
         untyped.create_purpose_attr()?.set(Purpose::Guide)?;
 
-        assert_eq!(untyped.compute_purpose_info()?, PurposeInfo::default());
+        assert_eq!(untyped.purpose_info()?, PurposeInfo::default());
         root.create_purpose_attr()?.set(Purpose::Render)?;
-        let parent = root.compute_purpose_info()?;
-        assert_eq!(untyped.compute_purpose_info_from(parent)?, parent);
-        assert_eq!(untyped.compute_purpose_info()?, parent);
+        let parent = root.purpose_info()?;
+        assert_eq!(untyped.purpose_info_from(parent)?, parent);
+        assert_eq!(untyped.purpose_info()?, parent);
         Ok(())
     }
 
@@ -687,11 +673,11 @@ mod tests {
         let (render, geo, proxy) = render_and_proxy(&stage)?;
 
         for view in [&render, &geo] {
-            let (found, root) = view.compute_proxy_prim()?.expect("a proxy");
+            let (found, root) = view.proxy_prim()?.expect("a proxy");
             assert_eq!(found.path(), proxy.path());
             assert_eq!(root.path(), render.path());
         }
-        assert!(proxy.compute_proxy_prim()?.is_none());
+        assert!(proxy.proxy_prim()?.is_none());
         Ok(())
     }
 
@@ -705,8 +691,8 @@ mod tests {
         let leaf = Scope::define(&stage, "/Render/Geo/Leaf")?;
         leaf.create_purpose_attr()?.set(Purpose::Render)?;
 
-        assert!(geo.compute_proxy_prim()?.is_none());
-        assert!(leaf.compute_proxy_prim()?.is_none());
+        assert!(geo.proxy_prim()?.is_none());
+        assert!(leaf.proxy_prim()?.is_none());
         Ok(())
     }
 
@@ -718,18 +704,18 @@ mod tests {
         let (render, geo, proxy) = render_and_proxy(&stage)?;
 
         proxy.create_purpose_attr()?.set(Purpose::Default)?;
-        assert!(geo.compute_proxy_prim()?.is_none());
+        assert!(geo.proxy_prim()?.is_none());
         proxy.create_purpose_attr()?.set(Purpose::Proxy)?;
-        assert!(geo.compute_proxy_prim()?.is_some());
+        assert!(geo.proxy_prim()?.is_some());
 
         render
             .proxy_prim_rel_builder()
             .set_targets(["/Proxy", "/Render/Geo"])
             .build()?;
-        assert!(geo.compute_proxy_prim()?.is_none());
+        assert!(geo.proxy_prim()?.is_none());
 
         render.proxy_prim_rel_builder().set_targets(["/Missing"]).build()?;
-        assert!(geo.compute_proxy_prim()?.is_none());
+        assert!(geo.proxy_prim()?.is_none());
         Ok(())
     }
 

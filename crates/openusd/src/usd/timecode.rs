@@ -45,7 +45,7 @@ impl TimeCode {
     // epsilon window would fold genuine times near the bottom of the range into
     // the sentinel.
     #[allow(clippy::float_cmp_const)]
-    pub fn is_earliest_time(self) -> bool {
+    pub fn is_earliest(self) -> bool {
         self.0 == f64::MIN
     }
 
@@ -108,8 +108,8 @@ mod tests {
 
     #[test]
     fn earliest_is_min() {
-        assert!(TimeCode::EARLIEST.is_earliest_time());
-        assert!(!TimeCode::new(0.0).is_earliest_time());
+        assert!(TimeCode::EARLIEST.is_earliest());
+        assert!(!TimeCode::new(0.0).is_earliest());
     }
 
     #[test]

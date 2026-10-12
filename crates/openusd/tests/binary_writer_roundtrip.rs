@@ -16,7 +16,7 @@ fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
         let mut fields: BTreeMap<String, sdf::Value> = BTreeMap::new();
         if let Some(names) = data.list_fields(&path) {
             for name in names {
-                let v = data.get_field(&path, &name).unwrap().into_owned();
+                let v = data.field(&path, &name).unwrap().into_owned();
                 fields.insert(name, v);
             }
         }
@@ -109,11 +109,11 @@ fn compressed_int_array_roundtrips() {
 
     let round = CrateData::open(buf.clone(), true).expect("re-parse");
     let round_short = (&round as &dyn AbstractData)
-        .get_field(&short_prop, "default")
+        .field(&short_prop, "default")
         .unwrap()
         .into_owned();
     let round_long = (&round as &dyn AbstractData)
-        .get_field(&long_prop, "default")
+        .field(&long_prop, "default")
         .unwrap()
         .into_owned();
     assert_eq!(round_short, Value::IntVec(vec![1, 2, 3]));
@@ -148,7 +148,7 @@ fn cpp_authored_unregistered_values() {
         let data = CrateData::open(bytes, true).unwrap_or_else(|e| panic!("parse {}: {e:#}", full.display()));
 
         let value = (&data as &dyn AbstractData)
-            .get_field(&path(spec).expect("a path"), field)
+            .field(&path(spec).expect("a path"), field)
             .unwrap_or_else(|e| panic!("{file} has no {field}: {e}"))
             .into_owned();
         assert_eq!(value, Value::UnregisteredValue(literal.to_owned()), "{file}");
@@ -189,7 +189,7 @@ fn unregistered_values_roundtrip() {
     let round = CrateData::open(buf.clone(), true).expect("re-parse");
     for (name, value) in &fields {
         let read = (&round as &dyn AbstractData)
-            .get_field(&prim, name)
+            .field(&prim, name)
             .expect("field")
             .into_owned();
         assert_eq!(&read, value, "{name}");
@@ -221,7 +221,7 @@ fn asset_array_roundtrips() {
 
     let round = CrateData::open(buf.clone(), true).expect("re-parse");
     let value = (&round as &dyn AbstractData)
-        .get_field(&files, "default")
+        .field(&files, "default")
         .unwrap()
         .into_owned();
     assert_eq!(value, Value::AssetPathVec(paths));
@@ -352,7 +352,7 @@ fn quat_write_read_preserves_wxyz_convention() {
 
     // fields.usda: quatf quatfSingle = (1.4, 2.9, 8.5, 4.6)
     let scalar = round
-        .get_field(&sdf::path("/World.quatfSingle").unwrap(), "default")
+        .field(&sdf::path("/World.quatfSingle").unwrap(), "default")
         .unwrap()
         .into_owned();
     assert_eq!(
@@ -367,7 +367,7 @@ fn quat_write_read_preserves_wxyz_convention() {
 
     // fields.usda: quatf[] quatfArr = [(4.2, 3.5, 2.6, 3.6), (2.4, 5.3, 6.3, 5.2), (7.1, 4.3, 2.4, 6.4)]
     let arr = round
-        .get_field(&sdf::path("/World.quatfArr").unwrap(), "default")
+        .field(&sdf::path("/World.quatfArr").unwrap(), "default")
         .unwrap()
         .into_owned();
     assert_eq!(
@@ -396,7 +396,7 @@ fn quat_write_read_preserves_wxyz_convention() {
 
     // fields.usda: quatd quatdSingle = (2.4, 5.3, 6.3, 5.2)
     let scalar = round
-        .get_field(&sdf::path("/World.quatdSingle").unwrap(), "default")
+        .field(&sdf::path("/World.quatdSingle").unwrap(), "default")
         .unwrap()
         .into_owned();
     assert_eq!(
@@ -411,7 +411,7 @@ fn quat_write_read_preserves_wxyz_convention() {
 
     // fields.usda: quatd[] quatdArr = [(4.2, 3.5, 2.6, 3.6), (7.1, 4.3, 2.4, 6.4)]
     let arr = round
-        .get_field(&sdf::path("/World.quatdArr").unwrap(), "default")
+        .field(&sdf::path("/World.quatdArr").unwrap(), "default")
         .unwrap()
         .into_owned();
     assert_eq!(
@@ -461,7 +461,7 @@ fn unsorted_samples_sorted() {
     CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("write");
     let round = CrateData::open(buf.clone(), true).expect("re-parse");
     let samples = (&round as &dyn AbstractData)
-        .get_field(&attr, "timeSamples")
+        .field(&attr, "timeSamples")
         .expect("samples")
         .into_owned();
     assert_eq!(

@@ -32,7 +32,7 @@ pub use glob::GlobPattern;
 pub use pattern::{Component, PathPattern};
 pub use predicate::{
     FnArg, FnCall, FnCallKind, PredResult, PredicateArg, PredicateBinder, PredicateExpression, PredicateFn,
-    PredicateLibrary, PredicateProgram, link_predicate_expression,
+    PredicateLibrary, PredicateProgram, link_predicate,
 };
 
 /// A path expression that cannot be compiled into an evaluator: incomplete
@@ -261,13 +261,13 @@ impl PathExpression {
     }
 
     /// Whether any expression reference remains.
-    pub fn contains_expression_references(&self) -> bool {
+    pub fn has_references(&self) -> bool {
         self.any_reference(|_| true)
     }
 
     /// Whether the weaker reference `%_` remains, so composition still has
     /// an opinion slot to fill.
-    pub fn contains_weaker_reference(&self) -> bool {
+    pub fn has_weaker_reference(&self) -> bool {
         self.any_reference(ExpressionReference::is_weaker)
     }
 
@@ -282,7 +282,7 @@ impl PathExpression {
     /// Whether the expression can be evaluated as-is: no references remain
     /// and everything is absolute.
     pub fn is_complete(&self) -> bool {
-        !self.contains_expression_references() && self.is_absolute()
+        !self.has_references() && self.is_absolute()
     }
 
     /// Anchors every relative pattern prefix and reference path to `anchor`.

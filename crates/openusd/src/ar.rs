@@ -451,7 +451,7 @@ pub trait Resolver {
 
     /// Returns the file extension of the given asset path (without the leading
     /// dot), the innermost packaged path's for a package-relative one.
-    fn get_extension<'a>(&self, asset_path: &'a str) -> &'a str {
+    fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
         extension(asset_path)
     }
 
@@ -485,12 +485,12 @@ pub trait Resolver {
     }
 
     /// Returns metadata about a resolved asset.
-    fn get_asset_info(&self, _asset_path: &str, _resolved_path: &ResolvedPath) -> AssetInfo {
+    fn asset_info(&self, _asset_path: &str, _resolved_path: &ResolvedPath) -> AssetInfo {
         AssetInfo::default()
     }
 
     /// Returns the modification timestamp of a resolved asset.
-    fn get_modification_timestamp(&self, _asset_path: &str, resolved_path: &ResolvedPath) -> Option<SystemTime> {
+    fn modification_timestamp(&self, _asset_path: &str, resolved_path: &ResolvedPath) -> Option<SystemTime> {
         fs::metadata(&**resolved_path).and_then(|m| m.modified()).ok()
     }
 
@@ -1467,11 +1467,11 @@ pub(crate) mod tests {
     #[test]
     fn resolver_extension() {
         let resolver = DefaultResolver::new();
-        assert_eq!(resolver.get_extension("model.usda"), "usda");
-        assert_eq!(resolver.get_extension("archive.usdz"), "usdz");
-        assert_eq!(resolver.get_extension("no_extension"), "");
-        assert_eq!(resolver.get_extension("path/to/file.usdc"), "usdc");
-        assert_eq!(resolver.get_extension("pkg.usdz[inner.usdz[a.usda]]"), "usda");
+        assert_eq!(resolver.extension("model.usda"), "usda");
+        assert_eq!(resolver.extension("archive.usdz"), "usdz");
+        assert_eq!(resolver.extension("no_extension"), "");
+        assert_eq!(resolver.extension("path/to/file.usdc"), "usdc");
+        assert_eq!(resolver.extension("pkg.usdz[inner.usdz[a.usda]]"), "usda");
     }
 
     #[test]
@@ -1863,7 +1863,7 @@ pub(crate) mod tests {
         let resolver = DefaultResolver::with_search_paths([&manifest]);
 
         let resolved = resolver.resolve("Cargo.toml").unwrap();
-        let ts = resolver.get_modification_timestamp("Cargo.toml", &resolved);
+        let ts = resolver.modification_timestamp("Cargo.toml", &resolved);
         assert!(ts.is_some());
     }
 

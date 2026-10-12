@@ -40,7 +40,7 @@ pub struct Dependencies {
 /// UDIM patterns and clip templates, which C++ expands by listing the
 /// filesystem, and variable expressions, which C++ anchors unevaluated and
 /// reports unresolved, return [`DependencyError`](super::DependencyError).
-pub fn compute_all_dependencies(stage: &Stage, asset_path: &str) -> Result<Dependencies> {
+pub fn all_dependencies(stage: &Stage, asset_path: &str) -> Result<Dependencies> {
     let graph = stage.layers();
     let policy = Discover {
         inactive: false,
@@ -641,7 +641,7 @@ def "N" (
         let dir = tempfile::tempdir()?;
         let root = scene(dir.path());
         let stage = Stage::open(&root)?;
-        let dependencies = compute_all_dependencies(&stage, &root)?;
+        let dependencies = all_dependencies(&stage, &root)?;
         assert_eq!(
             relative(dir.path(), &dependencies.layers),
             [
@@ -690,7 +690,7 @@ def "N" (
             );
             Ok(())
         })?;
-        let dependencies = compute_all_dependencies(&stage, &identifier)?;
+        let dependencies = all_dependencies(&stage, &identifier)?;
         assert_eq!(relative(dir.path(), &dependencies.layers), ["extra.usda", "root.usda"]);
         Ok(())
     }
@@ -707,7 +707,7 @@ def "N" (
             "#usda 1.0\ndef \"A\" (\n    assetInfo = {\n        asset identifier = @./nowhere.usda@\n        asset icon = @./missing.png@\n    }\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        let dependencies = compute_all_dependencies(&stage, &root)?;
+        let dependencies = all_dependencies(&stage, &root)?;
         assert_eq!(relative(dir.path(), &dependencies.layers), ["root.usda"]);
         assert_eq!(relative(dir.path(), &dependencies.unresolved), ["missing.png"]);
 
@@ -735,7 +735,7 @@ def "N" (
             "#usda 1.0\ndef \"A\" (\n    delete references = @`\"./${NAME}.usda\"`@\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        let dependencies = compute_all_dependencies(&stage, &root)?;
+        let dependencies = all_dependencies(&stage, &root)?;
         assert_eq!(relative(dir.path(), &dependencies.layers), ["root.usda"]);
         assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
         Ok(())
@@ -752,7 +752,7 @@ def "N" (
             "#usda 1.0\ndef \"A\" (\n    delete references = @./gone.usda@ (\n        customData = {\n            asset icon = @`\"./${X}.png\"`@\n        }\n    )\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        let dependencies = compute_all_dependencies(&stage, &root)?;
+        let dependencies = all_dependencies(&stage, &root)?;
         assert!(dependencies.assets.is_empty(), "{:?}", dependencies.assets);
         assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
         Ok(())
@@ -768,7 +768,7 @@ def "N" (
             "#usda 1.0\ndef \"A\" (\n    clips = {\n        dictionary default = {\n            string templateAssetPath = \"\"\n        }\n    }\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        assert_eq!(compute_all_dependencies(&stage, &root)?.layers.len(), 1);
+        assert_eq!(all_dependencies(&stage, &root)?.layers.len(), 1);
         Ok(())
     }
 
@@ -787,7 +787,7 @@ def "N" (
                 &format!("#usda 1.0\ndef \"A\" {{\n    {body}\n}}\n"),
             );
             let (root, stage) = open(dir.path(), "root.usda")?;
-            let error = compute_all_dependencies(&stage, &root).unwrap_err();
+            let error = all_dependencies(&stage, &root).unwrap_err();
             assert!(
                 matches!(&error, Error::Dependency(DependencyError::Unsupported { kind: k, .. }) if *k == kind),
                 "{error}"

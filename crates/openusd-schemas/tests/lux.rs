@@ -338,9 +338,7 @@ fn light_links_include_root() -> Result<()> {
         let linking = CollectionAPI::from_prim_unchecked(light.prim().clone(), name);
         assert_eq!(linking.include_root()?, Some(true), "{name} includes the pseudo-root");
         assert!(
-            linking
-                .compute_membership_query()?
-                .is_path_included(&sdf::path("/World/Geo")?),
+            linking.membership_query()?.is_included(&sdf::path("/World/Geo")?),
             "{name} links the geometry"
         );
     }

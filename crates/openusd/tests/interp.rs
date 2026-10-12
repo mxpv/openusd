@@ -14,7 +14,7 @@ fn open() -> Result<usd::Stage> {
 #[test]
 fn default_interpolation_is_linear() -> Result<()> {
     let stage = open()?;
-    assert_eq!(stage.interpolation_type(), usd::InterpolationType::Linear);
+    assert_eq!(stage.interpolation(), usd::InterpolationType::Linear);
     Ok(())
 }
 
@@ -80,7 +80,7 @@ fn unsupported_type_falls_back_to_held() -> Result<()> {
 #[test]
 fn held_mode_returns_previous_sample() -> Result<()> {
     let stage = open()?;
-    stage.set_interpolation_type(usd::InterpolationType::Held);
+    stage.set_interpolation(usd::InterpolationType::Held);
     let v = stage
         .attribute(path("/Prim.scalar")?)?
         .get_at::<Value>(usd::TimeCode::new(5.0))?
@@ -146,9 +146,9 @@ fn falls_back_to_default_when_no_timesamples() -> Result<()> {
 #[test]
 fn set_interpolation_type_via_builder() -> Result<()> {
     let stage = usd::Stage::builder()
-        .interpolation_type(usd::InterpolationType::Held)
+        .interpolation(usd::InterpolationType::Held)
         .open(FIXTURE)?;
-    assert_eq!(stage.interpolation_type(), usd::InterpolationType::Held);
+    assert_eq!(stage.interpolation(), usd::InterpolationType::Held);
     let v = stage
         .attribute(path("/Prim.scalar")?)?
         .get_at::<Value>(usd::TimeCode::new(5.0))?

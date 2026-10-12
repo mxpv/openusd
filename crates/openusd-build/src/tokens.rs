@@ -255,10 +255,7 @@ impl Gathered {
 /// bare placeholder are told apart the same way, by the prefix each namespaces
 /// under.
 fn property_id(property: &Property) -> String {
-    let spelled = usd::SchemaRegistry::make_multiple_apply_name_instance(
-        property.schematics_name.as_str(),
-        "_MultipleApplyTemplate_",
-    );
+    let spelled = usd::SchemaRegistry::make_name_instance(property.schematics_name.as_str(), "_MultipleApplyTemplate_");
     names::token_id(spelled.as_str(), false)
 }
 

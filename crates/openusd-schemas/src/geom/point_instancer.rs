@@ -604,7 +604,7 @@ fn prototype_xforms(cache: &mut XformCache, prototypes: &[Option<usd::Prim>]) ->
     let mut xforms = Vec::with_capacity(prototypes.len());
     for prototype in prototypes {
         xforms.push(match prototype {
-            Some(prototype) => cache.local_transformation(prototype)?.0,
+            Some(prototype) => cache.local_transform(prototype)?.0,
             None => gf::Mat4d::IDENTITY,
         });
     }

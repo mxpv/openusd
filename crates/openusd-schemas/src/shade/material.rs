@@ -179,7 +179,7 @@ impl TerminalSource {
     }
 
     /// The source attribute's base name without `inputs:` or `outputs:`.
-    pub fn source_name(&self) -> &str {
+    pub fn name(&self) -> &str {
         match &self.attribute {
             ShadingAttribute::Input(input) => input.base_name(),
             ShadingAttribute::Output(output) => output.base_name(),
@@ -325,22 +325,19 @@ impl Material {
     ///
     /// The earliest context with valid shader sources wins. The universal
     /// context is tried last unless it already appears in `render_contexts`.
-    pub fn compute_surface_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
+    pub fn surface_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
         self.compute_terminal_source(TerminalKind::Surface, render_contexts)
     }
 
     /// Resolve the displacement terminal for the ordered render-context
     /// preferences, with universal fallback.
-    pub fn compute_displacement_source(
-        &self,
-        render_contexts: &[&str],
-    ) -> Result<Option<ResolvedTerminal>, SchemaError> {
+    pub fn displacement_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
         self.compute_terminal_source(TerminalKind::Displacement, render_contexts)
     }
 
     /// Resolve the volume terminal for the ordered render-context preferences,
     /// with universal fallback.
-    pub fn compute_volume_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
+    pub fn volume_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
         self.compute_terminal_source(TerminalKind::Volume, render_contexts)
     }
 
@@ -465,9 +462,7 @@ mod tests {
         material.create_displacement_output()?.connect_to(&displacement)?;
         material.create_volume_output()?.connect_to(&volume)?;
 
-        let displacement = material
-            .compute_displacement_source(&[])?
-            .expect("displacement terminal");
+        let displacement = material.displacement_source(&[])?.expect("displacement terminal");
         assert_eq!(displacement.kind(), TerminalKind::Displacement);
         assert_eq!(
             displacement.sources()[0]
@@ -478,7 +473,7 @@ mod tests {
             "/Mat/Displace"
         );
 
-        let volume = material.compute_volume_source(&[])?.expect("volume terminal");
+        let volume = material.volume_source(&[])?.expect("volume terminal");
         assert_eq!(volume.kind(), TerminalKind::Volume);
         assert_eq!(
             volume.sources()[0].shader().expect("shader source").path().as_str(),
@@ -499,16 +494,14 @@ mod tests {
             .set_connections([sdf::path("/Missing.outputs:result")?])?;
         material.create_surface_output_for("ri")?.connect_to(&renderman)?;
 
-        let selected = material.compute_surface_source(&["mtlx", "ri"])?.expect("ri terminal");
+        let selected = material.surface_source(&["mtlx", "ri"])?.expect("ri terminal");
         assert_eq!(selected.render_context().as_str(), "ri");
         assert_eq!(
             selected.sources()[0].shader().expect("shader source").path().as_str(),
             "/Mat/Renderman"
         );
 
-        let fallback = material
-            .compute_surface_source(&["unknown"])?
-            .expect("universal terminal");
+        let fallback = material.surface_source(&["unknown"])?.expect("universal terminal");
         assert!(fallback.render_context().is_empty());
         assert_eq!(
             fallback.sources()[0].shader().expect("shader source").path().as_str(),
@@ -531,13 +524,13 @@ mod tests {
             .create_volume_output_for("ri")?
             .connect_to(&graph.output("volume"))?;
 
-        let terminal = material.compute_volume_source(&["ri"])?.expect("volume terminal");
+        let terminal = material.volume_source(&["ri"])?.expect("volume terminal");
         let paths: Vec<&str> = terminal
             .sources()
             .iter()
             .map(|source| source.shader().expect("shader source").path().as_str())
             .collect();
-        let names: Vec<&str> = terminal.sources().iter().map(TerminalSource::source_name).collect();
+        let names: Vec<&str> = terminal.sources().iter().map(TerminalSource::name).collect();
         assert_eq!(paths, ["/Mat/Second", "/Mat/First"]);
         assert_eq!(names, ["fog", "density"]);
         assert!(
@@ -564,7 +557,7 @@ mod tests {
 
         // The requested context commits to its own endpoint (with no shader
         // view) rather than falling through to the universal shader.
-        let terminal = material.compute_surface_source(&["ri"])?.expect("ri terminal");
+        let terminal = material.surface_source(&["ri"])?.expect("ri terminal");
         assert_eq!(terminal.render_context().as_str(), "ri");
         let source = &terminal.sources()[0];
         assert!(source.shader().is_none());
@@ -585,7 +578,7 @@ mod tests {
             .create_surface_output()?
             .set_connections([shader_out.path().clone(), graph_out.path().clone()])?;
 
-        let terminal = material.compute_surface_source(&[])?.expect("terminal");
+        let terminal = material.surface_source(&[])?.expect("terminal");
         assert_eq!(terminal.sources().len(), 1);
         Ok(())
     }
@@ -597,7 +590,7 @@ mod tests {
         assert!(material.surface_output_for("ri ").is_err());
         assert!(material.displacement_output_for("ri:").is_err());
         assert!(material.volume_output_for("a b").is_err());
-        assert!(material.compute_surface_source(&["ri "]).is_err());
+        assert!(material.surface_source(&["ri "]).is_err());
         // The universal context stays addressable through the empty string.
         assert!(material.surface_output_for("").is_ok());
         Ok(())
@@ -615,7 +608,7 @@ mod tests {
         // With no universal terminal authored, the render-context terminal
         // answers.
         let mat = Material::get(&stage, "/Mat")?.expect("Material");
-        let terminal = mat.compute_surface_source(&["ri"])?.expect("surface terminal");
+        let terminal = mat.surface_source(&["ri"])?.expect("surface terminal");
         let source = terminal.sources().first().expect("surface source");
         assert_eq!(
             source.shader().expect("shader source").path().as_str(),
@@ -640,7 +633,7 @@ mod tests {
             .connect_to(&empty.create_output("surface", "token")?)?;
 
         let mat = Material::get(&stage, "/Mat")?.expect("Material");
-        assert!(mat.compute_surface_source(&[])?.is_none());
+        assert!(mat.surface_source(&[])?.is_none());
         Ok(())
     }
 }

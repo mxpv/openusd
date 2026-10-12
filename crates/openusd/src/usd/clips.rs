@@ -548,7 +548,7 @@ mod tests {
             .data()
             .spec_paths()
             .into_iter()
-            .filter(|path| path.is_property_path())
+            .filter(|path| path.is_property())
             .map(|path| path.as_str().to_owned())
             .collect()
     }

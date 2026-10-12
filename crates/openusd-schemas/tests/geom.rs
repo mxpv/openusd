@@ -235,7 +235,7 @@ fn resets_xform_stack_detects_sentinel() -> Result<()> {
 #[test]
 fn unauthored_xform_is_identity() -> Result<(), SchemaError> {
     let stage = open()?;
-    let m = xform(&stage, "/World")?.local_transformation(None)?;
+    let m = xform(&stage, "/World")?.local_transform(None)?;
     assert_eq!(m, Mat4d::IDENTITY);
     Ok(())
 }
@@ -243,7 +243,7 @@ fn unauthored_xform_is_identity() -> Result<(), SchemaError> {
 #[test]
 fn matrix_op_round_trips_to_authored_matrix() -> Result<(), SchemaError> {
     let stage = open()?;
-    let m = xform(&stage, "/World/MatrixOp")?.local_transformation(None)?;
+    let m = xform(&stage, "/World/MatrixOp")?.local_transform(None)?;
     assert_eq!(m.0[12..15], [5.0, 6.0, 7.0]);
     Ok(())
 }
@@ -252,7 +252,7 @@ fn matrix_op_round_trips_to_authored_matrix() -> Result<(), SchemaError> {
 fn invert_prefix_inverts_the_op() -> Result<(), SchemaError> {
     let stage = open()?;
     // Authored translate (4, 0, 0), then !invert! it → translation row (-4, 0, 0).
-    let m = xform(&stage, "/World/Inverted")?.local_transformation(None)?;
+    let m = xform(&stage, "/World/Inverted")?.local_transform(None)?;
     assert_eq!(m.0[12..15], [-4.0, 0.0, 0.0]);
     Ok(())
 }
@@ -264,7 +264,7 @@ fn rotate_xyz_matches_pixar_composition() -> Result<(), SchemaError> {
     // first to v). Test rotateXYZ(0, 90°, 0) on +X: Ry(90°) takes
     // +X to -Z.
     let stage = open()?;
-    let m = xform(&stage, "/World/EulerXYZ")?.local_transformation(None)?;
+    let m = xform(&stage, "/World/EulerXYZ")?.local_transform(None)?;
     let p = m.transform_affine(Vec3d { x: 1.0, y: 0.0, z: 0.0 });
     assert!(p.x.abs() < 1e-5, "x: {}", p.x);
     assert!(p.y.abs() < 1e-5, "y: {}", p.y);
@@ -282,7 +282,7 @@ fn trs_stack_composes_in_authored_order() -> Result<(), SchemaError> {
     //   1. scale by 2: (1, 0, 0) → (2, 0, 0)
     //   2. rotate by 90° about Y: (2, 0, 0) → (0, 0, -2)
     //   3. translate by (1, 2, 3): (0, 0, -2) → (1, 2, 1)
-    let m = xform(&stage, "/World/TRS")?.local_transformation(None)?;
+    let m = xform(&stage, "/World/TRS")?.local_transform(None)?;
     let p = m.transform_affine(Vec3d { x: 1.0, y: 0.0, z: 0.0 });
     assert!((p.x - 1.0).abs() < 1e-4, "x: {}", p.x);
     assert!((p.y - 2.0).abs() < 1e-4, "y: {}", p.y);
@@ -294,17 +294,17 @@ fn trs_stack_composes_in_authored_order() -> Result<(), SchemaError> {
 fn xform_double_precision() -> Result<(), SchemaError> {
     let stage = open()?;
 
-    let translate = xform(&stage, "/World/DoubleTranslate")?.local_transformation(None)?;
+    let translate = xform(&stage, "/World/DoubleTranslate")?.local_transform(None)?;
     assert_eq!(translate[12], 16_777_217.0);
 
-    let scale = xform(&stage, "/World/DoubleScale")?.local_transformation(None)?;
+    let scale = xform(&stage, "/World/DoubleScale")?.local_transform(None)?;
     assert_eq!(scale[0], 16_777_217.0);
 
-    let scalar = xform(&stage, "/World/DoubleScalarOps")?.local_transformation(None)?;
+    let scalar = xform(&stage, "/World/DoubleScalarOps")?.local_transform(None)?;
     assert_eq!(scalar[12], 16_777_217.0);
     assert_eq!(scalar[5], 16_777_217.0);
 
-    let orient = xform(&stage, "/World/DoubleOrient")?.local_transformation(None)?;
+    let orient = xform(&stage, "/World/DoubleOrient")?.local_transform(None)?;
     assert!(orient[0].abs() < 1e-12, "x axis scale term: {}", orient[0]);
 
     Ok(())
@@ -406,11 +406,11 @@ fn verify_xform_cache(stage: &Stage, cache: &mut geom::XformCache, x: Mat4d) -> 
     }
     assert_eq!(cache.parent_to_world_transform(&pseudo_root)?, Mat4d::IDENTITY);
 
-    assert_eq!(cache.compute_relative_transform(&root, &pseudo_root)?, (x, false));
-    assert_eq!(cache.compute_relative_transform(&scope_foo, &root)?, (x, false));
-    assert_eq!(cache.compute_relative_transform(&bar_under_foo, &root)?, (x, true));
-    assert_eq!(cache.compute_relative_transform(&deepest, &root)?, (x * x, true));
-    assert_eq!(cache.compute_relative_transform(&scope_bar, &root)?, (x, false));
+    assert_eq!(cache.relative_transform(&root, &pseudo_root)?, (x, false));
+    assert_eq!(cache.relative_transform(&scope_foo, &root)?, (x, false));
+    assert_eq!(cache.relative_transform(&bar_under_foo, &root)?, (x, true));
+    assert_eq!(cache.relative_transform(&deepest, &root)?, (x * x, true));
+    assert_eq!(cache.relative_transform(&scope_bar, &root)?, (x, false));
     Ok(())
 }
 
@@ -452,8 +452,8 @@ fn imageable_world_transform() -> Result<(), SchemaError> {
     let stage = xform_cache_stage(0.0)?;
     let step = xform_step();
     let baz = xform(&stage, "/RootPrim/Scope/Foo/Bar/Baz")?;
-    assert_eq!(baz.compute_local_to_world_transform(None)?, step * step);
-    assert_eq!(baz.compute_parent_to_world_transform(TimeCode::new(1.0))?, step * step);
+    assert_eq!(baz.local_to_world_transform(None)?, step * step);
+    assert_eq!(baz.parent_to_world_transform(TimeCode::new(1.0))?, step * step);
     Ok(())
 }
 
@@ -662,7 +662,7 @@ fn mesh_normals_carry_interpolation() -> Result<()> {
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(array_len(&m.normals_attr(), vec3f_len)?, 4);
     assert_eq!(
-        m.normals_attr().get_metadata::<Token>("interpolation")?.as_deref(),
+        m.normals_attr().metadata::<Token>("interpolation")?.as_deref(),
         Some("vertex")
     );
     Ok(())
@@ -680,10 +680,7 @@ fn mesh_uvs_face_varying() -> Result<()> {
             .map(|v| v.len()),
         Some(4)
     );
-    assert_eq!(
-        st.get_metadata::<Token>("interpolation")?.as_deref(),
-        Some("faceVarying")
-    );
+    assert_eq!(st.metadata::<Token>("interpolation")?.as_deref(), Some("faceVarying"));
     Ok(())
 }
 
@@ -700,9 +697,7 @@ fn mesh_display_color() -> Result<()> {
         }]))
     );
     assert_eq!(
-        m.display_color_attr()
-            .get_metadata::<Token>("interpolation")?
-            .as_deref(),
+        m.display_color_attr().metadata::<Token>("interpolation")?.as_deref(),
         Some("constant")
     );
     Ok(())
@@ -1017,7 +1012,7 @@ fn basis_curves_roundtrip() -> Result<()> {
     assert_eq!(c.curve_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![2])));
     assert_eq!(c.type_attr().get()?, Some(sdf::Value::Token("linear".into())));
     assert_eq!(
-        c.widths_attr().get_metadata(geom::tokens::INTERPOLATION)?,
+        c.widths_attr().metadata(geom::tokens::INTERPOLATION)?,
         Some(sdf::Value::Token("vertex".into()))
     );
     assert!(BasisCurves::get(&stage, "/Missing")?.is_none());
@@ -1282,7 +1277,7 @@ fn mcusd_st_flattens() -> Result<(), SchemaError> {
 
     let values = st.get_at::<Vec<Vec2f>>(None)?.expect("authored");
     let indices = st.indices(None)?.expect("authored");
-    let flattened = st.compute_flattened::<Vec<Vec2f>>(None)?.expect("flattened");
+    let flattened = st.flattened::<Vec<Vec2f>>(None)?.expect("flattened");
     assert_eq!(values.len(), 4);
     let face_vertices: i32 = mesh
         .face_vertex_counts_attr()
@@ -1308,7 +1303,7 @@ fn teapot_indices_blocked() -> Result<(), SchemaError> {
         assert!(primvar.indices_attr().is_defined()?, "{name}");
         assert!(!primvar.is_indexed()?, "{name}");
         assert_eq!(
-            primvar.compute_flattened::<sdf::Value>(None)?,
+            primvar.flattened::<sdf::Value>(None)?,
             primvar.get_at::<sdf::Value>(None)?,
             "{name}"
         );
@@ -1338,7 +1333,7 @@ fn interpolation_doc_asset() -> Result<(), SchemaError> {
         assert_eq!(color.primvar_name(), "displayColor", "{name}");
         assert_eq!(color.interpolation()?, interpolation, "{name}");
         assert!(!color.is_indexed()?, "{name}");
-        let values = color.compute_flattened::<Vec<Vec3f>>(None)?.expect("authored");
+        let values = color.flattened::<Vec<Vec3f>>(None)?.expect("authored");
         assert_eq!(values.len(), count, "{name}");
     }
     Ok(())

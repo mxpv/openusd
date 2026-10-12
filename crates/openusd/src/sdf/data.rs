@@ -46,7 +46,7 @@ pub trait AbstractData {
     /// Returns the value for a field, erroring if not authored.
     ///
     /// Use [`AbstractData::try_field`] when absence is an expected condition.
-    fn get_field(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>, DataError> {
+    fn field(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>, DataError> {
         self.try_field(path, field)?.ok_or_else(|| DataError::Missing {
             path: path.clone(),
             field: field.to_owned(),
@@ -91,7 +91,7 @@ pub trait AbstractData {
 }
 
 /// A failure reading a field value through [`AbstractData::try_field`] /
-/// [`AbstractData::get_field`].
+/// [`AbstractData::field`].
 ///
 /// Eager backends ([`Data`], the text reader) never fail a field read; only a
 /// lazy backend that decodes on demand — the `.usdc` crate reader — can error,
@@ -111,7 +111,7 @@ pub enum DataError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    /// [`get_field`](AbstractData::get_field) was asked for a field that is not
+    /// [`field`](AbstractData::field) was asked for a field that is not
     /// authored on the spec.
     #[error("no field {field:?} at {path}")]
     Missing {
@@ -162,7 +162,7 @@ impl Data {
             let spec = out.create_spec(path.clone(), ty);
             if let Some(fields) = src.list_fields(&path) {
                 for name in fields {
-                    spec.add(&name, src.get_field(&path, &name)?.into_owned());
+                    spec.add(&name, src.field(&path, &name)?.into_owned());
                 }
             }
         }
@@ -642,7 +642,7 @@ mod tests {
         assert!(data.has_field(&root, "primChildren"));
         assert_eq!(data.list_fields(&root).unwrap(), vec!["primChildren".to_string()]);
 
-        let value = data.get_field(&root, "primChildren").unwrap().into_owned();
+        let value = data.field(&root, "primChildren").unwrap().into_owned();
         assert_eq!(value, Value::TokenVec(vec!["child".into()]));
     }
 
@@ -689,7 +689,7 @@ mod tests {
 
         assert_eq!(copy.len(), 2);
         assert_eq!(copy.list_fields(&root).unwrap(), vec!["primChildren", "kind"]);
-        assert_eq!(copy.get_field(&child, "specifier").unwrap().into_owned(), Value::Int(0));
+        assert_eq!(copy.field(&child, "specifier").unwrap().into_owned(), Value::Int(0));
     }
 
     /// Reads see the staged-over-base view while the base is left untouched
@@ -704,17 +704,14 @@ mod tests {
         let mut cow = CowData::new(base);
         assert!(cow.is_empty());
         assert!(cow.has_spec(&a));
-        assert_eq!(cow.get_field(&a, "kind").unwrap().into_owned(), Value::token("group"));
+        assert_eq!(cow.field(&a, "kind").unwrap().into_owned(), Value::token("group"));
 
         cow.set_field(&a, "kind", Value::token("component"));
         assert!(!cow.is_empty());
-        assert_eq!(
-            cow.get_field(&a, "kind").unwrap().into_owned(),
-            Value::token("component")
-        );
+        assert_eq!(cow.field(&a, "kind").unwrap().into_owned(), Value::token("component"));
         // The base still holds the original opinion: the write only staged.
         let base = cow.into_inner();
-        assert_eq!(base.get_field(&a, "kind").unwrap().into_owned(), Value::token("group"));
+        assert_eq!(base.field(&a, "kind").unwrap().into_owned(), Value::token("group"));
     }
 
     /// `commit` flushes the staged patch into the base — added specs, modified
@@ -738,10 +735,7 @@ mod tests {
         let base = cow.into_inner();
         assert!(base.has_spec(&fresh));
         assert!(!base.has_spec(&doomed));
-        assert_eq!(
-            base.get_field(&keep, "kind").unwrap().into_owned(),
-            Value::token("group")
-        );
+        assert_eq!(base.field(&keep, "kind").unwrap().into_owned(), Value::token("group"));
     }
 
     /// `rollback` drops the staged patch, leaving the base exactly as it was.
@@ -798,21 +792,15 @@ mod tests {
 
         // Touched field staged, untouched-but-present field reads through base,
         // erased field hidden, new field visible.
-        assert_eq!(
-            cow.get_field(&a, "kind").unwrap().into_owned(),
-            Value::token("component")
-        );
-        assert_eq!(cow.get_field(&a, "custom").unwrap().into_owned(), Value::Bool(true));
+        assert_eq!(cow.field(&a, "kind").unwrap().into_owned(), Value::token("component"));
+        assert_eq!(cow.field(&a, "custom").unwrap().into_owned(), Value::Bool(true));
         assert!(!cow.has_field(&a, "doc"));
         assert_eq!(cow.list_fields(&a).unwrap(), vec!["kind", "custom"]);
 
         cow.commit();
         let base = cow.into_inner();
-        assert_eq!(
-            base.get_field(&a, "kind").unwrap().into_owned(),
-            Value::token("component")
-        );
-        assert_eq!(base.get_field(&a, "custom").unwrap().into_owned(), Value::Bool(true));
+        assert_eq!(base.field(&a, "kind").unwrap().into_owned(), Value::token("component"));
+        assert_eq!(base.field(&a, "custom").unwrap().into_owned(), Value::Bool(true));
         assert!(!base.has_field(&a, "doc"));
         assert_eq!(base.list_fields(&a).unwrap(), vec!["kind", "custom"]);
     }

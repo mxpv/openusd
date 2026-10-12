@@ -459,7 +459,7 @@ impl ClipSet {
     /// time variation within a single window is reported through the sample-time
     /// count instead.
     ///
-    /// [`UsdAttribute::ValueMightBeTimeVarying`]: crate::usd::Attribute::value_might_be_time_varying
+    /// [`UsdAttribute::ValueMightBeTimeVarying`]: crate::usd::Attribute::might_be_time_varying
     pub(crate) fn may_be_time_varying(&self) -> bool {
         self.active.len() > 1
     }

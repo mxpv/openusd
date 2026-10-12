@@ -357,7 +357,7 @@ pub fn check(library: &Library) -> Result<Vec<String>, Error> {
 
 /// The identifier and the type name that reach the registry.
 fn check_identifier(class: &Class) -> Result<(), Error> {
-    if !usd::SchemaRegistry::is_allowed_schema_identifier(class.identifier.as_str()) {
+    if !usd::SchemaRegistry::is_allowed_identifier(class.identifier.as_str()) {
         return Err(class.violation(Violation::DisallowedIdentifier {
             identifier: class.identifier.clone(),
         }));
@@ -388,7 +388,7 @@ fn check_kind(class: &Class) -> Result<(), Error> {
             "apiSchemaAutoApplyTo",
         ),
         (
-            !kind.is_applied_api_schema() && !metadata.can_only_apply_to.is_empty(),
+            !kind.is_applied_api() && !metadata.can_only_apply_to.is_empty(),
             "apiSchemaCanOnlyApplyTo",
         ),
         (
@@ -424,7 +424,7 @@ fn check_kind(class: &Class) -> Result<(), Error> {
         }
     }
 
-    if kind.is_api_schema() && (class.is_typed || class.authored_type_name.is_some()) {
+    if kind.is_api() && (class.is_typed || class.authored_type_name.is_some()) {
         return Err(class.violation(Violation::ApiSchemaTypeOnTyped));
     }
 
@@ -460,7 +460,7 @@ fn check_inheritance(class: &Class) -> Result<(), Error> {
     // Any ancestor of this schema's own family makes the chain read as one
     // schema at two versions, not as two schemas.
     for base in &class.bases {
-        let (family, _) = usd::SchemaRegistry::parse_schema_family_and_version(&base.identifier);
+        let (family, _) = usd::SchemaRegistry::parse_family_and_version(&base.identifier);
         if family == class.family {
             return Err(class.violation(Violation::InheritsWithinFamily {
                 base: base.identifier.clone(),
@@ -468,7 +468,7 @@ fn check_inheritance(class: &Class) -> Result<(), Error> {
         }
     }
 
-    if !class.kind.is_api_schema() {
+    if !class.kind.is_api() {
         return Ok(());
     }
 
@@ -479,7 +479,7 @@ fn check_inheritance(class: &Class) -> Result<(), Error> {
     let base = class.direct_base.clone().unwrap_or_else(|| tf::Token::new(SCHEMA_BASE));
     let inherits_root = base.as_str() == API_SCHEMA_BASE;
 
-    if class.kind.is_applied_api_schema() && !inherits_root {
+    if class.kind.is_applied_api() && !inherits_root {
         return Err(class.violation(Violation::AppliedApiNotRooted { base }));
     }
 
@@ -639,7 +639,7 @@ fn check_reflection(class: &Class, library: &Library, warnings: &mut Vec<String>
 fn conventions(class: &Class) -> Vec<String> {
     let mut warnings = Vec::new();
     let ends_in_api = class.family.as_str().ends_with("API");
-    let is_api = class.kind.is_api_schema();
+    let is_api = class.kind.is_api();
 
     // The registry never reads this, so it is a convention rather than a rule.
     if is_api && !ends_in_api {

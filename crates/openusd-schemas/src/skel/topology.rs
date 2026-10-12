@@ -66,7 +66,7 @@ impl Topology {
     }
 
     /// Number of joints in this topology.
-    pub fn num_joints(&self) -> usize {
+    pub fn joint_count(&self) -> usize {
         self.parents.len()
     }
 
@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(t.parents(), &[NO_PARENT, 0, 1, 1]);
         assert!(t.is_root(0));
         assert!(!t.is_root(1));
-        assert_eq!(t.num_joints(), 4);
+        assert_eq!(t.joint_count(), 4);
         t.validate().unwrap();
     }
 

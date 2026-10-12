@@ -271,8 +271,8 @@ impl MapFunction {
     /// inside a bracketed target component belongs to the embedded target path
     /// and is preserved.
     pub fn translate_to_target(&self, path: &Path) -> Option<Path> {
-        if path.contains_prim_variant_selection() {
-            return self.map_impl(&path.strip_all_variant_selections(), false, true);
+        if path.has_variant_selection() {
+            return self.map_impl(&path.strip_variant_selections(), false, true);
         }
         self.map_impl(path, false, true)
     }
@@ -476,7 +476,7 @@ impl MapFunction {
     /// `node_path` rather than at the shallower site where the arc was
     /// introduced (used by the ancestor-seed implied-class conjugation).
     pub(crate) fn deepen_to(&self, node_path: &Path) -> MapFunction {
-        let node = node_path.strip_all_variant_selections();
+        let node = node_path.strip_variant_selections();
         let pairs = self.path_map.as_slice();
         if pairs.iter().any(|(s, _)| *s == node) {
             return self.clone();

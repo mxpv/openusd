@@ -139,7 +139,7 @@ if let Some(mesh) = geom::Mesh::get(&stage, "/World/Mesh")? {
 
 // Follow the material's surface terminal to the shader driving it.
 if let Some(material) = shade::Material::get(&stage, "/World/Material")? {
-    if let Some(terminal) = material.compute_surface_source(&[])? {
+    if let Some(terminal) = material.surface_source(&[])? {
         for source in terminal.sources() {
             if let Some(shader) = source.shader() {
                 println!("surface shader: {:?}", shader.id()?);

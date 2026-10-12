@@ -105,17 +105,17 @@ pub struct ConnectionSource {
 
 impl ConnectionSource {
     /// The connectable prim that owns the source attribute.
-    pub fn source_prim(&self) -> &usd::Prim {
+    pub fn prim(&self) -> &usd::Prim {
         &self.source_prim
     }
 
     /// The complete property path targeted by the connection.
-    pub fn source_path(&self) -> &sdf::Path {
+    pub fn path(&self) -> &sdf::Path {
         &self.source_path
     }
 
     /// The source attribute's base name without its namespace prefix.
-    pub fn source_name(&self) -> &tf::Token {
+    pub fn name(&self) -> &tf::Token {
         &self.source_name
     }
 
@@ -161,7 +161,7 @@ impl ConnectionSource {
 #[derive(Clone, Default)]
 pub struct ConnectedSources {
     sources: Vec<ConnectionSource>,
-    invalid_source_paths: Vec<sdf::Path>,
+    invalid_paths: Vec<sdf::Path>,
 }
 
 impl ConnectedSources {
@@ -171,8 +171,8 @@ impl ConnectedSources {
     }
 
     /// Connection paths that do not identify valid UsdShade sources.
-    pub fn invalid_source_paths(&self) -> &[sdf::Path] {
-        &self.invalid_source_paths
+    pub fn invalid_paths(&self) -> &[sdf::Path] {
+        &self.invalid_paths
     }
 
     /// Consume the result and return its valid sources.
@@ -185,21 +185,21 @@ pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedS
     let mut result = ConnectedSources::default();
     for source_path in attribute.connections()? {
         let Some((source_prim_path, full_name)) = source_path.split_property() else {
-            result.invalid_source_paths.push(source_path);
+            result.invalid_paths.push(source_path);
             continue;
         };
         let Some((source_name, source_type)) = base_name_and_type(full_name) else {
-            result.invalid_source_paths.push(source_path);
+            result.invalid_paths.push(source_path);
             continue;
         };
         let Some((source_prim, source_is_container)) = source_prim(attribute.stage(), &source_prim_path)? else {
-            result.invalid_source_paths.push(source_path);
+            result.invalid_paths.push(source_path);
             continue;
         };
 
         let source_attribute = attribute.stage().attribute(source_path.clone())?;
         if !source_attribute.is_defined()? {
-            result.invalid_source_paths.push(source_path);
+            result.invalid_paths.push(source_path);
             continue;
         }
         let source_name = tf::Token::from(source_name);
@@ -298,11 +298,11 @@ mod tests {
         sink.create_input("color", "color3f")?.connect_to(&output)?;
 
         let connected = sink.input("color").connected_sources()?;
-        assert!(connected.invalid_source_paths().is_empty());
+        assert!(connected.invalid_paths().is_empty());
         let source = connected.sources().first().expect("connected source");
-        assert_eq!(source.source_prim().path().as_str(), "/Mat/Source");
-        assert_eq!(source.source_path().as_str(), "/Mat/Source.outputs:rgb");
-        assert_eq!(source.source_name().as_str(), "rgb");
+        assert_eq!(source.prim().path().as_str(), "/Mat/Source");
+        assert_eq!(source.path().as_str(), "/Mat/Source.outputs:rgb");
+        assert_eq!(source.name().as_str(), "rgb");
         assert_eq!(source.full_name(), "outputs:rgb");
         assert_eq!(source.source_type(), AttributeType::Output);
         assert_eq!(source.type_name(), Some(&sdf::ValueTypeName::FLOAT3));
@@ -323,9 +323,9 @@ mod tests {
         // Nothing is asked of the source prim's type, so an `over` carrying a
         // namespaced attribute is a source like any other.
         let connected = sink.input("value").connected_sources()?;
-        assert!(connected.invalid_source_paths().is_empty());
+        assert!(connected.invalid_paths().is_empty());
         assert_eq!(connected.sources().len(), 1);
-        assert_eq!(connected.sources()[0].source_prim().path(), source.path());
+        assert_eq!(connected.sources()[0].prim().path(), source.path());
         Ok(())
     }
 
@@ -347,11 +347,11 @@ mod tests {
 
         let connected = sink.input("value").connected_sources()?;
         assert_eq!(connected.sources().len(), 1);
-        assert_eq!(connected.sources()[0].source_path(), valid_output.path());
+        assert_eq!(connected.sources()[0].path(), valid_output.path());
 
         // A missing prim, a name outside the shading namespaces, and a
         // namespaced name nothing defines each fail for their own reason.
-        let invalid: Vec<&str> = connected.invalid_source_paths().iter().map(sdf::Path::as_str).collect();
+        let invalid: Vec<&str> = connected.invalid_paths().iter().map(sdf::Path::as_str).collect();
         assert_eq!(
             invalid,
             vec![

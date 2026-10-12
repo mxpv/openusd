@@ -162,7 +162,7 @@ impl LabelsQuery {
         if self.labels.borrow().contains_key(prim.path()) {
             return Ok(());
         }
-        let labels = match LabelsAPI::get_instance(prim, &self.taxonomy)? {
+        let labels = match LabelsAPI::from_prim(prim, &self.taxonomy)? {
             Some(view) => Some(self.read(&view)?),
             None => None,
         };
@@ -182,10 +182,10 @@ impl LabelsQuery {
             QueryTime::Over(interval) => {
                 // TODO: which times carry the values in effect across an
                 // interval is a value-resolution concept `usd::Attribute`
-                // should answer beside `time_samples_in_interval`, along with
+                // should answer beside `time_samples_in`, along with
                 // the trailing bracketing sample that an interpolating value
                 // type needs and a held one does not.
-                let mut times = labels.time_samples_in_interval(interval)?;
+                let mut times = labels.time_samples_in(interval)?;
 
                 // A value is held from the sample before it, so the interval's
                 // start carries one as much as the samples inside it do,

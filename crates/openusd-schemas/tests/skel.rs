@@ -9,9 +9,8 @@ use openusd::sdf::{self, Value};
 use openusd::usd::{PrimPredicate, SchemaBase, Stage};
 use openusd_schemas::geom::BoundableSchema;
 use openusd_schemas::skel::{
-    AnimMapper, Animation, BindingAPI, BlendShape, BlendShapeSchema, InfluenceInterpolation, NO_PARENT, Root,
-    SkelAnimQuery, Skeleton, SkeletonResolver, SkeletonSchema, SkinningMethod, SkinningResolver, Topology,
-    discover_bindings,
+    AnimMapper, AnimQuery, Animation, BindingAPI, BlendShape, BlendShapeSchema, InfluenceInterpolation, NO_PARENT,
+    Root, Skeleton, SkeletonResolver, SkeletonSchema, SkinningMethod, SkinningResolver, Topology, discover_bindings,
 };
 
 const FIXTURE: &str = "fixtures/usdSkel_scene.usda";
@@ -147,7 +146,7 @@ fn reads_skel_binding_on_mesh() -> Result<()> {
     assert_eq!(bind.joint_subset()?, vec!["Root/Hip", "Root/Hip/Knee"]);
     assert_eq!(bind.joint_indices()?, Some(vec![0, 0, 1, 1]));
     assert_eq!(bind.joint_weights()?, Some(vec![1.0, 1.0, 1.0, 1.0]));
-    assert_eq!(bind.elements_per_element()?, 1);
+    assert_eq!(bind.element_size()?, 1);
     assert_eq!(bind.interpolation()?, InfluenceInterpolation::Vertex);
     assert_eq!(bind.blend_shapes()?.expect("authored"), vec!["smile"]);
     assert_eq!(bind.blend_shape_targets()?, vec![sdf::path("/World/Character/Smile")?]);
@@ -207,7 +206,7 @@ fn skeleton_resolver_pre_computes_inverse_bind() -> Result<()> {
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
     let resolver = SkeletonResolver::from_skeleton(&skl)?;
 
-    assert_eq!(resolver.topology().num_joints(), 3);
+    assert_eq!(resolver.topology().joint_count(), 3);
     assert_eq!(resolver.topology().parents(), &[NO_PARENT, 0, 1]);
     assert_eq!(resolver.inverse_bind_transforms().len(), 3);
 
@@ -229,7 +228,7 @@ fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<()> {
 
     assert!(!resolver.is_rigidly_deformed());
     assert!(resolver.has_joint_influences());
-    assert_eq!(resolver.num_influences_per_component(), 1);
+    assert_eq!(resolver.influences_per_component(), 1);
     // skel:joints subset = ["Root/Hip", "Root/Hip/Knee"] — two mesh-effective
     // joints out of the skeleton's three.
     assert_eq!(resolver.joint_order_len(), 2);
@@ -237,7 +236,7 @@ fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<()> {
 
     let identity = Mat4d::IDENTITY;
     let skel_xforms = vec![identity; 3];
-    let mesh_xforms = resolver.remap_skinning_xforms(&skel_xforms);
+    let mesh_xforms = resolver.remap_transforms(&skel_xforms);
     assert_eq!(mesh_xforms.len(), 2);
     assert_eq!(mesh_xforms[0], identity);
     Ok(())
@@ -284,7 +283,7 @@ fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(
 #[test]
 fn topology_unit_methods() {
     let topo = Topology::from_joint_paths(&["Root".to_string(), "Root/Hip".to_string(), "Root/Hip/Knee".to_string()]);
-    assert_eq!(topo.num_joints(), 3);
+    assert_eq!(topo.joint_count(), 3);
     assert!(topo.is_root(0));
     assert!(!topo.is_root(1));
     assert_eq!(topo.parent(2), 1);
@@ -304,9 +303,9 @@ fn anim_mapper_remap_with_missing_joints() {
 }
 
 /// The query over the fixture's animation.
-fn anim_query(stage: &Stage) -> Result<SkelAnimQuery> {
+fn anim_query(stage: &Stage) -> Result<AnimQuery> {
     let anim = Animation::get(stage, "/World/Character/Anim")?.expect("Animation");
-    Ok(SkelAnimQuery::new(anim)?.expect("joints and blend shapes"))
+    Ok(AnimQuery::new(anim)?.expect("joints and blend shapes"))
 }
 
 #[test]
@@ -330,10 +329,10 @@ fn skel_anim_query_time_samples() -> Result<()> {
     let q = anim_query(&stage)?;
 
     assert_eq!(q.joint_transform_time_samples()?, vec![0.0, 10.0]);
-    assert_eq!(q.joint_transform_time_samples_in_interval(0.0..=5.0)?, vec![0.0]);
-    assert_eq!(q.joint_transform_time_samples_in_interval(0.0..10.0)?, vec![0.0]);
+    assert_eq!(q.joint_transform_time_samples_in(0.0..=5.0)?, vec![0.0]);
+    assert_eq!(q.joint_transform_time_samples_in(0.0..10.0)?, vec![0.0]);
     assert_eq!(q.blend_shape_weight_time_samples()?, vec![0.0, 10.0]);
-    assert_eq!(q.blend_shape_weight_time_samples_in_interval(5.0..=10.0)?, vec![10.0]);
+    assert_eq!(q.blend_shape_weight_time_samples_in(5.0..=10.0)?, vec![10.0]);
     Ok(())
 }
 
@@ -341,7 +340,7 @@ fn skel_anim_query_time_samples() -> Result<()> {
 fn skel_anim_query_components_at_start_frame() -> Result<()> {
     let stage = open()?;
     let q = anim_query(&stage)?;
-    let (t, r, s) = q.joint_local_transform_components(0.0)?;
+    let (t, r, s) = q.joint_transform_components(0.0)?;
     // Authored at t=0: hip is at (0, 1, 0), all rotations identity, scales
     // unauthored so they default to unit.
     assert_eq!(t[1], Vec3f { x: 0.0, y: 1.0, z: 0.0 });
@@ -354,7 +353,7 @@ fn skel_anim_query_components_at_start_frame() -> Result<()> {
 fn skel_anim_query_components_lerp_at_midframe() -> Result<()> {
     let stage = open()?;
     let q = anim_query(&stage)?;
-    let (t, r, _) = q.joint_local_transform_components(5.0)?;
+    let (t, r, _) = q.joint_transform_components(5.0)?;
     // Hip translation lerps from (0,1,0) at t=0 to (0,1.5,0) at t=10.
     assert!((t[1].y - 1.25).abs() < 1e-5, "hip y at t=5: got {}", t[1].y);
     // Hip rotation slerps from identity to ~45° about +Z; at t=5 ~22.5°.
@@ -400,7 +399,7 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
 fn skel_anim_query_none_when_empty() -> Result<()> {
     let stage = memory()?;
     let empty = Animation::define(&stage, "/Empty")?;
-    assert!(SkelAnimQuery::new(empty)?.is_none());
+    assert!(AnimQuery::new(empty)?.is_none());
     Ok(())
 }
 

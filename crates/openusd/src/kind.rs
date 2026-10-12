@@ -31,13 +31,13 @@ impl Registry {
     }
 
     /// Whether `kind` is registered (C++ `KindRegistry::HasKind`).
-    pub fn has_kind(&self, kind: &str) -> bool {
+    pub fn contains(&self, kind: &str) -> bool {
         self.kinds.contains_key(kind)
     }
 
     /// The kind `kind` derives from (C++ `KindRegistry::GetBaseKind`). `None`
     /// for a root kind, and for a kind that is not registered.
-    pub fn base_kind(&self, kind: &str) -> Option<&str> {
+    pub fn base(&self, kind: &str) -> Option<&str> {
         self.kinds.get(kind)?.base.as_deref()
     }
 
@@ -52,7 +52,7 @@ impl Registry {
             if current == base {
                 return true;
             }
-            match self.base_kind(current) {
+            match self.base(current) {
                 Some(next) => current = next,
                 None => return false,
             }
@@ -60,7 +60,7 @@ impl Registry {
     }
 
     /// Every registered kind, sorted by name (C++ `KindRegistry::GetAllKinds`).
-    pub fn all_kinds(&self) -> Vec<&str> {
+    pub fn kinds(&self) -> Vec<&str> {
         let mut kinds: Vec<&str> = self.kinds.keys().map(String::as_str).collect();
         kinds.sort_unstable();
         kinds
@@ -432,15 +432,15 @@ pub(crate) mod tests {
     fn built_in_hierarchy() {
         let kinds = Registry::default();
         assert_eq!(
-            kinds.all_kinds(),
+            kinds.kinds(),
             ["assembly", "component", "group", "model", "subcomponent"]
         );
 
-        assert_eq!(kinds.base_kind(tokens::ASSEMBLY), Some(tokens::GROUP));
-        assert_eq!(kinds.base_kind(tokens::GROUP), Some(tokens::MODEL));
-        assert_eq!(kinds.base_kind(tokens::COMPONENT), Some(tokens::MODEL));
-        assert_eq!(kinds.base_kind(tokens::MODEL), None);
-        assert_eq!(kinds.base_kind(tokens::SUBCOMPONENT), None);
+        assert_eq!(kinds.base(tokens::ASSEMBLY), Some(tokens::GROUP));
+        assert_eq!(kinds.base(tokens::GROUP), Some(tokens::MODEL));
+        assert_eq!(kinds.base(tokens::COMPONENT), Some(tokens::MODEL));
+        assert_eq!(kinds.base(tokens::MODEL), None);
+        assert_eq!(kinds.base(tokens::SUBCOMPONENT), None);
 
         assert!(kinds.is_model(tokens::ASSEMBLY) && kinds.is_group(tokens::ASSEMBLY));
         assert!(kinds.is_assembly(tokens::ASSEMBLY) && !kinds.is_assembly(tokens::GROUP));
@@ -453,8 +453,8 @@ pub(crate) mod tests {
     #[test]
     fn unknown_kind_queries() {
         let kinds = Registry::default();
-        assert!(!kinds.has_kind("chargroup"));
-        assert_eq!(kinds.base_kind("chargroup"), None);
+        assert!(!kinds.contains("chargroup"));
+        assert_eq!(kinds.base("chargroup"), None);
         assert!(!kinds.is_model("chargroup") && !kinds.is_subcomponent("chargroup"));
         assert!(kinds.is_a("chargroup", "chargroup"), "equal names need no registration");
         assert!(!kinds.is_a("chargroup", tokens::MODEL));
@@ -466,11 +466,11 @@ pub(crate) mod tests {
     fn declared_kinds() -> Result<(), RegistryError> {
         let kinds = registry(&[Decl::new("test_model_kind").base("model"), Decl::new("test_root_kind")])?;
         for kind in ["group", "model", "test_model_kind", "test_root_kind"] {
-            assert!(kinds.has_kind(kind), "{kind}");
-            assert!(kinds.all_kinds().contains(&kind), "{kind}");
+            assert!(kinds.contains(kind), "{kind}");
+            assert!(kinds.kinds().contains(&kind), "{kind}");
         }
-        assert_eq!(kinds.base_kind("test_root_kind"), None);
-        assert_eq!(kinds.base_kind("test_model_kind"), Some("model"));
+        assert_eq!(kinds.base("test_root_kind"), None);
+        assert_eq!(kinds.base("test_model_kind"), Some("model"));
 
         assert!(kinds.is_model("test_model_kind"));
         assert!(!kinds.is_group("test_model_kind") && !kinds.is_component("test_model_kind"));
@@ -497,9 +497,9 @@ pub(crate) mod tests {
     fn empty_base_is_root() -> Result<(), RegistryError> {
         assert_eq!(Decl::new("a").base(""), Decl::new("a"));
         let kinds = registry(&[Decl::new("absent"), Decl::new("empty").base("")])?;
-        assert_eq!(kinds.base_kind("absent"), None);
-        assert_eq!(kinds.base_kind("empty"), None);
-        assert!(kinds.has_kind("absent") && kinds.has_kind("empty"));
+        assert_eq!(kinds.base("absent"), None);
+        assert_eq!(kinds.base("empty"), None);
+        assert!(kinds.contains("absent") && kinds.contains("empty"));
         Ok(())
     }
 

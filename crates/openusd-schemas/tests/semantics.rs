@@ -38,13 +38,13 @@ fn labels_from_fixture() -> Result<()> {
 
     // The instance name is the taxonomy, so one prim carries a set of labels
     // per taxonomy applied to it.
-    let category = LabelsAPI::get_instance(&kitchen, "category")?.expect("the category taxonomy");
+    let category = LabelsAPI::from_prim(&kitchen, "category")?.expect("the category taxonomy");
     assert_eq!(labels(&category)?, Some(tokens(&["room", "interior"])));
-    let style = LabelsAPI::get_instance(&kitchen, "style")?.expect("the style taxonomy");
+    let style = LabelsAPI::from_prim(&kitchen, "style")?.expect("the style taxonomy");
     assert_eq!(labels(&style)?, Some(tokens(&["modern"])));
 
     // A taxonomy the prim was never labelled under is not there at all.
-    assert!(LabelsAPI::get_instance(&kitchen, "lifecycle")?.is_none());
+    assert!(LabelsAPI::from_prim(&kitchen, "lifecycle")?.is_none());
     Ok(())
 }
 
@@ -82,7 +82,7 @@ fn labels_roundtrip() -> Result<()> {
     let category = LabelsAPI::apply(&prim, "category")?;
     category.create_labels_attr()?.set(tokens(&["furniture", "seating"]))?;
 
-    let category = LabelsAPI::get_instance(&prim, "category")?.expect("the applied taxonomy");
+    let category = LabelsAPI::from_prim(&prim, "category")?.expect("the applied taxonomy");
     assert_eq!(labels(&category)?, Some(tokens(&["furniture", "seating"])));
     // The property the taxonomy is named by, spelled out.
     assert_eq!(

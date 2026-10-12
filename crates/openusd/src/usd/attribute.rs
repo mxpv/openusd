@@ -505,7 +505,7 @@ impl Attribute {
     /// connection is built on.
     pub fn set_connections(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
         let targets: Vec<sdf::Path> = targets.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
-        self.edit(|spec| Ok(spec.set_connection_paths(targets)?))
+        self.edit(|spec| Ok(spec.set_connections(targets)?))
     }
 
     /// Wire this attribute to a single `source` property, replacing any
@@ -549,7 +549,7 @@ impl Attribute {
             return Ok(self);
         }
         self.edit(move |spec| {
-            spec.add_connection_path(target, prepend)?;
+            spec.add_connection(target, prepend)?;
             Ok(())
         })
     }
@@ -569,7 +569,7 @@ impl Attribute {
         // as any other write stamps it.
         let mut removed = false;
         authoring::author::<Self>(&self.stage, &self.path, |spec| {
-            removed = spec.delete_connection_path(&target)?;
+            removed = spec.delete_connection(&target)?;
             Ok(())
         })?;
         Ok(removed)
@@ -580,7 +580,7 @@ impl Attribute {
     /// alone, and the layer records a change only when an opinion went away.
     pub fn clear_connections(self) -> Result<Self, StageAuthoringError> {
         self.edit_existing(|spec| {
-            spec.clear_connection_paths();
+            spec.clear_connections();
             Ok(())
         })
     }
@@ -686,7 +686,7 @@ impl Attribute {
     /// Composed value type (the `typeName` field) as a registered type name
     /// (C++ `UsdAttribute::GetTypeName`): `None` when nothing declares one, or
     /// the declared spelling is not in the type table. The spelling itself is
-    /// metadata, `get_metadata::<tf::Token>(sdf::FieldKey::TypeName)`.
+    /// metadata, `metadata::<tf::Token>(sdf::FieldKey::TypeName)`.
     ///
     /// A schema that declares this attribute wins outright, as it does for
     /// [`variability`](Self::variability): the value type is part of the
@@ -1036,9 +1036,9 @@ impl Attribute {
     /// The read counterpart of [`Attribute::set_metadata`]; used for the
     /// schema-layered fields it authors (UsdGeom's `interpolation` /
     /// `elementSize` on primvars, UsdSkel's inbetween `weight`, …). Decode to
-    /// the field's type (`get_metadata::<i32>("elementSize")`) or to
+    /// the field's type (`metadata::<i32>("elementSize")`) or to
     /// [`sdf::Value`] for the raw value.
-    pub fn get_metadata<T>(&self, key: &str) -> Result<Option<T>>
+    pub fn metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
         T::Error: Into<crate::Error>,
@@ -1109,9 +1109,9 @@ impl Attribute {
     ///
     /// Each end of the interval is closed or open as the [`gf::Interval`]
     /// says, and a range converts into one: for samples authored at
-    /// `{0, 5, 10}`, `time_samples_in_interval(2.0..=8.0)` returns `[5.0]`,
-    /// `time_samples_in_interval(0.0..=5.0)` returns `[0.0, 5.0]`, and
-    /// `time_samples_in_interval(0.0..5.0)` returns `[0.0]`.
+    /// `{0, 5, 10}`, `time_samples_in(2.0..=8.0)` returns `[5.0]`,
+    /// `time_samples_in(0.0..=5.0)` returns `[0.0, 5.0]`, and
+    /// `time_samples_in(0.0..5.0)` returns `[0.0]`.
     ///
     /// TODO(perf): the interval is applied after every sample time has been
     /// resolved. C++ `_SamplesInIntervalResolver` clips each contributing
@@ -1119,7 +1119,7 @@ impl Attribute {
     /// before gathering, and stops the walk once a source holds the sample
     /// bracketing the interval's start; carrying the interval into
     /// `IndexCache::time_sample_times` would do the same here.
-    pub fn time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+    pub fn time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
         let interval = interval.into();
         let mut times = self.time_sample_times()?;
         times.retain(|t| interval.contains(*t));
@@ -1134,20 +1134,17 @@ impl Attribute {
     /// steps through — the components of a joint transform, the ops of a
     /// transform stack. The attributes may belong to different stages.
     pub fn unioned_time_samples(attributes: &[Attribute]) -> Result<Vec<f64>> {
-        Self::unioned_time_samples_in_interval(attributes, f64::NEG_INFINITY..=f64::INFINITY)
+        Self::unioned_time_samples_in(attributes, f64::NEG_INFINITY..=f64::INFINITY)
     }
 
     /// The authored sample times of every attribute in `attributes` within
     /// `interval`, as one ascending list without repeats. Mirrors C++
     /// `UsdAttribute::GetUnionedTimeSamplesInInterval`.
-    pub fn unioned_time_samples_in_interval(
-        attributes: &[Attribute],
-        interval: impl Into<gf::Interval>,
-    ) -> Result<Vec<f64>> {
+    pub fn unioned_time_samples_in(attributes: &[Attribute], interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
         let interval = interval.into();
         let mut times = Vec::new();
         for attribute in attributes {
-            times.extend(attribute.time_samples_in_interval(interval)?);
+            times.extend(attribute.time_samples_in(interval)?);
         }
         times.sort_by(|a, b| sdf::compare_sample_times(*a, *b));
         times.dedup_by(|a, b| sdf::compare_sample_times(*a, *b).is_eq());
@@ -1178,7 +1175,7 @@ impl Attribute {
     /// is composed, and conservatively when a participating value-clip set has
     /// more than one active clip (spec 12.3.4) — those clips can each serve a
     /// different value even where the reported sample count collapses to one.
-    pub fn value_might_be_time_varying(&self) -> Result<bool> {
+    pub fn might_be_time_varying(&self) -> Result<bool> {
         self.stage.value_might_be_time_varying(&self.path)
     }
 
@@ -1425,10 +1422,10 @@ impl AttributeQuery {
     }
 
     /// `true` when more than one time sample is authored — the cached-source
-    /// counterpart of [`Attribute::value_might_be_time_varying`]. Mirrors C++
+    /// counterpart of [`Attribute::might_be_time_varying`]. Mirrors C++
     /// `UsdAttributeQuery::ValueMightBeTimeVarying`.
-    pub fn value_might_be_time_varying(&self) -> Result<bool> {
-        self.attr.value_might_be_time_varying()
+    pub fn might_be_time_varying(&self) -> Result<bool> {
+        self.attr.might_be_time_varying()
     }
 
     /// The authored sample times in ascending order, or empty when none are
@@ -1493,7 +1490,7 @@ impl AttributeQuery {
                 // The map answers even where its sample is blocked, so a missing
                 // value is withheld, not unauthored.
                 let Some(value) = offset.sample_in_stage_time(samples, time, |map, layer_time| {
-                    interp::evaluate(map, layer_time, stage.interpolation_type())
+                    interp::evaluate(map, layer_time, stage.interpolation())
                 }) else {
                     return Ok(pcp::TimedValue::NoValue);
                 };
@@ -1631,17 +1628,17 @@ mod tests {
         let attributes = [b, unsampled, a];
         assert_eq!(Attribute::unioned_time_samples(&attributes)?, vec![0.0, 5.0, 10.0]);
         assert_eq!(
-            Attribute::unioned_time_samples_in_interval(&attributes, 4.0..=10.0)?,
+            Attribute::unioned_time_samples_in(&attributes, 4.0..=10.0)?,
             vec![5.0, 10.0]
         );
         // An open end leaves out a sample sitting exactly on it, and an empty
         // interval holds no sample at all.
         assert_eq!(
-            Attribute::unioned_time_samples_in_interval(&attributes, 0.0..10.0)?,
+            Attribute::unioned_time_samples_in(&attributes, 0.0..10.0)?,
             vec![0.0, 5.0]
         );
-        assert!(Attribute::unioned_time_samples_in_interval(&attributes, 5.0..5.0)?.is_empty());
-        assert!(Attribute::unioned_time_samples_in_interval(&attributes, 10.0..=0.0)?.is_empty());
+        assert!(Attribute::unioned_time_samples_in(&attributes, 5.0..5.0)?.is_empty());
+        assert!(Attribute::unioned_time_samples_in(&attributes, 10.0..=0.0)?.is_empty());
         assert!(Attribute::unioned_time_samples(&[])?.is_empty());
         Ok(())
     }
@@ -1943,7 +1940,7 @@ class Marker "Marker"
         // spec. Property metadata parses untyped, so the token list reads back
         // as a string array.
         let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
-        let allowed = rule.get_metadata::<sdf::Value>("allowedTokens")?;
+        let allowed = rule.metadata::<sdf::Value>("allowedTokens")?;
         assert_eq!(
             allowed,
             Some(sdf::Value::StringVec(vec![
@@ -2022,7 +2019,7 @@ class Marker "Marker"
         assert_eq!(
             stage
                 .attribute("/Sun.inputs:angle")?
-                .get_metadata::<String>("displayGroup")?,
+                .metadata::<String>("displayGroup")?,
             Some("Basic".to_owned())
         );
 
@@ -2096,15 +2093,15 @@ class Marker "Marker"
         // rule gives, not the raw composed opinion.
         let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
         assert_eq!(
-            rule.get_metadata::<sdf::Variability>(sdf::FieldKey::Variability.as_str())?,
+            rule.metadata::<sdf::Variability>(sdf::FieldKey::Variability.as_str())?,
             rule.variability()?
         );
         assert_eq!(
-            rule.get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?,
+            rule.metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?,
             rule.type_name()?.map(|type_name| type_name.as_token())
         );
         assert_eq!(
-            rule.get_metadata::<bool>(sdf::FieldKey::Custom.as_str())?,
+            rule.metadata::<bool>(sdf::FieldKey::Custom.as_str())?,
             Some(rule.is_custom()?)
         );
         assert_eq!(rule.variability()?, Some(sdf::Variability::Uniform));
@@ -2119,7 +2116,7 @@ class Marker "Marker"
         // Schema metadata parses untyped, so asking for a variant it does not
         // hold reads as undeclared rather than failing.
         let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
-        assert_eq!(rule.get_metadata::<Vec<tf::Token>>("allowedTokens")?, None);
+        assert_eq!(rule.metadata::<Vec<tf::Token>>("allowedTokens")?, None);
         Ok(())
     }
 
@@ -2250,8 +2247,8 @@ class Marker "Marker"
 
         assert_eq!(attr.num_time_samples()?, 2);
         assert_eq!(attr.time_sample_times()?, vec![0.0, 10.0]);
-        assert_eq!(attr.time_samples_in_interval(1.0..=10.0)?, vec![10.0]);
-        assert!(attr.value_might_be_time_varying()?);
+        assert_eq!(attr.time_samples_in(1.0..=10.0)?, vec![10.0]);
+        assert!(attr.might_be_time_varying()?);
 
         // Before / after the ends clamp to a single repeated endpoint; a time
         // between the two samples brackets them; an exact hit collapses.
@@ -2264,7 +2261,7 @@ class Marker "Marker"
         let plain = stage.define_prim("/B")?.create_attribute("y", "double")?;
         assert_eq!(plain.num_time_samples()?, 0);
         assert!(plain.time_sample_times()?.is_empty());
-        assert!(!plain.value_might_be_time_varying()?);
+        assert!(!plain.might_be_time_varying()?);
         assert_eq!(plain.bracketing_time_samples(0.0)?, None);
         Ok(())
     }
@@ -2309,7 +2306,7 @@ class Marker "Marker"
         assert!(attr.time_samples()?.is_none());
         assert!(attr.time_sample_times()?.is_empty());
         assert_eq!(attr.num_time_samples()?, 0);
-        assert!(!attr.value_might_be_time_varying()?);
+        assert!(!attr.might_be_time_varying()?);
         Ok(())
     }
 
@@ -2694,7 +2691,7 @@ class Marker "Marker"
         let _ = stage.attribute("/P")?.clear_metadata("documentation");
 
         assert_eq!(
-            stage.prim("/P")?.get_metadata::<String>("documentation")?.as_deref(),
+            stage.prim("/P")?.metadata::<String>("documentation")?.as_deref(),
             Some("keep"),
             "the prim's own metadata is not an attribute's to clear"
         );
@@ -2829,7 +2826,7 @@ class Marker "Marker"
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
         let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
-        assert!(rule.get_metadata::<sdf::Value>("allowedTokens")?.is_some());
+        assert!(rule.metadata::<sdf::Value>("allowedTokens")?.is_some());
         assert!(!rule.has_authored_metadata("allowedTokens")?);
 
         let mine = stage.create_attribute("/Sun.mine", "double")?;
@@ -2865,10 +2862,10 @@ class Marker "Marker"
 
         assert_eq!(commits.get(), 1);
         assert_eq!(
-            attr.get_metadata::<tf::Token>("interpolation")?,
+            attr.metadata::<tf::Token>("interpolation")?,
             Some(tf::Token::from("vertex"))
         );
-        assert_eq!(attr.get_metadata::<i32>("elementSize")?, Some(2));
+        assert_eq!(attr.metadata::<i32>("elementSize")?, Some(2));
         assert_eq!(attr.get::<Vec<f32>>()?, Some(vec![1.0, 2.0]));
         Ok(())
     }
@@ -2942,7 +2939,7 @@ class Marker "Marker"
         })?;
 
         assert_eq!(commits.get(), 1);
-        assert_eq!(stage.attribute("/A.x")?.get_metadata::<i32>("elementSize")?, Some(3));
+        assert_eq!(stage.attribute("/A.x")?.metadata::<i32>("elementSize")?, Some(3));
         assert!(stage.attribute("/A.x:indices")?.resolve_info()?.value_is_blocked());
         Ok(())
     }
@@ -3114,7 +3111,7 @@ class Marker "Marker"
         assert_eq!(attr.type_name()?, None);
         assert_eq!(attr.role()?, None);
         assert_eq!(
-            attr.get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?,
+            attr.metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?,
             Some(tf::Token::from("double3d[]"))
         );
         Ok(())
@@ -3127,7 +3124,7 @@ class Marker "Marker"
         let attr = stage.create_attribute("/A.x", "Color")?;
         assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::COLOR3D));
         assert_eq!(
-            attr.get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?,
+            attr.metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?,
             Some(tf::Token::from("Color")),
             "the spelling is kept as authored"
         );

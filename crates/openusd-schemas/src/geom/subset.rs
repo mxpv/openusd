@@ -258,7 +258,7 @@ impl Subset {
     ///
     /// The indices are read as single elements, so this does not validate
     /// edges or segments; [`validate_family`](Self::validate_family) does.
-    pub fn validate_subsets(subsets: &[Subset], element_count: usize, family_type: FamilyType) -> Result<Vec<String>> {
+    pub fn validate(subsets: &[Subset], element_count: usize, family_type: FamilyType) -> Result<Vec<String>> {
         let Some((first, rest)) = subsets.split_first() else {
             return Ok(Vec::new());
         };
@@ -562,7 +562,7 @@ impl Elements {
     /// Whether the number of elements may change over time: whether the
     /// topology they are counted from might be time varying.
     fn might_vary(&self) -> Result<bool> {
-        let varies = |attr: usd::Attribute| attr.value_might_be_time_varying();
+        let varies = |attr: usd::Attribute| attr.might_be_time_varying();
         match self {
             Self::MeshFaces(mesh) => varies(mesh.face_vertex_counts_attr()),
             Self::MeshPoints(mesh) => varies(mesh.points_attr()),
@@ -2004,16 +2004,16 @@ mod tests {
             &[(Some(&[0, 1]), &[(1.0, &[2, 3])]), (Some(&[2, 3]), &[(1.0, &[0, 1])])],
         )?;
         let halves = Subset::in_family(&mesh, None, Some("halves"))?;
-        assert!(Subset::validate_subsets(&halves, 4, Partition)?.is_empty());
-        assert!(Subset::validate_subsets(&[], 4, Partition)?.is_empty());
+        assert!(Subset::validate(&halves, 4, Partition)?.is_empty());
+        assert!(Subset::validate(&[], 4, Partition)?.is_empty());
         assert_eq!(Subset::unassigned_indices_in(&halves, 6, None)?, [4, 5]);
 
-        let short = Subset::validate_subsets(&halves, 5, Partition)?;
+        let short = Subset::validate(&halves, 5, Partition)?;
         assert_eq!(short.len(), 2, "{short:?}");
         assert!(short[0].contains("at time DEFAULT does not match the element count 5"));
         assert!(short[1].contains("at time 1 does not match the element count 5"));
 
-        let long = Subset::validate_subsets(&halves, 3, NonOverlapping)?;
+        let long = Subset::validate(&halves, 3, NonOverlapping)?;
         assert!(
             long.iter()
                 .all(|reason| reason.contains("greater than the element count 3"))
@@ -2028,22 +2028,22 @@ mod tests {
             &[(Some(&[0, 1]), &[]), (Some(&[1, -1]), &[])],
         )?;
         let overlap = Subset::in_family(&mesh, None, Some("overlap"))?;
-        let reasons = Subset::validate_subsets(&overlap, 4, NonOverlapping)?;
+        let reasons = Subset::validate(&overlap, 4, NonOverlapping)?;
         assert_eq!(reasons.len(), 2, "{reasons:?}");
         assert!(reasons[0].contains("Found overlapping index 1 in GeomSubset at path </Mesh/overlap_1>"));
         assert!(reasons[1].contains("less than 0 at time DEFAULT"));
-        assert_eq!(Subset::validate_subsets(&overlap, 4, Unrestricted)?.len(), 1);
+        assert_eq!(Subset::validate(&overlap, 4, Unrestricted)?.len(), 1);
 
         // Subsets with nothing in them have nothing out of bounds.
         family(&mesh, Face, "empty", None, &[(None, &[])])?;
         let empty = Subset::in_family(&mesh, None, Some("empty"))?;
-        assert!(Subset::validate_subsets(&empty, 4, Unrestricted)?.is_empty());
+        assert!(Subset::validate(&empty, 4, Unrestricted)?.is_empty());
 
         // Subsets of different element types are no family.
         family(&mesh, ElementType::Point, "points", None, &[(Some(&[0]), &[])])?;
         let mut mixed = empty;
         mixed.extend(Subset::in_family(&mesh, None, Some("points"))?);
-        let reasons = Subset::validate_subsets(&mixed, 4, Unrestricted)?;
+        let reasons = Subset::validate(&mixed, 4, Unrestricted)?;
         assert_eq!(
             reasons,
             ["Subset at path </Mesh/points_0> has elementType point, which does not match 'face'."]

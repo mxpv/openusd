@@ -90,7 +90,7 @@ impl PathPattern {
     /// flag (mirroring what folding a literal property produces).
     pub fn set_prefix(&mut self, prefix: Path) {
         if self.components.is_empty() {
-            self.is_property = prefix.is_property_path();
+            self.is_property = prefix.is_property();
         }
         self.prefix = prefix;
     }

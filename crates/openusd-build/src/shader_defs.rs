@@ -103,17 +103,17 @@ pub fn read(builder: &Builder, name: &str, path: &Path) -> Result<NodeLibrary, E
                 base_name: base_name.to_owned(),
                 type_name,
                 fallback: stage.field::<sdf::Value>(attr.path(), sdf::FieldKey::Default)?,
-                documentation: attr.get_metadata::<String>(sdf::FieldKey::Documentation.as_str())?,
+                documentation: attr.metadata::<String>(sdf::FieldKey::Documentation.as_str())?,
                 allowed_tokens: model::allowed_tokens(
-                    attr.get_metadata::<sdf::Value>(sdf::FieldKey::AllowedTokens.as_str())?
+                    attr.metadata::<sdf::Value>(sdf::FieldKey::AllowedTokens.as_str())?
                         .as_ref(),
                 ),
-                interface_only: attr.get_metadata::<tf::Token>("connectability")?.as_deref() == Some("interfaceOnly"),
+                interface_only: attr.metadata::<tf::Token>("connectability")?.as_deref() == Some("interfaceOnly"),
             });
         }
 
         nodes.push(Node {
-            documentation: prim.get_metadata::<String>(sdf::FieldKey::Documentation.as_str())?,
+            documentation: prim.metadata::<String>(sdf::FieldKey::Documentation.as_str())?,
             prim_name,
             id,
             inputs,

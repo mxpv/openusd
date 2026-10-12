@@ -63,7 +63,7 @@ use crate::SchemaError;
 /// assert_eq!(cache.parent_to_world_transform(&arm)?, at(10.0, 0.0, 0.0));
 ///
 /// // The hand relative to the world prim leaves the world's own ops out.
-/// let (relative, resets) = cache.compute_relative_transform(&hand, &world)?;
+/// let (relative, resets) = cache.relative_transform(&hand, &world)?;
 /// assert_eq!(relative, at(0.0, 5.0, 1.0));
 /// assert!(!resets);
 ///
@@ -146,13 +146,10 @@ impl XformCache {
     /// `prim`'s local transform and whether it resets the transform stack
     /// (C++ `GetLocalTransformation`). The ops are cached; the matrix is
     /// evaluated per call.
-    pub fn local_transformation(&mut self, prim: &usd::Prim) -> Result<(gf::Mat4d, bool), SchemaError> {
+    pub fn local_transform(&mut self, prim: &usd::Prim) -> Result<(gf::Mat4d, bool), SchemaError> {
         let time = self.time;
         match self.admit(prim)? {
-            Some(entry) => Ok((
-                entry.query.local_transformation(time)?,
-                entry.query.resets_xform_stack(),
-            )),
+            Some(entry) => Ok((entry.query.local_transform(time)?, entry.query.resets_xform_stack())),
             None => Ok((gf::Mat4d::IDENTITY, false)),
         }
     }
@@ -164,7 +161,7 @@ impl XformCache {
     /// When `ancestor` is not an ancestor of `prim`, this is `prim`'s
     /// local-to-world transform. The local transforms are cached; the product
     /// is not.
-    pub fn compute_relative_transform(
+    pub fn relative_transform(
         &mut self,
         prim: &usd::Prim,
         ancestor: &usd::Prim,
@@ -179,7 +176,7 @@ impl XformCache {
             let query = &self.entry(&p)?.query;
             // Row-vector convention: each ancestor's transform applies after,
             // growing the product on the right.
-            xform = xform * query.local_transformation(time)?;
+            xform = xform * query.local_transform(time)?;
             if query.resets_xform_stack() {
                 return Ok((xform, true));
             }
@@ -205,14 +202,10 @@ impl XformCache {
 
     /// `true` when the attribute named `name` is one of `prim`'s ops (C++
     /// `IsAttributeIncludedInLocalTransform`).
-    pub fn is_attribute_included_in_local_transform(
-        &mut self,
-        prim: &usd::Prim,
-        name: &str,
-    ) -> Result<bool, SchemaError> {
+    pub fn affects_transform(&mut self, prim: &usd::Prim, name: &str) -> Result<bool, SchemaError> {
         Ok(self
             .admit(prim)?
-            .is_some_and(|entry| entry.query.is_attribute_included_in_local_transform(name)))
+            .is_some_and(|entry| entry.query.affects_transform(name)))
     }
 
     /// The local-to-world transform of `prim`, a prim that exists (C++
@@ -238,7 +231,7 @@ impl XformCache {
                 true => None,
                 false => p.parent(),
             };
-            chain.push((entry.query.local_transformation(time)?, p));
+            chain.push((entry.query.local_transform(time)?, p));
         }
 
         // TODO(rayon): once a shared ancestor's matrix is cached, sibling
@@ -363,9 +356,9 @@ def Xform "B" (
 
         // An edited op order is likewise fixed in the cached query.
         parent.set_xform_op_order(Vec::<String>::new())?;
-        assert!(cache.is_attribute_included_in_local_transform(&stage.prim("/P")?, "xformOp:translate")?);
+        assert!(cache.affects_transform(&stage.prim("/P")?, "xformOp:translate")?);
         cache.clear();
-        assert!(!cache.is_attribute_included_in_local_transform(&stage.prim("/P")?, "xformOp:translate")?);
+        assert!(!cache.affects_transform(&stage.prim("/P")?, "xformOp:translate")?);
         assert_eq!(
             cache.local_to_world_transform(&child)?,
             gf::Mat4d::translation([0.0, 1.0, 0.0])
@@ -388,14 +381,14 @@ def Xform "B" (
 
         assert_eq!(cache.local_to_world_transform(&missing)?, gf::Mat4d::IDENTITY);
         assert_eq!(cache.parent_to_world_transform(&missing)?, gf::Mat4d::IDENTITY);
-        assert_eq!(cache.local_transformation(&missing)?, (gf::Mat4d::IDENTITY, false));
+        assert_eq!(cache.local_transform(&missing)?, (gf::Mat4d::IDENTITY, false));
         assert_eq!(
-            cache.compute_relative_transform(&missing, &parent)?,
+            cache.relative_transform(&missing, &parent)?,
             (gf::Mat4d::IDENTITY, false)
         );
         assert!(!cache.resets_xform_stack(&missing)?);
         assert!(!cache.transform_might_be_time_varying(&missing)?);
-        assert!(!cache.is_attribute_included_in_local_transform(&missing, "xformOp:translate")?);
+        assert!(!cache.affects_transform(&missing, "xformOp:translate")?);
         assert!(!cache.entries.contains_key(&missing), "a missing prim is not cached");
 
         assert_eq!(cache.local_to_world_transform(&parent)?, translate);

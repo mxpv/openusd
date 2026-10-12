@@ -905,9 +905,9 @@ mod tests {
         let with_ref = PathExpression::parse("/a// %/Sets:b");
         assert!(with_ref.is_absolute());
         assert!(!with_ref.is_complete());
-        assert!(with_ref.contains_expression_references());
-        assert!(!with_ref.contains_weaker_reference());
-        assert!(PathExpression::parse("/a// %_").contains_weaker_reference());
+        assert!(with_ref.has_references());
+        assert!(!with_ref.has_weaker_reference());
+        assert!(PathExpression::parse("/a// %_").has_weaker_reference());
     }
 
     #[test]

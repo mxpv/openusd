@@ -147,7 +147,7 @@ mod tests {
 
         let color = mesh.create_display_color_primvar(Interpolation::Vertex, 3)?;
         assert_eq!(
-            color.declaration_info()?,
+            color.declaration()?,
             PrimvarDeclaration {
                 name: "displayColor".to_owned(),
                 type_name: Some(sdf::ValueTypeName::COLOR3F_ARRAY),
@@ -158,7 +158,7 @@ mod tests {
 
         let opacity = mesh.create_display_opacity_primvar(Interpolation::Constant, None)?;
         assert_eq!(
-            opacity.declaration_info()?,
+            opacity.declaration()?,
             PrimvarDeclaration {
                 name: "displayOpacity".to_owned(),
                 type_name: Some(sdf::ValueTypeName::FLOAT_ARRAY),

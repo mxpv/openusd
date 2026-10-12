@@ -26,7 +26,7 @@ pub struct ConformedAperture {
 /// policies pin one dimension; `adjustPixelAspectRatio` leaves the aperture
 /// alone and changes `pixelAspectRatio` instead. The adjusted dimension is
 /// always set so `width / height == imageAspectRatio`.
-pub fn apply_aspect_ratio_policy(
+pub fn conform_aperture(
     policy: AspectRatioConformPolicy,
     resolution: [i32; 2],
     pixel_aspect_ratio: f32,
@@ -116,7 +116,7 @@ mod tests {
     const APERTURE: [f32; 2] = [10.0, 10.0];
 
     fn run(policy: AspectRatioConformPolicy) -> ConformedAperture {
-        apply_aspect_ratio_policy(policy, RES, PAR, APERTURE)
+        conform_aperture(policy, RES, PAR, APERTURE)
     }
 
     fn approx(a: [f32; 2], b: [f32; 2]) -> bool {
@@ -165,7 +165,7 @@ mod tests {
             ([200, 100], -1.0, [10.0, 10.0]), // negative pixel aspect ratio
             ([200, 100], 0.0, [10.0, 10.0]),  // zero pixel aspect ratio
         ] {
-            let c = apply_aspect_ratio_policy(policy, res, par, aperture);
+            let c = conform_aperture(policy, res, par, aperture);
             assert_eq!(c.aperture_size, aperture);
             assert!(c.aperture_size.iter().all(|v| v.is_finite()));
         }

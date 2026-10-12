@@ -183,7 +183,7 @@ impl Path {
             offset,
             reason,
         };
-        if self.is_property_path() {
+        if self.is_property() {
             return Err(fail(0, "cannot append a property to a property path"));
         }
         // The pseudo-root, the empty path, and the `.`/`..` relative anchors
@@ -220,7 +220,7 @@ impl Path {
             });
         }
 
-        if self.is_property_path() {
+        if self.is_property() {
             return Err(PathParseError {
                 input: self.path.to_string(),
                 offset: self.path.rfind('.').unwrap_or(0),
@@ -254,7 +254,7 @@ impl Path {
         // "/" + "foo/bar" => "/foo/bar"
         let combined = if self.as_str() == "/" {
             format!("/{}", append.path)
-        } else if self.is_prim_variant_selection_path() {
+        } else if self.is_variant_selection() {
             // A prim child attaches directly to a variant selection with no
             // separator: "/A{v=s}" + "B" => "/A{v=s}B" (C++ SdfPath::AppendChild).
             format!("{}{}", self.path, append.path)
@@ -265,7 +265,7 @@ impl Path {
         Ok(Path { path: combined.into() })
     }
 
-    pub fn is_property_path(&self) -> bool {
+    pub fn is_property(&self) -> bool {
         let pos = match self.path.rfind('.') {
             Some(index) => index,
             // No dot, not a property path
@@ -287,7 +287,7 @@ impl Path {
     /// Mirrors C++ `SdfPath::IsPrimVariantSelectionPath`. A variant selection
     /// path identifies a variant spec, not a prim, so it is not a valid target
     /// for prim authoring.
-    pub fn is_prim_variant_selection_path(&self) -> bool {
+    pub fn is_variant_selection(&self) -> bool {
         self.path.ends_with('}')
     }
 
@@ -303,7 +303,7 @@ impl Path {
     /// do not model still classifies correctly: `/A.rel[/Target]` leaves a
     /// remainder the prim-chain grammar cannot consume, and so is not a prim
     /// path.
-    pub fn is_prim_path(&self) -> bool {
+    pub fn is_prim(&self) -> bool {
         // The relative anchors: `.`, and a `..(/..)*` run with nothing after it.
         if self.as_str() == "." || (!self.path.is_empty() && self.path.split('/').all(|seg| seg == "..")) {
             return true;
@@ -342,13 +342,13 @@ impl Path {
     /// — including on a relative path (`../A{v=x}`).
     ///
     /// Mirrors C++ `SdfPath::ContainsPrimVariantSelection`. Unlike
-    /// [`is_prim_variant_selection_path`](Self::is_prim_variant_selection_path),
+    /// [`is_variant_selection`](Self::is_variant_selection),
     /// which only inspects the final component, this finds a selection embedded
     /// anywhere in the prim chain. A `{` inside a bracketed target component
     /// (`/A.rel[/T{v=x}]`) belongs to the embedded target path and does not
     /// count, matching
-    /// [`strip_all_variant_selections`](Self::strip_all_variant_selections).
-    pub fn contains_prim_variant_selection(&self) -> bool {
+    /// [`strip_variant_selections`](Self::strip_variant_selections).
+    pub fn has_variant_selection(&self) -> bool {
         // In a well-formed path a `{` outside a target bracket can only open a
         // `{set=sel}` segment, so a depth-0 scan decides without parsing
         // components (which relative `..` prefixes would stop short).
@@ -369,9 +369,9 @@ impl Path {
         // "/A/B/C.foo[target].bar:baz" will become "/A/B" and "C.foo[target].bar:baz"
         let Some((before, after)) = self.path.rsplit_once('/') else {
             // Relative single segment (no slash): strip a trailing property or
-            // variant selection. `is_property_path` separates `Foo.bar` from a
+            // variant selection. `is_property` separates `Foo.bar` from a
             // relative `..`, which has no property tail and is its own prim.
-            if self.is_property_path()
+            if self.is_property()
                 && let Some(dot) = find_component_dot(&self.path)
             {
                 return Path::from_str_unchecked(&self.path[..dot]);
@@ -432,7 +432,7 @@ impl Path {
     /// "/World/Mesh"          -> None
     /// ```
     pub fn split_property(&self) -> Option<(Path, &str)> {
-        if !self.is_property_path() {
+        if !self.is_property() {
             return None;
         }
         let prim = self.prim_path();
@@ -453,14 +453,14 @@ impl Path {
     /// itself carries relational-target syntax (`/A.rel[/B.rel2[/C]]`) is
     /// extracted whole. A later, separate bracket pair (e.g. a connection
     /// `.mapper[..]`) is left untouched.
-    pub fn embedded_target_path(&self) -> Option<Path> {
+    pub fn embedded_target(&self) -> Option<Path> {
         let (open, close) = self.target_brackets()?;
         Some(Path::from_str_unchecked(&self.path[open + 1..close]))
     }
 
     /// Returns this path with the target path in its first `[..]` bracket
     /// replaced by `new_target`, or `None` when there is no bracket. The
-    /// inverse of [`embedded_target_path`](Self::embedded_target_path).
+    /// inverse of [`embedded_target`](Self::embedded_target).
     pub fn replace_embedded_target(&self, new_target: &Path) -> Option<Path> {
         let (open, close) = self.target_brackets()?;
         let mut replaced = String::with_capacity(self.path.len() + new_target.as_str().len());
@@ -548,7 +548,7 @@ impl Path {
             return None;
         }
         // Drop a trailing `{set=sel}` variant selection.
-        if self.is_prim_variant_selection_path()
+        if self.is_variant_selection()
             && let Some(open) = self.path.rfind('{')
         {
             return Some(Path::from_str_unchecked(&self.path[..open]));
@@ -572,7 +572,7 @@ impl Path {
             // No `[` balances the trailing `]`; the path is malformed.
             return None;
         }
-        if self.is_property_path() {
+        if self.is_property() {
             return Some(self.prim_path());
         }
         // Prim path: drop the final prim name. It is introduced either by a `/`
@@ -674,7 +674,7 @@ impl Path {
     /// [`remainder`](PathComponents::remainder). It is the single definition of
     /// the prim-path grammar; validating consumers layer their checks on top.
     ///
-    /// Unlike [`strip_all_variant_selections`](Self::strip_all_variant_selections),
+    /// Unlike [`strip_variant_selections`](Self::strip_variant_selections),
     /// which is a blunt string strip that also removes variant segments
     /// embedded inside relationship-target brackets, this models only the
     /// structured prim namespace.
@@ -724,8 +724,8 @@ impl Path {
     /// target component (`/A.rel[/T{v=x}]`) belongs to the embedded target
     /// path and is left in place, as in C++, where target components are data
     /// on a path node rather than part of the outer prim chain.
-    pub fn strip_all_variant_selections(&self) -> Path {
-        if !self.contains_prim_variant_selection() {
+    pub fn strip_variant_selections(&self) -> Path {
+        if !self.has_variant_selection() {
             return self.clone();
         }
         let mut out = String::with_capacity(self.path.len());
@@ -793,7 +793,7 @@ impl Path {
             || suffix.starts_with('{')
             // A prim child attaches directly after a variant selection
             // (`/A{v=s}B`), so a `}`-terminated prefix is a boundary too.
-            || prefix.is_prim_variant_selection_path()
+            || prefix.is_variant_selection()
     }
 
     /// Whether this path and `other` are nested — one is a prefix of the other,
@@ -835,7 +835,7 @@ impl Path {
             && !suffix.starts_with('/')
             && !suffix.starts_with('.')
             && !suffix.starts_with('{')
-            && !old_prefix.is_prim_variant_selection_path()
+            && !old_prefix.is_variant_selection()
         {
             return None;
         }
@@ -855,7 +855,7 @@ impl Path {
         // `.` or nested variant `{` attaches directly in any namespace.
         let (body, is_prim_child) = if let Some(rest) = suffix.strip_prefix('/') {
             (rest, true)
-        } else if old_prefix.is_prim_variant_selection_path() && suffix.starts_with(is_identifier_cont) {
+        } else if old_prefix.is_variant_selection() && suffix.starts_with(is_identifier_cont) {
             (suffix, true)
         } else {
             (suffix, false)
@@ -863,7 +863,7 @@ impl Path {
         // Re-attach with the separator the new namespace needs: a prim child gets
         // a `/`, unless the new prefix is the root (the `/` is already there) or a
         // variant selection (the child attaches directly, `/Prim{set=sel}child`).
-        let separator = if is_prim_child && new != "/" && !new_prefix.is_prim_variant_selection_path() {
+        let separator = if is_prim_child && new != "/" && !new_prefix.is_variant_selection() {
             "/"
         } else {
             ""
@@ -901,7 +901,7 @@ impl Path {
         // relative anchors cannot.
         if self.is_empty()
             || self.is_abs_root()
-            || self.is_property_path()
+            || self.is_property()
             || self.as_str() == "."
             || self.path.ends_with("..")
             || self.path.ends_with(']')
@@ -1432,14 +1432,14 @@ mod tests {
         assert!(serde_json::from_str::<Path>("\"/invalid path\"").is_err());
     }
 
-    /// `is_prim_path` classifies by the path's final element, so every tail
+    /// `is_prim` classifies by the path's final element, so every tail
     /// shape lands where C++ `SdfPath::IsPrimPath` puts it — including `.` and
     /// `..`, which C++ builds as prim nodes, and `/A.rel[/T]`, which the
-    /// simpler `is_property_path` predicate cannot recognize as non-prim.
+    /// simpler `is_property` predicate cannot recognize as non-prim.
     #[test]
     fn is_prim_path_forms() {
         for text in ["/A", "/A/B", "/A{x=y}B", "../foo", "..", "../..", "."] {
-            assert!(raw(text).is_prim_path(), "{text} names a prim");
+            assert!(raw(text).is_prim(), "{text} names a prim");
         }
         for text in [
             "",
@@ -1453,7 +1453,7 @@ mod tests {
             "/A.attr.mapper[/T]",
             "/A.attr.expression",
         ] {
-            assert!(!raw(text).is_prim_path(), "{text} does not name a prim");
+            assert!(!raw(text).is_prim(), "{text} does not name a prim");
         }
     }
 
@@ -1476,21 +1476,21 @@ mod tests {
     #[test]
     fn embedded_target_get() {
         assert_eq!(
-            Path::new("/A.rel[/T].attr").unwrap().embedded_target_path(),
+            Path::new("/A.rel[/T].attr").unwrap().embedded_target(),
             Some(Path::new("/T").unwrap())
         );
         assert_eq!(
-            Path::new("/A.attr[/T.x]").unwrap().embedded_target_path(),
+            Path::new("/A.attr[/T.x]").unwrap().embedded_target(),
             Some(Path::new("/T.x").unwrap())
         );
         // A nested target bracket is matched whole, not truncated at the inner `]`.
         assert_eq!(
-            Path::new("/A.rel[/B.rel2[/C]].attr").unwrap().embedded_target_path(),
+            Path::new("/A.rel[/B.rel2[/C]].attr").unwrap().embedded_target(),
             Some(Path::new("/B.rel2[/C]").unwrap())
         );
         // An unclosed bracket has no balanced close.
-        assert_eq!(raw("/A.rel[/T").embedded_target_path(), None);
-        assert_eq!(Path::new("/A/B").unwrap().embedded_target_path(), None);
+        assert_eq!(raw("/A.rel[/T").embedded_target(), None);
+        assert_eq!(Path::new("/A/B").unwrap().embedded_target(), None);
     }
 
     #[test]
@@ -1658,7 +1658,7 @@ mod tests {
         ];
 
         for (path, expected) in cases {
-            assert_eq!(Path::new(path).unwrap().is_property_path(), expected);
+            assert_eq!(Path::new(path).unwrap().is_property(), expected);
         }
     }
 
@@ -1674,7 +1674,7 @@ mod tests {
         ];
         for (input, expected) in cases {
             let p = Path::new(input).unwrap();
-            assert_eq!(p.strip_all_variant_selections().as_str(), *expected, "input {input}");
+            assert_eq!(p.strip_variant_selections().as_str(), *expected, "input {input}");
         }
     }
 
@@ -1691,12 +1691,12 @@ mod tests {
         ];
         for (input, expected) in cases {
             let p = raw(input);
-            assert_eq!(p.strip_all_variant_selections().as_str(), *expected, "input {input}");
+            assert_eq!(p.strip_variant_selections().as_str(), *expected, "input {input}");
         }
     }
 
     #[test]
-    fn contains_prim_variant_selection() {
+    fn has_variant_selection() {
         // A selection anywhere in the prim chain counts — on relative paths
         // too; a `{` that is not a prim-namespace variant (a
         // relationship-target bracket) does not.
@@ -1710,7 +1710,7 @@ mod tests {
             ("..", false),
         ];
         for (input, expected) in cases {
-            assert_eq!(raw(input).contains_prim_variant_selection(), *expected, "input {input}");
+            assert_eq!(raw(input).has_variant_selection(), *expected, "input {input}");
         }
     }
 
@@ -2222,9 +2222,9 @@ mod tests {
         // The lenient non-ASCII identifier rule holds across the read-side
         // classifiers, not just the validator.
         let p = Path::new("/A.p\u{2603}").unwrap();
-        assert!(p.is_property_path());
+        assert!(p.is_property());
         assert_eq!(p.parent().unwrap().as_str(), "/A");
-        let stripped = Path::new("/A{v=x}\u{2206}B").unwrap().strip_all_variant_selections();
+        let stripped = Path::new("/A{v=x}\u{2206}B").unwrap().strip_variant_selections();
         assert_eq!(stripped.as_str(), "/A/\u{2206}B");
     }
 
@@ -2234,7 +2234,7 @@ mod tests {
     fn derived_revalidate() {
         for case in ["/A/B/C.attr", "/A{x=y}B", "../C.foo", "/A.rel[/T].attr"] {
             let path = Path::new(case).unwrap();
-            for derived in [path.prim_path(), path.strip_all_variant_selections()] {
+            for derived in [path.prim_path(), path.strip_variant_selections()] {
                 let text = derived.as_str();
                 assert!(text.is_empty() || Path::new(text).is_ok(), "derived {text} of {case}");
             }

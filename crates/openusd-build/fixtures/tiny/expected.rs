@@ -662,7 +662,7 @@ impl SlotAPI {
     /// Unchecked of the schema, not of memory: nothing here is
     /// `unsafe`, and a prim that does not carry this schema under this
     /// name simply answers nothing for the properties it declares.
-    /// [`get_instance`](Self::get_instance) is the constructor that
+    /// [`from_prim`](Self::from_prim) is the constructor that
     /// asks.
     pub fn from_prim_unchecked(
         prim: ::openusd::usd::Prim,
@@ -690,7 +690,7 @@ impl SlotAPI {
     }
     /// Views `prim` as this schema applied under `name`, or `None`
     /// where it does not carry it.
-    pub fn get_instance(
+    pub fn from_prim(
         prim: &::openusd::usd::Prim,
         name: impl ::std::convert::Into<::openusd::tf::Token>,
     ) -> ::openusd::Result<::std::option::Option<Self>> {
@@ -714,9 +714,7 @@ impl SlotAPI {
         )
     }
     /// Every instance of this schema applied to `prim`.
-    pub fn get_all(
-        prim: &::openusd::usd::Prim,
-    ) -> ::openusd::Result<::std::vec::Vec<Self>> {
+    pub fn all(prim: &::openusd::usd::Prim) -> ::openusd::Result<::std::vec::Vec<Self>> {
         prim.api_schema_instance_names(tokens::SLOT_API)
             .map(|names| {
                 names
@@ -727,7 +725,7 @@ impl SlotAPI {
     }
     /// Whether `base_name` is one of the property names this schema
     /// declares, which an instance name may therefore not end with.
-    pub fn is_schema_property_base_name(base_name: &str) -> bool {
+    pub fn is_property_base_name(base_name: &str) -> bool {
         ::std::matches!(base_name, "" | "depth" | "offset")
     }
     /// The prim and instance name a property path of this schema names,
@@ -745,7 +743,7 @@ impl SlotAPI {
         }
         let instance = property.strip_prefix("slot")?.strip_prefix(':')?;
         let base_name = instance.rsplit(':').next()?;
-        match Self::is_schema_property_base_name(base_name) {
+        match Self::is_property_base_name(base_name) {
             true => ::std::option::Option::None,
             false => {
                 ::std::option::Option::Some((prim, ::openusd::tf::Token::from(instance)))
@@ -757,7 +755,7 @@ impl SlotAPI {
     /// Declared `opaque slot:__INSTANCE_NAME__`.
     pub fn slot_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_,
                 self.name.as_str(),
             ),
@@ -768,7 +766,7 @@ impl SlotAPI {
     /// declaration by itself.
     pub fn slot_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_,
                     self.name.as_str(),
                 ),
@@ -785,7 +783,7 @@ impl SlotAPI {
     /// Declared `int slot:__INSTANCE_NAME__:depth = 0`.
     pub fn depth_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_DEPTH,
                 self.name.as_str(),
             ),
@@ -812,7 +810,7 @@ impl SlotAPI {
     /// declaration by itself.
     pub fn depth_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_DEPTH,
                     self.name.as_str(),
                 ),
@@ -829,7 +827,7 @@ impl SlotAPI {
     /// Declared `double3 slot:__INSTANCE_NAME__:offset = (0.0, 0.0, 0.0)`.
     pub fn slot_offset_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_OFFSET,
                 self.name.as_str(),
             ),
@@ -858,7 +856,7 @@ impl SlotAPI {
     /// declaration by itself.
     pub fn slot_offset_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_OFFSET,
                     self.name.as_str(),
                 ),
@@ -912,7 +910,7 @@ impl PrimMetadata for ::openusd::usd::Prim {
     fn tiny_hints(
         &self,
     ) -> ::openusd::Result<::std::option::Option<::openusd::sdf::Value>> {
-        self.get_metadata::<::openusd::sdf::Value>(tokens::TINY_HINTS)
+        self.metadata::<::openusd::sdf::Value>(tokens::TINY_HINTS)
     }
     fn set_tiny_hints(
         self,
@@ -960,7 +958,7 @@ impl AttributeMetadata for ::openusd::usd::Attribute {
     fn tiny_hints(
         &self,
     ) -> ::openusd::Result<::std::option::Option<::openusd::sdf::Value>> {
-        self.get_metadata::<::openusd::sdf::Value>(tokens::TINY_HINTS)
+        self.metadata::<::openusd::sdf::Value>(tokens::TINY_HINTS)
     }
     fn set_tiny_hints(
         self,
@@ -971,7 +969,7 @@ impl AttributeMetadata for ::openusd::usd::Attribute {
     fn tiny_role(
         &self,
     ) -> ::openusd::Result<::std::option::Option<::openusd::tf::Token>> {
-        self.get_metadata::<::openusd::tf::Token>(tokens::TINY_ROLE)
+        self.metadata::<::openusd::tf::Token>(tokens::TINY_ROLE)
     }
     fn set_tiny_role(
         self,
@@ -1003,7 +1001,7 @@ impl RelationshipMetadata for ::openusd::usd::Relationship {
     fn tiny_hints(
         &self,
     ) -> ::openusd::Result<::std::option::Option<::openusd::sdf::Value>> {
-        self.get_metadata::<::openusd::sdf::Value>(tokens::TINY_HINTS)
+        self.metadata::<::openusd::sdf::Value>(tokens::TINY_HINTS)
     }
     fn set_tiny_hints(
         self,

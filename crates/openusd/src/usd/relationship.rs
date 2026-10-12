@@ -230,14 +230,14 @@ impl Relationship {
     /// Replace the entire target list.
     pub fn set_targets(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
         let targets: Vec<sdf::Path> = targets.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
-        self.edit(|spec| Ok(spec.set_target_paths(targets)?))
+        self.edit(|spec| Ok(spec.set_targets(targets)?))
     }
 
     /// Composed value of a generic metadata field on the relationship decoded
     /// to `T`, falling back to what the relationship's schema declares.
     /// Mirrors C++ `UsdObject::GetMetadata(name, &value)`; the read
     /// counterpart of [`set_metadata`](Self::set_metadata).
-    pub fn get_metadata<T>(&self, key: &str) -> Result<Option<T>>
+    pub fn metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
         T::Error: Into<crate::Error>,

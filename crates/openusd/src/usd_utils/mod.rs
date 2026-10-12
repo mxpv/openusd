@@ -1,7 +1,7 @@
 //! Utilities over layers and stages, the counterpart of C++ `UsdUtils`.
 //!
-//! [`compute_all_dependencies`] walks the layers and assets a layer reaches
-//! (C++ `UsdUtilsComputeAllDependencies`), [`create_new_usdz_package`]
+//! [`all_dependencies`] walks the layers and assets a layer reaches
+//! (C++ `UsdUtilsComputeAllDependencies`), [`create_usdz_package`]
 //! writes them into a USDZ package (C++ `UsdUtilsCreateNewUsdzPackage`), and
 //! [`modify_asset_paths`] rewrites the asset paths a layer authors (C++
 //! `UsdUtilsModifyAssetPaths`).
@@ -10,8 +10,8 @@ mod discover;
 mod package;
 mod walk;
 
-pub use discover::{Dependencies, compute_all_dependencies};
-pub use package::create_new_usdz_package;
+pub use discover::{Dependencies, all_dependencies};
+pub use package::create_usdz_package;
 pub use walk::modify_asset_paths;
 
 /// An asset path the dependency walk cannot follow.

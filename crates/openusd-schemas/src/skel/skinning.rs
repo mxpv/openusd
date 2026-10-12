@@ -19,8 +19,8 @@ use super::topology::{NO_PARENT, Topology};
 pub fn joint_local_to_skel_space(local: &[gf::Mat4d], topology: &Topology) -> Vec<gf::Mat4d> {
     assert_eq!(
         local.len(),
-        topology.num_joints(),
-        "joint_local_to_skel_space: local.len() must equal topology.num_joints()"
+        topology.joint_count(),
+        "joint_local_to_skel_space: local.len() must equal topology.joint_count()"
     );
     let mut out = vec![gf::Mat4d::IDENTITY; local.len()];
     for i in 0..local.len() {

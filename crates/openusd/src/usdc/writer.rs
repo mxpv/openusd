@@ -164,7 +164,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             let fieldset_idx = self.fieldsets.len() as u32;
             if let Some(field_names) = data.list_fields(path) {
                 for name in field_names {
-                    let value = data.get_field(path, &name)?.into_owned();
+                    let value = data.field(path, &name)?.into_owned();
                     let rep = self.write_field_value(&name, &value)?;
                     let token = if name == sdf::ChildrenKey::PropertyChildren.as_str() {
                         super::CRATE_PROPERTY_CHILDREN.to_owned()

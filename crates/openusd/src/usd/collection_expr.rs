@@ -30,7 +30,7 @@ pub struct CollectionObject {
 impl CollectionObject {
     /// Whether the object is a prim (rather than a property).
     fn is_prim(&self) -> bool {
-        !self.path.is_property_path()
+        !self.path.is_property()
     }
 
     /// The object's prim, or the owning prim of a property.
@@ -60,7 +60,7 @@ impl fmt::Debug for CollectionEvaluator {
 
 impl CollectionEvaluator {
     /// Compiles `expression` — complete, per
-    /// [`resolve_complete_membership_expression`] — against the collection
+    /// [`complete_membership_expression`] — against the collection
     /// predicate library.
     pub(super) fn build(stage: &Stage, expression: sdf::PathExpression) -> Result<Self> {
         let eval = PathExpressionEval::build(&expression, &predicate_library(stage.schema_registry()))?;
@@ -87,10 +87,10 @@ impl CollectionEvaluator {
 
     /// A fresh [`CollectionSearcher`] borrowing this evaluator, for
     /// answering a whole depth-first stage traversal incrementally.
-    pub fn incremental_searcher(&self) -> CollectionSearcher<'_> {
+    pub fn searcher(&self) -> CollectionSearcher<'_> {
         CollectionSearcher {
             evaluator: self,
-            searcher: self.eval.incremental_searcher(Box::new(self.domain())),
+            searcher: self.eval.searcher(Box::new(self.domain())),
         }
     }
 
@@ -105,7 +105,7 @@ impl CollectionEvaluator {
 }
 
 /// A stateful depth-first searcher over a collection expression, created by
-/// [`CollectionEvaluator::incremental_searcher`] — the incremental
+/// [`CollectionEvaluator::searcher`] — the incremental
 /// counterpart of [`CollectionEvaluator::match_path`] for stage traversals
 /// (C++ `UsdObjectCollectionExpressionEvaluator::IncrementalSearcher`).
 pub struct CollectionSearcher<'a> {
@@ -145,7 +145,7 @@ impl CollectionSearcher<'_> {
 // TODO: report the dropped references (unknown collection, cycle); C++ warns
 // through `TF_WARN` and flags circular dependencies. This crate has no
 // diagnostic channel for a query build to carry the report out through.
-pub fn resolve_complete_membership_expression(collection: &CollectionAPI) -> Result<sdf::PathExpression> {
+pub fn complete_membership_expression(collection: &CollectionAPI) -> Result<sdf::PathExpression> {
     let mut state = ResolveState {
         visited: HashSet::from([(collection.path().clone(), collection.name().to_string())]),
         memo: HashMap::new(),
@@ -292,7 +292,7 @@ fn predicate_library(registry: &Arc<SchemaRegistry>) -> PredicateLibrary<Collect
             let strict = strict_argument(args)?;
             let kinds = registry.kinds();
             let mut wanted = string_arguments(args)?;
-            wanted.retain(|kind| kinds.has_kind(kind));
+            wanted.retain(|kind| kinds.contains(kind));
             if wanted.is_empty() {
                 return None;
             }
@@ -302,7 +302,7 @@ fn predicate_library(registry: &Arc<SchemaRegistry>) -> PredicateLibrary<Collect
                 wanted
             } else {
                 kinds
-                    .all_kinds()
+                    .kinds()
                     .into_iter()
                     .filter(|kind| wanted.iter().any(|wanted| kinds.is_a(kind, wanted)))
                     .map(str::to_owned)
@@ -418,11 +418,7 @@ fn predicate_library(registry: &Arc<SchemaRegistry>) -> PredicateLibrary<Collect
                 if !obj.is_prim() {
                     return PredResult::constant(false);
                 }
-                let selections = obj
-                    .closest_prim()
-                    .variant_sets()
-                    .get_all_variant_selections()
-                    .unwrap_or_default();
+                let selections = obj.closest_prim().variant_sets().selections().unwrap_or_default();
                 let value = wanted.iter().all(|(set, matcher)| {
                     selections
                         .iter()
@@ -502,7 +498,7 @@ mod tests {
     use std::fs;
 
     use crate::kind;
-    use crate::sdf::path_expr::{PredicateExpression, link_predicate_expression};
+    use crate::sdf::path_expr::{PredicateExpression, link_predicate};
     use crate::usd::SchemaFamily;
 
     static SITE: &SchemaFamily<'_> = &SchemaFamily::new("site", &[]).kinds(kind::tests::SITE);
@@ -660,7 +656,7 @@ def Scope "Container"
         // against the one-shot answer.
         let search = |expression: &str| -> Result<Vec<&'static str>> {
             let evaluator = evaluator(&stage, expression)?;
-            let mut searcher = evaluator.incremental_searcher();
+            let mut searcher = evaluator.searcher();
             let mut members = Vec::new();
             for step in walk {
                 let path = sdf::path(step)?;
@@ -686,7 +682,7 @@ def Scope "Container"
 
         let library = predicate_library(stage.schema_registry());
         for predicate in ["model", "group", "not model", "not group"] {
-            let program = link_predicate_expression(&PredicateExpression::parse(predicate), &library)?;
+            let program = link_predicate(&PredicateExpression::parse(predicate), &library)?;
             for step in ["/Container", "/Container/Inst", "/Container/Inst/Nest"] {
                 let object = CollectionObject {
                     stage: stage.clone(),

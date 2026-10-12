@@ -92,7 +92,7 @@ impl ObjectKind {
     /// Whether `path` is of this kind — a property path for `Property`, a
     /// non-property (prim) path for `Prim`.
     fn matches(self, path: &sdf::Path) -> bool {
-        path.is_property_path() == (self == ObjectKind::Property)
+        path.is_property() == (self == ObjectKind::Property)
     }
 }
 
@@ -563,7 +563,7 @@ impl NamespaceEditor {
             }
             // Only a prim arriving across an arc below the target needs (and can
             // carry) a relocate; a property is moved or deleted directly.
-            let relocated = facts.below_target && !stage_src.is_property_path();
+            let relocated = facts.below_target && !stage_src.is_property();
             let (dst, occupied) = match edit {
                 NamespaceEdit::Move { dst, .. } => {
                     let mapped_dst = map(dst)?;
@@ -776,7 +776,7 @@ impl<'a> NamespaceProjection<'a> {
     /// plain arc; both kinds present means a masking relocate target. Property
     /// paths are never realized by a relocate.
     fn cross_arc_facts(&self, path: &sdf::Path, earlier: &[NamespaceEdit]) -> Result<(bool, bool), NamespaceEditError> {
-        if path.is_property_path() {
+        if path.is_property() {
             return Ok((false, false));
         }
         let Some(origin) = projected_origin(path, earlier) else {
@@ -856,7 +856,7 @@ impl<'a> NamespaceProjection<'a> {
             outside: facts.outside,
             // A property cannot itself be a relocate target, so it never masks
             // (matching `cross_arc_facts`'s property short-circuit).
-            masks: !path.is_property_path() && facts.masks,
+            masks: !path.is_property() && facts.masks,
         })
     }
 }
@@ -956,8 +956,8 @@ fn classify_source_nodes(
         // `PcpTranslatePathFromNodeToRoot`), so the comparison against the
         // selection-free `origin` stays like-for-like.
         let mut intro_path = index.graph().path_at_introduction(id);
-        if intro_path.contains_prim_variant_selection() {
-            intro_path = intro_path.strip_all_variant_selections();
+        if intro_path.has_variant_selection() {
+            intro_path = intro_path.strip_variant_selections();
         }
         let introduced_away = node
             .map_to_root()
@@ -3526,7 +3526,7 @@ mod tests {
             .unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
         assert!(
-            !stage.root_layer().relocates().iter().any(|(s, _)| s.is_property_path()),
+            !stage.root_layer().relocates().iter().any(|(s, _)| s.is_property()),
             "no property relocate must be authored"
         );
     }

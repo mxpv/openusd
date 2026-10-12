@@ -777,7 +777,7 @@ impl LayerGraph {
         let Ok(Value::StringVec(sub_paths)) = node
             .layer
             .data()
-            .get_field(&root_path, FieldKey::SubLayers.as_str())
+            .field(&root_path, FieldKey::SubLayers.as_str())
             .map(|v| v.into_owned())
         else {
             return Vec::new();
@@ -785,7 +785,7 @@ impl LayerGraph {
         let offsets: Vec<LayerOffset> = node
             .layer
             .data()
-            .get_field(&root_path, FieldKey::SubLayerOffsets.as_str())
+            .field(&root_path, FieldKey::SubLayerOffsets.as_str())
             .ok()
             .and_then(|v| match v.into_owned() {
                 Value::LayerOffsetVec(v) => Some(v),
@@ -1614,7 +1614,7 @@ impl LayerGraph {
         let mut any = false;
         for node in self.nodes.values_mut() {
             let has = matches!(
-                node.layer.data().get_field(&root_path, FieldKey::SubLayers.as_str()),
+                node.layer.data().field(&root_path, FieldKey::SubLayers.as_str()),
                 Ok(subs) if matches!(&*subs, Value::StringVec(paths) if paths.iter().any(|p| expr::is_expression(p)))
             );
             node.has_expr_sublayer = has;
@@ -1654,7 +1654,7 @@ impl LayerGraph {
     /// composition-time read of the same already-loaded layer cannot abort, so
     /// an unreadable field degrades to no variables.
     fn composed_stack_vars(&self, root: LayerId, seed_vars: &HashMap<String, Value>) -> HashMap<String, Value> {
-        expr::stack_expression_variables(self.nodes[&root].layer.data(), seed_vars).unwrap_or_default()
+        expr::stack_variables(self.nodes[&root].layer.data(), seed_vars).unwrap_or_default()
     }
 
     /// The single member-expansion policy for every "stack rooted at `root` under
@@ -1754,7 +1754,7 @@ impl LayerGraph {
     fn session_expression_variables(&self) -> HashMap<String, Value> {
         match self.session_layers().first() {
             Some(&session_root) if !self.is_muted(session_root) => {
-                expr::read_expression_variables(self.nodes[&session_root].layer.data())
+                expr::read_variables(self.nodes[&session_root].layer.data())
                     .map(|dict| dict.into_owned())
                     .unwrap_or_default()
             }
@@ -1769,18 +1769,16 @@ impl LayerGraph {
     /// regions of a single stack, C++ `PcpExpressionVariables`), so muting a layer
     /// leaves the walk's edges unchanged: the ancestor set is identical before a mute
     /// and after the matching unmute. The composition context a muted session root
-    /// drops out of is [`stack_expression_variables`](Self::stack_expression_variables).
+    /// drops out of is [`stack_variables`](Self::stack_variables).
     fn root_stack_structural_vars(&self) -> HashMap<String, Value> {
         let session = match self.session_layers().first() {
-            Some(&session_root) => expr::read_expression_variables(self.nodes[&session_root].layer.data())
+            Some(&session_root) => expr::read_variables(self.nodes[&session_root].layer.data())
                 .map(|dict| dict.into_owned())
                 .unwrap_or_default(),
             None => HashMap::new(),
         };
         match self.root {
-            Some(root) => {
-                expr::stack_expression_variables(self.nodes[&root].layer.data(), &session).unwrap_or_default()
-            }
+            Some(root) => expr::stack_variables(self.nodes[&root].layer.data(), &session).unwrap_or_default(),
             None => session,
         }
     }
@@ -1796,7 +1794,7 @@ impl LayerGraph {
     /// resolved with ([`build_stack_members`](Self::build_stack_members)), so
     /// membership and asset-path resolution never diverge. Panics on an unminted
     /// handle — composition only reads stacks the graph has built.
-    pub(crate) fn stack_expression_variables(&self, id: LayerStackId) -> &HashMap<String, Value> {
+    pub(crate) fn stack_variables(&self, id: LayerStackId) -> &HashMap<String, Value> {
         self.stacks.expression_variables(id)
     }
 
@@ -2713,7 +2711,7 @@ impl LayerGraph {
         //
         // Only a session-layer toggle can move any stack's composed *values*: a
         // stack's variables come from its own root layer overlaid by the
-        // referrer's (`expr::stack_expression_variables`), sublayers contribute
+        // referrer's (`expr::stack_variables`), sublayers contribute
         // none, and a muted root still feeds its own — so
         // `session_expression_variables` is the single muting-sensitive input,
         // and the stage root layer can never be muted. `mute_fanout` answers such
@@ -3437,12 +3435,12 @@ mod tests {
             "the muted expression sublayer leaves both sources' members equal"
         );
         assert_eq!(
-            graph.stack_expression_variables(ia),
+            graph.stack_variables(ia),
             &HashMap::from([("V".to_string(), Value::String("a".to_string()))]),
             "the instance carries its source's variables"
         );
         assert_eq!(
-            graph.stack_expression_variables(ib),
+            graph.stack_variables(ib),
             &HashMap::from([("V".to_string(), Value::String("b".to_string()))]),
             "the instance carries its source's variables"
         );
@@ -3465,7 +3463,7 @@ mod tests {
         let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
         let id = graph.intern_external(target, src_stack).0;
         assert_eq!(
-            graph.stack_expression_variables(id),
+            graph.stack_variables(id),
             &HashMap::from([
                 ("V".to_string(), Value::String("a".to_string())),
                 ("W".to_string(), Value::String("x".to_string())),
@@ -3476,7 +3474,7 @@ mod tests {
         set_expr_var(&mut graph.nodes.get_mut(&target).unwrap().layer, "V", "b");
         graph.recompute_sublayers(Some(&HashSet::from([target])));
         assert_eq!(
-            graph.stack_expression_variables(id),
+            graph.stack_variables(id),
             &HashMap::from([
                 ("V".to_string(), Value::String("b".to_string())),
                 ("W".to_string(), Value::String("x".to_string())),
@@ -3501,7 +3499,7 @@ mod tests {
         let id = graph.intern_external(target, LayerStackId::ROOT).0;
         assert!(graph.layer_stack(id).is_empty(), "the muted root empties the stack");
         assert_eq!(
-            graph.stack_expression_variables(id),
+            graph.stack_variables(id),
             &HashMap::from([("V".to_string(), Value::String("a".to_string()))]),
             "the muted root's own variables still compose the stored set"
         );
@@ -3509,7 +3507,7 @@ mod tests {
         set_expr_var(&mut graph.nodes.get_mut(&target).unwrap().layer, "V", "b");
         graph.recompute_sublayers(Some(&HashSet::from([target])));
         assert_eq!(
-            graph.stack_expression_variables(id),
+            graph.stack_variables(id),
             &HashMap::from([("V".to_string(), Value::String("b".to_string()))]),
             "the edit reaches the instance even though its member set is empty"
         );
@@ -3546,7 +3544,7 @@ mod tests {
             "a back-reference through a var-authoring source stays contextual"
         );
         assert_eq!(
-            graph.stack_expression_variables(id),
+            graph.stack_variables(id),
             &HashMap::from([
                 ("V".to_string(), Value::String("r".to_string())),
                 ("EXTRA".to_string(), Value::String("e".to_string())),
@@ -3582,8 +3580,8 @@ mod tests {
         assert!(fresh1 && fresh2, "each authoring source mints its own instance");
         assert_ne!(t1, t2, "equal composed maps do not coalesce distinct sources");
         assert_eq!(
-            graph.stack_expression_variables(t1),
-            graph.stack_expression_variables(t2),
+            graph.stack_variables(t1),
+            graph.stack_variables(t2),
             "both instances compose the same variables"
         );
     }
@@ -3688,7 +3686,7 @@ mod tests {
         assert!(!fresh, "the edit re-keys nothing; the instance is reused");
         assert_eq!(resolved, t_stack, "the arc still resolves the same instance");
         assert_eq!(
-            graph.stack_expression_variables(t_stack),
+            graph.stack_variables(t_stack),
             &HashMap::from([("V".to_string(), Value::String("b".to_string()))]),
             "the stored composed set follows the source edit"
         );
@@ -3879,7 +3877,7 @@ mod tests {
         let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
         let t = graph.intern_external(target_id, src_stack).0;
         let members: Vec<LayerId> = graph.layer_stack(t).iter().map(|&(l, _)| l).collect();
-        let vars = graph.stack_expression_variables(t).clone();
+        let vars = graph.stack_variables(t).clone();
 
         // Keep the demanding context alive; only the target instance sweeps.
         let mut marks = StackMarks::default();
@@ -3907,7 +3905,7 @@ mod tests {
             "the reminted members match the reclaimed composition"
         );
         assert_eq!(
-            graph.stack_expression_variables(reminted),
+            graph.stack_variables(reminted),
             &vars,
             "the reminted composed variables match the reclaimed set"
         );

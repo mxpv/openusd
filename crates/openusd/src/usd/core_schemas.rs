@@ -666,7 +666,7 @@ impl ColorSpaceDefinitionAPI {
     /// Unchecked of the schema, not of memory: nothing here is
     /// `unsafe`, and a prim that does not carry this schema under this
     /// name simply answers nothing for the properties it declares.
-    /// [`get_instance`](Self::get_instance) is the constructor that
+    /// [`from_prim`](Self::from_prim) is the constructor that
     /// asks.
     pub fn from_prim_unchecked(
         prim: ::openusd::usd::Prim,
@@ -694,7 +694,7 @@ impl ColorSpaceDefinitionAPI {
     }
     /// Views `prim` as this schema applied under `name`, or `None`
     /// where it does not carry it.
-    pub fn get_instance(
+    pub fn from_prim(
         prim: &::openusd::usd::Prim,
         name: impl ::std::convert::Into<::openusd::tf::Token>,
     ) -> ::openusd::Result<::std::option::Option<Self>> {
@@ -721,9 +721,7 @@ impl ColorSpaceDefinitionAPI {
         )
     }
     /// Every instance of this schema applied to `prim`.
-    pub fn get_all(
-        prim: &::openusd::usd::Prim,
-    ) -> ::openusd::Result<::std::vec::Vec<Self>> {
+    pub fn all(prim: &::openusd::usd::Prim) -> ::openusd::Result<::std::vec::Vec<Self>> {
         prim.api_schema_instance_names(tokens::COLOR_SPACE_DEFINITION_API)
             .map(|names| {
                 names
@@ -734,7 +732,7 @@ impl ColorSpaceDefinitionAPI {
     }
     /// Whether `base_name` is one of the property names this schema
     /// declares, which an instance name may therefore not end with.
-    pub fn is_schema_property_base_name(base_name: &str) -> bool {
+    pub fn is_property_base_name(base_name: &str) -> bool {
         ::std::matches!(
             base_name, "name" | "redChroma" | "greenChroma" | "blueChroma" | "whitePoint"
             | "gamma" | "linearBias"
@@ -755,7 +753,7 @@ impl ColorSpaceDefinitionAPI {
         }
         let instance = property.strip_prefix("colorSpaceDefinition")?.strip_prefix(':')?;
         let base_name = instance.rsplit(':').next()?;
-        match Self::is_schema_property_base_name(base_name) {
+        match Self::is_property_base_name(base_name) {
             true => ::std::option::Option::None,
             false => {
                 ::std::option::Option::Some((prim, ::openusd::tf::Token::from(instance)))
@@ -768,7 +766,7 @@ impl ColorSpaceDefinitionAPI {
     /// "custom"`.
     pub fn name_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_NAME,
                 self.name.as_str(),
             ),
@@ -779,7 +777,7 @@ impl ColorSpaceDefinitionAPI {
     /// declaration by itself.
     pub fn name_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_NAME,
                     self.name.as_str(),
                 ),
@@ -798,7 +796,7 @@ impl ColorSpaceDefinitionAPI {
     /// 0.0)`.
     pub fn red_chroma_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_RED_CHROMA,
                 self.name.as_str(),
             ),
@@ -827,7 +825,7 @@ impl ColorSpaceDefinitionAPI {
     /// declaration by itself.
     pub fn red_chroma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_RED_CHROMA,
                     self.name.as_str(),
                 ),
@@ -847,7 +845,7 @@ impl ColorSpaceDefinitionAPI {
     /// 1.0)`.
     pub fn green_chroma_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
                 self.name.as_str(),
             ),
@@ -878,7 +876,7 @@ impl ColorSpaceDefinitionAPI {
         &self,
     ) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
                     self.name.as_str(),
                 ),
@@ -898,7 +896,7 @@ impl ColorSpaceDefinitionAPI {
     /// 0.0)`.
     pub fn blue_chroma_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
                 self.name.as_str(),
             ),
@@ -927,7 +925,7 @@ impl ColorSpaceDefinitionAPI {
     /// declaration by itself.
     pub fn blue_chroma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
                     self.name.as_str(),
                 ),
@@ -947,7 +945,7 @@ impl ColorSpaceDefinitionAPI {
     /// (0.3333333432674408, 0.3333333432674408)`.
     pub fn white_point_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_WHITE_POINT,
                 self.name.as_str(),
             ),
@@ -976,7 +974,7 @@ impl ColorSpaceDefinitionAPI {
     /// declaration by itself.
     pub fn white_point_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_WHITE_POINT,
                     self.name.as_str(),
                 ),
@@ -995,7 +993,7 @@ impl ColorSpaceDefinitionAPI {
     /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:gamma = 1.0`.
     pub fn gamma_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
                 self.name.as_str(),
             ),
@@ -1022,7 +1020,7 @@ impl ColorSpaceDefinitionAPI {
     /// declaration by itself.
     pub fn gamma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
                     self.name.as_str(),
                 ),
@@ -1039,7 +1037,7 @@ impl ColorSpaceDefinitionAPI {
     /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:linearBias = 0.0`.
     pub fn linear_bias_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
                 self.name.as_str(),
             ),
@@ -1066,7 +1064,7 @@ impl ColorSpaceDefinitionAPI {
     /// declaration by itself.
     pub fn linear_bias_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
                     self.name.as_str(),
                 ),
@@ -1247,7 +1245,7 @@ impl CollectionAPI {
     /// Unchecked of the schema, not of memory: nothing here is
     /// `unsafe`, and a prim that does not carry this schema under this
     /// name simply answers nothing for the properties it declares.
-    /// [`get_instance`](Self::get_instance) is the constructor that
+    /// [`from_prim`](Self::from_prim) is the constructor that
     /// asks.
     pub fn from_prim_unchecked(
         prim: ::openusd::usd::Prim,
@@ -1275,7 +1273,7 @@ impl CollectionAPI {
     }
     /// Views `prim` as this schema applied under `name`, or `None`
     /// where it does not carry it.
-    pub fn get_instance(
+    pub fn from_prim(
         prim: &::openusd::usd::Prim,
         name: impl ::std::convert::Into<::openusd::tf::Token>,
     ) -> ::openusd::Result<::std::option::Option<Self>> {
@@ -1302,9 +1300,7 @@ impl CollectionAPI {
         )
     }
     /// Every instance of this schema applied to `prim`.
-    pub fn get_all(
-        prim: &::openusd::usd::Prim,
-    ) -> ::openusd::Result<::std::vec::Vec<Self>> {
+    pub fn all(prim: &::openusd::usd::Prim) -> ::openusd::Result<::std::vec::Vec<Self>> {
         prim.api_schema_instance_names(tokens::COLLECTION_API)
             .map(|names| {
                 names
@@ -1315,7 +1311,7 @@ impl CollectionAPI {
     }
     /// Whether `base_name` is one of the property names this schema
     /// declares, which an instance name may therefore not end with.
-    pub fn is_schema_property_base_name(base_name: &str) -> bool {
+    pub fn is_property_base_name(base_name: &str) -> bool {
         ::std::matches!(
             base_name, "expansionRule" | "includeRoot" | "includes" | "excludes" |
             "membershipExpression" | "mode" | ""
@@ -1336,7 +1332,7 @@ impl CollectionAPI {
         }
         let instance = property.strip_prefix("collection")?.strip_prefix(':')?;
         let base_name = instance.rsplit(':').next()?;
-        match Self::is_schema_property_base_name(base_name) {
+        match Self::is_property_base_name(base_name) {
             true => ::std::option::Option::None,
             false => {
                 ::std::option::Option::Some((prim, ::openusd::tf::Token::from(instance)))
@@ -1351,7 +1347,7 @@ impl CollectionAPI {
     /// `expandPrimsAndProperties`.
     pub fn expansion_rule_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXPANSION_RULE,
                 self.name.as_str(),
             ),
@@ -1372,7 +1368,7 @@ impl CollectionAPI {
         &self,
     ) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXPANSION_RULE,
                     self.name.as_str(),
                 ),
@@ -1395,7 +1391,7 @@ impl CollectionAPI {
     /// Declared `uniform bool collection:__INSTANCE_NAME__:includeRoot`.
     pub fn include_root_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDE_ROOT,
                 self.name.as_str(),
             ),
@@ -1414,7 +1410,7 @@ impl CollectionAPI {
         &self,
     ) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDE_ROOT,
                     self.name.as_str(),
                 ),
@@ -1438,7 +1434,7 @@ impl CollectionAPI {
     /// Declared `rel collection:__INSTANCE_NAME__:includes`.
     pub fn includes_rel(&self) -> ::openusd::usd::Relationship {
         self.relationship(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDES,
                 self.name.as_str(),
             ),
@@ -1449,7 +1445,7 @@ impl CollectionAPI {
     /// declaration by itself.
     pub fn includes_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
         self.relationship_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_INCLUDES,
                     self.name.as_str(),
                 ),
@@ -1478,7 +1474,7 @@ impl CollectionAPI {
     /// Declared `rel collection:__INSTANCE_NAME__:excludes`.
     pub fn excludes_rel(&self) -> ::openusd::usd::Relationship {
         self.relationship(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
                 self.name.as_str(),
             ),
@@ -1489,7 +1485,7 @@ impl CollectionAPI {
     /// declaration by itself.
     pub fn excludes_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
         self.relationship_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
                     self.name.as_str(),
                 ),
@@ -1509,7 +1505,7 @@ impl CollectionAPI {
     /// collection:__INSTANCE_NAME__:membershipExpression`.
     pub fn membership_expression_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MEMBERSHIP_EXPRESSION,
                 self.name.as_str(),
             ),
@@ -1530,7 +1526,7 @@ impl CollectionAPI {
         &self,
     ) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MEMBERSHIP_EXPRESSION,
                     self.name.as_str(),
                 ),
@@ -1569,7 +1565,7 @@ impl CollectionAPI {
     /// One of `automatic`, `relationship`, `expression`.
     pub fn mode_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MODE,
                 self.name.as_str(),
             ),
@@ -1586,7 +1582,7 @@ impl CollectionAPI {
     /// declaration by itself.
     pub fn mode_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_MODE,
                     self.name.as_str(),
                 ),
@@ -1608,7 +1604,7 @@ impl CollectionAPI {
     /// Declared `uniform opaque collection:__INSTANCE_NAME__`.
     pub fn collection_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
-            ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
                 tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
                 self.name.as_str(),
             ),
@@ -1619,7 +1615,7 @@ impl CollectionAPI {
     /// declaration by itself.
     pub fn collection_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
         self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_multiple_apply_name_instance(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
                     tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
                     self.name.as_str(),
                 ),

@@ -144,7 +144,7 @@ impl ResolveInfo {
     /// Whether the source that answered can vary over time.
     ///
     /// Deliberately more conservative than
-    /// [`Attribute::value_might_be_time_varying`](super::Attribute::value_might_be_time_varying),
+    /// [`Attribute::might_be_time_varying`](super::Attribute::might_be_time_varying),
     /// which has the attribute's own sample count to consult: a `timeSamples`
     /// source reports `true` even holding a single sample.
     ///

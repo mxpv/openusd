@@ -148,7 +148,7 @@ impl Points {
 /// one `normals` and `widths` have where none is.
 pub(super) fn interpolation(attr: &usd::Attribute) -> Result<Interpolation> {
     Ok(attr
-        .get_metadata::<Interpolation>(tokens::INTERPOLATION)?
+        .metadata::<Interpolation>(tokens::INTERPOLATION)?
         .unwrap_or(Interpolation::Vertex))
 }
 

@@ -65,7 +65,7 @@ fn finds_every_shade_prim() -> Result<()> {
 fn resolves_surface_terminal_to_shader() -> Result<(), SchemaError> {
     let stage = open()?;
     let mat = Material::get(&stage, "/World/Looks/BrickMat")?.expect("Material");
-    let terminal = mat.compute_surface_source(&[])?.expect("surface terminal");
+    let terminal = mat.surface_source(&[])?.expect("surface terminal");
     let source = terminal.sources().first().expect("surface source");
     assert_eq!(
         source.shader().expect("shader source").path().as_str(),
@@ -302,13 +302,13 @@ fn material_surface_terminal() -> Result<(), SchemaError> {
 
     let mat = Material::get(&stage, "/Mat")?.expect("Material");
     assert_eq!(mat.surface_output().connections()?, vec![shader_out]);
-    let terminal = mat.compute_surface_source(&[])?.expect("surface terminal");
+    let terminal = mat.surface_source(&[])?.expect("surface terminal");
     assert_eq!(terminal.kind(), TerminalKind::Surface);
     assert!(terminal.render_context().is_empty());
     assert_eq!(terminal.sources().len(), 1);
     let source = terminal.sources().first().expect("surface source");
     assert_eq!(source.shader().expect("shader source").path().as_str(), "/Mat/Surface");
-    assert_eq!(source.source_name(), "surface");
+    assert_eq!(source.name(), "surface");
     assert_eq!(source.source_type(), AttributeType::Output);
     Ok(())
 }
@@ -327,7 +327,7 @@ fn surface_through_node_graph() -> Result<(), SchemaError> {
     // The terminal names the node graph, but the shader inside it is what
     // drives the surface.
     let mat = Material::get(&stage, "/Mat")?.expect("Material");
-    let terminal = mat.compute_surface_source(&[])?.expect("surface terminal");
+    let terminal = mat.surface_source(&[])?.expect("surface terminal");
     let source = terminal.sources().first().expect("surface source");
     assert_eq!(
         source.shader().expect("shader source").path().as_str(),

@@ -1710,7 +1710,7 @@ fn schema_metadatum_stays_unanchored() {
     );
 
     let declared = attribute
-        .get_metadata::<sdf::Value>("default")
+        .metadata::<sdf::Value>("default")
         .expect("read metadata")
         .expect("the schema declares a default")
         .try_as_asset_path()

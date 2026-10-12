@@ -4,17 +4,15 @@
 //! carried across a reference arc.
 
 use openusd::sdf;
-use openusd::usd::{
-    self, CollectionAPI, PrimPredicate, compute_included_paths, resolve_complete_membership_expression,
-};
+use openusd::usd::{self, CollectionAPI, PrimPredicate, complete_membership_expression, included_paths};
 
 fn open() -> usd::Stage {
     usd::Stage::open("fixtures/collections.usda").expect("open collections fixture")
 }
 
 fn included(coll: &CollectionAPI) -> Vec<String> {
-    let query = coll.compute_membership_query().expect("query");
-    let mut paths: Vec<String> = compute_included_paths(coll.stage(), &query, PrimPredicate::DEFAULT)
+    let query = coll.membership_query().expect("query");
+    let mut paths: Vec<String> = included_paths(coll.stage(), &query, PrimPredicate::DEFAULT)
         .expect("included paths")
         .into_iter()
         .map(|p| p.to_string())
@@ -32,11 +30,11 @@ fn weaker_expression_composes() {
     let expr = coll.membership_expression().unwrap().expect("authored");
     assert_eq!(expr.to_string(), "/World/Chars/M* /World/Chars/Sully");
 
-    let query = coll.compute_membership_query().unwrap();
-    assert!(!query.uses_path_expansion_rule_map());
-    assert!(query.is_path_included(&sdf::path("/World/Chars/Mike").unwrap()));
-    assert!(query.is_path_included(&sdf::path("/World/Chars/Sully").unwrap()));
-    assert!(!query.is_path_included(&sdf::path("/World/Props/Ball").unwrap()));
+    let query = coll.membership_query().unwrap();
+    assert!(!query.uses_rule_map());
+    assert!(query.is_included(&sdf::path("/World/Chars/Mike").unwrap()));
+    assert!(query.is_included(&sdf::path("/World/Chars/Sully").unwrap()));
+    assert!(!query.is_included(&sdf::path("/World/Props/Ball").unwrap()));
 }
 
 #[test]
@@ -44,7 +42,7 @@ fn collection_reference_expands() {
     let stage = open();
     let coll = CollectionAPI::from_prim_unchecked(stage.prim("/Sets").unwrap(), "combined");
 
-    let resolved = resolve_complete_membership_expression(&coll).expect("resolve");
+    let resolved = complete_membership_expression(&coll).expect("resolve");
     assert_eq!(
         resolved.to_string(),
         "/World/Chars/M* /World/Chars/Sully /World/Props//"

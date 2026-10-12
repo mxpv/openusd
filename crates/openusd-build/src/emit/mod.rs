@@ -457,7 +457,7 @@ class Box "Box" (
     fn instanced_accessors() {
         let text = kinds();
         assert!(
-            text.contains("make_multiple_apply_name_instance("),
+            text.contains("make_name_instance("),
             "the template is instantiated: {text}"
         );
         assert!(text.contains("tokens::SLOT_MULTIPLE_APPLY_TEMPLATE_DEPTH"), "{text}");
@@ -470,7 +470,7 @@ class Box "Box" (
     fn instances_decode_from_a_path() {
         let text = packed(kinds());
         assert!(
-            text.contains(r#"is_schema_property_base_name(base_name:&str)->bool{::std::matches!(base_name,"depth")"#),
+            text.contains(r#"is_property_base_name(base_name:&str)->bool{::std::matches!(base_name,"depth")"#),
             "the names it declares are the ones an instance may not end with: {text}"
         );
         assert!(

@@ -84,7 +84,7 @@ impl XformOpPrecision {
 ///
 /// // The last op listed applies to a point first: scale, then translate.
 /// assert_eq!(
-///     prop.local_transformation(None)?,
+///     prop.local_transform(None)?,
 ///     gf::Mat4d::scale([2.0, 2.0, 2.0]) * gf::Mat4d::translation([1.0, 2.0, 3.0])
 /// );
 /// # Ok::<(), openusd_schemas::SchemaError>(())
@@ -129,8 +129,8 @@ pub trait XformableExt: XformableSchema {
     /// where `None` is the default time (C++ `GetLocalTransformation`).
     /// [`gf::Mat4d::IDENTITY`] when no stack is authored. An op directly
     /// beside its own inverse is skipped along with it.
-    fn local_transformation(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
-        XformQuery::new(self)?.local_transformation(time)
+    fn local_transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
+        XformQuery::new(self)?.local_transform(time)
     }
 
     /// `true` when an op of the stack might have a different value at another
@@ -144,13 +144,13 @@ pub trait XformableExt: XformableSchema {
     /// Every time at which an op of the stack authors a sample, ascending
     /// (C++ `GetTimeSamples`).
     fn time_samples(&self) -> Result<Vec<f64>> {
-        self.time_samples_in_interval(..)
+        self.time_samples_in(..)
     }
 
     /// The times within `interval` at which an op of the stack authors a
     /// sample, ascending (C++ `GetTimeSamplesInInterval`).
-    fn time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
-        XformQuery::new(self)?.time_samples_in_interval(interval)
+    fn time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+        XformQuery::new(self)?.time_samples_in(interval)
     }
 
     /// Replace `xformOpOrder` with `order` verbatim (C++
@@ -421,7 +421,7 @@ impl Xformable {
 /// assert_eq!(query.time_samples()?, [1.0, 11.0]);
 /// for (time, x) in [(1.0, 0.0), (6.0, 5.0), (11.0, 10.0)] {
 ///     assert_eq!(
-///         query.local_transformation(usd::TimeCode::new(time))?,
+///         query.local_transform(usd::TimeCode::new(time))?,
 ///         gf::Mat4d::translation([x, 0.0, 0.0])
 ///     );
 /// }
@@ -457,7 +457,7 @@ impl XformQuery {
     ///
     /// An op directly beside its own inverse is skipped along with it. A
     /// singular `transform` paired with its inverse therefore still evaluates.
-    pub fn local_transformation(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
+    pub fn local_transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
         let time = time.into();
         let mut m = gf::Mat4d::IDENTITY;
         // Row-vector convention: the last listed op is most local and applies
@@ -469,7 +469,7 @@ impl XformQuery {
                 rev.next();
                 continue;
             }
-            m = m * op.op_transform(time)?;
+            m = m * op.transform(time)?;
         }
         Ok(m)
     }
@@ -497,7 +497,7 @@ impl XformQuery {
 
     /// `true` when the stack lists at least one op (C++
     /// `HasNonEmptyXformOpOrder`).
-    pub fn has_non_empty_xform_op_order(&self) -> bool {
+    pub fn has_ops(&self) -> bool {
         !self.ops.is_empty()
     }
 
@@ -511,19 +511,19 @@ impl XformQuery {
     /// Every time at which an op authors a sample, ascending (C++
     /// `GetTimeSamples`).
     pub fn time_samples(&self) -> Result<Vec<f64>> {
-        self.time_samples_in_interval(..)
+        self.time_samples_in(..)
     }
 
     /// The times within `interval` at which an op authors a sample, ascending
     /// (C++ `GetTimeSamplesInInterval`).
-    pub fn time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+    pub fn time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
         let attrs: Vec<usd::Attribute> = self.ops.iter().map(|op| op.attribute().clone()).collect();
-        usd::Attribute::unioned_time_samples_in_interval(&attrs, interval)
+        usd::Attribute::unioned_time_samples_in(&attrs, interval)
     }
 
     /// `true` when the attribute named `name` is one of the ops (C++
     /// `IsAttributeIncludedInLocalTransform`).
-    pub fn is_attribute_included_in_local_transform(&self, name: &str) -> bool {
+    pub fn affects_transform(&self, name: &str) -> bool {
         self.ops.iter().any(|op| op.name() == name)
     }
 
@@ -873,7 +873,7 @@ mod tests {
         let x = Xform::define(&stage, "/X")?
             .set_translate(gf::vec3d(3.0, 5.0, 7.0))?
             .set_rotate_z(90.0)?;
-        let m = x.local_transformation(None)?;
+        let m = x.local_transform(None)?;
         assert_eq!([m.0[12], m.0[13], m.0[14]], [3.0, 5.0, 7.0]);
         Ok(())
     }
@@ -951,7 +951,7 @@ mod tests {
             order.push(format!("!invert!{op}"));
         }
         let x = x.set_xform_op_order(order)?;
-        assert_close(x.local_transformation(None)?, gf::Mat4d::IDENTITY);
+        assert_close(x.local_transform(None)?, gf::Mat4d::IDENTITY);
         Ok(())
     }
 
@@ -971,11 +971,11 @@ mod tests {
             .set_transform(singular)?
             .set_translate(gf::vec3d(1.0, 1.0, 1.0))?
             .set_xform_op_order(["xformOp:transform", "xformOp:translate", "!invert!xformOp:transform"])?;
-        let error = x.local_transformation(None).expect_err("the lone inverse is singular");
+        let error = x.local_transform(None).expect_err("the lone inverse is singular");
         assert!(matches!(error, SchemaError::SingularTransform { .. }), "{error:?}");
 
         let x = x.set_xform_op_order(["xformOp:transform", "!invert!xformOp:transform"])?;
-        assert_eq!(x.local_transformation(None)?, gf::Mat4d::IDENTITY);
+        assert_eq!(x.local_transform(None)?, gf::Mat4d::IDENTITY);
         Ok(())
     }
 
@@ -991,7 +991,7 @@ mod tests {
         let names: Vec<_> = ops.iter().map(XformOp::op_name).collect();
         assert_eq!(names, vec!["xformOp:translate"]);
         assert!(!resets);
-        assert_eq!(x.local_transformation(None)?, gf::Mat4d::translation([1.0, 2.0, 3.0]));
+        assert_eq!(x.local_transform(None)?, gf::Mat4d::translation([1.0, 2.0, 3.0]));
         Ok(())
     }
 
@@ -1008,7 +1008,7 @@ mod tests {
         let (ops, resets) = x.ordered_xform_ops()?;
         assert!(resets);
         assert_eq!(ops.len(), 1);
-        assert_eq!(x.local_transformation(None)?, gf::Mat4d::translation([0.0, 2.0, 0.0]));
+        assert_eq!(x.local_transform(None)?, gf::Mat4d::translation([0.0, 2.0, 0.0]));
         Ok(())
     }
 
@@ -1063,10 +1063,10 @@ mod tests {
             .set_at(gf::vec3f(1.0, 2.0, 3.0), usd::TimeCode::new(4.0))?;
 
         assert_eq!(x.time_samples()?, vec![1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(x.time_samples_in_interval(1.5..=3.2)?, vec![2.0, 3.0]);
+        assert_eq!(x.time_samples_in(1.5..=3.2)?, vec![2.0, 3.0]);
         let query = XformQuery::new(&x)?;
         assert_eq!(query.time_samples()?, vec![1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(query.time_samples_in_interval(1.5..=3.2)?, vec![2.0, 3.0]);
+        assert_eq!(query.time_samples_in(1.5..=3.2)?, vec![2.0, 3.0]);
         Ok(())
     }
 
@@ -1078,20 +1078,20 @@ mod tests {
             .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
             .set_rotate_z(90.0)?;
         let query = XformQuery::new(&x)?;
-        assert_eq!(query.local_transformation(None)?, x.local_transformation(None)?);
+        assert_eq!(query.local_transform(None)?, x.local_transform(None)?);
         assert!(!query.resets_xform_stack());
-        assert!(query.has_non_empty_xform_op_order());
+        assert!(query.has_ops());
         assert!(query.transform_might_have_effect());
-        assert!(query.is_attribute_included_in_local_transform("xformOp:rotateZ"));
-        assert!(!query.is_attribute_included_in_local_transform("xformOp:scale"));
+        assert!(query.affects_transform("xformOp:rotateZ"));
+        assert!(!query.affects_transform("xformOp:scale"));
 
         // An op beside its own inverse has no effect; an empty stack neither.
         let x = x.set_xform_op_order(["xformOp:translate", "!invert!xformOp:translate"])?;
         assert!(!XformQuery::new(&x)?.transform_might_have_effect());
         let empty = XformQuery::for_prim(&stage.define_prim("/Untyped")?)?;
-        assert!(!empty.has_non_empty_xform_op_order());
+        assert!(!empty.has_ops());
         assert!(!empty.transform_might_have_effect());
-        assert_eq!(empty.local_transformation(None)?, gf::Mat4d::IDENTITY);
+        assert_eq!(empty.local_transform(None)?, gf::Mat4d::IDENTITY);
         Ok(())
     }
 
@@ -1144,7 +1144,7 @@ class PivotXform "PivotXform"
         );
         assert!(x.resets_xform_stack()?);
         assert_eq!(x.ordered_xform_ops()?.0.len(), 1);
-        assert_eq!(x.local_transformation(None)?, gf::Mat4d::translation([1.0, 2.0, 3.0]));
+        assert_eq!(x.local_transform(None)?, gf::Mat4d::translation([1.0, 2.0, 3.0]));
         Ok(())
     }
 
@@ -1162,7 +1162,7 @@ class PivotXform "PivotXform"
         assert_eq!(op.precision()?, Some(XformOpPrecision::Double));
         assert!(!op.attribute().has_authored_value()?);
         assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
-        assert_eq!(x.local_transformation(None)?, gf::Mat4d::IDENTITY);
+        assert_eq!(x.local_transform(None)?, gf::Mat4d::IDENTITY);
         Ok(())
     }
 
@@ -1223,7 +1223,7 @@ class PivotXform "PivotXform"
                 "!invert!xformOp:translate:pivot"
             ]
         );
-        assert!(unpivot.is_inverse_op() && unpivot.has_suffix("pivot"));
+        assert!(unpivot.is_inverse() && unpivot.has_suffix("pivot"));
         assert!(matches!(
             unpivot.set(gf::vec3d(1.0, 0.0, 0.0)),
             Err(SchemaError::InverseXformOp { .. })
@@ -1232,7 +1232,7 @@ class PivotXform "PivotXform"
         pivot.set(gf::vec3d(1.0, 0.0, 0.0))?;
         scale.set(gf::vec3f(2.0, 2.0, 2.0))?;
         assert_eq!(
-            x.local_transformation(None)?,
+            x.local_transform(None)?,
             gf::Mat4d::translation([-1.0, 0.0, 0.0])
                 * gf::Mat4d::scale([2.0, 2.0, 2.0])
                 * gf::Mat4d::translation([1.0, 0.0, 0.0])
@@ -1308,10 +1308,10 @@ class PivotXform "PivotXform"
 
         let matrix = gf::Mat4d::translation([4.0, 5.0, 6.0]);
         op.set(matrix)?;
-        assert_eq!(x.local_transformation(None)?, matrix);
+        assert_eq!(x.local_transform(None)?, matrix);
         // Reducing it again keeps the value the op holds.
         x.make_matrix_xform()?;
-        assert_eq!(x.local_transformation(None)?, matrix);
+        assert_eq!(x.local_transform(None)?, matrix);
         Ok(())
     }
 

@@ -133,7 +133,7 @@ fn sampled_attributes(
 ) -> Result<Vec<(Path, sdf::ValueTypeName, Variability)>, sdf::PathParseError> {
     let mut out = Vec::new();
     for path in clip.data().spec_paths() {
-        if !path.is_property_path() || !path.has_prefix(clip_prim_path) {
+        if !path.is_property() || !path.has_prefix(clip_prim_path) {
             continue;
         }
         let Some(attr) = clip.attribute(&path)? else {
@@ -185,7 +185,7 @@ mod tests {
             .data()
             .spec_paths()
             .into_iter()
-            .filter(|path| path.is_property_path())
+            .filter(|path| path.is_property())
             .map(|path| path.as_str().to_owned())
             .collect()
     }

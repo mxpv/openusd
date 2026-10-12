@@ -868,19 +868,19 @@ impl<'a> Parser<'a> {
         &mut self,
         spec: &mut sdf::SpecData,
         name: &str,
-        declared: &sdf::MetadataFieldType,
+        declared: &sdf::FieldType,
         list_op: Option<Token<'a>>,
     ) -> Result<(), RawError> {
         use sdf::{Value, ValueKind};
 
         let element = match declared {
-            sdf::MetadataFieldType::ListOp(element) => element,
-            sdf::MetadataFieldType::Value(ty) => {
+            sdf::FieldType::ListOp(element) => element,
+            sdf::FieldType::Value(ty) => {
                 ensure!(list_op.is_none(), "{name} metadata does not support list ops");
                 spec.add(name, types::parse_value(&mut self.cursor, ty)?);
                 return Ok(());
             }
-            sdf::MetadataFieldType::Untyped => {
+            sdf::FieldType::Untyped => {
                 ensure!(list_op.is_none(), "{name} metadata does not support list ops");
                 spec.add(name, types::parse_untyped_value(&mut self.cursor)?);
                 return Ok(());

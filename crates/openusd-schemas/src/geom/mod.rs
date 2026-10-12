@@ -71,12 +71,12 @@
 //! `model:cardGeometry` decode to [`DrawMode`] and [`CardGeometry`].
 //! `visibility`, `purpose` and the purpose visibilities are inherited down
 //! namespace. [`ImageableExt::compute_visibility`],
-//! [`ImageableExt::compute_effective_visibility`] and
+//! [`ImageableExt::effective_visibility`] and
 //! [`ImageableExt::compute_purpose`] resolve the effective value by walking
 //! imageable ancestors. A purpose visibility counts only where
 //! [`VisibilityAPI`] is applied. [`ImageableExt::make_visible`] authors
 //! visibility with that inheritance in mind, and
-//! [`ImageableExt::compute_proxy_prim`] finds the `proxy` prim standing in
+//! [`ImageableExt::proxy_prim`] finds the `proxy` prim standing in
 //! for a `render` one. The motion settings
 //! ([`MotionAPI::compute_motion_blur_scale`] and its siblings) are inherited
 //! the same way, from the nearest prim that applies [`MotionAPI`].
@@ -88,7 +88,7 @@
 //! that keeps the ordered ops for evaluation at many times. [`XformCache`]
 //! accumulates those local transforms into world-space ones across the
 //! hierarchy at one time, reusing each ancestor's answer;
-//! [`ImageableExt::compute_local_to_world_transform`] answers once, without
+//! [`ImageableExt::local_to_world_transform`] answers once, without
 //! a cache.
 //!
 //! [`XformableExt::add_xform_op`] declares one op of any [`XformOpKind`],
@@ -120,7 +120,7 @@
 //! A `primvars:*` attribute is read through [`Primvar`], which bundles its
 //! values with its `interpolation`, its `elementSize` and the
 //! `<name>:indices` attribute that may index them;
-//! [`Primvar::compute_flattened`] applies the indices. [`PrimvarsAPI`] views
+//! [`Primvar::flattened`] applies the indices. [`PrimvarsAPI`] views
 //! any prim: it creates, lists, blocks and removes the prim's primvars, and
 //! answers which ones reach it from its ancestors, since a constant primvar
 //! is inherited down namespace. [`PrimvarBuilder`] authors a primvar with its
@@ -162,7 +162,7 @@ use openusd::{sdf, tf, usd};
 use tokens::*;
 
 pub use boundable::{BoundableExt, ExtentFn, ExtentRegistry};
-pub use curves::{CurvesExt, PointAndTangentArrays};
+pub use curves::{CurvesExt, PointsAndTangents};
 pub use extent::Extent;
 pub use gprim::GprimExt;
 pub use imageable::{ImageableExt, PurposeInfo};
@@ -281,7 +281,7 @@ openusd::sdf::impl_token_value!(Interpolation, CurveBasis);
 /// where nothing declares the attribute.
 fn declared_type(attr: &usd::Attribute) -> Result<Option<sdf::ValueTypeName>> {
     Ok(attr
-        .get_metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?
+        .metadata::<tf::Token>(sdf::FieldKey::TypeName.as_str())?
         .map(sdf::ValueTypeName::from))
 }
 

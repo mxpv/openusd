@@ -9,7 +9,7 @@
 //! layers (e.g. via [`crate::usdc::CrateWriter`] or [`crate::usda::TextWriter`])
 //! and hand the resulting bytes to [`ArchiveWriter::add_layer`]. Packaging a
 //! layer with its dependencies (the C++ `UsdUtilsCreateNewUsdzPackage`
-//! equivalent) is [`crate::usd_utils::create_new_usdz_package`].
+//! equivalent) is [`crate::usd_utils::create_usdz_package`].
 
 use std::fs;
 use std::io::{self, Seek, Write};

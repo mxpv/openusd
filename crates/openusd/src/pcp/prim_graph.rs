@@ -129,7 +129,7 @@ pub struct Node {
     /// storing them on each node; for value resolution fold each member's
     /// sublayer offset onto this node's arc offset (`map_to_root.time_offset()`).
     /// The stack also carries the composed expression variables this node's
-    /// opinions resolve against (`LayerGraph::stack_expression_variables`).
+    /// opinions resolve against (`LayerGraph::stack_variables`).
     pub(crate) layer_stack: LayerStackId,
     /// The strongest (representative) layer of [`layer_stack`](Self::layer_stack)
     /// (C++ `PcpNode::GetLayerStack()->GetLayers().front()`). Cached so
@@ -1156,7 +1156,7 @@ impl std::ops::Deref for PrimIndexGraph {
 fn path_at_intro_depth(path: &Path, depth: u16) -> Path {
     let mut path = path.clone();
     for _ in 0..depth {
-        while path.is_prim_variant_selection_path() {
+        while path.is_variant_selection() {
             match path.parent() {
                 Some(parent) => path = parent,
                 None => return path,

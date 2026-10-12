@@ -269,7 +269,7 @@ mod tests {
         let foo = sdf::path("/Foo").unwrap();
         assert_eq!(read.spec_type(&foo), Some(SpecType::Prim));
         assert_eq!(
-            read.get_field(&foo, "typeName").unwrap().into_owned(),
+            read.field(&foo, "typeName").unwrap().into_owned(),
             sdf::Value::Token("Xform".into())
         );
     }

@@ -158,7 +158,7 @@ impl Shader {
     /// Identifier mode is the schema fallback, so a shader that never selected a
     /// family needs no opinion, while one that did has an opinion to correct —
     /// the test C++ applies when it writes the attribute sparsely.
-    pub fn set_shader_id(&self, id: impl Into<tf::Token>) -> Result<usd::Attribute> {
+    pub fn set_id(&self, id: impl Into<tf::Token>) -> Result<usd::Attribute> {
         if self.implementation_source_attr().has_authored_value()? {
             self.create_implementation_source_attr()?
                 .set(ImplementationSource::Id)?;
@@ -195,17 +195,17 @@ impl Shader {
     /// an [`SdrMetadata`] is what a consumer wants; a composed presence probe
     /// that does not clone the value would serve the `has_*` pair.
     pub fn sdr_metadata(&self) -> Result<SdrMetadata> {
-        Ok(metadata_map(self.get_metadata(tokens::SDR_METADATA)?))
+        Ok(metadata_map(self.metadata(tokens::SDR_METADATA)?))
     }
 
     /// The composed shader-level `sdrMetadata` value for `key`.
     pub fn sdr_metadata_by_key(&self, key: impl AsRef<str>) -> Result<Option<String>> {
-        Ok(metadata_value(self.get_metadata(tokens::SDR_METADATA)?, key.as_ref()))
+        Ok(metadata_value(self.metadata(tokens::SDR_METADATA)?, key.as_ref()))
     }
 
     /// Whether a composed shader-level `sdrMetadata` field exists.
     pub fn has_sdr_metadata(&self) -> Result<bool> {
-        Ok(self.get_metadata::<sdf::Value>(tokens::SDR_METADATA)?.is_some())
+        Ok(self.metadata::<sdf::Value>(tokens::SDR_METADATA)?.is_some())
     }
 
     /// Whether the composed shader-level `sdrMetadata` dictionary contains
@@ -213,7 +213,7 @@ impl Shader {
     /// text rendering, so a key holding one reports here but reads back as
     /// absent from the value queries.
     pub fn has_sdr_metadata_by_key(&self, key: impl AsRef<str>) -> Result<bool> {
-        Ok(metadata_has_key(self.get_metadata(tokens::SDR_METADATA)?, key.as_ref()))
+        Ok(metadata_has_key(self.metadata(tokens::SDR_METADATA)?, key.as_ref()))
     }
 
     /// Author `sdrMetadata` entries on the shader (C++ `SetSdrMetadata`).
@@ -397,22 +397,22 @@ pub(super) fn remove_metadata_key(current: Option<sdf::Value>, key: &str) -> Opt
 
 /// The composed `sdrMetadata` dictionary on a shading attribute.
 pub(super) fn attribute_sdr_metadata(attribute: &usd::Attribute) -> Result<SdrMetadata> {
-    Ok(metadata_map(attribute.get_metadata(tokens::SDR_METADATA)?))
+    Ok(metadata_map(attribute.metadata(tokens::SDR_METADATA)?))
 }
 
 /// The composed `sdrMetadata` value for `key` on a shading attribute.
 pub(super) fn attribute_sdr_metadata_by_key(attribute: &usd::Attribute, key: &str) -> Result<Option<String>> {
-    Ok(metadata_value(attribute.get_metadata(tokens::SDR_METADATA)?, key))
+    Ok(metadata_value(attribute.metadata(tokens::SDR_METADATA)?, key))
 }
 
 /// Whether a composed `sdrMetadata` field exists on a shading attribute.
 pub(super) fn attribute_has_sdr_metadata(attribute: &usd::Attribute) -> Result<bool> {
-    Ok(attribute.get_metadata::<sdf::Value>(tokens::SDR_METADATA)?.is_some())
+    Ok(attribute.metadata::<sdf::Value>(tokens::SDR_METADATA)?.is_some())
 }
 
 /// Whether a shading attribute's composed `sdrMetadata` dictionary holds `key`.
 pub(super) fn attribute_has_sdr_metadata_by_key(attribute: &usd::Attribute, key: &str) -> Result<bool> {
-    Ok(metadata_has_key(attribute.get_metadata(tokens::SDR_METADATA)?, key))
+    Ok(metadata_has_key(attribute.metadata(tokens::SDR_METADATA)?, key))
 }
 
 /// Merges `metadata` into a shading attribute's own `sdrMetadata` opinion.
@@ -594,7 +594,7 @@ mod tests {
 
         // An id needs no authored `info:implementationSource`: identifier mode
         // is the schema's own fallback, which the registry answers with.
-        shader.set_shader_id("Example")?;
+        shader.set_id("Example")?;
         assert_eq!(shader.id()?.as_deref(), Some("Example"));
         assert_eq!(
             shader.implementation_source_attr().get()?,
@@ -614,7 +614,7 @@ mod tests {
 
         // Selecting an id again has a stale family to correct, so this time the
         // opinion is authored.
-        shader.set_shader_id("Example")?;
+        shader.set_id("Example")?;
         assert_eq!(shader.implementation_source()?, ImplementationSource::Id);
         assert_eq!(shader.id()?.as_deref(), Some("Example"));
 
@@ -650,7 +650,7 @@ mod tests {
         assert_eq!(shader.implementation_source()?, ImplementationSource::Id);
 
         stage.set_edit_target(usd::EditTarget::for_layer(&weak_id))?;
-        shader.set_shader_id("Example")?;
+        shader.set_id("Example")?;
 
         let weak = stage.layer(&weak_id).expect("weak layer").export_to_string()?;
         assert!(!weak.contains(tokens::SOURCE_CODE));

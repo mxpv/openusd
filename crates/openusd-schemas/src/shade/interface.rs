@@ -102,7 +102,7 @@ pub trait NodeGraphInterface: Connectable {
     /// This walks the active, loaded, defined, non-abstract descendants rooted
     /// at this container and stops at instances. It is the Rust counterpart of
     /// `UsdShadeNodeGraph::ComputeInterfaceInputConsumersMap`.
-    fn compute_interface_input_consumers_map(&self, transitive: bool) -> Result<InterfaceInputConsumersMap> {
+    fn interface_input_consumers(&self, transitive: bool) -> Result<InterfaceInputConsumersMap> {
         let direct = compute_direct_map(self.prim())?;
         if !transitive {
             return Ok(direct);
@@ -161,10 +161,10 @@ fn compute_direct_map(root: &usd::Prim) -> Result<InterfaceInputConsumersMap> {
         };
         for input in inputs {
             for source in input.connected_sources()?.sources() {
-                if source.source_type() != super::AttributeType::Input || source.source_prim().path() != root.path() {
+                if source.source_type() != super::AttributeType::Input || source.prim().path() != root.path() {
                     continue;
                 }
-                if let Some(entry) = result.entry_mut(source.source_prim().stage(), source.source_path()) {
+                if let Some(entry) = result.entry_mut(source.prim().stage(), source.path()) {
                     entry.push_consumer(input.clone());
                 }
             }
@@ -291,7 +291,7 @@ mod tests {
         let nested = NodeGraph::define(&stage, "/Graph/Nested")?;
         nested.create_input("gain", "float")?.connect_to(&gain)?;
 
-        let map = graph.compute_interface_input_consumers_map(false)?;
+        let map = graph.interface_input_consumers(false)?;
         assert_eq!(map.len(), 2);
         assert_eq!(
             paths(map.consumers(&gain).expect("gain entry")),
@@ -316,13 +316,13 @@ mod tests {
             .create_input("gain", "float")?
             .set_connections([first.path().clone(), second.path().clone()])?;
 
-        let direct = graph.compute_interface_input_consumers_map(false)?;
+        let direct = graph.interface_input_consumers(false)?;
         assert_eq!(
             paths(direct.consumers(&gain).expect("gain entry")),
             [first.path().as_str(), second.path().as_str()]
         );
 
-        let transitive = graph.compute_interface_input_consumers_map(true)?;
+        let transitive = graph.interface_input_consumers(true)?;
         assert_eq!(
             paths(transitive.consumers(&gain).expect("gain entry")),
             [shader_gain.path().as_str()]
@@ -337,7 +337,7 @@ mod tests {
         let first_gain = first_graph.create_input("gain", "float")?;
         let shader = Shader::define(&first_stage, "/Graph/Shader")?;
         shader.create_input("gain", "float")?.connect_to(&first_gain)?;
-        let map = first_graph.compute_interface_input_consumers_map(false)?;
+        let map = first_graph.interface_input_consumers(false)?;
 
         let second_stage = crate::tests::stage("same.usda")?;
         let second_graph = NodeGraph::define(&second_stage, "/Graph")?;
@@ -360,7 +360,7 @@ mod tests {
         let shader = Shader::define(&stage, "/Graph/Nested/Shader")?;
         shader.create_input("gain", "float")?.connect_to(&nested_gain)?;
 
-        let map = graph.compute_interface_input_consumers_map(true)?;
+        let map = graph.interface_input_consumers(true)?;
         assert_eq!(
             paths(map.consumers(&gain).expect("gain entry")),
             ["/Graph/Nested/Shader.inputs:gain"]
@@ -382,13 +382,13 @@ mod tests {
         let shader = Shader::define(&stage, "/Graph/Mat/Shader")?;
         let shader_gain = shader.create_input("gain", "float")?.connect_to(&material_gain)?;
 
-        let direct = graph.compute_interface_input_consumers_map(false)?;
+        let direct = graph.interface_input_consumers(false)?;
         assert_eq!(
             paths(direct.consumers(&gain).expect("gain entry")),
             [material_gain.path().as_str()]
         );
 
-        let transitive = graph.compute_interface_input_consumers_map(true)?;
+        let transitive = graph.interface_input_consumers(true)?;
         assert_eq!(
             paths(transitive.consumers(&gain).expect("gain entry")),
             [shader_gain.path().as_str()]
@@ -404,7 +404,7 @@ mod tests {
         let shader = Shader::define(&stage, "/Mat/Surface")?;
         shader.create_input("roughness", "float")?.connect_to(&roughness)?;
 
-        let map = material.compute_interface_input_consumers_map(false)?;
+        let map = material.interface_input_consumers(false)?;
         assert_eq!(
             paths(map.consumers(&roughness).expect("roughness entry")),
             ["/Mat/Surface.inputs:roughness"]
@@ -440,7 +440,7 @@ mod tests {
             Ok(())
         })?;
 
-        let map = graph.compute_interface_input_consumers_map(false)?;
+        let map = graph.interface_input_consumers(false)?;
         assert_eq!(
             paths(map.consumers(&gain).expect("gain entry")),
             ["/Graph/Active.inputs:gain"]
@@ -460,7 +460,7 @@ mod tests {
         let plain = stage.define_prim("/Graph/Plain")?;
         Input::new(plain.create_attribute("inputs:x", "float")?).connect_to(&gain)?;
 
-        let map = graph.compute_interface_input_consumers_map(false)?;
+        let map = graph.interface_input_consumers(false)?;
         assert_eq!(
             paths(map.consumers(&gain).expect("gain entry")),
             ["/Graph/Light.inputs:intensity"]
@@ -489,7 +489,7 @@ mod tests {
         let instance = NodeGraph::get(&stage, "/Instance")?.expect("node graph instance");
         let instance_gain = instance.input("gain");
 
-        let map = instance.compute_interface_input_consumers_map(false)?;
+        let map = instance.interface_input_consumers(false)?;
         assert!(map.consumers(&instance_gain).expect("gain entry").is_empty());
         Ok(())
     }

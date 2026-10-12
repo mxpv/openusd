@@ -631,7 +631,7 @@ pub(super) fn parse_sublayers(cursor: &mut Cursor<'_>) -> Result<(Vec<String>, V
 /// "Inherit paths cannot contain variant selections"). `arc` names the field.
 pub(super) fn reject_variant_selection_in_path(path: &sdf::Path, arc: &str) -> Result<(), RawError> {
     ensure!(
-        !path.contains_prim_variant_selection(),
+        !path.has_variant_selection(),
         "{arc} paths cannot contain variant selections: <{path}>"
     );
     Ok(())

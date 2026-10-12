@@ -237,8 +237,8 @@ impl Prim {
     /// `UsdObject::GetMetadata(name, &value)` for a prim.
     ///
     /// The read counterpart of [`set_metadata`](Self::set_metadata), and the
-    /// prim-level sibling of [`Attribute::get_metadata`]. Decode to the field's
-    /// type (`get_metadata::<String>("documentation")`) or to [`sdf::Value`]
+    /// prim-level sibling of [`Attribute::metadata`]. Decode to the field's
+    /// type (`metadata::<String>("documentation")`) or to [`sdf::Value`]
     /// for the raw value. Dictionary-valued fields come back merged key-by-key
     /// across layers, as value resolution composes them (spec 12.2.5).
     ///
@@ -249,8 +249,8 @@ impl Prim {
     ///
     /// TODO: a schema-declared dictionary should compose *under* the authored
     /// one (C++ `VtDictionaryOver`) rather than being shadowed by it; the same
-    /// generalization is missing from [`Attribute::get_metadata`].
-    pub fn get_metadata<T>(&self, key: &str) -> Result<Option<T>>
+    /// generalization is missing from [`Attribute::metadata`].
+    pub fn metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
         T::Error: Into<crate::Error>,
@@ -1381,7 +1381,7 @@ impl PrimIndexRef {
 //
 // TODO: grow this to cover the rest of `UsdVariantSets`
 // (`GetNames` / `HasVariantSet` / `GetVariantSet` / `SetSelection`). Until it
-// carries more than `get_all_variant_selections`, the newtype earns its keep
+// carries more than `selections`, the newtype earns its keep
 // only as the C++ API shape; if those methods don't materialize, fold the one
 // query back onto `Prim`.
 #[derive(Clone)]
@@ -1403,7 +1403,7 @@ impl VariantSets {
     /// `UsdVariantSets::GetAllVariantSelections`. These are the effective
     /// selections — authored, fallback, or default — read from the variant
     /// selection sites that actually contribute to the prim.
-    pub fn get_all_variant_selections(&self) -> Result<Vec<(String, String)>> {
+    pub fn selections(&self) -> Result<Vec<(String, String)>> {
         Ok(self
             .stage
             .masked_opinions(&self.prim, |g, c| c.variant_selections(g, &self.prim))?)
@@ -2331,15 +2331,12 @@ mod tests {
             .define_prim("/World")?
             .set_metadata("documentation", sdf::Value::String("x".into()))?;
         assert_eq!(
-            stage
-                .prim("/World")?
-                .get_metadata::<String>("documentation")?
-                .as_deref(),
+            stage.prim("/World")?.metadata::<String>("documentation")?.as_deref(),
             Some("x")
         );
 
         stage.prim("/World")?.clear_metadata("documentation")?;
-        assert_eq!(stage.prim("/World")?.get_metadata::<String>("documentation")?, None);
+        assert_eq!(stage.prim("/World")?.metadata::<String>("documentation")?, None);
         Ok(())
     }
 

@@ -18,7 +18,7 @@ use crate::{PrimvarIndexError, SchemaError};
 /// [`has_authored_value`](usd::Attribute::has_authored_value).
 ///
 /// Values read through [`get_at`](Self::get_at) as they are authored, and
-/// through [`compute_flattened`](Self::compute_flattened) with the indices
+/// through [`flattened`](Self::flattened) with the indices
 /// applied. The interpolation's element count applies to the indices of an
 /// indexed primvar, not to its values.
 ///
@@ -47,12 +47,12 @@ use crate::{PrimvarIndexError, SchemaError};
 /// assert_eq!(heat.interpolation()?, geom::Interpolation::Vertex);
 /// assert!(heat.is_indexed()?);
 ///
-/// // `get_at` reads the values as authored; `compute_flattened` applies the
+/// // `get_at` reads the values as authored; `flattened` applies the
 /// // indices and yields one value per vertex.
 /// assert_eq!(heat.get_at::<Vec<f32>>(None)?, Some(vec![20.0, 35.0]));
 /// assert_eq!(heat.indices(None)?, Some(vec![0, 1, 1, 0]));
 /// assert_eq!(
-///     heat.compute_flattened::<Vec<f32>>(None)?,
+///     heat.flattened::<Vec<f32>>(None)?,
 ///     Some(vec![20.0, 35.0, 35.0, 20.0])
 /// );
 /// # Ok::<(), openusd_schemas::SchemaError>(())
@@ -66,7 +66,7 @@ impl Primvar {
     /// Whether `name` is an attribute name a primvar can have: one in the
     /// `primvars:` namespace that does not end in `:indices` (C++
     /// `UsdGeomPrimvar::IsValidPrimvarName`).
-    pub fn is_valid_primvar_name(name: &str) -> bool {
+    pub fn is_valid_name(name: &str) -> bool {
         name.starts_with(PRIMVARS_NAMESPACE) && !name.ends_with(INDICES_SUFFIX)
     }
 
@@ -100,7 +100,7 @@ impl Primvar {
     /// # Ok::<(), openusd_schemas::SchemaError>(())
     /// ```
     pub fn from_attribute(attribute: usd::Attribute) -> Option<Self> {
-        Self::is_valid_primvar_name(attribute.name()).then_some(Self { attribute })
+        Self::is_valid_name(attribute.name()).then_some(Self { attribute })
     }
 
     /// Wrap an attribute whose name the caller built as a primvar's.
@@ -141,7 +141,7 @@ impl Primvar {
     pub fn interpolation(&self) -> Result<Interpolation> {
         Ok(self
             .attribute
-            .get_metadata::<Interpolation>(tokens::INTERPOLATION)?
+            .metadata::<Interpolation>(tokens::INTERPOLATION)?
             .unwrap_or_default())
     }
 
@@ -164,7 +164,7 @@ impl Primvar {
     pub(super) fn is_constant(&self) -> Result<bool> {
         Ok(self
             .attribute
-            .get_metadata::<tf::Token>(tokens::INTERPOLATION)?
+            .metadata::<tf::Token>(tokens::INTERPOLATION)?
             .is_none_or(|token| token == tokens::CONSTANT))
     }
 
@@ -172,7 +172,7 @@ impl Primvar {
     /// `GetElementSize`), 1 where none is authored: 9 for the coefficients of
     /// a spherical harmonic stored in a `float[]`.
     pub fn element_size(&self) -> Result<i32> {
-        Ok(self.attribute.get_metadata::<i32>(tokens::ELEMENT_SIZE)?.unwrap_or(1))
+        Ok(self.attribute.metadata::<i32>(tokens::ELEMENT_SIZE)?.unwrap_or(1))
     }
 
     /// Author the primvar's `elementSize` (C++ `SetElementSize`). A size below
@@ -196,7 +196,7 @@ impl Primvar {
     /// `GetDeclarationInfo`): its [name](Self::primvar_name), its value
     /// type, its [`interpolation`](Self::interpolation) and its
     /// [`element_size`](Self::element_size).
-    pub fn declaration_info(&self) -> Result<PrimvarDeclaration> {
+    pub fn declaration(&self) -> Result<PrimvarDeclaration> {
         Ok(PrimvarDeclaration {
             name: self.primvar_name().to_owned(),
             type_name: super::declared_type(&self.attribute)?,
@@ -211,7 +211,7 @@ impl Primvar {
     pub fn unauthored_values_index(&self) -> Result<i32> {
         Ok(self
             .attribute
-            .get_metadata::<i32>(tokens::UNAUTHORED_VALUES_INDEX)?
+            .metadata::<i32>(tokens::UNAUTHORED_VALUES_INDEX)?
             .unwrap_or(-1))
     }
 
@@ -310,7 +310,7 @@ impl Primvar {
     ///
     /// The values and the indices are each read at `time` from their own
     /// samples.
-    pub fn compute_flattened<T>(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Option<T>, SchemaError>
+    pub fn flattened<T>(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Option<T>, SchemaError>
     where
         T: sdf::FromValue,
         T::Error: Into<Error>,
@@ -332,29 +332,29 @@ impl Primvar {
     /// The sample times of the primvar's values, and of its indices where it
     /// is indexed, as one ascending list (C++ `GetTimeSamples`).
     pub fn time_sample_times(&self) -> Result<Vec<f64>> {
-        self.time_samples_in_interval(f64::NEG_INFINITY..=f64::INFINITY)
+        self.time_samples_in(f64::NEG_INFINITY..=f64::INFINITY)
     }
 
     /// [`time_sample_times`](Self::time_sample_times) within `interval` (C++
     /// `GetTimeSamplesInInterval`).
-    pub fn time_samples_in_interval(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+    pub fn time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
         let indices = self.indices_attr();
         if indices.has_authored_value()? {
-            return usd::Attribute::unioned_time_samples_in_interval(&[self.attribute.clone(), indices], interval);
+            return usd::Attribute::unioned_time_samples_in(&[self.attribute.clone(), indices], interval);
         }
-        self.attribute.time_samples_in_interval(interval)
+        self.attribute.time_samples_in(interval)
     }
 
     /// Whether the flattened value may change over time (C++
     /// `ValueMightBeTimeVarying`): the values might, or the indices of an
     /// indexed primvar might. Each is asked about its own samples, so one
     /// sample on each is not time-varying.
-    pub fn value_might_be_time_varying(&self) -> Result<bool> {
+    pub fn might_be_time_varying(&self) -> Result<bool> {
         let indices = self.indices_attr();
-        if indices.has_authored_value()? && indices.value_might_be_time_varying()? {
+        if indices.has_authored_value()? && indices.might_be_time_varying()? {
             return Ok(true);
         }
-        self.attribute.value_might_be_time_varying()
+        self.attribute.might_be_time_varying()
     }
 
     /// Whether the primvar takes its value from an id target (C++
@@ -502,7 +502,7 @@ impl Primvar {
     }
 }
 
-/// How a primvar is declared: what [`Primvar::declaration_info`] answers
+/// How a primvar is declared: what [`Primvar::declaration`] answers
 /// (the out-parameters of C++ `UsdGeomPrimvar::GetDeclarationInfo`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimvarDeclaration {
@@ -593,7 +593,7 @@ mod tests {
     }
 
     fn flat(primvar: &Primvar) -> Result<Option<Vec<f32>>> {
-        primvar.compute_flattened::<Vec<f32>>(None)
+        primvar.flattened::<Vec<f32>>(None)
     }
 
     fn out_of_range(error: SchemaError) -> PrimvarIndexError {
@@ -607,12 +607,12 @@ mod tests {
     /// the reserved word anywhere else, and `idFrom`, are ordinary names.
     #[test]
     fn primvar_name_rule() -> Result {
-        assert!(Primvar::is_valid_primvar_name("primvars:st"));
-        assert!(Primvar::is_valid_primvar_name("primvars:skel:jointWeights"));
-        assert!(Primvar::is_valid_primvar_name("primvars:st:indices:more"));
-        assert!(Primvar::is_valid_primvar_name("primvars:st:idFrom"));
-        assert!(!Primvar::is_valid_primvar_name("st"));
-        assert!(!Primvar::is_valid_primvar_name("primvars:st:indices"));
+        assert!(Primvar::is_valid_name("primvars:st"));
+        assert!(Primvar::is_valid_name("primvars:skel:jointWeights"));
+        assert!(Primvar::is_valid_name("primvars:st:indices:more"));
+        assert!(Primvar::is_valid_name("primvars:st:idFrom"));
+        assert!(!Primvar::is_valid_name("st"));
+        assert!(!Primvar::is_valid_name("primvars:st:indices"));
 
         assert_eq!(
             Primvar::strip_primvars_name("primvars:skel:jointWeights"),
@@ -740,7 +740,7 @@ mod tests {
                 3,
             ),
         ] {
-            let info = api.primvar(name)?.declaration_info()?;
+            let info = api.primvar(name)?.declaration()?;
             assert_eq!(info.name, primvar.primvar_name());
             assert_eq!(info.type_name, crate::geom::declared_type(primvar.attribute())?);
             assert_eq!(info.interpolation, primvar.interpolation()?);
@@ -758,7 +758,7 @@ mod tests {
         }
 
         // A primvar nothing declares has no type and the fallbacks.
-        let undeclared = api.primvar("nope")?.declaration_info()?;
+        let undeclared = api.primvar("nope")?.declaration()?;
         assert_eq!(undeclared.type_name, None);
         assert_eq!(undeclared.interpolation, Interpolation::Constant);
         assert_eq!(undeclared.element_size, 1);
@@ -880,7 +880,7 @@ mod tests {
             "s",
         )?;
         assert!(primvar.is_indexed()?);
-        assert_eq!(primvar.compute_flattened::<String>(None)?, Some("one".to_owned()));
+        assert_eq!(primvar.flattened::<String>(None)?, Some("one".to_owned()));
         Ok(())
     }
 
@@ -941,8 +941,8 @@ mod tests {
         primvar.set_indices(vec![1, 0], one)?;
         primvar.set_indices(Vec::new(), two)?;
 
-        assert_eq!(primvar.compute_flattened::<Vec<f32>>(one)?, Some(vec![2.0, 1.0]));
-        assert_eq!(primvar.compute_flattened::<Vec<f32>>(two)?, Some(Vec::new()));
+        assert_eq!(primvar.flattened::<Vec<f32>>(one)?, Some(vec![2.0, 1.0]));
+        assert_eq!(primvar.flattened::<Vec<f32>>(two)?, Some(Vec::new()));
         Ok(())
     }
 
@@ -957,11 +957,11 @@ mod tests {
             .build()?;
 
         assert_eq!(
-            primvar.compute_flattened::<sdf::Value>(None)?,
+            primvar.flattened::<sdf::Value>(None)?,
             Some(sdf::Value::TokenVec(tokens(&["b", "b", "a"])))
         );
         assert_eq!(
-            primvar.compute_flattened::<Vec<tf::Token>>(None)?,
+            primvar.flattened::<Vec<tf::Token>>(None)?,
             Some(tokens(&["b", "b", "a"]))
         );
         Ok(())
@@ -1008,9 +1008,9 @@ mod tests {
         primvar.set_indices(vec![1], one)?;
         primvar.indices_attr().set_at(sdf::Value::ValueBlock, two)?;
 
-        assert_eq!(primvar.compute_flattened::<Vec<f32>>(one)?, Some(vec![2.0]));
+        assert_eq!(primvar.flattened::<Vec<f32>>(one)?, Some(vec![2.0]));
         assert!(matches!(
-            primvar.compute_flattened::<Vec<f32>>(two),
+            primvar.flattened::<Vec<f32>>(two),
             Err(SchemaError::PrimvarIndicesMissing { .. })
         ));
         Ok(())
@@ -1052,9 +1052,7 @@ mod tests {
         assert_eq!(flat(&primvar)?, Some(vec![3.0, 1.0]));
         // Read as a value, the stronger array of two answers, and index 2
         // reaches past it.
-        let error = primvar
-            .compute_flattened::<sdf::Value>(None)
-            .expect_err("index 2 of 2 values");
+        let error = primvar.flattened::<sdf::Value>(None).expect_err("index 2 of 2 values");
         assert_eq!(out_of_range(error).len, 2);
         Ok(())
     }
@@ -1074,7 +1072,7 @@ mod tests {
         primvar.set_indices(vec![0], at(0.0))?;
         primvar.set_indices(vec![0], at(3.0))?;
         assert_eq!(primvar.time_sample_times()?, vec![0.0, 1.0, 2.0, 3.0]);
-        assert_eq!(primvar.time_samples_in_interval(0.5..=1.5)?, vec![1.0]);
+        assert_eq!(primvar.time_samples_in(0.5..=1.5)?, vec![1.0]);
         Ok(())
     }
 
@@ -1098,10 +1096,10 @@ mod tests {
     #[test]
     fn varying_from_indices() -> Result {
         let primvar = floats(&[1.0, 2.0])?;
-        assert!(!primvar.value_might_be_time_varying()?);
+        assert!(!primvar.might_be_time_varying()?);
         primvar.set_indices(vec![0], TimeCode::new(1.0))?;
         primvar.set_indices(vec![1], TimeCode::new(2.0))?;
-        assert!(primvar.value_might_be_time_varying()?);
+        assert!(primvar.might_be_time_varying()?);
         Ok(())
     }
 
@@ -1117,7 +1115,7 @@ mod tests {
             .set_at(sdf::Value::FloatVec(vec![1.0]), one)?;
         primvar.set_indices(vec![0], one)?;
         assert_eq!(primvar.time_sample_times()?, vec![1.0]);
-        assert!(!primvar.value_might_be_time_varying()?);
+        assert!(!primvar.might_be_time_varying()?);
         Ok(())
     }
 
@@ -1211,7 +1209,7 @@ mod tests {
     fn flatten_reads_id_target() -> Result {
         let primvar = id_primvar("string", sdf::Value::String("authored".to_owned()))?;
         primvar.set_id_target(&sdf::path("/Target")?)?;
-        assert_eq!(primvar.compute_flattened::<String>(None)?, Some("/Target".to_owned()));
+        assert_eq!(primvar.flattened::<String>(None)?, Some("/Target".to_owned()));
         Ok(())
     }
 }

@@ -17,10 +17,10 @@ use crate::{Error, Result, ar, pcp, tf, usdz};
 /// does. Returns the layer dependencies that did not resolve and were left
 /// out, as C++ warns about them.
 ///
-/// The dependencies are the ones [`compute_all_dependencies`] walks, plus
+/// The dependencies are the ones [`all_dependencies`] walks, plus
 /// deleted reference and payload items, so a delete still matches its target
 /// once both are packaged. Layers keep their file format and are read as
-/// [`compute_all_dependencies`] reads them, unsaved edits included.
+/// [`all_dependencies`] reads them, unsaved edits included.
 ///
 /// The root layer is the package's first entry, named `first_layer_name` or
 /// the root's file name; either way it must name a native layer (`.usd`,
@@ -45,8 +45,8 @@ use crate::{Error, Result, ar, pcp, tf, usdz};
 /// once complete. A source read along the way, the destination itself
 /// included, stays intact until then.
 ///
-/// [`compute_all_dependencies`]: super::compute_all_dependencies
-pub fn create_new_usdz_package(
+/// [`all_dependencies`]: super::all_dependencies
+pub fn create_usdz_package(
     stage: &Stage,
     asset_path: &str,
     usdz_file_path: impl AsRef<Path>,
@@ -288,7 +288,7 @@ mod tests {
 
     use crate::ar::Resolver;
     use crate::usd::stage::tests::attribute_value;
-    use crate::usd_utils::compute_all_dependencies;
+    use crate::usd_utils::all_dependencies;
     use crate::usd_utils::discover::tests::{open, write};
     use crate::usdz::ArchiveWriter;
 
@@ -412,7 +412,7 @@ def "T"
 
         let (root, stage) = open(base, "scene/root.usda")?;
         let output = base.join("out.usdz");
-        let skipped = create_new_usdz_package(&stage, &root, &output, None)?;
+        let skipped = create_usdz_package(&stage, &root, &output, None)?;
         assert_eq!(skipped.len(), 1);
         assert!(Path::new(&skipped[0]).ends_with("scene/missing.usda"));
         assert_eq!(
@@ -468,7 +468,7 @@ def "T"
         let (root, stage) = open(dir.path(), "root.usda")?;
         stage.define_prim("/Edited")?;
         let output = dir.path().join("out.usdz");
-        create_new_usdz_package(&stage, &root, &output, Some("scene.usdc"))?;
+        create_usdz_package(&stage, &root, &output, Some("scene.usdc"))?;
 
         assert_eq!(entries(&output).0, ["scene.usdc"]);
         let packaged = Stage::open(output.to_str().unwrap())?;
@@ -501,7 +501,7 @@ def "T"
         assert_eq!(attribute_value(&stage, "/A.probe"), None);
 
         let output = dir.path().join("out.usdz");
-        create_new_usdz_package(&stage, &root, &output, None)?;
+        create_usdz_package(&stage, &root, &output, None)?;
         let (names, texts) = entries(&output);
         assert_eq!(names, ["root.usda", "0/weak.usda", "ref.usda"]);
         assert!(
@@ -522,7 +522,7 @@ def "T"
         write(dir.path(), "root.usda", "#usda 1.0\ndef \"A\" {\n}\n");
         let (root, stage) = open(dir.path(), "root.usda")?;
         let output = dir.path().join("out.usdz");
-        let error = create_new_usdz_package(&stage, &root, &output, Some("root.usdz")).unwrap_err();
+        let error = create_usdz_package(&stage, &root, &output, Some("root.usdz")).unwrap_err();
         assert!(
             matches!(&error, Error::Archive(archive) if matches!(**archive, usdz::ArchiveError::InvalidEntryName { .. })),
             "{error}"
@@ -543,7 +543,7 @@ def "T"
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
         let output = dir.path().join("out.usdz");
-        let error = create_new_usdz_package(&stage, &root, &output, None).unwrap_err();
+        let error = create_usdz_package(&stage, &root, &output, None).unwrap_err();
         assert!(
             matches!(&error, Error::UnresolvedAsset(path) if path.ends_with("missing.png")),
             "{error}"
@@ -571,7 +571,7 @@ def "T"
 
         let stage = Stage::open(source.to_str().unwrap())?;
         let output = dir.path().join("out.usdz");
-        create_new_usdz_package(&stage, source.to_str().unwrap(), &output, None)?;
+        create_usdz_package(&stage, source.to_str().unwrap(), &output, None)?;
         assert_eq!(entries(&output).0, ["root.usda", "sub/inner.usda", "tex.png"]);
         let packaged = Stage::open(output.to_str().unwrap())?;
         assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(7)));
@@ -595,7 +595,7 @@ def "T"
 
         let stage = Stage::open(source.to_str().unwrap())?;
         assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(7)));
-        create_new_usdz_package(&stage, source.to_str().unwrap(), &source, None)?;
+        create_usdz_package(&stage, source.to_str().unwrap(), &source, None)?;
         assert_eq!(fs::read_dir(dir.path())?.count(), 1, "only the package is left");
         assert_eq!(entries(&source).0, ["root.usda", "tex.png"]);
         let packaged = Stage::open(source.to_str().unwrap())?;
@@ -623,7 +623,7 @@ def "T"
         // Composing the references loads the packaged layers into the stage.
         assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
         assert_eq!(attribute_value(&stage, "/B.probe"), Some(sdf::Value::Int(1)));
-        let dependencies = compute_all_dependencies(&stage, &root)?;
+        let dependencies = all_dependencies(&stage, &root)?;
         let probe = sdf::path("/R.probe")?;
         for identifier in dependencies.layers.iter().filter(|layer| layer.contains("pkg.usdz")) {
             stage.layer_mut(identifier).unwrap().edit(|edit| {
@@ -634,7 +634,7 @@ def "T"
         }
 
         let output = dir.path().join("out.usdz");
-        create_new_usdz_package(&stage, &root, &output, None)?;
+        create_usdz_package(&stage, &root, &output, None)?;
         assert_eq!(entries(&output).0, ["root.usda", "pkg.usdz"]);
         let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
         assert_eq!(nested_entries(&nested).0, ["first.usda", "other.usda", "tex.png"]);
@@ -674,7 +674,7 @@ def "T"
         assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(7)));
 
         let output = dir.path().join("out.usdz");
-        create_new_usdz_package(&stage, &root, &output, None)?;
+        create_usdz_package(&stage, &root, &output, None)?;
         let nested = ar::join_package_relative_path(output.to_str().unwrap(), "outer.usdz[inner.usdz]");
         assert_eq!(nested_entries(&nested).0, ["first.usda", "second.usda", "tex.png"]);
         let packaged = Stage::open(output.to_str().unwrap())?;
@@ -705,14 +705,14 @@ def "T"
         assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
 
         let output = dir.path().join("out.usdz");
-        create_new_usdz_package(&stage, &root, &output, None)?;
+        create_usdz_package(&stage, &root, &output, None)?;
         let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
         let (names, texts) = nested_entries(&nested);
         assert_eq!(names, ["first.usda", "0/t.png"]);
         assert!(texts["first.usda"].contains("@0/t.png@"), "{}", texts["first.usda"]);
 
         let packaged = Stage::open(output.to_str().unwrap())?;
-        let dependencies = compute_all_dependencies(&packaged, output.to_str().unwrap())?;
+        let dependencies = all_dependencies(&packaged, output.to_str().unwrap())?;
         assert!(
             dependencies
                 .assets
@@ -750,7 +750,7 @@ def "T"
         assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
 
         let output = dir.path().join("out.usdz");
-        create_new_usdz_package(&stage, &root, &output, None)?;
+        create_usdz_package(&stage, &root, &output, None)?;
         let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
         let (names, texts) = nested_entries(&nested);
         assert_eq!(names, ["first.usda", "0/extra.png", "1/extra.png"]);
@@ -785,7 +785,7 @@ def "T"
         assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(7)));
 
         let output = dir.path().join("out.usdz");
-        let error = create_new_usdz_package(&stage, &root, &output, None).unwrap_err();
+        let error = create_usdz_package(&stage, &root, &output, None).unwrap_err();
         assert!(
             matches!(&error, Error::UnresolvedAsset(path) if path.ends_with("outer.usdz[inner.usdz[missing.png]]")),
             "{error}"
@@ -826,7 +826,7 @@ def "T"
         assert_eq!(attribute_value(&stage, "/A.deep"), Some(sdf::Value::Int(9)));
 
         let output = dir.path().join("out.usdz");
-        create_new_usdz_package(&stage, &root, &output, None)?;
+        create_usdz_package(&stage, &root, &output, None)?;
         fs::rename(&package, dir.path().join("moved.usdz"))?;
         let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
         let (names, texts) = nested_entries(&nested);
@@ -840,7 +840,7 @@ def "T"
 
         let packaged = Stage::open(output.to_str().unwrap())?;
         assert_eq!(attribute_value(&packaged, "/A.deep"), Some(sdf::Value::Int(9)));
-        let dependencies = compute_all_dependencies(&packaged, output.to_str().unwrap())?;
+        let dependencies = all_dependencies(&packaged, output.to_str().unwrap())?;
         assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
         Ok(())
     }
@@ -861,7 +861,7 @@ def "T"
         write(base, "scene/tex/wood.png", "PNG");
 
         let (root, stage) = open(base, "scene/root.usda")?;
-        let dependencies = compute_all_dependencies(&stage, &root)?;
+        let dependencies = all_dependencies(&stage, &root)?;
         assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
         for texture in ["stone.png", "wood.png"] {
             let expected = fs::canonicalize(base.join("scene/tex").join(texture))?;
@@ -873,7 +873,7 @@ def "T"
         }
 
         let output = base.join("out.usdz");
-        let skipped = create_new_usdz_package(&stage, &root, &output, None)?;
+        let skipped = create_usdz_package(&stage, &root, &output, None)?;
         assert!(skipped.is_empty(), "{skipped:?}");
         let (names, texts) = entries(&output);
         assert_eq!(names, ["root.usda", "tex/wood.png", "0/stone.png"]);
@@ -913,7 +913,7 @@ def "T"
 
         let (root, stage) = open(base, "scene/root.usda")?;
         let output = base.join("out.usdz");
-        let skipped = create_new_usdz_package(&stage, &root, &output, None)?;
+        let skipped = create_usdz_package(&stage, &root, &output, None)?;
         assert!(skipped.is_empty(), "{skipped:?}");
         let (names, texts) = entries(&output);
         assert_eq!(names, ["root.usda", "model.usdz"]);
@@ -960,7 +960,7 @@ def "T"
         ] {
             write(dir.path(), "root.usda", root);
             let (root, stage) = open(dir.path(), "root.usda")?;
-            let result = create_new_usdz_package(&stage, &root, dir.path().join("out.usdz"), None);
+            let result = create_usdz_package(&stage, &root, dir.path().join("out.usdz"), None);
             if layer {
                 let skipped = result?;
                 assert_eq!(skipped.len(), 1, "{skipped:?}");

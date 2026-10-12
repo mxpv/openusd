@@ -158,7 +158,7 @@ fn class(
     // Upstream clears a type name a parent already declares; here one has to be
     // the class's own identifier (`Violation::TypeNameMismatch`), and two
     // classes cannot share that, so there is nothing to clear.
-    let (family, version) = usd::SchemaRegistry::parse_schema_family_and_version(&declaration.name);
+    let (family, version) = usd::SchemaRegistry::parse_family_and_version(&declaration.name);
     let kind = kind(declaration, is_typed)?;
     let metadata = metadata(declaration);
     let properties = properties(flattened, index, declaration, &bases, &metadata, kind)?;
@@ -362,7 +362,7 @@ fn applied_api_schemas(flattened: &sdf::Layer, declaration: &Declaration, kind: 
         .map(|name| {
             let (identifier, instance) = usd::SchemaRegistry::type_name_and_instance(name);
             let instance = instance.as_ref().map_or("", tf::Token::as_str);
-            usd::SchemaRegistry::make_multiple_apply_name_template(identifier.as_str(), instance)
+            usd::SchemaRegistry::make_name_template(identifier.as_str(), instance)
         })
         .collect()
 }
@@ -548,18 +548,18 @@ fn schematics_name(name: &tf::Token, metadata: &Metadata, kind: usd::SchemaKind)
 
     // The bare placeholder is the schema's own property, and takes the prefix
     // with no base name of its own.
-    let placeholder = usd::SchemaRegistry::make_multiple_apply_name_template("", "");
+    let placeholder = usd::SchemaRegistry::make_name_template("", "");
     if name == &placeholder {
-        return usd::SchemaRegistry::make_multiple_apply_name_template(prefix.as_str(), "");
+        return usd::SchemaRegistry::make_name_template(prefix.as_str(), "");
     }
 
     // A schema may write a property in template form itself, which is already
     // the name the schematics wants; templating it again would prefix it twice.
-    if usd::SchemaRegistry::is_multiple_apply_name_template(name.as_str()) {
+    if usd::SchemaRegistry::is_name_template(name.as_str()) {
         return name.clone();
     }
 
-    usd::SchemaRegistry::make_multiple_apply_name_template(prefix.as_str(), name.as_str())
+    usd::SchemaRegistry::make_name_template(prefix.as_str(), name.as_str())
 }
 
 #[cfg(test)]
