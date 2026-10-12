@@ -312,7 +312,7 @@ pub enum SchemaError {
     ResetBeneathFlattened {
         /// The prim that resets the transform stack.
         prim: sdf::Path,
-        /// The prim whose bound was being computed.
+        /// The prim that holds it, whose place in the world has no inverse.
         ancestor: sdf::Path,
     },
 
@@ -325,6 +325,15 @@ pub enum SchemaError {
         index: usize,
         /// How many instances the instancer holds at the times asked for.
         instances: usize,
+    },
+
+    /// A point instancer is held by one of its own prototypes, directly or
+    /// through the prototypes of an instancer between them. Its extent is
+    /// the bound of those prototypes, which would hold the extent itself.
+    #[error("{prim} is bounded by prototypes that hold it")]
+    InstancerCycle {
+        /// The point instancer.
+        prim: sdf::Path,
     },
 
     /// A point instancer asked for its prototypes' transforms targets no

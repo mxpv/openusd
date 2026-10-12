@@ -1341,6 +1341,8 @@ fn interpolation_doc_asset() -> Result<(), SchemaError> {
 
 /// `BBoxCache` against the fixtures of the C++ `testUsdGeomBBoxCache`.
 mod bbox_cache {
+    use std::collections::{BTreeSet, HashMap};
+
     use openusd::usd::{self, SchemaBase};
     use openusd::{gf, sdf};
     use openusd_schemas::SchemaError;
@@ -1741,6 +1743,12 @@ mod bbox_cache {
         assert!(without.world_bound(&root)?.range().is_empty());
         let mut with = BBoxCache::new(time, [Purpose::Default]).with_extents_hint(true);
         assert_range(with.world_bound(&root)?.aligned_range(), range([-1.0; 3], [1.0; 3]));
+
+        // The override walk reaches the unloaded model too.
+        let skip = BTreeSet::from([sdf::path("/World/Absent")?]);
+        let world = stage.prim("/World")?;
+        let found = with.untransformed_bound_with_overrides(&world, &skip, &HashMap::new())?;
+        assert_range(found.aligned_range(), range([-1.0; 3], [1.0; 3]));
         Ok(())
     }
 

@@ -113,11 +113,14 @@
 //! computing take those sizes as plain values: `Sphere::extent_from`,
 //! `PointBased::extent_from` and the rest, each answering an [`Extent`]. An
 //! [`ExtentRegistry`] says which function bounds which type, and takes the
-//! functions of types declared elsewhere.
+//! functions of types declared elsewhere. A point instancer's extent is the
+//! box around its instances, which [`PointInstancer::extent_at`] computes
+//! from the bounds of its prototypes.
 //!
 //! A model caches the extent of everything beneath it, for each purpose, in
-//! its `extentsHint`: [`ModelAPI::extents_hint_at`] reads it and
-//! [`ModelAPI::set_extents_hint`] authors it.
+//! its `extentsHint`: [`ModelAPI::extents_hint_at`] reads it,
+//! [`ModelAPI::set_extents_hint`] authors it and
+//! [`ModelAPI::compute_extents_hint`] computes what to author.
 //!
 //! The bound of a prim is the box around the extents at and beneath it. A
 //! [`BBoxCache`] answers it at one time and for a set of purposes, in the
@@ -178,7 +181,7 @@ use openusd::{sdf, tf, usd};
 use tokens::*;
 
 pub use bbox_cache::BBoxCache;
-pub use boundable::{BoundableExt, ExtentFn, ExtentRegistry};
+pub use boundable::{BoundableExt, ExtentContext, ExtentFn, ExtentRegistry};
 pub use curves::{CurvesExt, PointsAndTangents};
 pub use extent::Extent;
 pub use gprim::GprimExt;

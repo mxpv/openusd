@@ -195,7 +195,7 @@ impl Curves {
 }
 
 /// The extent that holds nothing: the corners of [`gf::Range3d::EMPTY`].
-const EMPTY: Extent = [
+pub(super) const EMPTY: Extent = [
     gf::Vec3f {
         x: f32::MAX,
         y: f32::MAX,

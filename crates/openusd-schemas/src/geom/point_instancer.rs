@@ -1,6 +1,7 @@
 //! What `UsdGeomPointInstancer` answers beyond its own properties: how many
 //! instances it holds, which of them `inactiveIds` and `invisibleIds` mask
-//! out, how those two are authored, and where each instance is at a time.
+//! out, how those two are authored, where each instance is at a time, and
+//! the extent around them all.
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
@@ -10,8 +11,12 @@ use openusd::Result;
 use openusd::usd::{self, SchemaBase};
 use openusd::{gf, sdf};
 
+use super::extent;
 use super::sampling::{Held, Motion, per_element, position_after, time_delta};
-use super::{PointInstancer, PointInstancerSchema, PrimMetadata, XformCache, array_len, tokens};
+use super::{
+    BBoxCache, Extent, ExtentContext, PointInstancer, PointInstancerSchema, PrimMetadata, Purpose, XformCache,
+    array_len, tokens,
+};
 use crate::SchemaError;
 
 /// Whether an instance's transform includes its prototype's own (C++
@@ -461,20 +466,7 @@ impl PointInstancer {
         proto_xforms: ProtoXformInclusion,
         mask: MaskApplication,
     ) -> Result<Vec<Vec<gf::Mat4d>>, SchemaError> {
-        if times.iter().any(|time| time.is_some() != base_time.is_some()) {
-            return Err(SchemaError::DefaultTimeMismatch {
-                prim: self.path().clone(),
-            });
-        }
-        let proto_indices_attr = self.proto_indices_attr();
-        let Some(proto_indices) = Held::<Vec<i32>>::read(&proto_indices_attr, base_time)? else {
-            return Err(SchemaError::NoValue {
-                attribute: proto_indices_attr.path().clone(),
-            });
-        };
-        let proto_indices = proto_indices.value;
-        let count = proto_indices.len();
-
+        let proto_indices = self.held_proto_indices(base_time)?;
         let proto_paths = match proto_xforms {
             ProtoXformInclusion::Include => self.prototype_paths(&proto_indices)?,
             ProtoXformInclusion::Exclude => Vec::new(),
@@ -483,7 +475,41 @@ impl PointInstancer {
             MaskApplication::Apply => self.mask_at(base_time, None)?,
             MaskApplication::Ignore => Vec::new(),
         };
-        check_mask(&mask, count)?;
+        self.placed_over(times, base_time, &proto_indices, &proto_paths, &mask)
+    }
+
+    /// `protoIndices` at the sample at or before `base_time`, which names
+    /// the instances and the prototype of each.
+    fn held_proto_indices(&self, base_time: Option<usd::TimeCode>) -> Result<Vec<i32>, SchemaError> {
+        let attr = self.proto_indices_attr();
+        match Held::<Vec<i32>>::read(&attr, base_time)? {
+            Some(held) => Ok(held.value),
+            None => Err(SchemaError::NoValue {
+                attribute: attr.path().clone(),
+            }),
+        }
+    }
+
+    /// The transform of each instance `mask` keeps at each of `times`,
+    /// carried there from `base_time`, for the instances `proto_indices`
+    /// names. Each comes after the local transform of the prototype root
+    /// its index names among `proto_paths`, and with no paths the instances
+    /// are placed only. An empty mask keeps every instance.
+    fn placed_over(
+        &self,
+        times: &[Option<usd::TimeCode>],
+        base_time: Option<usd::TimeCode>,
+        proto_indices: &[i32],
+        proto_paths: &[sdf::Path],
+        mask: &[bool],
+    ) -> Result<Vec<Vec<gf::Mat4d>>, SchemaError> {
+        if times.iter().any(|time| time.is_some() != base_time.is_some()) {
+            return Err(SchemaError::DefaultTimeMismatch {
+                prim: self.path().clone(),
+            });
+        }
+        let count = proto_indices.len();
+        check_mask(mask, count)?;
 
         let positions_attr = self.positions_attr();
         let mut motion = Motion::read(
@@ -529,7 +555,7 @@ impl PointInstancer {
 
         let stage = self.stage();
         let time_codes_per_second = stage.time_codes_per_second();
-        let prototype_prims = prototype_prims(stage, &proto_paths)?;
+        let prototype_prims = prototype_prims(stage, proto_paths)?;
         let mut cache = XformCache::default();
         let interpolated = motion.velocities.is_empty() && spin.is_empty();
         let mut samples = Vec::with_capacity(times.len());
@@ -551,7 +577,7 @@ impl PointInstancer {
             cache.set_time(time);
             let prototypes = prototype_xforms(&mut cache, &prototype_prims)?;
             let arrays = InstanceArrays {
-                proto_indices: &proto_indices,
+                proto_indices,
                 positions: &motion.positions,
                 velocities: &motion.velocities,
                 velocities_sample_time: motion.velocities_time,
@@ -560,11 +586,141 @@ impl PointInstancer {
                 orientations: &orientations,
                 angular_velocities: &spin,
                 angular_velocities_sample_time: spin_time,
-                mask: &mask,
+                mask,
             };
             samples.push(arrays.transforms(time, time_codes_per_second, &prototypes));
         }
         Ok(samples)
+    }
+
+    /// The extent of the instancer at `time`: the box around its instances,
+    /// each one the bound of its prototype root where the instance is,
+    /// carried there from `base_time`, and under `transform` where one is
+    /// given (C++ `ComputeExtentAtTime`). `None` for both times is the
+    /// default time.
+    ///
+    /// The instances are those of
+    /// [`instance_transforms_at`](Self::instance_transforms_at), less the
+    /// ones the mask of `base_time` prunes. A prototype is bounded by its
+    /// prims of the `default`, `proxy` and `render` purposes, with the
+    /// extent functions of [`extent_registry`](crate::extent_registry). An
+    /// instancer with no instance left has the corners of
+    /// [`gf::Range3d::EMPTY`].
+    ///
+    /// The errors are those of `instance_transforms_at` and of the bounds
+    /// of the prototypes, [`SchemaError::MaskSizeMismatch`] for `ids` that
+    /// are not one for each instance, and [`SchemaError::InstancerCycle`]
+    /// for an instancer that one of its own prototypes holds, which C++
+    /// does not come back from.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::{gf, usd};
+    /// use openusd_schemas::geom::{self, PointInstancerSchema};
+    ///
+    /// let stage = usd::Stage::builder()
+    ///     .schema_registry(openusd_schemas::schema_registry())
+    ///     .in_memory("scene.usda")?;
+    /// let instancer = geom::PointInstancer::define(&stage, "/Balls")?;
+    /// geom::Sphere::define(&stage, "/Balls/Ball")?;
+    /// instancer.prototypes_rel_builder().set_targets(["/Balls/Ball"]).build()?;
+    /// instancer.create_proto_indices_attr()?.set(vec![0, 0])?;
+    /// let positions = vec![gf::vec3f(0.0, 0.0, 0.0), gf::vec3f(10.0, 0.0, 0.0)];
+    /// instancer.create_positions_attr()?.set(positions)?;
+    ///
+    /// // Two unit spheres, ten apart.
+    /// let extent = instancer.extent_at(None, None, None)?;
+    /// assert_eq!(extent, [gf::vec3f(-1.0, -1.0, -1.0), gf::vec3f(11.0, 1.0, 1.0)]);
+    /// # Ok::<(), openusd_schemas::SchemaError>(())
+    /// ```
+    pub fn extent_at(
+        &self,
+        time: impl Into<Option<usd::TimeCode>>,
+        base_time: impl Into<Option<usd::TimeCode>>,
+        transform: impl Into<Option<gf::Mat4d>>,
+    ) -> Result<Extent, SchemaError> {
+        let context = ExtentContext::default();
+        let mut extents = self.extents_over(&[time.into()], base_time.into(), transform.into(), &context)?;
+        Ok(extents.pop().unwrap_or(extent::EMPTY))
+    }
+
+    /// The extent of the instancer at each of `times`, its instances
+    /// carried there from `base_time` (C++ `ComputeExtentAtTimes`); see
+    /// [`extent_at`](Self::extent_at).
+    pub fn extent_at_times(
+        &self,
+        times: &[usd::TimeCode],
+        base_time: usd::TimeCode,
+        transform: impl Into<Option<gf::Mat4d>>,
+    ) -> Result<Vec<Extent>, SchemaError> {
+        let times: Vec<_> = times.iter().copied().map(Some).collect();
+        self.extents_over(&times, Some(base_time), transform.into(), &ExtentContext::default())
+    }
+
+    /// The extent of the instancer at each of `times`, where `None` is the
+    /// default time: what [`extent_at_times`](Self::extent_at_times)
+    /// answers, with the prototypes bounded in `context`. The times are all
+    /// numeric or all the default time.
+    pub(super) fn extents_over(
+        &self,
+        times: &[Option<usd::TimeCode>],
+        base_time: Option<usd::TimeCode>,
+        transform: Option<gf::Mat4d>,
+        context: &ExtentContext,
+    ) -> Result<Vec<Extent>, SchemaError> {
+        // A prototype that holds an instancer bounds that one's prototypes
+        // in turn. An instancer met again on the way is one its own
+        // prototypes hold, whose extent has no end.
+        let Some(context) = context.nested(self.prim()) else {
+            return Err(SchemaError::InstancerCycle {
+                prim: self.path().clone(),
+            });
+        };
+        let proto_indices = self.held_proto_indices(base_time)?;
+        let mask = self.mask_at(base_time, None)?;
+        check_mask(&mask, proto_indices.len())?;
+        let proto_paths = self.prototype_paths(&proto_indices)?;
+        // The transforms keep every instance, so that each is beside the
+        // index of its prototype. The mask prunes them below.
+        let transforms = self.placed_over(times, base_time, &proto_indices, &proto_paths, &[])?;
+
+        let stage = self.stage();
+        let mut roots = Vec::with_capacity(proto_paths.len());
+        for path in &proto_paths {
+            roots.push(stage.prim(path)?);
+        }
+        let purposes = [Purpose::Default, Purpose::Proxy, Purpose::Render];
+        let mut cache = BBoxCache::new(None, purposes).in_context(context);
+        let mut extents = Vec::with_capacity(times.len());
+        for (&time, transforms) in times.iter().zip(&transforms) {
+            cache.set_time(time);
+            // The range and the matrix of each prototype's box.
+            let mut prototypes = Vec::with_capacity(roots.len());
+            for root in &roots {
+                let bound = cache.untransformed_bound(root)?;
+                prototypes.push((bound.range(), bound.matrix()));
+            }
+
+            // TODO(rayon): each instance's range comes from its own
+            // transform and its prototype's box, so the instances are
+            // independent, and their union does not depend on order.
+            let mut range = gf::Range3d::EMPTY;
+            for (index, (&prototype, &placed)) in proto_indices.iter().zip(transforms).enumerate() {
+                if !mask.get(index).copied().unwrap_or(true) {
+                    continue;
+                }
+                // `prototype_paths` checked every index against the paths.
+                let (proto_range, proto_matrix) = prototypes[usize::try_from(prototype).unwrap_or_default()];
+                let placed = match transform {
+                    Some(transform) => placed * transform,
+                    None => placed,
+                };
+                range = range.union(proto_range.transformed(proto_matrix * placed));
+            }
+            extents.push(range.into());
+        }
+        Ok(extents)
     }
 
     /// The targets of `prototypes`, which every one of `proto_indices` must
@@ -704,7 +860,8 @@ mod tests {
 
     use super::{InstanceArrays, MaskApplication, ProtoXformInclusion, canonical};
     use crate::SchemaError;
-    use crate::geom::{PointInstancer, PointInstancerSchema, Xform, XformableExt};
+    use crate::geom::extent::tests::extent;
+    use crate::geom::{BoundableExt, PointInstancer, PointInstancerSchema, Sphere, Xform, XformableExt};
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;
 
@@ -755,6 +912,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Two instances of a unit sphere, at time 0 at `(1, 0, 0)` and
+    /// `(0, 2, 0)`.
+    fn spheres() -> Result<PointInstancer> {
+        let instancer = placed()?;
+        Sphere::define(instancer.stage(), "/Instance/Proto")?;
+        instancer
+            .prototypes_rel_builder()
+            .set_targets(["/Instance/Proto"])
+            .build()?;
+        Ok(instancer)
+    }
+
+    /// An instancer's extent is the box around its prototype where each
+    /// instance is, less the instances the mask prunes, and under the
+    /// transform given.
+    #[test]
+    fn extent_around_instances() -> Result {
+        let instancer = spheres()?;
+        let whole = extent([-1.0, -1.0, -1.0], [2.0, 3.0, 1.0]);
+        assert_eq!(instancer.extent_at(START, START, None)?, whole);
+        // With no extent authored, this is what bounds the instancer.
+        assert_eq!(instancer.compute_extent(START)?, Some(whole));
+
+        let moved = gf::Mat4d::translation([10.0, 0.0, 0.0]);
+        assert_eq!(
+            instancer.extent_at(START, START, moved)?,
+            extent([9.0, -1.0, -1.0], [12.0, 3.0, 1.0])
+        );
+
+        // A prototype's own transform comes before its instance's.
+        Sphere::get(instancer.stage(), "/Instance/Proto")?
+            .expect("the prototype")
+            .set_translate(gf::vec3d(0.0, 0.0, 5.0))?;
+        assert_eq!(
+            instancer.extent_at(START, START, None)?,
+            extent([-1.0, -1.0, 4.0], [2.0, 3.0, 6.0])
+        );
+
+        instancer.deactivate_id(0)?;
+        assert_eq!(
+            instancer.extent_at(START, START, None)?,
+            extent([-1.0, 1.0, 4.0], [1.0, 3.0, 6.0])
+        );
+        instancer.deactivate_id(1)?;
+        assert_eq!(instancer.extent_at(START, START, None)?, crate::geom::extent::EMPTY);
+        Ok(())
+    }
+
+    /// The extent at each of several times carries the instances there
+    /// from the base time.
+    #[test]
+    fn extent_at_several_times() -> Result {
+        let instancer = spheres()?;
+        instancer
+            .create_velocities_attr()?
+            .set_at(vec![gf::vec3f(24.0, 0.0, 0.0); 2], START)?;
+        let times = [START, TimeCode::new(24.0)];
+        assert_eq!(
+            instancer.extent_at_times(&times, START, None)?,
+            [
+                extent([-1.0, -1.0, -1.0], [2.0, 3.0, 1.0]),
+                extent([23.0, -1.0, -1.0], [26.0, 3.0, 1.0]),
+            ]
+        );
+        assert!(instancer.extent_at_times(&[], START, None)?.is_empty());
+
+        let refused = instancer.extent_at(None, START, None);
+        assert!(
+            matches!(refused, Err(SchemaError::DefaultTimeMismatch { .. })),
+            "{refused:?}"
+        );
+        Ok(())
+    }
+
+    /// An instancer with nothing to place has no extent to compute, and
+    /// one that a prototype of its own holds is refused.
+    #[test]
+    fn extent_refused() -> Result {
+        let bare = instancer(0)?;
+        let refused = bare.extent_at(None, None, None);
+        assert!(matches!(refused, Err(SchemaError::NoValue { .. })), "{refused:?}");
+
+        let unplaced = placed()?;
+        let refused = unplaced.extent_at(START, START, None);
+        assert!(matches!(refused, Err(SchemaError::NoPrototypes { .. })), "{refused:?}");
+        assert_eq!(unplaced.compute_extent(START)?, None);
+
+        // The instancer is its own prototype.
+        let looped = placed()?;
+        let targeting = |target: &str| looped.prototypes_rel_builder().set_targets([target]).build();
+        targeting("/Instance")?;
+        let refused = looped.extent_at(START, START, None);
+        assert!(
+            matches!(&refused, Err(SchemaError::InstancerCycle { prim }) if prim.as_str() == "/Instance"),
+            "{refused:?}"
+        );
+        // The refusal leaves the instancer free to be bounded again.
+        Sphere::define(looped.stage(), "/Instance/Proto")?;
+        targeting("/Instance/Proto")?;
+        assert_eq!(
+            looped.extent_at(START, START, None)?,
+            extent([-1.0, -1.0, -1.0], [2.0, 3.0, 1.0])
+        );
+
+        // Two instancers, each a prototype of the other.
+        let stage = looped.stage();
+        let other = PointInstancer::define(stage, "/Other")?;
+        other.create_proto_indices_attr()?.set(vec![0])?;
+        other.create_positions_attr()?.set(vec![gf::vec3f(0.0, 0.0, 0.0)])?;
+        other.prototypes_rel_builder().set_targets(["/Instance"]).build()?;
+        targeting("/Other")?;
+        for (instancer, met_again) in [(&looped, "/Instance"), (&other, "/Other")] {
+            let refused = instancer.extent_at(START, START, None);
+            assert!(
+                matches!(&refused, Err(SchemaError::InstancerCycle { prim }) if prim.as_str() == met_again),
+                "{refused:?}"
+            );
+        }
+        Ok(())
     }
 
     /// At the default time every attribute is read at its default value

@@ -3,13 +3,14 @@
 //! it.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use openusd::{gf, tf, usd};
 
 use super::{
     Axis, BoundableSchema, Capsule, Capsule_1, Capsule_1Schema, CapsuleSchema, Cone, ConeSchema, Cube, CubeSchema,
     Curves, CurvesSchema, Cylinder, Cylinder_1, Cylinder_1Schema, CylinderSchema, Extent, Plane, PlaneSchema,
-    PointBased, PointBasedSchema, Points, PointsSchema, Sphere, SphereSchema, tokens,
+    PointBased, PointBasedSchema, PointInstancer, Points, PointsSchema, Sphere, SphereSchema, tokens,
 };
 use crate::SchemaError;
 
@@ -84,7 +85,12 @@ impl<T: BoundableSchema> BoundableExt for T {}
 /// is the default time, under a transform where one is given (C++
 /// `UsdGeomComputeExtentFunction`). `None` is a prim one of whose sizing
 /// attributes reads no value.
-pub type ExtentFn = fn(&usd::Prim, Option<usd::TimeCode>, Option<gf::Mat4d>) -> Result<Option<Extent>, SchemaError>;
+///
+/// The [`ExtentContext`] is what a function bounds other prims with, where
+/// its own prim's extent is made of theirs. A function that sizes its prim
+/// from the prim's own attributes has no use for it.
+pub type ExtentFn =
+    fn(&usd::Prim, Option<usd::TimeCode>, Option<gf::Mat4d>, &ExtentContext) -> Result<Option<Extent>, SchemaError>;
 
 /// The function that computes the extent of each schema type that has one,
 /// by the identifier of the schema (the registry behind C++
@@ -102,7 +108,9 @@ pub type ExtentFn = fn(&usd::Prim, Option<usd::TimeCode>, Option<gf::Mat4d>) -> 
 ///
 /// // Bound every sphere by the cube two units wide, whatever its radius.
 /// let mut extents = openusd_schemas::extent_registry().clone();
-/// extents.register("Sphere", |_prim, _time, transform| Ok(Some(geom::Cube::extent_from(2.0, transform))));
+/// extents.register("Sphere", |_prim, _time, transform, _context| {
+///     Ok(Some(geom::Cube::extent_from(2.0, transform)))
+/// });
 ///
 /// let stage = usd::Stage::builder()
 ///     .schema_registry(openusd_schemas::schema_registry())
@@ -115,7 +123,9 @@ pub type ExtentFn = fn(&usd::Prim, Option<usd::TimeCode>, Option<gf::Mat4d>) -> 
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct ExtentRegistry {
-    fns: HashMap<tf::Token, ExtentFn>,
+    /// Shared between the clones of a registry until one of them registers
+    /// a function, so that a clone costs no copy of the table.
+    fns: Arc<HashMap<tf::Token, ExtentFn>>,
 }
 
 impl ExtentRegistry {
@@ -134,7 +144,7 @@ impl ExtentRegistry {
     /// schema registry, so the second is checked where a function is looked
     /// up, in [`extent_fn`](Self::extent_fn).
     pub fn register(&mut self, schema: impl Into<tf::Token>, compute: ExtentFn) -> &mut Self {
-        self.fns.insert(schema.into(), compute);
+        Arc::make_mut(&mut self.fns).insert(schema.into(), compute);
         self
     }
 
@@ -171,10 +181,7 @@ impl ExtentRegistry {
         time: impl Into<Option<usd::TimeCode>>,
         transform: impl Into<Option<gf::Mat4d>>,
     ) -> Result<Option<Extent>, SchemaError> {
-        match self.extent_fn(prim)? {
-            Some(compute) => compute(prim, time.into(), transform.into()),
-            None => Ok(None),
-        }
+        ExtentContext::new(self.clone()).shape_extent(prim, time, transform)
     }
 
     /// `boundable`'s extent at `time`, where `None` is the default time,
@@ -193,6 +200,76 @@ impl ExtentRegistry {
     }
 }
 
+/// What an extent function computes with: the registry it was found in,
+/// and the prims whose extents are being computed around the call.
+///
+/// A prim's extent can be made of the bounds of other prims, as a point
+/// instancer's is of its prototypes'. Its function bounds those by the
+/// same registry, and takes [`nested`](Self::nested) for a context to do it
+/// in, which refuses a prim whose extent is already being computed. A
+/// [`BBoxCache`](super::BBoxCache) bounds prims in a context through
+/// `BBoxCache::in_context`, and [`shape_extent`](Self::shape_extent) asks
+/// one prim's extent in it.
+#[derive(Debug, Clone)]
+pub struct ExtentContext {
+    extents: ExtentRegistry,
+    /// The prims whose extents the call is nested in, the outermost first.
+    bounding: Vec<usd::Prim>,
+}
+
+impl ExtentContext {
+    /// A context for an extent computed by the functions of `extents`,
+    /// nested in no other.
+    pub fn new(extents: ExtentRegistry) -> Self {
+        ExtentContext {
+            extents,
+            bounding: Vec::new(),
+        }
+    }
+
+    /// The registry the extent is computed by.
+    pub fn extents(&self) -> &ExtentRegistry {
+        &self.extents
+    }
+
+    /// The extent `prim`'s type computes at `time`, where `None` is the
+    /// default time, under `transform` where one is given, by the registry
+    /// of this context and nested in what the context is nested in: what
+    /// [`ExtentRegistry::shape_extent`] answers for a prim asked about on
+    /// its own. An extent function asks this of the context it was handed,
+    /// for a prim its own prim's extent is made of.
+    pub fn shape_extent(
+        &self,
+        prim: &usd::Prim,
+        time: impl Into<Option<usd::TimeCode>>,
+        transform: impl Into<Option<gf::Mat4d>>,
+    ) -> Result<Option<Extent>, SchemaError> {
+        match self.extents.extent_fn(prim)? {
+            Some(compute) => compute(prim, time.into(), transform.into(), self),
+            None => Ok(None),
+        }
+    }
+
+    /// The context to bound the prims that `prim`'s extent is made of, or
+    /// `None` where `prim`'s extent is already being computed around this
+    /// call: one of the prims it is made of holds `prim` itself.
+    pub fn nested(&self, prim: &usd::Prim) -> Option<Self> {
+        if self.bounding.contains(prim) {
+            return None;
+        }
+        let mut nested = self.clone();
+        nested.bounding.push(prim.clone());
+        Some(nested)
+    }
+}
+
+impl Default for ExtentContext {
+    /// A context over [`extent_registry`](crate::extent_registry).
+    fn default() -> Self {
+        Self::new(crate::extent_registry().clone())
+    }
+}
+
 /// The `extent` a layer authors for `boundable` at `time`, where `None` is
 /// the default time. `None` is no authored extent to take: none is
 /// authored, or the authored one is blocked or does not hold two corners.
@@ -205,9 +282,6 @@ pub(crate) fn authored_extent(
 }
 
 /// Add the extent function of each `UsdGeom` type that has one.
-// TODO: `PointInstancer` has none. Its extent unions the bounds of its
-// prototypes under each instance transform (C++ `ComputeExtentAtTime`),
-// over a `BBoxCache` of its own.
 pub(crate) fn register_extents(registry: &mut ExtentRegistry) {
     registry
         .register(tokens::SPHERE, sphere)
@@ -220,7 +294,27 @@ pub(crate) fn register_extents(registry: &mut ExtentRegistry) {
         .register(tokens::PLANE, plane)
         .register(tokens::POINT_BASED, point_based)
         .register(tokens::POINTS_, points)
-        .register(tokens::CURVES, curves);
+        .register(tokens::CURVES, curves)
+        .register(tokens::POINT_INSTANCER, point_instancer);
+}
+
+/// A `PointInstancer` from its instances at `time`, with `time` as their
+/// base time, its prototypes bounded by the registry of `context` (C++
+/// `_ComputeExtentForPointInstancer`). An instancer whose own
+/// `protoIndices` or `positions` read no value, or that targets no
+/// prototypes, computes none.
+fn point_instancer(
+    prim: &usd::Prim,
+    time: Option<usd::TimeCode>,
+    transform: Option<gf::Mat4d>,
+    context: &ExtentContext,
+) -> Result<Option<Extent>, SchemaError> {
+    let instancer = PointInstancer::from_prim_unchecked(prim.clone());
+    match instancer.extents_over(&[time], time, transform, context) {
+        Err(SchemaError::NoValue { attribute }) if attribute.prim_path() == *prim.path() => Ok(None),
+        Err(SchemaError::NoPrototypes { prim: instancer }) if instancer == *prim.path() => Ok(None),
+        extents => extents.map(|mut extents| extents.pop()),
+    }
 }
 
 /// A `Sphere` from its `radius`.
@@ -228,6 +322,7 @@ fn sphere(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let radius = Sphere::from_prim_unchecked(prim.clone()).radius_at(time)?;
     Ok(radius.map(|radius| Sphere::extent_from(radius, transform)))
@@ -238,6 +333,7 @@ fn cube(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let size = Cube::from_prim_unchecked(prim.clone()).size_at(time)?;
     Ok(size.map(|size| Cube::extent_from(size, transform)))
@@ -248,6 +344,7 @@ fn cone(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let cone = Cone::from_prim_unchecked(prim.clone());
     let sizes = (cone.height_at(time)?)
@@ -261,6 +358,7 @@ fn cylinder(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let cylinder = Cylinder::from_prim_unchecked(prim.clone());
     let sizes = (cylinder.height_at(time)?)
@@ -275,6 +373,7 @@ fn cylinder_1(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let cylinder = Cylinder_1::from_prim_unchecked(prim.clone());
     let sizes = (cylinder.height_at(time)?)
@@ -289,6 +388,7 @@ fn capsule(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let capsule = Capsule::from_prim_unchecked(prim.clone());
     let sizes = (capsule.height_at(time)?)
@@ -303,6 +403,7 @@ fn capsule_1(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let capsule = Capsule_1::from_prim_unchecked(prim.clone());
     let sizes = (capsule.height_at(time)?)
@@ -319,6 +420,7 @@ fn plane(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let plane = Plane::from_prim_unchecked(prim.clone());
     let sizes = (plane.width_at(time)?)
@@ -332,6 +434,7 @@ fn point_based(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let points = PointBased::from_prim_unchecked(prim.clone()).points_at(time)?;
     Ok(points.map(|points| PointBased::extent_from(&points, transform)))
@@ -343,6 +446,7 @@ fn points(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let view = Points::from_prim_unchecked(prim.clone());
     let Some(points) = view.points_at(time)? else {
@@ -361,6 +465,7 @@ fn curves(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let view = Curves::from_prim_unchecked(prim.clone());
     let Some(points) = view.points_at(time)? else {
@@ -375,12 +480,13 @@ pub(crate) mod tests {
     use openusd::usd::{self, SchemaBase, SchemaDecl, SchemaFamily, SchemaKind, SchemaRegistry};
     use openusd::{gf, tf};
 
-    use super::{BoundableExt, ExtentFn};
+    use super::{BoundableExt, ExtentContext, ExtentFn};
     use crate::SchemaError;
     use crate::geom::extent::tests::extent;
     use crate::geom::{
-        Axis, BasisCurves, Boundable, BoundableSchema, Capsule_1, Cone, Cube, CurvesSchema, Extent, Mesh, Plane,
-        PointBased, PointBasedSchema, PointInstancer, Points, PointsSchema, Sphere, SphereSchema, Xform, tokens,
+        Axis, BBoxCache, BasisCurves, Boundable, BoundableSchema, Capsule_1, Cone, Cube, CurvesSchema, Extent, Mesh,
+        Plane, PointBased, PointBasedSchema, PointInstancer, Points, PointsSchema, Purpose, Sphere, SphereSchema,
+        Xform, tokens,
     };
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;
@@ -520,7 +626,8 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A type with no function, and a prim of no type, compute nothing.
+    /// An instancer with nothing to place, and a prim of no type, compute
+    /// nothing.
     #[test]
     fn no_function() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
@@ -536,7 +643,9 @@ pub(crate) mod tests {
         extents.register(tokens::XFORMABLE, boxed::<2> as ExtentFn);
         let xform = Xform::define(&stage, "/Xform")?;
         assert_eq!(extents.shape_extent(&xform, None, None)?, None);
-        assert_eq!(extents.shape_extent(&instancer, None, None)?, None);
+        let stage = stage_with(&[typed("Bare", &[tokens::BOUNDABLE])])?;
+        let bare = stage.define_typed_prim("/Bare", "Bare")?;
+        assert_eq!(extents.shape_extent(&bare, None, None)?, None);
         Ok(())
     }
 
@@ -545,8 +654,82 @@ pub(crate) mod tests {
         _prim: &usd::Prim,
         _time: Option<usd::TimeCode>,
         transform: Option<gf::Mat4d>,
+        _context: &ExtentContext,
     ) -> Result<Option<Extent>> {
         Ok(Some(Cube::extent_from(SIZE.into(), transform)))
+    }
+
+    /// A prim bounded by the prims beneath it, through a cache in the
+    /// context the function is handed.
+    fn around_children(
+        prim: &usd::Prim,
+        time: Option<usd::TimeCode>,
+        _transform: Option<gf::Mat4d>,
+        context: &ExtentContext,
+    ) -> Result<Option<Extent>> {
+        let Some(nested) = context.nested(prim) else {
+            return Ok(None);
+        };
+        let mut cache = BBoxCache::new(time, [Purpose::Default]).in_context(nested);
+        let mut range = gf::Range3d::EMPTY;
+        for child in prim.children()? {
+            range = range.union(cache.local_bound(&child)?.aligned_range());
+        }
+        Ok((!range.is_empty()).then(|| range.into()))
+    }
+
+    /// A prim whose extent asks for its own, and takes a cube two wide
+    /// where it finds itself being bounded already.
+    fn around_itself(
+        prim: &usd::Prim,
+        time: Option<usd::TimeCode>,
+        transform: Option<gf::Mat4d>,
+        context: &ExtentContext,
+    ) -> Result<Option<Extent>> {
+        match context.nested(prim) {
+            Some(nested) => nested.shape_extent(prim, time, transform),
+            None => boxed::<2>(prim, time, transform, context),
+        }
+    }
+
+    /// A function that bounds other prims does so in the context it is
+    /// handed: by the registry that was asked, and told when its own prim
+    /// is already being bounded.
+    #[test]
+    fn extent_of_parts() -> Result {
+        let stage = stage_with(&[
+            typed("Group", &[tokens::BOUNDABLE]),
+            typed("Loop", &[tokens::BOUNDABLE]),
+        ])?;
+        let group = stage.define_typed_prim("/Group", "Group")?;
+        Sphere::define(&stage, "/Group/Ball")?;
+        let looped = stage.define_typed_prim("/Loop", "Loop")?;
+
+        let mut extents = crate::extent_registry().clone();
+        extents
+            .register("Group", around_children as ExtentFn)
+            .register("Loop", around_itself as ExtentFn);
+        assert_eq!(
+            extents.shape_extent(&group, None, None)?,
+            Some(extent([-1.0; 3], [1.0; 3]))
+        );
+        assert_eq!(
+            extents.shape_extent(&looped, None, None)?,
+            Some(extent([-1.0; 3], [1.0; 3]))
+        );
+
+        // The parts are bounded by the functions of the registry asked.
+        extents.register(tokens::SPHERE, boxed::<6> as ExtentFn);
+        assert_eq!(
+            extents.shape_extent(&group, None, None)?,
+            Some(extent([-3.0; 3], [3.0; 3]))
+        );
+        let mut cache = BBoxCache::new(None, [Purpose::Default]).with_extents(extents);
+        assert_eq!(
+            cache.untransformed_bound(&group)?.range(),
+            gf::Range3d::from(extent([-3.0; 3], [3.0; 3]))
+        );
+        Ok(())
     }
 
     /// A stage that knows this crate's schemas and the family `decls` make.

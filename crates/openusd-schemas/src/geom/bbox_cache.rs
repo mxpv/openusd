@@ -19,8 +19,9 @@ use openusd::{gf, sdf, tf};
 use super::boundable::authored_extent;
 use super::imageable::{is_invisible, purpose_below};
 use super::{
-    Boundable, BoundableSchema, ExtentFn, ExtentRegistry, Imageable, ImageableExt, ImageableSchema, MaskApplication,
-    ModelAPI, PointInstancer, PointInstancerSchema, ProtoXformInclusion, Purpose, PurposeInfo, XformCache, tokens,
+    Boundable, BoundableSchema, ExtentContext, ExtentFn, ExtentRegistry, Imageable, ImageableExt, ImageableSchema,
+    MaskApplication, ModelAPI, PointInstancer, PointInstancerSchema, ProtoXformInclusion, Purpose, PurposeInfo,
+    XformCache, tokens,
 };
 use crate::SchemaError;
 
@@ -52,9 +53,6 @@ use crate::SchemaError;
 /// prototype's prims. Queries take `&mut self`, since answering one may
 /// fill the cache. A query that fails keeps the entries it completed and
 /// leaves the cache as usable as it was.
-///
-/// A `PointInstancer` is bounded by its authored `extent` alone, and by
-/// nothing where it authors none.
 ///
 /// A prim that does not exist on its stage has the empty box, where C++
 /// raises a coding error. An extent that cannot be computed fails the query
@@ -98,9 +96,9 @@ pub struct BBoxCache {
     purposes: Vec<Purpose>,
     use_extents_hint: bool,
     ignore_visibility: bool,
-    /// The registry extents are computed with, or `None` for
-    /// [`extent_registry`](crate::extent_registry).
-    extents: Option<ExtentRegistry>,
+    /// What extents are computed with: the registry, and the prims whose
+    /// extents this cache is bounding prims for.
+    context: ExtentContext,
     xforms: XformCache,
     /// The resolved prims. An entry is inserted once its resolve has
     /// succeeded, so every entry is complete.
@@ -123,7 +121,7 @@ impl BBoxCache {
             purposes: purposes.into_iter().collect(),
             use_extents_hint: false,
             ignore_visibility: false,
-            extents: None,
+            context: ExtentContext::default(),
             xforms: XformCache::new(time),
             entries: HashMap::new(),
             types: SchemaTypes::default(),
@@ -134,8 +132,19 @@ impl BBoxCache {
     /// Compute extents with `extents` from now on, where a cache otherwise
     /// uses [`extent_registry`](crate::extent_registry). Every bound the
     /// cache holds is dropped.
-    pub fn with_extents(mut self, extents: ExtentRegistry) -> Self {
-        self.extents = Some(extents);
+    pub fn with_extents(self, extents: ExtentRegistry) -> Self {
+        self.in_context(ExtentContext::new(extents))
+    }
+
+    /// Compute extents in `context` from now on: by its registry, and
+    /// nested in the extents it is nested in. Every bound the cache holds
+    /// is dropped.
+    ///
+    /// This is how an extent function bounds the prims its own prim's
+    /// extent is made of: with a cache in the [`ExtentContext::nested`]
+    /// context of the one it was handed.
+    pub fn in_context(mut self, context: ExtentContext) -> Self {
+        self.context = context;
         self.entries.clear();
         self.types = SchemaTypes::default();
         self
@@ -608,6 +617,34 @@ impl BBoxCache {
         Ok(prim_ctm * inverse(ancestor_ctm))
     }
 
+    /// What extents are computed with.
+    pub(super) fn context(&self) -> &ExtentContext {
+        &self.context
+    }
+
+    /// The untransformed bound of `prim` for each purpose taken alone, as
+    /// an axis-aligned range in the prim's own space, in the order of
+    /// [`Purpose::ORDERED`]. A purpose the prim has no geometry of has the
+    /// empty range.
+    pub(super) fn purpose_ranges(
+        &mut self,
+        prim: &usd::Prim,
+    ) -> Result<[gf::Range3d; Purpose::ORDERED.len()], SchemaError> {
+        let context = Context {
+            prim: prim.clone(),
+            purpose: None,
+        };
+        self.resolve(&context, None, None)?;
+        let Some(entry) = self.entries.get(&context) else {
+            return Ok(Default::default());
+        };
+        let matrix = entry.boxes.matrix();
+        Ok(Purpose::ORDERED.map(|purpose| match entry.boxes.range(purpose) {
+            Some(range) => range.transformed(matrix),
+            None => gf::Range3d::EMPTY,
+        }))
+    }
+
     /// The boxes of `prim` for the included purposes, combined in the order
     /// the purposes were given (C++ `_GetCombinedBBoxForIncludedPurposes`).
     /// `None` is a prim with no box for any purpose, the included ones or
@@ -787,7 +824,7 @@ impl BBoxCache {
                 // time.
                 frame.varying |= compute.is_some();
                 match compute {
-                    Some(compute) => compute(&prim, time, None)?,
+                    Some(compute) => compute(&prim, time, None, &self.context)?,
                     None => None,
                 }
             };
@@ -822,7 +859,10 @@ impl BBoxCache {
         // instance with the same inheritable purpose shares the entries of.
         // A prototype's prims sit in the prototype's own space, which the
         // instance's place in its component takes them out of.
-        let prototype = match by_proxies {
+        // The listing that found the prim may already say it is no
+        // instance.
+        let instance = composed.as_ref().and_then(usd::ComposedStatus::is_instance);
+        let prototype = match by_proxies || instance == Some(false) {
             true => None,
             false => prim.prototype()?,
         };
@@ -983,13 +1023,12 @@ impl BBoxCache {
         }
         let is_a = |base: &'static str| registry.is_a(name, &tf::Token::new(base));
         let boundable = is_a(tokens::BOUNDABLE);
-        let extents = self.extents.as_ref().unwrap_or_else(|| crate::extent_registry());
         let schema = SchemaType {
             typed: is_a(usd::tokens::TYPED),
             imageable: is_a(tokens::IMAGEABLE),
             boundable,
             extent_fn: match boundable {
-                true => extents.extent_fn(prim)?,
+                true => self.context.extents().extent_fn(prim)?,
                 false => None,
             },
         };
@@ -1344,7 +1383,7 @@ fn inverse(matrix: gf::Mat4d) -> gf::Mat4d {
 mod tests {
     use std::collections::{BTreeSet, HashMap};
 
-    use openusd::usd;
+    use openusd::usd::{self, SchemaBase};
     use openusd::{gf, sdf};
 
     use super::{BBoxCache, Boxes, Context, Entry};
@@ -2100,11 +2139,41 @@ def Xform "Root"
         let mut cache = default_cache();
         assert_range(world(&mut cache, &stage, "/Root")?, range([-5.0; 3], [5.0; 3]));
 
-        let cube: ExtentFn = |_prim, _time, transform| Ok(Some(Cube::extent_from(2.0, transform)));
+        let cube: ExtentFn = |_prim, _time, transform, _context| Ok(Some(Cube::extent_from(2.0, transform)));
         let mut extents = crate::extent_registry().clone();
         extents.register(tokens::SPHERE, cube);
         let mut cache = cache.with_extents(extents);
         assert_range(world(&mut cache, &stage, "/Root")?, range([-1.0; 3], [1.0; 3]));
+        Ok(())
+    }
+
+    /// A point instancer's prototypes are bounded by the functions of the
+    /// cache that bounds the instancer.
+    #[test]
+    fn instancer_by_cache_extents() -> Result {
+        let (_dir, stage, instancer) = instancer("int[] protoIndices = [0]", "point3f[] positions = [(0, 0, 0)]")?;
+        let cube: ExtentFn = |_prim, _time, transform, _context| Ok(Some(Cube::extent_from(6.0, transform)));
+        let mut extents = crate::extent_registry().clone();
+        extents.register(tokens::SPHERE, cube);
+        let mut cache = default_cache().with_extents(extents);
+
+        let prototype = stage.prim("/World/Inst/Protos/Small")?;
+        assert_range(
+            cache.untransformed_bound(&prototype)?.range(),
+            range([-3.0; 3], [3.0; 3]),
+        );
+        let own = cache.untransformed_bound(instancer.prim())?;
+        assert_range(own.range(), range([-3.0; 3], [3.0; 3]));
+        let instances = cache.point_instance_untransformed_bounds(&instancer, &[0])?;
+        assert_range(instances[0].aligned_range(), range([-3.0; 3], [3.0; 3]));
+
+        // The registry of this crate's schemas bounds the same sphere by
+        // its radius.
+        let mut plain = default_cache();
+        assert_range(
+            plain.untransformed_bound(instancer.prim())?.range(),
+            range([-1.0; 3], [1.0; 3]),
+        );
         Ok(())
     }
 
@@ -2491,8 +2560,12 @@ def Xform "World"
         assert!(cache.point_instance_world_bounds(&instancer, &[])?.is_empty());
         assert_eq!(cache.instancers.len(), 1, "the instancer was read once and kept");
 
-        // The instancer has no extent of its own to bound it by.
-        assert!(world(&mut cache, &stage, "/World")?.is_empty());
+        // With no `extent` authored, the instancer is bounded by its
+        // instances, and its prototypes are not bounded beside them.
+        assert_range(
+            world(&mut cache, &stage, "/World")?,
+            range([-6.0, 9.0, -1.0], [2.0, 17.0, 3.0]),
+        );
         Ok(())
     }
 

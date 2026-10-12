@@ -65,7 +65,7 @@ openusd::include_schema!("usdLux");
 use openusd::{gf, usd};
 
 use crate::SchemaError;
-use crate::geom::{Axis, Cylinder, Extent, ExtentRegistry, Plane, Sphere};
+use crate::geom::{Axis, Cylinder, Extent, ExtentContext, ExtentRegistry, Plane, Sphere};
 
 impl Default for LightListCacheBehavior {
     /// `ignore`: the cache is not consulted and lights are discovered by
@@ -98,6 +98,7 @@ fn sphere_light(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let radius = SphereLight::from_prim_unchecked(prim.clone()).radius_at(time)?;
     Ok(radius.map(|radius| Sphere::extent_from(radius.into(), transform)))
@@ -109,6 +110,7 @@ fn disk_light(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let radius = DiskLight::from_prim_unchecked(prim.clone()).radius_at(time)?;
     Ok(radius.map(|radius| Cylinder::extent_from(0.0, radius.into(), Axis::Z, transform)))
@@ -119,6 +121,7 @@ fn cylinder_light(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let light = CylinderLight::from_prim_unchecked(prim.clone());
     let sizes = light.length_at(time)?.zip(light.radius_at(time)?);
@@ -130,6 +133,7 @@ fn rect_light(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let light = RectLight::from_prim_unchecked(prim.clone());
     let sizes = light.width_at(time)?.zip(light.height_at(time)?);
@@ -141,6 +145,7 @@ fn portal_light(
     prim: &usd::Prim,
     time: Option<usd::TimeCode>,
     transform: Option<gf::Mat4d>,
+    _context: &ExtentContext,
 ) -> Result<Option<Extent>, SchemaError> {
     let light = PortalLight::from_prim_unchecked(prim.clone());
     let sizes = light.width_at(time)?.zip(light.height_at(time)?);

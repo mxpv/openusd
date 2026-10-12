@@ -3,7 +3,7 @@
 use openusd::usd::{self, SchemaBase};
 use openusd::{Result, gf, sdf};
 
-use super::{Extent, ModelAPI, Purpose, tokens};
+use super::{BBoxCache, Boundable, Extent, ModelAPI, Purpose, extent, tokens};
 use crate::SchemaError;
 
 impl ModelAPI {
@@ -86,6 +86,60 @@ impl ModelAPI {
             .set_at(extents.as_flattened().to_vec(), time)
             .build()?)
     }
+
+    /// The extents to cache on the model at the time of `cache`, as
+    /// [`set_extents_hint`](Self::set_extents_hint) takes them (C++
+    /// `UsdGeomModelAPI::ComputeExtentsHint`).
+    ///
+    /// They are the model's untransformed bound for each purpose in
+    /// [`Purpose::ORDERED`], as an axis-aligned extent, up to the last
+    /// purpose the model has geometry of. A model with none has one extent,
+    /// the corners of [`gf::Range3d::EMPTY`].
+    ///
+    /// A model that is itself boundable takes the extent its type computes
+    /// for every purpose, by the cache's extent functions, and the one
+    /// empty extent where its type computes none.
+    ///
+    /// The cache answers with its own options, and should not be one that
+    /// bounds models by their hints, which would answer the hint the model
+    /// holds. Its included purposes play no part and are left as they are,
+    /// where C++ leaves the last purpose included.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::usd::{self, SchemaBase};
+    /// use openusd::gf;
+    /// use openusd_schemas::geom::{self, Purpose};
+    ///
+    /// let stage = usd::Stage::builder()
+    ///     .schema_registry(openusd_schemas::schema_registry())
+    ///     .in_memory("scene.usda")?;
+    /// let model = geom::ModelAPI::apply(geom::Xform::define(&stage, "/Model")?.prim())?;
+    /// geom::Sphere::define(&stage, "/Model/Ball")?;
+    ///
+    /// let mut cache = geom::BBoxCache::new(None, [Purpose::Default]);
+    /// let extents = model.compute_extents_hint(&mut cache)?;
+    /// assert_eq!(extents, [[gf::vec3f(-1.0, -1.0, -1.0), gf::vec3f(1.0, 1.0, 1.0)]]);
+    /// model.set_extents_hint(&extents, None)?;
+    /// # Ok::<(), openusd_schemas::SchemaError>(())
+    /// ```
+    pub fn compute_extents_hint(&self, cache: &mut BBoxCache) -> Result<Vec<Extent>, SchemaError> {
+        if Boundable::from_prim(self.prim().clone())?.is_some() {
+            let extent = cache.context().shape_extent(self.prim(), cache.time(), None)?;
+            return Ok(match extent {
+                Some(extent) => vec![extent; Purpose::ORDERED.len()],
+                None => vec![extent::EMPTY],
+            });
+        }
+
+        let ranges = cache.purpose_ranges(self.prim())?;
+        let bounded = ranges
+            .iter()
+            .rposition(|range| !range.is_empty())
+            .map_or(1, |last| last + 1);
+        Ok(ranges[..bounded].iter().map(|range| Extent::from(*range)).collect())
+    }
 }
 
 #[cfg(test)]
@@ -95,7 +149,7 @@ mod tests {
 
     use crate::SchemaError;
     use crate::geom::extent::tests::extent;
-    use crate::geom::{ModelAPI, Xform};
+    use crate::geom::{BBoxCache, Cube, ExtentFn, ModelAPI, PointInstancer, Purpose, Sphere, Xform, tokens};
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;
 
@@ -145,6 +199,89 @@ mod tests {
 
         model.set_extents_hint(&[unit; 4], None)?;
         assert_eq!(model.extents_hint_at(None)?, Some(vec![unit; 4]));
+        Ok(())
+    }
+
+    /// The extents computed for a model are its bound for each purpose, up
+    /// to the last one it has geometry of, and a cache that reads them back
+    /// as a hint bounds the model as one that bounds its geometry.
+    #[test]
+    fn computed_hint_per_purpose() -> Result {
+        let (_dir, stage) = crate::tests::from_usda(
+            r#"#usda 1.0
+
+def Xform "Model" (kind = "component")
+{
+    double3 xformOp:translate = (100, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    def Sphere "Ball" {}
+
+    def Cube "Shell"
+    {
+        uniform token purpose = "render"
+        double size = 10
+    }
+}
+
+def Xform "Guides" (kind = "component")
+{
+    def Cube "Guide"
+    {
+        uniform token purpose = "guide"
+    }
+}
+
+def Xform "Empty" (kind = "component") {}
+"#,
+        )?;
+        let empty = crate::geom::extent::EMPTY;
+        let model = |path: &str| -> Result<ModelAPI> { Ok(ModelAPI::from_prim_unchecked(stage.prim(path)?)) };
+        let mut cache = BBoxCache::new(None, [Purpose::Proxy, Purpose::Guide]);
+
+        // The model's own transform plays no part.
+        let extents = model("/Model")?.compute_extents_hint(&mut cache)?;
+        assert_eq!(extents, [extent([-1.0; 3], [1.0; 3]), extent([-5.0; 3], [5.0; 3])]);
+        assert_eq!(cache.included_purposes(), [Purpose::Proxy, Purpose::Guide]);
+
+        // Purposes before the last one with geometry keep their place.
+        let guides = model("/Guides")?.compute_extents_hint(&mut cache)?;
+        assert_eq!(guides, [empty, empty, empty, extent([-1.0; 3], [1.0; 3])]);
+        assert_eq!(model("/Empty")?.compute_extents_hint(&mut cache)?, [empty]);
+
+        model("/Model")?.set_extents_hint(&extents, None)?;
+        let prim = stage.prim("/Model")?;
+        let mut hinted = BBoxCache::new(None, [Purpose::Default, Purpose::Render]).with_extents_hint(true);
+        let mut plain = BBoxCache::new(None, [Purpose::Default, Purpose::Render]);
+        assert_eq!(
+            hinted.world_bound(&prim)?.aligned_range(),
+            plain.world_bound(&prim)?.aligned_range()
+        );
+        Ok(())
+    }
+
+    /// A model that is itself boundable takes the extent its type computes
+    /// for every purpose, by the functions of the cache asked, and one
+    /// empty extent where its type computes none.
+    #[test]
+    fn computed_hint_boundable() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        let mut cache = BBoxCache::new(None, [Purpose::Default]);
+        let ball = Sphere::define(&stage, "/Ball")?;
+        let model = ModelAPI::from_prim_unchecked(ball.prim().clone());
+        let extents = model.compute_extents_hint(&mut cache)?;
+        assert_eq!(extents, [extent([-1.0; 3], [1.0; 3]); 4]);
+
+        let cube: ExtentFn = |_prim, _time, transform, _context| Ok(Some(Cube::extent_from(6.0, transform)));
+        let mut extents = crate::extent_registry().clone();
+        extents.register(tokens::SPHERE, cube);
+        let mut cache = cache.with_extents(extents);
+        let extents = model.compute_extents_hint(&mut cache)?;
+        assert_eq!(extents, [extent([-3.0; 3], [3.0; 3]); 4]);
+
+        let bare = PointInstancer::define(&stage, "/Bare")?;
+        let extents = ModelAPI::from_prim_unchecked(bare.prim().clone()).compute_extents_hint(&mut cache)?;
+        assert_eq!(extents, [crate::geom::extent::EMPTY]);
         Ok(())
     }
 
