@@ -67,7 +67,7 @@ pub trait PointBasedExt: PointBasedSchema {
             &self.points_attr(),
             &self.velocities_attr(),
             &self.accelerations_attr(),
-            base_time,
+            Some(base_time),
         )?;
         let count = motion.positions.len();
         let time_codes_per_second = self.stage().time_codes_per_second();

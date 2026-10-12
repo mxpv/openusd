@@ -28,13 +28,21 @@ pub(super) struct Held<T> {
 
 impl<T> Held<T> {
     /// Read `attr` at the sample at or before `base_time`, or its default
-    /// value where it has no samples (C++ `_GetAttrForTransforms`). `None`
-    /// where that reads no value.
-    pub(super) fn read(attr: &usd::Attribute, base_time: usd::TimeCode) -> Result<Option<Self>>
+    /// value where it has no samples or `base_time` is the default time
+    /// (C++ `_GetAttrForTransforms`). `None` where that reads no value.
+    pub(super) fn read(attr: &usd::Attribute, base_time: Option<usd::TimeCode>) -> Result<Option<Self>>
     where
         T: sdf::FromValue,
         T::Error: Into<openusd::Error>,
     {
+        let Some(base_time) = base_time else {
+            let value = attr.get_at::<T>(None)?;
+            return Ok(value.map(|value| Held {
+                value,
+                sample_time: None,
+                bracket: None,
+            }));
+        };
         let times = attr.time_sample_times()?;
         let bracket = usd::bracketing_time_samples(&times, base_time.value());
         let sample_time = bracket.map(|(lower, _)| lower);
@@ -75,7 +83,7 @@ impl<T> Held<Vec<T>> {
     /// than the value it moves says nothing about that value.
     pub(super) fn aligned<U>(
         attr: &usd::Attribute,
-        base_time: usd::TimeCode,
+        base_time: Option<usd::TimeCode>,
         lead: &Held<U>,
         len: usize,
     ) -> Result<Option<Self>>
@@ -125,7 +133,7 @@ impl Motion {
         positions: &usd::Attribute,
         velocities: &usd::Attribute,
         accelerations: &usd::Attribute,
-        base_time: usd::TimeCode,
+        base_time: Option<usd::TimeCode>,
     ) -> Result<Self, SchemaError> {
         let Some(positions) = Held::<Vec<gf::Vec3f>>::read(positions, base_time)? else {
             return Err(SchemaError::NoValue {

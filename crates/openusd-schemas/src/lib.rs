@@ -293,6 +293,16 @@ pub enum SchemaError {
         expected: usize,
     },
 
+    /// One of the times instance transforms were asked for is the default
+    /// time and another is numeric. C++ `ComputeInstanceTransformsAtTimes`
+    /// refuses the mix: values read at their defaults cannot be carried to a
+    /// time, nor sampled ones to none.
+    #[error("the times asked of {prim} mix the default time with numeric ones")]
+    DefaultTimeMismatch {
+        /// The point instancer.
+        prim: sdf::Path,
+    },
+
     /// A point instancer asked for its prototypes' transforms targets no
     /// prototype.
     #[error("{prim} targets no prototypes")]

@@ -89,7 +89,7 @@ impl<'a> InstanceArrays<'a> {
     ) -> Result<Vec<gf::Mat4d>, SchemaError> {
         let arrays = self.checked()?;
         let prototypes = prototype_xforms(&mut XformCache::new(time), &prototype_prims(stage, proto_paths)?)?;
-        Ok(arrays.transforms(time, stage.time_codes_per_second(), &prototypes))
+        Ok(arrays.transforms(Some(time), stage.time_codes_per_second(), &prototypes))
     }
 
     /// These arrays as [`transforms`](Self::transforms) takes them: the
@@ -120,9 +120,16 @@ impl<'a> InstanceArrays<'a> {
     /// prototype transform in `prototypes` its index names. The positions
     /// hold one element for each instance, and the mask and every other
     /// array either that many or none.
-    fn transforms(&self, time: usd::TimeCode, time_codes_per_second: f64, prototypes: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
-        let delta = time_delta(time, self.velocities_sample_time, time_codes_per_second);
-        let spin_delta = time_delta(time, self.angular_velocities_sample_time, time_codes_per_second);
+    fn transforms(
+        &self,
+        time: Option<usd::TimeCode>,
+        time_codes_per_second: f64,
+        prototypes: &[gf::Mat4d],
+    ) -> Vec<gf::Mat4d> {
+        // At the default time nothing was sampled, so nothing has moved.
+        let since = |sample_time| time.map_or(0.0, |time| time_delta(time, sample_time, time_codes_per_second));
+        let delta = since(self.velocities_sample_time);
+        let spin_delta = since(self.angular_velocities_sample_time);
         // TODO(rayon): each instance's transform is computed from its own
         // elements, so the instances are independent.
         (0..self.proto_indices.len())
@@ -384,14 +391,19 @@ impl PointInstancer {
     /// The transform of each instance at `time`, carried there from
     /// `base_time` (C++ `ComputeInstanceTransformsAtTime`); see
     /// [`instance_transforms_at_times`](Self::instance_transforms_at_times).
+    ///
+    /// `None` for both times is the default time: every attribute is read
+    /// at its default value, and nothing moves. One default time beside one
+    /// numeric time is [`SchemaError::DefaultTimeMismatch`], as C++ refuses
+    /// it.
     pub fn instance_transforms_at(
         &self,
-        time: usd::TimeCode,
-        base_time: usd::TimeCode,
+        time: impl Into<Option<usd::TimeCode>>,
+        base_time: impl Into<Option<usd::TimeCode>>,
         proto_xforms: ProtoXformInclusion,
         mask: MaskApplication,
     ) -> Result<Vec<gf::Mat4d>, SchemaError> {
-        let mut samples = self.instance_transforms_at_times(&[time], base_time, proto_xforms, mask)?;
+        let mut samples = self.transforms_over(&[time.into()], base_time.into(), proto_xforms, mask)?;
         Ok(samples.pop().unwrap_or_default())
     }
 
@@ -434,6 +446,26 @@ impl PointInstancer {
         proto_xforms: ProtoXformInclusion,
         mask: MaskApplication,
     ) -> Result<Vec<Vec<gf::Mat4d>>, SchemaError> {
+        let times: Vec<_> = times.iter().copied().map(Some).collect();
+        self.transforms_over(&times, Some(base_time), proto_xforms, mask)
+    }
+
+    /// The transform of each instance at each of `times`, carried there
+    /// from `base_time`, where `None` is the default time: what
+    /// [`instance_transforms_at_times`](Self::instance_transforms_at_times)
+    /// answers. The times are all numeric or all the default time.
+    fn transforms_over(
+        &self,
+        times: &[Option<usd::TimeCode>],
+        base_time: Option<usd::TimeCode>,
+        proto_xforms: ProtoXformInclusion,
+        mask: MaskApplication,
+    ) -> Result<Vec<Vec<gf::Mat4d>>, SchemaError> {
+        if times.iter().any(|time| time.is_some() != base_time.is_some()) {
+            return Err(SchemaError::DefaultTimeMismatch {
+                prim: self.path().clone(),
+            });
+        }
         let proto_indices_attr = self.proto_indices_attr();
         let Some(proto_indices) = Held::<Vec<i32>>::read(&proto_indices_attr, base_time)? else {
             return Err(SchemaError::NoValue {
@@ -537,7 +569,7 @@ impl PointInstancer {
 
     /// The targets of `prototypes`, which every one of `proto_indices` must
     /// name one of (C++ `_GetPrototypePathsForInstanceTransforms`).
-    fn prototype_paths(&self, proto_indices: &[i32]) -> Result<Vec<sdf::Path>, SchemaError> {
+    pub(super) fn prototype_paths(&self, proto_indices: &[i32]) -> Result<Vec<sdf::Path>, SchemaError> {
         let paths = self.prototypes_rel().targets()?;
         if paths.is_empty() {
             return Err(SchemaError::NoPrototypes {
@@ -618,7 +650,7 @@ fn quats<Q: Into<[f64; 4]>>(orientations: Vec<Q>) -> Vec<gf::Quatd> {
 
 /// The quaternion array `attr` holds at the sample at or before
 /// `base_time`, read as an array of `Q`.
-fn held_quats<Q>(attr: &usd::Attribute, base_time: usd::TimeCode) -> Result<Option<Held<Vec<gf::Quatd>>>>
+fn held_quats<Q>(attr: &usd::Attribute, base_time: Option<usd::TimeCode>) -> Result<Option<Held<Vec<gf::Quatd>>>>
 where
     Q: Into<[f64; 4]>,
     Vec<Q>: sdf::FromValue,
@@ -628,7 +660,7 @@ where
 }
 
 /// The quaternion array `attr` holds at `time`, read as an array of `Q`.
-fn quats_at<Q>(attr: &usd::Attribute, time: usd::TimeCode) -> Result<Option<Vec<gf::Quatd>>>
+fn quats_at<Q>(attr: &usd::Attribute, time: Option<usd::TimeCode>) -> Result<Option<Vec<gf::Quatd>>>
 where
     Q: Into<[f64; 4]>,
     Vec<Q>: sdf::FromValue,
@@ -723,6 +755,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// At the default time every attribute is read at its default value
+    /// and nothing moves. A default time beside a numeric one is refused.
+    #[test]
+    fn transforms_at_default_time() -> Result {
+        let instancer = placed()?;
+        instancer
+            .positions_attr()
+            .set(vec![gf::vec3f(7.0, 0.0, 0.0), gf::vec3f(0.0, 8.0, 0.0)])?;
+        instancer
+            .create_velocities_attr()?
+            .set(vec![gf::vec3f(24.0, 0.0, 0.0); 2])?
+            .set_at(vec![gf::vec3f(24.0, 0.0, 0.0); 2], START)?;
+        let at = |time: Option<TimeCode>, base_time: Option<TimeCode>| {
+            instancer.instance_transforms_at(time, base_time, ProtoXformInclusion::Exclude, MaskApplication::Ignore)
+        };
+
+        let translation = gf::Mat4d::translation;
+        assert_matrices(
+            &at(None, None)?,
+            &[translation([7.0, 0.0, 0.0]), translation([0.0, 8.0, 0.0])],
+        );
+        assert_matrices(
+            &at(Some(TimeCode::new(24.0)), Some(START))?,
+            &[translation([25.0, 0.0, 0.0]), translation([24.0, 2.0, 0.0])],
+        );
+        for (time, base_time) in [(None, Some(START)), (Some(START), None)] {
+            let refused = at(time, base_time);
+            assert!(
+                matches!(refused, Err(SchemaError::DefaultTimeMismatch { .. })),
+                "{refused:?}"
+            );
+        }
+        Ok(())
     }
 
     /// Positions alone place each instance, and velocities sampled with
