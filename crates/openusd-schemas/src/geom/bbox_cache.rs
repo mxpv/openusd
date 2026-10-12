@@ -55,9 +55,6 @@ use crate::SchemaError;
 ///
 /// A `PointInstancer` is bounded by its authored `extent` alone, and by
 /// nothing where it authors none.
-// TODO: C++ computes an instancer's extent from its prototypes and its
-// instances (`UsdGeomPointInstancer::ComputeExtentAtTime`), which no extent
-// function here does yet.
 ///
 /// A prim that does not exist on its stage has the empty box, where C++
 /// raises a coding error. An extent that cannot be computed fails the query
@@ -251,6 +248,10 @@ impl BBoxCache {
 
     /// Carry point instances from `time`, where `None` is the default time
     /// (C++ `SetBaseTime`). No bound is dropped.
+    ///
+    /// The base time and the cache's time are both numeric or both the
+    /// default time. With one of each, the point-instance bounds are
+    /// [`SchemaError::DefaultTimeMismatch`].
     pub fn set_base_time(&mut self, time: impl Into<Option<usd::TimeCode>>) {
         self.base_time = BaseTime::Set(time.into());
     }
@@ -272,6 +273,10 @@ impl BBoxCache {
     /// The bound of `prim` in world space: its
     /// [untransformed bound](Self::untransformed_bound) under its
     /// local-to-world transform (C++ `ComputeWorldBound`).
+    ///
+    /// A prim with no geometry of any purpose has the empty box. One with
+    /// geometry of other purposes than the included ones has an empty range
+    /// under its transform, as in C++.
     pub fn world_bound(&mut self, prim: &usd::Prim) -> Result<gf::BBox3d, SchemaError> {
         let Some(mut bbox) = self.combined(prim, None, None)? else {
             return Ok(gf::BBox3d::default());
@@ -852,6 +857,9 @@ impl BBoxCache {
         // An instance resolved through its instance proxies lists them,
         // and they list theirs under either predicate.
         let listed = CHILDREN.with_instance_proxies(by_proxies);
+        // A prototype's children are listed from the prototype root, which
+        // the walk did not list and has no status of.
+        let composed = composed.filter(|_| prototype.is_none());
         for (child, composed) in holder.filtered_children_from(listed, composed)? {
             let schema = self.schema_type(&child)?;
             // A prim of no type, or of a type the registry does not know,
@@ -1259,8 +1267,7 @@ const CHILDREN: usd::PrimPredicate = usd::PrimPredicate::new(
 ///
 /// The children are unioned in the order the frame holds them, purpose by
 /// purpose, and the union is stored under the matrix that takes it back to
-/// the prim's own space. The order is part of the answer, since a
-/// floating-point union depends on it.
+/// the prim's own space.
 fn fold(frame: &Frame, entries: &HashMap<Context, Entry>) -> Entry {
     let mut varying = frame.varying;
     let mut resets = false;
