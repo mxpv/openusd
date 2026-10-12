@@ -6,7 +6,7 @@ use openusd::sdf;
 use openusd::tf;
 use openusd::usd;
 
-use super::{Imageable, ImageableSchema, Purpose, PurposeVisibility, Visibility, VisibilityAPI, XformCache};
+use super::{BBoxCache, Imageable, ImageableSchema, Purpose, PurposeVisibility, Visibility, VisibilityAPI, XformCache};
 use super::{nearest, tokens};
 use crate::SchemaError;
 use crate::authored_at;
@@ -299,6 +299,85 @@ pub trait ImageableExt: ImageableSchema {
     fn parent_to_world_transform(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<gf::Mat4d, SchemaError> {
         XformCache::new(time).parent_to_world_transform(self.prim())
     }
+
+    /// The bound of this prim in world space at `time`, where `None` is the
+    /// default time, around the prims at and beneath it whose purpose is one of
+    /// `purposes` (C++ `ComputeWorldBound`).
+    ///
+    /// With no purposes the box is the empty one, as in C++, which also
+    /// raises a coding error.
+    /// Each call bounds the whole subtree afresh; for several prims, or one
+    /// prim at several times, query a [`BBoxCache`] instead.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::{gf, usd};
+    /// use openusd_schemas::geom::{self, ImageableExt, Purpose, XformableExt};
+    ///
+    /// let stage = usd::Stage::builder()
+    ///     .schema_registry(openusd_schemas::schema_registry())
+    ///     .in_memory("scene.usda")?;
+    /// let set = geom::Xform::define(&stage, "/Set")?.set_translate(gf::vec3d(10.0, 0.0, 0.0))?;
+    /// geom::Sphere::define(&stage, "/Set/Ball")?;
+    ///
+    /// let own = set.untransformed_bound(None, [Purpose::Default])?.aligned_range();
+    /// assert_eq!(own.min(), gf::vec3d(-1.0, -1.0, -1.0));
+    /// let world = set.world_bound(None, [Purpose::Default])?.aligned_range();
+    /// assert_eq!(world.min(), gf::vec3d(9.0, -1.0, -1.0));
+    /// # Ok::<(), openusd_schemas::SchemaError>(())
+    /// ```
+    fn world_bound(
+        &self,
+        time: impl Into<Option<usd::TimeCode>>,
+        purposes: impl IntoIterator<Item = Purpose>,
+    ) -> Result<gf::BBox3d, SchemaError> {
+        match bound_cache(time, purposes) {
+            Some(mut cache) => cache.world_bound(self.prim()),
+            None => Ok(gf::BBox3d::default()),
+        }
+    }
+
+    /// The bound of this prim in its parent's space at `time`, where `None`
+    /// is the default time, around the prims at and beneath it whose purpose
+    /// is one
+    /// of `purposes` (C++ `ComputeLocalBound`).
+    ///
+    /// With no purposes the box is the empty one, as in C++, which also
+    /// raises a coding error.
+    /// Each call bounds the whole subtree afresh; for several prims, or one
+    /// prim at several times, query a [`BBoxCache`] instead.
+    fn local_bound(
+        &self,
+        time: impl Into<Option<usd::TimeCode>>,
+        purposes: impl IntoIterator<Item = Purpose>,
+    ) -> Result<gf::BBox3d, SchemaError> {
+        match bound_cache(time, purposes) {
+            Some(mut cache) => cache.local_bound(self.prim()),
+            None => Ok(gf::BBox3d::default()),
+        }
+    }
+
+    /// The bound of this prim in its own space at `time`, where `None` is
+    /// the default time, around the prims at and beneath it whose purpose is
+    /// one of
+    /// `purposes`, its own transform left out (C++
+    /// `ComputeUntransformedBound`).
+    ///
+    /// With no purposes the box is the empty one, as in C++, which also
+    /// raises a coding error.
+    /// Each call bounds the whole subtree afresh; for several prims, or one
+    /// prim at several times, query a [`BBoxCache`] instead.
+    fn untransformed_bound(
+        &self,
+        time: impl Into<Option<usd::TimeCode>>,
+        purposes: impl IntoIterator<Item = Purpose>,
+    ) -> Result<gf::BBox3d, SchemaError> {
+        match bound_cache(time, purposes) {
+            Some(mut cache) => cache.untransformed_bound(self.prim()),
+            None => Ok(gf::BBox3d::default()),
+        }
+    }
 }
 
 impl<T: ImageableSchema> ImageableExt for T {}
@@ -342,6 +421,16 @@ pub(super) fn purpose_below(ip: Option<&Imageable>, parent: PurposeInfo) -> Resu
         None if parent.is_inheritable => Ok(parent),
         None => fallback_purpose(ip),
     }
+}
+
+/// A cache for one bound at `time` over `purposes`, or `None` where there
+/// is no purpose to bound.
+fn bound_cache(
+    time: impl Into<Option<usd::TimeCode>>,
+    purposes: impl IntoIterator<Item = Purpose>,
+) -> Option<BBoxCache> {
+    let mut purposes = purposes.into_iter().peekable();
+    purposes.peek().is_some().then(|| BBoxCache::new(time, purposes))
 }
 
 /// The `purpose` a layer authors on `ip`, where an unrecognized token reads
@@ -391,7 +480,11 @@ mod tests {
     use openusd::usd::{self, SchemaBase};
 
     use super::{ImageableExt, PurposeInfo};
-    use crate::geom::{Imageable, ImageableSchema, Purpose, PurposeVisibility, Scope, Visibility, VisibilityAPI};
+    use crate::SchemaError;
+    use crate::geom::{
+        BBoxCache, Imageable, ImageableSchema, Purpose, PurposeVisibility, Scope, Visibility, VisibilityAPI,
+    };
+    use openusd::gf;
 
     /// A `Scope` at `path` carrying [`VisibilityAPI`].
     fn vis_scope(stage: &usd::Stage, path: &str) -> Result<Scope> {
@@ -876,6 +969,74 @@ mod tests {
         let commits = crate::tests::commits(&stage);
         root.make_invisible(None)?;
         assert_eq!(commits.get(), 0);
+        Ok(())
+    }
+
+    /// A prim's bounds are those a cache of the same time and purposes
+    /// answers, in each of the three spaces. With no purposes they are the
+    /// empty box.
+    #[test]
+    fn bounds_as_cache() -> Result<(), SchemaError> {
+        let (_dir, stage) = crate::tests::from_usda(
+            r#"#usda 1.0
+
+def Xform "World"
+{
+    double3 xformOp:translate = (0, 0, 7)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    def Xform "Set"
+    {
+        double3 xformOp:translate.timeSamples = { 1: (10, 0, 0), 2: (20, 0, 0) }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Sphere "Ball" {}
+
+        def Cube "Guide"
+        {
+            uniform token purpose = "guide"
+            double3 xformOp:translate = (0, 50, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+}
+"#,
+        )?;
+        let set = Imageable::get(&stage, "/World/Set")?.expect("Imageable");
+        let range = |min: [f64; 3], max: [f64; 3]| gf::Range3d::new(min.into(), max.into());
+
+        let time = usd::TimeCode::new(2.0);
+        let default = [Purpose::Default];
+        let own = set.untransformed_bound(time, default)?;
+        assert_eq!(own.aligned_range(), range([-1.0; 3], [1.0; 3]));
+        let local = set.local_bound(time, default)?;
+        assert_eq!(local.aligned_range(), range([19.0, -1.0, -1.0], [21.0, 1.0, 1.0]));
+        let world = set.world_bound(time, default)?;
+        assert_eq!(world.aligned_range(), range([19.0, -1.0, 6.0], [21.0, 1.0, 8.0]));
+        // The default time reads no sample of the translation.
+        let world = set.world_bound(None, default)?;
+        assert_eq!(world.aligned_range(), range([-1.0, -1.0, 6.0], [1.0, 1.0, 8.0]));
+
+        // The purposes asked for are the ones bounded.
+        let cases = [
+            (vec![Purpose::Guide], range([-1.0, 49.0, -1.0], [1.0, 51.0, 1.0])),
+            (
+                vec![Purpose::Default, Purpose::Guide],
+                range([-1.0; 3], [1.0, 51.0, 1.0]),
+            ),
+        ];
+        for (purposes, expected) in cases {
+            let mut cache = BBoxCache::new(time, purposes.clone());
+            assert_eq!(set.world_bound(time, purposes.clone())?, cache.world_bound(set.prim())?);
+            assert_eq!(set.local_bound(time, purposes.clone())?, cache.local_bound(set.prim())?);
+            let own = set.untransformed_bound(time, purposes)?;
+            assert_eq!(own, cache.untransformed_bound(set.prim())?);
+            assert_eq!(own.aligned_range(), expected);
+        }
+
+        assert_eq!(set.world_bound(time, [])?, gf::BBox3d::default());
+        assert_eq!(set.local_bound(time, [])?, gf::BBox3d::default());
+        assert_eq!(set.untransformed_bound(time, [])?, gf::BBox3d::default());
         Ok(())
     }
 

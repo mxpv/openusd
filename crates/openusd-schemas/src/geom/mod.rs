@@ -124,7 +124,10 @@
 //! prim's own space, its parent's, an ancestor's or the world's, and keeps
 //! the box of each prim it resolves for the queries that follow. It bounds
 //! the instances of a point instancer one by one, and a model by its hint
-//! where asked to.
+//! where asked to. For one bound of one prim,
+//! [`ImageableExt::world_bound`], [`local_bound`](ImageableExt::local_bound)
+//! and [`untransformed_bound`](ImageableExt::untransformed_bound) ask a
+//! cache made for the call.
 //!
 //! # Primvars
 //!
