@@ -257,7 +257,7 @@ fn corners(range: gf::Range3d) -> Extent {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use openusd::gf;
 
     use super::Extent;
@@ -266,7 +266,8 @@ mod tests {
         Axis, Capsule, Capsule_1, Cone, Cube, Curves, Cylinder, Cylinder_1, Plane, PointBased, Points, Sphere,
     };
 
-    fn extent(min: [f32; 3], max: [f32; 3]) -> Extent {
+    /// The extent from `min` to `max`.
+    pub(crate) fn extent(min: [f32; 3], max: [f32; 3]) -> Extent {
         [min.into(), max.into()]
     }
 

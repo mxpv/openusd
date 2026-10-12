@@ -491,12 +491,39 @@ pub fn schema_registry() -> Arc<SchemaRegistry> {
         .clone()
 }
 
+/// The extent function of every schema of this crate that has one, among
+/// the families enabled: what [`geom::BoundableExt`] computes extents with.
+///
+/// A clone of it is the starting point for a registry that also bounds types
+/// declared elsewhere.
+// TODO: `skel` adds none. A `Skeleton` is bounded by its joints in skeleton
+// space and a `SkelRoot` by the skeletons and skinned prims below it (C++
+// `UsdSkelComputeJointsExtent` and `UsdSkelCache`), neither of which is
+// ported.
+#[cfg(feature = "geom")]
+pub fn extent_registry() -> &'static geom::ExtentRegistry {
+    static REGISTRY: OnceLock<geom::ExtentRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut registry = geom::ExtentRegistry::new();
+        geom::boundable::register_extents(&mut registry);
+        #[cfg(feature = "lux")]
+        lux::register_extents(&mut registry);
+        registry
+    })
+}
+
 /// `attr`'s value at `time`, where `None` is the default time, when some layer
 /// authors one, and `None` where the value would be the schema's fallback.
 ///
 /// A fallback is not an opinion anyone stated, so the computations that
 /// inherit a value from an ancestor, or from a settings prim, look past it:
 /// C++ checks `HasAuthoredValue` before `Get` for exactly this.
+// TODO(perf): the two calls resolve the attribute twice. C++ asks both of
+// one `UsdAttributeQuery`; `usd::AttributeQuery` would need to answer
+// whether a value is authored, and the default-time read, from the source
+// it keeps. A single read at `time` that drops a fallback is not the same
+// answer: an attribute with samples and no default reads its fallback at
+// the default time, and that read still counts as authored.
 #[cfg(any(feature = "geom", feature = "render"))]
 pub(crate) fn authored_at<T>(attr: &usd::Attribute, time: Option<usd::TimeCode>) -> openusd::Result<Option<T>>
 where

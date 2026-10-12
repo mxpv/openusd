@@ -104,6 +104,17 @@
 //! are, and [`stage_up_axis`] and [`set_stage_up_axis`] as an [`UpAxis`].
 //! [`linear_units`] names the common units.
 //!
+//! # Bounds
+//!
+//! A boundable prim's `extent` is the box around its own geometry, in its
+//! own space. [`BoundableExt::compute_extent`] reads the authored one, or
+//! else computes it from the attributes that size the prim's type, which
+//! [`BoundableExt::shape_extent`] does on its own. The functions that do the
+//! computing take those sizes as plain values: `Sphere::extent_from`,
+//! `PointBased::extent_from` and the rest, each answering an [`Extent`]. An
+//! [`ExtentRegistry`] says which function bounds which type, and takes the
+//! functions of types declared elsewhere.
+//!
 //! # Primvars
 //!
 //! A `primvars:*` attribute is read through [`Primvar`], which bundles its
@@ -123,6 +134,7 @@
 
 openusd::include_schema!("usdGeom");
 
+pub(crate) mod boundable;
 mod curves;
 mod extent;
 mod gprim;
@@ -149,6 +161,7 @@ use openusd::{sdf, tf, usd};
 // The enums still written by hand name the generated constants directly.
 use tokens::*;
 
+pub use boundable::{BoundableExt, ExtentFn, ExtentRegistry};
 pub use curves::{CurvesExt, PointAndTangentArrays};
 pub use extent::Extent;
 pub use gprim::GprimExt;
