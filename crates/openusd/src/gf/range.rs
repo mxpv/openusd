@@ -3,7 +3,7 @@
 use std::array;
 use std::ops::{Add, Div, Mul, Sub};
 
-use super::{Mat4d, Vec3d};
+use super::{Mat4d, Vec3d, Vec3f};
 
 /// An axis-aligned box given by its minimum and maximum corners (C++
 /// `GfRange3d`).
@@ -216,6 +216,20 @@ impl Default for Range3d {
     }
 }
 
+impl From<[Vec3f; 2]> for Range3d {
+    /// The range between two single-precision corners, the minimum first.
+    fn from([min, max]: [Vec3f; 2]) -> Self {
+        Range3d::new(min.into(), max.into())
+    }
+}
+
+impl From<Range3d> for [Vec3f; 2] {
+    /// The corners of `range` in single precision, the minimum first.
+    fn from(range: Range3d) -> Self {
+        [range.min.to_f32(), range.max.to_f32()]
+    }
+}
+
 impl Add for Range3d {
     type Output = Range3d;
 
@@ -276,6 +290,20 @@ pub(crate) mod tests {
 
     pub(crate) fn range(min: [f64; 3], max: [f64; 3]) -> Range3d {
         Range3d::new(min.into(), max.into())
+    }
+
+    /// A range and a pair of single-precision corners convert both ways,
+    /// the empty range included.
+    #[test]
+    fn corner_pairs() {
+        let corners = [gf::vec3f(-1.0, 0.0, 2.5), gf::vec3f(3.0, 2.0, 4.0)];
+        let r = Range3d::from(corners);
+        assert_eq!(r, range([-1.0, 0.0, 2.5], [3.0, 2.0, 4.0]));
+        assert_eq!(<[gf::Vec3f; 2]>::from(r), corners);
+
+        let empty = <[gf::Vec3f; 2]>::from(Range3d::EMPTY);
+        assert_eq!(empty, [gf::Vec3f::from([f32::MAX; 3]), gf::Vec3f::from([-f32::MAX; 3])]);
+        assert_eq!(Range3d::from(empty), Range3d::EMPTY);
     }
 
     /// The default range is empty, and a point makes it that point.

@@ -215,7 +215,7 @@ const UNIT: gf::Vec3d = gf::Vec3d { x: 1.0, y: 1.0, z: 1.0 };
 /// is given.
 fn centered(max: gf::Vec3d, transform: Option<gf::Mat4d>) -> Extent {
     let range = gf::Range3d::new(-max, max);
-    corners(transform.map_or(range, |transform| range.transformed(transform)))
+    transform.map_or(range, |transform| range.transformed(transform)).into()
 }
 
 /// The far corner of a shape that reaches `half_length` along `axis` and
@@ -249,11 +249,6 @@ fn moved(point: gf::Vec3f, transform: Option<gf::Mat4d>) -> gf::Vec3f {
 fn without_translation(mut transform: gf::Mat4d) -> gf::Mat4d {
     transform.set_translation(gf::Vec3d::default());
     transform
-}
-
-/// The corners of `range` in the precision an extent is stored in.
-fn corners(range: gf::Range3d) -> Extent {
-    [range.min().to_f32(), range.max().to_f32()]
 }
 
 #[cfg(test)]
