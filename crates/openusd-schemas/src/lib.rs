@@ -109,6 +109,25 @@ pub enum SchemaError {
         op: String,
     },
 
+    /// A prim's whole transform stack is replaced at an edit target a
+    /// stronger site overrides, so the `xformOpOrder` authored there would
+    /// not be the one read.
+    #[error("{prim} takes its xformOpOrder from {layer}, which is stronger than the edit target")]
+    XformOpOrderShadowed {
+        /// The prim whose stack was to be replaced.
+        prim: sdf::Path,
+        /// Identifier of the layer holding the stronger opinion.
+        layer: String,
+    },
+
+    /// A world-space transform is to be authored on a prim whose parent's
+    /// transform has no inverse, so no local transform gives it.
+    #[error("the parent transform of {prim} is singular and cannot be inverted")]
+    SingularParentTransform {
+        /// The prim whose local transform was to be authored.
+        prim: sdf::Path,
+    },
+
     /// A prim's transform is asked for as a translate, a rotate, a scale and
     /// a pivot, and the prim is not transformable or its `xformOpOrder` is
     /// not that shape.
@@ -616,6 +635,7 @@ pub(crate) mod tests {
 
     use std::cell::Cell;
     use std::fs;
+    use std::path::Path;
     use std::rc::Rc;
 
     use openusd::Result;
@@ -661,5 +681,55 @@ pub(crate) mod tests {
             .schema_registry(schema_registry())
             .open(path.to_str().expect("utf-8 temp path"))?;
         Ok((dir, stage))
+    }
+
+    /// A stage whose root layer only sublayers `layers`, strongest first, each
+    /// a file name and its `usda` body after the header. Carries every enabled
+    /// family's schema data.
+    #[allow(
+        dead_code,
+        reason = "which families' tests reach for it depends on the features enabled"
+    )]
+    pub(crate) fn layered(layers: &[(&str, &str)]) -> Result<(tempfile::TempDir, Stage)> {
+        let dir = tempfile::tempdir()?;
+        let subs: Vec<String> = layers.iter().map(|(name, _)| format!("@./{name}@")).collect();
+        let root = dir.path().join("root.usda");
+        fs::write(
+            &root,
+            format!("#usda 1.0\n(\n    subLayers = [{}]\n)\n", subs.join(", ")),
+        )?;
+        for (name, body) in layers {
+            fs::write(dir.path().join(name), format!("#usda 1.0\n{body}\n"))?;
+        }
+        let stage = Stage::builder()
+            .schema_registry(schema_registry())
+            .open(root.to_str().expect("utf-8 temp path"))?;
+        Ok((dir, stage))
+    }
+
+    /// Aim `stage`'s edit target at the layer whose file is `name`, and
+    /// return that layer's identifier.
+    #[allow(
+        dead_code,
+        reason = "which families' tests reach for it depends on the features enabled"
+    )]
+    pub(crate) fn target_layer(stage: &Stage, name: &str) -> Result<String> {
+        let identifier = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|id| Path::new(id).file_name().is_some_and(|file| file == name))
+            .expect("the layer is on the stage");
+        stage.set_edit_target(usd::EditTarget::for_layer(identifier.clone()))?;
+        Ok(identifier)
+    }
+
+    /// The layer named `identifier`, as the text it would be saved as.
+    #[allow(
+        dead_code,
+        reason = "which families' tests reach for it depends on the features enabled"
+    )]
+    pub(crate) fn layer_text(stage: &Stage, identifier: &str) -> String {
+        let layer = stage.layer(identifier).expect("the layer is on the stage");
+        layer.export_to_string().expect("the layer exports")
     }
 }

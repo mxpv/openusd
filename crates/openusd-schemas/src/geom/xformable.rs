@@ -245,15 +245,19 @@ pub trait XformableExt: XformableSchema {
     ///
     /// `xformOpOrder` lists the one op and nothing else, so a reset goes with
     /// the other entries. The op keeps whatever value it already holds.
+    ///
+    /// The order is authored at the stage's edit target, and where a
+    /// stronger site holds a value for `xformOpOrder` that order would not be
+    /// the one read. That is [`SchemaError::XformOpOrderShadowed`], and
+    /// nothing is authored. C++ refuses only where the stack still composes
+    /// ops after it has emptied the order at the edit target. A stronger
+    /// empty order lets it through, and it leaves the emptied order behind
+    /// when it refuses.
     fn make_matrix_xform(&self) -> Result<XformOp, SchemaError> {
-        add_op(
-            self.prim(),
-            Vec::new(),
-            XformOpKind::Transform,
-            XformOpPrecision::Double,
-            None,
-            false,
-        )
+        let prim = self.prim();
+        StackEdit::matrix(prim, None, None)?.commit(prim)?;
+        let name = XformOpKind::Transform.op_name(None, false);
+        Ok(XformOp::new(&prim.attribute(name.as_str()), false))
     }
 
     /// Author `xformOp:<op>` at `precision` and append it to the stack (C++
@@ -300,7 +304,7 @@ pub trait XformableExt: XformableSchema {
             order.push(name);
             order
         });
-        author_stack(self.prim(), vec![write], order, None)?;
+        StackEdit::prepare(self.prim(), vec![write], order, None)?.commit(self.prim())?;
         Ok(self)
     }
 
@@ -548,48 +552,89 @@ pub(super) struct OpWrite {
     pub value: Option<sdf::Value>,
 }
 
-/// Author op attributes and `xformOpOrder` on `prim` as one edit.
+/// Op attributes and an `xformOpOrder` to author on a prim as one edit,
+/// checked against the stage and ready to queue.
 ///
-/// Each write declares its op where nothing declares it and authors its
-/// value at `time`, and `order`, where given, replaces `xformOpOrder`. With
-/// neither a write to make nor an order, nothing is committed.
+/// An op the stage already declares keeps that declaration, and every value
+/// has been converted to the type its op holds, so a value an op cannot hold
+/// is refused before anything is queued.
 ///
-/// An op the stage already declares keeps that declaration. Every value is
-/// converted to the type its op holds before anything is queued, so a value
-/// an op cannot hold leaves the stage untouched. The declaration is read as
-/// the raw spelling it was authored with, so one the type table does not know
-/// is refused by the conversion.
-pub(super) fn author_stack(
-    prim: &usd::Prim,
-    writes: Vec<OpWrite>,
+/// One is prepared and applied inside a single call and never kept: what it
+/// was checked against is the stage as it stood then.
+pub(super) struct StackEdit {
+    /// Each op to author: its name, the type it is declared as, and the
+    /// value to give it, if any.
+    ops: Vec<(tf::Token, sdf::ValueTypeName, Option<sdf::Value>)>,
+    /// What replaces `xformOpOrder`, where the edit changes it.
     order: Option<Vec<tf::Token>>,
+    /// The time the values are authored at.
     time: Option<usd::TimeCode>,
-) -> Result<(), SchemaError> {
-    let mut planned = Vec::new();
-    for write in writes {
-        let declared = super::declared_type(&prim.attribute(write.name.as_str()))?;
-        if declared.is_some() && write.value.is_none() {
-            continue;
+}
+
+impl StackEdit {
+    /// The edit that declares each of `writes` where nothing declares it and
+    /// authors its value at `time`, and replaces `xformOpOrder` with `order`
+    /// where one is given.
+    ///
+    /// A declaration is read as the raw spelling it was authored with, so one
+    /// the type table does not know is refused by the conversion.
+    pub(super) fn prepare(
+        prim: &usd::Prim,
+        writes: Vec<OpWrite>,
+        order: Option<Vec<tf::Token>>,
+        time: Option<usd::TimeCode>,
+    ) -> Result<Self, SchemaError> {
+        let mut ops = Vec::new();
+        for write in writes {
+            let declared = super::declared_type(&prim.attribute(write.name.as_str()))?;
+            if declared.is_some() && write.value.is_none() {
+                continue;
+            }
+            let type_name = declared.unwrap_or(write.new_type);
+            let value = write.value.map(|value| type_name.coerce(value)).transpose()?;
+            ops.push((write.name, type_name, value));
         }
-        let type_name = declared.unwrap_or(write.new_type);
-        let value = write.value.map(|value| type_name.coerce(value)).transpose()?;
-        planned.push((write.name, type_name, value));
-    }
-    if planned.is_empty() && order.is_none() {
-        return Ok(());
+        Ok(StackEdit { ops, order, time })
     }
 
-    prim.stage().edit(|edit| -> Result<(), SchemaError> {
-        let prim = edit.prim(prim.path())?;
-        for (name, type_name, value) in planned {
+    /// The edit that replaces the whole stack with one `xformOp:transform`,
+    /// holding `matrix` at `time` where one is given and the value it
+    /// already has otherwise.
+    ///
+    /// Refused with [`SchemaError::XformOpOrderShadowed`] where a stronger
+    /// site holds a value for `xformOpOrder`, since the replacement would
+    /// not be the order read.
+    pub(super) fn matrix(
+        prim: &usd::Prim,
+        matrix: Option<gf::Mat4d>,
+        time: Option<usd::TimeCode>,
+    ) -> Result<Self, SchemaError> {
+        if let Some(site) = prim.attribute(super::tokens::XFORM_OP_ORDER).shadowing_opinion()? {
+            return Err(SchemaError::XformOpOrderShadowed {
+                prim: prim.path().clone(),
+                layer: site.layer,
+            });
+        }
+        let name = XformOpKind::Transform.op_name(None, false);
+        let write = OpWrite {
+            name: name.clone(),
+            new_type: XformOpKind::Transform.value_type(XformOpPrecision::Double),
+            value: matrix.map(sdf::Value::from),
+        };
+        Self::prepare(prim, vec![write], Some(vec![name]), time)
+    }
+
+    /// Queue the edit on `prim`'s transaction.
+    pub(super) fn apply(self, prim: &usd::PrimEdit<'_>) -> Result<(), SchemaError> {
+        for (name, type_name, value) in self.ops {
             let builder = prim.attribute_builder(name, type_name).custom(false);
             match value {
-                Some(value) => builder.set_at(value, time),
+                Some(value) => builder.set_at(value, self.time),
                 None => builder,
             }
             .build()?;
         }
-        if let Some(order) = order {
+        if let Some(order) = self.order {
             prim.attribute_builder(super::tokens::XFORM_OP_ORDER, sdf::ValueTypeName::TOKEN_ARRAY)
                 .custom(false)
                 .variability(sdf::Variability::Uniform)
@@ -597,7 +642,17 @@ pub(super) fn author_stack(
                 .build()?;
         }
         Ok(())
-    })
+    }
+
+    /// Author the edit on `prim` as a transaction of its own. An edit with
+    /// neither an op to author nor an order commits nothing.
+    pub(super) fn commit(self, prim: &usd::Prim) -> Result<(), SchemaError> {
+        if self.ops.is_empty() && self.order.is_none() {
+            return Ok(());
+        }
+        prim.stage()
+            .edit(|edit| -> Result<(), SchemaError> { self.apply(&edit.prim(prim.path())?) })
+    }
 }
 
 /// Declare the op of `kind` on `prim` where nothing declares it and author
@@ -624,7 +679,7 @@ fn add_op(
         new_type: kind.value_type(precision),
         value: None,
     };
-    author_stack(prim, vec![write], Some(order), None)?;
+    StackEdit::prepare(prim, vec![write], Some(order), None)?.commit(prim)?;
     Ok(op)
 }
 
@@ -1312,6 +1367,44 @@ class PivotXform "PivotXform"
         // Reducing it again keeps the value the op holds.
         x.make_matrix_xform()?;
         assert_eq!(x.local_transform(None)?, matrix);
+        Ok(())
+    }
+
+    const ORDERED: &str = "over \"X\"\n{\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}";
+    const DEFINED: &str = "def Xform \"X\"\n{\n    double3 xformOp:translate = (1, 2, 3)\n}";
+
+    /// A stronger layer's order would shadow the one a reduction authors, so
+    /// the reduction is refused and the edit target is left as it was.
+    #[test]
+    fn matrix_xform_shadowed() -> Result<(), SchemaError> {
+        let (_dir, stage) = crate::tests::layered(&[("strong.usda", ORDERED), ("weak.usda", DEFINED)])?;
+        let weak = crate::tests::target_layer(&stage, "weak.usda")?;
+        let before = crate::tests::layer_text(&stage, &weak);
+        let commits = crate::tests::commits(&stage);
+
+        let x = Xform::get(&stage, "/X")?.expect("Xform");
+        let Err(SchemaError::XformOpOrderShadowed { prim, layer }) = x.make_matrix_xform() else {
+            panic!("the order is shadowed");
+        };
+        assert_eq!(prim.as_str(), "/X");
+        assert!(layer.ends_with("strong.usda"), "{layer}");
+        assert_eq!(crate::tests::layer_text(&stage, &weak), before);
+        assert_eq!(commits.get(), 0);
+        Ok(())
+    }
+
+    /// A weaker layer's order is replaced by the one authored above it.
+    #[test]
+    fn matrix_xform_over_weaker() -> Result<(), SchemaError> {
+        let ordered = "def Xform \"X\"\n{\n    double3 xformOp:translate = (1, 2, 3)\n    \
+                       uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}";
+        let (_dir, stage) = crate::tests::layered(&[("strong.usda", "over \"X\"\n{\n}"), ("weak.usda", ordered)])?;
+        crate::tests::target_layer(&stage, "strong.usda")?;
+
+        let x = Xform::get(&stage, "/X")?.expect("Xform");
+        x.make_matrix_xform()?.set(gf::Mat4d::translation([4.0, 5.0, 6.0]))?;
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:transform"]);
+        assert_eq!(x.local_transform(None)?, gf::Mat4d::translation([4.0, 5.0, 6.0]));
         Ok(())
     }
 

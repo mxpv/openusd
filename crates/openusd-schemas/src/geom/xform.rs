@@ -12,7 +12,7 @@ use openusd::usd::{self, SchemaBase};
 use openusd::{gf, sdf, tf};
 
 use super::xform_op::TOKEN_RESET_XFORM_STACK;
-use super::xformable::{OpWrite, author_stack};
+use super::xformable::{OpWrite, StackEdit};
 use super::{XformCommonAPI, XformOp, XformOpKind, XformOpPrecision, Xformable, XformableExt, tokens};
 use crate::SchemaError;
 
@@ -401,7 +401,7 @@ impl XformCommonAPI {
                 .chain(listed.into_iter().flatten().map(XformOp::op_name))
                 .collect()
         });
-        author_stack(prim, writes, order, time)?;
+        StackEdit::prepare(prim, writes, order, time)?.commit(prim)?;
         Ok(common)
     }
 }
