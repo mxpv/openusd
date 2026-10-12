@@ -1,9 +1,14 @@
-//! What `UsdGeomModelAPI` answers beyond its own properties.
+//! What `UsdGeomModelAPI` answers beyond its own properties: the extents a
+//! model caches, the mode it is drawn in, and the constraint targets it
+//! publishes.
 
 use openusd::usd::{self, SchemaBase};
-use openusd::{Result, gf, sdf};
+use openusd::{Result, gf, sdf, tf};
 
-use super::{BBoxCache, Boundable, Extent, ModelAPI, Purpose, extent, tokens};
+use super::constraint_target::holds_matrix;
+use super::{
+    BBoxCache, Boundable, ConstraintTarget, DrawMode, Extent, ModelAPI, Purpose, declared_type, extent, nearest, tokens,
+};
 use crate::SchemaError;
 
 impl ModelAPI {
@@ -140,6 +145,132 @@ impl ModelAPI {
             .map_or(1, |last| last + 1);
         Ok(ranges[..bounded].iter().map(|range| Extent::from(*range)).collect())
     }
+
+    /// The mode the prim is drawn in (C++
+    /// `UsdGeomModelAPI::ComputeModelDrawMode`): the `model:drawMode` of
+    /// the nearest model at or above it that has one other than
+    /// `inherited`, or [`DrawMode::Default`] where there is none.
+    ///
+    /// Only a [model](usd::Prim::is_model) decides a draw mode, so a
+    /// `model:drawMode` on any other prim plays no part, and neither does
+    /// the pseudo-root. A token that names no draw mode decides
+    /// [`DrawMode::Default`], where C++ answers the token.
+    ///
+    /// `parent` is the draw mode computed for the prim's parent, where a
+    /// walk has it: it answers for a prim that decides none of its own,
+    /// with no prim above looked at. A walk over many prims passes it. With
+    /// none, each call reads `model:drawMode` on every prim above up to the
+    /// pseudo-root.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::usd::{self, SchemaBase};
+    /// use openusd_schemas::geom::{self, DrawMode};
+    ///
+    /// let stage = usd::Stage::builder()
+    ///     .schema_registry(openusd_schemas::schema_registry())
+    ///     .in_memory("scene.usda")?;
+    /// let set = geom::Xform::define(&stage, "/Set")?.prim().clone().set_kind("group")?;
+    /// let chair = geom::Xform::define(&stage, "/Set/Chair")?.prim().clone().set_kind("component")?;
+    /// let set = geom::ModelAPI::apply(&set)?;
+    /// let chair = geom::ModelAPI::apply(&chair)?;
+    /// assert_eq!(chair.compute_model_draw_mode(None)?, DrawMode::Default);
+    ///
+    /// // The set's mode reaches the models beneath it.
+    /// set.model_draw_mode_attr().set(DrawMode::Bounds)?;
+    /// assert_eq!(chair.compute_model_draw_mode(None)?, DrawMode::Bounds);
+    /// # Ok::<(), openusd_schemas::SchemaError>(())
+    /// ```
+    pub fn compute_model_draw_mode(&self, parent: impl Into<Option<DrawMode>>) -> Result<DrawMode> {
+        if let Some(parent) = parent.into() {
+            return Ok(decided_draw_mode(self.prim())?.unwrap_or(parent));
+        }
+        let decided = nearest(self.stage(), self.path(), |prim| Ok(Some(prim)), decided_draw_mode)?;
+        Ok(decided.unwrap_or(DrawMode::Default))
+    }
+
+    /// The constraint target named `name`, the attribute
+    /// `constraintTargets:<name>` (C++
+    /// `UsdGeomModelAPI::GetConstraintTarget`), or `None` where the prim
+    /// has [none](ConstraintTarget::is_valid) by that name.
+    pub fn constraint_target(&self, name: &str) -> Result<Option<ConstraintTarget>> {
+        ConstraintTarget::from_attribute(self.attribute(ConstraintTarget::attr_name(name)))
+    }
+
+    /// The constraint target named `name`, created as the `matrix4d`
+    /// attribute `constraintTargets:<name>` where the prim has no attribute
+    /// of that name (C++ `UsdGeomModelAPI::CreateConstraintTarget`).
+    ///
+    /// Only a [model](usd::Prim::is_model) has constraint targets, so any
+    /// other prim is [`SchemaError::ConstraintTargetOffModel`], and a
+    /// property of that name that is no matrix-valued attribute is
+    /// [`SchemaError::ConstraintTargetType`]. Neither authors anything.
+    /// C++ answers a target that is not valid in both cases, and creates
+    /// the attribute on a prim that is not a model.
+    pub fn create_constraint_target(&self, name: &str) -> Result<ConstraintTarget, SchemaError> {
+        if !self.prim().is_model()? {
+            return Err(SchemaError::ConstraintTargetOffModel {
+                prim: self.path().clone(),
+            });
+        }
+        let attr_name = ConstraintTarget::attr_name(name);
+        let attr = self.attribute(attr_name.clone());
+        match declared_type(&attr)? {
+            Some(type_name) if holds_matrix(&type_name) => Ok(ConstraintTarget::new(attr)),
+            Some(type_name) => Err(SchemaError::ConstraintTargetType {
+                attribute: attr.path().clone(),
+                type_name: type_name.as_token(),
+            }),
+            // A relationship has the name and declares no type.
+            None if self.prim().relationship(attr_name.clone()).is_defined()? => {
+                Err(SchemaError::ConstraintTargetType {
+                    attribute: attr.path().clone(),
+                    type_name: tf::Token::default(),
+                })
+            }
+            None => {
+                let builder = self.attribute_builder(attr_name, sdf::ValueTypeName::MATRIX4D);
+                Ok(ConstraintTarget::new(builder.custom(false).build()?))
+            }
+        }
+    }
+
+    /// The constraint targets of the prim, in the order of its attributes
+    /// (C++ `UsdGeomModelAPI::GetConstraintTargets`). A prim that is not a
+    /// model has none.
+    pub fn constraint_targets(&self) -> Result<Vec<ConstraintTarget>> {
+        let prim = self.prim();
+        if !prim.is_model()? {
+            return Ok(Vec::new());
+        }
+        let mut targets = Vec::new();
+        for attribute in prim.attributes()? {
+            if ConstraintTarget::is_shaped(&attribute)? {
+                targets.push(ConstraintTarget::new(attribute));
+            }
+        }
+        Ok(targets)
+    }
+}
+
+/// The draw mode `prim` decides for itself and the prims beneath it: its
+/// `model:drawMode` where that is other than `inherited` and the prim is a
+/// model below the pseudo-root.
+fn decided_draw_mode(prim: &usd::Prim) -> Result<Option<DrawMode>> {
+    if prim.path().is_abs_root() {
+        return Ok(None);
+    }
+    // A value that is no token decides nothing, as an attribute with no
+    // value does.
+    let value = prim.attribute(tokens::MODEL_DRAW_MODE).get::<sdf::Value>()?;
+    let Some(token) = value.and_then(|value| value.try_as_token()) else {
+        return Ok(None);
+    };
+    let mode = DrawMode::from_token(token).unwrap_or(DrawMode::Default);
+    // Few prims author a mode, and those alone are asked whether they are
+    // models, which reads the kind of every prim above.
+    Ok((mode != DrawMode::Inherited && prim.is_model()?).then_some(mode))
 }
 
 #[cfg(test)]
@@ -149,7 +280,7 @@ mod tests {
 
     use crate::SchemaError;
     use crate::geom::extent::tests::extent;
-    use crate::geom::{BBoxCache, Cube, ExtentFn, ModelAPI, PointInstancer, Purpose, Sphere, Xform, tokens};
+    use crate::geom::{BBoxCache, Cube, DrawMode, ExtentFn, ModelAPI, PointInstancer, Purpose, Sphere, Xform, tokens};
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;
 
@@ -282,6 +413,87 @@ def Xform "Empty" (kind = "component") {}
         let bare = PointInstancer::define(&stage, "/Bare")?;
         let extents = ModelAPI::from_prim_unchecked(bare.prim().clone()).compute_extents_hint(&mut cache)?;
         assert_eq!(extents, [crate::geom::extent::EMPTY]);
+        Ok(())
+    }
+
+    /// A prim is drawn in the mode of the nearest model at or above it that
+    /// has one other than `inherited`. A prim that is no model decides
+    /// none, and the mode handed in for the parent stands in for the prims
+    /// above.
+    #[test]
+    fn draw_mode_nearest_model() -> Result {
+        let (_dir, stage) = crate::tests::from_usda(
+            r#"#usda 1.0
+
+def Xform "World" (kind = "group")
+{
+    uniform token model:drawMode = "bounds"
+
+    def Xform "Set" (kind = "group")
+    {
+        def Xform "Chair" (kind = "component") {}
+
+        def Xform "Table" (kind = "component")
+        {
+            uniform token model:drawMode = "cards"
+        }
+
+        def Xform "Lamp" (kind = "component")
+        {
+            uniform token model:drawMode = "inherited"
+        }
+
+        def Xform "Sketch" (kind = "component")
+        {
+            uniform token model:drawMode = "sketch"
+        }
+
+        def Xform "Mistyped" (kind = "component")
+        {
+            custom string model:drawMode = "cards"
+        }
+
+        def Xform "Loose"
+        {
+            uniform token model:drawMode = "origin"
+
+            def Xform "Under" {}
+        }
+    }
+}
+
+def Xform "Plain" (kind = "component")
+{
+    def Xform "Geom" {}
+}
+"#,
+        )?;
+        let mode = |path: &str, parent: Option<DrawMode>| -> Result<DrawMode> {
+            let model = ModelAPI::from_prim_unchecked(stage.prim(path)?);
+            Ok(model.compute_model_draw_mode(parent)?)
+        };
+        assert_eq!(mode("/World", None)?, DrawMode::Bounds);
+        assert_eq!(mode("/World/Set", None)?, DrawMode::Bounds);
+        assert_eq!(mode("/World/Set/Chair", None)?, DrawMode::Bounds);
+        assert_eq!(mode("/World/Set/Table", None)?, DrawMode::Cards);
+        assert_eq!(mode("/World/Set/Lamp", None)?, DrawMode::Bounds);
+        assert_eq!(mode("/World/Set/Sketch", None)?, DrawMode::Default);
+        // A mode that is no token is passed over.
+        assert_eq!(mode("/World/Set/Mistyped", None)?, DrawMode::Bounds);
+        // A prim that is no model decides nothing, for itself or below.
+        assert!(!stage.prim("/World/Set/Loose")?.is_model()?);
+        assert_eq!(mode("/World/Set/Loose", None)?, DrawMode::Bounds);
+        assert_eq!(mode("/World/Set/Loose/Under", None)?, DrawMode::Bounds);
+        assert_eq!(mode("/Plain", None)?, DrawMode::Default);
+        assert_eq!(mode("/Plain/Geom", None)?, DrawMode::Default);
+        assert_eq!(mode("/", None)?, DrawMode::Default);
+
+        // The parent's mode answers where the prim decides none, and its
+        // own mode still comes first.
+        assert_eq!(mode("/World/Set/Chair", Some(DrawMode::Origin))?, DrawMode::Origin);
+        assert_eq!(mode("/World/Set/Lamp", Some(DrawMode::Inherited))?, DrawMode::Inherited);
+        assert_eq!(mode("/World/Set/Table", Some(DrawMode::Origin))?, DrawMode::Cards);
+        assert_eq!(mode("/Plain", Some(DrawMode::Cards))?, DrawMode::Cards);
         Ok(())
     }
 

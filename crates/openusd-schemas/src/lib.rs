@@ -283,6 +283,25 @@ pub enum SchemaError {
         max: usize,
     },
 
+    /// A constraint target is asked to be created on a prim that is not a
+    /// model. Only a model publishes constraint targets.
+    #[error("{prim} is not a model, and only a model has constraint targets")]
+    ConstraintTargetOffModel {
+        /// The prim.
+        prim: sdf::Path,
+    },
+
+    /// The attribute a constraint target would be is declared to hold
+    /// something other than a matrix.
+    #[error("{attribute} of type `{type_name}` is no constraint target: only a matrix-valued attribute is")]
+    ConstraintTargetType {
+        /// The attribute's path.
+        attribute: sdf::Path,
+        /// The type the attribute is declared as, empty where the property
+        /// is a relationship.
+        type_name: tf::Token,
+    },
+
     /// The positions instance transforms are computed from are not one for
     /// each instance.
     #[error("{found} positions for {expected} instances")]

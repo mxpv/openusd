@@ -132,6 +132,18 @@
 //! and [`untransformed_bound`](ImageableExt::untransformed_bound) ask a
 //! cache made for the call.
 //!
+//! # Models
+//!
+//! A model is drawn in full or as a stand-in, by its `model:drawMode` and
+//! that of the models above it: [`ModelAPI::compute_model_draw_mode`]
+//! resolves the mode a prim is drawn in.
+//!
+//! A model publishes named frames for other prims to follow, each a
+//! matrix-valued attribute in the `constraintTargets` namespace.
+//! [`ConstraintTarget`] reads and authors one, and
+//! [`ModelAPI::create_constraint_target`] and
+//! [`ModelAPI::constraint_targets`] create and list a model's.
+//!
 //! # Primvars
 //!
 //! A `primvars:*` attribute is read through [`Primvar`], which bundles its
@@ -153,6 +165,7 @@ openusd::include_schema!("usdGeom");
 
 mod bbox_cache;
 pub(crate) mod boundable;
+mod constraint_target;
 mod curves;
 mod extent;
 mod gprim;
@@ -182,6 +195,7 @@ use tokens::*;
 
 pub use bbox_cache::BBoxCache;
 pub use boundable::{BoundableExt, ExtentContext, ExtentFn, ExtentRegistry};
+pub use constraint_target::ConstraintTarget;
 pub use curves::{CurvesExt, PointsAndTangents};
 pub use extent::Extent;
 pub use gprim::GprimExt;
