@@ -955,6 +955,30 @@ impl Attribute {
         self.build_resolve_info(pcp::ResolveMode::at(time.into().map(|time| time.value())))
     }
 
+    /// The site that would shadow a value authored for this attribute at the
+    /// stage's current edit target, or `None` where that value would be the
+    /// one a read returns.
+    ///
+    /// A site shadows when it is stronger than the edit target's and holds a
+    /// value opinion: a default, a value block, time samples, or a value-clip
+    /// set that carries the attribute. A stronger spec that only declares the
+    /// attribute shadows nothing, and neither does a blocked `timeSamples`
+    /// field, which leaves a default to answer. Where several sites shadow,
+    /// the strongest is the one returned.
+    ///
+    /// The question is asked of no one time. A read at the default time
+    /// looks at defaults alone. Stronger samples or clips shadow a read at a
+    /// numeric time and leave the default-time read to the edit target.
+    ///
+    /// The answer is for the stage as it stands, so it holds until the next
+    /// edit or change of edit target. An edit target the attribute does not
+    /// compose from is
+    /// [`OutsideEditTarget`](super::StageAuthoringError::OutsideEditTarget),
+    /// since nothing authored there would be read at all.
+    pub fn shadowing_opinion(&self) -> Result<Option<SpecSite>> {
+        self.stage.shadowing_opinion(&self.path)
+    }
+
     /// Adds the schema tier `pcp` knows nothing about to the authored source it
     /// resolved: a blocked or absent authored value falls through to the
     /// prim definition's fallback (spec §12.3.6).
@@ -4415,6 +4439,209 @@ def \"M\"
             finalized,
             Some(seen[0].clone()),
             "the raw read keeps the stronger double"
+        );
+        Ok(())
+    }
+
+    /// The file name of the layer `identifier` names.
+    fn file_name(identifier: &str) -> &str {
+        FsPath::new(identifier)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("a layer on disk")
+    }
+
+    /// Aim the stage's edit target at the layer whose file is `name`.
+    fn target_layer(stage: &Stage, name: &str) -> Result<()> {
+        let identifier = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|id| file_name(id) == name)
+            .expect("the layer is on the stage");
+        Ok(stage.set_edit_target(EditTarget::for_layer(identifier))?)
+    }
+
+    /// The layer file and spec path of the site that shadows `/P.x`, if one
+    /// does.
+    fn shadow(stage: &Stage) -> Result<Option<String>> {
+        let site = stage.attribute("/P.x")?.shadowing_opinion()?;
+        Ok(site.map(|site| format!("{}{}", file_name(&site.layer), site.path)))
+    }
+
+    const P_DECLARED: &str = "def \"P\"\n{\n    custom double x\n}";
+    const P_VALUE: &str = "over \"P\"\n{\n    custom double x = 1\n}";
+
+    /// A default in a stronger sublayer shadows a write to a weaker one, and
+    /// a default in a weaker sublayer shadows nothing.
+    #[test]
+    fn shadowed_by_stronger_layer() -> Result<()> {
+        let (_dir, stage) = layered(&[("strong.usda", P_VALUE), ("weak.usda", P_DECLARED)])?;
+        target_layer(&stage, "weak.usda")?;
+        assert_eq!(shadow(&stage)?.as_deref(), Some("strong.usda/P.x"));
+
+        let (_dir, stage) = layered(&[("strong.usda", P_DECLARED), ("weak.usda", P_VALUE)])?;
+        target_layer(&stage, "strong.usda")?;
+        assert_eq!(shadow(&stage)?, None);
+        Ok(())
+    }
+
+    /// With no value anywhere, or only a stronger declaration, a write at the
+    /// edit target is the one that answers.
+    #[test]
+    fn declaration_shadows_nothing() -> Result<()> {
+        let (_dir, stage) = layered(&[("strong.usda", "over \"P\"\n{\n}"), ("weak.usda", P_DECLARED)])?;
+        target_layer(&stage, "weak.usda")?;
+        assert_eq!(shadow(&stage)?, None);
+
+        let declared = "over \"P\"\n{\n    custom double x\n}";
+        let (_dir, stage) = layered(&[("strong.usda", declared), ("weak.usda", P_DECLARED)])?;
+        target_layer(&stage, "weak.usda")?;
+        assert_eq!(shadow(&stage)?, None);
+        Ok(())
+    }
+
+    /// A target on a reference that holds no spec for the prim yet is still a
+    /// site of it, beneath the prim's own opinions.
+    #[test]
+    fn shadow_at_specless_arc_site() -> Result<()> {
+        let referenced = ("ref.usda", "def \"R\"\n{\n}");
+        let child = |decl: &str| {
+            format!(
+                "def \"P\" (\n    references = @ref.usda@</R>\n)\n{{\n    def \"Child\"\n    {{\n        {decl}\n    }}\n}}"
+            )
+        };
+        for (decl, expected) in [
+            ("custom double x", None),
+            ("custom double x = 1", Some("root.usda/P/Child.x")),
+        ] {
+            let (_dir, stage) = scene(&[("root.usda", child(decl).as_str()), referenced])?;
+            stage.set_edit_target(stage.edit_target_for_node(&sdf::Path::new("/P")?, EditTargetArc::Reference)?)?;
+            let site = stage.attribute("/P/Child.x")?.shadowing_opinion()?;
+            let named = site.map(|site| format!("{}{}", file_name(&site.layer), site.path));
+            assert_eq!(named.as_deref(), expected, "declared as {decl:?}");
+        }
+        Ok(())
+    }
+
+    /// A blocked `timeSamples` field withholds samples and leaves a default
+    /// to answer, so it shadows nothing.
+    #[test]
+    fn samples_block_shadows_nothing() -> Result<()> {
+        let blocked = "over \"P\"\n{\n    custom double x.timeSamples = None\n}";
+        let (_dir, stage) = layered(&[("strong.usda", blocked), ("weak.usda", P_DECLARED)])?;
+        target_layer(&stage, "weak.usda")?;
+        assert_eq!(shadow(&stage)?, None);
+        Ok(())
+    }
+
+    /// A prim outside the stage's population has nothing to be shadowed by.
+    #[test]
+    fn shadow_outside_population() -> Result<()> {
+        let (_dir, stage) = layered(&[("strong.usda", P_VALUE), ("weak.usda", P_DECLARED)])?;
+        target_layer(&stage, "weak.usda")?;
+        assert_eq!(stage.attribute("/Missing.x")?.shadowing_opinion()?, None);
+        Ok(())
+    }
+
+    /// A stronger block and stronger time samples are value opinions too.
+    #[test]
+    fn block_and_samples_shadow() -> Result<()> {
+        let blocked = "over \"P\"\n{\n    custom double x = None\n}";
+        let (_dir, stage) = layered(&[("strong.usda", blocked), ("weak.usda", P_DECLARED)])?;
+        target_layer(&stage, "weak.usda")?;
+        assert_eq!(shadow(&stage)?.as_deref(), Some("strong.usda/P.x"));
+
+        let sampled = "over \"P\"\n{\n    custom double x.timeSamples = { 1: 2 }\n}";
+        let (_dir, stage) = layered(&[("strong.usda", sampled), ("weak.usda", P_DECLARED)])?;
+        target_layer(&stage, "weak.usda")?;
+        assert_eq!(shadow(&stage)?.as_deref(), Some("strong.usda/P.x"));
+        Ok(())
+    }
+
+    /// The session layer is stronger than the root stack, so a root default
+    /// shadows nothing written there.
+    #[test]
+    fn session_target_unshadowed() -> Result<()> {
+        let (_dir, stage) = stack("", "custom double x = 1", "")?;
+        stage.set_edit_target(stage.edit_target_session().expect("a session layer"))?;
+        assert_eq!(stage.attribute("/A.x")?.shadowing_opinion()?, None);
+
+        stage.set_edit_target(stage.edit_target_root())?;
+        assert_eq!(stage.attribute("/A.x")?.shadowing_opinion()?, None);
+        Ok(())
+    }
+
+    /// A target that writes into a referenced layer is weaker than the prim
+    /// that references it.
+    #[test]
+    fn shadowed_through_reference() -> Result<()> {
+        let referenced = ("ref.usda", "def \"R\"\n{\n    custom double x = 2\n}");
+        let over = "def \"P\" (\n    references = @ref.usda@</R>\n)\n{\n    custom double x = 1\n}";
+        let (_dir, stage) = scene(&[("root.usda", over), referenced])?;
+        stage.set_edit_target(stage.edit_target_for_node(&sdf::Path::new("/P")?, EditTargetArc::Reference)?)?;
+        assert_eq!(shadow(&stage)?.as_deref(), Some("root.usda/P.x"));
+
+        let bare = "def \"P\" (\n    references = @ref.usda@</R>\n)\n{\n}";
+        let (_dir, stage) = scene(&[("root.usda", bare), referenced])?;
+        stage.set_edit_target(stage.edit_target_for_node(&sdf::Path::new("/P")?, EditTargetArc::Reference)?)?;
+        assert_eq!(shadow(&stage)?, None);
+        Ok(())
+    }
+
+    /// A target that writes into a variant is weaker than the prim's own
+    /// opinion on the same layer.
+    #[test]
+    fn shadowed_through_variant() -> Result<()> {
+        let prim = |own: &str| {
+            format!(
+                "def \"P\" (\n    variants = {{\n        string v = \"a\"\n    }}\n    prepend variantSets = \"v\"\n)\n\
+                 {{\n    {own}\n    variantSet \"v\" = {{\n        \"a\" {{\n            custom double x = 2\n        }}\n    }}\n}}"
+            )
+        };
+        for (own, expected) in [("custom double x = 1", Some("root.usda/P.x")), ("", None)] {
+            let (_dir, stage) = scene(&[("root.usda", prim(own).as_str())])?;
+            let root = stage.root_layer().identifier().to_string();
+            stage.set_edit_target(EditTarget::for_local_direct_variant(root, "/P{v=a}")?)?;
+            assert_eq!(shadow(&stage)?.as_deref(), expected, "own opinion: {own:?}");
+        }
+        Ok(())
+    }
+
+    /// The root layer is a site of every prim, one it holds no spec for
+    /// included, so an override of a referenced child is never shadowed by
+    /// the reference.
+    #[test]
+    fn local_override_unshadowed() -> Result<()> {
+        let referenced = (
+            "ref.usda",
+            "def \"R\"\n{\n    def \"Child\"\n    {\n        custom double x = 2\n    }\n}",
+        );
+        let root = "def \"P\" (\n    references = @ref.usda@</R>\n)\n{\n}";
+        let (_dir, stage) = scene(&[("root.usda", root), referenced])?;
+        assert_eq!(stage.attribute("/P/Child.x")?.shadowing_opinion()?, None);
+        Ok(())
+    }
+
+    /// A layer the prim does not compose from at the mapped path is no place
+    /// to ask about.
+    #[test]
+    fn shadow_outside_composition() -> Result<()> {
+        let referenced = ("ref.usda", "def \"R\"\n{\n    custom double x = 2\n}");
+        let root = "def \"P\" (\n    references = @ref.usda@</R>\n)\n{\n}";
+        let (_dir, stage) = scene(&[("root.usda", root), referenced])?;
+        stage.attribute("/P.x")?.get::<f64>()?;
+        target_layer(&stage, "ref.usda")?;
+
+        let error = stage
+            .attribute("/P.x")?
+            .shadowing_opinion()
+            .expect_err("ref.usda holds no /P");
+        assert!(
+            matches!(
+                error,
+                crate::Error::Authoring(StageAuthoringError::OutsideEditTarget { .. })
+            ),
+            "{error:?}"
         );
         Ok(())
     }

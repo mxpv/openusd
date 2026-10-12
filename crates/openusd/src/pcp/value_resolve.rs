@@ -558,6 +558,15 @@ pub(crate) trait OpinionResolver {
         false
     }
 
+    /// Whether the walk visits the layers that author no spec for the prim
+    /// as well, each through [`on_site`](Self::on_site).
+    ///
+    /// A value read has nothing to find at one. A query about a site that
+    /// may hold no spec yet needs the walk to come to it.
+    fn visits_every_layer(&self) -> bool {
+        false
+    }
+
     /// An opinion that exists and withholds a value.
     ///
     /// The default is what withholding means to a value query: a blocked

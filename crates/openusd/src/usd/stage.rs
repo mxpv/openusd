@@ -2870,6 +2870,25 @@ impl Stage {
         Ok(self.masked_opinions(path, |g, c| c.property_stack(g, path, time))?)
     }
 
+    /// The strongest site whose value opinion would shadow one authored for
+    /// the attribute at the current edit target. Backs
+    /// [`Attribute::shadowing_opinion`](super::Attribute::shadowing_opinion).
+    pub(crate) fn shadowing_opinion(&self, attr_path: &sdf::Path) -> Result<Option<super::SpecSite>> {
+        let (identifier, spec_path) = self.target_spec_path(attr_path)?;
+        let outside = || StageAuthoringError::OutsideEditTarget {
+            path: attr_path.clone(),
+        };
+        let layer = self.layers().id_of(&identifier).ok_or_else(outside)?;
+        let standing = self.masked_opinions(attr_path, |g, c| c.opinion_standing(g, attr_path, layer, &spec_path))?;
+        match standing {
+            // A prim the stage does not hold has no opinions to be shadowed
+            // by, and authoring on it reports that itself.
+            None | Some(pcp::Standing::Strongest) => Ok(None),
+            Some(pcp::Standing::Shadowed(site)) => Ok(Some(site)),
+            Some(pcp::Standing::Absent) => Err(outside().into()),
+        }
+    }
+
     /// Resolves where an attribute's value comes from, without producing the
     /// value. Backs [`Attribute::resolve_info`](super::Attribute::resolve_info).
     pub(crate) fn resolve_info(&self, attr_path: &sdf::Path, mode: pcp::ResolveMode) -> Result<pcp::Resolution> {

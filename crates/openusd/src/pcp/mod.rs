@@ -370,6 +370,7 @@ use crate::sdf::{self, Path, Value};
 pub(crate) use change::{ApplyOutcome, Changes, LayerChanges};
 pub(crate) use diagnostics::Diagnostics;
 pub use index_cache::SpecSiteRecord;
+pub(crate) use index_cache::Standing;
 pub(crate) use index_cache::{AttributeValueSource, IndexCache, StampedValueSource};
 pub(crate) use index_store::PrimRevision;
 pub(crate) use instancing::is_prototype_namespace;

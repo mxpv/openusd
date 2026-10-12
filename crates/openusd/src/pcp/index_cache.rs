@@ -1017,6 +1017,90 @@ impl SpecSiteRecord {
     }
 }
 
+/// Where a value opinion authored at one site of a property would stand among
+/// the sites that compose it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Standing {
+    /// No stronger site holds a value opinion, so one authored at the site
+    /// would answer a read.
+    Strongest,
+    /// A stronger site holds a value opinion: this is the strongest of them.
+    Shadowed(SpecSiteRecord),
+    /// The site is not one the property composes from, so nothing authored
+    /// there would be read.
+    Absent,
+}
+
+/// Finds the strongest value opinion above one site of a property (the
+/// resolver behind [`IndexCache::opinion_standing`]).
+///
+/// The site asked about may hold no spec yet, so the walk visits every
+/// layer, and it stops there: what is weaker cannot shadow it.
+struct StandingResolver<'a> {
+    graph: &'a LayerGraph,
+    /// The layer of the site asked about.
+    layer: LayerId,
+    /// The property's path in that layer.
+    spec_path: &'a Path,
+    /// The strongest value opinion met so far.
+    stronger: Option<SpecSiteRecord>,
+    /// Whether the walk came to the site asked about.
+    reached: bool,
+}
+
+impl StandingResolver<'_> {
+    /// Records `site` as holding a value opinion, where it is the first to.
+    fn found(&mut self, site: &OpinionSite<'_>) {
+        if self.stronger.is_none() {
+            self.stronger = Some(site.spec_record(self.graph));
+        }
+    }
+}
+
+impl OpinionResolver for StandingResolver<'_> {
+    fn on_site(&mut self, site: &OpinionSite<'_>) -> Step {
+        self.reached = site.layer == self.layer && site.query_path == *self.spec_path;
+        match self.reached {
+            true => Step::Stop,
+            false => Step::Continue,
+        }
+    }
+
+    fn on_default(&mut self, _value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
+        self.found(site);
+        Step::NextSite
+    }
+
+    fn on_time_samples(&mut self, _samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        self.found(site);
+        Step::Continue
+    }
+
+    /// A blocked `default` is a value opinion like any other. A blocked
+    /// `timeSamples` field holds none: it withholds samples and leaves every
+    /// `default` to answer. Either way the walk goes on to find the site
+    /// asked about.
+    fn on_withheld(&mut self, kind: Withheld, site: &OpinionSite<'_>) -> Step {
+        if matches!(kind, Withheld::DefaultBlock) {
+            self.found(site);
+        }
+        Step::Continue
+    }
+
+    /// A clip set that carries the property is recorded at the site that
+    /// introduced it.
+    fn on_clips(&mut self, probe: &mut ClipProbe<'_>, site: &OpinionSite<'_>) -> Result<Step, QueryError> {
+        if self.stronger.is_none() && !matches!(probe.answer_untimed()?, ValueState::Absent) {
+            self.found(site);
+        }
+        Ok(Step::Continue)
+    }
+
+    fn visits_every_layer(&self) -> bool {
+        true
+    }
+}
+
 impl OpinionResolver for StackResolver<'_> {
     fn on_site(&mut self, site: &OpinionSite<'_>) -> Step {
         let Some(spec_type) = self.graph.layer(site.layer).data().spec_type(&site.query_path) else {
@@ -1376,7 +1460,7 @@ impl IndexCache {
             ..
         } = self;
         let mut clips = ClipTier::new(store, clip_cache, query_diagnostics);
-        let scope = match consults_clips {
+        let scope = match consults_clips || resolver.visits_every_layer() {
             true => SiteScope::EveryLayer,
             false => SiteScope::SpecStack,
         };
@@ -3081,6 +3165,47 @@ impl IndexCache {
         // each, so the diagnostic reads once however often it is found.
         self.query_diagnostics.extend(conflicts);
         Ok(sites)
+    }
+
+    /// Reports where a value opinion for the property at `path` would stand
+    /// if `layer` authored it at `spec_path`, the layer's own spelling of the
+    /// property.
+    ///
+    /// A stronger site counts when it holds a `default`, a value block or
+    /// time samples, or introduces a value-clip set that carries the
+    /// property. A spec that only declares the property holds no value
+    /// opinion and is passed over.
+    pub fn opinion_standing(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        layer: LayerId,
+        spec_path: &Path,
+    ) -> Result<Option<Standing>, QueryError> {
+        let path = self.effective_path(graph, path)?;
+        if !path.is_property() {
+            return Ok(Some(Standing::Absent));
+        }
+        let prim_path = path.prim_path();
+        let suffix = path.property_suffix().to_owned();
+        self.ensure_index(graph, &prim_path)?;
+        let mut resolver = StandingResolver {
+            graph,
+            layer,
+            spec_path,
+            stronger: None,
+            reached: false,
+        };
+        // The untimed walk: every tier takes part, and samples and clips
+        // count by being there.
+        self.resolve_property(graph, &prim_path, &suffix, ResolveMode::Proximal, &mut resolver)?;
+        Ok(Some(match resolver {
+            StandingResolver { reached: false, .. } => Standing::Absent,
+            StandingResolver { stronger: None, .. } => Standing::Strongest,
+            StandingResolver {
+                stronger: Some(site), ..
+            } => Standing::Shadowed(site),
+        }))
     }
 
     /// Returns the variant selections composed onto a prim, as `(set,
