@@ -10,6 +10,7 @@
 //! product, var) into `namespacedSettings`.
 
 use openusd::Result;
+use openusd::gf;
 
 use std::collections::HashMap;
 
@@ -232,14 +233,14 @@ fn collect_var_indices(
 }
 
 /// Read a camera prim's `(horizontalAperture, verticalAperture)`, falling
-/// back to `UsdGeomCamera`'s defaults `(20.955, 15.2908)` mm. Reads the
+/// back to the apertures of [`gf::Camera::default`]. Reads the
 /// aperture attributes by name so it needs no dependency on the `geom`
 /// feature — the conform policy only needs these two floats.
 fn read_camera_aperture(stage: &Stage, camera: &Path) -> Result<[f32; 2]> {
     let prim = stage.prim(camera.clone())?;
     Ok([
-        read_f32(&prim.attribute("horizontalAperture"))?.unwrap_or(20.955),
-        read_f32(&prim.attribute("verticalAperture"))?.unwrap_or(15.2908),
+        read_f32(&prim.attribute("horizontalAperture"))?.unwrap_or(gf::Camera::DEFAULT_HORIZONTAL_APERTURE),
+        read_f32(&prim.attribute("verticalAperture"))?.unwrap_or(gf::Camera::DEFAULT_VERTICAL_APERTURE),
     ])
 }
 

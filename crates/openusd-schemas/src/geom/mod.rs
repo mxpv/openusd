@@ -97,6 +97,13 @@
 //! one rotate, one scale and a pivot ([`XformVectors`]), for the stacks that
 //! have that shape.
 //!
+//! # Cameras
+//!
+//! A [`Camera`] prim reads as one [`openusd::gf::Camera`] value, placed in
+//! the world, through [`Camera::camera_at`], and [`Camera::set_from_camera`]
+//! authors one back as a single edit. [`Camera::linear_exposure_scale`] is
+//! the factor its exposure attributes scale an image by.
+//!
 //! # Stage metrics
 //!
 //! The axis a stage calls up and the length of its unit are stage metadata.
@@ -165,6 +172,7 @@ openusd::include_schema!("usdGeom");
 
 mod bbox_cache;
 pub(crate) mod boundable;
+mod camera;
 mod constraint_target;
 mod curves;
 mod extent;

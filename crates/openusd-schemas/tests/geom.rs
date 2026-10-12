@@ -2,11 +2,13 @@
 //! `usdGeom_scene.usda` fixture: the cross-cutting Imageable / Boundable
 //! surface, the `Xformable` transform stack, and every concrete prim view.
 
+use std::path::Path;
+
 use openusd::Result;
-use openusd::gf::{Mat4d, Vec2f, Vec3d, Vec3f};
+use openusd::gf::{self, Mat4d, Vec2f, Vec3d, Vec3f};
 use openusd::sdf;
 use openusd::tf::Token;
-use openusd::usd::{Attribute, SchemaBase, Stage, TimeCode};
+use openusd::usd::{Attribute, EditTarget, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{
     self, Axis, BasisCurves, BasisCurvesSchema, BoundableSchema, Camera, CameraSchema, Capsule, CapsuleSchema, Cone,
@@ -580,6 +582,69 @@ fn orthographic_projection_token() -> Result<()> {
         tok.as_deref().and_then(Projection::from_token),
         Some(Projection::Orthographic)
     );
+    Ok(())
+}
+
+/// The camera fixture's layer stack, with the edit target on the layer whose
+/// file is `layer`.
+fn open_camera_layers(layer: &str) -> Result<(Stage, Camera)> {
+    let stage = Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .open("fixtures/usdGeom_camera_layers.usda")?;
+    edit_camera_layer(&stage, layer)?;
+    let camera = Camera::get(&stage, "/camera")?.expect("Camera");
+    Ok((stage, camera))
+}
+
+fn edit_camera_layer(stage: &Stage, layer: &str) -> Result<()> {
+    let identifier = stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| Path::new(id).file_name().is_some_and(|file| file == layer))
+        .expect("the layer is on the stage");
+    Ok(stage.set_edit_target(EditTarget::for_layer(identifier))?)
+}
+
+/// A camera set from the weaker of two layers is refused where the stronger
+/// one holds the op order, and nothing of it is authored. From the stronger
+/// layer it is authored whole.
+#[test]
+fn camera_set_across_layers() -> Result<(), SchemaError> {
+    let (stage, prim) = open_camera_layers("usdGeom_camera_b.usda")?;
+    let time = TimeCode::new(1.0);
+    let placed = Mat4d::translation([100.0, 200.0, 300.0]);
+    let camera = gf::Camera {
+        transform: placed,
+        horizontal_aperture: 500.0,
+        ..gf::Camera::default()
+    };
+
+    let error = prim.set_from_camera(&camera, time).expect_err("the order is shadowed");
+    assert!(matches!(error, SchemaError::XformOpOrderShadowed { .. }), "{error:?}");
+    assert_eq!(prim.horizontal_aperture_at(time)?, Some(1.0));
+
+    edit_camera_layer(&stage, "usdGeom_camera_a.usda")?;
+    prim.set_from_camera(&camera, time)?;
+    assert_eq!(prim.horizontal_aperture_at(time)?, Some(500.0));
+    assert_eq!(prim.local_to_world_transform(time)?, placed);
+    assert_eq!(prim.camera_at(time)?, camera);
+    Ok(())
+}
+
+/// The exposure scale follows the layer's exposure attributes, and is one
+/// at the values the schema falls back to.
+#[test]
+fn camera_exposure_scale() -> Result<()> {
+    let (_stage, prim) = open_camera_layers("usdGeom_camera_b.usda")?;
+    assert!((prim.linear_exposure_scale(None)? - 0.015).abs() < 1e-6);
+    assert!((prim.linear_exposure_scale(TimeCode::new(1.0))? - 0.015).abs() < 1e-6);
+
+    prim.exposure_attr().set(0.0_f32)?;
+    prim.exposure_time_attr().set(1.0_f32)?;
+    prim.exposure_f_stop_attr().set(1.0_f32)?;
+    prim.exposure_iso_attr().set(100.0_f32)?;
+    prim.exposure_responsivity_attr().set(1.0_f32)?;
+    assert_eq!(prim.linear_exposure_scale(None)?, 1.0);
     Ok(())
 }
 

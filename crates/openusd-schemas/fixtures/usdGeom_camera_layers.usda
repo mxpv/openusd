@@ -1,0 +1,9 @@
+#usda 1.0
+(
+    defaultPrim = "camera"
+    subLayers = [
+        @./usdGeom_camera_a.usda@,
+        @./usdGeom_camera_b.usda@
+    ]
+)
+
