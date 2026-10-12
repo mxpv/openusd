@@ -1,4 +1,5 @@
-//! `GfRange3d` — an axis-aligned box in three dimensions.
+//! `GfRange3d` and `GfRange1f` — an axis-aligned box in three dimensions and
+//! a span on a line.
 
 use std::array;
 use std::ops::{Add, Div, Mul, Sub};
@@ -283,9 +284,76 @@ impl Div<f64> for Range3d {
     }
 }
 
+/// A span on a line given by its two ends, in single precision (C++
+/// `GfRange1f`).
+///
+/// A range whose minimum exceeds its maximum is empty, and the [`Default`]
+/// range is one.
+///
+/// ```
+/// use openusd::gf;
+///
+/// let near_far = gf::Range1f::new(1.0, 100.0);
+/// assert_eq!(near_far.size(), 99.0);
+/// assert!(near_far.contains(1.0));
+/// assert!(gf::Range1f::default().is_empty());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Range1f {
+    min: f32,
+    max: f32,
+}
+
+impl Range1f {
+    /// The empty range C++ builds by default: the largest `float` as the
+    /// minimum and its negation as the maximum.
+    pub const EMPTY: Range1f = Range1f {
+        min: f32::MAX,
+        max: -f32::MAX,
+    };
+
+    /// The range from `min` to `max`, which is empty where `min` exceeds
+    /// `max`.
+    pub const fn new(min: f32, max: f32) -> Self {
+        Range1f { min, max }
+    }
+
+    /// The lower end (C++ `GetMin`).
+    pub const fn min(&self) -> f32 {
+        self.min
+    }
+
+    /// The upper end (C++ `GetMax`).
+    pub const fn max(&self) -> f32 {
+        self.max
+    }
+
+    /// The length (C++ `GetSize`), negative for an empty range.
+    pub fn size(&self) -> f32 {
+        self.max - self.min
+    }
+
+    /// Whether the range holds no value (C++ `IsEmpty`).
+    pub fn is_empty(&self) -> bool {
+        self.min > self.max
+    }
+
+    /// Whether `value` lies in the range, its ends included (C++
+    /// `Contains`).
+    pub fn contains(&self, value: f32) -> bool {
+        (self.min..=self.max).contains(&value)
+    }
+}
+
+impl Default for Range1f {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::Range3d;
+    use super::{Range1f, Range3d};
     use crate::gf;
 
     pub(crate) fn range(min: [f64; 3], max: [f64; 3]) -> Range3d {
@@ -440,5 +508,19 @@ pub(crate) mod tests {
             assert_eq!(result, Range3d::EMPTY);
         }
         assert_eq!(a * 0.0, range([0.0; 3], [0.0; 3]));
+    }
+
+    /// A span holds its ends, and one whose ends are out of order holds
+    /// nothing.
+    #[test]
+    fn span_ends() {
+        let r = Range1f::new(1.0, 4.0);
+        assert_eq!((r.min(), r.max(), r.size()), (1.0, 4.0, 3.0));
+        assert!(r.contains(1.0) && r.contains(4.0) && !r.contains(4.5));
+        assert!(!r.is_empty());
+
+        assert!(Range1f::default().is_empty());
+        assert!(Range1f::new(2.0, 1.0).is_empty());
+        assert!(!Range1f::new(2.0, 1.0).contains(1.5));
     }
 }

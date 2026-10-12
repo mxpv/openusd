@@ -1,6 +1,7 @@
 //! Graphics foundations — the value types beneath the schema layer: linear
-//! algebra, the [`Interval`] a time-sample query is asked over, and the
-//! [`Range3d`] and [`BBox3d`] that bound geometry.
+//! algebra, the [`Interval`] a time-sample query is asked over, the
+//! [`Range3d`] and [`BBox3d`] that bound geometry, and the [`Camera`] that
+//! looks at it.
 //!
 //! Mirrors Pixar's `Gf` namespace.
 //!
@@ -26,26 +27,35 @@
 //!
 //! Rotation angles — the USD high-level API (`UsdGeomXformOp`) expresses
 //! angles in degrees; these low-level types take radians to match Rust's
-//! `f32::sin_cos` and friends. [`Rotation`] is the exception: like C++
-//! `GfRotation`, it holds its angle in degrees.
+//! `f32::sin_cos` and friends. [`Rotation`] and [`Camera`] are the
+//! exceptions: like C++ `GfRotation` and `GfCamera`, they hold and take
+//! their angles in degrees.
+//!
+//! Camera space — a [`Camera`] looks along its own −Z, with +Y up and +X to
+//! the right. Its film back and focal length are in tenths of a world unit,
+//! and its distances in world units.
 //!
 //! Quaternion layout — `(w, x, y, z)` with `w` the real (scalar) part,
 //! matching `GfQuatf`'s constructor order.
 
 mod bbox;
+mod camera;
 mod interval;
 mod matrix;
+mod projection;
 mod quat;
 mod range;
 mod rotation;
 mod vec;
 
 pub use bbox::BBox3d;
+pub use camera::{Camera, FovDirection};
 pub use half::f16;
 pub use interval::Interval;
 pub use matrix::{Factors, Mat2d, Mat3d, Mat4d};
+pub use projection::{Projection, ProjectionParams};
 pub use quat::{Quatd, Quatf, Quath};
-pub use range::Range3d;
+pub use range::{Range1f, Range3d};
 pub use rotation::Rotation;
 pub use vec::{Vec2d, Vec2f, Vec2h, Vec2i, Vec3d, Vec3f, Vec3h, Vec3i, Vec4d, Vec4f, Vec4h, Vec4i};
 

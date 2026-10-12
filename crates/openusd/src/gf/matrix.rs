@@ -217,6 +217,47 @@ impl Mat4d {
         m
     }
 
+    /// The perspective projection that sees through the window from
+    /// `(left, bottom)` to `(right, top)`, between the distances `near` and
+    /// `far` along −Z.
+    ///
+    /// The window stands at a distance of one from the camera, where
+    /// `glFrustum`'s is on the near plane. Its size is the tangent of the
+    /// field of view whatever `near` is. The matrix carries the volume into
+    /// OpenGL clip space, with the near plane at −1 and the far plane at 1
+    /// after the divide (C++ `GfFrustum::ComputeProjectionMatrix`).
+    pub fn perspective(left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64) -> Self {
+        let (width, height, depth) = (right - left, top - bottom, far - near);
+        let mut m = Self::IDENTITY;
+        m[(0, 0)] = 2.0 / width;
+        m[(1, 1)] = 2.0 / height;
+        m[(2, 0)] = (right + left) / width;
+        m[(2, 1)] = (top + bottom) / height;
+        m[(2, 2)] = -(far + near) / depth;
+        m[(2, 3)] = -1.0;
+        m[(3, 2)] = -2.0 * near * far / depth;
+        m[(3, 3)] = 0.0;
+        m
+    }
+
+    /// The orthographic projection that sees the box from `(left, bottom)`
+    /// to `(right, top)`, between the distances `near` and `far` along −Z.
+    ///
+    /// The matrix carries the box into OpenGL clip space, with the near
+    /// plane at −1 and the far plane at 1 (C++
+    /// `GfFrustum::ComputeProjectionMatrix`).
+    pub fn orthographic(left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64) -> Self {
+        let (width, height, depth) = (right - left, top - bottom, far - near);
+        let mut m = Self::IDENTITY;
+        m[(0, 0)] = 2.0 / width;
+        m[(1, 1)] = 2.0 / height;
+        m[(2, 2)] = -2.0 / depth;
+        m[(3, 0)] = -(right + left) / width;
+        m[(3, 1)] = -(top + bottom) / height;
+        m[(3, 2)] = -(far + near) / depth;
+        m
+    }
+
     /// Row-major rotation about the X axis by `rad` radians.
     pub fn rotation_x(rad: f64) -> Self {
         let (s, c) = rad.sin_cos();

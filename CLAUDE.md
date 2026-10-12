@@ -135,9 +135,11 @@ source of truth for specifics.
   row-vector convention, each bridging to `sdf::Value` via `From` / `TryFrom`;
   `gf::Rotation` (C++ `GfRotation`), the axis-and-angle rotation the xformOp
   rotations are built through; `gf::Interval` (C++ `GfInterval`), the
-  open-or-closed-ended span a time-sample query is asked over; and
+  open-or-closed-ended span a time-sample query is asked over;
   `gf::Range3d` and `gf::BBox3d` (C++ `GfRange3d`, `GfBBox3d`), the
-  axis-aligned box and the box-with-a-matrix that bounds are computed in. See
+  axis-aligned box and the box-with-a-matrix that bounds are computed in; and
+  `gf::Camera` (C++ `GfCamera`), a camera as a plain value, with
+  `gf::ProjectionParams` for the volume a projection matrix sees. See
   `gf/mod.rs` for the conventions.
 
 ## Development Commands
