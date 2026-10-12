@@ -100,7 +100,9 @@ pub trait NodeGraphInterface: Connectable {
     /// Compute the reverse map from interface inputs to their consumers.
     ///
     /// This walks the active, loaded, defined, non-abstract descendants rooted
-    /// at this container and stops at instances. It is the Rust counterpart of
+    /// at this container and stops at instances, unless the container is
+    /// itself an instance proxy, beneath which every prim is one. It is the
+    /// Rust counterpart of
     /// `UsdShadeNodeGraph::ComputeInterfaceInputConsumersMap`.
     fn interface_input_consumers(&self, transitive: bool) -> Result<InterfaceInputConsumersMap> {
         let direct = compute_direct_map(self.prim())?;
@@ -136,9 +138,8 @@ fn compute_direct_map(root: &usd::Prim) -> Result<InterfaceInputConsumersMap> {
         result.insert(InterfaceInputConsumers::new(interface_input));
     }
 
-    // Nothing beneath an instance is listed under the default predicate,
-    // so the walk stops at one.
     for prim in root.filtered_descendants(usd::PrimPredicate::DEFAULT)? {
+        let prim = prim?;
         let Some(inputs) = connectable_inputs(&prim)? else {
             continue;
         };

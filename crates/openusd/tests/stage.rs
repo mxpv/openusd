@@ -13270,7 +13270,8 @@ def "A" (instanceable = true references = </Proto>) {}
     // The prims beneath a prim, each before its own, with a prim that does
     // not match left out along with what is beneath it.
     let beneath = |path: &str, predicate| -> Result<Vec<String>> {
-        Ok(paths(stage.prim(path)?.filtered_descendants(predicate)?))
+        let beneath = stage.prim(path)?.filtered_descendants(predicate)?;
+        Ok(paths(beneath.collect::<Result<_>>()?))
     };
     assert_eq!(
         beneath("/Root", PrimPredicate::DEFAULT)?,

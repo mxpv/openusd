@@ -43,7 +43,7 @@ pub use diff::{ApplyMode, Diff, Edit, FieldValue};
 pub use editor::{NamespaceEditError, NamespaceEditor};
 pub use interp::{InterpolationType, bracketing_time_samples};
 pub use model_api::KindValidation;
-pub use prim::{Prim, PrimIndexRef, VariantSets};
+pub use prim::{FilteredDescendants, Prim, PrimIndexRef, VariantSets};
 pub use prim_definition::{DefProperty, PrimDefinition};
 pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
 pub use relationship::{Relationship, RelationshipBuilder};

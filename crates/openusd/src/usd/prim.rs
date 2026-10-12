@@ -1023,7 +1023,7 @@ impl Prim {
     ///
     /// A prim that does not match is left out with everything beneath it.
     /// Nothing beneath an instance is listed unless `predicate` traverses
-    /// instance proxies.
+    /// instance proxies, or this prim is itself an instance proxy.
     ///
     /// # Example
     ///
@@ -1037,22 +1037,17 @@ impl Prim {
     /// stage.define_prim("/World/Cast")?;
     ///
     /// let world = stage.prim("/World")?;
-    /// let beneath = world.filtered_descendants(PrimPredicate::DEFAULT)?;
-    /// let paths: Vec<_> = beneath.iter().map(|prim| prim.path().as_str()).collect();
+    /// let mut paths = Vec::new();
+    /// for prim in world.filtered_descendants(PrimPredicate::DEFAULT)? {
+    ///     paths.push(prim?.path().to_string());
+    /// }
     /// assert_eq!(paths, ["/World/Set", "/World/Set/Chair", "/World/Cast"]);
     /// # Ok::<(), openusd::Error>(())
     /// ```
-    pub fn filtered_descendants(&self, predicate: PrimPredicate) -> Result<Vec<Prim>> {
-        let mut found = Vec::new();
+    pub fn filtered_descendants(&self, predicate: PrimPredicate) -> Result<FilteredDescendants> {
         let mut stack = self.stage.filtered_children(&self.path, predicate, None)?;
         stack.reverse();
-        while let Some((prim, composed)) = stack.pop() {
-            let mut children = self.stage.filtered_children(&prim.path, predicate, Some(composed))?;
-            children.reverse();
-            stack.extend(children);
-            found.push(prim);
-        }
-        Ok(found)
+        Ok(FilteredDescendants { predicate, stack })
     }
 
     /// [`filtered_children`](Self::filtered_children) for a walk that goes
@@ -1501,6 +1496,38 @@ impl VariantSets {
         Ok(self
             .stage
             .masked_opinions(&self.prim, |g, c| c.variant_selections(g, &self.prim))?)
+    }
+}
+
+/// The prims beneath a prim that match a predicate, each before the prims
+/// beneath it: what [`Prim::filtered_descendants`] walks (C++
+/// `UsdPrimSubtreeRange`).
+///
+/// A prim's children are listed when the walk comes to it, so a walk that
+/// stops early lists nothing beneath where it stopped. A listing that fails
+/// is the walk's last item.
+pub struct FilteredDescendants {
+    predicate: PrimPredicate,
+    /// The prims still to walk, the next one last, each with the status it
+    /// composed when it was listed.
+    stack: Vec<(Prim, ComposedStatus)>,
+}
+
+impl Iterator for FilteredDescendants {
+    type Item = Result<Prim>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (prim, composed) = self.stack.pop()?;
+        match prim.stage.filtered_children(&prim.path, self.predicate, Some(composed)) {
+            Ok(children) => {
+                self.stack.extend(children.into_iter().rev());
+                Some(Ok(prim))
+            }
+            Err(error) => {
+                self.stack.clear();
+                Some(Err(error))
+            }
+        }
     }
 }
 
