@@ -28,7 +28,7 @@
 //! [`StageBuilder::schema_registry`](super::StageBuilder::schema_registry).
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
@@ -659,6 +659,62 @@ impl SchemaRegistry {
             pending.extend(&info.bases);
         }
         false
+    }
+
+    /// `schema` and then every schema it derives from, in the order a lookup
+    /// by type falls back through them (C++ `TfType::GetAllAncestorTypes`).
+    ///
+    /// A schema with one base is followed by that base's ancestors. One with
+    /// several is followed by a C3 merge of three kinds of sequence, tried
+    /// in this order: its direct bases as declared, then the ancestors of
+    /// each. The next schema is the first one heading a sequence that no
+    /// sequence holds further in, which keeps every schema ahead of its own
+    /// bases and takes a direct base ahead of another base's ancestors.
+    ///
+    /// Only registered schemas are listed, as [`is_a`](Self::is_a) counts
+    /// only them: the answer is empty for an unregistered name, and a base
+    /// that is not registered is passed over. A base that names a schema
+    /// already on the chain leading to it is passed over too, so each schema
+    /// is listed once. The order ends early where the declared bases allow
+    /// no such order, as it does in C++.
+    pub fn ancestors<'a>(&'a self, schema: &'a tf::Token) -> Vec<&'a tf::Token> {
+        let mut order = Vec::new();
+        self.linearize(schema, &mut Vec::new(), &mut order);
+        order
+    }
+
+    /// Append the [`ancestors`](Self::ancestors) of `schema` to `order`,
+    /// where `chain` holds the schemas whose bases are being followed to
+    /// reach it.
+    fn linearize<'a>(&'a self, schema: &'a tf::Token, chain: &mut Vec<&'a tf::Token>, order: &mut Vec<&'a tf::Token>) {
+        let depth = chain.len();
+        let mut schema = schema;
+        while let Some(info) = self.infos.get(schema) {
+            order.push(schema);
+            chain.push(schema);
+            // Manifests are data, so a malformed one can name a base that is
+            // not registered, or a base cycle.
+            let mut bases = info
+                .bases
+                .iter()
+                .filter(|base| self.infos.contains_key(*base) && !chain.contains(base));
+            match (bases.next(), bases.next()) {
+                (None, _) => break,
+                (Some(only), None) => schema = only,
+                (Some(first), Some(second)) => {
+                    let bases: Vec<&tf::Token> = [first, second].into_iter().chain(bases).collect();
+                    let mut sequences: Vec<VecDeque<&tf::Token>> = vec![bases.iter().copied().collect()];
+                    for base in bases {
+                        let mut ancestors = Vec::new();
+                        self.linearize(base, chain, &mut ancestors);
+                        sequences.push(ancestors.into());
+                    }
+                    merge_ancestors(sequences, order);
+                    break;
+                }
+            }
+        }
+        chain.truncate(depth);
     }
 
     /// Resolves an applied-schema name to the schema it names and its instance,
@@ -2319,6 +2375,31 @@ class DomeLight_1 "DomeLight_1"
     }
 }
 
+/// Append to `order` the C3 merge of `sequences` (C++ `_MergeAncestors`): the
+/// first schema heading a sequence that no sequence holds further in, taken
+/// off every sequence it heads, until none is left or none qualifies.
+fn merge_ancestors<'a>(mut sequences: Vec<VecDeque<&'a tf::Token>>, order: &mut Vec<&'a tf::Token>) {
+    loop {
+        let next = sequences
+            .iter()
+            .filter_map(|sequence| sequence.front().copied())
+            .find(|head| {
+                sequences
+                    .iter()
+                    .all(|sequence| !sequence.iter().skip(1).any(|later| later == head))
+            });
+        let Some(next) = next else {
+            return;
+        };
+        order.push(next);
+        for sequence in &mut sequences {
+            if sequence.front() == Some(&next) {
+                sequence.pop_front();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2360,6 +2441,46 @@ mod tests {
         assert!(!registry.is_a(&tf::Token::new("Bogus"), &tf::Token::new("Typed")));
         assert!(!registry.is_a(&tf::Token::new("Bogus"), &tf::Token::new("Bogus")));
         assert!(!registry.is_a(&distant, &tf::Token::default()));
+    }
+
+    /// A schema comes before its bases, and a direct base before another
+    /// base's ancestors.
+    #[test]
+    fn ancestors_order() {
+        let decl = |name, bases| SchemaDecl::new(name, SchemaKind::ConcreteTyped).bases(bases);
+        let decls = [
+            decl("Deep", &["Typed"]),
+            decl("Left", &["Deep"]),
+            decl("Right", &["Typed"]),
+            decl("Shared", &["Deep"]),
+            // A direct base comes before another base's ancestors.
+            decl("Both", &["Left", "Right"]),
+            // A base two schemas share comes after both of them.
+            decl("Diamond", &["Left", "Shared"]),
+            decl("Loop", &["Pool"]),
+            decl("Pool", &["Loop"]),
+        ];
+        let family = SchemaFamily::new("mine", &decls);
+        let registry = SchemaRegistry::builder().register(&family).build().unwrap();
+        let ancestors = |name: &str| {
+            let name = tf::Token::from(name);
+            let order: Vec<String> = registry.ancestors(&name).into_iter().map(|t| t.to_string()).collect();
+            order
+        };
+
+        assert_eq!(ancestors("Left"), ["Left", "Deep", "Typed", "SchemaBase"]);
+        assert_eq!(
+            ancestors("Both"),
+            ["Both", "Left", "Right", "Deep", "Typed", "SchemaBase"]
+        );
+        assert_eq!(
+            ancestors("Diamond"),
+            ["Diamond", "Left", "Shared", "Deep", "Typed", "SchemaBase"]
+        );
+        // A base cycle lists each schema once, and an unregistered name is
+        // no schema.
+        assert_eq!(ancestors("Loop"), ["Loop", "Pool"]);
+        assert_eq!(ancestors("Bogus"), [""; 0]);
     }
 
     #[test]
