@@ -13142,3 +13142,201 @@ fn missing_target_found_malformed() -> Result<()> {
     );
     Ok(())
 }
+
+/// The children that match a predicate are told from the parent's status
+/// alone: an inactive, an undefined and an abstract sibling drop out, an
+/// instance lists its proxies only when asked to, and an instance proxy
+/// lists its own either way.
+#[test]
+fn filtered_children_predicates() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+
+def "Root"
+{
+    def "Kept" {}
+    def "Inactive" (active = false) {}
+    over "Undefined" {}
+    class "Abstract" {}
+}
+
+def "Proto"
+{
+    def "Child"
+    {
+        def "Leaf" {}
+    }
+}
+
+def "A" (instanceable = true references = </Proto>) {}
+"#,
+    )?;
+    let names = |prim: &usd::Prim, predicate| -> Result<Vec<String>> {
+        let children = prim.filtered_children(predicate)?;
+        Ok(children.iter().map(|child| child.path().to_string()).collect())
+    };
+
+    let root = stage.prim("/Root")?;
+    assert_eq!(names(&root, PrimPredicate::DEFAULT)?, ["/Root/Kept"]);
+    assert_eq!(names(&root, PrimPredicate::ALL)?.len(), root.children()?.len());
+    let defined = PrimPredicate::new(PrimStatus::DEFINED, PrimStatus::empty());
+    assert_eq!(
+        names(&root, defined)?,
+        ["/Root/Kept", "/Root/Inactive", "/Root/Abstract"]
+    );
+    assert_eq!(
+        names(&stage.prim("/")?, PrimPredicate::DEFAULT)?,
+        ["/Root", "/Proto", "/A"]
+    );
+
+    let instance = stage.prim("/A")?;
+    assert!(instance.is_instance()?);
+    assert!(names(&instance, PrimPredicate::DEFAULT)?.is_empty());
+    assert_eq!(names(&instance, PrimPredicate::DEFAULT_PROXIES)?, ["/A/Child"]);
+
+    let proxy = stage.prim("/A/Child")?;
+    assert!(proxy.is_instance_proxy()?);
+    assert_eq!(names(&proxy, PrimPredicate::DEFAULT)?, ["/A/Child/Leaf"]);
+
+    // The prototype's own children are plain prims.
+    let prototype = stage.prim(instance.prototype()?.expect("an instance"))?;
+    let children = prototype.filtered_children(PrimPredicate::DEFAULT)?;
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].path(), &prototype.path().append_path("Child")?);
+    Ok(())
+}
+
+/// A walk that hands each prim's composed status to the listing of its
+/// children lists what a listing with no status does, and a status read
+/// before an edit is passed over after it.
+#[test]
+fn filtered_children_from_status() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+
+def "Root"
+{
+    def "Kept"
+    {
+        def "Leaf" {}
+        class "Abstract"
+        {
+            def "Below" {}
+        }
+    }
+    def "Inactive" (active = false) {}
+}
+
+def "Proto"
+{
+    def "Child"
+    {
+        def "Leaf" {}
+    }
+}
+
+def "A" (instanceable = true references = </Proto>) {}
+"#,
+    )?;
+    let paths = |prims: Vec<usd::Prim>| -> Vec<String> { prims.iter().map(|prim| prim.path().to_string()).collect() };
+
+    for predicate in [
+        PrimPredicate::DEFAULT,
+        PrimPredicate::DEFAULT_PROXIES,
+        PrimPredicate::ALL,
+        PrimPredicate::new(PrimStatus::DEFINED, PrimStatus::empty()),
+    ] {
+        let mut visited = 0;
+        let mut stack = vec![(stage.prim("/")?, None)];
+        while let Some((prim, composed)) = stack.pop() {
+            let children = prim.filtered_children_from(predicate, composed)?;
+            let listed = children.iter().map(|(child, _)| child.clone()).collect();
+            assert_eq!(
+                paths(listed),
+                paths(prim.filtered_children(predicate)?),
+                "{}",
+                prim.path()
+            );
+            visited += children.len();
+            stack.extend(children.into_iter().map(|(child, composed)| (child, Some(composed))));
+        }
+        assert!(visited >= 5, "{predicate:?} visited {visited}");
+    }
+
+    // The prims beneath a prim, each before its own, with a prim that does
+    // not match left out along with what is beneath it.
+    let beneath = |path: &str, predicate| -> Result<Vec<String>> {
+        Ok(paths(stage.prim(path)?.filtered_descendants(predicate)?))
+    };
+    assert_eq!(
+        beneath("/Root", PrimPredicate::DEFAULT)?,
+        ["/Root/Kept", "/Root/Kept/Leaf"]
+    );
+    assert_eq!(
+        beneath("/", PrimPredicate::DEFAULT)?,
+        [
+            "/Root",
+            "/Root/Kept",
+            "/Root/Kept/Leaf",
+            "/Proto",
+            "/Proto/Child",
+            "/Proto/Child/Leaf",
+            "/A"
+        ]
+    );
+    assert!(beneath("/A", PrimPredicate::DEFAULT)?.is_empty());
+    assert_eq!(
+        beneath("/A", PrimPredicate::DEFAULT_PROXIES)?,
+        ["/A/Child", "/A/Child/Leaf"]
+    );
+    assert!(beneath("/Root/Kept/Leaf", PrimPredicate::ALL)?.is_empty());
+
+    // A status handed to another prim than the one it was read for is
+    // passed over: an active prim's does not make an inactive prim's
+    // children active.
+    let listed = stage
+        .prim("/Root")?
+        .filtered_children_from(PrimPredicate::new(PrimStatus::DEFINED, PrimStatus::empty()), None)?;
+    let (kept, of_kept) = listed[0].clone();
+    let (inactive, _) = listed[1].clone();
+    assert_eq!(
+        (kept.path().as_str(), inactive.path().as_str()),
+        ("/Root/Kept", "/Root/Inactive")
+    );
+    assert!(
+        inactive
+            .filtered_children_from(PrimPredicate::ALL, Some(of_kept.clone()))?
+            .is_empty()
+    );
+    assert_eq!(
+        paths(
+            (stage.prim("/Proto")?)
+                .filtered_children_from(PrimPredicate::DEFAULT, Some(of_kept))?
+                .into_iter()
+                .map(|(child, _)| child)
+                .collect()
+        ),
+        ["/Proto/Child"]
+    );
+
+    // The status of a prim read while it was active does not outlive the
+    // edit that deactivates the prim above it.
+    let root = stage.prim("/Root")?;
+    let listed = root.filtered_children_from(PrimPredicate::DEFAULT, None)?;
+    let (kept, composed) = listed.into_iter().next().expect("/Root/Kept");
+    assert_eq!(
+        paths(kept.filtered_children(PrimPredicate::DEFAULT)?),
+        ["/Root/Kept/Leaf"]
+    );
+    root.clone().set_active(false)?;
+    assert!(kept.filtered_children(PrimPredicate::DEFAULT)?.is_empty());
+    assert!(
+        kept.filtered_children_from(PrimPredicate::DEFAULT, Some(composed))?
+            .is_empty()
+    );
+    Ok(())
+}

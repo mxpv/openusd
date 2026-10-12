@@ -130,32 +130,15 @@ impl NodeGraphInterface for Material {}
 /// Builds the non-transitive map for `root`: every interface input of the
 /// container, each with the consumer inputs inside the container's subtree
 /// that connect directly to it.
-// TODO(perf): this hand-rolls a prim-rooted DFS (C++ `UsdPrimRange`) because
-// `Stage::traverse` can only start at the pseudo-root, and each
-// `prim_matches` call re-walks the prim's ancestor chain. Grow a prim-rooted
-// traversal on `Stage` and use it here.
 fn compute_direct_map(root: &usd::Prim) -> Result<InterfaceInputConsumersMap> {
     let mut result = InterfaceInputConsumersMap::default();
     for interface_input in connectable_inputs(root)?.unwrap_or_default() {
         result.insert(InterfaceInputConsumers::new(interface_input));
     }
 
-    let mut stack = if root.is_instance()? {
-        Vec::new()
-    } else {
-        root.children()?
-    };
-    stack.reverse();
-    while let Some(prim) = stack.pop() {
-        if !root.stage().prim_matches(prim.path(), usd::PrimPredicate::DEFAULT)? {
-            continue;
-        }
-        if !prim.is_instance()? {
-            let mut children = prim.children()?;
-            children.reverse();
-            stack.extend(children);
-        }
-
+    // Nothing beneath an instance is listed under the default predicate,
+    // so the walk stops at one.
+    for prim in root.filtered_descendants(usd::PrimPredicate::DEFAULT)? {
         let Some(inputs) = connectable_inputs(&prim)? else {
             continue;
         };

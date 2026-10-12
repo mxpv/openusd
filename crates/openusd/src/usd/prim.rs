@@ -35,8 +35,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
-    ApplyApiError, Attribute, EditTarget, EditTargetArc, LoadPolicy, PrimDefinition, PrimStatus, PrimTypeInfo,
-    Relationship, SchemaRegistry, SpecSite, Stage, StageAuthoringError, VersionFilter,
+    ApplyApiError, Attribute, ComposedStatus, EditTarget, EditTargetArc, LoadPolicy, PrimDefinition, PrimPredicate,
+    PrimStatus, PrimTypeInfo, Relationship, SchemaRegistry, SpecSite, Stage, StageAuthoringError, VersionFilter,
 };
 use crate::tf::Token;
 use crate::{Result, pcp, sdf};
@@ -1001,6 +1001,100 @@ impl Prim {
             .filter_map(|name| self.path.append_path(name.as_str()).ok())
             .map(|path| Prim::new(&self.stage, path))
             .collect())
+    }
+
+    /// Returns the children of this prim that match `predicate`, in the order
+    /// [`children`](Self::children) lists them. Mirrors C++
+    /// `UsdPrim::GetFilteredChildren`.
+    ///
+    /// An instance has no children unless `predicate` traverses instance
+    /// proxies; its contents are the children of its
+    /// [`prototype`](Self::prototype). An instance proxy lists its children,
+    /// which are instance proxies, under either setting.
+    pub fn filtered_children(&self, predicate: PrimPredicate) -> Result<Vec<Prim>> {
+        let children = self.stage.filtered_children(&self.path, predicate, None)?;
+        Ok(children.into_iter().map(|(child, _)| child).collect())
+    }
+
+    /// Returns the prims beneath this one that match `predicate`, each
+    /// before the prims beneath it and in the order
+    /// [`children`](Self::children) lists siblings. Mirrors C++
+    /// `UsdPrim::GetFilteredDescendants`.
+    ///
+    /// A prim that does not match is left out with everything beneath it.
+    /// Nothing beneath an instance is listed unless `predicate` traverses
+    /// instance proxies.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::usd::{self, PrimPredicate};
+    ///
+    /// let stage = usd::Stage::builder().in_memory("scene.usda")?;
+    /// stage.define_prim("/World")?;
+    /// stage.define_prim("/World/Set")?;
+    /// stage.define_prim("/World/Set/Chair")?;
+    /// stage.define_prim("/World/Cast")?;
+    ///
+    /// let world = stage.prim("/World")?;
+    /// let beneath = world.filtered_descendants(PrimPredicate::DEFAULT)?;
+    /// let paths: Vec<_> = beneath.iter().map(|prim| prim.path().as_str()).collect();
+    /// assert_eq!(paths, ["/World/Set", "/World/Set/Chair", "/World/Cast"]);
+    /// # Ok::<(), openusd::Error>(())
+    /// ```
+    pub fn filtered_descendants(&self, predicate: PrimPredicate) -> Result<Vec<Prim>> {
+        let mut found = Vec::new();
+        let mut stack = self.stage.filtered_children(&self.path, predicate, None)?;
+        stack.reverse();
+        while let Some((prim, composed)) = stack.pop() {
+            let mut children = self.stage.filtered_children(&prim.path, predicate, Some(composed))?;
+            children.reverse();
+            stack.extend(children);
+            found.push(prim);
+        }
+        Ok(found)
+    }
+
+    /// [`filtered_children`](Self::filtered_children) for a walk that goes
+    /// on beneath the children: each child comes with the status it
+    /// composed, to pass as `composed` when its own children are listed.
+    ///
+    /// `composed` is this prim's status from the call that listed it, or
+    /// `None` where the walk starts at this prim. With it each child
+    /// composes its status from this prim's in one step. Without it, or
+    /// with the status of another prim, this prim's status is composed from
+    /// the pseudo-root first, which is what
+    /// [`filtered_children`](Self::filtered_children) pays at every prim of
+    /// a walk.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::usd::{self, PrimPredicate};
+    ///
+    /// let stage = usd::Stage::builder().in_memory("scene.usda")?;
+    /// stage.define_prim("/World")?;
+    /// stage.define_prim("/World/Set")?;
+    /// stage.define_prim("/World/Set/Chair")?;
+    ///
+    /// // A walk beneath `/World`, each prim handing its status down.
+    /// let mut found = Vec::new();
+    /// let mut stack = vec![(stage.prim("/World")?, None)];
+    /// while let Some((prim, composed)) = stack.pop() {
+    ///     for (child, composed) in prim.filtered_children_from(PrimPredicate::DEFAULT, composed)? {
+    ///         found.push(child.path().to_string());
+    ///         stack.push((child, Some(composed)));
+    ///     }
+    /// }
+    /// assert_eq!(found, ["/World/Set", "/World/Set/Chair"]);
+    /// # Ok::<(), openusd::Error>(())
+    /// ```
+    pub fn filtered_children_from(
+        &self,
+        predicate: PrimPredicate,
+        composed: Option<ComposedStatus>,
+    ) -> Result<Vec<(Prim, ComposedStatus)>> {
+        self.stage.filtered_children(&self.path, predicate, composed)
     }
 
     /// Returns every property name of this prim — the ones layers author and

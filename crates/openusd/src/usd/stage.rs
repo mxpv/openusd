@@ -193,6 +193,32 @@ impl Default for PrimPredicate {
     }
 }
 
+/// The status a prim composed when a walk listed it, for the walk to hand
+/// back when it lists the prim's own children
+/// ([`Prim::filtered_children_from`](super::Prim::filtered_children_from)).
+///
+/// A prim's active, loaded, defined and abstract bits come from its parent's
+/// and its own opinions (C++ `Usd_PrimData::_ComposeAndCacheFlags`). A walk
+/// that hands each prim's status down composes each prim once, where a
+/// prim asked on its own composes every prim above it.
+///
+/// The status is that of one prim under the stage's population when it was
+/// read. It is passed over for a fresh read once the population has
+/// changed, and where it is handed to another prim than the one it was read
+/// for.
+#[derive(Debug, Clone)]
+pub struct ComposedStatus {
+    /// The prim the status is of.
+    path: sdf::Path,
+    /// The prim's inherited bits, and its `INSTANCE` bit where
+    /// `instance_known`.
+    status: PrimStatus,
+    /// Whether `status` says if the prim is an instance.
+    instance_known: bool,
+    /// The population epoch `status` was read under.
+    epoch: u64,
+}
+
 /// Initial payload loading behavior for a stage.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum InitialLoadSet {
@@ -3325,6 +3351,67 @@ impl Stage {
             Ok(status)
         })?;
         self.with_own_status(prim, status, mask)
+    }
+
+    /// The children of `parent` that match `predicate`, in the order
+    /// [`Prim::children`](super::Prim::children) lists them, each with the
+    /// status it composed (C++ `UsdPrim::GetFilteredChildren`).
+    ///
+    /// `composed` is the parent's own status where a walk has it from the
+    /// step that listed the parent. With it, and while the population it
+    /// was read under stands, each child composes its status from the
+    /// parent's in one step, as C++ `Usd_PrimData` does. Without it the
+    /// parent's status is composed from the pseudo-root first.
+    ///
+    /// An instance has no children unless `predicate` traverses instance
+    /// proxies. An instance proxy lists its children under either setting,
+    /// as C++ `Usd_CreatePredicateForTraversal` keeps proxy traversal on
+    /// for a walk that starts at a proxy.
+    pub(super) fn filtered_children(
+        &self,
+        parent: &sdf::Path,
+        predicate: PrimPredicate,
+        composed: Option<ComposedStatus>,
+    ) -> Result<Vec<(super::Prim, ComposedStatus)>> {
+        let epoch = self.population_epoch();
+        let composed = composed.filter(|composed| composed.epoch == epoch && &composed.path == parent);
+        let status = match &composed {
+            _ if parent.is_abs_root() => PrimStatus::ROOT,
+            Some(composed) => composed.status,
+            None => self.prim_status_masked(parent, PrimStatus::INHERITED)?,
+        };
+        if !predicate.traverse_instance_proxies {
+            let instance = match composed.filter(|composed| composed.instance_known) {
+                Some(composed) => composed.status.contains(PrimStatus::INSTANCE),
+                None => self.masked(parent, |g, cache| cache.is_instance(g, parent))?,
+            };
+            if instance && !self.masked(parent, |g, cache| cache.is_instance_proxy(g, parent))? {
+                return Ok(Vec::new());
+            }
+        }
+
+        // A child's inherited bits are composed whatever the predicate
+        // consults, so that its status can be handed to the next step.
+        let needed = predicate.consulted_bits().union(PrimStatus::INHERITED);
+        let instance_known = needed.contains(PrimStatus::INSTANCE);
+        let names = self.masked(parent, |g, cache| cache.populated_children(g, parent))?;
+        let mut children = Vec::with_capacity(names.len());
+        for name in names {
+            let Ok(child) = parent.append_path(name.as_str()) else {
+                continue;
+            };
+            let status = self.child_status_masked(&child, status, needed)?;
+            if predicate.matches(status) {
+                let composed = ComposedStatus {
+                    path: child.clone(),
+                    status,
+                    instance_known,
+                    epoch,
+                };
+                children.push((super::Prim::new(self, child), composed));
+            }
+        }
+        Ok(children)
     }
 
     /// `prim`'s inherited bits below a parent whose are `parent`, from the
