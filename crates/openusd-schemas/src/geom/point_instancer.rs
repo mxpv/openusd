@@ -466,16 +466,33 @@ impl PointInstancer {
         proto_xforms: ProtoXformInclusion,
         mask: MaskApplication,
     ) -> Result<Vec<Vec<gf::Mat4d>>, SchemaError> {
+        self.check_times(times, base_time)?;
         let proto_indices = self.held_proto_indices(base_time)?;
-        let proto_paths = match proto_xforms {
-            ProtoXformInclusion::Include => self.prototype_paths(&proto_indices)?,
+        let roots = match proto_xforms {
+            ProtoXformInclusion::Include => prototype_prims(self.stage(), &self.prototype_paths(&proto_indices)?)?,
             ProtoXformInclusion::Exclude => Vec::new(),
         };
         let mask = match mask {
             MaskApplication::Apply => self.mask_at(base_time, None)?,
             MaskApplication::Ignore => Vec::new(),
         };
-        self.placed_over(times, base_time, &proto_indices, &proto_paths, &mask)
+        self.placed_over(times, base_time, &proto_indices, &roots, &mask)
+    }
+
+    /// One of `times` that is the default time beside a numeric
+    /// `base_time`, or the other way round, is
+    /// [`SchemaError::DefaultTimeMismatch`].
+    fn check_times(
+        &self,
+        times: &[Option<usd::TimeCode>],
+        base_time: Option<usd::TimeCode>,
+    ) -> Result<(), SchemaError> {
+        match times.iter().all(|time| time.is_some() == base_time.is_some()) {
+            true => Ok(()),
+            false => Err(SchemaError::DefaultTimeMismatch {
+                prim: self.path().clone(),
+            }),
+        }
     }
 
     /// `protoIndices` at the sample at or before `base_time`, which names
@@ -493,21 +510,18 @@ impl PointInstancer {
     /// The transform of each instance `mask` keeps at each of `times`,
     /// carried there from `base_time`, for the instances `proto_indices`
     /// names. Each comes after the local transform of the prototype root
-    /// its index names among `proto_paths`, and with no paths the instances
-    /// are placed only. An empty mask keeps every instance.
+    /// its index names among `roots`, where `None` is a root the stage
+    /// holds no prim for, and with no roots the instances are placed only.
+    /// An empty mask keeps every instance. The times are all numeric or
+    /// all the default time.
     fn placed_over(
         &self,
         times: &[Option<usd::TimeCode>],
         base_time: Option<usd::TimeCode>,
         proto_indices: &[i32],
-        proto_paths: &[sdf::Path],
+        roots: &[Option<usd::Prim>],
         mask: &[bool],
     ) -> Result<Vec<Vec<gf::Mat4d>>, SchemaError> {
-        if times.iter().any(|time| time.is_some() != base_time.is_some()) {
-            return Err(SchemaError::DefaultTimeMismatch {
-                prim: self.path().clone(),
-            });
-        }
         let count = proto_indices.len();
         check_mask(mask, count)?;
 
@@ -555,7 +569,6 @@ impl PointInstancer {
 
         let stage = self.stage();
         let time_codes_per_second = stage.time_codes_per_second();
-        let prototype_prims = prototype_prims(stage, proto_paths)?;
         let mut cache = XformCache::default();
         let interpolated = motion.velocities.is_empty() && spin.is_empty();
         let mut samples = Vec::with_capacity(times.len());
@@ -575,7 +588,7 @@ impl PointInstancer {
             }
 
             cache.set_time(time);
-            let prototypes = prototype_xforms(&mut cache, &prototype_prims)?;
+            let prototypes = prototype_xforms(&mut cache, roots)?;
             let arrays = InstanceArrays {
                 proto_indices,
                 positions: &motion.positions,
@@ -677,19 +690,15 @@ impl PointInstancer {
                 prim: self.path().clone(),
             });
         };
+        self.check_times(times, base_time)?;
         let proto_indices = self.held_proto_indices(base_time)?;
         let mask = self.mask_at(base_time, None)?;
         check_mask(&mask, proto_indices.len())?;
-        let proto_paths = self.prototype_paths(&proto_indices)?;
+        let roots = prototype_prims(self.stage(), &self.prototype_paths(&proto_indices)?)?;
         // The transforms keep every instance, so that each is beside the
         // index of its prototype. The mask prunes them below.
-        let transforms = self.placed_over(times, base_time, &proto_indices, &proto_paths, &[])?;
+        let transforms = self.placed_over(times, base_time, &proto_indices, &roots, &[])?;
 
-        let stage = self.stage();
-        let mut roots = Vec::with_capacity(proto_paths.len());
-        for path in &proto_paths {
-            roots.push(stage.prim(path)?);
-        }
         let purposes = [Purpose::Default, Purpose::Proxy, Purpose::Render];
         let mut cache = BBoxCache::new(None, purposes).in_context(context);
         let mut extents = Vec::with_capacity(times.len());
@@ -698,7 +707,11 @@ impl PointInstancer {
             // The range and the matrix of each prototype's box.
             let mut prototypes = Vec::with_capacity(roots.len());
             for root in &roots {
-                let bound = cache.untransformed_bound(root)?;
+                // A root the stage holds no prim for bounds nothing.
+                let bound = match root {
+                    Some(root) => cache.untransformed_bound(root)?,
+                    None => gf::BBox3d::default(),
+                };
                 prototypes.push((bound.range(), bound.matrix()));
             }
 
