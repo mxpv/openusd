@@ -322,14 +322,27 @@ struct SublayerState {
     /// context, keyed by the authoring parent — the table a stack on the
     /// context-free `collect_plain` fast path consults to record load demands
     /// without re-decoding `subLayers` (its edges are exactly the context-free
-    /// ones). Rebuilt wholesale by [`set_plain_misses`](Self::set_plain_misses)
-    /// per edge build; a stack with an expression sublayer records its
-    /// unresolved entries directly from its contextual re-resolution instead.
+    /// ones). Replaced by [`set_plain_misses`](Self::set_plain_misses) for the
+    /// parents each edge build re-resolves; a stack with an expression
+    /// sublayer records its unresolved entries directly from its contextual
+    /// re-resolution instead.
     // TODO(perf): a permanently missing literal keeps this table non-empty, so
     // every plain-stack rebuild re-scans its members to regenerate the
     // diagnostic; a per-parent presence flag on `LayerNode` would shortcut
     // stacks with no unresolved entries.
     unresolved_plain: HashMap<LayerId, Vec<String>>,
+    /// Parents with a context-free `subLayers` entry that resolved through the
+    /// bare in-memory fallback. A layer joining under the entry's anchored
+    /// identifier takes it over. With the parents in
+    /// [`unresolved_plain`](Self::unresolved_plain), these are the layers whose
+    /// edges a join can change ([`LayerGraph::wire_joined`]).
+    fallback_plain: HashSet<LayerId>,
+    /// Stacks whose last composition met an entry naming no layer interned
+    /// under its anchored identifier: unresolved, or resolved through the bare
+    /// in-memory fallback. A joining layer can extend such a stack without
+    /// changing any context-free edge (a `${VAR}`-selected entry).
+    /// [`LayerGraph::wire_joined`] recomposes them.
+    unsettled: HashSet<LayerStackId>,
     /// The [`SublayerDemand`]s the last stack recompose or mint discovered,
     /// awaiting the stage's load barrier
     /// ([`LayerGraph::take_sublayer_demands`]). A plain `Vec` mutated through
@@ -387,6 +400,7 @@ impl SublayerState {
     fn retire_stacks(&mut self, removed: &[LayerStackId]) {
         for id in removed {
             self.errors.remove(id);
+            self.unsettled.remove(id);
         }
     }
 
@@ -395,13 +409,24 @@ impl SublayerState {
         mem::take(&mut self.pending_demands)
     }
 
-    /// Replaces the per-parent table of context-free unresolved entries from
-    /// one edge build's misses.
-    fn set_plain_misses(&mut self, misses: Vec<(LayerId, String)>) {
-        self.unresolved_plain.clear();
-        for (parent, evaluated) in misses {
+    /// Replaces the context-free unresolved and fallback-resolved entries of
+    /// `parents` — every parent when `None` — with those one edge build's
+    /// `sink` recorded for them.
+    fn set_plain_misses(&mut self, parents: Option<&HashSet<LayerId>>, sink: EdgeSink) {
+        match parents {
+            None => {
+                self.unresolved_plain.clear();
+                self.fallback_plain.clear();
+            }
+            Some(parents) => {
+                self.unresolved_plain.retain(|parent, _| !parents.contains(parent));
+                self.fallback_plain.retain(|parent| !parents.contains(parent));
+            }
+        }
+        for (parent, evaluated) in sink.demands {
             self.unresolved_plain.entry(parent).or_default().push(evaluated);
         }
+        self.fallback_plain.extend(sink.fallbacks);
     }
 
     /// Every per-stack diagnostic, in stack mint order.
@@ -507,6 +532,24 @@ impl LoadFailure {
     }
 }
 
+/// Which layers an edge rebuild ([`LayerGraph::build_sublayer_edges`])
+/// re-resolves, and which stacks it recomposes.
+#[derive(Clone, Copy)]
+enum EdgeScope<'a> {
+    /// Every layer and every stack.
+    All,
+    /// Every layer, and the stacks reaching either a layer whose edges changed
+    /// or one of these layers, whose `subLayers` or `expressionVariables` were
+    /// authored.
+    Edited(&'a HashSet<LayerId>),
+    /// These layers, which just joined the graph, and the parents whose
+    /// entries a join can take over ([`SublayerState::unresolved_plain`],
+    /// [`SublayerState::fallback_plain`]). The stacks it recomposes are those
+    /// reaching a joined layer or a layer whose edges changed, and those a join
+    /// can extend ([`SublayerState::unsettled`]).
+    Joined(&'a HashSet<LayerId>),
+}
+
 /// What a sublayer-edge resolution pass discovers beyond the edges themselves,
 /// tagged by the authoring parent so the consumer can drop what a muted branch
 /// keeps out of the composed stack. The default sink records demands only —
@@ -517,6 +560,8 @@ impl LoadFailure {
 struct EdgeSink {
     /// Unresolved entries as `(parent, evaluated path)`.
     demands: Vec<(LayerId, String)>,
+    /// Parents of entries that resolved through the bare in-memory fallback.
+    fallbacks: Vec<LayerId>,
     /// The buckets only a stack's contextual re-resolution fills, or `None` to
     /// skip recording them.
     contextual: Option<ContextualSink>,
@@ -543,6 +588,7 @@ impl EdgeSink {
     fn contextual() -> Self {
         Self {
             demands: Vec::new(),
+            fallbacks: Vec::new(),
             contextual: Some(ContextualSink::default()),
         }
     }
@@ -631,7 +677,7 @@ impl LayerGraph {
         // A full pass returns no scoped set; finalize re-resolves every stack.
         // The first composition's vars deltas are discarded too — nothing is
         // cached yet, so there is nothing to invalidate against them.
-        let _ = self.build_sublayer_edges(None);
+        let _ = self.build_sublayer_edges(EdgeScope::All);
         self.mint_eager_target_stacks();
         self.recompute_relocates();
     }
@@ -672,9 +718,11 @@ impl LayerGraph {
         (id, true)
     }
 
-    /// Resolves every layer's `subLayers` into [`LayerNode::children`] — the
-    /// context-free edges — folding the per-hop time-codes-per-second retiming into
-    /// each edge offset. Replaces [`cycles`](GraphDiagnostics::cycles) with the
+    /// Resolves the `subLayers` of the layers `scope` names (every layer,
+    /// except for a join) into [`LayerNode::children`], the context-free edges,
+    /// folding the per-hop time-codes-per-second retiming into each edge
+    /// offset, then recomposes the stacks `scope` names. Replaces
+    /// [`cycles`](GraphDiagnostics::cycles) with the
     /// sublayer-cycle errors reachable from the root layer (C++
     /// `PcpErrorSublayerCycle`).
     ///
@@ -687,21 +735,37 @@ impl LayerGraph {
     /// [`compose_stack_edges`](Self::compose_stack_edges); the shared context-free
     /// `children` feed only the stacks that have none.
     ///
-    /// Returns the affected layer set for a scoped edit (the layers whose composed
-    /// edges changed, unioned with `edited`) so the caller can scope cache eviction
-    /// to the same stacks the re-resolution touched — `None` for a full pass —
-    /// together with the [`StackVarsDelta`]s the stack rebuild emitted.
-    fn build_sublayer_edges(
-        &mut self,
-        edited: Option<&HashSet<LayerId>>,
-    ) -> (Option<HashSet<LayerId>>, Vec<StackVarsDelta>) {
+    /// Returns the affected layer set for an edit (the layers whose composed
+    /// edges changed, unioned with the edited ones) so the caller can scope
+    /// cache eviction to the same stacks the re-resolution touched — `None` for
+    /// a full pass or a join — together with the [`StackVarsDelta`]s the stack
+    /// rebuild emitted.
+    fn build_sublayer_edges(&mut self, scope: EdgeScope<'_>) -> (Option<HashSet<LayerId>>, Vec<StackVarsDelta>) {
+        // The layers whose edges this pass re-resolves, every layer when `None`.
+        // A join changes another layer's edges only through an entry that names
+        // no layer under its anchored identifier. Beside the joined layers, the
+        // parents of such entries re-resolve.
+        let resolved: Option<HashSet<LayerId>> = match scope {
+            EdgeScope::All | EdgeScope::Edited(_) => None,
+            EdgeScope::Joined(joined) => Some(
+                joined
+                    .iter()
+                    .chain(self.sublayers.unresolved_plain.keys())
+                    .chain(&self.sublayers.fallback_plain)
+                    .copied()
+                    .collect(),
+            ),
+        };
         // Refresh the expression-sublayer flags first, so the stack rebuild below
         // reads them through `has_expr_sublayer` for its `collect_plain` fast-path
-        // gate.
-        self.recompute_expr_sublayer_flags();
+        // gate. A join leaves every other layer's `subLayers` unchanged.
+        match scope {
+            EdgeScope::All | EdgeScope::Edited(_) => self.recompute_expr_sublayer_flags(None),
+            EdgeScope::Joined(joined) => self.recompute_expr_sublayer_flags(Some(joined)),
+        }
         // Edges are resolved into a side buffer so the immutable `resolve_edges`
         // borrow does not clash with the per-node mutation that applies them.
-        let mut all_edges: Vec<(LayerId, SublayerEdges)> = Vec::with_capacity(self.nodes.len());
+        let mut all_edges: Vec<(LayerId, SublayerEdges)> = Vec::new();
         // Take the resolution cache out so `resolve_edges` (which borrows `self`
         // immutably) can fill it; it carries forward across rebuilds, so a
         // `subLayers` edit only resolves paths it has not seen before.
@@ -709,17 +773,21 @@ impl LayerGraph {
 
         // Each layer's context-free edges depend only on its own `subLayers`
         // resolved against the empty variable set, so one per-layer pass builds them
-        // all. The demand-only sink collects the entries that resolved to no loaded
-        // layer; they become the per-parent table plain stacks consult for load
-        // demands ([`SublayerState::unresolved_plain`]).
+        // all. The sink collects the entries that resolved to no loaded layer,
+        // which become the per-parent table plain stacks consult for load
+        // demands ([`SublayerState::unresolved_plain`]), and the parents resolved
+        // through the bare fallback.
         let empty = HashMap::new();
         let mut plain_sink = EdgeSink::default();
         for &id in &self.order {
+            if resolved.as_ref().is_some_and(|resolved| !resolved.contains(&id)) {
+                continue;
+            }
             let edges = self.resolve_edges(id, &empty, &mut resolution, Some(&mut plain_sink));
             all_edges.push((id, edges));
         }
         self.sublayers.resolution = resolution;
-        self.sublayers.set_plain_misses(plain_sink.demands);
+        self.sublayers.set_plain_misses(resolved.as_ref(), plain_sink);
 
         // Apply the composed edges. A full pass (`None`, at finalize or after a load
         // that can extend a stack with a newly opened member) re-resolves every
@@ -729,14 +797,14 @@ impl LayerGraph {
         // edge diff catches a layer whose own `subLayers` resolution changed, while
         // `edited` catches an authored `${VAR}` sublayer or `expressionVariables` edit
         // that shifts a stack's members without changing its plain edges.
-        let affected = match edited {
-            None => {
+        let affected = match scope {
+            EdgeScope::All => {
                 for (id, edges) in all_edges {
                     self.nodes.get_mut(&id).expect("edge source exists").children = edges;
                 }
                 None
             }
-            Some(edited) => {
+            EdgeScope::Edited(touched) | EdgeScope::Joined(touched) => {
                 let mut changed: HashSet<LayerId> = HashSet::new();
                 for (id, edges) in all_edges {
                     let node = self.nodes.get_mut(&id).expect("edge source exists");
@@ -745,14 +813,23 @@ impl LayerGraph {
                         changed.insert(id);
                     }
                 }
-                changed.extend(edited);
+                changed.extend(touched);
                 Some(changed)
             }
         };
 
-        let vars_deltas = self.rebuild_sublayer_stacks(affected.as_ref());
+        // A join also recomposes the stacks it can extend without changing a
+        // context-free edge.
+        let unsettled = match scope {
+            EdgeScope::Joined(_) => self.sublayers.unsettled.clone(),
+            EdgeScope::All | EdgeScope::Edited(_) => HashSet::new(),
+        };
+        let vars_deltas = self.rebuild_sublayer_stacks(affected.as_ref(), &unsettled);
         self.recompute_cycle_diagnostics();
-        (affected, vars_deltas)
+        match scope {
+            EdgeScope::Joined(_) => (None, vars_deltas),
+            EdgeScope::All | EdgeScope::Edited(_) => (affected, vars_deltas),
+        }
     }
 
     /// Resolves `id`'s `subLayers` into `(child, effective offset)` edges,
@@ -762,7 +839,8 @@ impl LayerGraph {
     /// `id`'s own `expressionVariables` do not contribute — only the stack root's do
     /// (C++ `PcpExpressionVariables`), and the caller has already folded them into
     /// `context`. `sink`, when given, receives what the resolution drops: entries
-    /// that resolved to no loaded layer (load-demand candidates), and — when it
+    /// that resolved to no loaded layer (load-demand candidates), the parent of
+    /// each entry resolved through the bare in-memory fallback, and — when it
     /// carries the contextual buckets — `${VAR}` evaluation diagnostics and the
     /// variable names those evaluations read.
     fn resolve_edges(
@@ -830,7 +908,7 @@ impl LayerGraph {
             } else {
                 sub_path
             };
-            let Ok(sub_id) = self.resolve_sublayer(id, &sub_path, resolution) else {
+            let Ok((sub_id, anchored)) = self.resolve_sublayer(id, &sub_path, resolution) else {
                 // No loaded layer at the entry's anchored (or bare) identifier:
                 // record a load-demand candidate for the stacks whose members
                 // include `id`, so the stage's load barrier can open it. An
@@ -842,6 +920,9 @@ impl LayerGraph {
                 }
                 continue;
             };
+            if !anchored && let Some(sink) = sink.as_deref_mut() {
+                sink.fallbacks.push(id);
+            }
             let ratio = parent_tcps / effective_time_codes_per_second(&self.nodes[&sub_id].layer);
             let effective = offsets
                 .get(i)
@@ -867,7 +948,8 @@ impl LayerGraph {
     /// resolver receives the authored spelling, so a leading `./` keeps its
     /// file-relative meaning; the bare fallback looks up the resolver's
     /// [`in_memory_identifier`](crate::ar::Resolver::in_memory_identifier)
-    /// for it.
+    /// for it. The sublayer is paired with whether its anchored identifier
+    /// matched.
     ///
     /// An identifier is memoized in `cache` once it is stable — made from an
     /// entry the resolver does not call
@@ -882,7 +964,7 @@ impl LayerGraph {
         parent: LayerId,
         sub_path: &str,
         cache: &mut HashMap<LayerId, HashMap<String, String>>,
-    ) -> Result<LayerId, String> {
+    ) -> Result<(LayerId, bool), String> {
         if let Some(anchored) = cache.get(&parent).and_then(|paths| paths.get(sub_path)) {
             return self
                 .anchored_or_bare(anchored, sub_path)
@@ -891,13 +973,13 @@ impl LayerGraph {
         let anchored = self
             .registry
             .create_identifier_anchored(sub_path, self.real_path(parent));
-        let Some(sub_id) = self.anchored_or_bare(&anchored, sub_path) else {
+        let Some(resolved) = self.anchored_or_bare(&anchored, sub_path) else {
             return Err(anchored);
         };
         if !self.registry.is_context_dependent_path(sub_path) {
             cache.entry(parent).or_default().insert(sub_path.to_string(), anchored);
         }
-        Ok(sub_id)
+        Ok(resolved)
     }
 
     /// Replaces [`cycles`](GraphDiagnostics::cycles) with the sublayer cycles
@@ -967,12 +1049,18 @@ impl LayerGraph {
     /// chain): a sublayer-only layer participates through its root's stack, never its
     /// own.
     ///
+    /// With `affected`, the stacks in `unsettled` rebuild as well.
+    ///
     /// Returns one [`StackVarsDelta`] per stack whose composed expression
     /// variables (or their source) changed, in ascending stack order — dependency
     /// order, so a consumer processing them in sequence sees a source's delta
     /// before the deltas it cascaded into (the C++ step-5 propagation to stacks
     /// whose override source resolves here).
-    fn rebuild_sublayer_stacks(&mut self, affected: Option<&HashSet<LayerId>>) -> Vec<StackVarsDelta> {
+    fn rebuild_sublayer_stacks(
+        &mut self,
+        affected: Option<&HashSet<LayerId>>,
+        unsettled: &HashSet<LayerStackId>,
+    ) -> Vec<StackVarsDelta> {
         // Re-resolve the muted identifiers to ids first, so a layer muted before
         // it was loaded takes effect the moment a later edit interns it and
         // rebuilds the stacks.
@@ -994,10 +1082,13 @@ impl LayerGraph {
         // rebuilds.
         let rebuild_root = match affected {
             None => true,
-            Some(affected) => self
-                .stacks
-                .member_set(LayerStackId::ROOT)
-                .is_none_or(|members| !members.is_disjoint(affected)),
+            Some(affected) => {
+                unsettled.contains(&LayerStackId::ROOT)
+                    || self
+                        .stacks
+                        .member_set(LayerStackId::ROOT)
+                        .is_none_or(|members| !members.is_disjoint(affected))
+            }
         };
         if rebuild_root {
             // Both regions of the stage root stack — the session root's sublayer
@@ -1048,7 +1139,8 @@ impl LayerGraph {
             let rebuild = match affected {
                 None => true,
                 Some(affected) => {
-                    affected.contains(&root)
+                    unsettled.contains(&id)
+                        || affected.contains(&root)
                         || self
                             .stacks
                             .member_set(id)
@@ -1086,6 +1178,13 @@ impl LayerGraph {
     /// demands rather than reporting — the sublayer analog of the arc demand
     /// gate's retry.
     fn file_stack_discoveries(&mut self, stack: LayerStackId, sink: EdgeSink) {
+        // A stack with an entry naming no layer under its anchored identifier
+        // stays open to a join ([`SublayerState::unsettled`]).
+        if sink.demands.is_empty() && sink.fallbacks.is_empty() {
+            self.sublayers.unsettled.remove(&stack);
+        } else {
+            self.sublayers.unsettled.insert(stack);
+        }
         let members = self.stacks.member_set(stack).expect("a filed stack is minted");
         let (demands, mut errors, used_vars) = sink.drain(stack, members);
         // The names this composition's `${VAR}` entries read replace the stack's
@@ -1603,24 +1702,39 @@ impl LayerGraph {
     /// Recomputes the exact [`LayerNode::has_expr_sublayer`] flags and their
     /// graph-level union [`SublayerState::any_expr`] from each
     /// layer's own `subLayers`. Run on every edge rebuild so an edit that adds or
-    /// removes the last expression `subLayers` entry is reflected exactly.
+    /// removes the last expression `subLayers` entry is reflected exactly. With
+    /// `only`, refreshes just those layers' flags and folds them into the union,
+    /// for layers that joined with every other layer's `subLayers` unchanged.
     //
     // TODO(perf): this re-decodes each layer's `subLayers`, which `resolve_edges`
     // already decodes (and already runs `is_expression` over) in the same
     // `build_sublayer_edges` pass. Returning the flag from `resolve_edges` and
     // folding it in as `children` are applied would drop this second decode.
-    fn recompute_expr_sublayer_flags(&mut self) {
+    fn recompute_expr_sublayer_flags(&mut self, only: Option<&HashSet<LayerId>>) {
         let root_path = Path::abs_root();
-        let mut any = false;
-        for node in self.nodes.values_mut() {
-            let has = matches!(
-                node.layer.data().field(&root_path, FieldKey::SubLayers.as_str()),
-                Ok(subs) if matches!(&*subs, Value::StringVec(paths) if paths.iter().any(|p| expr::is_expression(p)))
-            );
-            node.has_expr_sublayer = has;
-            any |= has;
+        let has_expr = |node: &LayerNode| {
+            matches!(
+                node.layer.data().try_field(&root_path, FieldKey::SubLayers.as_str()),
+                Ok(Some(subs)) if matches!(&*subs, Value::StringVec(paths) if paths.iter().any(|p| expr::is_expression(p)))
+            )
+        };
+        match only {
+            None => {
+                let mut any = false;
+                for node in self.nodes.values_mut() {
+                    node.has_expr_sublayer = has_expr(node);
+                    any |= node.has_expr_sublayer;
+                }
+                self.sublayers.any_expr = any;
+            }
+            Some(only) => {
+                for id in only {
+                    let node = self.nodes.get_mut(id).expect("a refreshed layer is live");
+                    node.has_expr_sublayer = has_expr(node);
+                    self.sublayers.any_expr |= node.has_expr_sublayer;
+                }
+            }
         }
-        self.sublayers.any_expr = any;
     }
 
     /// The cached composer for a rebuild: composes the stack's expression
@@ -2060,9 +2174,9 @@ impl LayerGraph {
     ///
     /// `edited` names the layers whose root metadata the edit authored; together
     /// with the edges the rebuild finds changed, it scopes the stack re-resolution
-    /// to the instances the change can affect. Pass `None` for a load, where a
-    /// newly opened layer can join a stack the changed-edge set cannot name, so
-    /// every stack is re-resolved.
+    /// to the instances the change can affect. `None` re-resolves every stack.
+    /// Layers that joined the graph are wired by
+    /// [`wire_joined`](Self::wire_joined).
     ///
     /// Returns the affected layer set the caller drops cached indices against — the
     /// layers whose composed edges shifted (unioned with `edited`) plus those whose
@@ -2072,10 +2186,33 @@ impl LayerGraph {
     /// rebuild emitted, which only an `expressionVariables` edit's change
     /// processing consumes.
     pub(crate) fn recompute_sublayers(&mut self, edited: Option<&HashSet<LayerId>>) -> SublayerRecompute {
-        let (affected, vars_deltas) = self.build_sublayer_edges(edited);
+        let scope = edited.map_or(EdgeScope::All, EdgeScope::Edited);
+        let (affected, vars_deltas) = self.build_sublayer_edges(scope);
         let mut affected = affected.unwrap_or_default();
         affected.extend(self.recompute_relocates());
         SublayerRecompute { affected, vars_deltas }
+    }
+
+    /// Wires the layers in `joined`, which just joined the graph, into the
+    /// sublayer edges and the composed stacks. Only the joined layers and the
+    /// parents whose entries a join can take over are re-resolved, and only
+    /// the stacks reaching a changed edge or open to a join
+    /// ([`SublayerState::unsettled`]) recompose; a layer that joined earlier
+    /// keeps the edges it has.
+    ///
+    /// Returns the layers whose relocate pairs changed, which the caller drops
+    /// cached indices against. Relocates are revalidated only when a joined
+    /// layer authors some: a layer authoring none does not change another
+    /// layer's pairs or conflicts.
+    pub(crate) fn wire_joined(&mut self, joined: &HashSet<LayerId>) -> HashSet<LayerId> {
+        // Stack deltas matter only to `expressionVariables` change processing,
+        // which a join is not.
+        let _ = self.build_sublayer_edges(EdgeScope::Joined(joined));
+        if joined.iter().any(|id| !self.nodes[id].layer.relocates().is_empty()) {
+            self.recompute_relocates()
+        } else {
+            HashSet::new()
+        }
     }
 
     /// The variable names whose value differs between the interned
@@ -2325,11 +2462,16 @@ impl LayerGraph {
     /// Anchoring wins so a relative path against a filesystem-backed layer never
     /// resolves to an unrelated layer interned under the bare string, while an
     /// in-memory layer keyed under that literal name (no filesystem anchor) still
-    /// resolves. The shared lookup behind [`find_relative`](Self::find_relative)
+    /// resolves. The layer comes paired with whether the anchored identifier
+    /// matched. The shared lookup behind [`find_relative`](Self::find_relative)
     /// and [`resolve_sublayer`](Self::resolve_sublayer).
-    fn anchored_or_bare(&self, anchored: &str, asset_path: &str) -> Option<LayerId> {
-        self.id_of(anchored)
-            .or_else(|| self.id_of(&self.registry.in_memory_identifier(asset_path)))
+    fn anchored_or_bare(&self, anchored: &str, asset_path: &str) -> Option<(LayerId, bool)> {
+        match self.id_of(anchored) {
+            Some(id) => Some((id, true)),
+            None => self
+                .id_of(&self.registry.in_memory_identifier(asset_path))
+                .map(|id| (id, false)),
+        }
     }
 
     /// Resolves `asset_path` as authored in `anchor`, anchoring it through the
@@ -2360,7 +2502,9 @@ impl LayerGraph {
         let anchored = self
             .registry
             .create_identifier_anchored(asset_path, self.real_path(anchor));
-        self.anchored_or_bare(&anchored, asset_path).ok_or(anchored)
+        self.anchored_or_bare(&anchored, asset_path)
+            .map(|(id, _)| id)
+            .ok_or(anchored)
     }
 
     /// [`resolve_sublayer`](Self::resolve_sublayer) for a demanded sublayer
@@ -2371,7 +2515,7 @@ impl LayerGraph {
         let mut resolution = mem::take(&mut self.sublayers.resolution);
         let resolved = self.resolve_sublayer(parent, sub_path, &mut resolution);
         self.sublayers.resolution = resolution;
-        resolved
+        resolved.map(|(id, _)| id)
     }
 
     /// Mutes the layer with the given identifier so it contributes no opinions to
@@ -2720,7 +2864,7 @@ impl LayerGraph {
         // prototypes those drops touch. So the asset-path channel `Changes::apply`
         // publishes for a composed-variable move could name only indices the mute
         // has already dropped.
-        let _ = self.rebuild_sublayer_stacks(None);
+        let _ = self.rebuild_sublayer_stacks(None, &HashSet::new());
         self.recompute_cycle_diagnostics();
         self.recompute_relocates()
     }
@@ -4258,6 +4402,81 @@ mod tests {
             vec![root_id, leaf],
             "the newly interned sublayer resolves on rebuild"
         );
+    }
+
+    /// The ids of the stage root stack's members, strongest first.
+    fn root_members(graph: &LayerGraph) -> Vec<LayerId> {
+        graph
+            .layer_stack(LayerStackId::ROOT)
+            .iter()
+            .map(|&(id, _)| id)
+            .collect()
+    }
+
+    /// A join wires a literal sublayer entry that named no loaded layer: the
+    /// parent re-resolves and the stack reaching it recomposes.
+    #[test]
+    fn join_wires_missing_sublayer() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["./leaf.usda"]);
+        });
+        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
+        let root_id = graph.root_id().unwrap();
+
+        let (leaf, _) = graph.ensure_layer(sdf::Layer::new_in_memory("leaf.usda"));
+        graph.wire_joined(&HashSet::from([leaf]));
+        assert_eq!(root_members(&graph), vec![root_id, leaf]);
+    }
+
+    /// A join extends a stack through a `${VAR}`-selected entry, which no
+    /// context-free edge names: the stack recomposes because its last
+    /// composition left the entry unresolved.
+    #[test]
+    fn join_extends_expr_stack() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["`${WHICH}`"]);
+        });
+        set_expr_var(&mut root, "WHICH", "sub.usda");
+        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
+        let root_id = graph.root_id().unwrap();
+        assert_eq!(root_members(&graph), vec![root_id]);
+
+        let (sub, _) = graph.ensure_layer(sdf::Layer::new_in_memory("sub.usda"));
+        graph.wire_joined(&HashSet::from([sub]));
+        assert_eq!(root_members(&graph), vec![root_id, sub]);
+    }
+
+    /// A layer joining under an entry's anchored identifier takes over the
+    /// edge the bare in-memory fallback had resolved. On-disk files give the
+    /// parent a location for its relative entry to anchor beside.
+    #[test]
+    fn join_takes_over_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("root.usda"), b"#usda 1.0\n").unwrap();
+        std::fs::write(tmp.path().join("sub.usda"), b"#usda 1.0\n").unwrap();
+        let canonical = |leaf: &str| {
+            tmp.path()
+                .join(leaf)
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let mut root = sdf::Layer::new(canonical("root.usda"), Box::new(sdf::Data::new()));
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["sub.usda"]);
+        });
+        let bare = sdf::Layer::new("sub.usda", Box::new(sdf::Data::new()));
+        let mut graph = LayerGraph::from_layers(vec![root, bare], 0, sdf::LayerRegistry::default());
+        let root_id = graph.root_id().unwrap();
+        let bare = graph.id_of("sub.usda").unwrap();
+        assert_eq!(root_members(&graph), vec![root_id, bare]);
+
+        let (anchored, _) = graph.ensure_layer(sdf::Layer::new(canonical("sub.usda"), Box::new(sdf::Data::new())));
+        graph.wire_joined(&HashSet::from([anchored]));
+        assert_eq!(root_members(&graph), vec![root_id, anchored]);
     }
 
     /// Relocate conflicts are scoped to the stack being composed. A layer that is
