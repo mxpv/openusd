@@ -5,7 +5,7 @@ use openusd::usd::{self, SchemaBase};
 use openusd::{Result, gf, sdf, tf};
 
 use super::xformable::StackEdit;
-use super::{Camera, CameraSchema, ImageableExt, Projection, tokens};
+use super::{Camera, CameraSchema, ImageableExt, Projection};
 use crate::SchemaError;
 
 impl Camera {
@@ -117,44 +117,29 @@ impl Camera {
             gf::Projection::Orthographic => Projection::Orthographic,
         };
         let range = camera.clipping_range;
-        let floats = [
-            (tokens::HORIZONTAL_APERTURE, camera.horizontal_aperture),
-            (tokens::VERTICAL_APERTURE, camera.vertical_aperture),
-            (tokens::HORIZONTAL_APERTURE_OFFSET, camera.horizontal_aperture_offset),
-            (tokens::VERTICAL_APERTURE_OFFSET, camera.vertical_aperture_offset),
-            (tokens::FOCAL_LENGTH, camera.focal_length),
-            (tokens::F_STOP, camera.f_stop),
-            (tokens::FOCUS_DISTANCE, camera.focus_distance),
-        ];
-        let floats = floats.map(|(name, value)| (name, sdf::ValueTypeName::FLOAT, sdf::Value::from(value)));
-        let others = [
-            (tokens::PROJECTION, sdf::ValueTypeName::TOKEN, projection.into()),
-            (
-                tokens::CLIPPING_RANGE,
-                sdf::ValueTypeName::FLOAT2,
-                gf::vec2f(range.min(), range.max()).into(),
-            ),
-            (
-                tokens::CLIPPING_PLANES,
-                sdf::ValueTypeName::FLOAT4_ARRAY,
-                sdf::Value::Vec4fVec(camera.clipping_planes.clone()),
-            ),
-        ];
+        let range = gf::vec2f(range.min(), range.max());
+        let planes = sdf::Value::Vec4fVec(camera.clipping_planes.clone());
 
-        // TODO: the generated `*_attr_builder`s carry these declarations, but
-        // a builder taken from the prim commits on its own. Queue them here
-        // once a builder can join a `usd::StageEdit` it was not made by.
-        //
-        // The attributes are queued through the transaction's own view of
-        // the prim, which is what makes them part of it.
         prim.stage().edit(|edit| -> Result<(), SchemaError> {
-            let prim = edit.prim(prim.path())?;
-            stack.apply(&prim)?;
-            for (name, type_name, value) in floats.into_iter().chain(others) {
-                prim.attribute_builder(name, type_name)
-                    .custom(false)
-                    .set_at(value, time)
-                    .build()?;
+            stack.apply(edit, prim)?;
+            let attributes = [
+                self.projection_attr_builder().set_at(projection, time),
+                self.horizontal_aperture_attr_builder()
+                    .set_at(camera.horizontal_aperture, time),
+                self.vertical_aperture_attr_builder()
+                    .set_at(camera.vertical_aperture, time),
+                self.horizontal_aperture_offset_attr_builder()
+                    .set_at(camera.horizontal_aperture_offset, time),
+                self.vertical_aperture_offset_attr_builder()
+                    .set_at(camera.vertical_aperture_offset, time),
+                self.focal_length_attr_builder().set_at(camera.focal_length, time),
+                self.clipping_range_attr_builder().set_at(range, time),
+                self.clipping_planes_attr_builder().set_at(planes, time),
+                self.f_stop_attr_builder().set_at(camera.f_stop, time),
+                self.focus_distance_attr_builder().set_at(camera.focus_distance, time),
+            ];
+            for attribute in attributes {
+                attribute.in_edit(edit).build()?;
             }
             Ok(())
         })

@@ -679,6 +679,15 @@ pub enum StageAuthoringError {
     #[error("the edit target moved while the batch was open")]
     EditTargetMoved,
 
+    /// A property planned on one stage was handed to another stage's
+    /// [`StageEdit`](super::StageEdit), which has none of that stage's
+    /// layers to write it to.
+    #[error("property {path} belongs to another stage than the batch")]
+    EditOfAnotherStage {
+        /// The property's path on its own stage.
+        path: sdf::Path,
+    },
+
     /// A [`StageEdit`](super::StageEdit) was given the same property twice.
     /// Each queued property resolves its declaration before the batch opens, so
     /// a second plan for one property would be resolved against a stage the
@@ -1545,8 +1554,9 @@ impl Stage {
     ///
     /// Reads inside `f` see the stage as it stands, not what the batch has
     /// queued. A builder taken from the stage or a [`Prim`](super::Prim) still
-    /// commits on its own, so where a builder came from is what decides whether
-    /// it is part of the transaction.
+    /// commits on its own unless it is handed to the transaction with
+    /// [`AttributeBuilder::in_edit`](super::AttributeBuilder::in_edit) or
+    /// [`RelationshipBuilder::in_edit`](super::RelationshipBuilder::in_edit).
     ///
     /// The batch is tied to the edit target it opened on, and moving that
     /// target inside `f` is [`StageAuthoringError::EditTargetMoved`]: a queued

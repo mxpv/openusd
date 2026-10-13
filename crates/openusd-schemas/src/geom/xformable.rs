@@ -624,21 +624,22 @@ impl StackEdit {
         Self::prepare(prim, vec![write], Some(vec![name]), time)
     }
 
-    /// Queue the edit on `prim`'s transaction.
-    pub(super) fn apply(self, prim: &usd::PrimEdit<'_>) -> Result<(), SchemaError> {
+    /// Queue the edit of `prim` on `edit`'s transaction.
+    pub(super) fn apply(self, edit: &usd::StageEdit, prim: &usd::Prim) -> Result<(), SchemaError> {
         for (name, type_name, value) in self.ops {
             let builder = prim.attribute_builder(name, type_name).custom(false);
             match value {
                 Some(value) => builder.set_at(value, self.time),
                 None => builder,
             }
+            .in_edit(edit)
             .build()?;
         }
         if let Some(order) = self.order {
-            prim.attribute_builder(super::tokens::XFORM_OP_ORDER, sdf::ValueTypeName::TOKEN_ARRAY)
-                .custom(false)
-                .variability(sdf::Variability::Uniform)
+            Xformable::from_prim_unchecked(prim.clone())
+                .xform_op_order_attr_builder()
                 .set(sdf::Value::TokenVec(order))
+                .in_edit(edit)
                 .build()?;
         }
         Ok(())
@@ -651,7 +652,7 @@ impl StackEdit {
             return Ok(());
         }
         prim.stage()
-            .edit(|edit| -> Result<(), SchemaError> { self.apply(&edit.prim(prim.path())?) })
+            .edit(|edit| -> Result<(), SchemaError> { self.apply(edit, prim) })
     }
 }
 

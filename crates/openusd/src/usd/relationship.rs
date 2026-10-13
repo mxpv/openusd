@@ -46,11 +46,21 @@ impl<'a> RelationshipBuilder<'a> {
         }
     }
 
-    /// The same relationship, authored as part of `batch` rather than on its
-    /// own.
-    pub(super) fn in_batch(mut self, batch: &'a StageEdit) -> Self {
-        self.batch = Some(batch);
-        self
+    /// The same relationship, queued into `edit`'s transaction when it is
+    /// built.
+    ///
+    /// A builder taken from a prim or the stage joins a transaction this
+    /// way. `edit` has to be an edit of the stage the builder authors on,
+    /// and building into another stage's is
+    /// [`StageAuthoringError::EditOfAnotherStage`].
+    pub fn in_edit<'e>(self, edit: &'e StageEdit) -> RelationshipBuilder<'e>
+    where
+        'a: 'e,
+    {
+        RelationshipBuilder {
+            batch: Some(edit),
+            ..self
+        }
     }
 
     /// Whether the relationship is the caller's own rather than a schema's

@@ -34,8 +34,9 @@ use crate::tf;
 /// one a stronger layer already authored, keeps the declaration it has.
 ///
 /// A builder from [`Prim`] or [`Stage`] commits on its own; one from a
-/// [`PrimEdit`](super::PrimEdit) or a [`StageEdit`](super::StageEdit) joins
-/// that transaction instead.
+/// [`PrimEdit`](super::PrimEdit) or a [`StageEdit`](super::StageEdit), or
+/// handed to one with [`in_edit`](Self::in_edit), joins that transaction
+/// instead.
 #[derive(Debug)]
 pub struct AttributeBuilder<'a> {
     /// The stage and the property path to author at, or what naming them hit.
@@ -76,10 +77,21 @@ impl<'a> AttributeBuilder<'a> {
         }
     }
 
-    /// The same attribute, authored as part of `batch` rather than on its own.
-    pub(super) fn in_batch(mut self, batch: &'a StageEdit) -> Self {
-        self.batch = Some(batch);
-        self
+    /// The same attribute, queued into `edit`'s transaction when it is built.
+    ///
+    /// A builder taken from a prim or the stage joins a transaction this
+    /// way, as does one a schema view hands out with its declaration filled
+    /// in. `edit` has to be an edit of the stage the builder authors on, and
+    /// building into another stage's is
+    /// [`StageAuthoringError::EditOfAnotherStage`].
+    pub fn in_edit<'e>(self, edit: &'e StageEdit) -> AttributeBuilder<'e>
+    where
+        'a: 'e,
+    {
+        AttributeBuilder {
+            batch: Some(edit),
+            ..self
+        }
     }
 
     /// Whether the attribute is the caller's own rather than a schema's

@@ -86,13 +86,13 @@ impl StageEdit {
         path: impl sdf::IntoPath,
         type_name: impl Into<sdf::ValueTypeName>,
     ) -> AttributeBuilder<'_> {
-        self.stage.attribute_builder(path, type_name).in_batch(self)
+        self.stage.attribute_builder(path, type_name).in_edit(self)
     }
 
     /// A relationship at a property path, queued rather than committed:
     /// [`Stage::relationship_builder`] inside the transaction.
     pub fn relationship_builder(&self, path: impl sdf::IntoPath) -> RelationshipBuilder<'_> {
-        self.stage.relationship_builder(path).in_batch(self)
+        self.stage.relationship_builder(path).in_edit(self)
     }
 
     /// Queues several properties as one: all of what `f` builds joins the
@@ -141,11 +141,16 @@ impl StageEdit {
     /// Queues an already-planned property, and hands back where it will be
     /// authored for the builder to make its handle from.
     ///
-    /// Returns [`StageAuthoringError::DuplicateProperty`] where the batch
+    /// Returns [`StageAuthoringError::EditOfAnotherStage`] for a property
+    /// planned on another stage, which this batch has no layer to write to,
+    /// and [`StageAuthoringError::DuplicateProperty`] where the batch
     /// already holds that path — two plans for one property each resolve
     /// against a stage the other has not changed yet, so neither accounts for
     /// what the other declares.
     pub(super) fn queue(&self, planned: PlannedProperty) -> Result<(Stage, sdf::Path), StageAuthoringError> {
+        if planned.stage != self.stage {
+            return Err(StageAuthoringError::EditOfAnotherStage { path: planned.path });
+        }
         let mut queued = self.queued.borrow_mut();
         if queued.iter().any(|other| other.path == planned.path) {
             return Err(StageAuthoringError::DuplicateProperty { path: planned.path });
@@ -221,13 +226,13 @@ impl<'a> PrimEdit<'a> {
         name: impl Into<tf::Token>,
         type_name: impl Into<sdf::ValueTypeName>,
     ) -> AttributeBuilder<'a> {
-        self.prim.attribute_builder(name, type_name).in_batch(self.batch)
+        self.prim.attribute_builder(name, type_name).in_edit(self.batch)
     }
 
     /// A relationship on the prim, queued rather than committed:
     /// [`Prim::relationship_builder`] inside the transaction.
     pub fn relationship_builder(&self, name: impl Into<tf::Token>) -> RelationshipBuilder<'a> {
-        self.prim.relationship_builder(name).in_batch(self.batch)
+        self.prim.relationship_builder(name).in_edit(self.batch)
     }
 
     /// Queues several of the prim's properties as one: [`StageEdit::group`],
@@ -1002,6 +1007,57 @@ mod tests {
         for (name, value) in [("radius", 1.0), ("height", 2.0), ("width", 3.0)] {
             assert_eq!(prim.attribute(name).get::<f64>()?, Some(value), "{name}");
         }
+        Ok(())
+    }
+
+    /// A builder taken from the prim joins the batch it is handed to, and
+    /// writes nothing until that batch commits.
+    #[test]
+    fn builder_joins_edit() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        stage
+            .edit(|edit| {
+                prim.attribute_builder("height", "double")
+                    .set(2.0)
+                    .in_edit(edit)
+                    .build()?;
+                prim.relationship_builder("proxy")
+                    .set_targets(["/World"])
+                    .in_edit(edit)
+                    .build()?;
+                assert!(!prim.attribute("height").is_defined()?, "nothing is written yet");
+                Err::<(), crate::Error>(StageAuthoringError::EditTargetMoved.into())
+            })
+            .expect_err("the closure fails");
+        assert!(!prim.attribute("height").is_defined()?, "a failed batch writes nothing");
+
+        stage.edit(|edit| {
+            prim.attribute_builder("height", "double")
+                .set(2.0)
+                .in_edit(edit)
+                .build()?;
+            Ok::<_, StageAuthoringError>(())
+        })?;
+        assert_eq!(prim.attribute("height").get::<f64>()?, Some(2.0));
+        Ok(())
+    }
+
+    /// A batch has no layer of another stage to write to.
+    #[test]
+    fn foreign_builder_refused() -> Result<()> {
+        let (stage, other) = (stage()?, stage()?);
+        stage.define_prim("/World")?;
+        let foreign = other.define_prim("/World")?;
+        let refused = stage.edit(|edit| {
+            foreign.attribute_builder("height", "double").in_edit(edit).build()?;
+            Ok::<_, StageAuthoringError>(())
+        });
+        assert!(
+            matches!(refused, Err(StageAuthoringError::EditOfAnotherStage { .. })),
+            "{refused:?}"
+        );
+        assert!(!foreign.attribute("height").is_defined()?);
         Ok(())
     }
 
