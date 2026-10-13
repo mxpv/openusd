@@ -2208,14 +2208,15 @@ impl LayerGraph {
     /// keeps the edges it has.
     ///
     /// Returns the layers whose relocate pairs changed, which the caller drops
-    /// cached indices against. Relocates are revalidated only when a joined
-    /// layer authors some: a layer authoring none does not change another
-    /// layer's pairs or conflicts.
+    /// cached indices against. Relocates are revalidated when a loaded layer
+    /// holds valid pairs or a joined layer authors some. A joined layer
+    /// authoring none still opens a conflict scope over the loaded layers it
+    /// sublayers.
     pub(crate) fn wire_joined(&mut self, joined: &HashSet<LayerId>) -> HashSet<LayerId> {
         // Stack deltas matter only to `expressionVariables` change processing,
         // which a join is not.
         let _ = self.build_sublayer_edges(EdgeScope::Joined(joined));
-        if joined.iter().any(|id| !self.nodes[id].layer.relocates().is_empty()) {
+        if self.has_relocates || joined.iter().any(|id| !self.nodes[id].layer.relocates().is_empty()) {
             self.recompute_relocates()
         } else {
             HashSet::new()
@@ -4484,6 +4485,40 @@ mod tests {
         let (anchored, _) = graph.ensure_layer(sdf::Layer::new(canonical("sub.usda"), Box::new(sdf::Data::new())));
         graph.wire_joined(&HashSet::from([anchored]));
         assert_eq!(root_members(&graph), vec![root_id, anchored]);
+    }
+
+    /// A joined layer authoring no relocates brings the loaded layers it
+    /// sublayers into one conflict scope, and their same-target relocates are
+    /// reported.
+    #[test]
+    fn join_scopes_relocate_conflict() {
+        let reloc = |id: &str, source: &str, target: &str| {
+            let mut layer = sdf::Layer::new_in_memory(id);
+            edit_layer(&mut layer, |e| {
+                e.set_relocates(vec![(Path::new(source).unwrap(), Path::new(target).unwrap())])
+                    .unwrap();
+            });
+            layer
+        };
+        let same_target = |graph: &LayerGraph| {
+            graph
+                .errors()
+                .iter()
+                .any(|error| matches!(error, CompositionDiagnostic::SameTargetRelocations { .. }))
+        };
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let s1 = reloc("s1.usda", "/W/A", "/W/C");
+        let s2 = reloc("s2.usda", "/W/B", "/W/C");
+        let mut graph = LayerGraph::from_layers(vec![root, s1, s2], 0, sdf::LayerRegistry::default());
+        assert!(!same_target(&graph), "s1 and s2 share no stack yet");
+
+        let mut combo = sdf::Layer::new_in_memory("combo.usda");
+        edit_layer(&mut combo, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["s1.usda", "s2.usda"]);
+        });
+        let (combo, _) = graph.ensure_layer(combo);
+        graph.wire_joined(&HashSet::from([combo]));
+        assert!(same_target(&graph), "combo's stack holds both relocates");
     }
 
     /// Relocate conflicts are scoped to the stack being composed. A layer that is
