@@ -955,28 +955,39 @@ impl Attribute {
         self.build_resolve_info(pcp::ResolveMode::at(time.into().map(|time| time.value())))
     }
 
+    /// The site that would shadow a default authored for this attribute at
+    /// the stage's current edit target, or `None` where that default would be
+    /// the one a read at the default time returns. The convenience spelling
+    /// of [`shadowing_opinion_at(None)`](Self::shadowing_opinion_at).
+    pub fn shadowing_opinion(&self) -> Result<Option<SpecSite>> {
+        self.shadowing_opinion_at(None)
+    }
+
     /// The site that would shadow a value authored for this attribute at the
     /// stage's current edit target, or `None` where that value would be the
-    /// one a read returns.
+    /// one a read at `time` returns. A `time` of `None` is the default time.
     ///
     /// A site shadows when it is stronger than the edit target's and holds a
-    /// value opinion: a default, a value block, time samples, or a value-clip
-    /// set that carries the attribute. A stronger spec that only declares the
-    /// attribute shadows nothing, and neither does a blocked `timeSamples`
-    /// field, which leaves a default to answer. Where several sites shadow,
-    /// the strongest is the one returned.
+    /// value opinion the read looks at. A read at the default time looks at
+    /// defaults and value blocks alone. A read at a numeric time also looks
+    /// at time samples and at value clips, and a clip set counts where it
+    /// answers for the attribute at `time`, with a value or a block.
     ///
-    /// The question is asked of no one time. A read at the default time
-    /// looks at defaults alone. Stronger samples or clips shadow a read at a
-    /// numeric time and leave the default-time read to the edit target.
+    /// The value in question at a numeric time is a sample, so a stronger
+    /// blocked `timeSamples` field shadows it there: the block withholds
+    /// every weaker sample. At the default time that block shadows nothing,
+    /// since it leaves a default to answer. A stronger spec that only
+    /// declares the attribute never shadows. Where several sites shadow, the
+    /// strongest is the one returned.
     ///
     /// The answer is for the stage as it stands, so it holds until the next
     /// edit or change of edit target. An edit target the attribute does not
     /// compose from is
     /// [`OutsideEditTarget`](super::StageAuthoringError::OutsideEditTarget),
     /// since nothing authored there would be read at all.
-    pub fn shadowing_opinion(&self) -> Result<Option<SpecSite>> {
-        self.stage.shadowing_opinion(&self.path)
+    pub fn shadowing_opinion_at(&self, time: impl Into<Option<TimeCode>>) -> Result<Option<SpecSite>> {
+        let time = time.into().map(|time| time.value());
+        self.stage.shadowing_opinion(&self.path, time)
     }
 
     /// Adds the schema tier `pcp` knows nothing about to the authored source it
@@ -4523,14 +4534,36 @@ def \"M\"
         Ok(())
     }
 
-    /// A blocked `timeSamples` field withholds samples and leaves a default
-    /// to answer, so it shadows nothing.
+    /// A blocked `timeSamples` field leaves a default to answer and
+    /// withholds a sample authored beneath it.
     #[test]
-    fn samples_block_shadows_nothing() -> Result<()> {
-        let blocked = "over \"P\"\n{\n    custom double x.timeSamples = None\n}";
-        let (_dir, stage) = layered(&[("strong.usda", blocked), ("weak.usda", P_DECLARED)])?;
+    fn samples_block_shadows_samples() -> Result<()> {
+        let declared = "over \"P\"\n{\n    custom double x\n}";
+        let (_dir, stage) = layered(&[("strong.usda", declared), ("weak.usda", P_DECLARED)])?;
+        let path = sdf::Path::new("/P.x")?;
+        let strong = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|id| file_name(id) == "strong.usda")
+            .expect("the layer is on the stage");
+        stage.layer_mut(&strong).expect("the layer is live").edit(|edit| {
+            edit.attribute_mut(&path)?
+                .expect("the attribute spec is on the layer")
+                .set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock);
+            Ok(())
+        })?;
         target_layer(&stage, "weak.usda")?;
+
         assert_eq!(shadow(&stage)?, None);
+        let site = stage.attribute("/P.x")?.shadowing_opinion_at(TimeCode::new(1.0))?;
+        assert_eq!(
+            site.map(|site| file_name(&site.layer).to_string()).as_deref(),
+            Some("strong.usda")
+        );
+
+        // The block is what a sample written beneath it meets.
+        stage.attribute("/P.x")?.set_at(5.0_f64, TimeCode::new(1.0))?;
+        assert_eq!(stage.attribute("/P.x")?.get_at::<f64>(TimeCode::new(1.0))?, None);
         Ok(())
     }
 
@@ -4543,18 +4576,30 @@ def \"M\"
         Ok(())
     }
 
-    /// A stronger block and stronger time samples are value opinions too.
+    /// A stronger block shadows a read at any time. Stronger time samples
+    /// shadow a read at a numeric time and leave the default-time read alone.
     #[test]
     fn block_and_samples_shadow() -> Result<()> {
         let blocked = "over \"P\"\n{\n    custom double x = None\n}";
         let (_dir, stage) = layered(&[("strong.usda", blocked), ("weak.usda", P_DECLARED)])?;
         target_layer(&stage, "weak.usda")?;
         assert_eq!(shadow(&stage)?.as_deref(), Some("strong.usda/P.x"));
+        assert!(
+            stage
+                .attribute("/P.x")?
+                .shadowing_opinion_at(TimeCode::new(1.0))?
+                .is_some()
+        );
 
         let sampled = "over \"P\"\n{\n    custom double x.timeSamples = { 1: 2 }\n}";
         let (_dir, stage) = layered(&[("strong.usda", sampled), ("weak.usda", P_DECLARED)])?;
         target_layer(&stage, "weak.usda")?;
-        assert_eq!(shadow(&stage)?.as_deref(), Some("strong.usda/P.x"));
+        assert_eq!(shadow(&stage)?, None);
+        let site = stage.attribute("/P.x")?.shadowing_opinion_at(TimeCode::new(5.0))?;
+        assert_eq!(
+            site.map(|site| file_name(&site.layer).to_string()).as_deref(),
+            Some("strong.usda")
+        );
         Ok(())
     }
 

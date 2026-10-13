@@ -40,7 +40,7 @@ use super::prim_resolve::{
 };
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::value_resolve::{
-    self, ClipProbe, OpinionResolver, OpinionSite, Resolution, ResolveMode, ResolveNode, ResolveSourceKind,
+    self, ClipAnswer, ClipProbe, OpinionResolver, OpinionSite, Resolution, ResolveMode, ResolveNode, ResolveSourceKind,
     ResolvedSite, SampleField, SelectedSite, Step, TimedValue, ValueState, Withheld,
 };
 use super::{
@@ -1042,6 +1042,10 @@ struct StandingResolver<'a> {
     layer: LayerId,
     /// The property's path in that layer.
     spec_path: &'a Path,
+    /// The numeric time asked about, where there is one.
+    time: Option<f64>,
+    /// How a clip's samples are read at that time.
+    interp: &'a dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     /// The strongest value opinion met so far.
     stronger: Option<SpecSiteRecord>,
     /// Whether the walk came to the site asked about.
@@ -1076,21 +1080,25 @@ impl OpinionResolver for StandingResolver<'_> {
         Step::Continue
     }
 
-    /// A blocked `default` is a value opinion like any other. A blocked
-    /// `timeSamples` field holds none: it withholds samples and leaves every
-    /// `default` to answer. Either way the walk goes on to find the site
-    /// asked about.
-    fn on_withheld(&mut self, kind: Withheld, site: &OpinionSite<'_>) -> Step {
-        if matches!(kind, Withheld::DefaultBlock) {
-            self.found(site);
-        }
+    /// A block is a value opinion like any other. A blocked `timeSamples`
+    /// field is met only by a walk at a numeric time, where the value asked
+    /// about is a sample and the block withholds it. The walk goes on to
+    /// find the site asked about.
+    fn on_withheld(&mut self, _kind: Withheld, site: &OpinionSite<'_>) -> Step {
+        self.found(site);
         Step::Continue
     }
 
-    /// A clip set that carries the property is recorded at the site that
-    /// introduced it.
+    /// A clip set that answers for the property at the time asked about is
+    /// recorded at the site that introduced it, whether it answers with a
+    /// value or a block.
+    // TODO(perf): the answer is the clip's value at that time, read and
+    // interpolated to learn only that there is one. A probe for whether the
+    // active clip carries the property would skip the read.
     fn on_clips(&mut self, probe: &mut ClipProbe<'_>, site: &OpinionSite<'_>) -> Result<Step, QueryError> {
-        if self.stronger.is_none() && !matches!(probe.answer_untimed()?, ValueState::Absent) {
+        if let (None, Some(time)) = (&self.stronger, self.time)
+            && !matches!(probe.answer_at(time, self.interp)?, ClipAnswer::Absent)
+        {
             self.found(site);
         }
         Ok(Step::Continue)
@@ -3168,19 +3176,24 @@ impl IndexCache {
     }
 
     /// Reports where a value opinion for the property at `path` would stand
-    /// if `layer` authored it at `spec_path`, the layer's own spelling of the
-    /// property.
+    /// to a read at `time` if `layer` authored it at `spec_path`, the layer's
+    /// own spelling of the property. A `time` of `None` is the default time.
     ///
-    /// A stronger site counts when it holds a `default`, a value block or
-    /// time samples, or introduces a value-clip set that carries the
-    /// property. A spec that only declares the property holds no value
-    /// opinion and is passed over.
+    /// At the default time a stronger site counts when it holds a `default`
+    /// or a value block, which are all such a read looks at. At a numeric
+    /// time it also counts when it holds time samples or a block of them, or
+    /// introduces a
+    /// value-clip set that answers for the property there, `interp` being
+    /// how a clip's samples are read. A spec that only declares the property
+    /// holds no value opinion and is passed over.
     pub fn opinion_standing(
         &mut self,
         graph: &LayerGraph,
         path: &Path,
         layer: LayerId,
         spec_path: &Path,
+        time: Option<f64>,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Standing>, QueryError> {
         let path = self.effective_path(graph, path)?;
         if !path.is_property() {
@@ -3193,12 +3206,12 @@ impl IndexCache {
             graph,
             layer,
             spec_path,
+            time,
+            interp,
             stronger: None,
             reached: false,
         };
-        // The untimed walk: every tier takes part, and samples and clips
-        // count by being there.
-        self.resolve_property(graph, &prim_path, &suffix, ResolveMode::Proximal, &mut resolver)?;
+        self.resolve_property(graph, &prim_path, &suffix, ResolveMode::at(time), &mut resolver)?;
         Ok(Some(match resolver {
             StandingResolver { reached: false, .. } => Standing::Absent,
             StandingResolver { stronger: None, .. } => Standing::Strongest,

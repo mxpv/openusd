@@ -247,8 +247,8 @@ pub trait XformableExt: XformableSchema {
     /// the other entries. The op keeps whatever value it already holds.
     ///
     /// The order is authored at the stage's edit target, and where a
-    /// stronger site holds a value for `xformOpOrder` that order would not be
-    /// the one read. That is [`SchemaError::XformOpOrderShadowed`], and
+    /// stronger site holds a default for `xformOpOrder` that order would not
+    /// be the one read. That is [`SchemaError::XformOpOrderShadowed`], and
     /// nothing is authored. C++ refuses only where the stack still composes
     /// ops after it has emptied the order at the edit target. A stronger
     /// empty order lets it through, and it leaves the emptied order behind
@@ -1390,6 +1390,20 @@ class PivotXform "PivotXform"
         assert!(layer.ends_with("strong.usda"), "{layer}");
         assert_eq!(crate::tests::layer_text(&stage, &weak), before);
         assert_eq!(commits.get(), 0);
+        Ok(())
+    }
+
+    /// The order is a default, read at the default time, so a stronger
+    /// layer that holds only samples for it shadows nothing.
+    #[test]
+    fn matrix_xform_under_samples() -> Result<(), SchemaError> {
+        let sampled = "over \"X\"\n{\n    uniform token[] xformOpOrder.timeSamples = { 1: [\"xformOp:translate\"] }\n}";
+        let (_dir, stage) = crate::tests::layered(&[("strong.usda", sampled), ("weak.usda", DEFINED)])?;
+        crate::tests::target_layer(&stage, "weak.usda")?;
+
+        let x = Xform::get(&stage, "/X")?.expect("Xform");
+        x.make_matrix_xform()?;
+        assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:transform"]);
         Ok(())
     }
 
