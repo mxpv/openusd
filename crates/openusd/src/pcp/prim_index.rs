@@ -1300,9 +1300,9 @@ fn tracks_dependency(node: &Node) -> bool {
 ///
 /// [`tracks_dependency`] minus the self-Root edge — the node whose site is the
 /// prim's own path, which the site map skips to stay compact (C++
-/// `PcpDependencyTypeRoot`) while the layer map still counts it. Shared by the
-/// registration walk and the lookup, so a site can never be re-found that was
-/// never registered.
+/// `PcpDependencyTypeRoot`) while the root stack's users still count it.
+/// Shared by the registration walk and the lookup, so a site can never be
+/// re-found that was never registered.
 pub(super) fn registers_site(node: &Node, prim_path: &Path) -> bool {
     tracks_dependency(node) && !(node.arc == ArcType::Root && node.path == *prim_path)
 }

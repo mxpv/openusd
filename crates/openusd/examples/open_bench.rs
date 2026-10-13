@@ -25,14 +25,17 @@
 //!
 //! # Usage
 //! ```bash
-//! cargo run --release -p openusd --example open_bench -- [--time <t>] [--save] <root.usd[a|c|z]>
+//! cargo run --release -p openusd --example open_bench -- [--time <t>] [--save] [--mute] <root.usd[a|c|z]>
 //! ```
 //!
 //! `--time <t>` reads arrays at time code `t`, resolving time samples;
 //! without it the default value is read and no sample is touched. `--save`
 //! adds a phase that authors one attribute and saves the root layer; it runs
 //! on a copy of a single-file root in the temporary directory, so the file
-//! named on the command line is never written. `--no-arrays` skips the
+//! named on the command line is never written. `--mute` adds a phase that
+//! mutes one layer and unmutes it again, timing the two invalidations of
+//! the populated stage: the root layer's first sublayer, or the layer
+//! loaded last when the root has none. `--no-arrays` skips the
 //! array phase, for measuring what a stage that never reads its arrays
 //! holds. `--proxies` walks instance subtrees as instance proxies and
 //! `--all` walks every composed prim whatever its status, where the default
@@ -40,7 +43,7 @@
 //! abstract prims. `--mmap` opens the scene through a resolver that maps
 //! files (the `mmap` feature), which asks that nothing write the scene's
 //! files while the benchmark runs. `--until <phase>` ends the run after the
-//! phase named (`open`, `metadata`, `arrays` or `save`).
+//! phase named (`open`, `metadata`, `arrays`, `mute` or `save`).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(not(feature = "mmap"))]
@@ -58,7 +61,7 @@ use openusd::{Error, Result, ar, sdf, usdz};
 fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
         eprintln!(
-            "usage: open_bench [--time <t>] [--save] [--no-arrays] [--proxies | --all] [--mmap] \
+            "usage: open_bench [--time <t>] [--save] [--mute] [--no-arrays] [--proxies | --all] [--mmap] \
              [--until <phase>] <root.usd[a|c|z]>"
         );
         process::exit(2);
@@ -107,6 +110,22 @@ fn main() -> Result<()> {
         phase.end(&format!("arrays: {arrays}  decoded: {}", mib(decoded)));
     }
 
+    if args.mute && args.runs("mute") {
+        let root = stage.root_layer().identifier().to_owned();
+        let layer = stage
+            .sub_layers(&root)
+            .into_iter()
+            .nth(1)
+            .or_else(|| stage.layer_identifiers().pop())
+            .filter(|layer| *layer != root);
+        if let Some(layer) = layer {
+            let phase = Phase::start("mute");
+            stage.mute_layer(layer.as_str());
+            stage.unmute_layer(&layer);
+            phase.end(&format!("layer: {layer}"));
+        }
+    }
+
     if args.save && args.runs("save") {
         let phase = Phase::start("save");
         let prim = prims.first().cloned().unwrap_or_else(sdf::Path::abs_root);
@@ -141,6 +160,7 @@ struct Args {
     root: PathBuf,
     time: Option<f64>,
     save: bool,
+    mute: bool,
     no_arrays: bool,
     predicate: PrimPredicate,
     mmap: bool,
@@ -156,6 +176,7 @@ impl Args {
             root: PathBuf::new(),
             time: None,
             save: false,
+            mute: false,
             no_arrays: false,
             predicate: PrimPredicate::DEFAULT,
             mmap: false,
@@ -165,6 +186,7 @@ impl Args {
             match arg.as_str() {
                 "--time" => parsed.time = Some(args.next()?.parse().ok()?),
                 "--save" => parsed.save = true,
+                "--mute" => parsed.mute = true,
                 "--no-arrays" => parsed.no_arrays = true,
                 "--proxies" => parsed.predicate = PrimPredicate::DEFAULT_PROXIES,
                 "--all" => parsed.predicate = PrimPredicate::ALL,
@@ -187,7 +209,7 @@ impl Args {
 }
 
 /// The phases, in the order they run.
-const PHASES: [&str; 4] = ["open", "metadata", "arrays", "save"];
+const PHASES: [&str; 5] = ["open", "metadata", "arrays", "mute", "save"];
 
 /// The resolver the stage opens through, mapping files when `mmap` is set.
 #[cfg(feature = "mmap")]

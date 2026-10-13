@@ -9,10 +9,9 @@
 //! the composed path a dependent is affected at needs that dependent's own
 //! composition graph, which this table does not hold, so
 //! [`IndexStore`](super::index_store::IndexStore) joins and translates them.
-//! A coarser `layer → indices` map
-//! ([`indices_for_layers`](Dependencies::indices_for_layers)) answers the
-//! whole-layer question a mute/unmute or layer-stack edit asks, without
-//! scanning every cached index.
+//! [`indices_for_layers`](Dependencies::indices_for_layers) answers the
+//! whole-layer question a mute/unmute or layer-stack edit asks, from the
+//! indices composing against each stack that holds the layer.
 //!
 //! This is C++ `Pcp_Dependencies`, which also keys sites by layer stack.
 
@@ -48,8 +47,8 @@ pub(super) struct Dependencies {
     /// Prim-index paths with a dependency node composing against the stage
     /// root layer stack, the self-Root edge included. A change to a layer of the
     /// root stack reaches these ([`indices_for_layers`](Self::indices_for_layers));
-    /// a change to another stack reaches the dependents registered in its
-    /// [`per_stack`](Self::per_stack) table. A muted reference/payload target
+    /// a change to another stack reaches the indices in its
+    /// [`by_stack`](Self::by_stack) entry. A muted reference/payload target
     /// reached by nothing is tracked by canonical identifier in
     /// [`by_muted_canonical`](Self::by_muted_canonical).
     root_users: HashSet<Path>,
@@ -155,11 +154,6 @@ impl Dependencies {
             // The site map skips the self-Root edge to stay compact;
             // `root_users` keeps it (the prim reads its own root stack).
             if !registers_site(node, prim_index_path) {
-                debug_assert_eq!(
-                    stack,
-                    LayerStackId::ROOT,
-                    "only the self-Root edge goes unregistered, so `per_stack` names every other stack's users",
-                );
                 continue;
             }
             let key = (stack, node.path.clone());
@@ -401,18 +395,19 @@ impl Dependencies {
         Self::dedup_paths(self.stack_users(&stacks))
     }
 
-    /// The prim indices composing against one of `stacks`, with repeats.
+    /// The prim indices composing against one of `stacks`: the
+    /// [`root_users`](Self::root_users) for the root stack and the
+    /// [`by_stack`](Self::by_stack) entry for any other, which also holds the
+    /// indices that read the stack's expression variables. An index using
+    /// several of the stacks repeats.
     fn stack_users<'a>(&'a self, stacks: &'a BTreeSet<LayerStackId>) -> impl Iterator<Item = &'a Path> {
-        let root = stacks
-            .contains(&LayerStackId::ROOT)
-            .then_some(&self.root_users)
-            .into_iter()
-            .flatten();
-        let others = stacks
+        stacks
             .iter()
-            .filter_map(|stack| self.per_stack.get(stack))
-            .flat_map(|table| table.iter().flat_map(|(_, deps)| deps.iter()));
-        root.chain(others)
+            .filter_map(|stack| match *stack {
+                LayerStackId::ROOT => Some(&self.root_users),
+                stack => self.by_stack.get(&stack),
+            })
+            .flatten()
     }
 
     /// Prim indices whose composition uses the layer stack `stack`, as an
