@@ -22,7 +22,7 @@ use super::layer_graph::LayerGraph;
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::prim_index::{CompositionContext, NodeRuns, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
 use super::prim_indexer::ExprVarDeps;
-use super::{CompositionDiagnostic, LayerId};
+use super::{CompositionDiagnostic, LayerId, QueryError};
 
 /// Per-prim composition index storage with dependency tracking. See the
 /// [module docs](self).
@@ -246,6 +246,7 @@ impl IndexStore {
                 errors,
                 property_errors: Diagnostics::default(),
                 resolved_targets: HashMap::new(),
+                instanceable: None,
                 revision,
             },
         );
@@ -577,6 +578,24 @@ impl IndexStore {
         if let Some(entry) = self.entries.get_mut(prim) {
             entry.resolved_targets.insert(key, memo);
         }
+    }
+
+    /// [`PrimIndex::is_instanceable`] for the cached index at `prim`, answered
+    /// once per entry revision ([`PrimEntry::instanceable`]). A path with no
+    /// cached entry answers `false`, as the empty stand-in index
+    /// [`cached`](Self::cached) returns would.
+    pub(super) fn instanceable(&mut self, graph: &LayerGraph, prim: &Path) -> Result<bool, QueryError> {
+        let Some(entry) = self.entries.get_mut(prim) else {
+            return Ok(false);
+        };
+        if let Some((revision, instanceable)) = entry.instanceable
+            && revision == entry.revision
+        {
+            return Ok(instanceable);
+        }
+        let instanceable = entry.index.is_instanceable(graph, prim.prim_element_count() as u16)?;
+        entry.instanceable = Some((entry.revision, instanceable));
+        Ok(instanceable)
     }
 }
 

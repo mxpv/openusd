@@ -1945,6 +1945,12 @@ impl IndexCache {
         self.store.cached(path)
     }
 
+    /// Whether the cached index at `path` makes its prim an instance
+    /// ([`IndexStore::instanceable`]).
+    pub(super) fn cached_instanceable(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+        self.store.instanceable(graph, path)
+    }
+
     /// Number of cached prim indices.
     pub fn indexed_count(&self) -> usize {
         self.store.len()

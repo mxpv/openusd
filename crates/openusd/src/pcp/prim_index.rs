@@ -20,7 +20,7 @@ use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
-use super::{ExpressionContext, LayerGraph, LayerId, VariantFallbackMap};
+use super::{ExpressionContext, LayerGraph, LayerId, QueryError, VariantFallbackMap};
 
 /// How much of the composition graph a value-resolution walk visits
 /// ([`PrimIndex::live_sites`]) — C++ `Usd_Resolver`'s `skipEmptyNodes`.
@@ -119,6 +119,12 @@ pub(crate) struct PrimEntry {
     /// [`relationship_targets`]: super::index_cache::IndexCache::relationship_targets
     /// [`connection_paths`]: super::index_cache::IndexCache::connection_paths
     pub resolved_targets: HashMap<TargetMemoKey, TargetMemo>,
+    /// [`PrimIndex::is_instanceable`] for [`index`](Self::index), memoized
+    /// with the [`revision`](Self::revision) it was answered at, as C++
+    /// computes `PcpPrimIndex::IsInstanceable` once per index. It is read only
+    /// while the revision matches: after a rebuild, a restale or a spec
+    /// refresh, the next query answers afresh.
+    pub(super) instanceable: Option<(PrimRevision, bool)>,
     /// Validity token for answers resolved from this prim's composed state.
     ///
     /// Written only by [`IndexStore`](super::index_store::IndexStore), which
@@ -805,6 +811,20 @@ impl PrimIndex {
     /// ancestral, or bring no opinions, has nothing a prototype could share.
     pub(crate) fn has_instanceable_node(&self, depth: u16) -> bool {
         self.instanceable_nodes(depth).contains(&true)
+    }
+
+    /// Whether this index, composing a prim at `depth`, makes the prim an
+    /// instance (C++ `Pcp_PrimIndexIsInstanceable`): it has an instanceable
+    /// node ([`has_instanceable_node`](Self::has_instanceable_node)), and its
+    /// composed `instanceable` metadata is `true`.
+    pub(crate) fn is_instanceable(&self, graph: &LayerGraph, depth: u16) -> Result<bool, QueryError> {
+        if !self.has_instanceable_node(depth) {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.resolve_field(FieldKey::Instanceable.as_str(), graph, None)?,
+            Some(Value::Bool(true))
+        ))
     }
 
     /// Inerts the instance-namespace opinions on a prim composed inside an
@@ -1555,6 +1575,7 @@ pub(crate) mod tests {
                         errors: Diagnostics::default(),
                         property_errors: Diagnostics::default(),
                         resolved_targets: HashMap::new(),
+                        instanceable: None,
                         revision: PrimRevision::placeholder(),
                     },
                 );

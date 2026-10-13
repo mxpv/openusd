@@ -3916,6 +3916,28 @@ fn ancestral_arc_not_instance() -> Result<()> {
     Ok(())
 }
 
+/// Whether an `instanceable` prim is an instance follows the specs its arcs
+/// reach, answered again after each edit. A class with no spec gives the prim
+/// nothing to share. Defining the class makes the prim an instance, and
+/// removing it again ends that.
+#[test]
+fn instance_follows_class_spec() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        "#usda 1.0\n\
+         def Scope \"Inst\" (instanceable = true\n inherits = </Class>) {}\n",
+    )?;
+    assert!(!stage.prim("/Inst")?.is_instance()?);
+
+    stage.override_prim("/Class")?;
+    assert!(stage.prim("/Inst")?.is_instance()?);
+
+    assert!(stage.remove_prim("/Class")?);
+    assert!(!stage.prim("/Inst")?.is_instance()?);
+    Ok(())
+}
+
 /// `get_prototype` / `get_instances` group instances by shared composition,
 /// and the prototype namespace is addressable (spec 11.3.3).
 #[test]
