@@ -429,7 +429,7 @@ struct Inputs<'a> {
     /// The layer stack being composed.
     stack: &'a LayerGraph,
     /// Composition context flowing from the parent prim (variant selections /
-    /// fallbacks, instance depth, denied prefixes, ancestor arcs).
+    /// fallbacks, instance depth).
     ctx: &'a CompositionContext,
     /// Cached prim indices from the composition cache. The parent prim's index
     /// is read from here to seed this child's graph (C++

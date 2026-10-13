@@ -11167,6 +11167,50 @@ fn target_edit_fans_out_to_dependent() -> Result<()> {
     Ok(())
 }
 
+/// A prim that inherits a class composes the class's site without the class
+/// getting an index of its own. A reference authored on the class recomposes
+/// the inheriting prim all the same.
+#[test]
+fn unindexed_class_edit_reaches_inheritor() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+def "Lib" {
+    def "FromRef" {}
+}
+class "_Class" {
+    def "Child" {}
+}
+def "Inst" (
+    inherits = </_Class>
+)
+{
+}
+"#,
+    )?;
+    assert_eq!(child_names(&stage, "/Inst")?, vec!["Child".to_string()]);
+    assert!(!stage.is_indexed(&sdf::path("/_Class")?), "nothing asked for the class");
+
+    let root = stage.root_layer().identifier().to_owned();
+    let reference = sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+        prim_path: sdf::path("/Lib")?,
+        ..Default::default()
+    }]));
+    stage.layer_mut(&root).expect("the root layer is live").edit(|e| {
+        e.data_mut()
+            .set_field(&sdf::path("/_Class")?, sdf::FieldKey::References.as_str(), reference);
+        Ok(())
+    })?;
+
+    let names = child_names(&stage, "/Inst")?;
+    assert!(
+        names.contains(&"FromRef".to_string()),
+        "the class's new reference reaches the prim inheriting it: {names:?}"
+    );
+    Ok(())
+}
+
 /// Removing the relationship spec that authored the memoized targets must drop
 /// the memo so the next query recomposes. The removal carries only
 /// `REMOVE_PROPERTY`, so the producer surfaces the removed `targetPaths` to route

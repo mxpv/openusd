@@ -17,7 +17,6 @@ use super::compose_site::evaluate_expression;
 use super::diagnostics::Diagnostics;
 use super::index_store::PrimRevision;
 use super::layer_stack::LayerStackId;
-use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite, extend_reversed};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
 use super::{ExpressionContext, LayerGraph, LayerId, QueryError, VariantFallbackMap};
@@ -1042,8 +1041,8 @@ impl PrimIndex {
     /// ancestor walk) drops them; its source prim's registration already
     /// stands.
     ///
-    /// Child prims use this context to inherit ancestor arc mappings and
-    /// variant selections without recomputing them.
+    /// Child prims use this context to inherit variant selections without
+    /// recomputing them.
     pub(crate) fn context_for_children(
         &self,
         stack: &LayerGraph,
@@ -1060,26 +1059,6 @@ impl PrimIndex {
             &mut expr_var_deps,
         );
 
-        // Build ancestor arcs: record every non-Root node so children can
-        // remap through it. We use map_to_root (not map_to_parent) because
-        // ancestor propagation needs to translate all the way to the composed
-        // namespace. An arc is kept even when its path mapping is a no-op
-        // (e.g. a reference whose target shares the prim's path): it still
-        // crosses into another layer, so a child must follow it to reach the
-        // referenced layer's descendants. Root nodes are skipped — the child's
-        // own root `L` site rescans the root layer stack.
-        let mut ancestor_arcs = parent_ctx.ancestor_arcs.clone();
-        // Record each non-Root node's namespace mapping so a descendant prim can
-        // translate a relative inherit/specialize target authored at this prim
-        // into the composed namespace (cache `precache_inherit_targets`).
-        for node in self.all_nodes() {
-            if node.arc() != ArcType::Root {
-                ancestor_arcs.push(AncestorArc {
-                    map: node.map_to_root().clone(),
-                });
-            }
-        }
-
         // Merge parent's selections (weaker) with this prim's (stronger).
         let mut merged_selections = parent_ctx.selections.clone();
         for (k, v) in selections {
@@ -1088,7 +1067,6 @@ impl PrimIndex {
 
         let context = CompositionContext {
             selections: merged_selections,
-            ancestor_arcs,
             variant_fallbacks: parent_ctx.variant_fallbacks.clone(),
             may_have_clips: parent_ctx.may_have_clips || self.authors_clips,
             // Inherited from the parent; the cache additionally sets this when
@@ -1131,17 +1109,13 @@ impl PrimIndex {
 
 /// Composition context carried from parent prims to children.
 ///
-/// Contains accumulated variant selections, arc mappings, and variant
-/// fallbacks that enable single-pass composition without cross-prim
-/// post-processing.
+/// Contains accumulated variant selections and variant fallbacks that
+/// enable single-pass composition without cross-prim post-processing.
 #[derive(Debug, Clone)]
 pub(crate) struct CompositionContext {
     /// Variant selections accumulated from all ancestor compositions.
     /// First-opinion-wins: strongest ancestor's selection takes priority.
     pub selections: HashMap<String, String>,
-    /// Ancestor composition arcs with namespace mappings.
-    /// Used for descendant namespace remapping and implied inherit propagation.
-    pub ancestor_arcs: Vec<AncestorArc>,
     /// Variant fallback selections for sets without authored opinions.
     /// Propagated unchanged from the stage configuration.
     pub variant_fallbacks: VariantFallbackMap,
@@ -1170,7 +1144,6 @@ impl Default for CompositionContext {
     fn default() -> Self {
         Self {
             selections: HashMap::new(),
-            ancestor_arcs: Vec::new(),
             variant_fallbacks: VariantFallbackMap::new(),
             may_have_clips: false,
             instance_depth: None,
@@ -1184,19 +1157,6 @@ impl CompositionContext {
     pub fn within_instance(&self) -> bool {
         self.instance_depth.is_some()
     }
-}
-
-/// Records an ancestor composition arc for descendant namespace remapping.
-///
-/// When `/Rig` inherits `/_class` which references `ref.usd /CharRig`,
-/// the ancestor arcs record the namespace mappings `/_class → /Rig` and
-/// `/CharRig → /Rig`. Children of `/Rig` use these to find their
-/// composition sites in other layers via [`MapFunction`] methods.
-#[derive(Debug, Clone)]
-pub(crate) struct AncestorArc {
-    /// Namespace mapping from this arc's source to the composed namespace.
-    /// Convention: source is the arc target's namespace, target is composed.
-    pub map: MapFunction,
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,6 +1391,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::pcp::CompositionDiagnostic;
+    use crate::pcp::mapping::MapFunction;
     use crate::pcp::prim_graph::NodeDesc;
 
     use crate::Result;
