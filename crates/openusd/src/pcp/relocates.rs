@@ -600,12 +600,12 @@ fn collect_stack_maps(
             continue;
         }
         for node in cached_index.index.nodes() {
-            if node.arc == ArcType::Relocate {
+            if node.arc() == ArcType::Relocate {
                 continue;
             }
             let stack = node.layer_stack_id();
-            if !maps.iter().any(|(s, m)| *s == stack && *m == node.map_to_root) {
-                maps.push((stack, node.map_to_root.clone()));
+            if !maps.iter().any(|(s, m)| *s == stack && m == node.map_to_root()) {
+                maps.push((stack, node.map_to_root().clone()));
             }
         }
     }
@@ -630,7 +630,7 @@ fn collect_stack_maps(
             continue;
         }
         for node in cached_index.index.all_nodes() {
-            if node.arc == ArcType::Relocate {
+            if node.arc() == ArcType::Relocate {
                 continue;
             }
             let stack = node.layer_stack_id();
@@ -638,8 +638,8 @@ fn collect_stack_maps(
                 .layer_stack(stack)
                 .iter()
                 .any(|&(layer, _)| relocate_layers.contains(&layer));
-            if has_relocates && !maps.iter().any(|(s, m)| *s == stack && *m == node.map_to_root) {
-                maps.push((stack, node.map_to_root.clone()));
+            if has_relocates && !maps.iter().any(|(s, m)| *s == stack && m == node.map_to_root()) {
+                maps.push((stack, node.map_to_root().clone()));
             }
         }
     }

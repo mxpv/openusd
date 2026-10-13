@@ -201,7 +201,7 @@ impl ClipAnchor {
     /// value resolution has reached: C++ `_ClipsApplyToNode` — the node's own
     /// stack and a prim path at or under the anchor's — together with the
     /// `sourceLayer` test its caller applies per layer.
-    pub(super) fn applies_at(&self, node: &Node, layer: LayerId) -> bool {
+    pub(super) fn applies_at(&self, node: Node<'_>, layer: LayerId) -> bool {
         self.layer == layer && node.layer_stack_id() == self.stack && node.path().has_prefix(&self.prim_path)
     }
 }

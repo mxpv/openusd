@@ -29,7 +29,7 @@ use super::{LayerGraph, LayerId, QueryError};
 /// field.
 struct Opinion<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
-    node: &'a Node,
+    node: Node<'a>,
     /// Id of the contributing layer, as yielded by
     /// [`Node::layers`](super::prim_graph::Node::layers) and used with
     /// [`LayerGraph::layer`](super::LayerGraph::layer) — not a position within
@@ -441,7 +441,7 @@ impl Series<Composed> {
 /// caller that builds a [`Composed`] of its own.
 pub(crate) fn rooted_at(value: Value, site: &OpinionSite<'_>) -> Value {
     let mut composing = Composing::new();
-    composing.fold(value, &site.query_path, &site.node.map_to_root);
+    composing.fold(value, &site.query_path, site.node.map_to_root());
     composing.into_open().unwrap_or(Value::ValueBlock)
 }
 
@@ -497,7 +497,7 @@ fn close_value(value: Value) -> Value {
 /// filter and query-path resolution and cannot drift.
 struct ContributingSite<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
-    node: &'a Node,
+    node: Node<'a>,
     /// Id of the contributing layer (see [`Opinion::layer`]).
     layer: LayerId,
     /// Effective time offset of the contributing layer to the root namespace,
@@ -711,9 +711,11 @@ impl PrimIndex {
             };
             let is_explicit = list_op.is_explicit();
             // The node's map to the root namespace (C++ `PcpNodeRef::GetMapToRoot`).
-            let map = &node.map_to_root;
-            let arc = node.arc;
-            let arc_root = node.parent.map_or_else(Path::abs_root, |p| self.node(p).path.clone());
+            let map = node.map_to_root();
+            let arc = node.arc();
+            let arc_root = node
+                .parent()
+                .map_or_else(Path::abs_root, |p| self.node(p).path().clone());
             let report = !seen_explicit;
             // Translate one authored target, dropping (and recording, when not
             // shadowed) an out-of-scope or instance target.
@@ -791,7 +793,7 @@ impl PrimIndex {
                 Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
                 _ => continue,
             };
-            ops.push(Self::map_path_list_op_to_root(list_op, &query_path, &node.map_to_root));
+            ops.push(Self::map_path_list_op_to_root(list_op, &query_path, node.map_to_root()));
         }
         Ok(ops)
     }
@@ -873,10 +875,10 @@ impl PrimIndex {
     /// The suffix comes from an already-validated property path and the node
     /// path from the composed graph, so appending one to the other needs no
     /// re-validation.
-    pub(super) fn query_path<'a>(node: &'a Node, prop_suffix: Option<&str>) -> Cow<'a, Path> {
+    pub(super) fn query_path<'a>(node: Node<'a>, prop_suffix: Option<&str>) -> Cow<'a, Path> {
         match prop_suffix {
-            Some(suffix) => Cow::Owned(Path::from_str_unchecked(&format!("{}{suffix}", node.path))),
-            None => Cow::Borrowed(&node.path),
+            Some(suffix) => Cow::Owned(Path::from_str_unchecked(&format!("{}{suffix}", node.path()))),
+            None => Cow::Borrowed(node.path()),
         }
     }
 
@@ -1004,7 +1006,7 @@ impl PrimIndex {
         for opinion in self.opinions(field, stack, prop_suffix) {
             let opinion = opinion?;
             let anchor = opinion.query_path.prim_path();
-            let folded = composing.fold(opinion.value.into_owned(), &anchor, &opinion.node.map_to_root);
+            let folded = composing.fold(opinion.value.into_owned(), &anchor, opinion.node.map_to_root());
             if folded.step().stop() {
                 break;
             }
@@ -1369,7 +1371,7 @@ impl PrimIndex {
                 break;
             }
             if let Value::Specifier(s) = value.into_owned() {
-                specs.push((s, node.arc));
+                specs.push((s, node.arc()));
             }
         }
         if specs.is_empty() {

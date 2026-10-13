@@ -260,10 +260,13 @@ mod pcp_txt {
             return Vec::new();
         };
         let mut out = Vec::new();
-        let mut stack: Vec<pcp::NodeId> = index.children(root).iter().rev().copied().collect();
+        let mut stack: Vec<pcp::NodeId> = index.children(root).collect();
+        stack.reverse();
         while let Some(id) = stack.pop() {
             out.push(id);
-            stack.extend(index.children(id).iter().rev().copied());
+            let first = stack.len();
+            stack.extend(index.children(id));
+            stack[first..].reverse();
         }
         out
     }

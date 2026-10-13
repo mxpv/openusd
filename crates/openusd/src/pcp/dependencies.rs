@@ -156,7 +156,7 @@ impl Dependencies {
             if !registers_site(node, prim_index_path) {
                 continue;
             }
-            let key = (stack, node.path.clone());
+            let key = (stack, node.path().clone());
             if !seen.insert(key.clone()) {
                 continue;
             }
@@ -164,7 +164,7 @@ impl Dependencies {
             self.per_stack
                 .entry(stack)
                 .or_default()
-                .get_or_insert_default(&node.path)
+                .get_or_insert_default(node.path())
                 .push(prim_index_path.clone());
         }
         if root_user {
@@ -531,7 +531,7 @@ mod tests {
     use crate::pcp::layer_graph::ExternalStack;
     use crate::pcp::mapping::MapFunction;
     use crate::pcp::prim_graph::ArcType;
-    use crate::pcp::prim_graph::Node;
+    use crate::pcp::prim_graph::NodeDesc;
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid path")
@@ -571,7 +571,7 @@ mod tests {
                 ExternalStack::Demand => panic!("no minted stack for test layer {layer_id:?}"),
             };
             let map = MapFunction::from_pair_identity(node_path.clone(), prim_path.clone());
-            idx.push_node(Node::new(stack, layer_id, node_path, arc, map.clone(), map, false));
+            idx.push_node(NodeDesc::new(stack, layer_id, node_path, arc, map));
         }
         idx
     }

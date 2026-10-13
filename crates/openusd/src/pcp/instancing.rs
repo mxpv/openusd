@@ -27,7 +27,7 @@ use super::index_cache::IndexCache;
 use super::layer_graph::LayerGraph;
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
-use super::prim_graph::{ArcType, NodeId};
+use super::prim_graph::{ArcType, NodeId, extend_reversed};
 use super::prim_index::PrimIndex;
 use super::prim_indexer::ExprVarDeps;
 use super::{LayerStackId, QueryError};
@@ -343,7 +343,7 @@ pub(crate) fn is_prototype_namespace(path: &Path) -> bool {
 /// prototype when their load state and their exposure agree.
 fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules, mask: PopulationMask) -> InstanceKey {
     let instanceable = index.instanceable_nodes(instance_depth);
-    let has_payload = index.arena().iter().any(|node| node.arc == ArcType::Payload);
+    let has_payload = index.arena().any(|node| node.arc() == ArcType::Payload);
     let mut arcs = Vec::new();
     let mut stack: Vec<NodeId> = index.root().into_iter().collect();
     while let Some(id) = stack.pop() {
@@ -353,17 +353,17 @@ fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules, m
         }
         if instanceable[id.idx()] {
             arcs.push(InstanceArc {
-                arc: node.arc as u8,
+                arc: node.arc() as u8,
                 layer_stack: node.layer_stack_id(),
-                path: node.path.to_string(),
-                layer_offset_bits: node.map_to_root.time_offset().to_bits(),
+                path: node.path().to_string(),
+                layer_offset_bits: node.map_to_root().time_offset().to_bits(),
             });
             if !has_payload {
                 continue;
             }
         }
         // Children in reverse, so the stack pops them strongest first.
-        stack.extend(node.children.iter().rev());
+        extend_reversed(&mut stack, node.children());
     }
     InstanceKey {
         arcs,
@@ -655,7 +655,8 @@ impl IndexCache {
         // Re-anchor the seeding instance's composed namespace onto the prototype
         // root so the root's own target translation lands in the prototype
         // namespace, not the canonical instance's.
-        index.rebase_root(canonical, prototype);
+        let nodes_copied = index.rebase_root(canonical, prototype);
+        self.count_copy(nodes_copied);
 
         // Seeded from a namespace root, so the prototype inherits nothing from
         // where its instance sits: its variant selections, clip presence and

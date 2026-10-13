@@ -53,7 +53,7 @@
 //! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`) and the `CompositionContext` that flows parent-to-child. |
 //! | `compose_site` | `PcpComposeSite` | Site field composition: the list-op primitives (`compose_references_in`, `collect_payloads_in`, `compose_arc_list_in`) the `prim_indexer` drives to read a node's arc fields across its layer stack, plus the asset-path anchoring and time-codes retiming they fold in. |
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
-//! | `prim_graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. |
+//! | `prim_graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. A child prim's graph shares its parent's node data. |
 //! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
 //! | `value_resolve` | `UsdStage::_GetResolvedValueAtTimeImpl` | The shared attribute-value walk: `ResolveMode`, the `OpinionResolver` seam every value query runs through, and the `Resolution` they answer with. |
 //! | `asset_resolve` | `Usd_AssetPathContext` | Value-time `asset` provenance: the `AssetSite` every value source supplies, projected onto the anchor and variable scope the `sdf` resolution tail takes. Shared by the composed-opinion path and the clip cache, whose layers stand outside the graph. |
@@ -369,9 +369,9 @@ use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::{ApplyOutcome, Changes, LayerChanges};
 pub(crate) use diagnostics::Diagnostics;
-pub use index_cache::SpecSiteRecord;
 pub(crate) use index_cache::Standing;
 pub(crate) use index_cache::{AttributeValueSource, IndexCache, StampedValueSource};
+pub use index_cache::{GraphStats, SpecSiteRecord};
 pub(crate) use index_store::PrimRevision;
 pub(crate) use instancing::is_prototype_namespace;
 pub use layer_graph::StackIdentity;

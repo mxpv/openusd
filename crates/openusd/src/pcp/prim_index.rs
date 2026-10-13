@@ -18,7 +18,7 @@ use super::diagnostics::Diagnostics;
 use super::index_store::PrimRevision;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
-use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite};
+use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite, extend_reversed};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
 use super::{ExpressionContext, LayerGraph, LayerId, QueryError, VariantFallbackMap};
 
@@ -55,8 +55,7 @@ pub struct PrimIndex {
     /// of the nodes a changed site touched ([`respec_nodes`](Self::respec_nodes))
     /// rather than rebuilding the whole thing; read through the filtered
     /// [`live_spec_sites`](Self::live_spec_sites) view. It is a resolution-time
-    /// artifact, kept off [`PrimIndexGraph`] so the indexer's structural seed
-    /// clone does not carry it.
+    /// artifact, kept off [`PrimIndexGraph`], which a child's build seeds from.
     spec_stack: Vec<SpecSite>,
     /// Whether any contributing node authors `clips` or `clipSets` at its own
     /// path. Computed alongside [`spec_stack`](Self::spec_stack), whose walk
@@ -74,7 +73,7 @@ pub struct PrimIndex {
     /// structure, so it stays valid across an in-place refresh. Lists every arena
     /// node — inert, culled, and the synthetic root — so the refresh sees each
     /// site's full candidate set. Like [`spec_stack`](Self::spec_stack), it is kept
-    /// off [`PrimIndexGraph`] so the indexer's seed clone does not carry it.
+    /// off [`PrimIndexGraph`], which a child's build seeds from.
     path_order: Vec<NodeId>,
 }
 
@@ -251,7 +250,7 @@ impl PrimIndex {
     pub fn is_empty(&self) -> bool {
         !self
             .graph
-            .iter()
+            .nodes()
             .any(|node| !node.is_inert() && !node.is_culled() && node.has_specs())
     }
 
@@ -264,8 +263,7 @@ impl PrimIndex {
     /// composed for instancing.
     pub(crate) fn has_composition_arc(&self) -> bool {
         self.arena()
-            .iter()
-            .any(|node| node.arc != ArcType::Root && !node.is_inert() && !node.is_culled() && node.has_specs())
+            .any(|node| node.arc() != ArcType::Root && !node.is_inert() && !node.is_culled() && node.has_specs())
     }
 
     /// Iterates the nodes in strength order (strongest first).
@@ -275,7 +273,7 @@ impl PrimIndex {
     /// they sit in the arena. Inert and culled nodes are skipped — they
     /// contribute no opinions. The iterator is cheap and re-creatable; call it
     /// again for another pass rather than collecting.
-    pub fn nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone {
+    pub fn nodes(&self) -> impl DoubleEndedIterator<Item = Node<'_>> + Clone {
         self.all_nodes().filter(|node| !node.is_culled())
     }
 
@@ -285,7 +283,7 @@ impl PrimIndex {
     /// propagation adds. Used for composition introspection and change tracking,
     /// where the full arc structure matters even where it contributes no
     /// opinions; value resolution uses [`nodes`](Self::nodes) instead.
-    pub fn all_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone {
+    pub fn all_nodes(&self) -> impl DoubleEndedIterator<Item = Node<'_>> + Clone {
         self.ordered_nodes().filter(|node| !node.is_inert())
     }
 
@@ -294,8 +292,8 @@ impl PrimIndex {
     /// relocation-source nodes: their source site contributes no opinions yet an
     /// edit there must recompose the relocated prim, so change tracking needs the
     /// reverse-map entry.
-    pub(crate) fn dependency_nodes(&self) -> impl Iterator<Item = &Node> {
-        self.ordered_nodes().filter(|node| tracks_dependency(node))
+    pub(crate) fn dependency_nodes(&self) -> impl Iterator<Item = Node<'_>> {
+        self.ordered_nodes().filter(|&node| tracks_dependency(node))
     }
 
     /// Handles of the nodes at site `(layer, path)` whose dependency
@@ -327,9 +325,9 @@ impl PrimIndex {
         // TODO(perf): scans the strength order per candidate. A site carrying
         // several nodes is rare and each run is short, so a rank table on the
         // graph would cost more than it saves here.
-        let rank = |id: NodeId| self.graph.strength_order.iter().position(|&s| s == id);
+        let rank = |id: NodeId| self.graph.strength_order().iter().position(|&s| s == id);
         out.extend(self.nodes_at(path).iter().copied().filter(|&id| {
-            let node = &self.graph.nodes[id.idx()];
+            let node = self.graph.node(id);
             registers_site(node, prim_path) && graph.stack_contains(node.layer_stack_id(), layer) && rank(id).is_some()
         }));
         out.sort_by_cached_key(|&id| rank(id).expect("filtered to ranked nodes"));
@@ -351,8 +349,8 @@ impl PrimIndex {
         let mut path = Cow::Borrowed(changed);
         while self.node(id).relocate_kind() == Some(RelocateKind::Propagated) {
             let placeholder = self.node(id);
-            let parent = placeholder.parent?;
-            path = Cow::Owned(path.replace_prefix(&placeholder.path, &self.node(parent).path)?);
+            let parent = placeholder.parent()?;
+            path = Cow::Owned(path.replace_prefix(placeholder.path(), self.node(parent).path())?);
             id = parent;
         }
         self.node(id).map_to_root().translate_to_target(&path)
@@ -391,7 +389,7 @@ impl PrimIndex {
     /// neither inert nor culled, the same structural filter
     /// [`nodes`](Self::nodes) applies — each paired with its resolved node. The
     /// single home for that filter, shared by every spec-stack consumer.
-    pub(crate) fn live_spec_sites(&self) -> impl Iterator<Item = (&SpecSite, &Node)> {
+    pub(crate) fn live_spec_sites(&self) -> impl Iterator<Item = (&SpecSite, Node<'_>)> {
         self.spec_stack.iter().filter_map(|site| {
             let node = self.node(site.node);
             (!node.is_inert() && !node.is_culled()).then_some((site, node))
@@ -414,16 +412,16 @@ impl PrimIndex {
         &'a self,
         graph: &'a LayerGraph,
         scope: SiteScope,
-    ) -> impl Iterator<Item = (&'a Node, LayerId, LayerOffset)> {
+    ) -> impl Iterator<Item = (Node<'a>, LayerId, LayerOffset)> {
         let specs = (scope == SiteScope::SpecStack).then(|| {
             self.live_spec_sites()
                 .map(|(site, node)| (node, site.layer, site.offset))
         });
         let every = (scope == SiteScope::EveryLayer).then(|| {
             self.nodes().flat_map(|node| {
-                let arc_offset = node.map_to_root.time_offset();
+                let arc_offset = node.map_to_root().time_offset();
                 graph
-                    .layer_stack(node.layer_stack)
+                    .layer_stack(node.layer_stack_id())
                     .iter()
                     .map(move |&(layer, sub)| (node, layer, arc_offset.concatenate(&sub)))
             })
@@ -433,33 +431,20 @@ impl PrimIndex {
 
     /// Iterates every node in strength order, unfiltered — the shared projection
     /// the filtered public node iterators build on.
-    fn ordered_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone {
-        let nodes = &self.graph.nodes;
-        self.graph.strength_order.iter().map(move |id| &nodes[id.idx()])
+    fn ordered_nodes(&self) -> impl DoubleEndedIterator<Item = Node<'_>> + Clone {
+        self.graph.strength_order().iter().map(|&id| self.graph.node(id))
     }
 
-    /// Iterates `(handle, node)` pairs in strength order. Used by the subtree
-    /// graft, which needs each node's [`NodeId`] to rebuild parent links. The
-    /// inert synthetic root is skipped, so a grafted target's real roots become
-    /// orphans that re-parent under the destination's own root.
-    pub(crate) fn nodes_with_ids(&self) -> impl DoubleEndedIterator<Item = (NodeId, &Node)> {
-        let nodes = &self.graph.nodes;
-        self.graph
-            .strength_order
-            .iter()
-            .map(move |&id| (id, &nodes[id.idx()]))
-            .filter(|(_, node)| !node.is_inert())
-    }
-
-    /// Returns the node arena in insertion (structural) order, indexed by
+    /// Iterates the node arena in insertion (structural) order, the order of
     /// [`NodeId`]. Use [`nodes`](Self::nodes) for strength-ordered resolution.
-    pub(crate) fn arena(&self) -> &[Node] {
-        &self.graph.nodes
+    pub(crate) fn arena(&self) -> impl DoubleEndedIterator<Item = Node<'_>> + ExactSizeIterator + Clone {
+        self.graph.nodes()
     }
 
-    /// Returns the underlying composition graph. The task-queue indexer clones a
-    /// parent prim's graph as the seed for its child's index (C++
-    /// `_BuildInitialPrimIndexFromAncestor`).
+    /// Returns the underlying composition graph. The task-queue indexer seeds a
+    /// child's index from its parent prim's graph (C++
+    /// `_BuildInitialPrimIndexFromAncestor`), sharing the node data the child
+    /// leaves unchanged.
     pub(crate) fn graph(&self) -> &PrimIndexGraph {
         &self.graph
     }
@@ -469,7 +454,7 @@ impl PrimIndex {
     /// The root is the synthetic, inert node created first during the build;
     /// every contributing node descends from it.
     pub fn root(&self) -> Option<NodeId> {
-        self.graph.root.is_valid().then_some(self.graph.root)
+        self.graph.root().is_valid().then_some(self.graph.root())
     }
 
     /// Recomputes `has_specs` from live layer data for every node sitting at
@@ -520,10 +505,10 @@ impl PrimIndex {
     ) -> SpecRefresh {
         let mut refresh = SpecRefresh::default();
         // `to_vec` copies the small candidate run of handles, releasing the
-        // `path_order` borrow so the loop can mutate `graph.nodes` in place.
+        // `path_order` borrow so the loop can write the graph in place.
         for id in self.nodes_at(path).to_vec() {
-            let node = &mut self.graph.nodes[id.idx()];
-            let stack = node.layer_stack;
+            let node = self.graph.node(id);
+            let stack = node.layer_stack_id();
             if !graph.layer_stack(stack).iter().any(|&(li, _)| li == layer) {
                 continue;
             }
@@ -543,18 +528,18 @@ impl PrimIndex {
             if node.is_culled() {
                 // An empty arc target the spec just filled in: rebuild so the
                 // arc un-culls and grafts the target's subtree.
-                refresh.needs_rebuild |= has_specs && !node.has_specs;
+                refresh.needs_rebuild |= has_specs && !node.has_specs();
             } else {
                 // An arc target that just lost its last spec must re-cull to
                 // match an always-empty target, so a later re-add takes the
                 // un-cull rebuild path. The local root and inert placeholders
                 // never cull.
-                let lost_last_spec = node.has_specs && !has_specs;
-                let cullable = node.arc != ArcType::Root && !node.is_inert();
+                let lost_last_spec = node.has_specs() && !has_specs;
+                let cullable = node.arc() != ArcType::Root && !node.is_inert();
                 refresh.needs_rebuild |= lost_last_spec && cullable;
             }
-            refresh.arc_specs_changed |= node.arc != ArcType::Root && node.has_specs != has_specs;
-            node.has_specs = has_specs;
+            refresh.arc_specs_changed |= node.arc() != ArcType::Root && node.has_specs() != has_specs;
+            self.graph.set_has_specs(id, has_specs);
         }
         refresh
     }
@@ -564,9 +549,10 @@ impl PrimIndex {
     /// [`path_order`](Self::path_order) projection for the contiguous run of nodes
     /// at the site.
     fn nodes_at(&self, path: &Path) -> &[NodeId] {
-        let nodes = &self.graph.nodes;
-        let lo = self.path_order.partition_point(|&id| nodes[id.idx()].path < *path);
-        let hi = self.path_order.partition_point(|&id| nodes[id.idx()].path <= *path);
+        let lo = self.path_order.partition_point(|&id| self.graph.node(id).path() < path);
+        let hi = self
+            .path_order
+            .partition_point(|&id| self.graph.node(id).path() <= path);
         &self.path_order[lo..hi]
     }
 
@@ -609,7 +595,7 @@ impl PrimIndex {
         let old_len = self.spec_stack.len();
         let mut old = mem::take(&mut self.spec_stack).into_iter().peekable();
         let mut stack = Vec::with_capacity(old_len);
-        for &id in &self.graph.strength_order {
+        for &id in self.graph.strength_order() {
             let old_run = iter::from_fn(|| old.next_if(|site| site.node == id));
             match runs.take(id) {
                 // The refresh rescanned this node, so what it found stands in
@@ -662,9 +648,9 @@ impl PrimIndex {
     fn build_spec_stack(&self, graph: &LayerGraph) -> (Vec<SpecSite>, bool) {
         let mut stack = Vec::new();
         let mut authors_clips = false;
-        for &id in &self.graph.strength_order {
-            let node = &self.graph.nodes[id.idx()];
-            if !node.has_specs {
+        for &id in self.graph.strength_order() {
+            let node = self.graph.node(id);
+            if !node.has_specs() {
                 continue;
             }
             push_node_run(graph, node, id, &mut stack, Some(&mut authors_clips));
@@ -724,9 +710,8 @@ impl PrimIndex {
     /// node-bearing index signals "not yet built"), or skip the projection for
     /// arenas small enough that a linear scan over the arena wins.
     fn build_path_order(&mut self) {
-        let nodes = &self.graph.nodes;
-        let mut order: Vec<NodeId> = (0..nodes.len() as u32).map(NodeId).collect();
-        order.sort_by(|&a, &b| nodes[a.idx()].path.cmp(&nodes[b.idx()].path));
+        let mut order: Vec<NodeId> = self.graph.nodes().map(Node::id).collect();
+        order.sort_by(|&a, &b| self.graph.node(a).path().cmp(self.graph.node(b).path()));
         self.path_order = order;
     }
 
@@ -766,22 +751,21 @@ impl PrimIndex {
         // levels between its introduction and the prim being composed; anything
         // deeper below its introduction was introduced above the instance.
         let below_instance = prim_depth.saturating_sub(instance_depth);
-        let nodes = &self.graph.nodes;
-        let mut local = vec![false; nodes.len()];
-        for (i, node) in nodes.iter().enumerate() {
+        let mut local = vec![false; self.graph.len()];
+        for (i, node) in self.graph.nodes().enumerate() {
             // The single forward pass only reads an already-computed parent
             // entry; a parent inserted after its child would be read as a stale
             // `false`, silently leaking an instance-local arc into the prototype.
             debug_assert!(
-                node.parent.is_none_or(|p| p.idx() < i),
+                node.parent().is_none_or(|p| p.idx() < i),
                 "instance partition requires every node's parent to precede it in the arena"
             );
-            local[i] = match node.arc {
+            local[i] = match node.arc() {
                 // The local site (and the synthetic root) is always instance-local.
                 ArcType::Root => true,
                 _ => {
                     self.graph.depth_below_introduction(NodeId(i as u32)) > below_instance
-                        && node.parent.is_some_and(|p| local[p.idx()])
+                        && node.parent().is_some_and(|p| local[p.idx()])
                 }
             };
         }
@@ -804,8 +788,7 @@ impl PrimIndex {
     fn instanceable_flags(&self, instance_depth: u16) -> impl Iterator<Item = bool> + '_ {
         let local = self.instance_local_nodes(instance_depth, instance_depth);
         self.graph
-            .nodes
-            .iter()
+            .nodes()
             .zip(local)
             .map(|(node, local)| !local && !node.is_inert() && !node.is_culled() && node.has_specs())
     }
@@ -845,9 +828,9 @@ impl PrimIndex {
     /// [`CompositionContext::within_instance`](super::prim_index::CompositionContext::within_instance).)
     pub(crate) fn mark_instance_local_inert(&mut self, prim_depth: u16, instance_depth: u16) {
         let local = self.instance_local_nodes(prim_depth, instance_depth);
-        for (node, &is_local) in self.graph.nodes.iter_mut().zip(local.iter()) {
+        for (i, is_local) in local.into_iter().enumerate() {
             if is_local {
-                node.flags |= NodeFlags::INERT;
+                self.graph.mark(NodeId(i as u32), NodeFlags::INERT);
             }
         }
     }
@@ -869,26 +852,26 @@ impl PrimIndex {
     /// Only map targets change; node paths, arc types, namespace depths, origins,
     /// and sibling numbers are untouched, so the strength-order projection stays
     /// valid without re-finalizing.
-    pub(crate) fn rebase_root(&mut self, from: &Path, to: &Path) {
-        for node in &mut self.graph.nodes {
-            node.map_to_root = node.map_to_root.rebase_target(from, to);
-            node.map_to_parent = node.map_to_parent.rebase_target(from, to);
-        }
+    ///
+    /// Returns how many nodes of shared data the rewrite copied
+    /// ([`PrimIndexGraph::rebase_maps`]).
+    pub(crate) fn rebase_root(&mut self, from: &Path, to: &Path) -> usize {
+        self.graph.rebase_maps(|map| map.rebase_target(from, to))
     }
 
     /// Returns the node behind a handle.
-    pub fn node(&self, id: NodeId) -> &Node {
-        &self.graph.nodes[id.idx()]
+    pub fn node(&self, id: NodeId) -> Node<'_> {
+        self.graph.node(id)
     }
 
     /// Returns the structural parent of a node, or `None` for a root.
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
-        self.node(id).parent
+        self.node(id).parent()
     }
 
     /// Returns the structural children of a node, in strength order.
-    pub fn children(&self, id: NodeId) -> &[NodeId] {
-        &self.node(id).children
+    pub fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.graph.children(id)
     }
 
     /// Renders the composition tree for debugging (C++ `PcpPrimIndex::DumpToString`).
@@ -904,18 +887,18 @@ impl PrimIndex {
     pub fn dump(&self) -> String {
         use std::fmt::Write as _;
 
-        let mut rank = vec![0usize; self.graph.nodes.len()];
-        for (r, id) in self.graph.strength_order.iter().enumerate() {
+        let mut rank = vec![0usize; self.graph.len()];
+        for (r, id) in self.graph.strength_order().iter().enumerate() {
             rank[id.idx()] = r;
         }
 
         let mut out = String::new();
         let mut stack: Vec<(NodeId, usize)> = self
             .graph
-            .strength_order
+            .strength_order()
             .iter()
             .rev()
-            .filter(|id| self.node(**id).parent.is_none())
+            .filter(|id| self.node(**id).parent().is_none())
             .map(|&id| (id, 0))
             .collect();
 
@@ -925,65 +908,33 @@ impl PrimIndex {
                 out,
                 "{:indent$}{:?} [{:?}] {} #{}",
                 "",
-                node.arc,
+                node.arc(),
                 node.layer_id(),
-                node.path,
+                node.path(),
                 rank[id.idx()],
                 indent = depth * 4
             );
-            let offset = node.map_to_root.time_offset();
+            let offset = node.map_to_root().time_offset();
             if !offset.is_identity() {
                 let _ = write!(out, " offset=({},{})", offset.offset, offset.scale);
             }
             // Show origin only when it differs from the structural parent —
             // i.e. for implied classes and grafts. A direct arc always origins
             // on its parent, so printing it there is redundant noise.
-            if let Some(origin) = node.origin
-                && Some(origin) != node.parent
+            if let Some(origin) = node.origin()
+                && Some(origin) != node.parent()
             {
                 let _ = write!(out, " origin={}", origin.0);
             }
-            if !node.flags.is_empty() {
-                let _ = write!(out, " {:?}", node.flags);
+            if !node.flags().is_empty() {
+                let _ = write!(out, " {:?}", node.flags());
             }
             out.push('\n');
 
             // Push children in reverse so the strongest sibling pops first.
-            for &child in node.children.iter().rev() {
-                stack.push((child, depth + 1));
-            }
+            extend_reversed(&mut stack, node.children().map(|child| (child, depth + 1)));
         }
         out
-    }
-
-    /// Appends a node to the end of the composition graph, weakest in strength.
-    ///
-    /// Test-only scaffolding for assembling synthetic indices; production
-    /// composition appends through [`PrimIndexGraph::add_child`] or the
-    /// relocate grafts so structural links are populated.
-    #[cfg(test)]
-    pub(crate) fn push_node(&mut self, node: Node) {
-        let id = NodeId(self.graph.nodes.len() as u32);
-        // Keep `path_order` a valid sorted projection so a synthetic index built
-        // through this helper drives `nodes_at` and the spec-tier refresh the same
-        // way a composed one does. The new handle is the highest arena index, so it
-        // sorts after any equal-path node, matching the stable `build_path_order`.
-        let at = self
-            .path_order
-            .partition_point(|&nid| self.graph.nodes[nid.idx()].path <= node.path);
-        self.graph.nodes.push(node);
-        self.graph.strength_order.push(id);
-        self.path_order.insert(at, id);
-    }
-
-    /// Builds a prim index for a root prim with no cached ancestors (a test
-    /// convenience over [`build_with_cache`](Self::build_with_cache)). A child
-    /// prim must instead be built through a cache holding its ancestors, since
-    /// the indexer seeds a child from its cached parent.
-    #[cfg(test)]
-    pub(crate) fn build_with_context(path: &Path, stack: &LayerGraph, ctx: &CompositionContext) -> BuildResult<Self> {
-        Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new(), true)
-            .map(|(index, _errors, _pending, _deps)| index)
     }
 
     /// Like [`build_with_context`](Self::build_with_context) but with access to
@@ -1009,7 +960,7 @@ impl PrimIndex {
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimEntry>,
         load_payloads: bool,
-    ) -> BuildResult<(Self, Diagnostics, Vec<Demand>, ExprVarDeps)> {
+    ) -> BuildResult<(Self, Diagnostics, Vec<Demand>, ExprVarDeps, usize)> {
         Self::build_with_cache_in(path, stack, ctx, cached_indices, LayerStackId::ROOT, load_payloads)
     }
 
@@ -1029,7 +980,7 @@ impl PrimIndex {
         cached_indices: &sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
         load_payloads: bool,
-    ) -> BuildResult<(Self, Diagnostics, Vec<Demand>, ExprVarDeps)> {
+    ) -> BuildResult<(Self, Diagnostics, Vec<Demand>, ExprVarDeps, usize)> {
         if ambient == LayerStackId::ROOT
             && let Some(cached) = cached_indices.get(path)
         {
@@ -1044,6 +995,7 @@ impl PrimIndex {
                 Diagnostics::default(),
                 Vec::new(),
                 ExprVarDeps::default(),
+                0,
             ));
         }
         // The task-queue indexer is the sole composition path. A genuine cycle
@@ -1056,12 +1008,15 @@ impl PrimIndex {
             errors,
             pending_loads,
             expr_var_deps,
+            nodes_copied,
             // A cycle only steers the sub-build that hit it; at the top level
             // the dropped arc is already recorded in `errors`.
             hit_cycle: _,
         } = indexer.build(path)?;
+        let mut graph = graph.unwrap_or_default();
+        graph.shrink_to_fit();
         let mut index = PrimIndex {
-            graph: graph.unwrap_or_default(),
+            graph,
             spec_stack: Vec::new(),
             authors_clips: false,
             path_order: Vec::new(),
@@ -1075,7 +1030,7 @@ impl PrimIndex {
         // materialized prototype clones an index that already carries them.
         index.finalize_spec_stack(stack);
         index.build_path_order();
-        Ok((index, errors, pending_loads, expr_var_deps))
+        Ok((index, errors, pending_loads, expr_var_deps, nodes_copied))
     }
 
     /// Returns the composition context derived from this prim's index, together
@@ -1117,10 +1072,10 @@ impl PrimIndex {
         // Record each non-Root node's namespace mapping so a descendant prim can
         // translate a relative inherit/specialize target authored at this prim
         // into the composed namespace (cache `precache_inherit_targets`).
-        for (_, node) in self.nodes_with_ids() {
-            if node.arc != ArcType::Root {
+        for node in self.all_nodes() {
+            if node.arc() != ArcType::Root {
                 ancestor_arcs.push(AncestorArc {
-                    map: node.map_to_root.clone(),
+                    map: node.map_to_root().clone(),
                 });
             }
         }
@@ -1155,10 +1110,10 @@ impl PrimIndex {
     pub(crate) fn variant_selections(&self) -> Vec<(String, String)> {
         let mut selections: HashMap<String, String> = HashMap::new();
         for node in self.all_nodes() {
-            if !node.path.is_variant_selection() {
+            if !node.path().is_variant_selection() {
                 continue;
             }
-            if let Some(sdf::PathElement::Variant { set, selection }) = node.path.last_element() {
+            if let Some(sdf::PathElement::Variant { set, selection }) = node.path().last_element() {
                 selections
                     .entry(set.to_string())
                     .or_insert_with(|| selection.to_string());
@@ -1267,11 +1222,17 @@ pub(crate) struct AncestorArc {
 /// This is [`stack_has_spec`] unrolled: `out` grows iff that predicate holds,
 /// so the flag the refresh derives from it agrees with the one the indexer
 /// computes by asking directly.
-fn push_node_run(graph: &LayerGraph, node: &Node, id: NodeId, out: &mut Vec<SpecSite>, mut clips: Option<&mut bool>) {
-    let arc_offset = node.map_to_root.time_offset();
-    for &(layer, sub) in graph.layer_stack(node.layer_stack).iter() {
+fn push_node_run(
+    graph: &LayerGraph,
+    node: Node<'_>,
+    id: NodeId,
+    out: &mut Vec<SpecSite>,
+    mut clips: Option<&mut bool>,
+) {
+    let arc_offset = node.map_to_root().time_offset();
+    for &(layer, sub) in graph.layer_stack(node.layer_stack_id()).iter() {
         let data = graph.layer(layer).data();
-        if !data.has_spec(&node.path) {
+        if !data.has_spec(node.path()) {
             continue;
         }
         out.push(SpecSite {
@@ -1284,7 +1245,7 @@ fn push_node_run(graph: &LayerGraph, node: &Node, id: NodeId, out: &mut Vec<Spec
         {
             *authors_clips = super::clip::CLIP_FIELDS
                 .iter()
-                .any(|key| data.has_field(&node.path, key.as_str()));
+                .any(|key| data.has_field(node.path(), key.as_str()));
         }
     }
 }
@@ -1292,7 +1253,7 @@ fn push_node_run(graph: &LayerGraph, node: &Node, id: NodeId, out: &mut Vec<Spec
 /// Whether `node`'s site belongs to its prim's dependency set: it contributes
 /// opinions, or it is an inert relocation source whose site an edit must still
 /// recompose the relocated prim through.
-fn tracks_dependency(node: &Node) -> bool {
+fn tracks_dependency(node: Node<'_>) -> bool {
     !node.is_inert() || node.is_relocate_source()
 }
 
@@ -1303,8 +1264,8 @@ fn tracks_dependency(node: &Node) -> bool {
 /// `PcpDependencyTypeRoot`) while the root stack's users still count it.
 /// Shared by the registration walk and the lookup, so a site can never be
 /// re-found that was never registered.
-pub(super) fn registers_site(node: &Node, prim_path: &Path) -> bool {
-    tracks_dependency(node) && !(node.arc == ArcType::Root && node.path == *prim_path)
+pub(super) fn registers_site(node: Node<'_>, prim_path: &Path) -> bool {
+    tracks_dependency(node) && !(node.arc() == ArcType::Root && node.path() == prim_path)
 }
 
 /// Whether any layer in `stack` authors a spec at `path` (C++
@@ -1343,7 +1304,7 @@ pub(super) fn stack_has_spec(graph: &LayerGraph, stack: LayerStackId, path: &Pat
 ///   overriding the descendant's local selection. Distinguishing an arc seed
 ///   from a namespace-ancestor seed would fix it.
 fn resolve_variant_selections_in<'a>(
-    nodes: impl Iterator<Item = &'a Node> + Clone,
+    nodes: impl Iterator<Item = Node<'a>> + Clone,
     graph: &LayerGraph,
     variant_fallbacks: &VariantFallbackMap,
     seed: &HashMap<String, String>,
@@ -1367,8 +1328,8 @@ fn resolve_variant_selections_in<'a>(
     // so nodes of equal arc strength keep their composition order. The arena's
     // strength projection is not finalized during the build, so order here by
     // the arc type directly.
-    let mut ordered: Vec<&Node> = nodes.collect();
-    ordered.sort_by_key(|n| n.arc);
+    let mut ordered: Vec<Node<'_>> = nodes.collect();
+    ordered.sort_by_key(|n| n.arc());
 
     // Gather explicit selections for sets the seed did not already fix. Each
     // node fans out into its layer stack, strongest sublayer first. An
@@ -1384,7 +1345,7 @@ fn resolve_variant_selections_in<'a>(
             if let Ok(value) = graph
                 .layer(layer)
                 .data()
-                .field(&node.path, FieldKey::VariantSelection.as_str())
+                .field(node.path(), FieldKey::VariantSelection.as_str())
                 && let Value::VariantSelectionMap(map) = value.into_owned()
             {
                 for (set_name, selection) in map {
@@ -1402,7 +1363,7 @@ fn resolve_variant_selections_in<'a>(
                             vars,
                             ExpressionContext::Variant,
                             graph.identifier(layer),
-                            &node.path,
+                            node.path(),
                             None,
                             Some(&mut used_vars),
                         );
@@ -1430,7 +1391,7 @@ fn resolve_variant_selections_in<'a>(
     for node in &ordered {
         for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
             let data = graph.layer(layer).data();
-            let Ok(value) = data.field(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
+            let Ok(value) = data.field(node.path(), ChildrenKey::VariantSetChildren.as_str()) else {
                 continue;
             };
             let Value::TokenVec(set_names) = value.into_owned() else {
@@ -1443,7 +1404,7 @@ fn resolve_variant_selections_in<'a>(
                 }
                 // An invalid authored set name cannot address variant
                 // storage, so it offers no fallback.
-                let Ok(set_path) = node.path.append_variant_selection(&set_name, "") else {
+                let Ok(set_path) = node.path().append_variant_selection(&set_name, "") else {
                     continue;
                 };
                 let Ok(val) = data.field(&set_path, ChildrenKey::VariantChildren.as_str()) else {
@@ -1464,39 +1425,65 @@ fn resolve_variant_selections_in<'a>(
     selections
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-impl PrimIndex {
-    /// [`push_node`](Self::push_node) but strongest rather than weakest, so a
-    /// synthetic index can make its strength order disagree with its arena
-    /// order — which `push_node` alone cannot, since it appends each new handle
-    /// to both.
-    pub(crate) fn push_node_strongest(&mut self, node: Node) {
-        self.push_node(node);
-        let id = self.graph.strength_order.pop().expect("just pushed");
-        self.graph.strength_order.insert(0, id);
-    }
-
-    /// Records `layer` as one whose `defaultPrim` this index's composition
-    /// consulted, so a test can set the dependency up without a real build.
-    pub(crate) fn record_default_prim(&mut self, layer: LayerId) {
-        self.graph.non_site_deps_mut().default_prim.push(layer);
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use std::cmp::Ordering;
 
     use super::*;
     use crate::pcp::CompositionDiagnostic;
+    use crate::pcp::prim_graph::NodeDesc;
 
     use crate::Result;
 
     use crate::sdf::LayerOffset;
+
+    impl PrimIndex {
+        /// Appends a parentless node to a synthetic index, weakest in strength,
+        /// or strongest when `strongest` so that the strength order disagrees
+        /// with the arena order. Production composition appends through
+        /// [`PrimIndexGraph::add_child`], which links the node to a parent.
+        fn push(&mut self, node: NodeDesc, strongest: bool) {
+            // Keep `path_order` a valid sorted projection so a synthetic index
+            // drives `nodes_at` and the spec-tier refresh the same way a composed
+            // one does. The new handle is the highest arena index, so it sorts
+            // after any equal-path node, matching the stable `build_path_order`.
+            let at = self
+                .path_order
+                .partition_point(|&nid| *self.graph.node(nid).path() <= node.path);
+            let id = self.graph.push_detached(node, strongest);
+            self.path_order.insert(at, id);
+        }
+
+        /// Appends a node to the end of the composition graph, weakest in
+        /// strength.
+        pub(crate) fn push_node(&mut self, node: NodeDesc) {
+            self.push(node, false);
+        }
+
+        /// [`push_node`](Self::push_node) but strongest rather than weakest.
+        pub(crate) fn push_node_strongest(&mut self, node: NodeDesc) {
+            self.push(node, true);
+        }
+
+        /// Records `layer` as one whose `defaultPrim` this index's composition
+        /// consulted, so a test can set the dependency up without a real build.
+        pub(crate) fn record_default_prim(&mut self, layer: LayerId) {
+            self.graph.non_site_deps_mut().default_prim.push(layer);
+        }
+
+        /// Builds a prim index for a root prim with no cached ancestors (a
+        /// convenience over [`build_with_cache`](Self::build_with_cache)). A
+        /// child prim must instead be built through a cache holding its
+        /// ancestors, since the indexer seeds a child from its cached parent.
+        pub(crate) fn build_with_context(
+            path: &Path,
+            stack: &LayerGraph,
+            ctx: &CompositionContext,
+        ) -> BuildResult<Self> {
+            Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new(), true)
+                .map(|(index, _errors, _pending, _deps, _copied)| index)
+        }
+    }
 
     const VENDOR_COMPOSITION: &str = concat!(
         env!("CARGO_WORKSPACE_DIR"),
@@ -1567,7 +1554,7 @@ pub(crate) mod tests {
             let mut last = None;
             let mut pending: Vec<Demand> = Vec::new();
             for ancestor in &chain {
-                let (index, _errors, demands, _deps) =
+                let (index, _errors, demands, _deps, _copied) =
                     PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache, true)
                         .expect("index build failed");
                 pending.extend(demands);
@@ -1616,7 +1603,7 @@ pub(crate) mod tests {
     /// The arc and target path of each unresolved-prim-path diagnostic that
     /// composing `prim` in `stack` reports.
     fn unresolved_targets(stack: &LayerGraph, prim: &str) -> Result<Vec<(ArcType, String)>> {
-        let (_, errors, _, _) = PrimIndex::build_with_cache(
+        let (_, errors, _, _, _) = PrimIndex::build_with_cache(
             &Path::new(prim)?,
             stack,
             &CompositionContext::default(),
@@ -1641,7 +1628,7 @@ pub(crate) mod tests {
 
         assert_eq!(index.nodes().count(), 1);
         assert_eq!(index.nodes().next().unwrap().layer_id(), stack.all_ids()[0]);
-        assert_eq!(index.nodes().next().unwrap().arc, ArcType::Root);
+        assert_eq!(index.nodes().next().unwrap().arc(), ArcType::Root);
         Ok(())
     }
 
@@ -1652,7 +1639,7 @@ pub(crate) mod tests {
 
         let ns: Vec<_> = index.nodes().collect();
         assert_eq!(ns.len(), 1, "one per-site node spans both sublayers");
-        assert_eq!(ns[0].arc, ArcType::Root);
+        assert_eq!(ns[0].arc(), ArcType::Root);
         let layers: Vec<LayerId> = stack
             .layer_stack(ns[0].layer_stack_id())
             .iter()
@@ -1687,7 +1674,7 @@ pub(crate) mod tests {
         let mut stack = load_stack(&fixture_path("ref_external.usda"))?;
         let index = build(&mut stack, "/World/MyPrim");
 
-        assert!(index.nodes().any(|n| n.arc == ArcType::Reference));
+        assert!(index.nodes().any(|n| n.arc() == ArcType::Reference));
         Ok(())
     }
 
@@ -1710,9 +1697,8 @@ pub(crate) mod tests {
         for p in ["/A", "/B"].into_iter().map(|s| Path::new(s).unwrap()) {
             let mut expected: Vec<NodeId> = index
                 .arena()
-                .iter()
                 .enumerate()
-                .filter(|(_, n)| n.path == p)
+                .filter(|(_, n)| *n.path() == p)
                 .map(|(i, _)| NodeId(i as u32))
                 .collect();
             let mut got = index.nodes_at(&p).to_vec();
@@ -1734,7 +1720,7 @@ pub(crate) mod tests {
             index
                 .nodes_at(&Path::new("/B").unwrap())
                 .iter()
-                .any(|&id| index.node(id).arc == ArcType::Reference),
+                .any(|&id| index.node(id).arc() == ArcType::Reference),
             "the reference node is indexed at its target path"
         );
 
@@ -1755,11 +1741,13 @@ pub(crate) mod tests {
         // The empty target is retained as a culled node so an editor sees the
         // arc, but value resolution skips it and the prim is not composed.
         assert!(
-            index.all_nodes().any(|n| n.arc == ArcType::Reference && n.is_culled()),
+            index
+                .all_nodes()
+                .any(|n| n.arc() == ArcType::Reference && n.is_culled()),
             "empty reference target kept as a culled node"
         );
         assert!(
-            index.nodes().all(|n| n.arc != ArcType::Reference),
+            index.nodes().all(|n| n.arc() != ArcType::Reference),
             "culled reference contributes no opinion to resolution"
         );
         assert!(
@@ -1779,11 +1767,11 @@ pub(crate) mod tests {
         // The empty class is retained as a culled node so an editor sees the arc,
         // but value resolution skips it and the prim is not composed.
         assert!(
-            index.all_nodes().any(|n| n.arc == ArcType::Inherit && n.is_culled()),
+            index.all_nodes().any(|n| n.arc() == ArcType::Inherit && n.is_culled()),
             "empty inherit target kept as a culled node"
         );
         assert!(
-            index.nodes().all(|n| n.arc != ArcType::Inherit),
+            index.nodes().all(|n| n.arc() != ArcType::Inherit),
             "culled inherit contributes no opinion to resolution"
         );
         assert!(
@@ -1801,11 +1789,13 @@ pub(crate) mod tests {
         let index = build(&mut one_layer_stack(root), "/A");
 
         assert!(
-            index.all_nodes().any(|n| n.arc == ArcType::Specialize && n.is_culled()),
+            index
+                .all_nodes()
+                .any(|n| n.arc() == ArcType::Specialize && n.is_culled()),
             "empty specialize target kept as a culled node"
         );
         assert!(
-            index.nodes().all(|n| n.arc != ArcType::Specialize),
+            index.nodes().all(|n| n.arc() != ArcType::Specialize),
             "culled specialize contributes no opinion to resolution"
         );
         assert!(
@@ -1826,11 +1816,11 @@ pub(crate) mod tests {
         let index = build(&mut one_layer_stack(root), "/A");
 
         assert!(
-            index.all_nodes().any(|n| n.arc == ArcType::Variant && n.is_culled()),
+            index.all_nodes().any(|n| n.arc() == ArcType::Variant && n.is_culled()),
             "empty variant target kept as a culled node"
         );
         assert!(
-            index.nodes().all(|n| n.arc != ArcType::Variant),
+            index.nodes().all(|n| n.arc() != ArcType::Variant),
             "culled variant contributes no opinion to resolution"
         );
         assert!(
@@ -1858,8 +1848,7 @@ pub(crate) mod tests {
         let index = build(&mut stack, "/Model/Sub");
         let implied = index
             .arena()
-            .iter()
-            .find(|n| n.path.as_str() == "/Model/Class")
+            .find(|n| n.path().as_str() == "/Model/Class")
             .expect("implied class node in the referencing namespace");
         assert!(
             implied.flags().contains(NodeFlags::IMPLIED_CLASS),
@@ -1876,7 +1865,7 @@ pub(crate) mod tests {
     fn prim_index_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<PrimIndex>();
-        assert_send_sync::<Node>();
+        assert_send_sync::<Node<'static>>();
         assert_send_sync::<NodeId>();
     }
 
@@ -1897,7 +1886,7 @@ pub(crate) mod tests {
         assert!(
             index
                 .nodes()
-                .any(|n| n.arc == ArcType::Variant && n.path.as_str().contains("{v=b}")),
+                .any(|n| n.arc() == ArcType::Variant && n.path().as_str().contains("{v=b}")),
             "selected variant from the referenced layer must be composed"
         );
         Ok(())
@@ -1916,11 +1905,11 @@ pub(crate) mod tests {
         // the Reference arc; what matters is that the selected variant (v=b),
         // not the fallback (v=a), was composed.
         assert!(
-            index.nodes().any(|n| n.path.as_str().contains("{v=b}")),
+            index.nodes().any(|n| n.path().as_str().contains("{v=b}")),
             "selected variant from the internal-reference target must be composed"
         );
         assert!(
-            !index.nodes().any(|n| n.path.as_str().contains("{v=a}")),
+            !index.nodes().any(|n| n.path().as_str().contains("{v=a}")),
             "fallback variant must not be composed when v=b is selected"
         );
         Ok(())
@@ -1941,11 +1930,11 @@ pub(crate) mod tests {
         assert!(
             index
                 .nodes()
-                .any(|n| n.arc == ArcType::Variant && n.path.as_str().contains("{v=b}")),
+                .any(|n| n.arc() == ArcType::Variant && n.path().as_str().contains("{v=b}")),
             "selected variant node present"
         );
         assert!(
-            index.nodes().any(|n| n.path.as_str() == "/Inner"),
+            index.nodes().any(|n| n.path().as_str() == "/Inner"),
             "reference inside the selected variant must be followed"
         );
         Ok(())
@@ -1959,26 +1948,25 @@ pub(crate) mod tests {
         let index = build(&mut stack, "/World/MyPrim");
 
         let root = index.root().expect("non-empty index has a root");
-        assert_eq!(index.node(root).arc, ArcType::Root);
+        assert_eq!(index.node(root).arc(), ArcType::Root);
 
         // The reference is parented under a node, not orphaned. NodeId indexes
         // the arena (structural order), so enumerate the arena, not the strength
         // projection.
         let reference = index
             .arena()
-            .iter()
-            .position(|n| n.arc == ArcType::Reference)
+            .position(|n| n.arc() == ArcType::Reference)
             .map(|i| NodeId(i as u32))
             .expect("reference fixture has a reference node");
         let parent = index.parent(reference).expect("reference has a parent");
-        assert!(index.children(parent).contains(&reference));
+        assert!(index.children(parent).any(|child| child == reference));
 
         // Every parent link is mirrored by the parent's children list.
-        for (i, _) in index.arena().iter().enumerate() {
+        for (i, _) in index.arena().enumerate() {
             let id = NodeId(i as u32);
             if let Some(parent) = index.parent(id) {
                 assert!(
-                    index.children(parent).contains(&id),
+                    index.children(parent).any(|child| child == id),
                     "node {i} parent {parent:?} missing it as a child"
                 );
             }
@@ -2002,8 +1990,7 @@ pub(crate) mod tests {
         let find = |p: &str| {
             index
                 .arena()
-                .iter()
-                .position(|n| n.path.as_str() == p)
+                .position(|n| n.path().as_str() == p)
                 .map(|i| NodeId(i as u32))
         };
         let class = find("/Class").expect("inherited /Class node");
@@ -2061,7 +2048,7 @@ pub(crate) mod tests {
         let mut stack = load_stack(&composition_path("class_inherit.usda"))?;
         let index = build(&mut stack, "/World/cubeWithoutSetColor");
 
-        assert!(index.nodes().any(|n| n.arc == ArcType::Inherit));
+        assert!(index.nodes().any(|n| n.arc() == ArcType::Inherit));
         Ok(())
     }
 
@@ -2069,7 +2056,7 @@ pub(crate) mod tests {
     fn inherit_root_is_strongest() -> Result<()> {
         let mut stack = load_stack(&composition_path("class_inherit.usda"))?;
         let index = build(&mut stack, "/World/cubeWithSetColor");
-        let arcs: Vec<_> = index.nodes().map(|n| n.arc).collect();
+        let arcs: Vec<_> = index.nodes().map(|n| n.arc()).collect();
 
         assert_eq!(arcs[0], ArcType::Root);
         assert!(arcs.contains(&ArcType::Inherit));
@@ -2085,10 +2072,10 @@ pub(crate) mod tests {
         let mut stack = load_stack(&path)?;
         let index = build(&mut stack, "/World/Sphere");
 
-        assert!(index.nodes().any(|n| n.arc == ArcType::Variant));
+        assert!(index.nodes().any(|n| n.arc() == ArcType::Variant));
 
-        let variant_node = index.nodes().find(|n| n.arc == ArcType::Variant).unwrap();
-        assert_eq!(variant_node.path.as_str(), "/World/Sphere{size=small}");
+        let variant_node = index.nodes().find(|n| n.arc() == ArcType::Variant).unwrap();
+        assert_eq!(variant_node.path().as_str(), "/World/Sphere{size=small}");
         Ok(())
     }
 
@@ -2097,7 +2084,7 @@ pub(crate) mod tests {
         let mut stack = load_stack(&composition_path("inherit_and_specialize.usda"))?;
         let index = build(&mut stack, "/World/cubeScene/specializes");
 
-        assert!(index.nodes().any(|n| n.arc == ArcType::Specialize));
+        assert!(index.nodes().any(|n| n.arc() == ArcType::Specialize));
         Ok(())
     }
 
@@ -2115,19 +2102,19 @@ pub(crate) mod tests {
         assert!(
             index
                 .nodes()
-                .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/A"),
+                .any(|n| n.arc() == ArcType::Reference && n.path().as_str() == "/A"),
             "should have node from A.usd"
         );
         assert!(
             index
                 .nodes()
-                .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/B"),
+                .any(|n| n.arc() == ArcType::Reference && n.path().as_str() == "/B"),
             "should have node from B.usd"
         );
         assert!(
             index
                 .nodes()
-                .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/C"),
+                .any(|n| n.arc() == ArcType::Reference && n.path().as_str() == "/C"),
             "should have node from C.usd via nested reference"
         );
 
@@ -2154,13 +2141,13 @@ pub(crate) mod tests {
         let index = build(&mut stack, "/B");
 
         assert!(
-            index.nodes().any(|n| n.arc == ArcType::Specialize),
+            index.nodes().any(|n| n.arc() == ArcType::Specialize),
             "should have specialize node from variant"
         );
         assert!(
             index
                 .nodes()
-                .any(|n| n.path.as_str().contains("{nestedVariantSet=nestedVariant}")),
+                .any(|n| n.path().as_str().contains("{nestedVariantSet=nestedVariant}")),
             "should have /A's variant node"
         );
         Ok(())
@@ -2184,7 +2171,7 @@ pub(crate) mod tests {
 
         let index = build(&mut stack, "/main_cam/Lens");
         assert!(
-            index.nodes().any(|n| n.path.as_str() == "/camera/_localclass_Lens"),
+            index.nodes().any(|n| n.path().as_str() == "/camera/_localclass_Lens"),
             "should have inherit node for _localclass_Lens"
         );
         Ok(())
@@ -2203,7 +2190,7 @@ pub(crate) mod tests {
         let index = build(&mut stack, "/bob");
 
         assert!(
-            index.nodes().any(|n| n.path.as_str().contains("{geotype=cube}")),
+            index.nodes().any(|n| n.path().as_str().contains("{geotype=cube}")),
             "should have geotype=cube variant node from inherited selection"
         );
         Ok(())
@@ -2290,9 +2277,9 @@ def "World" (
         };
         let index = PrimIndex::build_with_context(&Path::new("/World").unwrap(), &stack, &ctx).expect("index build");
         assert!(
-            index.nodes().any(|n| n.path.as_str() == "/World{v=hi}"),
+            index.nodes().any(|n| n.path().as_str() == "/World{v=hi}"),
             "the index composes the fallback, got {:?}",
-            index.nodes().map(|n| n.path.as_str()).collect::<Vec<_>>()
+            index.nodes().map(|n| n.path().as_str()).collect::<Vec<_>>()
         );
         let child = index.context_for_children(&stack, &ctx).0;
         assert_eq!(
@@ -2333,9 +2320,9 @@ def "World" (
         assert!(
             index
                 .nodes()
-                .any(|n| n.path.as_str() == "/World{v=hi}Child" && n.has_specs()),
+                .any(|n| n.path().as_str() == "/World{v=hi}Child" && n.has_specs()),
             "the child under the evaluated selection composes, got {:?}",
-            index.nodes().map(|n| n.path.as_str()).collect::<Vec<_>>()
+            index.nodes().map(|n| n.path().as_str()).collect::<Vec<_>>()
         );
     }
 
@@ -2372,7 +2359,7 @@ def "Root" (
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (_index, errors, _pending, _deps) = PrimIndex::build_with_cache(
+        let (_index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Root").unwrap(),
             &stack,
             &CompositionContext::default(),
@@ -2500,7 +2487,7 @@ def "Outer" (
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (_index, errors, _pending, _deps) = PrimIndex::build_with_cache(
+        let (_index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Root").unwrap(),
             &stack,
             &CompositionContext::default(),
@@ -2554,7 +2541,7 @@ def "Outer"
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (_index, errors, _pending, _deps) = PrimIndex::build_with_cache(
+        let (_index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Root").unwrap(),
             &stack,
             &CompositionContext::default(),
@@ -2598,12 +2585,12 @@ def "Prim" (
         // The first build demands the target and waits on it. The load
         // barrier finds no such asset and records that, which the build that
         // follows reports, asking only that the barrier look again.
-        let (_, errors, pending, _deps) = build(&stack)?;
+        let (_, errors, pending, _deps, _copied) = build(&stack)?;
         assert!(errors.is_empty(), "nothing is reported while the target is demanded");
         assert!(matches!(pending.as_slice(), [demand] if !demand.recheck));
         assert!(stack.intern_demanded(&pending));
 
-        let (index, errors, pending, _deps) = build(&stack)?;
+        let (index, errors, pending, _deps, _copied) = build(&stack)?;
         assert!(matches!(pending.as_slice(), [demand] if demand.recheck));
         assert!(
             errors
@@ -2639,7 +2626,7 @@ def "Prim" (
         ];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (index, errors, _pending, _deps) = PrimIndex::build_with_cache(
+        let (index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Prim").unwrap(),
             &stack,
             &CompositionContext::default(),
@@ -2665,8 +2652,8 @@ def "Prim" (
     fn variant_paths(index: &PrimIndex) -> Vec<String> {
         index
             .nodes()
-            .filter(|n| n.arc == ArcType::Variant)
-            .map(|n| n.path.as_str().to_string())
+            .filter(|n| n.arc() == ArcType::Variant)
+            .map(|n| n.path().as_str().to_string())
             .collect()
     }
 
@@ -2758,10 +2745,11 @@ def "Prim" (
         let lid = LayerId::from_raw(0);
         let lsid = LayerStackId::from_raw(1);
         let mut g = PrimIndexGraph::default();
-        let root = g.add_child(NodeId::INVALID, lsid, lid, p("/A"), ArcType::Root, id.clone(), false);
-        let inh = g.add_child(root, lsid, lid, p("/Class"), ArcType::Inherit, id.clone(), false);
-        let r1 = g.add_child(root, lsid, lid, p("/R1"), ArcType::Reference, id.clone(), false);
-        let r2 = g.add_child(root, lsid, lid, p("/R2"), ArcType::Reference, id.clone(), false);
+        let desc = |path: &str, arc| NodeDesc::new(lsid, lid, p(path), arc, id.clone());
+        let root = g.add_child(NodeId::INVALID, desc("/A", ArcType::Root));
+        let inh = g.add_child(root, desc("/Class", ArcType::Inherit));
+        let r1 = g.add_child(root, desc("/R1", ArcType::Reference));
+        let r2 = g.add_child(root, desc("/R2", ArcType::Reference));
 
         // Arc type: an inherit outranks a reference.
         assert_eq!(g.compare_sibling_node_strength(inh, r1), Ordering::Less);
@@ -2777,8 +2765,9 @@ def "Prim" (
         assert_eq!(g.compare_node_strength(r2, r2), Ordering::Equal);
 
         // Namespace depth: a deeper arc-introduction site is stronger.
-        let deep = g.add_child(root, lsid, lid, p("/D"), ArcType::Reference, id.clone(), false);
-        g.nodes[deep.idx()].namespace_depth = 5;
+        let mut deeper = desc("/D", ArcType::Reference);
+        deeper.namespace_depth = Some(5);
+        let deep = g.add_child(root, deeper);
         assert_eq!(g.compare_sibling_node_strength(deep, r1), Ordering::Less);
     }
 
@@ -2815,7 +2804,7 @@ def "Prim" (
             .map(|n| {
                 (
                     layer_name(stack.identifier(n.layer_id())).to_owned(),
-                    n.path.to_string(),
+                    n.path().to_string(),
                 )
             })
             .collect()
@@ -2860,16 +2849,16 @@ def "Prim" (
         let ns: Vec<_> = index.nodes().collect();
         for node in &ns[..3] {
             assert!(
-                !node.introduced_by_specialize(),
+                !node.flags().contains(NodeFlags::HAS_SPECIALIZES),
                 "node {:?} should not be specialize",
-                node.path
+                node.path()
             );
         }
         for node in &ns[3..] {
             assert!(
-                node.introduced_by_specialize(),
+                node.flags().contains(NodeFlags::HAS_SPECIALIZES),
                 "node {:?} should be specialize",
-                node.path
+                node.path()
             );
         }
 
@@ -2886,16 +2875,16 @@ def "Prim" (
         // Non-specialize opinions must come before all specialize opinions.
         let first_spec = index
             .nodes()
-            .position(|n| n.introduced_by_specialize())
+            .position(|n| n.flags().contains(NodeFlags::HAS_SPECIALIZES))
             .expect("should have specialize nodes");
         assert!(first_spec >= 2, "at least Root + Reference before specializes");
 
         // All nodes after the first specialize must also be specialize.
         for node in index.nodes().skip(first_spec) {
             assert!(
-                node.introduced_by_specialize(),
+                node.flags().contains(NodeFlags::HAS_SPECIALIZES),
                 "node {:?} should be globally weak",
-                node.path
+                node.path()
             );
         }
         Ok(())
@@ -2946,7 +2935,7 @@ def "Prim" (
     /// memoized spec stack — which keeps only spec-authoring members — this lists
     /// every member, so [`offset_stack`] can assert the offset folding on layers
     /// that author no spec at the node's path.
-    fn node_layer_offsets(node: &Node, graph: &LayerGraph) -> Vec<(LayerId, LayerOffset)> {
+    fn node_layer_offsets(node: Node<'_>, graph: &LayerGraph) -> Vec<(LayerId, LayerOffset)> {
         let arc_offset = node.map_to_root().time_offset();
         graph
             .layer_stack(node.layer_stack_id())
@@ -2964,8 +2953,8 @@ def "Prim" (
         index
             .nodes()
             .flat_map(|n| {
-                let path = n.path.to_string();
-                let arc = n.arc;
+                let path = n.path().to_string();
+                let arc = n.arc();
                 // One row per contributing sublayer, carrying that layer's
                 // effective offset.
                 node_layer_offsets(n, stack).into_iter().map(move |(li, off)| {

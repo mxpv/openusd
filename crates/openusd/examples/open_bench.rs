@@ -35,7 +35,10 @@
 //! named on the command line is never written. `--mute` adds a phase that
 //! mutes one layer and unmutes it again, timing the two invalidations of
 //! the populated stage: the root layer's first sublayer, or the layer
-//! loaded last when the root has none. `--no-arrays` skips the
+//! loaded last when the root has none. `--no-heap` turns the heap tracking
+//! off, for a timing run: the phase times carry no tracking cost, and the
+//! heap figures count only what the process held before the switch, so
+//! they say nothing about the scene. `--no-arrays` skips the
 //! array phase, for measuring what a stage that never reads its arrays
 //! holds. `--proxies` walks instance subtrees as instance proxies and
 //! `--all` walks every composed prim whatever its status, where the default
@@ -51,7 +54,7 @@ use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use std::{env, fs};
 
@@ -61,11 +64,12 @@ use openusd::{Error, Result, ar, sdf, usdz};
 fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
         eprintln!(
-            "usage: open_bench [--time <t>] [--save] [--mute] [--no-arrays] [--proxies | --all] [--mmap] \
+            "usage: open_bench [--time <t>] [--save] [--mute] [--no-heap] [--no-arrays] [--proxies | --all] [--mmap] \
              [--until <phase>] <root.usd[a|c|z]>"
         );
         process::exit(2);
     };
+    TRACKED.store(!args.no_heap, Ordering::Relaxed);
     let copy = if args.save {
         Some(copy_to_temp(&args.root)?)
     } else {
@@ -139,6 +143,11 @@ fn main() -> Result<()> {
         phase.end("");
     }
 
+    let graphs = stage.graph_stats();
+    eprintln!(
+        "graphs: {}  shared node data {}  copies {}  nodes copied {}",
+        graphs.graphs, graphs.shared, graphs.copies, graphs.nodes_copied,
+    );
     eprintln!("heap peak: {}", mib(PEAK.load(Ordering::Relaxed)));
     if let Some(memory) = Memory::read() {
         eprintln!("working set peak: {}", mib(memory.peak_working_set));
@@ -161,6 +170,7 @@ struct Args {
     time: Option<f64>,
     save: bool,
     mute: bool,
+    no_heap: bool,
     no_arrays: bool,
     predicate: PrimPredicate,
     mmap: bool,
@@ -177,6 +187,7 @@ impl Args {
             time: None,
             save: false,
             mute: false,
+            no_heap: false,
             no_arrays: false,
             predicate: PrimPredicate::DEFAULT,
             mmap: false,
@@ -187,6 +198,7 @@ impl Args {
                 "--time" => parsed.time = Some(args.next()?.parse().ok()?),
                 "--save" => parsed.save = true,
                 "--mute" => parsed.mute = true,
+                "--no-heap" => parsed.no_heap = true,
                 "--no-arrays" => parsed.no_arrays = true,
                 "--proxies" => parsed.predicate = PrimPredicate::DEFAULT_PROXIES,
                 "--all" => parsed.predicate = PrimPredicate::ALL,
@@ -463,17 +475,29 @@ struct Tracking;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 static PHASE_PEAK: AtomicUsize = AtomicUsize::new(0);
+/// Whether allocations are counted. `--no-heap` clears it.
+static TRACKED: AtomicBool = AtomicBool::new(true);
 
 impl Tracking {
     /// Records `delta` more live bytes and bumps both high-water marks. A
     /// mark is written only when passed, so an allocation below it costs
     /// one atomic update and two loads.
     fn add(delta: usize) {
+        if !TRACKED.load(Ordering::Relaxed) {
+            return;
+        }
         let live = LIVE.fetch_add(delta, Ordering::Relaxed) + delta;
         for mark in [&PEAK, &PHASE_PEAK] {
             if live > mark.load(Ordering::Relaxed) {
                 mark.fetch_max(live, Ordering::Relaxed);
             }
+        }
+    }
+
+    /// Records `delta` fewer live bytes.
+    fn sub(delta: usize) {
+        if TRACKED.load(Ordering::Relaxed) {
+            LIVE.fetch_sub(delta, Ordering::Relaxed);
         }
     }
 }
@@ -499,7 +523,7 @@ unsafe impl GlobalAlloc for Tracking {
         // SAFETY: `ptr` is the caller's, allocated by this allocator — and so by
         // `System` — with the same `layout`.
         unsafe { System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        Tracking::sub(layout.size());
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -509,7 +533,7 @@ unsafe impl GlobalAlloc for Tracking {
             if new_size >= layout.size() {
                 Tracking::add(new_size - layout.size());
             } else {
-                LIVE.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
+                Tracking::sub(layout.size() - new_size);
             }
         }
         new_ptr

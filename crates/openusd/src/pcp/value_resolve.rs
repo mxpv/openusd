@@ -289,14 +289,14 @@ impl ResolveNode {
     ///
     /// `stage` is the composition input the walk is running under; the graph
     /// does not hold it, since a `LayerGraph` is only ever built for one.
-    pub(crate) fn capture(graph: &LayerGraph, node: &Node, stage: &LayerStackIdentifier) -> Self {
+    pub(crate) fn capture(graph: &LayerGraph, node: Node<'_>, stage: &LayerStackIdentifier) -> Self {
         Self {
-            arc: node.arc,
-            path: node.path.clone(),
-            map_to_root: node.map_to_root.clone(),
+            arc: node.arc(),
+            path: node.path().clone(),
+            map_to_root: node.map_to_root().clone(),
             layer_stack: ResolveStackIdentity {
                 stage: stage.clone(),
-                stack: Box::new(graph.stack_identity(node.layer_stack)),
+                stack: Box::new(graph.stack_identity(node.layer_stack_id())),
             },
         }
     }
@@ -358,7 +358,7 @@ impl ResolveStackIdentity {
 /// to describe it without re-deriving the arc mapping.
 pub(crate) struct OpinionSite<'a> {
     /// The contributing node.
-    pub(crate) node: &'a Node,
+    pub(crate) node: Node<'a>,
     /// The layer that authored at this site.
     pub(crate) layer: LayerId,
     /// That layer's time offset folded to the root namespace — C++

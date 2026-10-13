@@ -2208,6 +2208,12 @@ impl Stage {
         self.cache().indexed_count()
     }
 
+    /// How much composition-graph data the stage holds and how much composing
+    /// it copied.
+    pub fn graph_stats(&self) -> pcp::GraphStats {
+        self.cache().graph_stats()
+    }
+
     /// Returns the identifiers of the layers loaded so far, in collection order
     /// (session and root layer stack first, then arc-target layers in the order
     /// composition opened them).
@@ -3330,7 +3336,7 @@ impl Stage {
     /// index the stage has since dropped, whose stack reclamation removed; a
     /// recomposition mints a successor under a fresh id, never the stale
     /// handle's.
-    pub fn node_layer_stack(&self, node: &pcp::Node) -> Option<Vec<(pcp::LayerId, sdf::LayerOffset)>> {
+    pub fn node_layer_stack(&self, node: pcp::Node<'_>) -> Option<Vec<(pcp::LayerId, sdf::LayerOffset)>> {
         self.layers().try_layer_stack(node.layer_stack_id()).map(<[_]>::to_vec)
     }
 

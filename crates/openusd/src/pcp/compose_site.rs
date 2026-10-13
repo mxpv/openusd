@@ -27,7 +27,7 @@ use super::{CompositionDiagnostic, ExpressionContext, LayerGraph, LayerId, Query
 /// relative paths in distinct sublayers stay distinct; the variable names a
 /// `${VAR}` asset path reads land in `used_vars` (see [`evaluate_expression`]).
 pub(super) fn compose_references_in(
-    nodes: &[Node],
+    nodes: &[Node<'_>],
     graph: &LayerGraph,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
@@ -74,7 +74,7 @@ pub(super) fn compose_references_in(
 /// asset path is anchored to its authoring layer, and the variable names a
 /// `${VAR}` asset path reads land in `used_vars`.
 pub(super) fn collect_payloads_in(
-    nodes: &[Node],
+    nodes: &[Node<'_>],
     graph: &LayerGraph,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
@@ -121,7 +121,7 @@ pub(super) fn collect_payloads_in(
 /// Composes an offset-free list-op field (inherits, specializes) by decoding
 /// each opinion through `TryInto` and combining across the layer stack.
 pub(super) fn compose_arc_list_in<T: Clone + PartialEq + Hash>(
-    nodes: &[Node],
+    nodes: &[Node<'_>],
     field: FieldKey,
     graph: &LayerGraph,
 ) -> Result<Vec<T>, QueryError>
@@ -147,7 +147,7 @@ where
 /// the contributing sublayer's offset (a no-op for offset-free arcs). Backend
 /// decode errors surface to the caller.
 fn compose_list_op_in<T, D, R, A>(
-    nodes: &[Node],
+    nodes: &[Node<'_>],
     field: &str,
     graph: &LayerGraph,
     decode: D,
@@ -184,7 +184,7 @@ where
             if !seen_layers.insert(layer) {
                 continue;
             }
-            let Some(value) = graph.layer(layer).data().try_field(&node.path, field)? else {
+            let Some(value) = graph.layer(layer).data().try_field(node.path(), field)? else {
                 continue;
             };
             let Some(mut list_op) = decode(value.into_owned()) else {

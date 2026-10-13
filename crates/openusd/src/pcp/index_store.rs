@@ -614,7 +614,6 @@ impl IndexStore {
 fn owned_stacks(index: &PrimIndex) -> HashSet<LayerStackId> {
     index
         .arena()
-        .iter()
         .map(|node| node.layer_stack_id())
         .filter(|&stack| stack != LayerStackId::ROOT)
         .collect()
@@ -642,7 +641,7 @@ mod tests {
 
     use crate::pcp::layer_graph::ExternalStack;
     use crate::pcp::mapping::MapFunction;
-    use crate::pcp::prim_graph::{ArcType, Node};
+    use crate::pcp::prim_graph::{ArcType, NodeDesc};
     use crate::pcp::prim_index::CompositionContext;
 
     fn p(s: &str) -> Path {
@@ -658,12 +657,12 @@ mod tests {
 
     /// A node whose map carries `source -> target`, so a synthetic index can
     /// name exactly what a site translates to.
-    fn node(g: &LayerGraph, layer: LayerId, site: &Path, map: MapFunction) -> Node {
+    fn node(g: &LayerGraph, layer: LayerId, site: &Path, map: MapFunction) -> NodeDesc {
         let stack = match g.external_stack_id(layer, LayerStackId::ROOT) {
             ExternalStack::Ready(id) => id,
             ExternalStack::Demand => panic!("no minted stack for test layer {layer:?}"),
         };
-        Node::new(stack, layer, site.clone(), ArcType::Reference, map.clone(), map, false)
+        NodeDesc::new(stack, layer, site.clone(), ArcType::Reference, map)
     }
 
     /// Registers `index` at `path` so the lookups can join it back.

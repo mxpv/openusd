@@ -29,7 +29,7 @@ use super::layer_graph::{LayerGraph, LayerStackIdentifier, MuteChange};
 use super::layer_stack::StackMarks;
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
-use super::prim_graph::ArcType;
+use super::prim_graph::{ArcType, PrimIndexGraph};
 use super::prim_index::{
     AncestorArc, CompositionContext, Demand, NodeRuns, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo,
     TargetMemoKey,
@@ -134,6 +134,10 @@ pub struct IndexCache {
     /// Advanced once per change batch that authored a schema-identity opinion —
     /// see [`Self::type_opinion_epoch`].
     type_opinion_epoch: u64,
+    /// Node copies made by every build so far ([`Self::graph_stats`]).
+    copies: u64,
+    /// Nodes those copies held.
+    nodes_copied: u64,
     /// One-shot errors from layer collection that the [`LayerGraph`](super::layer_graph::LayerGraph)
     /// cannot regenerate (e.g. `UnresolvedSublayer`). Set once at construction;
     /// never cleared, since nothing recomputes them.
@@ -446,7 +450,7 @@ fn probe_source(composing: &mut Composing, value: Cow<'_, Value>, site: &Opinion
     if composing.is_empty() && !composes_over_weaker(&value) {
         return Folded::Closed;
     }
-    composing.fold(value.into_owned(), &site.query_path, &site.node.map_to_root)
+    composing.fold(value.into_owned(), &site.query_path, site.node.map_to_root())
 }
 
 /// Resolves an attribute's value (the resolver behind
@@ -488,7 +492,7 @@ impl ValueAtResolver<'_> {
             self.anchor = (anchors && value.is_asset_valued()).then(|| site.select());
         }
         self.composing
-            .fold(value, &site.query_path, &site.node.map_to_root)
+            .fold(value, &site.query_path, site.node.map_to_root())
             .step()
     }
 }
@@ -985,6 +989,25 @@ struct StackResolver<'a> {
     defining: DefiningKind,
 }
 
+/// How much composition-graph node data a cache holds, and how much composing
+/// it copied (C++ `PcpCache::PrintStatistics` reports the graphs and their
+/// node pools).
+///
+/// A prim's graph shares its node data with its parent's until it adds a
+/// node of its own, so `shared` below `graphs` is data held once for several
+/// prims.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GraphStats {
+    /// Cached prim indices, each with a graph.
+    pub graphs: usize,
+    /// Distinct sets of shared node data those graphs hold.
+    pub shared: usize,
+    /// Times a build copied shared node data to change it.
+    pub copies: u64,
+    /// Nodes those copies held.
+    pub nodes_copied: u64,
+}
+
 /// One spec contributing to a composed property or prim, resolved out of the
 /// graph's arena handles (C++ `SdfPropertySpecHandle` / `SdfPrimSpecHandle`
 /// paired with its cumulative layer offset).
@@ -1177,6 +1200,8 @@ impl IndexCache {
             populated_prims: HashMap::new(),
             population_epoch: 0,
             type_opinion_epoch: 0,
+            copies: 0,
+            nodes_copied: 0,
             collection_diagnostics,
             query_diagnostics: Diagnostics::default(),
             in_progress: HashSet::new(),
@@ -1491,7 +1516,7 @@ impl IndexCache {
             // The wider walk reaches layers that author no spec for this prim,
             // so that a clip introduced there is still consulted; one lookup
             // rules the field probes out at those.
-            if node.has_specs() && data.has_spec(&node.path) {
+            if node.has_specs() && data.has_spec(node.path()) {
                 // At the default time the field is read only for a resolver
                 // that reports what it walked past; the value read skips it.
                 let probes_samples = mode.visits_time_samples() || resolver.wants_unresolved_samples();
@@ -1956,6 +1981,24 @@ impl IndexCache {
         self.store.len()
     }
 
+    /// How much node data the cache holds and how much composing it copied.
+    pub fn graph_stats(&self) -> GraphStats {
+        let graphs = self.store.entries().iter().map(|(_, entry)| entry.index.graph());
+        GraphStats {
+            graphs: self.store.len(),
+            shared: PrimIndexGraph::distinct_data(graphs),
+            copies: self.copies,
+            nodes_copied: self.nodes_copied,
+        }
+    }
+
+    /// Counts a copy of shared node data holding `nodes` nodes, or nothing
+    /// for 0, which is a graph that copied none.
+    pub(super) fn count_copy(&mut self, nodes: usize) {
+        self.copies += u64::from(nodes > 0);
+        self.nodes_copied += nodes as u64;
+    }
+
     /// Caches a fully composed `index` at `path` with the `context` its children
     /// inherit, its recoverable build `errors`, and the per-stack
     /// expression-variable names its build read (`expr_var_deps`), registering
@@ -2306,7 +2349,7 @@ impl IndexCache {
             return Ok(None);
         };
         for node in index.nodes() {
-            let Some(prop_path) = path.replace_prefix(&prim_path, &node.path) else {
+            let Some(prop_path) = path.replace_prefix(&prim_path, node.path()) else {
                 continue;
             };
             for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
@@ -2348,7 +2391,7 @@ impl IndexCache {
         };
         for node in index.nodes() {
             for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-                if let Some(ty) = graph.layer(layer).data().spec_type(&node.path) {
+                if let Some(ty) = graph.layer(layer).data().spec_type(node.path()) {
                     return Ok(Some(ty));
                 }
             }
@@ -2395,7 +2438,7 @@ impl IndexCache {
             return Ok(None);
         };
         Ok(index.nodes().find_map(|node| {
-            (matches(node.arc) && node.has_specs()).then(|| {
+            (matches(node.arc()) && node.has_specs()).then(|| {
                 // A node inside a variant stores its specs at the qualified site
                 // path; compose the qualifier onto the map so the edit target
                 // reaches it (C++ `_ComposeMappingForNode`). The qualifier pair
@@ -2404,18 +2447,18 @@ impl IndexCache {
                 // drop it, since the pair itself carries none — keeping paths
                 // outside the arc's explicit domain visible to the target, as
                 // they are for every other arc whose map has the root identity.
-                let mapping = if node.path.has_variant_selection() {
-                    let composed = node.map_to_root.compose(&MapFunction::from_pair(
-                        node.path.clone(),
-                        node.path.strip_variant_selections(),
+                let mapping = if node.path().has_variant_selection() {
+                    let composed = node.map_to_root().compose(&MapFunction::from_pair(
+                        node.path().clone(),
+                        node.path().strip_variant_selections(),
                     ));
-                    if node.map_to_root.has_root_identity() {
+                    if node.map_to_root().has_root_identity() {
                         composed.with_root_identity()
                     } else {
                         composed
                     }
                 } else {
-                    node.map_to_root.clone()
+                    node.map_to_root().clone()
                 };
                 // The layer stack the node composes in, captured by value identity
                 // so the edit target authors into it exactly rather than
@@ -2791,11 +2834,11 @@ impl IndexCache {
         let mut seen: HashSet<(Path, Path)> = HashSet::new();
         {
             let index = self.cached(resolved_prim);
-            for (id, node) in index.nodes_with_ids() {
-                if node.arc != ArcType::Inherit || !node.has_specs() {
+            for node in index.all_nodes() {
+                if node.arc() != ArcType::Inherit || !node.has_specs() {
                     continue;
                 }
-                let class_path = index.graph().path_at_introduction(id);
+                let class_path = index.graph().path_at_introduction(node.id());
                 // The selection-free form for the within-class test below: a
                 // class defined inside a variant has a qualified introduction
                 // path, while target paths compare selection-free.
@@ -2803,8 +2846,8 @@ impl IndexCache {
                 let members = graph.layer_stack(node.layer_stack_id());
                 let class_layers: Vec<LayerId> = members.iter().map(|(l, _)| *l).collect();
                 // The node's map to the root namespace (C++ `PcpNodeRef::GetMapToRoot`).
-                let map = &node.map_to_root;
-                let property = Path::new(&format!("{}{prop_suffix}", node.path))?;
+                let map = node.map_to_root();
+                let property = Path::new(&format!("{}{prop_suffix}", node.path()))?;
                 for &(layer, _) in members.iter() {
                     let Some(value) = graph.layer(layer).data().try_field(&property, field.as_str())? else {
                         continue;
@@ -2965,9 +3008,8 @@ impl IndexCache {
         // `CanContributeSpecs` guard): an inert relocate placeholder or salted-
         // earth source must not inject names or relocates at its site.
         let nodes = index
-            .nodes_with_ids()
-            .filter(|(id, node)| !(node.is_inert() || node.is_culled() || drop_local && local[id.idx()]))
-            .map(|(_, node)| node)
+            .all_nodes()
+            .filter(|node| !(node.is_culled() || drop_local && local[node.id().idx()]))
             .rev();
 
         for node in nodes {
@@ -2990,7 +3032,7 @@ impl IndexCache {
             // `PcpLayerStack`).
             if has_relocates {
                 let pairs = graph.combined_relocates(node.layer_stack_id());
-                apply_child_relocates(&node.path, &pairs, &mut name_order, &mut name_set, &mut prohibited);
+                apply_child_relocates(node.path(), &pairs, &mut name_order, &mut name_set, &mut prohibited);
             }
             // The node's contributing layers fold weakest-first; `layer_stack()`
             // is strongest-first, so it is reversed here. Only the layer index is
@@ -3000,14 +3042,14 @@ impl IndexCache {
                 let layer_data = graph.layer(layer);
                 append_unseen_names(
                     layer_data,
-                    &node.path,
+                    node.path(),
                     ChildrenKey::PrimChildren,
                     &mut name_order,
                     &mut name_set,
                 );
                 if let Ok(Value::TokenVec(order)) = layer_data
                     .data()
-                    .field(&node.path, FieldKey::PrimOrder.as_str())
+                    .field(node.path(), FieldKey::PrimOrder.as_str())
                     .map(|v| v.into_owned())
                 {
                     sdf::apply_ordering(&mut name_order, &order);
@@ -3270,10 +3312,10 @@ impl IndexCache {
         let name = path.name();
         let mut targets_to_cache = Vec::new();
         for node in parent_index.nodes() {
-            let child_in_node = name.and_then(|name| node.path.append_path(name).ok());
+            let child_in_node = name.and_then(|name| node.path().append_path(name).ok());
             for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 let data = graph.layer(layer).data();
-                for scan_path in iter::once(&node.path).chain(&child_in_node) {
+                for scan_path in iter::once(node.path()).chain(&child_in_node) {
                     for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
                         let Ok(Some(val)) = data.try_field(scan_path, field.as_str()) else {
                             continue;
@@ -3405,8 +3447,9 @@ impl IndexCache {
         // The blocker is the shared store the inherit/specialize targets read
         // mid-build — parallelizing the driver needs a concurrent map or a
         // topological (targets-first) build order.
-        let (mut index, mut build_errors, pending_loads, mut expr_var_deps) =
+        let (mut index, mut build_errors, pending_loads, mut expr_var_deps, nodes_copied) =
             PrimIndex::build_with_cache(path, graph, &parent_ctx, self.store.entries(), load_payloads)?;
+        self.count_copy(nodes_copied);
         self.pending_loads.extend(pending_loads);
         // A reference/payload arc demanded a layer that is not yet loaded — here,
         // or in a pre-cached ancestor that then seeded this build incompletely —
@@ -3540,7 +3583,7 @@ impl IndexCache {
                 let layer_data = graph.layer(layer);
                 append_unseen_names(
                     layer_data,
-                    &node.path,
+                    node.path(),
                     ChildrenKey::PropertyChildren,
                     &mut result,
                     &mut seen,
@@ -3599,13 +3642,13 @@ fn target_prim_inherits_class(
     class_path: &Path,
 ) -> bool {
     index.all_nodes().any(|n| {
-        n.arc == ArcType::Inherit
+        n.arc() == ArcType::Inherit
             && graph
                 .layer_stack(n.layer_stack_id())
                 .iter()
                 .map(|(l, _)| *l)
                 .eq(class_layers.iter().copied())
-            && n.path.has_prefix(class_path)
+            && n.path().has_prefix(class_path)
     })
 }
 
@@ -3922,16 +3965,14 @@ def "A" (
         // nothing — its ancestral children carry the relocated opinions — so it
         // is retained in the arena but skipped by `nodes`/`all_nodes`.
         assert!(
-            index
-                .arena()
-                .iter()
-                .any(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE)),
+            index.arena().any(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE)),
             "relocated prim has a relocate source node"
         );
-        for (id, node) in index.nodes_with_ids() {
+        for node in index.all_nodes() {
+            let id = node.id();
             if let Some(parent) = node.parent() {
                 assert!(
-                    index.children(parent).contains(&id),
+                    index.children(parent).any(|child| child == id),
                     "relocate node {id:?} parent {parent:?} missing it as a child"
                 );
             }
@@ -3957,7 +3998,6 @@ def "A" (
         // retained in the arena but skipped by `nodes`/`all_nodes`.
         let relocate = index
             .arena()
-            .iter()
             .find(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE))
             .expect("relocated prim has a relocate source node");
         let layers: Vec<LayerId> = graph
@@ -4971,7 +5011,7 @@ def "Anchor" (inherits = </Rig>) {}
                 .cached(&sdf::path("/User/Child")?)
                 .default_prim_layers()
                 .contains(&target_id),
-            "the seed clone carries the parent's record down"
+            "the seed carries the parent's record down"
         );
 
         edit_default_prim(&mut graph, &mut cache, target_id, Some("Second"))?;
@@ -5008,7 +5048,7 @@ def "Anchor" (inherits = </Rig>) {}
         assert_eq!(root.default_prim, [target_id]);
         for path in ["/User/A", "/User/A/B", "/User/A/B/C"] {
             let deps = cache.cached(&sdf::path(path)?).graph().non_site_deps_shared();
-            let deps = deps.expect("the seed clone carries the record down");
+            let deps = deps.expect("the seed carries the record down");
             assert!(Arc::ptr_eq(&root, deps), "{path} shares its ancestor's allocation");
         }
         Ok(())
@@ -5711,6 +5751,43 @@ def "Model" (
         let mut reported = cache.drop_index_victims(vec![sdf::path("/A")?]);
         reported.sort();
         assert_eq!(reported, expected, "the victim and every root the cascade retired");
+        Ok(())
+    }
+
+    /// A prim that adds no arc of its own holds its parent's node data, and so
+    /// does a prim inside an instance, whose opinions at the instance's own
+    /// namespace are inerted per prim.
+    #[test]
+    fn child_shares_node_data() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_chain.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        let (deep, leaf) = (sdf::path("/Deep")?, sdf::path("/Deep/Leaf")?);
+        cache.ensure_index(&graph, &leaf)?;
+        assert!(
+            cache
+                .cached(&leaf)
+                .graph()
+                .shares_data_with(cache.cached(&deep).graph())
+        );
+
+        cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp, None)?;
+        let shared_below_prototype = cache.prototypes().iter().any(|prototype| {
+            let child = prototype.append_path("Leaf").expect("a prim path");
+            cache.is_indexed(&child)
+                && cache
+                    .cached(&child)
+                    .graph()
+                    .shares_data_with(cache.cached(prototype).graph())
+        });
+        assert!(
+            shared_below_prototype,
+            "a prototype's child holds the prototype's node data"
+        );
+
+        let stats = cache.graph_stats();
+        assert!(stats.shared < stats.graphs, "{stats:?}");
         Ok(())
     }
 
@@ -6548,7 +6625,7 @@ def "Model" (
     /// A descendant under an empty ancestral variant selection carries the
     /// variant as a culled node and reports no live composition arc. The parent's
     /// local variant arc is culled when its `{set=sel}` site authors nothing, and
-    /// the ancestral seed clones that culled node down to the descendant — so the
+    /// the ancestral seed carries that culled node down to the descendant — so the
     /// cull reaches descendants without a separate path. `has_composition_arc`
     /// stays gated on `has_specs`, so the spec-less variant never counts as a
     /// composition arc.
@@ -6565,11 +6642,11 @@ def "Model" (
         assert!(!cache.has_composition_arc(&graph, &child)?);
         let index = cache.store.index_at(&child).expect("child index");
         assert!(
-            index.all_nodes().any(|n| n.arc == ArcType::Variant && n.is_culled()),
+            index.all_nodes().any(|n| n.arc() == ArcType::Variant && n.is_culled()),
             "the empty ancestral variant target is culled"
         );
         assert!(
-            index.nodes().all(|n| n.arc != ArcType::Variant),
+            index.nodes().all(|n| n.arc() != ArcType::Variant),
             "the culled variant contributes nothing to resolution"
         );
         Ok(())
@@ -6613,7 +6690,7 @@ def "Model" (
         assert!(!cache.has_composition_arc(&graph, &a)?);
         let index = cache.store.index_at(&a).expect("index rebuilt on query");
         assert!(
-            index.all_nodes().any(|n| n.arc == ArcType::Inherit && n.is_culled()),
+            index.all_nodes().any(|n| n.arc() == ArcType::Inherit && n.is_culled()),
             "the emptied inherit target re-culled"
         );
         Ok(())

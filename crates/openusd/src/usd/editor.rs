@@ -835,9 +835,9 @@ impl<'a> NamespaceProjection<'a> {
         let target_spec = target.map_to_spec_path(&prim);
         let target_node = target_spec.as_ref().and_then(|spec| {
             index
-                .nodes_with_ids()
-                .find(|(_, node)| node.layer_stack_id() == stack && node.path() == spec)
-                .map(|(id, _)| id)
+                .all_nodes()
+                .find(|node| node.layer_stack_id() == stack && node.path() == spec)
+                .map(|node| node.id())
         });
         let Some(target_node) = target_node else {
             // The target does not reach this prim; the source composes (if at
@@ -845,7 +845,7 @@ impl<'a> NamespaceProjection<'a> {
             // contributor the direct edit path resolves into a missing-source or
             // requires-relocate error.
             return Ok(TargetFacts {
-                outside: index.nodes_with_ids().any(|(_, node)| node.has_specs()),
+                outside: index.all_nodes().any(|node| node.has_specs()),
                 below_target: false,
                 masks: false,
             });
@@ -947,7 +947,8 @@ fn classify_source_nodes(
     let mut direct_ancestral = false;
     let mut below_target = false;
     let mut outside = false;
-    for (id, node) in index.nodes_with_ids() {
+    for node in index.all_nodes() {
+        let id = node.id();
         if !node.has_specs() {
             continue;
         }
