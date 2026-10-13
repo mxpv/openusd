@@ -883,7 +883,7 @@ impl PrimIndex {
     /// re-validation.
     pub(super) fn query_path<'a>(node: Node<'a>, prop_suffix: Option<&str>) -> Cow<'a, Path> {
         match prop_suffix {
-            Some(suffix) => Cow::Owned(Path::from_str_unchecked(&format!("{}{suffix}", node.path()))),
+            Some(suffix) => Cow::Owned(Path::from_string_unchecked([node.path().as_str(), suffix].concat())),
             None => Cow::Borrowed(node.path()),
         }
     }

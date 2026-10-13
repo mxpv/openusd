@@ -164,6 +164,22 @@ impl Path {
         }
     }
 
+    /// Takes `path` without validating it, like
+    /// [`from_str_unchecked`](Self::from_str_unchecked), for text a caller
+    /// already assembled in an owned `String`.
+    pub(crate) fn from_string_unchecked(path: String) -> Path {
+        match path.as_str() {
+            "" | "/" => Path::from_str_unchecked(&path),
+            _ => {
+                debug_assert!(
+                    Path::validate(&path).is_ok(),
+                    "from_string_unchecked on invalid path {path:?}"
+                );
+                Path::from_text(path)
+            }
+        }
+    }
+
     /// Wraps `path` without validating it — the fast path for strings a
     /// derivation method recombined from already-validated paths. External
     /// input must go through [`Path::new`].
@@ -229,11 +245,7 @@ impl Path {
             ));
         }
 
-        let mut new_path = self.path.to_string();
-        new_path.push('.');
-        new_path.push_str(property);
-
-        Ok(Path::from_text(new_path))
+        Ok(Path::from_text([self.as_str(), ".", property].concat()))
     }
 
     /// Appends `path` (parsed if given as a string) under this path with a `/`
@@ -395,28 +407,39 @@ impl Path {
     }
 
     pub fn prim_path(&self) -> Path {
-        // Split at last slash.
-        // "/A/B/C.foo[target].bar:baz" will become "/A/B" and "C.foo[target].bar:baz"
-        let Some((before, after)) = self.path.rsplit_once('/') else {
+        let len = self.prim_len();
+        if len == self.path.len() {
+            return self.clone();
+        }
+        Path::from_str_unchecked(&self.path[..len])
+    }
+
+    /// The byte length of this path's [`prim_path`](Self::prim_path) prefix,
+    /// found without building it.
+    fn prim_len(&self) -> usize {
+        // Split at the last slash outside a `[..]` target, which may itself be
+        // an absolute path: "/A/B/C.foo[/T].bar:baz" becomes "/A/B" and
+        // "C.foo[/T].bar:baz".
+        let Some((before, after)) = rsplit_outside_targets(&self.path, b'/') else {
             // Relative single segment (no slash): strip a trailing property or
             // variant selection. `is_property` separates `Foo.bar` from a
             // relative `..`, which has no property tail and is its own prim.
             if self.is_property()
                 && let Some(dot) = find_component_dot(&self.path)
             {
-                return Path::from_str_unchecked(&self.path[..dot]);
+                return dot;
             }
             if self.path.ends_with('}')
                 && let Some(open) = self.path.rfind('{')
             {
-                return Path::from_str_unchecked(&self.path[..open]);
+                return open;
             }
-            return self.clone();
+            return self.path.len();
         };
 
         // For cases like ../.foo[target].bar, just return ..
         if after.starts_with('.') {
-            return Path::from_str_unchecked(before);
+            return before.len();
         }
 
         // Strip the trailing variant selection, keeping any earlier variants on
@@ -425,19 +448,15 @@ impl Path {
         if after.ends_with('}')
             && let Some(pos) = after.rfind('{')
         {
-            let sz = before.len() + pos + 1;
-            return Path::from_str_unchecked(&self.path[..sz]);
+            return before.len() + pos + 1;
         }
 
-        let first_dot = match find_component_dot(after) {
-            Some(dot) => dot,
+        match find_component_dot(after) {
+            // Everything up to the first dot.
+            Some(first_dot) => before.len() + first_dot + 1,
             // No dots found, so we have a prim path
-            None => return self.clone(),
-        };
-
-        // Return everything up to the first dot
-        let sz = before.len() + first_dot + 1;
-        Path::from_str_unchecked(&self.path[..sz])
+            None => self.path.len(),
+        }
     }
 
     /// Returns the property portion of this path — the trailing segment after
@@ -445,7 +464,24 @@ impl Path {
     /// `.foo[/T].bar` for a target/namespaced property). Empty for a prim
     /// (non-property) path.
     pub fn property_suffix(&self) -> &str {
-        &self.path[self.prim_path().as_str().len()..]
+        &self.path[self.prim_len()..]
+    }
+
+    /// Splits this path into its [`prim_path`](Self::prim_path) and the
+    /// [`property_suffix`](Self::property_suffix) that follows it.
+    ///
+    /// ```text
+    /// "/World/Mesh.points" -> ("/World/Mesh", ".points")
+    /// "/World/Mesh"        -> ("/World/Mesh", "")
+    /// ```
+    pub fn split_prim(&self) -> (Path, &str) {
+        let len = self.prim_len();
+        let prim = if len == self.path.len() {
+            self.clone()
+        } else {
+            Path::from_str_unchecked(&self.path[..len])
+        };
+        (prim, &self.path[len..])
     }
 
     /// Splits a property path into its owning prim and the property name (the
@@ -465,9 +501,8 @@ impl Path {
         if !self.is_property() {
             return None;
         }
-        let prim = self.prim_path();
-        let name = self.path[prim.as_str().len()..].strip_prefix('.')?;
-        Some((prim, name))
+        let (prim, suffix) = self.split_prim();
+        Some((prim, suffix.strip_prefix('.')?))
     }
 
     /// Returns the relationship/connection target path embedded in this path's
@@ -1209,6 +1244,25 @@ fn is_variant_char(c: char) -> bool {
 /// selections and `[…]` target brackets — the dot introducing a property, as
 /// opposed to one embedded in a dotted variant name or a bracketed target
 /// path.
+/// Splits `text` around the last `sep` that sits outside every `[..]` target
+/// bracket, or `None` when there is none.
+fn rsplit_outside_targets(text: &str, sep: u8) -> Option<(&str, &str)> {
+    if !text.contains('[') {
+        return text.rsplit_once(char::from(sep));
+    }
+    let mut depth = 0usize;
+    let mut last = None;
+    for (i, byte) in text.bytes().enumerate() {
+        match byte {
+            b'[' => depth += 1,
+            b']' => depth = depth.saturating_sub(1),
+            _ if byte == sep && depth == 0 => last = Some(i),
+            _ => {}
+        }
+    }
+    last.map(|i| (&text[..i], &text[i + 1..]))
+}
+
 fn find_component_dot(segment: &str) -> Option<usize> {
     let mut depth = 0usize;
     for (i, byte) in segment.bytes().enumerate() {
@@ -1873,6 +1927,25 @@ mod tests {
         assert_eq!(suffix("Foo.bar"), ".bar");
         // A prim path has no property suffix.
         assert_eq!(suffix("/A"), "");
+    }
+
+    #[test]
+    fn test_split_prim() {
+        let split = |s: &str| {
+            let path = raw(s);
+            let (prim, suffix) = path.split_prim();
+            (prim.as_str().to_owned(), suffix.to_owned())
+        };
+        let owned = |p: &str, s: &str| (p.to_owned(), s.to_owned());
+
+        assert_eq!(split("/World/Mesh.points"), owned("/World/Mesh", ".points"));
+        assert_eq!(split("/A.rel[/T].attr"), owned("/A", ".rel[/T].attr"));
+        assert_eq!(split("/A{v=x}B.attr"), owned("/A{v=x}B", ".attr"));
+        assert_eq!(split("Foo.bar"), owned("Foo", ".bar"));
+        // A prim path is its own prim, with no suffix.
+        assert_eq!(split("/World/Mesh"), owned("/World/Mesh", ""));
+        // A trailing variant selection is not part of the prim path.
+        assert_eq!(split("/A{v=x}"), owned("/A", "{v=x}"));
     }
 
     #[test]

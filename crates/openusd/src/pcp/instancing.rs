@@ -923,22 +923,27 @@ impl IndexCache {
     /// registry is invalidated.
     pub(super) fn effective_path(&mut self, graph: &LayerGraph, path: &Path) -> Result<Path, QueryError> {
         let prim = path.prim_path();
-        let redirected = if let Some(hit) = self.redirected_prims.get(&prim) {
-            hit.clone()
-        } else {
-            let pending_before = self.pending_loads.len();
-            let redirected = self.redirect_prim(graph, &prim)?;
-            if !self.provisional(&prim, pending_before) {
-                self.redirected_prims.insert(prim.clone(), redirected.clone());
-            }
-            redirected
-        };
+        let redirected = self.effective_prim(graph, &prim)?;
         if redirected == prim {
             return Ok(path.clone());
         }
         // Re-anchor any property suffix onto the redirected prim; for a prim
         // path this is the redirected prim itself.
         Ok(path.replace_prefix(&prim, &redirected).unwrap_or(redirected))
+    }
+
+    /// The prim-path half of [`Self::effective_path`]: `prim` itself, or the
+    /// prototype prim serving it when it is an instance proxy.
+    pub(super) fn effective_prim(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Path, QueryError> {
+        if let Some(hit) = self.redirected_prims.get(prim) {
+            return Ok(hit.clone());
+        }
+        let pending_before = self.pending_loads.len();
+        let redirected = self.redirect_prim(graph, prim)?;
+        if !self.provisional(prim, pending_before) {
+            self.redirected_prims.insert(prim.clone(), redirected.clone());
+        }
+        Ok(redirected)
     }
 }
 
