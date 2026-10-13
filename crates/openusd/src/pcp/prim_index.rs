@@ -5,21 +5,18 @@
 //! [module-level docs](super) for the full composition overview.
 
 use std::borrow::Cow;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::{iter, mem};
 
-use crate::sdf::expr;
-use crate::sdf::schema::{ChildrenKey, FieldKey};
+use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Value};
 
-use super::compose_site::evaluate_expression;
 use super::diagnostics::Diagnostics;
 use super::index_store::PrimRevision;
 use super::layer_stack::LayerStackId;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite, extend_reversed};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
-use super::{ExpressionContext, LayerGraph, LayerId, QueryError, VariantFallbackMap};
+use super::{LayerGraph, LayerId, QueryError, VariantFallbackMap};
 
 /// How much of the composition graph a value-resolution walk visits
 /// ([`PrimIndex::live_sites`]) — C++ `Usd_Resolver`'s `skipEmptyNodes`.
@@ -957,10 +954,19 @@ impl PrimIndex {
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
+        fallbacks: &VariantFallbackMap,
         cached_indices: &sdf::PathTable<PrimEntry>,
         load_payloads: bool,
     ) -> BuildResult<(Self, Diagnostics, Vec<Demand>, ExprVarDeps, usize)> {
-        Self::build_with_cache_in(path, stack, ctx, cached_indices, LayerStackId::ROOT, load_payloads)
+        Self::build_with_cache_in(
+            path,
+            stack,
+            ctx,
+            fallbacks,
+            cached_indices,
+            LayerStackId::ROOT,
+            load_payloads,
+        )
     }
 
     /// Builds a prim index whose root `L` site scans the given `ambient` layer
@@ -976,6 +982,7 @@ impl PrimIndex {
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
+        fallbacks: &VariantFallbackMap,
         cached_indices: &sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
         load_payloads: bool,
@@ -1001,7 +1008,7 @@ impl PrimIndex {
         // surfaces as `CompositionDiagnostic::ArcCycle`; an unresolvable arc is recorded in the
         // returned errors and skipped. A `None` graph means an unestablished seed
         // or the runaway nesting backstop, which composes to an empty prim index.
-        let indexer = super::prim_indexer::Indexer::new(stack, ctx, cached_indices, ambient, load_payloads);
+        let indexer = super::prim_indexer::Indexer::new(stack, ctx, fallbacks, cached_indices, ambient, load_payloads);
         let super::prim_indexer::BuildOutput {
             graph,
             errors,
@@ -1032,48 +1039,14 @@ impl PrimIndex {
         Ok((index, errors, pending_loads, expr_var_deps, nodes_copied))
     }
 
-    /// Returns the composition context derived from this prim's index, together
-    /// with the per-stack variable names the selection resolution's `${VAR}`
-    /// expressions read — an expression selection authored here for a set
-    /// declared only on a descendant is evaluated solely by this pass, so the
-    /// caching caller merges the reads into this prim's registered
-    /// dependencies. A re-derivation pass (prototype materialization, the test
-    /// ancestor walk) drops them; its source prim's registration already
-    /// stands.
-    ///
-    /// Child prims use this context to inherit variant selections without
-    /// recomputing them.
-    pub(crate) fn context_for_children(
-        &self,
-        stack: &LayerGraph,
-        parent_ctx: &CompositionContext,
-    ) -> (CompositionContext, ExprVarDeps) {
-        // Gather variant selections from this prim's nodes; ancestor selections
-        // outrank this prim's local fallbacks.
-        let mut expr_var_deps = ExprVarDeps::default();
-        let selections = resolve_variant_selections_in(
-            self.nodes(),
-            stack,
-            &parent_ctx.variant_fallbacks,
-            &parent_ctx.selections,
-            &mut expr_var_deps,
-        );
-
-        // Merge parent's selections (weaker) with this prim's (stronger).
-        let mut merged_selections = parent_ctx.selections.clone();
-        for (k, v) in selections {
-            merged_selections.entry(k).or_insert(v);
-        }
-
-        let context = CompositionContext {
-            selections: merged_selections,
-            variant_fallbacks: parent_ctx.variant_fallbacks.clone(),
+    /// The composition context this prim hands its children, given the one its
+    /// parent handed it.
+    pub(crate) fn context_for_children(&self, parent_ctx: &CompositionContext) -> CompositionContext {
+        CompositionContext {
             may_have_clips: parent_ctx.may_have_clips || self.authors_clips,
-            // Inherited from the parent; the cache additionally sets this when
-            // the current prim itself resolves as an instance.
+            // The cache sets this when the prim itself resolves as an instance.
             instance_depth: parent_ctx.instance_depth,
-        };
-        (context, expr_var_deps)
+        }
     }
 
     /// The variant selections composed onto this prim, as `(set, selection)`
@@ -1107,18 +1080,10 @@ impl PrimIndex {
 // Composition context: flows from parent to child prim
 // ---------------------------------------------------------------------------
 
-/// Composition context carried from parent prims to children.
-///
-/// Contains accumulated variant selections and variant fallbacks that
-/// enable single-pass composition without cross-prim post-processing.
-#[derive(Debug, Clone)]
+/// Composition context carried from parent prims to children: what a prim's
+/// place in the namespace decides for it before its own index is built.
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CompositionContext {
-    /// Variant selections accumulated from all ancestor compositions.
-    /// First-opinion-wins: strongest ancestor's selection takes priority.
-    pub selections: HashMap<String, String>,
-    /// Variant fallback selections for sets without authored opinions.
-    /// Propagated unchanged from the stage configuration.
-    pub variant_fallbacks: VariantFallbackMap,
     /// Whether this prim or an ancestor authors clip metadata, so value
     /// resolution has to consult value clips here (C++
     /// `Usd_PrimData::MayHaveOpinionsInClips`, which likewise combines a prim's
@@ -1138,17 +1103,6 @@ pub(crate) struct CompositionContext {
     /// discarded, so the subtree composes only from the arcs the instance brings
     /// in (the instanceable arc and below, plus its implied classes).
     pub instance_depth: Option<u16>,
-}
-
-impl Default for CompositionContext {
-    fn default() -> Self {
-        Self {
-            selections: HashMap::new(),
-            variant_fallbacks: VariantFallbackMap::new(),
-            may_have_clips: false,
-            instance_depth: None,
-        }
-    }
 }
 
 impl CompositionContext {
@@ -1241,150 +1195,6 @@ pub(super) fn stack_has_spec(graph: &LayerGraph, stack: LayerStackId, path: &Pat
         .any(|&(li, _)| graph.layer(li).data().has_spec(path))
 }
 
-/// Resolves variant selections across a prim's composition nodes.
-///
-/// Precedence: `seed` selections inherited from the composition context win
-/// first — a selection authored on a referencing prim is stronger than the
-/// referenced layer's own opinion (spec 12.2), so it beats both an explicit
-/// selection authored on a node here and the target's own default. Each set the
-/// seed did not fix then takes its explicit node selection, nodes ordered by arc
-/// type; any still-unselected set defaults to its fallback, then to its first
-/// variant.
-///
-/// TODO: two approximations remain in the node ordering and the seed.
-/// - Nodes are ordered by `ArcType` alone, not the full node-strength
-///   comparator (arc type plus ancestry / origin / namespace depth). When two
-///   nodes in different subtrees author the same set, arc type can pick the
-///   wrong one. The full comparator needs `NodeId`/graph access and the
-///   strength projection, which is not finalized while the build still calls
-///   this, so the arc-type order is the build-time approximation.
-/// - The seed accumulates selections by set name down the whole namespace, so a
-///   namespace ancestor's selection for its *own* same-named variant set leaks
-///   onto a descendant prim that has an independent set of that name,
-///   overriding the descendant's local selection. Distinguishing an arc seed
-///   from a namespace-ancestor seed would fix it.
-fn resolve_variant_selections_in<'a>(
-    nodes: impl Iterator<Item = Node<'a>> + Clone,
-    graph: &LayerGraph,
-    variant_fallbacks: &VariantFallbackMap,
-    seed: &HashMap<String, String>,
-    expr_var_deps: &mut ExprVarDeps,
-) -> HashMap<String, String> {
-    let mut selections: HashMap<String, String> = HashMap::new();
-
-    // Seed selections come from the composition context — a selection already
-    // resolved on a stronger site (a referencing prim, or a namespace ancestor)
-    // that this build is weaker than. They rank above this site's own opinions:
-    // a `complexity=high` authored on the referencing layer stack must beat the
-    // `complexity=low` the referenced layer authored locally (spec 12.2, the
-    // referencing arc is stronger than the referenced opinion).
-    for (set_name, selection) in seed {
-        selections.entry(set_name.clone()).or_insert_with(|| selection.clone());
-    }
-
-    // Order nodes by arc strength so an explicit selection authored on a
-    // stronger arc wins (spec 12.2): a selection on an inherited class beats
-    // one on the referenced prim it is inherited into. `sort_by_key` is stable,
-    // so nodes of equal arc strength keep their composition order. The arena's
-    // strength projection is not finalized during the build, so order here by
-    // the arc type directly.
-    let mut ordered: Vec<Node<'_>> = nodes.collect();
-    ordered.sort_by_key(|n| n.arc());
-
-    // Gather explicit selections for sets the seed did not already fix. Each
-    // node fans out into its layer stack, strongest sublayer first. An
-    // expression-valued opinion evaluates against the node's own stack
-    // variables; an unevaluable one is skipped so the next-weaker opinion can
-    // fill the set, while one evaluating to `None` records the empty
-    // selection, blocking weaker opinions like an authored empty selection
-    // (C++ `PcpComposeSiteVariantSelections` erases only errored entries).
-    // The indexing-time site (`Indexer::compose_variant_selection`) is the
-    // sole diagnostic emitter, so no error is recorded here.
-    for node in &ordered {
-        for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-            if let Ok(value) = graph
-                .layer(layer)
-                .data()
-                .field(node.path(), FieldKey::VariantSelection.as_str())
-                && let Value::VariantSelectionMap(map) = value.into_owned()
-            {
-                for (set_name, selection) in map {
-                    // A set the seed or a stronger opinion already fixed
-                    // ignores this value; skip before paying for
-                    // evaluation.
-                    let Entry::Vacant(entry) = selections.entry(set_name) else {
-                        continue;
-                    };
-                    let selection = if expr::is_expression(&selection) {
-                        let vars = graph.stack_variables(node.layer_stack_id());
-                        let mut used_vars = HashSet::new();
-                        let evaluated = evaluate_expression(
-                            &selection,
-                            vars,
-                            ExpressionContext::Variant,
-                            graph.identifier(layer),
-                            node.path(),
-                            None,
-                            Some(&mut used_vars),
-                        );
-                        expr_var_deps.record(node.layer_stack_id(), used_vars);
-                        match evaluated.into_selection() {
-                            Some(selection) => selection,
-                            None => continue,
-                        }
-                    } else {
-                        selection
-                    };
-                    entry.insert(selection);
-                }
-            }
-        }
-    }
-
-    // For variant sets whose selection is absent or empty, apply a configured
-    // fallback if one names an existing variant — an empty selection, whether
-    // authored or the accepted expression-language `None`, defers to the
-    // fallback exactly as the indexer's authored-variant task does. With no
-    // applicable fallback the set stays unselected (C++
-    // `_EvalNodeFallbackVariant`); there is no implicit first-variant default,
-    // matching the indexer.
-    for node in &ordered {
-        for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-            let data = graph.layer(layer).data();
-            let Ok(value) = data.field(node.path(), ChildrenKey::VariantSetChildren.as_str()) else {
-                continue;
-            };
-            let Value::TokenVec(set_names) = value.into_owned() else {
-                continue;
-            };
-            for set_name in set_names {
-                let set_name = String::from(set_name);
-                if selections.get(&set_name).is_some_and(|sel| !sel.is_empty()) {
-                    continue;
-                }
-                // An invalid authored set name cannot address variant
-                // storage, so it offers no fallback.
-                let Ok(set_path) = node.path().append_variant_selection(&set_name, "") else {
-                    continue;
-                };
-                let Ok(val) = data.field(&set_path, ChildrenKey::VariantChildren.as_str()) else {
-                    continue;
-                };
-                let Value::TokenVec(variants) = val.into_owned() else {
-                    continue;
-                };
-                // Use the first configured fallback that exists in this set.
-                let fallbacks = variant_fallbacks.get(&set_name);
-                if let Some(fb) = fallbacks.iter().find(|fb| variants.iter().any(|v| v == fb.as_str())) {
-                    selections.insert(set_name, fb.clone());
-                }
-            }
-        }
-    }
-
-    selections
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use std::cmp::Ordering;
@@ -1441,8 +1251,15 @@ pub(crate) mod tests {
             stack: &LayerGraph,
             ctx: &CompositionContext,
         ) -> BuildResult<Self> {
-            Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new(), true)
-                .map(|(index, _errors, _pending, _deps, _copied)| index)
+            Self::build_with_cache(
+                path,
+                stack,
+                ctx,
+                &VariantFallbackMap::new(),
+                &sdf::PathTable::new(),
+                true,
+            )
+            .map(|(index, _errors, _pending, _deps, _copied)| index)
         }
     }
 
@@ -1508,18 +1325,15 @@ pub(crate) mod tests {
 
         loop {
             let mut cache: sdf::PathTable<PrimEntry> = sdf::PathTable::new();
-            let mut parent_ctx = CompositionContext {
-                variant_fallbacks: fallbacks.clone(),
-                ..CompositionContext::default()
-            };
+            let mut parent_ctx = CompositionContext::default();
             let mut last = None;
             let mut pending: Vec<Demand> = Vec::new();
             for ancestor in &chain {
                 let (index, _errors, demands, _deps, _copied) =
-                    PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache, true)
+                    PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &fallbacks, &cache, true)
                         .expect("index build failed");
                 pending.extend(demands);
-                parent_ctx = index.context_for_children(stack, &parent_ctx).0;
+                parent_ctx = index.context_for_children(&parent_ctx);
                 cache.insert(
                     ancestor.clone(),
                     PrimEntry {
@@ -1568,6 +1382,7 @@ pub(crate) mod tests {
             &Path::new(prim)?,
             stack,
             &CompositionContext::default(),
+            &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
             true,
         )?;
@@ -2164,58 +1979,8 @@ pub(crate) mod tests {
         Box::new(sdf::Data::from_specs(data))
     }
 
-    /// The child context evaluates an expression-valued selection opinion
-    /// against the node's stack variables, skips an unevaluable one so it
-    /// never seeds descendants raw, and records a successful `None` as the
-    /// empty (blocking) selection.
-    #[test]
-    fn child_ctx_expr_selection() {
-        let stack = one_layer_stack(parse_usda(
-            r#"#usda 1.0
-(
-    expressionVariables = {
-        string SEL = "hi"
-    }
-)
-def "World" (
-    variantSets = ["v", "w", "u"]
-    variants = {
-        string v = "`${SEL}`"
-        string w = "`${UNDEF}`"
-        string u = "`None`"
-    }
-)
-{
-    variantSet "v" = {
-        "hi" { custom double x = 1 }
-    }
-}
-"#,
-        ));
-        let index =
-            PrimIndex::build_with_context(&Path::new("/World").unwrap(), &stack, &CompositionContext::default())
-                .expect("index build");
-        let ctx = index.context_for_children(&stack, &CompositionContext::default()).0;
-        assert_eq!(
-            ctx.selections.get("v").map(String::as_str),
-            Some("hi"),
-            "the evaluated selection seeds children"
-        );
-        assert!(
-            !ctx.selections.contains_key("w"),
-            "an unevaluable selection opinion is skipped, got {:?}",
-            ctx.selections
-        );
-        assert_eq!(
-            ctx.selections.get("u").map(String::as_str),
-            Some(""),
-            "a successful `None` records the empty, blocking selection"
-        );
-    }
-
     /// An empty selection — here from an expression-language `None` — defers
-    /// to the configured fallback in the child context, matching the fallback
-    /// arc the composed index grafts for the same input.
+    /// to the configured fallback, whose variant the composed index grafts.
     #[test]
     fn empty_selection_fallback() {
         let stack = one_layer_stack(parse_usda(
@@ -2232,21 +1997,20 @@ def "World" (
 }
 "#,
         ));
-        let ctx = CompositionContext {
-            variant_fallbacks: VariantFallbackMap::new().add("v", ["hi"]),
-            ..CompositionContext::default()
-        };
-        let index = PrimIndex::build_with_context(&Path::new("/World").unwrap(), &stack, &ctx).expect("index build");
+        let fallbacks = VariantFallbackMap::new().add("v", ["hi"]);
+        let (index, ..) = PrimIndex::build_with_cache(
+            &Path::new("/World").unwrap(),
+            &stack,
+            &CompositionContext::default(),
+            &fallbacks,
+            &sdf::PathTable::new(),
+            true,
+        )
+        .expect("index build");
         assert!(
             index.nodes().any(|n| n.path().as_str() == "/World{v=hi}"),
             "the index composes the fallback, got {:?}",
             index.nodes().map(|n| n.path().as_str()).collect::<Vec<_>>()
-        );
-        let child = index.context_for_children(&stack, &ctx).0;
-        assert_eq!(
-            child.selections.get("v").map(String::as_str),
-            Some("hi"),
-            "the child context matches the composed index"
         );
     }
 
@@ -2324,6 +2088,7 @@ def "Root" (
             &Path::new("/Root").unwrap(),
             &stack,
             &CompositionContext::default(),
+            &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
             true,
         )?;
@@ -2452,6 +2217,7 @@ def "Outer" (
             &Path::new("/Root").unwrap(),
             &stack,
             &CompositionContext::default(),
+            &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
             true,
         )?;
@@ -2506,6 +2272,7 @@ def "Outer"
             &Path::new("/Root").unwrap(),
             &stack,
             &CompositionContext::default(),
+            &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
             true,
         )?;
@@ -2538,6 +2305,7 @@ def "Prim" (
                 &Path::new("/Prim").unwrap(),
                 stack,
                 &CompositionContext::default(),
+                &VariantFallbackMap::new(),
                 &sdf::PathTable::new(),
                 true,
             )
@@ -2591,6 +2359,7 @@ def "Prim" (
             &Path::new("/Prim").unwrap(),
             &stack,
             &CompositionContext::default(),
+            &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
             true,
         )?;

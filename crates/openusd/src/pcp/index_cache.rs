@@ -2009,19 +2009,6 @@ impl IndexCache {
         self.store.insert(graph, path, index, context, errors, expr_var_deps);
     }
 
-    /// The composition context for a namespace-root prim: empty except for the
-    /// stage's variant fallbacks. Used to seed the root of an ordinary build and
-    /// of a materialized prototype. `load_payloads` is left at its `Default`
-    /// value — [`build_index`](Self::build_index) always overwrites it with a
-    /// per-path decision before the context is ever consumed, so the value
-    /// seeded here is never read.
-    pub(super) fn root_parent_context(&self) -> CompositionContext {
-        CompositionContext {
-            variant_fallbacks: self.variant_fallbacks.clone(),
-            ..Default::default()
-        }
-    }
-
     /// Drop a single prim's cached entry (its index, child context, and build
     /// errors) along with its dependency registrations.
     ///
@@ -3317,8 +3304,8 @@ impl IndexCache {
         let parent_ctx = path
             .parent()
             .and_then(|p| self.store.context_at(&p))
-            .cloned()
-            .unwrap_or_else(|| self.root_parent_context());
+            .copied()
+            .unwrap_or_default();
         // Computed per path, not inherited from the parent context: two
         // siblings can have different load rules, and a rule authored on an
         // ancestor doesn't by itself determine this path's own decision (see
@@ -3331,8 +3318,14 @@ impl IndexCache {
         // compose independently once their parent is cached, and this is the
         // natural per-prim `par_iter` boundary; the entries each build
         // returns are then inserted by the driver.
-        let (mut index, mut build_errors, pending_loads, mut expr_var_deps, nodes_copied) =
-            PrimIndex::build_with_cache(path, graph, &parent_ctx, self.store.entries(), load_payloads)?;
+        let (mut index, mut build_errors, pending_loads, expr_var_deps, nodes_copied) = PrimIndex::build_with_cache(
+            path,
+            graph,
+            &parent_ctx,
+            &self.variant_fallbacks,
+            self.store.entries(),
+            load_payloads,
+        )?;
         self.count_copy(nodes_copied);
         self.pending_loads.extend(pending_loads);
         // A reference/payload arc demanded a layer that is not yet loaded — here,
@@ -3395,12 +3388,7 @@ impl IndexCache {
         // where a later `Prim::is_instance` reads it.
         let is_instance = index.is_instanceable(graph, path.prim_element_count() as u16)?;
 
-        // The child-context selection resolution can evaluate a `${VAR}`
-        // selection no indexing-time task did — one authored here for a set
-        // declared only on a descendant — so its reads merge into this prim's
-        // dependency map before it registers.
-        let (mut child_context, context_deps) = index.context_for_children(graph, &parent_ctx);
-        expr_var_deps.merge(context_deps);
+        let mut child_context = index.context_for_children(&parent_ctx);
         // A nested instance re-arms the depth to its own (deeper) level, so an
         // inner instance's descendants drop opinions above its instanceable arc
         // rather than the outer instance's.

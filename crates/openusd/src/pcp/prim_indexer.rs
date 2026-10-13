@@ -105,7 +105,9 @@ use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeDesc, NodeFlags, NodeId, PrimIndexGraph, is_class_based_arc};
 use super::prim_index::{CompositionContext, Demand, PrimEntry, stack_has_spec};
-use super::{CompositionDiagnostic, CycleChain, CycleHop, ExpressionContext, LayerGraph, LayerId, QueryError};
+use super::{
+    CompositionDiagnostic, CycleChain, CycleHop, ExpressionContext, LayerGraph, LayerId, QueryError, VariantFallbackMap,
+};
 
 /// Maximum composition-arc nesting before the prim is abandoned as a cycle,
 /// composing to an empty prim index. Matches C++ `MAX_COMPOSITION_DEPTH`.
@@ -428,9 +430,11 @@ pub(crate) struct BuildOutput {
 struct Inputs<'a> {
     /// The layer stack being composed.
     stack: &'a LayerGraph,
-    /// Composition context flowing from the parent prim (variant selections /
-    /// fallbacks, instance depth).
+    /// Composition context flowing from the parent prim.
     ctx: &'a CompositionContext,
+    /// The stage's variant fallbacks (C++
+    /// `PcpPrimIndexInputs::variantFallbacks`).
+    variant_fallbacks: &'a VariantFallbackMap,
     /// Cached prim indices from the composition cache. The parent prim's index
     /// is read from here to seed this child's graph (C++
     /// `_BuildInitialPrimIndexFromAncestor`).
@@ -528,6 +532,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     pub(crate) fn new(
         stack: &'a LayerGraph,
         ctx: &'a CompositionContext,
+        variant_fallbacks: &'a VariantFallbackMap,
         cached_indices: &'a sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
         load_payloads: bool,
@@ -536,6 +541,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             inputs: Inputs {
                 stack,
                 ctx,
+                variant_fallbacks,
                 cached_indices,
                 load_payloads,
             },
@@ -804,6 +810,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let mut sub = Indexer::new(
             self.inputs.stack,
             self.inputs.ctx,
+            self.inputs.variant_fallbacks,
             self.inputs.cached_indices,
             ambient,
             self.inputs.load_payloads,
@@ -1847,7 +1854,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // default.
         let fallback = self
             .inputs
-            .ctx
             .variant_fallbacks
             .get(&vt.vset_name)
             .iter()
@@ -3369,9 +3375,16 @@ mod tests {
         let ctx = CompositionContext::default();
         loop {
             let ambient = LayerStackId::ROOT;
-            let out = Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient, true)
-                .build(&Path::new(prim).unwrap())
-                .expect("indexer build");
+            let out = Indexer::new(
+                stack,
+                &ctx,
+                &VariantFallbackMap::new(),
+                &sdf::PathTable::new(),
+                ambient,
+                true,
+            )
+            .build(&Path::new(prim).unwrap())
+            .expect("indexer build");
             if !stack.intern_demanded(&out.pending_loads) {
                 return out;
             }
@@ -3980,7 +3993,7 @@ mod tests {
                 revision: PrimRevision::placeholder(),
             },
         );
-        let child = Indexer::new(&s, &ctx, &cached, ambient, true)
+        let child = Indexer::new(&s, &ctx, &VariantFallbackMap::new(), &cached, ambient, true)
             .build(&Path::new("/Root/Child").unwrap())
             .expect("indexer build")
             .graph

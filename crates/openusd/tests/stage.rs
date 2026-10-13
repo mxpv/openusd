@@ -832,6 +832,60 @@ fn dual_context_same_pass() -> Result<()> {
     Ok(())
 }
 
+/// A variant selection written as a `${VAR}` expression follows an edit to the
+/// variable: the prim that authors it and the child its variant defines both
+/// recompose onto the newly selected variant.
+#[test]
+fn var_edit_reselects_variant() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+(
+    expressionVariables = { string SEL = "hi" }
+)
+def "World" (
+    variantSets = "v"
+    variants = { string v = "`${SEL}`" }
+)
+{
+    variantSet "v" = {
+        "hi" {
+            custom double x = 1
+            def "Child" { custom double y = 1 }
+        }
+        "lo" {
+            custom double x = 2
+            def "Child" { custom double y = 2 }
+        }
+    }
+}
+"#,
+    )?;
+    assert_eq!(stage.attribute("/World.x")?.get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/World/Child.y")?.get::<f64>()?, Some(1.0));
+
+    let root = stage.root_layer().identifier().to_owned();
+    stage.layer_mut(&root).expect("the root layer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([(
+            "SEL".to_string(),
+            sdf::Value::String("lo".to_string()),
+        )]))
+    })?;
+
+    assert_eq!(
+        stage.attribute("/World.x")?.get::<f64>()?,
+        Some(2.0),
+        "the prim reselects"
+    );
+    assert_eq!(
+        stage.attribute("/World/Child.y")?.get::<f64>()?,
+        Some(2.0),
+        "the child composes through the newly selected variant"
+    );
+    Ok(())
+}
+
 /// A runtime `expressionVariables` edit on the session layer newly selects a
 /// root `${VAR}` sublayer that was never opened: the recompose records a
 /// sublayer demand and the load barrier opens `b.usda` from disk, so the edit

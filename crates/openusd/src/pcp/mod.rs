@@ -83,14 +83,9 @@
 //! strength-ordered children followed by the globally-weak specializes band —
 //! so value resolution is a linear scan.
 //!
-//! Composition is driven by a `CompositionContext`
-//! that flows from parent prims to children. The context carries:
-//!
-//! - Variant selections from all ancestors, so descendant prims resolve
-//!   variant sets without recomputing ancestor composition.
-//! - Arc mappings from ancestors, recording how composed paths map to
-//!   paths in other layers. Used for descendant namespace remapping and
-//!   implied inherit propagation.
+//! A `CompositionContext` flows from parent prims to children. It carries
+//! what a prim's place in the namespace decides for it: whether an ancestor
+//! authors value clips, and the depth of the instance it sits inside.
 //!
 //! # Variant fallbacks
 //!

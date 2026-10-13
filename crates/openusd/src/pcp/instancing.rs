@@ -28,7 +28,7 @@ use super::layer_graph::LayerGraph;
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
 use super::prim_graph::{ArcType, NodeId, extend_reversed};
-use super::prim_index::PrimIndex;
+use super::prim_index::{CompositionContext, PrimIndex};
 use super::prim_indexer::ExprVarDeps;
 use super::{LayerStackId, QueryError};
 
@@ -635,10 +635,10 @@ impl IndexCache {
     /// the ancestral arcs the instance is nested under drop out — and its
     /// namespace is re-anchored onto the prototype root.
     ///
-    /// The prototype root's child context is seeded as a namespace root with
-    /// `instance_depth` cleared — a prototype root is not an instance (see
+    /// The prototype root's child context is seeded as a namespace root, with
+    /// no instance depth — a prototype root is not an instance (see
     /// [`Self::is_instance`]) — so a descendant built by deepening this graph
-    /// composes as prototype content rather than instance-suppressed. Every
+    /// composes as prototype content. Every
     /// instance proxy redirects onto this namespace through
     /// [`Self::redirect_anchor`], so the prototype subtree is the one place a set
     /// of identical instances' descendants compose.
@@ -659,11 +659,9 @@ impl IndexCache {
         self.count_copy(nodes_copied);
 
         // Seeded from a namespace root, so the prototype inherits nothing from
-        // where its instance sits: its variant selections, clip presence and
-        // instance depth all come from the arcs the instanceable prim brings in
-        // (spec 11.3.3).
-        let (mut context, _) = index.context_for_children(graph, &self.root_parent_context());
-        context.instance_depth = None;
+        // where its instance sits: its clip presence comes from the arcs the
+        // instanceable prim brings in (spec 11.3.3).
+        let context = index.context_for_children(&CompositionContext::default());
 
         self.cache_index(
             graph,
