@@ -1,10 +1,10 @@
-//! `GfRange3d` and `GfRange1f` — an axis-aligned box in three dimensions and
-//! a span on a line.
+//! `GfRange3d`, `GfRange2d`, `GfRange1d` and `GfRange1f` — an axis-aligned box
+//! in three dimensions, a rectangle, and a span on a line.
 
 use std::array;
 use std::ops::{Add, Div, Mul, Sub};
 
-use super::{Mat4d, Vec3d, Vec3f};
+use super::{Mat4d, Vec2d, Vec3d, Vec3f};
 
 /// An axis-aligned box given by its minimum and maximum corners (C++
 /// `GfRange3d`).
@@ -284,6 +284,178 @@ impl Div<f64> for Range3d {
     }
 }
 
+/// An axis-aligned rectangle given by its minimum and maximum corners (C++
+/// `GfRange2d`).
+///
+/// A range whose minimum exceeds its maximum along either axis is empty, and
+/// the [`Default`] range is one. The corners are held as given, so one built
+/// with them out of order reads back the same.
+///
+/// The arithmetic is on the corners, as in C++, whatever order they are in:
+/// `a + b` adds minimum to minimum and maximum to maximum, and `a * m` scales
+/// both, exchanging them for a factor that is not positive. A window that
+/// has been turned over therefore stays turned over, where
+/// [`Range3d`]'s arithmetic gives [`Range3d::EMPTY`] for an empty range.
+///
+/// ```
+/// use openusd::gf;
+///
+/// let window = gf::Range2d::new(gf::vec2d(-1.0, -0.5), gf::vec2d(1.0, 0.5));
+/// assert_eq!(window.size(), gf::vec2d(2.0, 1.0));
+/// assert!(gf::Range2d::default().is_empty());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Range2d {
+    min: Vec2d,
+    max: Vec2d,
+}
+
+impl Range2d {
+    /// The empty range C++ builds by default: the largest `float` as the
+    /// minimum and its negation as the maximum.
+    pub const EMPTY: Range2d = Range2d {
+        min: Vec2d {
+            x: f32::MAX as f64,
+            y: f32::MAX as f64,
+        },
+        max: Vec2d {
+            x: -(f32::MAX as f64),
+            y: -(f32::MAX as f64),
+        },
+    };
+
+    /// The range from `min` to `max`, which is empty where `min` exceeds
+    /// `max` along either axis.
+    pub const fn new(min: Vec2d, max: Vec2d) -> Self {
+        Range2d { min, max }
+    }
+
+    /// The minimum corner (C++ `GetMin`).
+    pub const fn min(&self) -> Vec2d {
+        self.min
+    }
+
+    /// The maximum corner (C++ `GetMax`).
+    pub const fn max(&self) -> Vec2d {
+        self.max
+    }
+
+    /// The extent along each axis (C++ `GetSize`), negative along an axis
+    /// the range is empty on.
+    pub fn size(&self) -> Vec2d {
+        self.max - self.min
+    }
+
+    /// Whether the range holds no point (C++ `IsEmpty`).
+    pub fn is_empty(&self) -> bool {
+        self.min.x > self.max.x || self.min.y > self.max.y
+    }
+}
+
+impl Default for Range2d {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+impl Add for Range2d {
+    type Output = Range2d;
+
+    fn add(self, other: Range2d) -> Range2d {
+        Range2d::new(self.min + other.min, self.max + other.max)
+    }
+}
+
+impl Mul<f64> for Range2d {
+    type Output = Range2d;
+
+    fn mul(self, factor: f64) -> Range2d {
+        match factor > 0.0 {
+            true => Range2d::new(self.min * factor, self.max * factor),
+            false => Range2d::new(self.max * factor, self.min * factor),
+        }
+    }
+}
+
+impl Div<f64> for Range2d {
+    type Output = Range2d;
+
+    fn div(self, divisor: f64) -> Range2d {
+        self * (1.0 / divisor)
+    }
+}
+
+/// A span on a line given by its two ends (C++ `GfRange1d`).
+///
+/// A range whose minimum exceeds its maximum is empty, and the [`Default`]
+/// range is one. `a * m` scales both ends, as in C++, exchanging them for a
+/// factor that is not positive.
+///
+/// ```
+/// use openusd::gf;
+///
+/// let near_far = gf::Range1d::new(1.0, 100.0);
+/// assert_eq!(near_far.size(), 99.0);
+/// assert!(gf::Range1d::default().is_empty());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Range1d {
+    min: f64,
+    max: f64,
+}
+
+impl Range1d {
+    /// The empty range C++ builds by default: the largest `float` as the
+    /// minimum and its negation as the maximum.
+    pub const EMPTY: Range1d = Range1d {
+        min: f32::MAX as f64,
+        max: -(f32::MAX as f64),
+    };
+
+    /// The range from `min` to `max`, which is empty where `min` exceeds
+    /// `max`.
+    pub const fn new(min: f64, max: f64) -> Self {
+        Range1d { min, max }
+    }
+
+    /// The lower end (C++ `GetMin`).
+    pub const fn min(&self) -> f64 {
+        self.min
+    }
+
+    /// The upper end (C++ `GetMax`).
+    pub const fn max(&self) -> f64 {
+        self.max
+    }
+
+    /// The length (C++ `GetSize`), negative for an empty range.
+    pub fn size(&self) -> f64 {
+        self.max - self.min
+    }
+
+    /// Whether the range holds no value (C++ `IsEmpty`).
+    pub fn is_empty(&self) -> bool {
+        self.min > self.max
+    }
+}
+
+impl Default for Range1d {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+impl Mul<f64> for Range1d {
+    type Output = Range1d;
+
+    fn mul(self, factor: f64) -> Range1d {
+        match factor > 0.0 {
+            true => Range1d::new(self.min * factor, self.max * factor),
+            false => Range1d::new(self.max * factor, self.min * factor),
+        }
+    }
+}
+
 /// A span on a line given by its two ends, in single precision (C++
 /// `GfRange1f`).
 ///
@@ -353,7 +525,7 @@ impl Default for Range1f {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{Range1f, Range3d};
+    use super::{Range1d, Range1f, Range2d, Range3d};
     use crate::gf;
 
     pub(crate) fn range(min: [f64; 3], max: [f64; 3]) -> Range3d {
@@ -508,6 +680,34 @@ pub(crate) mod tests {
             assert_eq!(result, Range3d::EMPTY);
         }
         assert_eq!(a * 0.0, range([0.0; 3], [0.0; 3]));
+    }
+
+    /// A rectangle and a span hold their corners as given, and are empty
+    /// with any of them out of order.
+    #[test]
+    fn rectangle_and_span() {
+        let r = Range2d::new(gf::vec2d(-1.0, 0.0), gf::vec2d(3.0, 2.0));
+        assert_eq!(r.size(), gf::vec2d(4.0, 2.0));
+        assert!(!r.is_empty());
+        let inverted = Range2d::new(gf::vec2d(1.0, 1.0), gf::vec2d(-1.0, 2.0));
+        assert!(inverted.is_empty());
+        assert_eq!((inverted.min().x, inverted.max().x), (1.0, -1.0));
+        assert!(Range2d::default().is_empty());
+
+        // Arithmetic is on the corners, and a factor that is not positive
+        // exchanges them.
+        let moved = r + Range2d::new(gf::vec2d(1.0, 1.0), gf::vec2d(1.0, 1.0));
+        assert_eq!(moved, Range2d::new(gf::vec2d(0.0, 1.0), gf::vec2d(4.0, 3.0)));
+        assert_eq!(r * 2.0, Range2d::new(gf::vec2d(-2.0, 0.0), gf::vec2d(6.0, 4.0)));
+        assert_eq!(r * -1.0, Range2d::new(gf::vec2d(-3.0, -2.0), gf::vec2d(1.0, 0.0)));
+        assert_eq!(r / 2.0, Range2d::new(gf::vec2d(-0.5, 0.0), gf::vec2d(1.5, 1.0)));
+        assert_eq!(inverted * 2.0, Range2d::new(gf::vec2d(2.0, 2.0), gf::vec2d(-2.0, 4.0)));
+
+        let span = Range1d::new(1.0, 10.0);
+        assert_eq!(span * 2.0, Range1d::new(2.0, 20.0));
+        assert_eq!(span * -1.0, Range1d::new(-10.0, -1.0));
+        assert_eq!((span.min(), span.max(), span.size()), (1.0, 10.0, 9.0));
+        assert!(Range1d::new(2.0, 1.0).is_empty() && Range1d::default().is_empty());
     }
 
     /// A span holds its ends, and one whose ends are out of order holds

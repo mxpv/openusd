@@ -196,7 +196,7 @@ mod tests {
     use crate::gf::{self, Mat4d, Range3d, Rotation};
 
     fn rotation(axis: gf::Vec3d, degrees: f64) -> Mat4d {
-        Mat4d::from_quat(Rotation::new(axis, degrees).quat())
+        Mat4d::from(Rotation::new(axis, degrees))
     }
 
     /// Equality reads the range and the matrix, and the flag is left out.

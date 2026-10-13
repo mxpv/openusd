@@ -7,7 +7,7 @@ use std::ops::{Index, IndexMut, Mul};
 use bytemuck::{Pod, Zeroable};
 
 use super::quat::{Quatd, Quatf, Quath};
-use super::vec::{Vec3d, Vec3f};
+use super::vec::{Vec3d, Vec3f, Vec4d};
 use super::{MIN_ORTHO_TOLERANCE, MIN_VECTOR_LENGTH, Rotation};
 
 /// Row-major 2×2 double-precision matrix (`GfMatrix2d`).
@@ -258,6 +258,13 @@ impl Mat4d {
         m
     }
 
+    /// The matrix from world space to the space of a viewer at `eye` turned
+    /// by `orientation`, who looks along −Z of that space (C++ `SetLookAt`
+    /// with an orientation).
+    pub fn look_at(eye: Vec3d, orientation: Rotation) -> Self {
+        Self::translation(-eye) * Self::from(orientation.inverse())
+    }
+
     /// Row-major rotation about the X axis by `rad` radians.
     pub fn rotation_x(rad: f64) -> Self {
         let (s, c) = rad.sin_cos();
@@ -428,6 +435,12 @@ impl Mat4d {
             - m(0, 0) * m(1, 2) * m(2, 1)
             - m(0, 1) * m(1, 0) * m(2, 2)
             - m(0, 2) * m(1, 1) * m(2, 0)
+    }
+
+    /// Whether the upper-left 3×3 keeps the handedness of the axes (C++
+    /// `IsRightHanded`): its determinant is positive.
+    pub fn is_right_handed(self) -> bool {
+        self.determinant3() > 0.0
     }
 
     /// Replace the translation of the transform, its last row, and set the
@@ -664,6 +677,18 @@ impl Mat4d {
         }
     }
 
+    /// The row vector `v` through the matrix, `v · M`, all four components
+    /// kept and none divided by (C++ `GfVec4d * GfMatrix4d`).
+    pub fn transform_homogeneous(self, v: Vec4d) -> Vec4d {
+        let column = |c: usize| v.x * self[(0, c)] + v.y * self[(1, c)] + v.z * self[(2, c)] + v.w * self[(3, c)];
+        Vec4d {
+            x: column(0),
+            y: column(1),
+            z: column(2),
+            w: column(3),
+        }
+    }
+
     /// The direction `v` under the rotation and scale of this transform,
     /// its translation left out (C++ `TransformDir`). Correct for tangents
     /// and velocity-like directions. Normals under non-uniform scale require
@@ -751,6 +776,13 @@ impl From<Quath> for [f64; 4] {
 impl From<Quatf> for [f64; 4] {
     fn from(q: Quatf) -> Self {
         [q.w as f64, q.x as f64, q.y as f64, q.z as f64]
+    }
+}
+
+/// The matrix that turns as `rotation` does (C++ `GfMatrix4d::SetRotate`).
+impl From<Rotation> for Mat4d {
+    fn from(rotation: Rotation) -> Self {
+        Mat4d::from_quat(rotation.quat())
     }
 }
 
@@ -987,6 +1019,11 @@ pub(crate) mod tests {
         assert!(p.z.abs() < 1e-5);
     }
 
+    /// The matrix that turns by `degrees` about `axis`.
+    pub(crate) fn turn(axis: [f64; 3], degrees: f64) -> Mat4d {
+        Rotation::new(axis.into(), degrees).into()
+    }
+
     pub(crate) fn assert_close(got: Mat4d, want: Mat4d) {
         for i in 0..16 {
             assert!((got[i] - want[i]).abs() < 1e-9, "{got:?} != {want:?}");
@@ -1042,9 +1079,9 @@ pub(crate) mod tests {
             (Vec3d { x: 0.0, y: 1.0, z: 0.0 }, 170.0),
             (Vec3d { x: 0.0, y: 0.0, z: 1.0 }, 170.0),
         ] {
-            let m = Mat4d::from_quat(Rotation::new(axis, degrees).quat()) * translation(1.0, 2.0, 3.0);
+            let m = Mat4d::from(Rotation::new(axis, degrees)) * translation(1.0, 2.0, 3.0);
             assert_eq!(m.extract_translation(), Vec3d { x: 1.0, y: 2.0, z: 3.0 });
-            let back = Mat4d::from_quat(m.extract_rotation().quat()) * translation(1.0, 2.0, 3.0);
+            let back = Mat4d::from(m.extract_rotation()) * translation(1.0, 2.0, 3.0);
             assert_close(back, m);
         }
     }

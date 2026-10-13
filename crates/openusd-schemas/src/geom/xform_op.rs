@@ -222,7 +222,7 @@ impl XformOpKind {
             Self::Orient => value.cast::<[f64; 4]>().ok().map(|q| {
                 let rotation = gf::Rotation::from_quat(gf::Quatd::from(q));
                 let rotation = if inverse { rotation.inverse() } else { rotation };
-                gf::Mat4d::from_quat(rotation.quat())
+                gf::Mat4d::from(rotation)
             }),
         };
         Some(matrix.unwrap_or(gf::Mat4d::IDENTITY))
@@ -394,7 +394,7 @@ impl XformOp {
 fn rotation(axis: usize, degrees: f64) -> gf::Mat4d {
     let mut unit = gf::Vec3d::default();
     unit[axis] = 1.0;
-    gf::Mat4d::from_quat(gf::Rotation::new(unit, degrees).quat())
+    gf::Mat4d::from(gf::Rotation::new(unit, degrees))
 }
 
 #[cfg(test)]

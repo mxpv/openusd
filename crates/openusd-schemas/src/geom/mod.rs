@@ -101,8 +101,10 @@
 //!
 //! A [`Camera`] prim reads as one [`openusd::gf::Camera`] value, placed in
 //! the world, through [`Camera::camera_at`], and [`Camera::set_from_camera`]
-//! authors one back as a single edit. [`Camera::linear_exposure_scale`] is
-//! the factor its exposure attributes scale an image by.
+//! authors one back as a single edit. The volume it sees is that value's
+//! [`frustum`](openusd::gf::Camera::frustum).
+//! [`Camera::linear_exposure_scale`] is the factor its exposure attributes
+//! scale an image by.
 //!
 //! # Stage metrics
 //!

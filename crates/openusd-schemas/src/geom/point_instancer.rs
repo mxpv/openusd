@@ -149,7 +149,7 @@ impl<'a> InstanceArrays<'a> {
                     if let Some(&velocity) = self.angular_velocities.get(index) {
                         let axis = gf::Vec3d::from(velocity);
                         let degrees = spin_delta * f64::from(velocity.length());
-                        xform = xform * gf::Mat4d::from_quat(gf::Rotation::new(axis, degrees).quat());
+                        xform = xform * gf::Mat4d::from(gf::Rotation::new(axis, degrees));
                     }
                 }
                 let position = position_after(

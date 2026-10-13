@@ -87,7 +87,7 @@ impl Rotation {
             axes[(2, c)] = axis.z;
         }
         // The rotation in the frame whose X, Y and Z are the three axes.
-        let m = axes.transpose() * Mat4d::from_quat(self.quat()) * axes;
+        let m = axes.transpose() * Mat4d::from(self) * axes;
 
         // Ken Shoemake's Euler angle conversion (Graphics Gems IV, p. 222).
         let (i, j, k) = (0, 1, 2);
@@ -108,6 +108,11 @@ impl Rotation {
             y: angles[1].to_degrees(),
             z: angles[2].to_degrees(),
         }
+    }
+
+    /// The direction `v` turned by this rotation (C++ `TransformDir`).
+    pub fn transform_dir(self, v: Vec3d) -> Vec3d {
+        Mat4d::from(self).transform_dir(v)
     }
 
     /// The rotation as a unit quaternion (C++ `GetQuat`).

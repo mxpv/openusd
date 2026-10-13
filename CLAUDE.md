@@ -138,9 +138,10 @@ source of truth for specifics.
   open-or-closed-ended span a time-sample query is asked over;
   `gf::Range3d` and `gf::BBox3d` (C++ `GfRange3d`, `GfBBox3d`), the
   axis-aligned box and the box-with-a-matrix that bounds are computed in; and
-  `gf::Camera` (C++ `GfCamera`), a camera as a plain value, with
-  `gf::ProjectionParams` for the volume a projection matrix sees. See
-  `gf/mod.rs` for the conventions.
+  `gf::Camera` and `gf::Frustum` (C++ `GfCamera`, `GfFrustum`), a camera
+  as a plain value and the volume it sees, with `gf::ProjectionParams` for
+  what a projection matrix projects and `gf::Plane` and `gf::Ray` for the
+  frustum's intersection tests. See `gf/mod.rs` for the conventions.
 
 ## Development Commands
 

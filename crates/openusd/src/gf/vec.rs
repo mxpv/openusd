@@ -123,6 +123,24 @@ impl IndexMut<usize> for Vec2d {
 }
 
 impl Vec2d {
+    /// The lesser of this vector and `other` along each axis. A component
+    /// that is NaN in one is taken from the other.
+    pub fn min(self, other: Vec2d) -> Vec2d {
+        Vec2d {
+            x: self.x.min(other.x),
+            y: self.y.min(other.y),
+        }
+    }
+
+    /// The greater of this vector and `other` along each axis. A component
+    /// that is NaN in one is taken from the other.
+    pub fn max(self, other: Vec2d) -> Vec2d {
+        Vec2d {
+            x: self.x.max(other.x),
+            y: self.y.max(other.y),
+        }
+    }
+
     pub fn lerp(self, other: Self, t: f64) -> Self {
         self + (other - self) * t
     }

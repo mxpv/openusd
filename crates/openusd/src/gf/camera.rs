@@ -1,6 +1,6 @@
 //! `GfCamera` — a camera as a plain value: where it sits and what it sees.
 
-use super::{Mat4d, Projection, ProjectionParams, Range1f, Vec4f};
+use super::{Frustum, Mat4d, Projection, ProjectionParams, Range1d, Range1f, Range2d, Vec2d, Vec4f};
 
 /// A camera's placement, projection and lens, with no scene behind it (C++
 /// `GfCamera`).
@@ -213,6 +213,36 @@ impl Camera {
         true
     }
 
+    /// The volume the camera sees (C++ `GetFrustum`).
+    ///
+    /// The film back, moved by its offsets, is the frustum's window: as it
+    /// is for an orthographic camera, and brought to a distance of one for a
+    /// perspective camera, by its focal length. A perspective camera of no
+    /// focal length keeps the film back as its window. The frustum is placed
+    /// as [`Frustum::set_position_and_rotation`] reads the transform, so a
+    /// scale in it is left out.
+    pub fn frustum(&self) -> Frustum {
+        let half = Vec2d {
+            x: f64::from(self.horizontal_aperture / 2.0),
+            y: f64::from(self.vertical_aperture / 2.0),
+        };
+        let offset = Vec2d {
+            x: f64::from(self.horizontal_aperture_offset),
+            y: f64::from(self.vertical_aperture_offset),
+        };
+        // The film back about the lens axis, moved by its offsets, in world
+        // units.
+        let mut window = (Range2d::new(-half, half) + Range2d::new(offset, offset)) * Self::APERTURE_UNIT;
+        if self.projection != Projection::Orthographic && self.focal_length != 0.0 {
+            window = window / (f64::from(self.focal_length) * Self::FOCAL_LENGTH_UNIT);
+        }
+        let near_far = Range1d::new(
+            f64::from(self.clipping_range.min()),
+            f64::from(self.clipping_range.max()),
+        );
+        Frustum::from_matrix(self.transform, window, near_far, self.projection)
+    }
+
     /// The aperture measured along `direction`.
     fn aperture(&self, direction: FovDirection) -> f32 {
         match direction {
@@ -244,7 +274,7 @@ impl Default for Camera {
 mod tests {
     use super::{Camera, FovDirection, Projection};
     use crate::gf;
-    use crate::gf::matrix::tests::assert_close;
+    use crate::gf::matrix::tests::{assert_close, turn};
 
     fn close(got: f32, want: f32) -> bool {
         (got - want).abs() < 1e-5
@@ -423,6 +453,179 @@ mod tests {
             let mut camera = before.clone();
             assert!(!camera.set_from_view_and_projection(view, projection, 35.0));
             assert_eq!(camera, before);
+        }
+    }
+
+    fn assert_corners(camera: &Camera, expected: [[f64; 3]; 8], tolerance: f64) {
+        for (corner, expected) in camera.frustum().corners().into_iter().zip(expected) {
+            assert!(
+                (corner - gf::Vec3d::from(expected)).length() < tolerance,
+                "{corner:?} is not {expected:?}"
+            );
+        }
+    }
+
+    /// The corners C++ computes for a camera under a transform that scales,
+    /// in perspective and as three orthographic cameras of one size.
+    #[test]
+    fn frustum_corners_scaled() {
+        let transform = turn([1.0, 2.0, 3.0], 20.3)
+            * gf::Mat4d::translation([100.0, 123.0, 153.0])
+            * gf::Mat4d::scale([2.0, 1.0, 1.3]);
+        let mut camera = Camera {
+            transform,
+            clipping_range: gf::Range1f::new(10.0, 100.0),
+            ..Camera::default()
+        };
+        camera.set_perspective(2.4, 29.732_195, FovDirection::Vertical, 34.0);
+        assert_corners(
+            &camera,
+            [
+                [192.846230529544, 118.9700660570964, 189.943705234630],
+                [204.624699588231, 123.2629367321672, 187.667234572988],
+                [191.159053763979, 123.9580649710064, 190.620399628732],
+                [202.937522822666, 128.2509356460773, 188.343928967090],
+                [128.462305295447, 82.70066057096416, 109.337052346305],
+                [246.246995882312, 125.6293673216727, 86.5723457298875],
+                [111.590537639799, 132.5806497100646, 116.103996287320],
+                [229.375228226663, 175.5093564607731, 93.3392896709023],
+            ],
+            1e-6,
+        );
+
+        let orthographic = [
+            [184.427743371372, 111.227660346205, 191.278291105439],
+            [215.858183043795, 122.683038129349, 185.203607422842],
+            [179.925570308415, 124.537963573823, 193.084026778878],
+            [211.356009980839, 135.993341356968, 187.009343096281],
+            [165.454633456322, 116.722168010487, 103.472645013183],
+            [196.885073128745, 128.177545793631, 97.3979613305862],
+            [160.952460393365, 130.032471238105, 105.278380686621],
+            [192.382900065789, 141.487849021250, 99.2036970040248],
+        ];
+        camera.horizontal_aperture = 340.0;
+        camera.vertical_aperture = 340.0 / 2.4;
+        camera.projection = Projection::Orthographic;
+        assert_corners(&camera, orthographic, 1e-6);
+
+        let sized = |size: f32, direction: FovDirection| {
+            let mut camera = Camera {
+                transform,
+                clipping_range: gf::Range1f::new(10.0, 100.0),
+                ..Camera::default()
+            };
+            camera.set_orthographic(2.4, size, direction);
+            camera
+        };
+        assert_corners(&sized(34.0, FovDirection::Horizontal), orthographic, 1e-6);
+        assert_corners(&sized(34.0 / 2.4, FovDirection::Vertical), orthographic, 1e-4);
+    }
+
+    /// The corners C++ computes for a camera under a rigid transform.
+    #[test]
+    fn frustum_corners_rigid() {
+        let transform = turn([1.0, -2.0, 3.0], 30.3) * gf::Mat4d::translation([-100.0, 123.0, 153.0]);
+        let mut camera = Camera {
+            transform,
+            clipping_range: gf::Range1f::new(10.0, 100.0),
+            ..Camera::default()
+        };
+        camera.set_perspective(2.4, 29.732_195, FovDirection::Vertical, 34.0);
+        assert_corners(
+            &camera,
+            [
+                [-102.032919327869, 120.085637354940, 141.38080336149],
+                [-90.9077235508873, 124.991168793969, 145.18989392187],
+                [-104.284096916572, 124.876540072942, 141.78585214522],
+                [-93.1589011395900, 129.782071511971, 145.59494270559],
+                [-120.329193278696, 93.8563735494037, 36.808033614959],
+                [-9.07723550887376, 142.911687939691, 74.898939218725],
+                [-142.840969165722, 141.765400729428, 40.858521452219],
+                [-31.5890113959001, 190.820715119715, 78.949427055984],
+            ],
+            1e-6,
+        );
+
+        camera.horizontal_aperture = 340.0;
+        camera.vertical_aperture = 340.0 / 2.4;
+        camera.projection = Projection::Orthographic;
+        assert_corners(
+            &camera,
+            [
+                [-109.435916189226, 111.996553352311, 137.8652300230474],
+                [-79.748713805783, 125.086795317320, 148.0296572052388],
+                [-115.443106661676, 124.780913549591, 138.9460888618555],
+                [-85.755904278233, 137.871155514600, 149.1105160440469],
+                [-87.799108292794, 129.401243253415, 52.2560873249726],
+                [-58.111905909352, 142.491485218423, 62.4205145071640],
+                [-93.806298765244, 142.185603450695, 53.3369461637807],
+                [-64.119096381802, 155.275845415703, 63.5013733459721],
+            ],
+            1e-6,
+        );
+    }
+
+    /// An aperture offset moves the window, and the default clipping range
+    /// reaches a million units out.
+    #[test]
+    fn frustum_with_offset() {
+        let camera = Camera {
+            vertical_aperture_offset: 1.2,
+            ..Camera::default()
+        };
+        assert_corners(
+            &camera,
+            [
+                [-0.20954999923706, -0.128907999992370, -1.0],
+                [0.209549999237060, -0.128907999992370, -1.0],
+                [-0.20954999923706, 0.1769080018997192, -1.0],
+                [0.209549999237060, 0.1769080018997192, -1.0],
+                [-209549.999237060, -128907.9999923706, -1000000.0],
+                [209549.9992370605, -128907.9999923706, -1000000.0],
+                [-209549.999237060, 176908.00189971924, -1000000.0],
+                [209549.9992370605, 176908.00189971924, -1000000.0],
+            ],
+            1e-4,
+        );
+    }
+
+    /// A camera comes back from the view and projection matrices of its own
+    /// frustum.
+    #[test]
+    fn frustum_matrices_round_trip() {
+        for projection in [Projection::Perspective, Projection::Orthographic] {
+            let camera = Camera {
+                transform: turn([1.0, -2.0, 3.0], 30.3) * gf::Mat4d::translation([-100.0, 123.0, 153.0]),
+                projection,
+                horizontal_aperture: 36.0,
+                vertical_aperture: 24.0,
+                horizontal_aperture_offset: 1.5,
+                vertical_aperture_offset: -2.5,
+                focal_length: 35.0,
+                clipping_range: gf::Range1f::new(0.5, 200.0),
+                f_stop: 4.0,
+                ..Camera::default()
+            };
+            let frustum = camera.frustum();
+            let mut read = Camera {
+                f_stop: 4.0,
+                ..Camera::default()
+            };
+            assert!(read.set_from_view_and_projection(frustum.view_matrix(), frustum.projection_matrix(), 35.0));
+
+            assert_close(read.transform, camera.transform);
+            assert_eq!(read.projection, projection);
+            let pairs = [
+                (read.horizontal_aperture, camera.horizontal_aperture),
+                (read.vertical_aperture, camera.vertical_aperture),
+                (read.horizontal_aperture_offset, camera.horizontal_aperture_offset),
+                (read.vertical_aperture_offset, camera.vertical_aperture_offset),
+                (read.clipping_range.min(), camera.clipping_range.min()),
+                (read.clipping_range.max(), camera.clipping_range.max()),
+            ];
+            for (got, want) in pairs {
+                assert!((got - want).abs() < 1e-3 * want.abs().max(1.0), "{got} is not {want}");
+            }
         }
     }
 }
