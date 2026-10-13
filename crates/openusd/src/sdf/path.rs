@@ -1,5 +1,7 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
-use std::{convert::Infallible, fmt, str::FromStr};
+use std::{cmp, convert::Infallible, fmt, str::FromStr};
 
 use crate::tf;
 
@@ -47,14 +49,26 @@ pub fn try_into_path(path: impl IntoPath) -> Result<Path, PathParseError> {
 /// however they are reached.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Path {
-    path: Arc<String>,
+    path: Arc<Text>,
 }
 
 /// The text of the empty path, shared by every [`Path::default`].
-static EMPTY: LazyLock<Arc<String>> = LazyLock::new(Arc::default);
+static EMPTY: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(String::new())));
 
 /// The text of the absolute root path, shared by every [`Path::abs_root`].
-static ABS_ROOT: LazyLock<Arc<String>> = LazyLock::new(|| Arc::new(String::from("/")));
+static ABS_ROOT: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(String::from("/"))));
+
+/// A path's shared text and its hash.
+///
+/// Clones of a [`Path`] share one `Text`, whose hash is computed once, when
+/// the path is made. A path keying several maps, or one map many times, does
+/// not read its text again to hash it. Equality and ordering compare the text.
+struct Text {
+    text: String,
+    /// The text's hash under a fixed-key hasher. Equal texts in separate
+    /// allocations hash alike.
+    hash: u64,
+}
 
 impl Default for Path {
     /// The empty path.
@@ -112,9 +126,7 @@ impl FromStr for Path {
 
     fn from_str(s: &str) -> Result<Path, Self::Err> {
         Path::validate(s)?;
-        Ok(Path {
-            path: s.to_owned().into(),
-        })
+        Ok(Path::from_text(s.to_owned()))
     }
 }
 
@@ -132,6 +144,13 @@ impl Path {
         Path { path: ABS_ROOT.clone() }
     }
 
+    /// Wraps already-validated `text`.
+    fn from_text(text: String) -> Path {
+        Path {
+            path: Arc::new(Text::new(text)),
+        }
+    }
+
     /// Wraps `path` without validating it — the fast path for strings a
     /// derivation method recombined from already-validated paths. External
     /// input must go through [`Path::new`].
@@ -145,9 +164,7 @@ impl Path {
         match path {
             "" => Path::default(),
             "/" => Path::abs_root(),
-            _ => Path {
-                path: path.to_owned().into(),
-            },
+            _ => Path::from_text(path.to_owned()),
         }
     }
 
@@ -203,7 +220,7 @@ impl Path {
         new_path.push('.');
         new_path.push_str(property);
 
-        Ok(Path { path: new_path.into() })
+        Ok(Path::from_text(new_path))
     }
 
     /// Appends `path` (parsed if given as a string) under this path with a `/`
@@ -262,7 +279,7 @@ impl Path {
             format!("{}/{}", self.path, append.path)
         };
 
-        Ok(Path { path: combined.into() })
+        Ok(Path::from_text(combined))
     }
 
     pub fn is_property(&self) -> bool {
@@ -1365,7 +1382,7 @@ impl TryFrom<String> for Path {
     /// Validates `value` and shares its existing text allocation.
     fn try_from(value: String) -> Result<Path, PathParseError> {
         Path::validate(&value)?;
-        Ok(Path { path: value.into() })
+        Ok(Path::from_text(value))
     }
 }
 
@@ -1374,6 +1391,63 @@ impl TryFrom<&String> for Path {
 
     fn try_from(value: &String) -> Result<Path, PathParseError> {
         Path::new(value)
+    }
+}
+
+impl Text {
+    fn new(text: String) -> Self {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        Self {
+            hash: hasher.finish(),
+            text,
+        }
+    }
+}
+
+impl Deref for Text {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl Hash for Text {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+impl PartialEq for Text {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.text == other.text
+    }
+}
+
+impl Eq for Text {}
+
+impl PartialOrd for Text {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Text {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.text.cmp(&other.text)
+    }
+}
+
+impl fmt::Debug for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.text, f)
+    }
+}
+
+impl fmt::Display for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.text, f)
     }
 }
 
@@ -1460,9 +1534,7 @@ mod tests {
     /// Builds a `Path` directly from `path`, skipping validation — for
     /// exercising lenient read-side behavior on malformed input.
     fn raw(path: &str) -> Path {
-        Path {
-            path: path.to_owned().into(),
-        }
+        Path::from_text(path.to_owned())
     }
 
     #[test]
