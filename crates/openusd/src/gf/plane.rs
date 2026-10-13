@@ -114,13 +114,13 @@ impl Plane {
     /// The plane under `matrix` (C++ `Transform`), or `None` where the
     /// matrix has no inverse.
     pub fn transformed(self, matrix: Mat4d) -> Option<Plane> {
-        Some(self.under_inverse(matrix.inverse()?))
+        Some(self.under_inverse_transpose(matrix.inverse()?.transpose()))
     }
 
-    /// The plane under the transform whose inverse is `inverse`. A plane's
-    /// equation is carried by the transpose of that inverse.
-    pub(super) fn under_inverse(self, inverse: Mat4d) -> Plane {
-        Plane::from_equation(inverse.transpose().transform_homogeneous(self.equation()))
+    /// The plane under a transform, given the transpose of that transform's
+    /// inverse, which is the matrix a plane's equation is carried by.
+    pub(super) fn under_inverse_transpose(self, inverse_transpose: Mat4d) -> Plane {
+        Plane::from_equation(inverse_transpose.transform_homogeneous(self.equation()))
     }
 }
 

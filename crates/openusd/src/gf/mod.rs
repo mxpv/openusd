@@ -53,7 +53,7 @@ mod vec;
 
 pub use bbox::BBox3d;
 pub use camera::{Camera, FovDirection};
-pub use frustum::Frustum;
+pub use frustum::{Frustum, FrustumPlanes};
 pub use half::f16;
 pub use interval::Interval;
 pub use matrix::{Factors, Mat2d, Mat3d, Mat4d};

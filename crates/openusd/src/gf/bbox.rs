@@ -70,6 +70,11 @@ impl BBox3d {
         self.inverse.unwrap_or(Mat4d::IDENTITY)
     }
 
+    /// Whether the matrix has no inverse.
+    pub const fn is_degenerate(&self) -> bool {
+        self.inverse.is_none()
+    }
+
     /// Replace the matrix, keeping the box (C++ `SetMatrix`).
     pub fn set_matrix(&mut self, matrix: Mat4d) {
         self.matrix = matrix;

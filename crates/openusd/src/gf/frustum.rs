@@ -27,8 +27,8 @@ use super::{
 /// assert!((frustum.fov(gf::FovDirection::Vertical) - 60.0).abs() < 1e-12);
 /// assert!((frustum.aspect_ratio() - 16.0 / 9.0).abs() < 1e-12);
 ///
-/// assert!(frustum.intersects_point(gf::vec3d(0.0, 0.0, -5.0)));
-/// assert!(!frustum.intersects_point(gf::vec3d(0.0, 0.0, 5.0)));
+/// assert!(frustum.planes().intersects_point(gf::vec3d(0.0, 0.0, -5.0)));
+/// assert!(!frustum.planes().intersects_point(gf::vec3d(0.0, 0.0, 5.0)));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Frustum {
@@ -374,15 +374,12 @@ impl Frustum {
         self.past_near(self.ray_to(world_point))
     }
 
-    /// The six planes that bound the volume, each facing into it: left,
-    /// right, bottom, top, near and far.
-    // TODO(perf): the planes depend on the frustum's fields alone, and each
-    // `intersects_*` test builds them again. A caller testing many boxes or
-    // points against one frustum would build them once if the tests were
-    // offered over a `[Plane; 6]` it holds.
-    pub fn planes(&self) -> [Plane; 6] {
+    /// The six planes that bound the volume, with the tests of a box, a
+    /// point, a segment and a triangle against it (C++ `Intersects`).
+    pub fn planes(&self) -> FrustumPlanes {
         let (near, far) = (self.near_far.min(), self.near_far.max());
-        let [lb, rb, lt, rt] = self.corners_at(near);
+        let to_world = self.view_inverse();
+        let [lb, rb, lt, rt] = self.corners_in(to_world, near);
 
         let sides = match self.projection {
             // Each side runs from the position through an edge of the near
@@ -413,69 +410,10 @@ impl Frustum {
             -near_plane.normal(),
             -(near_plane.distance_from_origin() + (far - near)),
         );
-        [sides[0], sides[1], sides[2], sides[3], near_plane, far_plane]
-    }
-
-    /// Whether any of `bbox` is inside the volume (C++ `Intersects` of a
-    /// box). An empty box is not.
-    ///
-    /// The box is turned away only when it is wholly behind one of the six
-    /// planes, so a box near a corner of the volume can be reported inside
-    /// when it is just outside. A box whose matrix has no inverse is tested
-    /// as its range stands, with no matrix.
-    pub fn intersects_bbox(&self, bbox: &BBox3d) -> bool {
-        let range = bbox.range();
-        // Each plane is brought into the box's own space, where the box is
-        // aligned to the axes, by the inverse of the matrix that takes the
-        // world there.
-        let to_world = bbox.inverse_matrix().inverse().unwrap_or(Mat4d::IDENTITY);
-        !range.is_empty()
-            && self
-                .planes()
-                .iter()
-                .all(|plane| plane.under_inverse(to_world).reaches_positive_side(range))
-    }
-
-    /// Whether `point` is inside the volume or on its boundary (C++
-    /// `Intersects` of a point).
-    pub fn intersects_point(&self, point: Vec3d) -> bool {
-        self.planes().iter().all(|plane| plane.on_positive_side(point))
-    }
-
-    /// Whether any of the segment from `p0` to `p1` is inside the volume
-    /// (C++ `Intersects` of a segment).
-    pub fn intersects_segment(&self, p0: Vec3d, p1: Vec3d) -> bool {
-        let planes = self.planes();
-        segment_intersects(&planes, (p0, inside_mask(&planes, p0)), (p1, inside_mask(&planes, p1)))
-    }
-
-    /// Whether any of the triangle of three points is inside the volume
-    /// (C++ `Intersects` of a triangle).
-    pub fn intersects_triangle(&self, p0: Vec3d, p1: Vec3d, p2: Vec3d) -> bool {
-        let planes = self.planes();
-        let corners = [p0, p1, p2].map(|p| (p, inside_mask(&planes, p)));
-        let masks = corners.map(|(_, mask)| mask);
-
-        // All three behind one plane.
-        if masks.iter().fold(0, |all, mask| all | mask) != ALL_PLANES {
-            return false;
+        FrustumPlanes {
+            frustum: *self,
+            planes: [sides[0], sides[1], sides[2], sides[3], near_plane, far_plane],
         }
-        if masks.contains(&ALL_PLANES) {
-            return true;
-        }
-        if (0..3).any(|i| segment_intersects(&planes, corners[i], corners[(i + 1) % 3])) {
-            return true;
-        }
-
-        // What is left is a triangle that surrounds the volume, which a
-        // line of sight along one of its corners then passes through. One
-        // corner settles it where the triangle lies between the near and far
-        // planes. Where one of those planes cuts it, all four are tried.
-        let between = masks.iter().all(|mask| mask & NEAR_AND_FAR == NEAR_AND_FAR);
-        let lines = [(-1.0, -1.0), (-1.0, 1.0), (1.0, 1.0), (1.0, -1.0)];
-        lines[..if between { 1 } else { 4 }]
-            .iter()
-            .any(|&(x, y)| self.pick_ray(Vec2d { x, y }).intersect_triangle(p0, p1, p2).is_some())
     }
 
     /// Whether any of `bbox` is inside the volume a view-projection matrix
@@ -569,11 +507,112 @@ impl Default for Frustum {
     }
 }
 
+/// The six planes that bound a [`Frustum`], built once to test many things
+/// against it.
+///
+/// Each plane faces into the volume. The planes are of a copy of the
+/// frustum, so a later change to it leaves them as they are.
+///
+/// ```
+/// use openusd::gf;
+///
+/// let planes = gf::Frustum::default().planes();
+/// let seen: Vec<bool> = [-5.0, 5.0, -50.0]
+///     .into_iter()
+///     .map(|z| planes.intersects_point(gf::vec3d(0.0, 0.0, z)))
+///     .collect();
+/// assert_eq!(seen, [true, false, false]);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrustumPlanes {
+    /// The frustum the planes bound.
+    frustum: Frustum,
+    /// Left, right, bottom, top, near and far.
+    planes: [Plane; 6],
+}
+
+impl FrustumPlanes {
+    /// The planes, each facing into the volume: left, right, bottom, top,
+    /// near and far.
+    pub fn as_array(&self) -> &[Plane; 6] {
+        &self.planes
+    }
+
+    /// Whether any of `bbox` is inside the volume (C++ `Intersects` of a
+    /// box). An empty box is not.
+    ///
+    /// The box is turned away only when it is wholly behind one of the six
+    /// planes, so a box near a corner of the volume can be reported inside
+    /// when it is just outside. A box whose matrix has no inverse is tested
+    /// as its range stands, with no matrix.
+    pub fn intersects_bbox(&self, bbox: &BBox3d) -> bool {
+        let range = bbox.range();
+        if range.is_empty() {
+            return false;
+        }
+        // Each plane is brought into the box's own space, where the box is
+        // aligned to the axes. The box's matrix is the inverse of the one
+        // that takes the world there, and its transpose carries a plane.
+        let to_local = match bbox.is_degenerate() {
+            true => Mat4d::IDENTITY,
+            false => bbox.matrix().transpose(),
+        };
+        self.planes
+            .iter()
+            .all(|plane| plane.under_inverse_transpose(to_local).reaches_positive_side(range))
+    }
+
+    /// Whether `point` is inside the volume or on its boundary (C++
+    /// `Intersects` of a point).
+    pub fn intersects_point(&self, point: Vec3d) -> bool {
+        self.planes.iter().all(|plane| plane.on_positive_side(point))
+    }
+
+    /// Whether any of the segment from `p0` to `p1` is inside the volume
+    /// (C++ `Intersects` of a segment).
+    pub fn intersects_segment(&self, p0: Vec3d, p1: Vec3d) -> bool {
+        let planes = &self.planes;
+        segment_intersects(planes, (p0, inside_mask(planes, p0)), (p1, inside_mask(planes, p1)))
+    }
+
+    /// Whether any of the triangle of three points is inside the volume
+    /// (C++ `Intersects` of a triangle).
+    pub fn intersects_triangle(&self, p0: Vec3d, p1: Vec3d, p2: Vec3d) -> bool {
+        let planes = &self.planes;
+        let corners = [p0, p1, p2].map(|p| (p, inside_mask(planes, p)));
+        let masks = corners.map(|(_, mask)| mask);
+
+        // All three behind one plane.
+        if masks.iter().fold(0, |all, mask| all | mask) != ALL_PLANES {
+            return false;
+        }
+        if masks.contains(&ALL_PLANES) {
+            return true;
+        }
+        if (0..3).any(|i| segment_intersects(planes, corners[i], corners[(i + 1) % 3])) {
+            return true;
+        }
+
+        // What is left is a triangle that surrounds the volume, which a
+        // line of sight along one of its corners then passes through. One
+        // corner settles it where the triangle lies between the near and far
+        // planes. Where one of those planes cuts it, all four are tried.
+        let between = masks.iter().all(|mask| mask & NEAR_AND_FAR == NEAR_AND_FAR);
+        let lines = [(-1.0, -1.0), (-1.0, 1.0), (1.0, 1.0), (1.0, -1.0)];
+        lines[..if between { 1 } else { 4 }].iter().any(|&(x, y)| {
+            self.frustum
+                .pick_ray(Vec2d { x, y })
+                .intersect_triangle(p0, p1, p2)
+                .is_some()
+        })
+    }
+}
+
 /// The mask of a point inside all six planes.
 const ALL_PLANES: u32 = 0x3f;
 
 /// The bits of the near and far planes, the fifth and sixth of
-/// [`Frustum::planes`].
+/// [`FrustumPlanes::as_array`].
 const NEAR_AND_FAR: u32 = 0x30;
 
 /// One bit for each of `planes` that `point` is on the inner side of.
@@ -868,19 +907,19 @@ mod tests {
             for sign in [-0.9, 0.9] {
                 let mut point = gf::Vec3d::default();
                 point[axis] = sign;
-                assert!(f.intersects_point(point), "{point:?}");
+                assert!(f.planes().intersects_point(point), "{point:?}");
             }
         }
-        assert!(f.intersects_point(gf::Vec3d::default()));
+        assert!(f.planes().intersects_point(gf::Vec3d::default()));
 
         let mut f = Frustum::default();
         f.fit_to_sphere(gf::vec3d(1.0, 1.0, 1.0), 1.0, 0.2);
-        assert!(f.intersects_point(gf::vec3d(1.0, 1.0, 1.0)));
+        assert!(f.planes().intersects_point(gf::vec3d(1.0, 1.0, 1.0)));
         for axis in 0..3 {
             for reach in [-1.1, 1.1] {
                 let mut point = gf::vec3d(1.0, 1.0, 1.0);
                 point[axis] += reach;
-                assert!(f.intersects_point(point), "{point:?}");
+                assert!(f.planes().intersects_point(point), "{point:?}");
             }
         }
     }
@@ -1003,36 +1042,55 @@ mod tests {
         let f = Frustum::default();
         let v = |x: f64, y: f64, z: f64| gf::vec3d(x, y, z);
 
-        assert!(!f.intersects_bbox(&gf::BBox3d::default()));
+        assert!(!f.planes().intersects_bbox(&gf::BBox3d::default()));
         let unit = gf::Range3d::new(v(-1.0, -1.0, -1.0), v(1.0, 1.0, 1.0));
-        assert!(f.intersects_bbox(&gf::BBox3d::from(unit)));
+        assert!(f.planes().intersects_bbox(&gf::BBox3d::from(unit)));
         // A box the frustum only reaches once its matrix has moved it.
         let moved = gf::BBox3d::new(unit, gf::Mat4d::translation([0.0, 0.0, 20.0]));
-        assert!(!f.intersects_bbox(&moved));
+        assert!(!f.planes().intersects_bbox(&moved));
         let moved = gf::BBox3d::new(unit, gf::Mat4d::translation([0.0, 0.0, -5.0]));
-        assert!(f.intersects_bbox(&moved));
+        assert!(f.planes().intersects_bbox(&moved));
         // A matrix with no inverse leaves the range to be tested as it is.
         let flat = gf::Mat4d::scale([1.0, 0.0, 1.0]) * gf::Mat4d::translation([0.0, 0.0, 20.0]);
-        assert!(f.intersects_bbox(&gf::BBox3d::new(unit, flat)));
+        assert!(f.planes().intersects_bbox(&gf::BBox3d::new(unit, flat)));
 
-        assert!(f.intersects_point(v(0.0, 0.0, -1.0)));
-        assert!(!f.intersects_point(v(0.0, 0.0, 0.0)));
+        assert!(f.planes().intersects_point(v(0.0, 0.0, -1.0)));
+        assert!(!f.planes().intersects_point(v(0.0, 0.0, 0.0)));
 
         let origin = v(0.0, 0.0, 0.0);
-        assert!(!f.intersects_triangle(origin, v(1.0, 1.0, 1.0), v(0.0, 0.0, 1.0)));
-        assert!(f.intersects_triangle(origin, v(-1.0, -1.0, -1.0), v(0.0, 0.0, 1.0)));
-        assert!(!f.intersects_triangle(v(0.0, 100.0, -100.0), v(-100.0, -100.0, 100.0), v(100.0, -100.0, 100.0)));
+        assert!(
+            !f.planes()
+                .intersects_triangle(origin, v(1.0, 1.0, 1.0), v(0.0, 0.0, 1.0))
+        );
+        assert!(
+            f.planes()
+                .intersects_triangle(origin, v(-1.0, -1.0, -1.0), v(0.0, 0.0, 1.0))
+        );
+        assert!(!f.planes().intersects_triangle(
+            v(0.0, 100.0, -100.0),
+            v(-100.0, -100.0, 100.0),
+            v(100.0, -100.0, 100.0)
+        ));
         // A triangle that surrounds the volume, cut by the near plane.
-        assert!(f.intersects_triangle(v(0.0, 10.0, 100.0), v(-100.0, -10.0, -10.0), v(100.0, -10.0, -10.0)));
-        assert!(f.intersects_triangle(v(0.0, 1.0, 1.0), v(50.0, 0.0, -50.0), v(-50.0, 0.0, -50.0)));
+        assert!(
+            f.planes()
+                .intersects_triangle(v(0.0, 10.0, 100.0), v(-100.0, -10.0, -10.0), v(100.0, -10.0, -10.0))
+        );
+        assert!(
+            f.planes()
+                .intersects_triangle(v(0.0, 1.0, 1.0), v(50.0, 0.0, -50.0), v(-50.0, 0.0, -50.0))
+        );
         // One that surrounds it between the near and far planes.
-        assert!(f.intersects_triangle(v(0.0, 100.0, -5.0), v(-100.0, -100.0, -5.0), v(100.0, -100.0, -5.0)));
+        assert!(
+            f.planes()
+                .intersects_triangle(v(0.0, 100.0, -5.0), v(-100.0, -100.0, -5.0), v(100.0, -100.0, -5.0))
+        );
 
-        assert!(f.intersects_segment(origin, v(1.0, 1.0, -1.0)));
-        assert!(f.intersects_segment(v(-100.0, 0.0, -1.0), v(100.0, 0.0, -1.0)));
-        assert!(f.intersects_segment(v(0.0, 100.0, -1.0), v(0.0, -100.0, -1.0)));
-        assert!(!f.intersects_segment(v(-100.0, 0.0, 1.0), v(100.0, 0.0, -1.0)));
-        assert!(!f.intersects_segment(origin, v(1.0, 1.0, 1.0)));
+        assert!(f.planes().intersects_segment(origin, v(1.0, 1.0, -1.0)));
+        assert!(f.planes().intersects_segment(v(-100.0, 0.0, -1.0), v(100.0, 0.0, -1.0)));
+        assert!(f.planes().intersects_segment(v(0.0, 100.0, -1.0), v(0.0, -100.0, -1.0)));
+        assert!(!f.planes().intersects_segment(v(-100.0, 0.0, 1.0), v(100.0, 0.0, -1.0)));
+        assert!(!f.planes().intersects_segment(origin, v(1.0, 1.0, 1.0)));
     }
 
     /// The planes face into the volume, in the order the masks read them.
@@ -1040,7 +1098,7 @@ mod tests {
     fn planes_face_inward() {
         for f in [Frustum::default(), orthographic()] {
             let inside = gf::vec3d(0.0, 0.0, -5.0);
-            let planes = f.planes();
+            let planes = *f.planes().as_array();
             assert!(planes.iter().all(|plane| plane.distance(inside) > 0.0));
             let outside = [
                 [-20.0, 0.0, -5.0],
