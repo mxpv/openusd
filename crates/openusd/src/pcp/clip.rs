@@ -315,6 +315,14 @@ impl ClipSet {
         self.active_position(stage_time).map(|position| self.active[position])
     }
 
+    /// The clip active at `stage_time`: the stage time it became active at
+    /// and its asset. `None` when no `active` entries are authored, or for an
+    /// entry naming an asset the set does not have.
+    pub(crate) fn active_asset(&self, stage_time: f64) -> Option<(f64, &AssetPath)> {
+        let (activation, index) = self.active_entry(stage_time)?;
+        Some((activation, self.asset_paths.get(index)?))
+    }
+
     /// The position in [`Self::active`] of the entry [`Self::active_entry`]
     /// selects at `stage_time`, or `None` when no `active` entries are
     /// authored.
@@ -780,7 +788,98 @@ pub(crate) struct ClipQuery<'a> {
     pub suffix: &'a str,
 }
 
+/// The clip a set reads an attribute from at one time, for a set that sources
+/// the attribute.
+struct ActiveClip<'a> {
+    /// The stage time the clip became active at.
+    activation: f64,
+    /// The clip's asset.
+    asset: &'a AssetPath,
+    /// The attribute's path inside the clip layers.
+    clip_path: Path,
+    /// The set's manifest layer, which declares the attribute.
+    manifest: String,
+}
+
 impl ClipCache {
+    /// The manifest layer of `resolved`, for a set whose manifest declares
+    /// the attribute at `clip_path`, and `None` for a set with no manifest
+    /// that does.
+    ///
+    /// The manifest declares which attributes the clips provide. A set that
+    /// declares the attribute owns its time-varying value: a gap in a clip
+    /// resolves to a manifest default or a value block, never to a weaker
+    /// value source.
+    fn declaring_manifest(
+        &mut self,
+        graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
+        resolved: &ResolvedClipSet,
+        prim: &Path,
+        clip_path: &Path,
+    ) -> Result<Option<String>, QueryError> {
+        let manifest = self.manifest_id(graph, diagnostics, resolved, prim)?;
+        Ok(match self.manifest_declares(graph, manifest.as_deref(), clip_path)? {
+            true => manifest,
+            false => None,
+        })
+    }
+
+    /// The attribute's path inside the clip layers and the manifest layer
+    /// that declares it, for a set that sources the attribute of `query`,
+    /// and `None` for a set that does not. A set sources an attribute its
+    /// manifest declares, where it has a schedule to select a clip by.
+    fn sourced(
+        &mut self,
+        graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
+        resolved: &ResolvedClipSet,
+        query: &ClipQuery<'_>,
+    ) -> Result<Option<(Path, String)>, QueryError> {
+        let set = &resolved.set;
+        // With no active schedule no clip is ever selected, so the set
+        // sources nothing and needs no manifest.
+        if set.active.is_empty() {
+            return Ok(None);
+        }
+        let clip_path = clip_attr_path(query, &set.clip_prim_path(query.anchor))?;
+        let manifest = self.declaring_manifest(graph, diagnostics, resolved, query.anchor, &clip_path)?;
+        Ok(manifest.map(|manifest| (clip_path, manifest)))
+    }
+
+    /// Whether `resolved` sources the attribute of `query`, and so answers a
+    /// read of it at any numeric time with a value or a block.
+    pub(super) fn sources_in_set(
+        &mut self,
+        graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
+        resolved: &ResolvedClipSet,
+        query: &ClipQuery<'_>,
+    ) -> Result<bool, QueryError> {
+        Ok(self.sourced(graph, diagnostics, resolved, query)?.is_some())
+    }
+
+    /// The clip of `resolved` that is active at `time`, or `None` when the
+    /// set does not source the attribute of `query`.
+    fn active_clip<'a>(
+        &mut self,
+        graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
+        resolved: &'a ResolvedClipSet,
+        query: &ClipQuery<'_>,
+        time: f64,
+    ) -> Result<Option<ActiveClip<'a>>, QueryError> {
+        let Some((clip_path, manifest)) = self.sourced(graph, diagnostics, resolved, query)? else {
+            return Ok(None);
+        };
+        Ok(resolved.set.active_asset(time).map(|(activation, asset)| ActiveClip {
+            activation,
+            asset,
+            clip_path,
+            manifest,
+        }))
+    }
+
     /// Resolves a clip value using the active window's stage-time bracket.
     /// Only a bracket at the next activation needs a value from another clip;
     /// missing values use the manifest and neighboring contributing clips.
@@ -793,7 +892,10 @@ impl ClipCache {
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>, QueryError> {
-        let value = self.value_at_active_clip(graph, diagnostics, resolved, query, time, interp)?;
+        let Some(clip) = self.active_clip(graph, diagnostics, resolved, query, time)? else {
+            return Ok(None);
+        };
+        let value = Some(self.value_in_clip(graph, diagnostics, resolved, &clip, time, interp)?);
         let set = &resolved.set;
         if set.active.len() < 2 || value.as_ref().is_none_or(Value::is_asset_valued) {
             return Ok(value);
@@ -801,14 +903,12 @@ impl ClipCache {
         let Some(position) = set.active_position(time) else {
             return Ok(value);
         };
-        let (start, index) = set.active[position];
-        let path = clip_attr_path(query, &set.clip_prim_path(query.anchor))?;
-        let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
-        let samples = match set.asset_paths.get(index) {
-            Some(asset) if self.clip_contributes(graph, resolved, manifest.as_deref(), &path, start) => self
-                .clip_time_samples(graph, asset.asset_path(), resolved.source.layer, &path)?
+        let path = &clip.clip_path;
+        let samples = match self.clip_contributes(graph, resolved, &clip.manifest, path, clip.activation) {
+            true => self
+                .clip_time_samples(graph, clip.asset.asset_path(), resolved.source.layer, path)?
                 .map(|(_, samples)| samples),
-            _ => None,
+            false => None,
         };
         let samples = samples.iter().flatten().map(|(time, _)| *time);
         let mut times = set.window_sample_times(position, samples);
@@ -847,18 +947,7 @@ impl ClipCache {
 
     /// Resolves a value-clip value for `query` at `time` from `resolved` — one
     /// of the clip sets composed on `query.anchor` — or `None` when that set
-    /// does not source the attribute. An authored value block presents as
-    /// `Some(Value::ValueBlock)` so the caller stops fall-through to weaker
-    /// sources.
-    ///
-    /// TODO: the stage-to-clip mapping is applied to the query time only, so
-    /// every value returned here — a clip sample, a manifest default, an
-    /// interpolated gap value — comes back in clip time. A `timecode` among
-    /// them is a time coordinate in the clip's own frame and needs the inverse
-    /// mapping applied on the way out, the way
-    /// [`sdf::LayerOffset::apply_to_value`] maps a composed value out of its
-    /// layer's frame (C++ `Usd_Clip::_TranslateTimeToExternal`, which is also
-    /// why C++ skips the layer-offset transform for clip-sourced samples).
+    /// does not source the attribute.
     fn value_at_active_clip(
         &mut self,
         graph: &LayerGraph,
@@ -868,29 +957,48 @@ impl ClipCache {
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>, QueryError> {
+        let Some(clip) = self.active_clip(graph, diagnostics, resolved, query, time)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.value_in_clip(
+            graph,
+            diagnostics,
+            resolved,
+            &clip,
+            time,
+            interp,
+        )?))
+    }
+
+    /// The value `resolved` supplies at `time` through `clip`, the clip of
+    /// it active then. A set that sources an attribute always answers: an
+    /// authored value block, or a gap nothing fills, is `Value::ValueBlock`,
+    /// which stops fall-through to weaker sources.
+    ///
+    /// TODO: the stage-to-clip mapping is applied to the query time only, so
+    /// every value returned here — a clip sample, a manifest default, an
+    /// interpolated gap value — comes back in clip time. A `timecode` among
+    /// them is a time coordinate in the clip's own frame and needs the inverse
+    /// mapping applied on the way out, the way
+    /// [`sdf::LayerOffset::apply_to_value`] maps a composed value out of its
+    /// layer's frame (C++ `Usd_Clip::_TranslateTimeToExternal`, which is also
+    /// why C++ skips the layer-offset transform for clip-sourced samples).
+    fn value_in_clip(
+        &mut self,
+        graph: &LayerGraph,
+        diagnostics: &mut Diagnostics,
+        resolved: &ResolvedClipSet,
+        clip: &ActiveClip<'_>,
+        time: f64,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Value, QueryError> {
         let set = &resolved.set;
-        // With no active schedule no clip is ever selected, so the set
-        // sources nothing and needs no manifest.
-        let Some((activation, active)) = set.active_entry(time) else {
-            return Ok(None);
-        };
-        let clip_path = clip_attr_path(query, &set.clip_prim_path(query.anchor))?;
-
-        // The manifest declares which attributes the clips provide, and
-        // resolves once here because its default fills a gap further down
-        // (spec 12.3.4.6). A set whose manifest does not declare this
-        // attribute is skipped; a set that *does* declare it owns the
-        // attribute's time-varying value, so a gap in the active clip
-        // resolves to a manifest default or a value block, never to a
-        // weaker value source.
-        let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
-        if !self.manifest_declares(graph, manifest.as_deref(), &clip_path)? {
-            return Ok(None);
-        }
-
-        let Some(asset) = set.asset_paths.get(active) else {
-            return Ok(None);
-        };
+        let ActiveClip {
+            activation,
+            asset,
+            clip_path,
+            manifest,
+        } = clip;
         let clip_time = set.map_stage_to_clip(time);
 
         // A manifest block at the active clip's activation time states the
@@ -899,19 +1007,12 @@ impl ClipCache {
         // same terms as the gap search itself, which is what keeps the two
         // agreeing about what a clip contributes (C++
         // `Usd_ClipSet::_ClipContributesTimeSamples`).
-        let contributes = self.clip_contributes(graph, resolved, manifest.as_deref(), &clip_path, activation);
+        let contributes = self.clip_contributes(graph, resolved, manifest, clip_path, *activation);
         if contributes
             && let Some((clip_id, value)) =
-                self.clip_sample_at(graph, resolved, asset.asset_path(), &clip_path, clip_time, interp)?
+                self.clip_sample_at(graph, resolved, asset.asset_path(), clip_path, clip_time, interp)?
         {
-            return Ok(Some(self.resolve_asset_in(
-                graph,
-                diagnostics,
-                &clip_id,
-                resolved,
-                &clip_path,
-                value,
-            )));
+            return Ok(self.resolve_asset_in(graph, diagnostics, &clip_id, resolved, clip_path, value));
         }
 
         // The active clip has no sample at `clip_time`, and this set owns
@@ -920,39 +1021,23 @@ impl ClipCache {
         // (a) Manifest default: synthesize a sample at the clip's active
         //     time (spec 12.3.4.6). A synthesized manifest carries no
         //     defaults, so only an authored one reaches here.
-        if let Some(manifest) = manifest.as_deref()
-            && let Some(value) = self.manifest_default(graph, manifest, &clip_path)?
-        {
-            return Ok(Some(self.resolve_asset_in(
-                graph,
-                diagnostics,
-                manifest,
-                resolved,
-                &clip_path,
-                value,
-            )));
+        if let Some(value) = self.manifest_default(graph, manifest, clip_path)? {
+            return Ok(self.resolve_asset_in(graph, diagnostics, manifest, resolved, clip_path, value));
         }
 
         // (b) interpolateMissingClipValues: interpolate the gap across the
         //     nearest surrounding clips (spec 12.3.4.7).
         if set.interpolate_missing
-            && let Some(value) = self.interpolate_missing_value(
-                graph,
-                diagnostics,
-                resolved,
-                manifest.as_deref(),
-                &clip_path,
-                time,
-                interp,
-            )?
+            && let Some(value) =
+                self.interpolate_missing_value(graph, diagnostics, resolved, manifest, clip_path, time, interp)?
         {
-            return Ok(Some(value));
+            return Ok(value);
         }
 
         // (c) No default and nothing to interpolate: the manifest-declared
         //     attribute is authoritatively absent — a value block — which
         //     must not fall through to weaker sources (spec 12.3.4.6).
-        Ok(Some(Value::ValueBlock))
+        Ok(Value::ValueBlock)
     }
 
     /// The layer a property-stack query lists for `resolved` at `time`: the
@@ -971,23 +1056,20 @@ impl ClipCache {
         query: &ClipQuery<'_>,
         time: f64,
     ) -> Result<Option<(String, Path)>, QueryError> {
-        let set = &resolved.set;
-        let Some((activation, active)) = set.active_entry(time) else {
-            return Ok(None);
-        };
-        let clip_path = clip_attr_path(query, &set.clip_prim_path(query.anchor))?;
-        let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
-        if !self.manifest_declares(graph, manifest.as_deref(), &clip_path)? {
-            return Ok(None);
-        }
-        let Some(asset) = set.asset_paths.get(active) else {
+        let Some(ActiveClip {
+            activation,
+            asset,
+            clip_path,
+            manifest,
+        }) = self.active_clip(graph, diagnostics, resolved, query, time)?
+        else {
             return Ok(None);
         };
         // The clip contributes on exactly the terms the value read applies: a
         // manifest block at its activation time states it carries no samples for
         // the attribute, and the value then comes from the manifest or from the
         // clips surrounding the gap, so the clip is not the spec to report.
-        let contributes = self.clip_contributes(graph, resolved, manifest.as_deref(), &clip_path, activation);
+        let contributes = self.clip_contributes(graph, resolved, &manifest, &clip_path, activation);
         if contributes
             && let Some((clip_id, samples)) =
                 self.clip_time_samples(graph, asset.asset_path(), resolved.source.layer, &clip_path)?
@@ -995,7 +1077,7 @@ impl ClipCache {
         {
             return Ok(Some((clip_id, clip_path)));
         }
-        Ok(manifest.map(|id| (id, clip_path)))
+        Ok(Some((manifest, clip_path)))
     }
 
     /// What `resolved` contributes to a query that names no time: whether it
@@ -1322,11 +1404,11 @@ impl ClipCache {
         &self,
         graph: &LayerGraph,
         resolved: &ResolvedClipSet,
-        manifest: Option<&str>,
+        manifest: &str,
         clip_path: &Path,
         stage_time: f64,
     ) -> bool {
-        let Some(layer) = manifest.and_then(|id| self.layer(graph, id)) else {
+        let Some(layer) = self.layer(graph, manifest) else {
             return false;
         };
         let Ok(Some(field)) = layer.data().try_field(clip_path, FieldKey::TimeSamples.as_str()) else {
@@ -1348,7 +1430,7 @@ impl ClipCache {
         &self,
         graph: &LayerGraph,
         resolved: &ResolvedClipSet,
-        manifest: Option<&str>,
+        manifest: &str,
         clip_path: &Path,
         activation: f64,
     ) -> bool {
@@ -1436,10 +1518,9 @@ impl ClipCache {
         if set.active.is_empty() {
             return Ok(None);
         }
-        let manifest = self.manifest_id(graph, diagnostics, resolved, prim)?;
-        if !self.manifest_declares(graph, manifest.as_deref(), clip_path)? {
+        let Some(manifest) = self.declaring_manifest(graph, diagnostics, resolved, prim, clip_path)? else {
             return Ok(None);
-        }
+        };
         let mut per_clip: Vec<Vec<(f64, Supplied)>> = Vec::with_capacity(set.asset_paths.len());
         for asset in &set.asset_paths {
             per_clip.push(self.clip_in_clip_samples(graph, asset.asset_path(), resolved.source.layer, clip_path)?);
@@ -1451,12 +1532,9 @@ impl ClipCache {
         // manifest's default (spec 12.3.4.6), so that value is what the set
         // supplies there. With no gap it is never read.
         let gap = match per_clip.iter().any(Vec::is_empty) {
-            true => match manifest.as_deref() {
-                Some(manifest) => self
-                    .manifest_default(graph, manifest, clip_path)?
-                    .map_or(Supplied::Blocked, |value| Supplied::classify(&value, &|value| value)),
-                None => Supplied::Blocked,
-            },
+            true => self
+                .manifest_default(graph, &manifest, clip_path)?
+                .map_or(Supplied::Blocked, |value| Supplied::classify(&value, &|value| value)),
             false => Supplied::Blocked,
         };
         Ok(Some(ClipSamples { per_clip, gap }))
@@ -1623,7 +1701,7 @@ impl ClipCache {
         graph: &LayerGraph,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
-        manifest: Option<&str>,
+        manifest: &str,
         clip_path: &Path,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,

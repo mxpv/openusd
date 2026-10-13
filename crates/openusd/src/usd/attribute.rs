@@ -982,8 +982,9 @@ impl Attribute {
     /// A site shadows when it is stronger than the edit target's and holds a
     /// value opinion the read looks at. A read at the default time looks at
     /// defaults and value blocks alone. A read at a numeric time also looks
-    /// at time samples and at value clips, and a clip set counts where it
-    /// answers for the attribute at `time`, with a value or a block.
+    /// at time samples and at value clips, and a clip set counts where its
+    /// manifest declares the attribute, since it then answers with a value
+    /// or a block at every numeric time.
     ///
     /// The value in question at a numeric time is a sample, so a stronger
     /// blocked `timeSamples` field shadows it there: the block withholds
@@ -4576,6 +4577,38 @@ def \"M\"
         // The block is what a sample written beneath it meets.
         stage.attribute("/P.x")?.set_at(5.0_f64, TimeCode::new(1.0))?;
         assert_eq!(stage.attribute("/P.x")?.get_at::<f64>(TimeCode::new(1.0))?, None);
+        Ok(())
+    }
+
+    /// A stronger clip set shadows a sample of an attribute its manifest
+    /// declares, at a numeric time. It shadows neither a default nor an
+    /// attribute the manifest leaves out.
+    #[test]
+    fn clips_shadow_samples() -> Result<()> {
+        let clipped = "over \"P\" (\n    clips = {\n        dictionary default = {\n            \
+                       asset[] assetPaths = [@./clip.usda@]\n            string primPath = \"/P\"\n            \
+                       double2[] active = [(0, 0)]\n        }\n    }\n)\n{\n}";
+        let (_dir, stage) = scene(&[
+            ("root.usda", "(\n    subLayers = [@strong.usda@, @weak.usda@]\n)"),
+            ("strong.usda", clipped),
+            ("weak.usda", "def \"P\"\n{\n    custom double x\n    custom double y\n}"),
+            (
+                "clip.usda",
+                "def \"P\"\n{\n    double x.timeSamples = { 0: 1, 10: 2 }\n}",
+            ),
+        ])?;
+        target_layer(&stage, "weak.usda")?;
+        let time = TimeCode::new(5.0);
+
+        let x = stage.attribute("/P.x")?;
+        assert_eq!(x.shadowing_opinion()?, None);
+        let site = x.shadowing_opinion_at(time)?.expect("the clips answer for x");
+        assert_eq!(file_name(&site.layer), "strong.usda");
+        assert_eq!(stage.attribute("/P.y")?.shadowing_opinion_at(time)?, None);
+
+        // The clips are what a sample written beneath them meets.
+        x.set_at(9.0_f64, time)?;
+        assert_eq!(stage.attribute("/P.x")?.get_at::<f64>(time)?, Some(1.5));
         Ok(())
     }
 

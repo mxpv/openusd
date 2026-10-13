@@ -2893,12 +2893,8 @@ impl Stage {
             path: attr_path.clone(),
         };
         let layer = self.layers().id_of(&identifier).ok_or_else(outside)?;
-        // The policy a value read at that time goes through, so a clip
-        // answers here exactly where it would answer the read.
-        let interp_type = self.interpolation.get();
-        let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
         let standing = self.masked_opinions(attr_path, |g, c| {
-            c.opinion_standing(g, attr_path, layer, &spec_path, time, &interp)
+            c.opinion_standing(g, attr_path, layer, &spec_path, time)
         })?;
         match standing {
             // A prim the stage does not hold has no opinions to be shadowed

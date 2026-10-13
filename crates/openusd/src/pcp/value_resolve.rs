@@ -425,7 +425,7 @@ pub(crate) struct ClipProbe<'a> {
 
 /// What one clip set contributes to a query at a stage time.
 ///
-/// The single definition of "did this clip answer here", so a value read and an
+/// The single reading of what a clip answered with, so a value read and an
 /// introspection query cannot disagree about it.
 pub(crate) enum ClipAnswer {
     /// The set does not source the property, so weaker sources still may.
@@ -478,6 +478,13 @@ impl ClipProbe<'_> {
             Some(value) if is_block(&value) => Ok(ClipAnswer::Blocked),
             Some(value) => Ok(ClipAnswer::Value(value)),
         }
+    }
+
+    /// Whether the set sources the property, and so answers a read of it at
+    /// any numeric time with a value or a block.
+    pub(crate) fn sources(&mut self) -> Result<bool, QueryError> {
+        self.cache
+            .sources_in_set(self.graph, self.diagnostics, self.set, &self.query)
     }
 
     /// What the set contributes to a query that names no time.
