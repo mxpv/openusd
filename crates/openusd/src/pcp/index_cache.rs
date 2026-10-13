@@ -29,7 +29,7 @@ use super::layer_graph::{LayerGraph, LayerStackIdentifier, MuteChange};
 use super::layer_stack::StackMarks;
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
-use super::prim_graph::{ArcType, PrimIndexGraph};
+use super::prim_graph::{ArcType, Node, NodeId, PrimIndexGraph, SpecSite};
 use super::prim_index::{
     CompositionContext, Demand, NodeRuns, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo, TargetMemoKey,
 };
@@ -1635,9 +1635,20 @@ impl IndexCache {
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
         accepts: Option<fn(sdf::ValueKind) -> bool>,
     ) -> Result<TimedValue, QueryError> {
-        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
+        let (prim, suffix) = attr_path.split_prim();
+        let prim = self.effective_prim(graph, &prim)?;
+        self.ensure_index(graph, &prim)?;
+        // The spec-stack walk finds no opinion for an attribute no layer
+        // authors, which resolves to the fallback. A value clip answers at sites
+        // beyond the spec stack. Where clips are in reach, only an attribute
+        // some layer authors takes a value from them.
+        let mode = ResolveMode::at(time);
+        if mode.consults_clips()
+            && self.may_have_clips(&prim)
+            && !self.has_spec_at(graph, &Path::from_string_unchecked([prim.as_str(), suffix].concat()))?
+        {
             return Ok(TimedValue::Fallback);
-        };
+        }
         let mut resolver = ValueAtResolver {
             time,
             interp,
@@ -1646,7 +1657,7 @@ impl IndexCache {
             withheld: false,
             accepts,
         };
-        self.resolve_property(graph, &prim, &suffix, ResolveMode::at(time), &mut resolver)?;
+        self.resolve_property(graph, &prim, suffix, mode, &mut resolver)?;
         let ValueAtResolver {
             composing,
             anchor,
@@ -1915,10 +1926,9 @@ impl IndexCache {
         if !self.has_spec_at(graph, attr_path)? {
             return Ok(None);
         }
-        let prim = attr_path.prim_path();
-        let suffix = attr_path.property_suffix().to_owned();
+        let (prim, suffix) = attr_path.split_prim();
         self.ensure_index(graph, &prim)?;
-        Ok(Some((prim, suffix)))
+        Ok(Some((prim, suffix.to_owned())))
     }
 
     /// Read-only access to the cached indices and the dependency map they are
@@ -2299,16 +2309,18 @@ impl IndexCache {
         }
     }
 
-    /// Resolves a value over the composition nodes of a property's owning prim,
-    /// strongest first, reading each contributing layer live. `path` must be a
-    /// property path: it is re-anchored onto each node's prim (crossing the
-    /// `.` separator) and `probe` is called with that node's layer and the
+    /// Resolves a value over the sites of a property's owning prim, strongest
+    /// first, reading each contributing layer live. `path` must be a property
+    /// path: it is re-anchored onto each site's node path (crossing the `.`
+    /// separator) and `probe` is called with that site's layer and the
     /// re-anchored property path; the first `Some` wins.
     ///
-    /// Reading live — rather than from a property-keyed index — keeps results
-    /// correct after a property spec is authored, since authoring a property
-    /// never reshapes the owning prim's composition graph (the prim index
-    /// stays valid).
+    /// Walks the prim's spec stack ([`PrimIndex::live_spec_sites`]). A property
+    /// spec lives under a prim spec in its own layer, and only the layers that
+    /// author the prim can author the property. Reading those layers live
+    /// keeps results correct after a property spec is authored: authoring a
+    /// property never reshapes the owning prim's composition graph, and the
+    /// prim index stays valid.
     fn find_property_node<T>(
         &mut self,
         graph: &LayerGraph,
@@ -2320,14 +2332,18 @@ impl IndexCache {
         let Some(index) = self.store.index_at(&prim_path) else {
             return Ok(None);
         };
-        for node in index.nodes() {
-            let Some(prop_path) = path.replace_prefix(&prim_path, node.path()) else {
+        // A node's sites are adjacent in the stack. Its re-anchored path is
+        // computed once per node.
+        let mut anchored: Option<(NodeId, Option<Path>)> = None;
+        for (site, node) in index.live_spec_sites() {
+            if anchored.as_ref().is_none_or(|(id, _)| *id != site.node) {
+                anchored = Some((site.node, path.replace_prefix(&prim_path, node.path())));
+            }
+            let Some((_, Some(prop_path))) = &anchored else {
                 continue;
             };
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-                if let Some(found) = probe(graph.layer(layer), &prop_path) {
-                    return Ok(Some(found));
-                }
+            if let Some(found) = probe(graph.layer(site.layer), prop_path) {
+                return Ok(Some(found));
             }
         }
         Ok(None)
@@ -3047,6 +3063,45 @@ impl IndexCache {
         self.composed_property_names(graph, path)
     }
 
+    /// Returns the composed property names of a prim path, as
+    /// [`Self::prim_properties`] orders them, each with the spec type its
+    /// strongest spec authors (`None` where that layer lists the name without
+    /// holding its spec).
+    pub(crate) fn prim_property_kinds(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+    ) -> Result<Vec<(Token, Option<SpecType>)>, QueryError> {
+        let path = &self.effective_path(graph, path)?;
+        self.ensure_index(graph, path)?;
+        let index = self.cached(path);
+        let mut names: Vec<Token> = Vec::new();
+        // The strongest site listing each name, by position in `names`. The fold
+        // runs weakest to strongest, and each listing replaces the one before.
+        let mut strongest: Vec<(&Path, LayerId)> = Vec::new();
+        let mut position: HashMap<Token, usize> = HashMap::new();
+        fold_property_children(index, graph, |name, node, site| {
+            if let Some(&at) = position.get(name) {
+                strongest[at] = (node.path(), site.layer);
+            } else {
+                position.insert(name.clone(), names.len());
+                names.push(name.clone());
+                strongest.push((node.path(), site.layer));
+            }
+        });
+        Ok(names
+            .into_iter()
+            .zip(strongest)
+            .map(|(name, (prim, layer))| {
+                let kind = prim
+                    .append_property(&name)
+                    .ok()
+                    .and_then(|property| graph.layer(layer).data().spec_type(&property));
+                (name, kind)
+            })
+            .collect())
+    }
+
     /// Reports a [`CompositionDiagnostic::InconsistentPropertyType`] for each
     /// composed property of `prim_path` whose specs mix attribute and
     /// relationship kinds (C++ `PcpErrorInconsistentPropertyType`).
@@ -3434,28 +3489,43 @@ impl IndexCache {
         let index = self.cached(path);
         let mut result: Vec<Token> = Vec::new();
         let mut seen: HashSet<Token> = HashSet::new();
-
-        // Fold weakest-to-strongest across both nodes and, within each node, the
-        // layers that author the prim: contributing nodes in reverse strength
-        // order, each run (strongest first) reversed. `seen` dedups names in O(1)
-        // while `result` preserves the weakest-position order.
-        for (node, run) in index.spec_runs_weakest_first() {
-            if node.is_inert() || node.is_culled() {
-                continue;
+        // `seen` dedups names in O(1) while `result` preserves the
+        // weakest-position order.
+        fold_property_children(index, graph, |name, _, _| {
+            if !seen.contains(name) {
+                seen.insert(name.clone());
+                result.push(name.clone());
             }
-            for site in run.iter().rev() {
-                let layer_data = graph.layer(site.layer);
-                append_unseen_names(
-                    layer_data,
-                    node.path(),
-                    ChildrenKey::PropertyChildren,
-                    &mut result,
-                    &mut seen,
-                );
+        });
+        Ok(result)
+    }
+}
+
+/// Calls `visit` with each name a prim's contributing sites list in
+/// `propertyChildren`, with the node and site listing it, weakest to strongest:
+/// contributing nodes in reverse strength order and, within each, its
+/// spec-authoring layers (its run, strongest first) reversed. Each site's
+/// names come in authored order.
+fn fold_property_children<'a>(
+    index: &'a PrimIndex,
+    graph: &LayerGraph,
+    mut visit: impl FnMut(&Token, Node<'a>, &'a SpecSite),
+) {
+    let field = ChildrenKey::PropertyChildren.as_str();
+    for (node, run) in index.spec_runs_weakest_first() {
+        if node.is_inert() || node.is_culled() {
+            continue;
+        }
+        for site in run.iter().rev() {
+            let Ok(Some(value)) = graph.layer(site.layer).data().try_field(node.path(), field) else {
+                continue;
+            };
+            if let Value::TokenVec(names) = value.as_ref() {
+                for name in names {
+                    visit(name, node, site);
+                }
             }
         }
-
-        Ok(result)
     }
 }
 
@@ -3574,7 +3644,7 @@ mod tests {
 
     use super::super::{Changes, ExpressionContext, LayerChanges};
     use super::*;
-    use crate::pcp::prim_graph::{NodeId, RelocateKind};
+    use crate::pcp::prim_graph::RelocateKind;
 
     fn manifest_dir() -> String {
         std::env::var("CARGO_MANIFEST_DIR").unwrap()
