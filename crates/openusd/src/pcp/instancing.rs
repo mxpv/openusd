@@ -19,8 +19,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::sdf;
-use crate::sdf::schema::FieldKey;
-use crate::sdf::{Path, Value};
+use crate::sdf::Path;
 use crate::tf::Token;
 
 use super::diagnostics::Diagnostics;
@@ -578,14 +577,7 @@ impl IndexCache {
         }
         let composed = self.effective_path(graph, path)?;
         self.ensure_index(graph, &composed)?;
-        let index = self.cached(&composed);
-        if !index.has_instanceable_node(composed.prim_element_count() as u16) {
-            return Ok(false);
-        }
-        Ok(matches!(
-            index.resolve_field(FieldKey::Instanceable.as_str(), graph, None)?,
-            Some(Value::Bool(true))
-        ))
+        self.cached_instanceable(graph, &composed)
     }
 
     /// Composes `instance`'s shared subtree, registers it against its prototype,

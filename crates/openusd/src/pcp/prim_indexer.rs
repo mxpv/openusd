@@ -3979,6 +3979,7 @@ mod tests {
                 errors: Diagnostics::default(),
                 property_errors: Diagnostics::default(),
                 resolved_targets: Default::default(),
+                instanceable: None,
                 revision: PrimRevision::placeholder(),
             },
         );
