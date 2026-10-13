@@ -856,8 +856,7 @@ impl IndexCache {
     // through `effective_path`, which walks back up via this function — so a cold
     // first query on a depth-d path is O(d²) (cheap path/hashmap ops, no extra
     // composition). The `redirected_prims` memo collapses it to O(d) once the
-    // ancestors are warm, which a top-down traversal keeps it; a dedicated
-    // `is_instance` memo would remove the cold-cache factor entirely.
+    // ancestors are warm, which a top-down traversal keeps it.
     pub(crate) fn enclosing_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>, QueryError> {
         let mut ancestor = path.parent();
         while let Some(current) = ancestor {

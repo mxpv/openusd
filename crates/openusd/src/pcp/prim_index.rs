@@ -796,13 +796,18 @@ impl PrimIndex {
     /// contribute opinions, and authors a spec at its site: the nodes that bring
     /// a prototype its content.
     pub(crate) fn instanceable_nodes(&self, instance_depth: u16) -> Vec<bool> {
+        self.instanceable_flags(instance_depth).collect()
+    }
+
+    /// The [`instanceable_nodes`](Self::instanceable_nodes) classification,
+    /// one node at a time in arena order.
+    fn instanceable_flags(&self, instance_depth: u16) -> impl Iterator<Item = bool> + '_ {
         let local = self.instance_local_nodes(instance_depth, instance_depth);
         self.graph
             .nodes
             .iter()
             .zip(local)
             .map(|(node, local)| !local && !node.is_inert() && !node.is_culled() && node.has_specs())
-            .collect()
     }
 
     /// Whether this index, composing a prim at `depth`, has any instanceable
@@ -810,7 +815,7 @@ impl PrimIndex {
     /// half of C++ `Pcp_PrimIndexIsInstanceable`: a prim whose only arcs are
     /// ancestral, or bring no opinions, has nothing a prototype could share.
     pub(crate) fn has_instanceable_node(&self, depth: u16) -> bool {
-        self.instanceable_nodes(depth).contains(&true)
+        self.instanceable_flags(depth).any(|instanceable| instanceable)
     }
 
     /// Whether this index, composing a prim at `depth`, makes the prim an
