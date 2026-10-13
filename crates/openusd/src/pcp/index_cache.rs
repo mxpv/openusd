@@ -12,7 +12,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::mem;
+use std::{iter, mem};
 
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
@@ -3238,6 +3238,9 @@ impl IndexCache {
     /// Pre-caches inherit/specialize targets declared in the prim's layer
     /// data. Reads inherit paths from each layer, resolves them to composed
     /// namespace using ancestor arcs, and ensures those targets are cached.
+    ///
+    /// The target's own build pre-caches the target's inherit/specialize
+    /// targets, running this before it composes.
     fn precache_inherit_targets(&mut self, graph: &LayerGraph, path: &Path) {
         let Some(parent) = path.parent() else {
             return;
@@ -3254,44 +3257,40 @@ impl IndexCache {
         // prim directly contributes to the parent at the parent path, so it is
         // already covered here — no separate all-layers scan of the prim path is
         // needed.
-        let mut nodes_to_scan: Vec<(Path, LayerId)> = Vec::new();
-        for node in parent_index.nodes() {
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-                nodes_to_scan.push((node.path.clone(), layer));
-                if let Some(name) = path.name()
-                    && let Ok(child_in_node) = node.path.append_path(name)
-                {
-                    nodes_to_scan.push((child_in_node, layer));
-                }
-            }
-        }
-
+        let name = path.name();
         let mut targets_to_cache = Vec::new();
-        for (scan_path, scan_layer) in &nodes_to_scan {
-            for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                let Ok(val) = graph.layer(*scan_layer).data().field(scan_path, field.as_str()) else {
-                    continue;
-                };
-                let Value::PathListOp(list_op) = val.into_owned() else {
-                    continue;
-                };
-                for target in &list_op.flatten() {
-                    // Anchor a relative inherit/specialize target at the path it
-                    // is authored on (the scanned node's namespace), matching the
-                    // indexer's `path.make_absolute`. Anchoring at the
-                    // composed parent would mis-resolve `../` targets by a level.
-                    let raw = scan_path.make_absolute(target);
-                    // Try composed-namespace versions via ancestor arcs.
-                    for a in &ancestor_arcs {
-                        if let Some(composed) = a.map.map_source_to_target(&raw)
-                            && composed != raw
-                            && !targets_to_cache.contains(&composed)
-                        {
-                            targets_to_cache.push(composed);
+        for node in parent_index.nodes() {
+            let child_in_node = name.and_then(|name| node.path.append_path(name).ok());
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
+                let data = graph.layer(layer).data();
+                for scan_path in iter::once(&node.path).chain(&child_in_node) {
+                    for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
+                        let Ok(Some(val)) = data.try_field(scan_path, field.as_str()) else {
+                            continue;
+                        };
+                        let Value::PathListOp(list_op) = val.as_ref() else {
+                            continue;
+                        };
+                        for target in &list_op.flatten() {
+                            // Anchor a relative inherit/specialize target at the
+                            // path it is authored on (the scanned node's
+                            // namespace), matching the indexer's
+                            // `path.make_absolute`. Anchoring at the composed
+                            // parent would mis-resolve `../` targets by a level.
+                            let raw = scan_path.make_absolute(target);
+                            // Try composed-namespace versions via ancestor arcs.
+                            for a in &ancestor_arcs {
+                                if let Some(composed) = a.map.map_source_to_target(&raw)
+                                    && composed != raw
+                                    && !targets_to_cache.contains(&composed)
+                                {
+                                    targets_to_cache.push(composed);
+                                }
+                            }
+                            if !targets_to_cache.contains(&raw) {
+                                targets_to_cache.push(raw);
+                            }
                         }
-                    }
-                    if !targets_to_cache.contains(&raw) {
-                        targets_to_cache.push(raw);
                     }
                 }
             }
@@ -3299,10 +3298,6 @@ impl IndexCache {
 
         for target in targets_to_cache {
             self.precache_path(graph, &target);
-            // Recursively precache the target's own inherit targets.
-            if self.is_indexed(&target) {
-                self.precache_inherit_targets(graph, &target);
-            }
         }
     }
 
