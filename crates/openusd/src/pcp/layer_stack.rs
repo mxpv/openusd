@@ -23,7 +23,7 @@
 //! fresh id. Ids are never reused.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::sdf::{LayerOffset, Value};
 
@@ -355,6 +355,10 @@ pub(crate) struct LayerStackRegistry {
     // would restore O(1) and drop `targets`' per-call allocation.
     instances: BTreeMap<LayerStackId, LayerStackInstance>,
     by_key: HashMap<LayerStackKey, LayerStackId>,
+    /// The stacks each layer is a member of, in id order (C++
+    /// `PcpLayerStackRegistry::FindAllUsingLayer`): how a change to a layer
+    /// reaches the dependencies registered against the stacks holding it.
+    using: HashMap<LayerId, BTreeSet<LayerStackId>>,
     /// The interned composed expression-variable sets, keyed by [`ExprVarId`].
     contexts: ExprVarInterner,
     /// The next handle to mint. Monotonic: a removed instance's id is never
@@ -434,6 +438,9 @@ impl LayerStackRegistry {
         }
         let vars_source = self.derive_vars_source(id, key, expr_id);
         self.minted_since_sweep += 1;
+        for &(layer, _) in &members {
+            self.using.entry(layer).or_default().insert(id);
+        }
         self.instances.insert(
             id,
             LayerStackInstance {
@@ -479,6 +486,11 @@ impl LayerStackRegistry {
         self.instances
             .get(&id)
             .map_or(&[], |instance| instance.members.as_slice())
+    }
+
+    /// The stacks `layer` is a member of, in id order.
+    pub(crate) fn stacks_using(&self, layer: LayerId) -> impl Iterator<Item = LayerStackId> + '_ {
+        self.using.get(&layer).into_iter().flatten().copied()
     }
 
     /// The member layer ids of a stack as a set, for containment tests, or `None`
@@ -554,7 +566,14 @@ impl LayerStackRegistry {
             old_source: instance.vars_source,
             new_source: vars_source,
         });
-        instance.member_set = members.iter().map(|&(id, _)| id).collect();
+        let member_set: HashSet<LayerId> = members.iter().map(|&(id, _)| id).collect();
+        for &layer in instance.member_set.difference(&member_set) {
+            unuse(&mut self.using, layer, id);
+        }
+        for &layer in member_set.difference(&instance.member_set) {
+            self.using.entry(layer).or_default().insert(id);
+        }
+        instance.member_set = member_set;
         instance.members = members;
         instance.expr_vars = expr_vars;
         instance.expr_id = expr_id;
@@ -646,6 +665,9 @@ impl LayerStackRegistry {
         for &id in &removed {
             let instance = self.instances.remove(&id).expect("removal ids were just enumerated");
             self.by_key.remove(&instance.key);
+            for layer in instance.member_set {
+                unuse(&mut self.using, layer, id);
+            }
         }
         let used: HashSet<usize> = self.instances.values().map(|instance| instance.expr_id.idx()).collect();
         if used.len() < self.contexts.contexts.len() {
@@ -678,6 +700,17 @@ impl LayerStackRegistry {
     /// reclamation keeps the registry bounded.
     pub(crate) fn instance_count(&self) -> usize {
         self.instances.len()
+    }
+}
+
+/// Drops `stack` from `layer`'s entry in a registry's
+/// [`using`](LayerStackRegistry::using) map, removing an entry left empty.
+fn unuse(using: &mut HashMap<LayerId, BTreeSet<LayerStackId>>, layer: LayerId, stack: LayerStackId) {
+    if let Some(stacks) = using.get_mut(&layer) {
+        stacks.remove(&stack);
+        if stacks.is_empty() {
+            using.remove(&layer);
+        }
     }
 }
 

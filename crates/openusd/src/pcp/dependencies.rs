@@ -1,10 +1,11 @@
 //! Reverse dependency index from layer sites to composed prim indices.
 //!
-//! For each composed [`PrimIndex`], records the `(layer_index, site_path)`
+//! For each composed [`PrimIndex`], records the `(layer stack, site_path)`
 //! pairs read by its graph. When an authoring change reports "layer L
 //! changed at path P", [`ancestor_sites`](Dependencies::ancestor_sites) (plus
-//! [`subtree_lookup`](Self::subtree_lookup) for fanout downward) returns
-//! the registrations that change reaches. The pairs are untranslated: naming
+//! [`subtree_lookup`](Dependencies::subtree_lookup) for fanout downward)
+//! returns the registrations that change reaches, through the stacks L is a
+//! member of. The pairs are untranslated: naming
 //! the composed path a dependent is affected at needs that dependent's own
 //! composition graph, which this table does not hold, so
 //! [`IndexStore`](super::index_store::IndexStore) joins and translates them.
@@ -13,9 +14,7 @@
 //! whole-layer question a mute/unmute or layer-stack edit asks, without
 //! scanning every cached index.
 //!
-//! Single-layer-stack equivalent of C++ `Pcp_Dependencies`. Because
-//! [`IndexCache`](super::IndexCache) owns exactly one layer stack, the outer key is
-//! `layer_index` rather than a layer-stack reference.
+//! This is C++ `Pcp_Dependencies`, which also keys sites by layer stack.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -29,15 +28,18 @@ use super::{LayerGraph, LayerId, LayerStackId};
 
 #[derive(Debug, Default)]
 pub(super) struct Dependencies {
-    /// `per_layer[layer_id][site_path]` = prim index paths that read this site.
+    /// `per_stack[stack][site_path]` = prim index paths that read this site
+    /// through a node composing against `stack`. A change to a layer reaches
+    /// the sites of every stack holding it
+    /// ([`LayerGraph::stacks_using`]).
     ///
     /// The inner map is an [`sdf::PathTable`] so
     /// [`subtree_lookup`](Self::subtree_lookup) is a subtree walk rather than a
     /// full scan.
-    per_layer: HashMap<LayerId, sdf::PathTable<Vec<Path>>>,
-    /// Reverse map for cheap removal: `prim_index_path` → list of (layer, site)
+    per_stack: HashMap<LayerStackId, sdf::PathTable<Vec<Path>>>,
+    /// Reverse map for cheap removal: `prim_index_path` → list of (stack, site)
     /// it registered. Avoids re-walking the index when invalidating.
-    by_prim: HashMap<Path, Vec<(LayerId, Path)>>,
+    by_prim: HashMap<Path, Vec<(LayerStackId, Path)>>,
     /// Layer-agnostic set of prim-index paths, each observing exactly its own
     /// path. A prim self-registers here so an empty or cache-miss index stays
     /// findable when a spec is first authored at its path on a layer its graph
@@ -46,7 +48,7 @@ pub(super) struct Dependencies {
     /// Reverse `layer → prim-index-paths` map over the layers each index's
     /// composition actually reaches — any dependency node's own layer or a member
     /// of that node's resolved layer stack (including the self-Root edge, which
-    /// `per_layer` skips, since the local prim reads its own root layer stack). A
+    /// `per_stack` skips, since the local prim reads its own root layer stack). A
     /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables` edit
     /// or a mute/unmute collects its victims as a union of lookups over the changed
     /// layers ([`indices_for_layers`](Self::indices_for_layers)). A muted
@@ -106,12 +108,12 @@ pub(super) struct Dependencies {
 }
 
 impl Dependencies {
-    /// Register every `(layer_id, node.path)` site referenced by `index` as a
+    /// Register every `(layer stack, node.path)` site referenced by `index` as a
     /// dependency of `prim_index_path`, together with the per-stack
     /// expression-variable names its build read (`expr_var_deps`, from
     /// [`BuildOutput::expr_var_deps`](super::prim_indexer::BuildOutput::expr_var_deps)).
-    /// Replaces any prior registration for the same prim. A site whose node spans
-    /// several sublayers registers each member layer, so a change to any of them
+    /// Replaces any prior registration for the same prim. A site registers
+    /// once, for its node's stack. A change to any member layer of that stack
     /// fans out to this prim.
     ///
     /// The implicit "self" edge — a Root node whose path equals the prim's
@@ -130,8 +132,8 @@ impl Dependencies {
         // `seen` provides O(1) dedup as we walk graph nodes; the parallel
         // `registered` Vec preserves insertion order for the reverse-map
         // entry (the order is irrelevant to lookups but helps debug).
-        let mut seen: HashSet<(LayerId, Path)> = HashSet::new();
-        let mut registered: Vec<(LayerId, Path)> = Vec::new();
+        let mut seen: HashSet<(LayerStackId, Path)> = HashSet::new();
+        let mut registered: Vec<(LayerStackId, Path)> = Vec::new();
         // The layers this index touched, for the `by_layer` map. Includes the
         // self-Root edge the site map skips.
         let mut layers: HashSet<LayerId> = HashSet::new();
@@ -145,29 +147,27 @@ impl Dependencies {
         // nodes: authoring a spec at such a site must invalidate this prim so the
         // node un-culls / re-relocates on recomposition.
         for node in index.dependency_nodes() {
-            let registers = registers_site(node, prim_index_path);
+            let stack = node.layer_stack_id();
             layers.insert(node.layer_id());
-            if node.layer_stack_id() != LayerStackId::ROOT {
-                stacks.insert(node.layer_stack_id());
+            if stack != LayerStackId::ROOT {
+                stacks.insert(stack);
             }
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-                layers.insert(layer);
-                // The site map skips the self-Root edge to stay compact; the
-                // layer map keeps it (the prim reads its own root stack).
-                if !registers {
-                    continue;
-                }
-                let key = (layer, node.path.clone());
-                if !seen.insert(key.clone()) {
-                    continue;
-                }
-                registered.push(key);
-                self.per_layer
-                    .entry(layer)
-                    .or_default()
-                    .get_or_insert_default(&node.path)
-                    .push(prim_index_path.clone());
+            layers.extend(graph.layer_stack(stack).iter().map(|&(layer, _)| layer));
+            // The site map skips the self-Root edge to stay compact; the
+            // layer map keeps it (the prim reads its own root stack).
+            if !registers_site(node, prim_index_path) {
+                continue;
             }
+            let key = (stack, node.path.clone());
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            registered.push(key);
+            self.per_stack
+                .entry(stack)
+                .or_default()
+                .get_or_insert_default(&node.path)
+                .push(prim_index_path.clone());
         }
         for &layer in &layers {
             self.by_layer.entry(layer).or_default().insert(prim_index_path.clone());
@@ -286,13 +286,16 @@ impl Dependencies {
         let Some(sites) = self.by_prim.remove(prim_index_path) else {
             return;
         };
-        for (li, site) in sites {
-            if let Some(map) = self.per_layer.get_mut(&li)
+        for (stack, site) in sites {
+            if let Some(map) = self.per_stack.get_mut(&stack)
                 && let Some(deps) = map.get_mut(&site)
             {
                 deps.retain(|p| p != prim_index_path);
                 if deps.is_empty() {
                     map.remove(&site);
+                    if map.is_empty() {
+                        self.per_stack.remove(&stack);
+                    }
                 }
             }
         }
@@ -309,14 +312,16 @@ impl Dependencies {
     /// an arc introduced at `/Foo` makes `/Foo/Bar`'s composed index depend
     /// transitively on opinions at `/Foo`, so a change at `/Foo` reaches
     /// `/Foo/Bar` too.
+    ///
+    /// A dependent reading the site through two stacks that both hold
+    /// `layer_id` is paired with it once per stack.
     pub(super) fn ancestor_sites<'a>(
         &'a self,
+        graph: &'a LayerGraph,
         layer_id: LayerId,
         site_path: &'a Path,
     ) -> impl Iterator<Item = (&'a Path, &'a Path)> {
-        self.per_layer
-            .get(&layer_id)
-            .into_iter()
+        self.stack_tables(graph, layer_id)
             .flat_map(move |map| ancestors_to_variant_boundary(site_path).filter_map(|p| map.get_key_value(&p)))
             .flat_map(|(site, deps)| deps.iter().map(move |dep| (site, dep)))
     }
@@ -336,15 +341,13 @@ impl Dependencies {
     /// with no ancestor or subtree walk. The spec-tier rescan uses this to
     /// reach the nodes sitting at that precise site whose `has_specs` flag an
     /// inert spec add or remove can flip.
-    pub(super) fn exact_lookup(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
-        let per_layer = self
-            .per_layer
-            .get(&layer_id)
-            .and_then(|map| map.get(site_path))
+    pub(super) fn exact_lookup(&self, graph: &LayerGraph, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+        let per_stack = self
+            .stack_tables(graph, layer_id)
+            .filter_map(|map| map.get(site_path))
             .map(Vec::as_slice);
         Self::dedup_paths(
-            per_layer
-                .into_iter()
+            per_stack
                 .chain(std::iter::once(self.path_dependents(site_path)))
                 .flatten(),
         )
@@ -357,17 +360,29 @@ impl Dependencies {
     /// dependents a [`drop_index_subtree`](super::IndexCache::drop_index_subtree)
     /// of `prefix` misses: a prim like `/World/Inst` whose own path lies outside
     /// `prefix` but whose graph references `/Foo/Model` under it. Walks the
-    /// `prefix` subtree of the layer's dependency [`sdf::PathTable`].
+    /// `prefix` subtree of the dependency [`sdf::PathTable`] of each stack
+    /// holding the layer.
     ///
     /// The layer-agnostic [`by_path`](Self::by_path) self-registrations are not
     /// folded in here: a prim whose only registration is its own path under
     /// `prefix` is a namespace descendant of `prefix`, so the caller's
     /// literal-path subtree drop already reaches it.
-    pub(super) fn subtree_lookup(&self, layer_id: LayerId, prefix: &Path) -> Vec<Path> {
-        let Some(map) = self.per_layer.get(&layer_id) else {
-            return Vec::new();
-        };
-        Self::dedup_paths(map.subtree(prefix).flat_map(|(_, deps)| deps.as_slice()))
+    pub(super) fn subtree_lookup(&self, graph: &LayerGraph, layer_id: LayerId, prefix: &Path) -> Vec<Path> {
+        Self::dedup_paths(
+            self.stack_tables(graph, layer_id)
+                .flat_map(|map| map.subtree(prefix).flat_map(|(_, deps)| deps.as_slice())),
+        )
+    }
+
+    /// The site tables of the stacks holding `layer_id`.
+    fn stack_tables<'a>(
+        &'a self,
+        graph: &'a LayerGraph,
+        layer_id: LayerId,
+    ) -> impl Iterator<Item = &'a sdf::PathTable<Vec<Path>>> {
+        graph
+            .stacks_using(layer_id)
+            .filter_map(|stack| self.per_stack.get(&stack))
     }
 
     /// Prim indices to invalidate for a change to any layer in `affected` — the
@@ -520,9 +535,9 @@ mod tests {
 
     /// The dependent paths `ancestor_sites` reports for a site, deduplicated
     /// in first-seen order — what the table knows before any translation.
-    fn dependents(deps: &Dependencies, layer: LayerId, site: &Path) -> Vec<Path> {
+    fn dependents(deps: &Dependencies, graph: &LayerGraph, layer: LayerId, site: &Path) -> Vec<Path> {
         let mut out: Vec<Path> = Vec::new();
-        for (_, dep) in deps.ancestor_sites(layer, site) {
+        for (_, dep) in deps.ancestor_sites(graph, layer, site) {
             if !out.contains(dep) {
                 out.push(dep.clone());
             }
@@ -588,7 +603,7 @@ mod tests {
         deps.add(&user, &reader, &g, ExprVarDeps::default());
 
         assert_eq!(
-            dependents(&deps, l1, &source),
+            dependents(&deps, &g, l1, &source),
             vec![user.clone()],
             "only the graph reader registers a site here"
         );
@@ -613,14 +628,14 @@ mod tests {
         let index = make_index(&g, &foo, vec![(ArcType::Root, l0, foo.clone())]);
         deps.add(&foo, &index, &g, ExprVarDeps::default());
         assert!(
-            dependents(&deps, l0, &foo).is_empty(),
+            dependents(&deps, &g, l0, &foo).is_empty(),
             "the self-Root edge registers no site"
         );
         assert!(
             deps.has_path_ancestor(&foo),
             "the layer-agnostic entry covers it instead"
         );
-        assert_eq!(deps.exact_lookup(l1, &foo), vec![foo.clone()]);
+        assert_eq!(deps.exact_lookup(&g, l1, &foo), vec![foo.clone()]);
     }
 
     #[test]
@@ -639,7 +654,7 @@ mod tests {
             ],
         );
         deps.add(&here, &index, &g, ExprVarDeps::default());
-        assert_eq!(dependents(&deps, l1, &there), vec![here.clone()]);
+        assert_eq!(dependents(&deps, &g, l1, &there), vec![here.clone()]);
     }
 
     /// `indices_for_layers` scopes a layer-set invalidation to the indices that
@@ -706,9 +721,9 @@ mod tests {
             ],
         );
         deps.add(&here, &index, &g, ExprVarDeps::default());
-        assert_eq!(dependents(&deps, l0, &p("/X/Y/Child")), vec![here.clone()]);
+        assert_eq!(dependents(&deps, &g, l0, &p("/X/Y/Child")), vec![here.clone()]);
         // The site itself reaches the dependent too.
-        assert_eq!(dependents(&deps, l0, &arc_site), vec![here]);
+        assert_eq!(dependents(&deps, &g, l0, &arc_site), vec![here]);
     }
 
     /// A variant selection ends the namespace chain: it is not a child of the
@@ -739,17 +754,17 @@ mod tests {
 
         let under = p("/Model{lod=high}Child");
         assert_eq!(
-            dependents(&deps, l0, &under),
+            dependents(&deps, &g, l0, &under),
             vec![sel.clone()],
             "the walk stops at the selection, so /Model's dependent is not reached"
         );
         assert_eq!(
-            dependents(&deps, l0, &variant),
+            dependents(&deps, &g, l0, &variant),
             vec![sel],
             "a site that is itself a selection reaches only its own dependents"
         );
         assert_eq!(
-            dependents(&deps, l0, &p("/Model/Child")),
+            dependents(&deps, &g, l0, &p("/Model/Child")),
             vec![plain],
             "an ordinary child still walks up to /Model"
         );
@@ -798,7 +813,7 @@ mod tests {
             ExprVarDeps::default(),
         );
         // Subtree at /X/Y catches both sites.
-        let mut found = deps.subtree_lookup(l0, &p("/X"));
+        let mut found = deps.subtree_lookup(&g, l0, &p("/X"));
         found.sort();
         assert_eq!(found, vec![a.clone(), b.clone()]);
     }
@@ -816,9 +831,9 @@ mod tests {
             &g,
             ExprVarDeps::default(),
         );
-        assert!(!dependents(&deps, l0, &there).is_empty());
+        assert!(!dependents(&deps, &g, l0, &there).is_empty());
         deps.remove(&here);
-        assert!(dependents(&deps, l0, &there).is_empty());
+        assert!(dependents(&deps, &g, l0, &there).is_empty());
         assert!(!deps.has_path_ancestor(&here), "the self-registration goes too");
     }
 }
