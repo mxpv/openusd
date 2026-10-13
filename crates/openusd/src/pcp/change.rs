@@ -742,7 +742,7 @@ impl Changes {
         prim: &Path,
         work: &ScopedInvalidation,
     ) {
-        for dep in cache.store().dependencies().exact_lookup(layer, prim) {
+        for dep in cache.store().dependencies().exact_lookup(graph, layer, prim) {
             self.record_scoped(dep, work);
         }
         for dep in cache.store().translated_ancestor_dependents(graph, layer, prim) {
@@ -773,7 +773,7 @@ impl Changes {
         for dep in cache.store().lookup_with_ancestors(graph, layer, path) {
             self.cache.did_change_significantly.insert(dep);
         }
-        for dep in cache.store().dependencies().subtree_lookup(layer, path) {
+        for dep in cache.store().dependencies().subtree_lookup(graph, layer, path) {
             self.cache.did_change_significantly.insert(dep);
         }
         // Include the literal path even with no current dependent — a
@@ -1123,7 +1123,7 @@ fn apply_default_prim_edits(
         // evicts are a subset of that, so they need no separate mention.
         if let Some(path) = &old {
             reported.extend(cache.store().graph_ancestor_lookup(graph, *layer, path));
-            reported.extend(cache.store().dependencies().subtree_lookup(*layer, path));
+            reported.extend(cache.store().dependencies().subtree_lookup(graph, *layer, path));
         }
         victims.extend(cache.store().dependencies().prims_using_default_prim(*layer));
     }

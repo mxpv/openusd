@@ -1995,6 +1995,13 @@ impl LayerGraph {
         self.layer_stack(stack).iter().any(|&(member, _)| member == layer)
     }
 
+    /// The composed stacks `layer` is a member of, in id order (C++
+    /// `PcpLayerStackRegistry::FindAllUsingLayer`). A change to `layer`
+    /// reaches the dependencies registered against these stacks.
+    pub(crate) fn stacks_using(&self, layer: LayerId) -> impl Iterator<Item = LayerStackId> + '_ {
+        self.stacks.stacks_using(layer)
+    }
+
     /// The root layer (the first non-session layer), if any. Per spec 12.2.7,
     /// pseudo-root layer metadata resolves from this layer alone.
     pub(crate) fn root_layer(&self) -> Option<&sdf::Layer> {

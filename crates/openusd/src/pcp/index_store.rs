@@ -417,7 +417,7 @@ impl IndexStore {
         rebuild: &mut HashSet<Path>,
         rekeyed: &mut HashSet<Path>,
     ) {
-        for prim in self.deps.exact_lookup(layer, path) {
+        for prim in self.deps.exact_lookup(graph, layer, path) {
             // An index this round already condemned recomposes from scratch,
             // flags included, so the rescan leaves it alone.
             if rebuild.contains(&prim) {
@@ -542,7 +542,7 @@ impl IndexStore {
         // node, and a fresh vector per pair would be the round's only allocation
         // that scales with the number of dependents.
         let mut nodes = Vec::new();
-        for (site, dep) in self.deps.ancestor_sites(layer_id, site_path) {
+        for (site, dep) in self.deps.ancestor_sites(graph, layer_id, site_path) {
             if reach == Ancestry::StrictlyAbove && site == site_path {
                 continue;
             }
