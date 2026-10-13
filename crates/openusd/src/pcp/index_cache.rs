@@ -25,7 +25,7 @@ use super::clip_manifest;
 use super::diagnostics::Diagnostics;
 use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
 use super::instancing::PrototypeRegistry;
-use super::layer_graph::{LayerGraph, LayerStackIdentifier};
+use super::layer_graph::{LayerGraph, LayerStackIdentifier, MuteChange};
 use super::layer_stack::StackMarks;
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
@@ -2106,27 +2106,31 @@ impl IndexCache {
     /// Reports nothing, unlike its siblings: no caller of this path publishes a
     /// notice today. Widening it is the first half of the deferred demand-notice
     /// work — see the `TODO` beside `Payload::finish` in `usd::composition`.
-    pub(crate) fn invalidate_layers(&mut self, affected: &HashSet<LayerId>) {
+    pub(crate) fn invalidate_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
         self.retire_query_errors();
         self.invalidate_population();
-        self.drop_indices_touching_layers(affected);
+        self.drop_indices_touching_layers(graph, affected);
     }
 
-    /// Invalidates the cache after a layer-muting toggle of the layer with
-    /// canonical identifier `canonical`: retires the query diagnostics, then
-    /// drops the cached indices the toggle can restructure (see
+    /// Invalidates the cache after the layer-muting toggle `change`: retires
+    /// the query diagnostics, then drops the cached indices the toggle can
+    /// restructure (see
     /// [`Dependencies::indices_for_mute_toggle`](super::dependencies::Dependencies::indices_for_mute_toggle))
-    /// — those reading one of the `affected` layers, plus those that only skipped
-    /// the target and recorded `canonical` because it interned no reachable layer.
+    /// — those composing against a stack that held one of its affected layers,
+    /// plus those that only skipped the target and recorded its canonical
+    /// identifier because it interned no reachable layer.
     /// Unmuting such a target drops the referrer's stale index so it recomposes and
     /// the load barrier finally opens the now-unmuted target.
     ///
     /// Returns everything the toggle dropped — the indices above and the
     /// prototype roots retired with them — for a caller to report as-is.
-    pub(crate) fn invalidate_muting(&mut self, affected: &HashSet<LayerId>, canonical: &str) -> Vec<Path> {
+    pub(crate) fn invalidate_muting(&mut self, change: &MuteChange) -> Vec<Path> {
         self.retire_query_errors();
         self.invalidate_population();
-        let victims = self.store.dependencies().indices_for_mute_toggle(affected, canonical);
+        let victims = self
+            .store
+            .dependencies()
+            .indices_for_mute_toggle(&change.stacks, &change.changed);
         self.drop_index_victims(victims)
     }
 
@@ -2136,11 +2140,11 @@ impl IndexCache {
     /// leaving indices that read none of them cached. Editing a layer can only
     /// restructure prims that compose against a layer stack containing it (C++
     /// `PcpChanges` layer-stack fanout), so the rest of the cache stays warm.
-    fn drop_indices_touching_layers(&mut self, affected: &HashSet<LayerId>) {
+    fn drop_indices_touching_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
         if affected.is_empty() {
             return;
         }
-        let victims = self.store.dependencies().indices_for_layers(affected);
+        let victims = self.store.dependencies().indices_for_layers(graph, affected);
         self.drop_index_victims(victims);
     }
 

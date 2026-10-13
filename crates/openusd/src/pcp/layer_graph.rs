@@ -26,7 +26,7 @@
 //! save.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem;
 
@@ -445,9 +445,14 @@ pub(crate) struct MuteChange {
     /// listener mirroring the muted set stays in sync (C++ reports the canonical
     /// id it toggled).
     pub(crate) changed: String,
-    /// Layers whose cached prim indices the change can invalidate (see
-    /// [`mute_fanout`](LayerGraph::mute_fanout)).
-    pub(crate) affected: HashSet<LayerId>,
+    /// The stacks whose cached prim indices the change can invalidate: those
+    /// holding a layer of the [`mute_fanout`](LayerGraph::mute_fanout), or one
+    /// whose relocate pairs the toggle changed, before or after the toggle.
+    /// Muting a stack's root empties the stack. Its prims are found through the
+    /// stacks that held the root before the recompose, as C++
+    /// `PcpChanges::_DidMuteLayer` looks up the layer stacks using the muted
+    /// layer before they are recomposed.
+    pub(crate) stacks: BTreeSet<LayerStackId>,
 }
 
 /// The layer stack a reference/payload arc to an external target should compose
@@ -1992,7 +1997,9 @@ impl LayerGraph {
     /// both the dependency registration walk and its lookup apply to decide
     /// whether a node's site belongs to an edited layer.
     pub(crate) fn stack_contains(&self, stack: LayerStackId, layer: LayerId) -> bool {
-        self.layer_stack(stack).iter().any(|&(member, _)| member == layer)
+        self.stacks
+            .member_set(stack)
+            .is_some_and(|members| members.contains(&layer))
     }
 
     /// The composed stacks `layer` is a member of, in id order (C++
@@ -2545,8 +2552,7 @@ impl LayerGraph {
             Some(id) => self.muted.insert(id).then(|| self.identity(id))?,
             None => self.pending_mutes.insert(canonical.clone()).then_some(canonical)?,
         };
-        let affected = self.recompose_for_mute_with_fanout(&changed);
-        Some(MuteChange { changed, affected })
+        Some(self.recompose_for_mute_with_fanout(changed))
     }
 
     /// Unmutes the layer with the given identifier, restoring its opinions and
@@ -2560,8 +2566,7 @@ impl LayerGraph {
             Some(id) if self.muted.remove(&id) => self.identity(id),
             _ => self.pending_mutes.take(&canonical)?,
         };
-        let affected = self.recompose_for_mute_with_fanout(&changed);
-        Some(MuteChange { changed, affected })
+        Some(self.recompose_for_mute_with_fanout(changed))
     }
 
     /// The identity a loaded layer is muted under: its interned identifier.
@@ -2570,18 +2575,21 @@ impl LayerGraph {
     }
 
     /// Recomposes the muting-dependent graph state for a just-changed muted set
-    /// and returns the layers whose cached prim indices the toggle of the layer
-    /// with canonical identifier `canonical` can invalidate: the structural
-    /// [`mute_fanout`](Self::mute_fanout) plus any layer whose cached relocate
-    /// pairs the recompose changed.
+    /// and returns the [`MuteChange`] for the toggle of the layer with
+    /// canonical identifier `changed`. The layers it can invalidate are the
+    /// structural [`mute_fanout`](Self::mute_fanout) plus any layer whose
+    /// cached relocate pairs the recompose changed, and its stacks are those
+    /// holding one of them before or after the recompose.
     ///
     /// Relocate extraction omits muted layers and refreshes diagnostics in the
     /// graph. Any layer whose cached relocate pairs change is added to the
     /// fanout so dependent prims rebuild against the current stack state.
-    fn recompose_for_mute_with_fanout(&mut self, canonical: &str) -> HashSet<LayerId> {
-        let mut affected = self.mute_fanout(canonical);
+    fn recompose_for_mute_with_fanout(&mut self, changed: String) -> MuteChange {
+        let mut affected = self.mute_fanout(&changed);
+        let mut stacks: BTreeSet<LayerStackId> = affected.iter().flat_map(|&id| self.stacks_using(id)).collect();
         affected.extend(self.recompose_for_mute());
-        affected
+        stacks.extend(affected.iter().flat_map(|&id| self.stacks_using(id)));
+        MuteChange { changed, stacks }
     }
 
     /// The interned layers a (un)mute of the layer with canonical identifier
@@ -4569,8 +4577,8 @@ mod tests {
             .mute_layer("combo.usda".to_string())
             .expect("muting combo changed the set");
         assert_eq!(
-            change.affected,
-            HashSet::from([combo_id]),
+            change.stacks,
+            BTreeSet::from([combo_stack]),
             "muting combo affects only stacks that include combo"
         );
         assert_eq!(
