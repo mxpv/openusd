@@ -548,7 +548,8 @@ impl StageComposition {
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
         let _scope = ar::CacheScope::begin();
-        let before = self.layers.borrow().len();
+        // The layers that join the graph this pass.
+        let mut joined: HashSet<pcp::LayerId> = HashSet::new();
         let mut newly_failed = false;
         let mut newly_interned = false;
         // Whether an open ran for each demand this pass: the mint loop below
@@ -603,7 +604,10 @@ impl StageComposition {
                 let failure = match opened {
                     Ok(Some(layers)) => {
                         for layer in layers {
-                            self.intern_layer(layer, hooks);
+                            let (id, fresh) = self.intern_layer(layer, hooks);
+                            if fresh {
+                                joined.insert(id);
+                            }
                         }
                         None
                     }
@@ -645,7 +649,7 @@ impl StageComposition {
                 }
             }
         }
-        let grew = self.layers.borrow().len() != before;
+        let grew = !joined.is_empty();
         // A layer joined, and an asset may have appeared: one recorded as
         // unresolved that the resolver now finds is forgotten, and the
         // indices that reported a failed target recompose and demand it.
@@ -661,8 +665,7 @@ impl StageComposition {
         // Newly joined layers need their plain sublayer edges (and relocates) wired
         // before any stack is composed against them.
         if grew {
-            // TODO(perf): rebuild only the new subtrees rather than the whole DAG.
-            let relocated = self.layers.borrow_mut().recompute_sublayers(None).affected;
+            let relocated = self.layers.borrow_mut().wire_joined(&joined);
             // A demanded layer that introduces relocates restructures prims
             // composed against its stack; drop their cached indices so they
             // recompose with the relocates applied.
