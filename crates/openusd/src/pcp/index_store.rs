@@ -597,6 +597,15 @@ impl IndexStore {
         entry.instanceable = Some((entry.revision, instanceable));
         Ok(instanceable)
     }
+
+    /// Records `instanceable` as the [`instanceable`](Self::instanceable)
+    /// answer for the entry at `prim`, at its current revision. The build that
+    /// cached the entry has the answer already.
+    pub(super) fn seed_instanceable(&mut self, prim: &Path, instanceable: bool) {
+        if let Some(entry) = self.entries.get_mut(prim) {
+            entry.instanceable = Some((entry.revision, instanceable));
+        }
+    }
 }
 
 /// The distinct non-root layer stacks an index's arena references — the
@@ -683,6 +692,24 @@ mod tests {
         let mut store = IndexStore::default();
         register(&mut store, &g, &p("/Ref"), index);
         (g, l0, store)
+    }
+
+    /// The instanceable memo answers only at the revision it was recorded at.
+    /// The recorded answer here disagrees with the index, which has no
+    /// instanceable node, so the two reads tell the memo from the index: a
+    /// restale stamps a new revision, and the next query reads the index.
+    #[test]
+    fn instanceable_follows_revision() -> Result<(), QueryError> {
+        let g = graph(1);
+        let prim = p("/Prim");
+        let mut store = IndexStore::default();
+        register(&mut store, &g, &prim, PrimIndex::default());
+        store.seed_instanceable(&prim, true);
+        assert!(store.instanceable(&g, &prim)?, "the recorded answer is read");
+
+        store.restale(&prim, &BTreeSet::new());
+        assert!(!store.instanceable(&g, &prim)?, "a new revision answers afresh");
+        Ok(())
     }
 
     /// The map a reference-shaped node carries: `source` composes at `target`.

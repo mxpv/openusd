@@ -3460,14 +3460,9 @@ impl IndexCache {
         // This prim is an instance when its composition declares
         // `instanceable = true` and has an instanceable node; its descendants then
         // inherit `within_instance`. A nested instance therefore re-arms the
-        // flag for its own subtree. Computed from the freshly built index so it
-        // agrees with a later `Prim::is_instance`, avoiding re-entering
-        // `ensure_index` for `path`.
-        let is_instance = index.has_instanceable_node(path.prim_element_count() as u16)
-            && matches!(
-                index.resolve_field(FieldKey::Instanceable.as_str(), graph, None)?,
-                Some(Value::Bool(true))
-            );
+        // flag for its own subtree. The answer is recorded on the entry below,
+        // where a later `Prim::is_instance` reads it.
+        let is_instance = index.is_instanceable(graph, path.prim_element_count() as u16)?;
 
         // The child-context selection resolution can evaluate a `${VAR}`
         // selection no indexing-time task did — one authored here for a set
@@ -3484,6 +3479,7 @@ impl IndexCache {
             parent_ctx.instance_depth
         };
         self.cache_index(graph, path, index, child_context, build_errors, expr_var_deps);
+        self.store.seed_instanceable(path, is_instance);
         // Report inconsistent property types at prim composition (C++
         // `PcpErrorInconsistentPropertyType`) so the conflict is visible without
         // anyone asking for a property stack. Composed property names read back
