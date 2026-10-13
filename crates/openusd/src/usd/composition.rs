@@ -665,12 +665,13 @@ impl StageComposition {
         // Newly joined layers need their plain sublayer edges (and relocates) wired
         // before any stack is composed against them.
         if grew {
-            let relocated = self.layers.borrow_mut().wire_joined(&joined);
+            let mut graph = self.layers.borrow_mut();
+            let relocated = graph.wire_joined(&joined);
             // A demanded layer that introduces relocates restructures prims
             // composed against its stack; drop their cached indices so they
             // recompose with the relocates applied.
             if !relocated.is_empty() {
-                self.cache.borrow_mut().invalidate_layers(&relocated);
+                self.cache.borrow_mut().invalidate_layers(&graph, &relocated);
             }
         }
         // Mint each demand's layer stack now that the edges are wired. The layer
@@ -824,15 +825,12 @@ impl StageComposition {
             // indices reading an affected stack so they recompose against the
             // extended members. The recompose re-derives the pending demand set
             // for the next round.
-            let (affected, next) = {
-                let mut graph = self.layers.borrow_mut();
-                let affected = graph.recompute_sublayers(Some(&opened_parents)).affected;
-                (affected, graph.take_sublayer_demands())
-            };
+            let mut graph = self.layers.borrow_mut();
+            let affected = graph.recompute_sublayers(Some(&opened_parents)).affected;
             if !affected.is_empty() {
-                self.cache.borrow_mut().invalidate_layers(&affected);
+                self.cache.borrow_mut().invalidate_layers(&graph, &affected);
             }
-            demands = next;
+            demands = graph.take_sublayer_demands();
         }
         loaded_any
     }
@@ -910,7 +908,7 @@ impl StageComposition {
             // both the toggled layer's fanout and its canonical identifier reaches a
             // referrer that skipped this target while it was muted-and-never-loaded, so
             // unmuting recomposes it and the load barrier finally opens the target.
-            let resynced = cache.invalidate_muting(&change.affected, &change.changed);
+            let resynced = cache.invalidate_muting(&change);
             Some((change.changed, resynced, graph.take_sublayer_demands()))
         })?;
         // The set gathered above is the whole answer, though resolving the demands

@@ -16,7 +16,7 @@
 //!
 //! This is C++ `Pcp_Dependencies`, which also keys sites by layer stack.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem;
 
@@ -45,19 +45,14 @@ pub(super) struct Dependencies {
     /// findable when a spec is first authored at its path on a layer its graph
     /// does not yet touch; one entry per prim covers that prim on every layer.
     by_path: HashSet<Path>,
-    /// Reverse `layer → prim-index-paths` map over the layers each index's
-    /// composition actually reaches — any dependency node's own layer or a member
-    /// of that node's resolved layer stack (including the self-Root edge, which
-    /// `per_stack` skips, since the local prim reads its own root layer stack). A
-    /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables` edit
-    /// or a mute/unmute collects its victims as a union of lookups over the changed
-    /// layers ([`indices_for_layers`](Self::indices_for_layers)). A muted
-    /// reference/payload target — reached by nothing — is kept out and tracked by
-    /// canonical identifier in [`by_muted_canonical`](Self::by_muted_canonical).
-    by_layer: HashMap<LayerId, HashSet<Path>>,
-    /// The layers `prim_index_path` registered under in `by_layer`, for O(1)
-    /// retraction on removal.
-    by_prim_layers: HashMap<Path, HashSet<LayerId>>,
+    /// Prim-index paths with a dependency node composing against the stage
+    /// root layer stack, the self-Root edge included. A change to a layer of the
+    /// root stack reaches these ([`indices_for_layers`](Self::indices_for_layers));
+    /// a change to another stack reaches the dependents registered in its
+    /// [`per_stack`](Self::per_stack) table. A muted reference/payload target
+    /// reached by nothing is tracked by canonical identifier in
+    /// [`by_muted_canonical`](Self::by_muted_canonical).
+    root_users: HashSet<Path>,
     /// Reverse `canonical muted identifier → prim-index-paths` map: which indices
     /// depend on a reference/payload target's *mute state* without reaching it
     /// through a live site. Two cases resolve to one key here — a target muted
@@ -66,8 +61,8 @@ pub(super) struct Dependencies {
     /// no node, so keyed by the interned target root's identifier, which equals that
     /// same canonical). Unmuting a target fans back to these indices
     /// ([`indices_for_mute_toggle`](Self::indices_for_mute_toggle)); muting a
-    /// still-loaded target reaches its referrer through `by_layer` (the pre-mute
-    /// reach) instead.
+    /// still-loaded target reaches its referrer through the stacks holding the
+    /// target's layers.
     by_muted_canonical: HashMap<String, HashSet<Path>>,
     /// The canonical identifiers `prim_index_path` registered under in
     /// `by_muted_canonical`, for O(1) retraction on removal.
@@ -134,9 +129,9 @@ impl Dependencies {
         // entry (the order is irrelevant to lookups but helps debug).
         let mut seen: HashSet<(LayerStackId, Path)> = HashSet::new();
         let mut registered: Vec<(LayerStackId, Path)> = Vec::new();
-        // The layers this index touched, for the `by_layer` map. Includes the
-        // self-Root edge the site map skips.
-        let mut layers: HashSet<LayerId> = HashSet::new();
+        // Whether a node composes against the root stack, the self-Root edge the
+        // site map skips included.
+        let mut root_user = false;
         // The layer stacks this index composes against, for the two stack-keyed
         // maps and their shared retraction. The root stack is left implicit:
         // every prim composes in it, so recording it in `by_stack` would mirror
@@ -148,14 +143,23 @@ impl Dependencies {
         // node un-culls / re-relocates on recomposition.
         for node in index.dependency_nodes() {
             let stack = node.layer_stack_id();
-            layers.insert(node.layer_id());
-            if stack != LayerStackId::ROOT {
+            if stack == LayerStackId::ROOT {
+                root_user = true;
+            } else {
                 stacks.insert(stack);
             }
-            layers.extend(graph.layer_stack(stack).iter().map(|&(layer, _)| layer));
-            // The site map skips the self-Root edge to stay compact; the
-            // layer map keeps it (the prim reads its own root stack).
+            debug_assert!(
+                !node.layer_id().is_valid() || graph.stack_contains(stack, node.layer_id()),
+                "a node's representative layer is a member of its stack, so the stack lookups reach it",
+            );
+            // The site map skips the self-Root edge to stay compact;
+            // `root_users` keeps it (the prim reads its own root stack).
             if !registers_site(node, prim_index_path) {
+                debug_assert_eq!(
+                    stack,
+                    LayerStackId::ROOT,
+                    "only the self-Root edge goes unregistered, so `per_stack` names every other stack's users",
+                );
                 continue;
             }
             let key = (stack, node.path.clone());
@@ -169,8 +173,8 @@ impl Dependencies {
                 .get_or_insert_default(&node.path)
                 .push(prim_index_path.clone());
         }
-        for &layer in &layers {
-            self.by_layer.entry(layer).or_default().insert(prim_index_path.clone());
+        if root_user {
+            self.root_users.insert(prim_index_path.clone());
         }
         // Fold the variable-reading stacks into the same retraction set — the
         // root stack included here, since its per-prim names are the step-4
@@ -225,7 +229,6 @@ impl Dependencies {
         }
 
         self.by_prim.insert(prim_index_path.clone(), registered);
-        self.by_prim_layers.insert(prim_index_path.clone(), layers);
         // The common arc-free, expression-free index registers under no stack
         // (its only stack is the implicit root), so skip an empty entry.
         if !stacks.is_empty() {
@@ -250,15 +253,15 @@ impl Dependencies {
         self.by_path.insert(prim_index_path.clone());
     }
 
-    /// Drop all registered `(layer, site)` entries for `prim_index_path`.
+    /// Drop all registered `(layer stack, site)` entries for `prim_index_path`.
     pub(super) fn remove(&mut self, prim_index_path: &Path) {
         // Drop the prim's layer-agnostic self-registration so an eviction or
         // rebuild leaves no stale `by_path` entry.
         self.by_path.remove(prim_index_path);
-        // Retract the three reverse-keyed registrations: the layers this index
-        // reached, the muted targets it depends on the state of, and the layers
-        // whose `defaultPrim` it consulted.
-        retract(&mut self.by_layer, &mut self.by_prim_layers, prim_index_path);
+        self.root_users.remove(prim_index_path);
+        // Retract the two reverse-keyed registrations: the muted targets it
+        // depends on the state of, and the layers whose `defaultPrim` it
+        // consulted.
         retract(&mut self.by_muted_canonical, &mut self.by_prim_muted, prim_index_path);
         retract(
             &mut self.by_default_prim,
@@ -385,15 +388,31 @@ impl Dependencies {
             .filter_map(|stack| self.per_stack.get(&stack))
     }
 
-    /// Prim indices to invalidate for a change to any layer in `affected` — the
-    /// deduplicated union of the `by_layer` registrations. The victim set for a
-    /// mute/unmute or a `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables`
-    /// edit (C++ `PcpChanges` layer-stack fanout). Each registered index reads a
-    /// layer stack containing one of `affected`, so it is exactly one the change can
-    /// restructure. A referrer that only *skipped* a muted target reaches it through
-    /// [`indices_for_mute_toggle`](Self::indices_for_mute_toggle) instead.
-    pub(super) fn indices_for_layers(&self, affected: &HashSet<LayerId>) -> Vec<Path> {
-        Self::dedup_paths(affected.iter().filter_map(|layer| self.by_layer.get(layer)).flatten())
+    /// Prim indices to invalidate for a change to any layer in `affected`:
+    /// those composing against a stack that holds one of them, deduplicated.
+    /// The victim set for a mute/unmute or a
+    /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables`
+    /// edit (C++ `PcpChanges` layer-stack fanout), each of which the caller
+    /// names by layers that stay members of the stacks the change restructures.
+    /// A referrer that only *skipped* a muted target reaches it through
+    /// [`indices_for_mute_toggle`](Self::indices_for_mute_toggle).
+    pub(super) fn indices_for_layers(&self, graph: &LayerGraph, affected: &HashSet<LayerId>) -> Vec<Path> {
+        let stacks: BTreeSet<LayerStackId> = affected.iter().flat_map(|&layer| graph.stacks_using(layer)).collect();
+        Self::dedup_paths(self.stack_users(&stacks))
+    }
+
+    /// The prim indices composing against one of `stacks`, with repeats.
+    fn stack_users<'a>(&'a self, stacks: &'a BTreeSet<LayerStackId>) -> impl Iterator<Item = &'a Path> {
+        let root = stacks
+            .contains(&LayerStackId::ROOT)
+            .then_some(&self.root_users)
+            .into_iter()
+            .flatten();
+        let others = stacks
+            .iter()
+            .filter_map(|stack| self.per_stack.get(stack))
+            .flat_map(|table| table.iter().flat_map(|(_, deps)| deps.iter()));
+        root.chain(others)
     }
 
     /// Prim indices whose composition uses the layer stack `stack`, as an
@@ -438,16 +457,16 @@ impl Dependencies {
     }
 
     /// Prim indices to invalidate when the layer with canonical identifier
-    /// `canonical` toggles muted state and its stack members shift by `affected`
-    /// (from [`mute_fanout`](super::LayerGraph::mute_fanout)): the indices that read
-    /// one of `affected` through `by_layer` (a still-loaded target reached before
-    /// the toggle), plus those that only *skipped* the target and recorded it in
-    /// `by_muted_canonical` (muted before loading, or after its stack emptied).
-    /// Deduplicated in one pass over both streams.
-    pub(super) fn indices_for_mute_toggle(&self, affected: &HashSet<LayerId>, canonical: &str) -> Vec<Path> {
-        let by_layer = affected.iter().filter_map(|layer| self.by_layer.get(layer)).flatten();
+    /// `canonical` toggles muted state (from
+    /// [`MuteChange`](super::MuteChange)): the indices composing against one
+    /// of `stacks`, which held one of its affected layers before or after the
+    /// toggle (a still-loaded target reached before it), plus those that only
+    /// *skipped* the target and recorded it in `by_muted_canonical` (muted
+    /// before loading, or after its stack emptied). Deduplicated in one pass
+    /// over both streams.
+    pub(super) fn indices_for_mute_toggle(&self, stacks: &BTreeSet<LayerStackId>, canonical: &str) -> Vec<Path> {
         let by_canonical = self.by_muted_canonical.get(canonical).into_iter().flatten();
-        Self::dedup_paths(by_layer.chain(by_canonical))
+        Self::dedup_paths(self.stack_users(stacks).chain(by_canonical))
     }
 
     /// Prim indices that observe exactly `path`, independent of layer.
@@ -657,12 +676,13 @@ mod tests {
         assert_eq!(dependents(&deps, &g, l1, &there), vec![here.clone()]);
     }
 
-    /// `indices_for_layers` scopes a layer-set invalidation to the indices that
-    /// touched a changed layer. Unlike the `(layer, site)` map, it registers the
-    /// self-Root edge, so a local prim touching only its root layer is found; a
-    /// sibling reading a different layer is not, and removal retracts both maps.
+    /// `indices_for_layers` scopes a layer-set invalidation to the indices
+    /// composing against a stack that holds a changed layer. The root stack's
+    /// users include the self-Root edge the site map skips: a local prim
+    /// touching only its root layer is found, a sibling reading a different
+    /// layer is not, and removal retracts the registrations.
     #[test]
-    fn by_layer_scopes_invalidation() {
+    fn layer_users_scope_invalidation() {
         let g = graph(2);
         let (l0, l1) = (g.all_ids()[0], g.all_ids()[1]);
         let mut deps = Dependencies::default();
@@ -690,15 +710,15 @@ mod tests {
         );
 
         // Both prims' Root edges live on l0; only /Ref reaches l1.
-        let mut on_l0 = deps.indices_for_layers(&HashSet::from([l0]));
+        let mut on_l0 = deps.indices_for_layers(&g, &HashSet::from([l0]));
         on_l0.sort();
         assert_eq!(on_l0, vec![local.clone(), refp.clone()]);
-        assert_eq!(deps.indices_for_layers(&HashSet::from([l1])), vec![refp.clone()]);
+        assert_eq!(deps.indices_for_layers(&g, &HashSet::from([l1])), vec![refp.clone()]);
 
-        // Removal retracts the `by_layer` registrations.
+        // Removal retracts the registrations.
         deps.remove(&refp);
-        assert!(deps.indices_for_layers(&HashSet::from([l1])).is_empty());
-        assert_eq!(deps.indices_for_layers(&HashSet::from([l0])), vec![local]);
+        assert!(deps.indices_for_layers(&g, &HashSet::from([l1])).is_empty());
+        assert_eq!(deps.indices_for_layers(&g, &HashSet::from([l0])), vec![local]);
     }
 
     /// A change below an arc's site reaches the dependent through the ancestor

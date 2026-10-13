@@ -917,7 +917,7 @@ impl Changes {
             );
         }
         let mut resynced = if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
-            cache.invalidate_layers(&affected);
+            cache.invalidate_layers(graph, &affected);
             vec![Path::abs_root()]
         } else {
             apply_vars_deltas(cache, graph, &vars_deltas)
