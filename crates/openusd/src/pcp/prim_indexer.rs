@@ -762,7 +762,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // re-evaluates through the queue (C++ `AddTasksForRootNode`'s recursive
         // `_ScanArcs`). Deepening keeps each node's full site layer stack; the
         // set of layers that author a spec changes at the deeper path, so
-        // `has_specs` is recomputed for every node by `scan_and_enqueue`.
+        // `scan_and_enqueue` recomputes `has_specs` for every node that had one.
         self.output = if self.frame.is_none() && self.site.ambient == LayerStackId::ROOT {
             let Some(parent_index) = self.inputs.cached_indices.get(&parent).map(|e| &e.index) else {
                 return Ok(false);
@@ -1082,7 +1082,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
             if self.node(node).is_inert() {
                 continue;
             }
-            let has_specs = self.stack_has_spec(self.node(node).layer_stack_id(), self.node(node).path());
+            // A node that authored no spec at the parent's path authors none at
+            // the child's: a prim spec lives under its parent's spec in the
+            // same layer (C++ `_ConvertNodeForChild`).
+            let has_specs = self.node(node).has_specs()
+                && self.stack_has_spec(self.node(node).layer_stack_id(), self.node(node).path());
             self.output.set_has_specs(node, has_specs);
             if has_specs {
                 self.add_expressed_arc_tasks(node);
