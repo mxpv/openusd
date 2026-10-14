@@ -1506,20 +1506,32 @@ impl PrimIndexGraph {
     /// those (C++ `_ComputeEraseCulledNodeIndexMapping`). Strength ordering
     /// follows origins, so a chain that leads from a live node must stay whole.
     ///
-    /// A culled node that authors specs stays too, with its ancestors: content
-    /// a relocation masks is culled where it is elided, and the namespace
-    /// editor reads it to tell a masking relocate target.
+    /// Three kinds of culled node stay too, each with its ancestors:
+    ///
+    /// - one that authors specs: content a relocation masks is culled where it
+    ///   is elided, and the namespace editor reads it to tell a masking
+    ///   relocate target;
+    /// - one that introduces its arc at this prim: the indexer culls an empty
+    ///   arc target as it adds it, where C++ never culls such a node, so the
+    ///   arc stays discoverable (an absent payload still counts for the
+    ///   instance key);
+    /// - the parent of any node that stays: the indexer can compose a node
+    ///   under a culled one, where C++ culls only whole subtrees.
     pub(crate) fn erasable(&self) -> Vec<bool> {
-        let mut erasable: Vec<bool> = self
-            .sites
-            .iter()
-            .map(|site| site.flags.contains(NodeFlags::CULLED) && !site.has_specs)
+        let mut erasable: Vec<bool> = (0..self.len())
+            .map(|i| {
+                let site = &self.sites[i];
+                site.flags.contains(NodeFlags::CULLED)
+                    && !site.has_specs
+                    && self.depth_below_introduction(NodeId(i as u32)) != 0
+            })
             .collect();
         if !erasable.contains(&true) {
             return erasable;
         }
-        for (id, site) in self.sites.iter().enumerate() {
-            if site.flags.contains(NodeFlags::CULLED) && site.has_specs {
+        // A climb stops at a kept ancestor, whose own climb covers the rest.
+        for id in 0..self.len() {
+            if !erasable[id] {
                 let mut parent = self.parent_of(NodeId(id as u32));
                 while parent.is_valid() && erasable[parent.idx()] {
                     erasable[parent.idx()] = false;
@@ -1570,8 +1582,13 @@ impl PrimIndexGraph {
     /// The kept nodes stay sorted: a parent's children keep their relative
     /// order, and the strength order is the old one with the dropped handles
     /// removed. A kept node's parent and origin are kept, which
-    /// [`erasable`](Self::erasable) and the culling rule guarantee.
-    pub(crate) fn erase(&mut self, erase: &[bool]) {
+    /// [`erasable`](Self::erasable) guarantees.
+    ///
+    /// Returns how many nodes that copied: the kept ones when another graph
+    /// held the shared half, 0 otherwise.
+    // TODO(perf): a shared half this graph alone holds is still rebuilt into a
+    // fresh arena; it could be compacted in place.
+    pub(crate) fn erase(&mut self, erase: &[bool]) -> usize {
         let mut remap = vec![NodeId::INVALID; self.len()];
         let mut next = 0u32;
         for (old, &drop) in erase.iter().enumerate() {
@@ -1628,6 +1645,11 @@ impl PrimIndexGraph {
             .map(|&id| remap[id.idx()])
             .collect();
         let root = map(shared.root);
+        let copied = if Arc::strong_count(&self.shared) > 1 {
+            nodes.len()
+        } else {
+            0
+        };
         let mut kept = erase.iter();
         self.sites.retain(|_| !kept.next().copied().unwrap_or(false));
         self.shared = Arc::new(GraphData {
@@ -1635,6 +1657,7 @@ impl PrimIndexGraph {
             strength_order,
             root,
         });
+        copied
     }
 
     /// Gives back the room this graph's vectors hold beyond their nodes, for

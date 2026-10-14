@@ -141,45 +141,36 @@ impl Dependencies {
         let mut stacks: HashSet<LayerStackId> = HashSet::new();
         // Include the culled nodes the graph keeps and inert relocation-source
         // nodes: authoring a spec at such a site must invalidate this prim so the
-        // node un-culls / re-relocates on recomposition. The culled nodes the
-        // graph erased register below.
-        for node in index.dependency_nodes() {
-            let stack = node.layer_stack_id();
-            if stack == LayerStackId::ROOT {
-                root_user = true;
-            } else {
-                stacks.insert(stack);
-            }
+        // node un-culls / re-relocates on recomposition. A culled node the graph
+        // erased still read its site: a spec authored there can bring it back
+        // (C++ `PcpCulledDependency`).
+        let live = index.dependency_nodes().map(|node| {
             debug_assert!(
-                !node.layer_id().is_valid() || graph.stack_contains(stack, node.layer_id()),
+                !node.layer_id().is_valid() || graph.stack_contains(node.layer_stack_id(), node.layer_id()),
                 "a node's representative layer is a member of its stack, so the stack lookups reach it",
             );
             // The site map skips the self-Root edge to stay compact;
             // `root_users` keeps it (the prim reads its own root stack).
-            if !registers_site(node, prim_index_path) {
-                continue;
-            }
-            let key = (stack, node.path().clone());
-            if !seen.insert(key.clone()) {
-                continue;
-            }
-            registered.push(key);
-            self.per_stack
-                .entry(stack)
-                .or_default()
-                .get_or_insert_default(node.path())
-                .push(prim_index_path.clone());
-        }
-        // A culled node erased from the graph still read its site: a spec
-        // authored there can bring it back (C++ `PcpCulledDependency`).
-        for culled in index.culled_dependencies() {
-            let stack = culled.layer_stack;
+            (
+                node.layer_stack_id(),
+                node.path(),
+                registers_site(node, prim_index_path),
+            )
+        });
+        let erased = index
+            .culled_dependencies()
+            .iter()
+            .map(|culled| (culled.layer_stack, &culled.site, true));
+        for (stack, path, registers) in live.chain(erased) {
             if stack == LayerStackId::ROOT {
                 root_user = true;
             } else {
                 stacks.insert(stack);
             }
-            let key = (stack, culled.site.clone());
+            if !registers {
+                continue;
+            }
+            let key = (stack, path.clone());
             if !seen.insert(key.clone()) {
                 continue;
             }
@@ -187,7 +178,7 @@ impl Dependencies {
             self.per_stack
                 .entry(stack)
                 .or_default()
-                .get_or_insert_default(&culled.site)
+                .get_or_insert_default(path)
                 .push(prim_index_path.clone());
         }
         if root_user {

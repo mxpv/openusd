@@ -631,17 +631,26 @@ fn collect_stack_maps(
         if cached_path.root_prim_name() != root_name {
             continue;
         }
-        for node in cached_index.index.all_nodes() {
-            if node.arc() == ArcType::Relocate {
+        // The culled nodes the index erased composed against their stacks too.
+        let live = cached_index
+            .index
+            .all_nodes()
+            .map(|node| (node.arc(), node.layer_stack_id(), node.map_to_root()));
+        let erased = cached_index
+            .index
+            .culled_dependencies()
+            .iter()
+            .map(|culled| (culled.arc, culled.layer_stack, culled.map_to_root()));
+        for (arc, stack, map) in live.chain(erased) {
+            if arc == ArcType::Relocate {
                 continue;
             }
-            let stack = node.layer_stack_id();
             let has_relocates = graph
                 .layer_stack(stack)
                 .iter()
                 .any(|&(layer, _)| relocate_layers.contains(&layer));
-            if has_relocates && !maps.iter().any(|(s, m)| *s == stack && m == node.map_to_root()) {
-                maps.push((stack, node.map_to_root().clone()));
+            if has_relocates && !maps.iter().any(|(s, m)| *s == stack && m == map) {
+                maps.push((stack, map.clone()));
             }
         }
     }
