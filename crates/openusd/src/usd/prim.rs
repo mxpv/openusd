@@ -31,7 +31,7 @@
 //! routes invalidation through [`crate::pcp::Changes`], so only the prim
 //! indices observably affected by the write are dropped.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
@@ -1101,7 +1101,11 @@ impl Prim {
     /// to scan only what layers actually author.
     pub fn property_names(&self) -> Result<Vec<Token>> {
         let mut names = self.authored_names_unordered()?;
-        add_declared(&mut names, self.prim_type_info()?.prim_definition().property_names());
+        add_declared(
+            &mut names,
+            self.prim_type_info()?.prim_definition().property_names(),
+            Token::clone,
+        );
         self.apply_property_order(&mut names)?;
         Ok(names)
     }
@@ -1130,7 +1134,7 @@ impl Prim {
 
     /// Reorders `names` by the prim's composed `propertyOrder`, where it
     /// authors one (C++ `UsdPrim::ApplyPropertyOrder`).
-    fn apply_property_order(&self, names: &mut Vec<Token>) -> Result<()> {
+    fn apply_property_order<T: PartialEq<Token>>(&self, names: &mut Vec<T>) -> Result<()> {
         if let Some(order) = self
             .stage
             .field::<sdf::Value>(&self.path, sdf::FieldKey::PropertyOrder)?
@@ -1229,41 +1233,40 @@ impl Prim {
     /// matches `ty`, in composed order.
     ///
     /// The names and their composed spec types come from one cache query. The
-    /// namespace narrows the ordered names, so a property keeps the place the
-    /// whole list gave it.
+    /// namespace and the kind narrow the ordered names, so a property keeps
+    /// the place the whole list gave it.
     fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType, namespace: &str) -> Result<Vec<sdf::Path>> {
-        let authored = self
-            .stage
-            .masked_opinions(&self.path, |g, cache| cache.prim_property_kinds(g, &self.path))?;
-        let kinds: HashMap<&Token, sdf::SpecType> = authored
-            .iter()
-            .filter_map(|(name, kind)| Some((name, (*kind)?)))
-            .collect();
         let info = self.prim_type_info()?;
         let definition = info.prim_definition();
-
-        let mut names: Vec<Token> = authored.iter().map(|(name, _)| name.clone()).collect();
+        let declared_kind = |name: &Token| definition.property(name).map(|property| property.spec_type());
+        let mut properties: Vec<TypedName> = self
+            .stage
+            .masked_opinions(&self.path, |g, cache| cache.prim_property_kinds(g, &self.path))?
+            .into_iter()
+            .map(|(name, kind)| {
+                let kind = match source {
+                    // A property with no composed spec takes its kind from
+                    // the schema declaration.
+                    PropertySource::Composed => kind.or_else(|| declared_kind(&name)),
+                    // Nothing a schema declares is authored, so a name with no
+                    // composed spec belongs to neither kind.
+                    PropertySource::Authored => kind,
+                };
+                TypedName { name, kind }
+            })
+            .collect();
         if source == PropertySource::Composed {
-            add_declared(&mut names, definition.property_names());
+            add_declared(&mut properties, definition.property_names(), |name| TypedName {
+                name: name.clone(),
+                kind: declared_kind(name),
+            });
         }
-        self.apply_property_order(&mut names)?;
-
-        let mut paths = Vec::new();
-        for name in names.into_iter().filter(|name| in_namespace(name, namespace)) {
-            let spec_type = match (kinds.get(&name), source) {
-                (Some(&spec_type), _) => Some(spec_type),
-                // A property the prim only inherits from its schema has no
-                // composed spec, so its kind comes from the declaration.
-                (None, PropertySource::Composed) => definition.property(&name).map(|property| property.spec_type()),
-                // Nothing a schema declares is authored, so a name with no
-                // composed spec belongs to neither kind.
-                (None, PropertySource::Authored) => None,
-            };
-            if spec_type == Some(ty) {
-                paths.push(self.property_path(name));
-            }
-        }
-        Ok(paths)
+        self.apply_property_order(&mut properties)?;
+        Ok(properties
+            .into_iter()
+            .filter(|property| property.kind == Some(ty) && in_namespace(&property.name, namespace))
+            .map(|property| self.property_path(property.name))
+            .collect())
     }
 
     /// Property path for `name` under this prim. An invalid name yields the
@@ -1317,23 +1320,50 @@ struct ModelFlags {
     component: bool,
 }
 
+/// A property name with the spec type it resolves to, which
+/// [`Prim::properties_of_type`] orders by name.
+struct TypedName {
+    name: Token,
+    kind: Option<sdf::SpecType>,
+}
+
+impl PartialEq<Token> for TypedName {
+    fn eq(&self, other: &Token) -> bool {
+        self.name == *other
+    }
+}
+
+impl AsRef<str> for TypedName {
+    fn as_ref(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Adds to the authored `names` an entry, built by `declare`, for each
+/// schema-`declared` property name they lack, then sorts the union into
+/// element order. A schema-declared property is part of the prim's surface
+/// whether or not a layer authors a spec for it, since it still resolves a
+/// type and a fallback value.
+fn add_declared<T: AsRef<str>>(names: &mut Vec<T>, declared: &[Token], declare: impl Fn(&Token) -> T) {
+    if declared.is_empty() {
+        return;
+    }
+    let missing: Vec<T> = {
+        let authored: HashSet<&str> = names.iter().map(AsRef::as_ref).collect();
+        declared
+            .iter()
+            .filter(|name| !authored.contains(name.as_str()))
+            .map(declare)
+            .collect()
+    };
+    names.extend(missing);
+    names.sort_by(|a, b| sdf::element_cmp(a.as_ref(), b.as_ref()));
+}
+
 /// Whether the property `name` sits under `namespace`: the name continues past
 /// the namespace, and the namespace ends at one of the name's `:` delimiters
 /// (C++ `UsdPrim::_GetPropertiesInNamespace`). A trailing `:` on the namespace
 /// is that delimiter, and an empty namespace holds every name.
-/// Adds to the authored `names` the schema-`declared` property names they lack,
-/// then sorts the union into element order. A schema-declared property is part
-/// of the prim's surface whether or not a layer authors a spec for it, since it
-/// still resolves a type and a fallback value.
-fn add_declared(names: &mut Vec<Token>, declared: &[Token]) {
-    if declared.is_empty() {
-        return;
-    }
-    let authored: HashSet<Token> = names.iter().cloned().collect();
-    names.extend(declared.iter().filter(|name| !authored.contains(*name)).cloned());
-    names.sort_by(|a, b| sdf::element_cmp(a, b));
-}
-
 fn in_namespace(name: &str, namespace: &str) -> bool {
     if namespace.is_empty() {
         return true;

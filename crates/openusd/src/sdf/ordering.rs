@@ -18,12 +18,13 @@ use std::cmp::Ordering;
 use std::iter::Peekable;
 use std::str::Chars;
 
-/// Reorders `items` in place according to `order`.
+/// Reorders `items` in place according to `order`, matching an item to an
+/// order entry by the item's equality with `K`.
 ///
 /// See the module-level documentation for the precise semantics. The function
 /// is a no-op when `order` is empty, `items` is empty, or no entry in `items`
 /// appears in `order`.
-pub fn apply_ordering<T: Clone + PartialEq>(items: &mut Vec<T>, order: &[T]) {
+pub fn apply_ordering<T: PartialEq<K>, K>(items: &mut Vec<T>, order: &[K]) {
     if order.is_empty() || items.is_empty() {
         return;
     }
@@ -35,7 +36,7 @@ pub fn apply_ordering<T: Clone + PartialEq>(items: &mut Vec<T>, order: &[T]) {
     let mut leading: Vec<T> = Vec::new();
     let mut runs: Vec<Vec<T>> = Vec::new();
     for item in items.drain(..) {
-        if order.contains(&item) {
+        if order.iter().any(|name| item == *name) {
             runs.push(vec![item]);
         } else if let Some(run) = runs.last_mut() {
             run.push(item);
@@ -49,7 +50,10 @@ pub fn apply_ordering<T: Clone + PartialEq>(items: &mut Vec<T>, order: &[T]) {
     // contributes only once.
     let mut result = leading;
     for name in order {
-        if let Some(pos) = runs.iter().position(|run| run.first() == Some(name)) {
+        if let Some(pos) = runs
+            .iter()
+            .position(|run| run.first().is_some_and(|first| first == name))
+        {
             result.extend(runs.remove(pos));
         }
     }
@@ -220,7 +224,7 @@ mod tests {
     #[test]
     fn empty_order_is_noop() {
         let mut children = s(&["a", "b", "c"]);
-        apply_ordering(&mut children, &[]);
+        apply_ordering::<String, String>(&mut children, &[]);
         assert_eq!(children, s(&["a", "b", "c"]));
     }
 

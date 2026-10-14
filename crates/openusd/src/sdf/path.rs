@@ -407,7 +407,12 @@ impl Path {
     }
 
     pub fn prim_path(&self) -> Path {
-        let len = self.prim_len();
+        self.prefix(self.prim_len())
+    }
+
+    /// The first `len` bytes of this path as a path of their own, sharing
+    /// this one's text when `len` covers all of it.
+    fn prefix(&self, len: usize) -> Path {
         if len == self.path.len() {
             return self.clone();
         }
@@ -420,7 +425,7 @@ impl Path {
         // Split at the last slash outside a `[..]` target, which may itself be
         // an absolute path: "/A/B/C.foo[/T].bar:baz" becomes "/A/B" and
         // "C.foo[/T].bar:baz".
-        let Some((before, after)) = rsplit_outside_targets(&self.path, b'/') else {
+        let Some((before, after)) = rsplit_outside_targets(&self.path) else {
             // Relative single segment (no slash): strip a trailing property or
             // variant selection. `is_property` separates `Foo.bar` from a
             // relative `..`, which has no property tail and is its own prim.
@@ -476,12 +481,7 @@ impl Path {
     /// ```
     pub fn split_prim(&self) -> (Path, &str) {
         let len = self.prim_len();
-        let prim = if len == self.path.len() {
-            self.clone()
-        } else {
-            Path::from_str_unchecked(&self.path[..len])
-        };
-        (prim, &self.path[len..])
+        (self.prefix(len), &self.path[len..])
     }
 
     /// Splits a property path into its owning prim and the property name (the
@@ -1240,15 +1240,11 @@ fn is_variant_char(c: char) -> bool {
     matches!(c, '|' | '-' | '.') || is_identifier_cont(c)
 }
 
-/// Byte position of the first `.` in `segment` outside `{…}` variant
-/// selections and `[…]` target brackets — the dot introducing a property, as
-/// opposed to one embedded in a dotted variant name or a bracketed target
-/// path.
-/// Splits `text` around the last `sep` that sits outside every `[..]` target
+/// Splits `text` around the last `/` that sits outside every `[..]` target
 /// bracket, or `None` when there is none.
-fn rsplit_outside_targets(text: &str, sep: u8) -> Option<(&str, &str)> {
+fn rsplit_outside_targets(text: &str) -> Option<(&str, &str)> {
     if !text.contains('[') {
-        return text.rsplit_once(char::from(sep));
+        return text.rsplit_once('/');
     }
     let mut depth = 0usize;
     let mut last = None;
@@ -1256,13 +1252,17 @@ fn rsplit_outside_targets(text: &str, sep: u8) -> Option<(&str, &str)> {
         match byte {
             b'[' => depth += 1,
             b']' => depth = depth.saturating_sub(1),
-            _ if byte == sep && depth == 0 => last = Some(i),
+            b'/' if depth == 0 => last = Some(i),
             _ => {}
         }
     }
     last.map(|i| (&text[..i], &text[i + 1..]))
 }
 
+/// Byte position of the first `.` in `segment` outside `{…}` variant
+/// selections and `[…]` target brackets — the dot introducing a property, as
+/// opposed to one embedded in a dotted variant name or a bracketed target
+/// path.
 fn find_component_dot(segment: &str) -> Option<usize> {
     let mut depth = 0usize;
     for (i, byte) in segment.bytes().enumerate() {
