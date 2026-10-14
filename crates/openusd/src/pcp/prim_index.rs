@@ -392,6 +392,23 @@ impl PrimIndex {
         })
     }
 
+    /// Iterates every node weakest first, each with the run of spec sites it
+    /// contributes, which is empty for a node that authors no spec. A run
+    /// lists its layers strongest first, as the spec stack does. The caller
+    /// applies whatever node filter its walk needs.
+    pub(crate) fn spec_runs_weakest_first(&self) -> impl Iterator<Item = (Node<'_>, &[SpecSite])> {
+        let mut end = self.spec_stack.len();
+        self.ordered_nodes().rev().map(move |node| {
+            let start = self.spec_stack[..end]
+                .iter()
+                .rposition(|site| site.node != node.id())
+                .map_or(0, |other| other + 1);
+            let run = &self.spec_stack[start..end];
+            end = start;
+            (node, run)
+        })
+    }
+
     /// Iterates the `(node, layer, offset)` sites value resolution walks, in
     /// strength order, at the breadth `scope` asks for.
     ///
@@ -1977,6 +1994,36 @@ pub(crate) mod tests {
     fn parse_usda(text: &str) -> Box<dyn sdf::AbstractData> {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         Box::new(sdf::Data::from_specs(data))
+    }
+
+    /// The spec runs partition the spec stack: every node gets one, each holds
+    /// that node's sites alone, and read back strongest node first they are the
+    /// stack.
+    #[test]
+    fn spec_runs_cover_stack() {
+        let mut stack = one_layer_stack(parse_usda(
+            r#"#usda 1.0
+def "Ref" {
+}
+def "World" (
+    references = </Ref>
+)
+{
+}
+"#,
+        ));
+        let index = build_with_fallbacks(&mut stack, "/World", VariantFallbackMap::new());
+        let runs: Vec<_> = index.spec_runs_weakest_first().collect();
+        assert_eq!(runs.len(), index.ordered_nodes().count());
+
+        let mut sites = Vec::new();
+        for (node, run) in runs.iter().rev() {
+            assert!(run.iter().all(|site| site.node == node.id()));
+            sites.extend(run.iter().map(|site| (site.node, site.layer)));
+        }
+        let stack_sites: Vec<_> = index.spec_stack.iter().map(|site| (site.node, site.layer)).collect();
+        assert_eq!(sites, stack_sites);
+        assert!(sites.len() >= 2, "the prim and its reference each author a spec");
     }
 
     /// An empty selection — here from an expression-language `None` — defers

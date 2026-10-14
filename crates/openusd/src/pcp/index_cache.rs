@@ -2978,12 +2978,11 @@ impl IndexCache {
         // node (inert or culled) is skipped (C++ `_ComposePrimChildNamesAtNode`'s
         // `CanContributeSpecs` guard): an inert relocate placeholder or salted-
         // earth source must not inject names or relocates at its site.
-        let nodes = index
-            .all_nodes()
-            .filter(|node| !(node.is_culled() || drop_local && local[node.id().idx()]))
-            .rev();
+        let runs = index
+            .spec_runs_weakest_first()
+            .filter(|(node, _)| !(node.is_inert() || node.is_culled() || drop_local && local[node.id().idx()]));
 
-        for node in nodes {
+        for (node, run) in runs {
             // Apply this node's layer-stack relocates to the names contributed so
             // far, then compose the node's own children on top. A relocation
             // source is always a namespace child introduced by a composition arc
@@ -3005,12 +3004,10 @@ impl IndexCache {
                 let pairs = graph.combined_relocates(node.layer_stack_id());
                 apply_child_relocates(node.path(), &pairs, &mut name_order, &mut name_set, &mut prohibited);
             }
-            // The node's contributing layers fold weakest-first; `layer_stack()`
-            // is strongest-first, so it is reversed here. Only the layer index is
-            // needed (the offset `layers()` folds in is irrelevant to name
-            // composition), so the borrowed slice is reversed in place.
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter().rev() {
-                let layer_data = graph.layer(layer);
+            // The layers that author the prim fold weakest-first; the run is
+            // strongest-first, so it is reversed here.
+            for site in run.iter().rev() {
+                let layer_data = graph.layer(site.layer);
                 append_unseen_names(
                     layer_data,
                     node.path(),
@@ -3018,12 +3015,10 @@ impl IndexCache {
                     &mut name_order,
                     &mut name_set,
                 );
-                if let Ok(Value::TokenVec(order)) = layer_data
-                    .data()
-                    .field(node.path(), FieldKey::PrimOrder.as_str())
-                    .map(|v| v.into_owned())
+                if let Ok(Some(order)) = layer_data.data().try_field(node.path(), FieldKey::PrimOrder.as_str())
+                    && let Value::TokenVec(order) = order.as_ref()
                 {
-                    sdf::apply_ordering(&mut name_order, &order);
+                    sdf::apply_ordering(&mut name_order, order);
                 }
             }
         }
@@ -3439,13 +3434,16 @@ impl IndexCache {
         let mut result: Vec<Token> = Vec::new();
         let mut seen: HashSet<Token> = HashSet::new();
 
-        // Fold weakest-to-strongest across both nodes and, within each node, its
-        // layers: contributing nodes in reverse strength order, and `layer_stack()`
-        // (strongest first) reversed in place. `seen` dedups names in O(1) while
-        // `result` preserves the weakest-position order.
-        for node in index.nodes().rev() {
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter().rev() {
-                let layer_data = graph.layer(layer);
+        // Fold weakest-to-strongest across both nodes and, within each node, the
+        // layers that author the prim: contributing nodes in reverse strength
+        // order, each run (strongest first) reversed. `seen` dedups names in O(1)
+        // while `result` preserves the weakest-position order.
+        for (node, run) in index.spec_runs_weakest_first() {
+            if node.is_inert() || node.is_culled() {
+                continue;
+            }
+            for site in run.iter().rev() {
+                let layer_data = graph.layer(site.layer);
                 append_unseen_names(
                     layer_data,
                     node.path(),
@@ -3510,10 +3508,12 @@ fn append_unseen_names(
     order: &mut Vec<Token>,
     seen: &mut HashSet<Token>,
 ) {
-    if let Ok(Value::TokenVec(names)) = layer.data().field(path, field.as_str()).map(|v| v.into_owned()) {
+    if let Ok(Some(names)) = layer.data().try_field(path, field.as_str())
+        && let Value::TokenVec(names) = names.as_ref()
+    {
         for name in names {
             if seen.insert(name.clone()) {
-                order.push(name);
+                order.push(name.clone());
             }
         }
     }
