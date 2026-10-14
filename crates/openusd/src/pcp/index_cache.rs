@@ -26,12 +26,13 @@ use super::diagnostics::Diagnostics;
 use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::{LayerGraph, LayerStackIdentifier, MuteChange};
-use super::layer_stack::StackMarks;
+use super::layer_stack::{LayerStackId, StackMarks};
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
 use super::prim_graph::{ArcType, Node, NodeId, PrimIndexGraph, SpecSite};
 use super::prim_index::{
-    CompositionContext, Demand, NodeRuns, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo, TargetMemoKey,
+    CompositionContext, Demand, NodeRuns, PrimEntry, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo,
+    TargetMemoKey,
 };
 use super::prim_indexer::ExprVarDeps;
 use super::prim_resolve::{
@@ -1061,10 +1062,15 @@ struct StandingResolver<'a> {
     stronger: Option<SpecSiteRecord>,
     /// Whether the walk came to the site asked about.
     reached: bool,
-    /// Where the site asked about sat when it is a culled node the index
-    /// erased: its rank, and the rank of each live node by [`NodeId`]. The
-    /// walk reaches it at the first node no stronger than it.
+    /// Where the site asked about sat when the index erased a culled node at
+    /// it: the strongest such node's rank, and the rank of each live node by
+    /// [`NodeId`]. The walk reaches it at the first node no stronger than it,
+    /// unless a live node at the site comes first.
     culled: Option<(usize, Vec<usize>)>,
+    /// The `(layer, path)` sites stronger than the site asked about when an
+    /// ancestor's index erased the node it sat at, so this index never held
+    /// one: the walk reaches it at the first site outside the set.
+    stronger_sites: Option<HashSet<(LayerId, Path)>>,
 }
 
 impl StandingResolver<'_> {
@@ -1078,10 +1084,15 @@ impl StandingResolver<'_> {
 
 impl OpinionResolver for StandingResolver<'_> {
     fn on_site(&mut self, site: &OpinionSite<'_>) -> Step {
-        self.reached = match &self.culled {
-            Some((rank, ranks)) => ranks[site.node.id().idx()] >= *rank,
-            None => site.layer == self.layer && site.query_path == *self.spec_path,
-        };
+        self.reached = (site.layer == self.layer && site.query_path == *self.spec_path)
+            || self
+                .culled
+                .as_ref()
+                .is_some_and(|(rank, ranks)| ranks[site.node.id().idx()] >= *rank)
+            || self
+                .stronger_sites
+                .as_ref()
+                .is_some_and(|sites| !sites.contains(&(site.layer, site.query_path.clone())));
         match self.reached {
             true => Step::Stop,
             false => Step::Continue,
@@ -3279,13 +3290,27 @@ impl IndexCache {
         let suffix = path.property_suffix().to_owned();
         self.ensure_index(graph, &prim_path)?;
         // A site with no spec for the prim may have been culled and erased; the
-        // walk then stops where it sat.
+        // walk then stops where the strongest such node sat.
         let index = self.cached(&prim_path);
+        let site = spec_path.prim_path();
         let culled = index
             .culled_dependencies()
             .iter()
-            .find(|culled| culled.site == spec_path.prim_path() && graph.stack_contains(culled.layer_stack, layer))
-            .map(|culled| (culled.rank, index.strength_ranks()));
+            .filter(|culled| culled.site == site && graph.stack_contains(culled.layer_stack, layer))
+            .map(|culled| culled.rank)
+            .min()
+            .map(|rank| (rank, index.strength_ranks()));
+        // A site no node of this index sits at may have been erased from an
+        // ancestor's, which this index then seeded without.
+        let held = culled.is_some()
+            || index
+                .graph()
+                .nodes()
+                .any(|node| node.path() == &site && graph.stack_contains(node.layer_stack_id(), layer));
+        let stronger_sites = match held {
+            true => None,
+            false => self.sites_above_erased(graph, &prim_path, layer, spec_path, &suffix)?,
+        };
         let mut resolver = StandingResolver {
             graph,
             layer,
@@ -3293,11 +3318,12 @@ impl IndexCache {
             stronger: None,
             reached: false,
             culled,
+            stronger_sites,
         };
         self.resolve_property(graph, &prim_path, &suffix, ResolveMode::at(time), &mut resolver)?;
         // The walk visits only live nodes: a culled site weaker than all of
         // them is reached where the walk ends.
-        if resolver.culled.is_some() {
+        if resolver.culled.is_some() || resolver.stronger_sites.is_some() {
             resolver.reached = true;
         }
         Ok(Some(match resolver {
@@ -3307,6 +3333,82 @@ impl IndexCache {
                 stronger: Some(site), ..
             } => Standing::Shadowed(site),
         }))
+    }
+
+    /// The `(layer, path)` sites stronger than `spec_path` in `layer` among
+    /// `prim`'s opinions, read from `prim`'s index composed with every node
+    /// its namespace ancestors' indices culled. `None` when that index holds no
+    /// live node at the site either, or composing it needs a layer that is
+    /// not loaded.
+    ///
+    /// Culling drops only nodes that author no spec and keeps the strength
+    /// order of the rest, so a site of the cached index is stronger than the
+    /// one asked about exactly when the set holds it.
+    // TODO: a prim in a prototype namespace composes from its canonical
+    // instance's re-anchored index, which this chain does not reproduce, so
+    // such a prim answers `None`.
+    fn sites_above_erased(
+        &self,
+        graph: &LayerGraph,
+        prim: &Path,
+        layer: LayerId,
+        spec_path: &Path,
+        suffix: &str,
+    ) -> Result<Option<HashSet<(LayerId, Path)>>, QueryError> {
+        if super::instancing::is_prototype_namespace(prim) {
+            return Ok(None);
+        }
+        let mut chain: Vec<Path> = prim.ancestors_below_root().collect();
+        chain.reverse();
+        let mut built = sdf::PathTable::<PrimEntry>::new();
+        for path in chain {
+            let parent_ctx = path
+                .parent()
+                .and_then(|parent| self.store.context_at(&parent))
+                .copied()
+                .unwrap_or_default();
+            let (mut index, _errors, demands, _deps, _copied) = PrimIndex::build_with_cache_in(
+                &path,
+                graph,
+                &parent_ctx,
+                &self.variant_fallbacks,
+                &built,
+                LayerStackId::ROOT,
+                self.is_loaded(&path),
+                false,
+            )?;
+            if !demands.is_empty() {
+                return Ok(None);
+            }
+            if let Some(depth) = parent_ctx.instance_depth {
+                index.mark_instance_local_inert(path.prim_element_count() as u16, depth);
+            }
+            let context = self.store.context_at(&path).copied().unwrap_or_default();
+            built.insert(
+                path,
+                PrimEntry {
+                    index,
+                    context,
+                    errors: Diagnostics::default(),
+                    property_errors: Diagnostics::default(),
+                    resolved_targets: HashMap::new(),
+                    instanceable: None,
+                    revision: PrimRevision::placeholder(),
+                },
+            );
+        }
+        let Some(entry) = built.get(prim) else {
+            return Ok(None);
+        };
+        let mut stronger = HashSet::new();
+        for (node, site_layer, _) in entry.index.live_sites(graph, SiteScope::EveryLayer) {
+            let query_path = PrimIndex::query_path(node, Some(suffix)).into_owned();
+            if site_layer == layer && query_path == *spec_path {
+                return Ok(Some(stronger));
+            }
+            stronger.insert((site_layer, query_path));
+        }
+        Ok(None)
     }
 
     /// Returns the variant selections composed onto a prim, as `(set,
@@ -6532,6 +6634,66 @@ def "Model" (
         Ok(())
     }
 
+    /// Authoring specs below a reference target's spec-less child recomposes
+    /// a grandchild that seeded from the child's culled index, found through
+    /// the child's site (C++ `DidChangeSpecs`), both when the specs appear in
+    /// one round and when the deeper one follows.
+    #[test]
+    fn inert_add_reaches_descendant() -> Result<()> {
+        for rounds in [
+            &[&["/Ref/Child", "/Ref/Child/Grand"][..]][..],
+            &[&["/Ref/Child"][..], &["/Ref/Child/Grand"][..]],
+        ] {
+            let root = parse_named_layer(
+                "root.usd",
+                "#usda 1.0
+def \"A\" ( references = @base.usd@</Ref> ) {
+  def \"Child\" {
+    def \"Grand\" {}
+  }
+}
+",
+            );
+            let base = parse_named_layer(
+                "base.usd",
+                "#usda 1.0
+def \"Ref\" {}
+",
+            );
+            let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
+            let base_id = graph.id_of("base.usd").unwrap();
+            let mut cache = fresh_cache();
+            let grand = sdf::path("/A/Child/Grand")?;
+            for paths in rounds {
+                cache.prim_stack(&graph, &grand)?;
+                let cl = edit_layer(&mut graph.get_mut(base_id).unwrap().layer, |l| {
+                    let data = l.data_mut();
+                    for path in *paths {
+                        let path = sdf::path(path).unwrap();
+                        data.create_spec(path.clone(), sdf::SpecType::Prim);
+                        data.set_field(
+                            &path,
+                            sdf::FieldKey::Specifier.as_str(),
+                            Value::Specifier(sdf::Specifier::Over),
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                let mut changes = Changes::new();
+                changes.did_change(&cache, &graph, &[LayerChanges::plain(base_id, &cl)]);
+                changes.apply(&mut cache, &mut graph);
+            }
+            assert_eq!(
+                cache.prim_stack(&graph, &grand)?,
+                fresh_cache().prim_stack(&graph, &grand)?,
+                "{} rounds",
+                rounds.len()
+            );
+        }
+        Ok(())
+    }
+
     /// Authoring a spec at a previously-empty arc target recomposes a dependent
     /// that had culled the arc: the spec-tier rescan drops the dependent so its
     /// rebuild un-culls the reference, which an in-place `has_specs` flip cannot.
@@ -6707,16 +6869,12 @@ def "Model" (
         );
         changes.apply(&mut cache, &mut graph);
 
-        // The emptied inherit is culled, just like an always-empty target — the
-        // rescan rebuilt rather than flipping `has_specs` in place.
+        // The emptied inherit composes as a culled node, just like an always-empty
+        // target — the rescan rebuilt rather than flipping `has_specs` in place.
         assert!(!cache.has_composition_arc(&graph, &a)?);
         let index = cache.store.index_at(&a).expect("index rebuilt on query");
         assert!(
-            index.all_nodes().all(|n| n.arc() != ArcType::Inherit)
-                && index
-                    .culled_dependencies()
-                    .iter()
-                    .any(|c| c.site.as_str() == "/_class_Foo"),
+            index.all_nodes().any(|n| n.arc() == ArcType::Inherit && n.is_culled()),
             "the emptied inherit target re-culled"
         );
         Ok(())

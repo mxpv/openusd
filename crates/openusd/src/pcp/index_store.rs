@@ -70,11 +70,10 @@ pub(super) struct IndexStore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PrimRevision(u64);
 
-#[cfg(test)]
 impl PrimRevision {
-    /// A revision for an entry assembled outside an [`IndexStore`] — the
-    /// scratch build caches some indexer tests hand-build. Zero is never
-    /// minted, so it cannot collide with a stamp any cached answer holds.
+    /// A revision for an entry assembled outside an [`IndexStore`], in a
+    /// scratch build cache no cached answer reads. Zero is never minted, so it
+    /// cannot collide with a stamp any cached answer holds.
     pub(super) fn placeholder() -> Self {
         Self(0)
     }
@@ -443,6 +442,27 @@ impl IndexStore {
                 rebuild.insert(prim);
             } else {
                 refreshed.insert(prim, runs);
+            }
+        }
+        // A prim reached only through an ancestor of the site holds no node for
+        // the spec just added: the arc it would compose through was culled and
+        // erased in an ancestor's index, so the descendant never deepened a node
+        // to here. Rebuild it to pick the spec up (C++ `DidChangeSpecs` adding
+        // the prim to `didChangePrims`). A removed spec has no such prim to
+        // catch up.
+        if !graph.layer(layer).data().has_spec(path) {
+            return;
+        }
+        for prim in self.translated_ancestor_dependents(graph, layer, path) {
+            if rebuild.contains(&prim) {
+                continue;
+            }
+            let Some(entry) = self.entries.get(&prim) else {
+                continue;
+            };
+            if !entry.index.contributes_at(layer, path, graph) {
+                refreshed.remove(&prim);
+                rebuild.insert(prim);
             }
         }
     }

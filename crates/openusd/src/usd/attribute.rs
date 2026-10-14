@@ -4547,6 +4547,45 @@ def \"M\"
         Ok(())
     }
 
+    /// A grandchild of a prim with a reference composes through it too,
+    /// though the reference holds no spec for the grandchild's parent either.
+    #[test]
+    fn shadow_below_specless_arc_site() -> Result<()> {
+        let referenced = (
+            "ref.usda",
+            "def \"R\"
+{
+}",
+        );
+        let grand = |decl: &str| {
+            format!(
+                "def \"P\" (
+    references = @ref.usda@</R>
+)
+{{
+    def \"Child\"
+    {{
+        def \"Grand\"
+        {{
+            {decl}
+        }}
+    }}
+}}"
+            )
+        };
+        for (decl, expected) in [
+            ("custom double x", None),
+            ("custom double x = 1", Some("root.usda/P/Child/Grand.x")),
+        ] {
+            let (_dir, stage) = scene(&[("root.usda", grand(decl).as_str()), referenced])?;
+            stage.set_edit_target(stage.edit_target_for_node(&sdf::Path::new("/P")?, EditTargetArc::Reference)?)?;
+            let site = stage.attribute("/P/Child/Grand.x")?.shadowing_opinion()?;
+            let named = site.map(|site| format!("{}{}", file_name(&site.layer), site.path));
+            assert_eq!(named.as_deref(), expected, "declared as {decl:?}");
+        }
+        Ok(())
+    }
+
     /// A blocked `timeSamples` field leaves a default to answer and
     /// withholds a sample authored beneath it.
     #[test]
