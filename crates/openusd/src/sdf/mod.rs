@@ -56,7 +56,9 @@ pub(crate) use layer::{dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
 pub(crate) use layer_registry::PreparedLayer;
 pub use ordering::{apply_ordering, element_cmp};
-pub use path::{IntoPath, Path, PathComponent, PathComponents, PathElement, PathParseError, path, try_into_path};
+pub use path::{
+    IntoPath, Path, PathComponent, PathComponents, PathElement, PathMap, PathParseError, PathSet, path, try_into_path,
+};
 pub use path_expr::{EvalError, ExpressionReference, PathExpression, PathPattern, PredicateExpression};
 pub use path_table::PathTable;
 pub use schema::{

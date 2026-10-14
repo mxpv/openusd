@@ -414,9 +414,9 @@ impl IndexStore {
         graph: &LayerGraph,
         layer: LayerId,
         path: &Path,
-        refreshed: &mut HashMap<Path, NodeRuns>,
-        rebuild: &mut HashSet<Path>,
-        rekeyed: &mut HashSet<Path>,
+        refreshed: &mut sdf::PathMap<NodeRuns>,
+        rebuild: &mut sdf::PathSet,
+        rekeyed: &mut sdf::PathSet,
     ) {
         for prim in self.deps.exact_lookup(graph, layer, path) {
             // An index this round already condemned recomposes from scratch,
@@ -453,7 +453,7 @@ impl IndexStore {
     /// it consumed, for the caller's resync report. Every path here has a cached
     /// entry: [`refresh_specs`](Self::refresh_specs) records only indices it
     /// found, and the round's dropped set is disjoint from them.
-    pub(super) fn splice_spec_stacks(&mut self, graph: &LayerGraph, refreshed: HashMap<Path, NodeRuns>) -> Vec<Path> {
+    pub(super) fn splice_spec_stacks(&mut self, graph: &LayerGraph, refreshed: sdf::PathMap<NodeRuns>) -> Vec<Path> {
         let mut touched = Vec::with_capacity(refreshed.len());
         for (path, runs) in refreshed {
             debug_assert!(
@@ -630,7 +630,7 @@ enum Ancestry {
 
 /// Deduplicates translated paths in place, keeping first-seen order.
 fn dedup_owned(mut paths: Vec<Path>) -> Vec<Path> {
-    let mut seen: HashSet<Path> = HashSet::new();
+    let mut seen = sdf::PathSet::default();
     paths.retain(|p| seen.insert(p.clone()));
     paths
 }

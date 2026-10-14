@@ -19,6 +19,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem;
 
+use rustc_hash::FxHashSet;
+
 use crate::sdf::{self, Path};
 
 use super::prim_index::{PrimIndex, registers_site};
@@ -38,12 +40,12 @@ pub(super) struct Dependencies {
     per_stack: HashMap<LayerStackId, sdf::PathTable<Vec<Path>>>,
     /// Reverse map for cheap removal: `prim_index_path` → list of (stack, site)
     /// it registered. Avoids re-walking the index when invalidating.
-    by_prim: HashMap<Path, Vec<(LayerStackId, Path)>>,
+    by_prim: sdf::PathMap<Vec<(LayerStackId, Path)>>,
     /// Layer-agnostic set of prim-index paths, each observing exactly its own
     /// path. A prim self-registers here so an empty or cache-miss index stays
     /// findable when a spec is first authored at its path on a layer its graph
     /// does not yet touch; one entry per prim covers that prim on every layer.
-    by_path: HashSet<Path>,
+    by_path: sdf::PathSet,
     /// Prim-index paths with a dependency node composing against the stage
     /// root layer stack, the self-Root edge included. A change to a layer of the
     /// root stack reaches these ([`indices_for_layers`](Self::indices_for_layers));
@@ -51,7 +53,7 @@ pub(super) struct Dependencies {
     /// [`by_stack`](Self::by_stack) entry. A muted reference/payload target
     /// reached by nothing is tracked by canonical identifier in
     /// [`by_muted_canonical`](Self::by_muted_canonical).
-    root_users: HashSet<Path>,
+    root_users: sdf::PathSet,
     /// Reverse `canonical muted identifier → prim-index-paths` map: which indices
     /// depend on a reference/payload target's *mute state* without reaching it
     /// through a live site. Two cases resolve to one key here — a target muted
@@ -62,20 +64,20 @@ pub(super) struct Dependencies {
     /// ([`indices_for_mute_toggle`](Self::indices_for_mute_toggle)); muting a
     /// still-loaded target reaches its referrer through the stacks holding the
     /// target's layers.
-    by_muted_canonical: HashMap<String, HashSet<Path>>,
+    by_muted_canonical: HashMap<String, sdf::PathSet>,
     /// The canonical identifiers `prim_index_path` registered under in
     /// `by_muted_canonical`, for O(1) retraction on removal.
-    by_prim_muted: HashMap<Path, HashSet<String>>,
+    by_prim_muted: sdf::PathMap<HashSet<String>>,
     /// Reverse `layer → prim-index-paths` map for `defaultPrim` consultation:
     /// which indices resolved a reference or payload target through this layer's
     /// default because the arc named no prim. Registered whether or not the layer
     /// named one — an unresolved default grafts no node, so no site records it —
     /// and read by [`prims_using_default_prim`](Self::prims_using_default_prim)
     /// to evict exactly those indices when the field is edited.
-    by_default_prim: HashMap<LayerId, HashSet<Path>>,
+    by_default_prim: HashMap<LayerId, sdf::PathSet>,
     /// The layers `prim_index_path` registered under in `by_default_prim`, for
     /// O(1) retraction on removal.
-    by_prim_default_prim: HashMap<Path, HashSet<LayerId>>,
+    by_prim_default_prim: sdf::PathMap<HashSet<LayerId>>,
     /// Reverse `layer stack → prim-index-paths` map over the stacks each index's
     /// dependency nodes compose against. An `expressionVariables` edit whose
     /// stack delta demands a full resync — the variable source changed, or a
@@ -84,12 +86,12 @@ pub(super) struct Dependencies {
     /// stack is never recorded: every prim composes in it, so its entry would
     /// mirror every cached path; [`prims_for_stack`](Self::prims_for_stack)
     /// answers for it with the pseudo-root instead.
-    by_stack: HashMap<LayerStackId, HashSet<Path>>,
+    by_stack: HashMap<LayerStackId, sdf::PathSet>,
     /// The stacks `prim_index_path` registered under — in
     /// [`by_stack`](Self::by_stack), [`by_stack_vars`](Self::by_stack_vars), or
     /// both — for O(1) retraction on removal. Absent for a prim with neither
     /// registration, the common arc-free, expression-free case.
-    by_prim_stacks: HashMap<Path, HashSet<LayerStackId>>,
+    by_prim_stacks: sdf::PathMap<HashSet<LayerStackId>>,
     /// Per-stack expression-variable dependencies: `by_stack_vars[stack][prim]` =
     /// the variable names `prim`'s build read from `stack`'s composed set (C++
     /// `PcpExpressionVariablesDependencyData`). A variable edit that changes
@@ -98,7 +100,7 @@ pub(super) struct Dependencies {
     /// ([`prims_using_vars`](Self::prims_using_vars)). Unlike
     /// [`by_stack`](Self::by_stack), the root stack appears here — its per-prim
     /// names are exactly what the targeted lookup needs.
-    by_stack_vars: HashMap<LayerStackId, HashMap<Path, HashSet<String>>>,
+    by_stack_vars: HashMap<LayerStackId, sdf::PathMap<HashSet<String>>>,
 }
 
 impl Dependencies {
@@ -126,7 +128,7 @@ impl Dependencies {
         // `seen` provides O(1) dedup as we walk graph nodes; the parallel
         // `registered` Vec preserves insertion order for the reverse-map
         // entry (the order is irrelevant to lookups but helps debug).
-        let mut seen: HashSet<(LayerStackId, Path)> = HashSet::new();
+        let mut seen: FxHashSet<(LayerStackId, Path)> = FxHashSet::default();
         let mut registered: Vec<(LayerStackId, Path)> = Vec::new();
         // Whether a node composes against the root stack, the self-Root edge the
         // site map skips included.
@@ -479,7 +481,7 @@ impl Dependencies {
     /// order. Callers flatten their per-site lists into one path stream.
     fn dedup_paths<'a>(deps: impl Iterator<Item = &'a Path>) -> Vec<Path> {
         let mut out: Vec<Path> = Vec::new();
-        let mut seen: HashSet<&Path> = HashSet::new();
+        let mut seen: FxHashSet<&Path> = FxHashSet::default();
         for d in deps {
             if seen.insert(d) {
                 out.push(d.clone());
@@ -503,17 +505,13 @@ fn ancestors_to_variant_boundary(path: &Path) -> impl Iterator<Item = Path> {
 }
 
 /// The prim indices registered under `key`, as an invalidation victim list.
-fn keyed_prims<K: Eq + Hash>(map: &HashMap<K, HashSet<Path>>, key: &K) -> Vec<Path> {
+fn keyed_prims<K: Eq + Hash>(map: &HashMap<K, sdf::PathSet>, key: &K) -> Vec<Path> {
     map.get(key).into_iter().flatten().cloned().collect()
 }
 
 /// Drops `prim`'s registrations from a `key → prims` map and its `prim → keys`
 /// reverse, leaving no empty entry behind in either.
-fn retract<K: Eq + Hash>(
-    forward: &mut HashMap<K, HashSet<Path>>,
-    reverse: &mut HashMap<Path, HashSet<K>>,
-    prim: &Path,
-) {
+fn retract<K: Eq + Hash>(forward: &mut HashMap<K, sdf::PathSet>, reverse: &mut sdf::PathMap<HashSet<K>>, prim: &Path) {
     for key in reverse.remove(prim).into_iter().flatten() {
         if let Some(set) = forward.get_mut(&key) {
             set.remove(prim);

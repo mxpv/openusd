@@ -35,7 +35,8 @@ use super::prim_index::{
 };
 use super::prim_indexer::ExprVarDeps;
 use super::prim_resolve::{
-    self, Composed, Composing, Folded, InvalidTargetKind, Series, Supplied, composes_over_weaker, composition_rewrites,
+    self, Composed, Composing, Folded, InstanceTargets, InvalidTargetKind, Series, Supplied, composes_over_weaker,
+    composition_rewrites,
 };
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::value_resolve::{
@@ -116,13 +117,13 @@ pub struct IndexCache {
     // read-mostly; the entries are write-once until invalidation, so a
     // concurrent reader needs only a shared snapshot rather than a lock on the
     // hot path. Keep population off the critical section when that lands.
-    pub(super) redirected_prims: HashMap<Path, Path>,
+    pub(super) redirected_prims: sdf::PathMap<Path>,
     /// Memoized population eligibility (see [`Self::is_populated`]): whether the
     /// mask exposes a prim, it exists, and it and every ancestor are active.
     /// Defined recursively over the parent, so the memo turns a per-query
     /// O(depth) ancestor walk into O(1) amortized. Retired alongside
     /// `redirected_prims` by [`Self::invalidate_population`].
-    pub(super) populated_prims: HashMap<Path, bool>,
+    pub(super) populated_prims: sdf::PathMap<bool>,
     /// Advanced whenever the composed population may differ — see
     /// [`Self::invalidate_population`]. Distinct from
     /// [`revision`](Self::revision), which every edit batch advances: a
@@ -1187,8 +1188,8 @@ impl IndexCache {
             population_mask,
             clip_cache: ClipCache::default(),
             prototypes: PrototypeRegistry::default(),
-            redirected_prims: HashMap::new(),
-            populated_prims: HashMap::new(),
+            redirected_prims: sdf::PathMap::default(),
+            populated_prims: sdf::PathMap::default(),
             population_epoch: 0,
             type_opinion_epoch: 0,
             copies: 0,
@@ -2069,9 +2070,9 @@ impl IndexCache {
     /// registered instance and prototype root it reached that way, and the
     /// retired roots join the returned paths.
     pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, sites: &[(LayerId, Path)]) -> Vec<Path> {
-        let mut refreshed: HashMap<Path, NodeRuns> = HashMap::new();
-        let mut rebuild: HashSet<Path> = HashSet::new();
-        let mut rekeyed: HashSet<Path> = HashSet::new();
+        let mut refreshed = sdf::PathMap::<NodeRuns>::default();
+        let mut rebuild = sdf::PathSet::default();
+        let mut rekeyed = sdf::PathSet::default();
         for (layer, path) in sites {
             self.store
                 .refresh_specs(graph, *layer, path, &mut refreshed, &mut rebuild, &mut rekeyed);
@@ -2696,7 +2697,7 @@ impl IndexCache {
         // precomputes the cross-prim instance set; the per-node target walk
         // consults it so a valid stronger opinion for the same path survives.
         let (instance_targets, read_cross_prim) = if deleted {
-            (HashSet::new(), false)
+            (HashSet::default(), false)
         } else {
             self.compute_instance_targets(graph, &resolved_prim, field, &prop_suffix)?
         };
@@ -2798,11 +2799,11 @@ impl IndexCache {
         resolved_prim: &Path,
         field: FieldKey,
         prop_suffix: &str,
-    ) -> Result<(HashSet<(Path, Path)>, bool), QueryError> {
+    ) -> Result<(InstanceTargets, bool), QueryError> {
         // Phase 1: gather candidates that translate, releasing the index borrow
         // before the cross-prim composition in phase 2.
         let mut candidates: Vec<InstanceCandidate> = Vec::new();
-        let mut seen: HashSet<(Path, Path)> = HashSet::new();
+        let mut seen = InstanceTargets::default();
         {
             let index = self.cached(resolved_prim);
             for node in index.all_nodes() {
@@ -2860,7 +2861,7 @@ impl IndexCache {
         // A non-empty candidate set means the result read another prim's instance
         // status, so the caller must not memoize it.
         let read_cross_prim = !candidates.is_empty();
-        let mut instance_targets: HashSet<(Path, Path)> = HashSet::new();
+        let mut instance_targets = InstanceTargets::default();
         for c in candidates {
             // A target naming a prim inside an instance stands for a prim in that
             // instance's shared prototype, so the class check reads the index
@@ -3668,7 +3669,7 @@ def "Unrelated"
         ] {
             cache.ensure_index(&graph, &sdf::path(path)?)?;
         }
-        let before: HashMap<Path, _> = cache.prim_revisions().into_iter().collect();
+        let before: sdf::PathMap<_> = cache.prim_revisions().into_iter().collect();
 
         let mut cl = sdf::ChangeList::new();
         cl.entry_mut(&sdf::path("/Source/Inner.x")?)
@@ -3693,7 +3694,7 @@ def "Unrelated"
         // Named on their own: each referrer *root* reads `/Source` as an
         // ancestor site, and translating that reach is what keeps its own
         // composition — which the edit leaves alone — out of the radius.
-        let after: HashMap<Path, _> = cache.prim_revisions().into_iter().collect();
+        let after: sdf::PathMap<_> = cache.prim_revisions().into_iter().collect();
         for root in ["/RefA", "/RefB"] {
             let path = sdf::path(root)?;
             assert_eq!(

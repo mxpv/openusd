@@ -2393,7 +2393,7 @@ impl LayerGraph {
         // application covers the whole chain. Iterated to a fixpoint over chains
         // of any depth; bounded by the relocate count.
         // TODO(perf): this is O(relocates⁴) with the linear `.any` membership
-        // scans (a `HashSet<Path>` of seen sources would cut it); relocate counts
+        // scans (a `sdf::PathSet` of seen sources would cut it); relocate counts
         // are tiny in practice, and the per-ambient cache TODO at
         // `IndexCache::compose_property_paths` would amortize it away.
         for _ in 0..pairs.len() {

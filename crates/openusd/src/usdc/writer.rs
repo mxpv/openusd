@@ -394,7 +394,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // -----------------------------------------------------------------
 
     fn encode_paths(&mut self) -> Result<EncodedPaths, FormatError> {
-        let by_index: HashMap<Path, u32> = self
+        let by_index: sdf::PathMap<u32> = self
             .paths
             .items
             .iter()
@@ -406,7 +406,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         // `Value::Path` / ListOp items as placeholders (e.g. internal payload
         // paths) and are represented by the reader as the default empty slot
         // in the paths array.
-        let mut children: HashMap<Path, Vec<Path>> = HashMap::new();
+        let mut children = sdf::PathMap::<Vec<Path>>::default();
         for p in &self.paths.items {
             if p.as_str() == "/" || p.is_empty() {
                 continue;
@@ -443,8 +443,8 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     fn emit_path_node(
         &mut self,
         node: &Path,
-        children_map: &HashMap<Path, Vec<Path>>,
-        by_index: &HashMap<Path, u32>,
+        children_map: &sdf::PathMap<Vec<Path>>,
+        by_index: &sdf::PathMap<u32>,
         is_root_chain_root: bool,
         path_indexes: &mut Vec<u32>,
         tokens: &mut Vec<i32>,

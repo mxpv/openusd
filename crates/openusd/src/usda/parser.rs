@@ -88,14 +88,14 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse tokens to specs, locating any failure in the source text.
-    pub fn parse(mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>, ParseError> {
+    pub fn parse(mut self) -> Result<sdf::PathMap<sdf::SpecData>, ParseError> {
         self.parse_impl()
             .map_err(|cause| ParseError::new(cause, self.cursor.source(), self.cursor.diagnostic_span()))
     }
 
     /// Walks the entire token stream, seeding the pseudo root and recursing through every prim.
-    fn parse_impl(&mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>, RawError> {
-        let mut data = HashMap::new();
+    fn parse_impl(&mut self) -> Result<sdf::PathMap<sdf::SpecData>, RawError> {
+        let mut data = sdf::PathMap::default();
         let current_path = sdf::Path::abs_root();
 
         // Read pseudo root.
@@ -203,7 +203,7 @@ impl<'a> Parser<'a> {
         &mut self,
         current_path: &sdf::Path,
         parent_children: &mut Vec<String>,
-        data: &mut HashMap<sdf::Path, sdf::SpecData>,
+        data: &mut sdf::PathMap<sdf::SpecData>,
     ) -> Result<(), RawError> {
         let mut spec = sdf::SpecData::new(sdf::SpecType::Prim);
 
@@ -267,7 +267,7 @@ impl<'a> Parser<'a> {
         &mut self,
         path: &sdf::Path,
         owner_spec: &mut sdf::SpecData,
-        data: &mut HashMap<sdf::Path, sdf::SpecData>,
+        data: &mut sdf::PathMap<sdf::SpecData>,
     ) -> Result<PrimBodyNames, RawError> {
         let mut children = Vec::new();
         let mut properties = Vec::new();
@@ -340,7 +340,7 @@ impl<'a> Parser<'a> {
     fn read_variant_set(
         &mut self,
         prim_path: &sdf::Path,
-        data: &mut HashMap<sdf::Path, sdf::SpecData>,
+        data: &mut sdf::PathMap<sdf::SpecData>,
     ) -> Result<String, RawError> {
         self.cursor.bump()?; // consume `variantSet`
 
@@ -399,7 +399,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Merge a spec's fields into an existing spec at the given path, or insert it.
-    fn merge_spec(data: &mut HashMap<sdf::Path, sdf::SpecData>, path: sdf::Path, spec: sdf::SpecData) {
+    fn merge_spec(data: &mut sdf::PathMap<sdf::SpecData>, path: sdf::Path, spec: sdf::SpecData) {
         use std::collections::hash_map::Entry;
         match data.entry(path) {
             Entry::Occupied(mut e) => e.get_mut().extend_from(spec),
@@ -434,7 +434,7 @@ impl<'a> Parser<'a> {
         current_path: &sdf::Path,
         properties: &mut Vec<String>,
         suffixed_properties: &mut Vec<String>,
-        data: &mut HashMap<sdf::Path, sdf::SpecData>,
+        data: &mut sdf::PathMap<sdf::SpecData>,
     ) -> Result<(), RawError> {
         let mut custom = false;
         let list_op = self.try_list_op()?;
@@ -620,7 +620,7 @@ impl<'a> Parser<'a> {
         custom: bool,
         variability: sdf::Variability,
         properties: &mut Vec<String>,
-        data: &mut HashMap<sdf::Path, sdf::SpecData>,
+        data: &mut sdf::PathMap<sdf::SpecData>,
         outer_list_op: Option<Token<'a>>,
     ) -> Result<(), RawError> {
         let name = self.expect_name().context("relationship name expected")?;

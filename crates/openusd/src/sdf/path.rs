@@ -1,7 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use std::{cmp, convert::Infallible, fmt, str::FromStr};
+
+use rustc_hash::FxBuildHasher;
 
 use crate::tf;
 
@@ -51,6 +54,16 @@ pub fn try_into_path(path: impl IntoPath) -> Result<Path, PathParseError> {
 pub struct Path {
     path: Arc<Text>,
 }
+
+/// A map keyed by [`Path`], hashed with [`FxBuildHasher`]: a path writes the
+/// hash it already holds, so a lookup mixes one word.
+///
+/// The hasher has no per-process key, so the map gives no protection against
+/// paths chosen to collide.
+pub type PathMap<V> = HashMap<Path, V, FxBuildHasher>;
+
+/// A set of [`Path`]s, hashed as a [`PathMap`] is.
+pub type PathSet = HashSet<Path, FxBuildHasher>;
 
 /// The text of the empty path, shared by every [`Path::default`].
 static EMPTY: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(String::new())));
@@ -1461,6 +1474,21 @@ mod tests {
 
     /// The empty and absolute root paths share one text each, from every
     /// constructor and derivation that reaches them.
+    /// A path map finds an entry by an equal path built separately.
+    #[test]
+    fn path_map_finds_equal_path() {
+        let mut map = PathMap::default();
+        map.insert(Path::new("/World/Geo").unwrap(), 1);
+        map.insert(Path::new("/World/Geo.points").unwrap(), 2);
+        assert_eq!(map.get(&Path::new("/World/Geo").unwrap()), Some(&1));
+        assert_eq!(
+            map.get(&Path::new("/World").unwrap().append_path("Geo").unwrap()),
+            Some(&1)
+        );
+        assert_eq!(map.get(&Path::new("/World/Geo.points").unwrap()), Some(&2));
+        assert_eq!(map.get(&Path::new("/World").unwrap()), None);
+    }
+
     #[test]
     fn sentinels_shared() {
         assert!(Arc::ptr_eq(&Path::default().path, &Path::default().path));

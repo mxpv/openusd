@@ -9,6 +9,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
+use rustc_hash::FxHashSet;
+
 use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Specifier, Value};
@@ -58,6 +60,10 @@ impl Opinion<'_> {
         self
     }
 }
+
+/// The class targets that are instance targets, as the `(target, property)`
+/// node-namespace pairs the target walk matches on.
+pub(crate) type InstanceTargets = FxHashSet<(Path, Path)>;
 
 /// A value being composed from sources in strength order.
 ///
@@ -687,11 +693,11 @@ impl PrimIndex {
         field: FieldKey,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-        instance_targets: &HashSet<(Path, Path)>,
+        instance_targets: &InstanceTargets,
     ) -> Result<(Vec<Path>, Vec<InvalidTarget>), QueryError> {
         let mut ops = Vec::new();
         let mut invalid = Vec::new();
-        let mut deleted_composed: HashSet<Path> = HashSet::new();
+        let mut deleted_composed = sdf::PathSet::default();
         // An explicit opinion replaces everything weaker, so weaker opinions never
         // contribute and are not validated — only their stronger survivors are.
         let mut seen_explicit = false;

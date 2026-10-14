@@ -694,7 +694,7 @@ pub struct PendingLayerChange<'a> {
     /// The layer's pre-edit values (the overlay's base).
     pub base: &'a dyn AbstractData,
     /// The staged changes keyed by path — the new values, as [`Patch`]es.
-    pub overlay: &'a HashMap<Path, Patch>,
+    pub overlay: &'a sdf::PathMap<Patch>,
     /// The composition record derived from this layer's overlay. A sink that
     /// needs to retain it past the callback clones it ([`ChangeList`] is
     /// [`Clone`]).

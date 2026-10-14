@@ -32,6 +32,7 @@ lz4_flex = "0.14.0"
 memmap2 = { version = "0.9", optional = true }
 num-traits.workspace = true
 regex-lite = "0.1.9"
+rustc-hash = "2.1"
 serde = { workspace = true, optional = true }
 strum.workspace = true
 thiserror.workspace = true

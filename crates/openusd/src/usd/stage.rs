@@ -925,7 +925,7 @@ struct TypeEpochs {
 #[derive(Default)]
 struct PrimTypeMemo {
     epochs: TypeEpochs,
-    types: HashMap<sdf::Path, Arc<PrimTypeInfo>>,
+    types: sdf::PathMap<Arc<PrimTypeInfo>>,
 }
 
 impl PrimTypeMemo {
@@ -3259,7 +3259,7 @@ impl Stage {
         loop {
             let epoch = self.population_epoch();
             let mut roots: Vec<sdf::Path> = Vec::new();
-            let mut visited: HashSet<sdf::Path> = HashSet::new();
+            let mut visited = sdf::PathSet::default();
             self.register_instances_below(&sdf::Path::abs_root(), &mut roots)?;
             // A prototype's own namespace can hold further instances, and each
             // of those mints a prototype to walk in turn. The visited set

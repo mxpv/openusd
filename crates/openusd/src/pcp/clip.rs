@@ -740,7 +740,7 @@ pub(crate) struct ClipCache {
     /// Nested so a lookup borrows `(anchor, set name)` rather than building an
     /// owned key: the probe below runs on every clipped attribute read, and only
     /// a set that actually re-resolved should allocate.
-    set_sources: HashMap<Path, HashMap<String, SetSources>>,
+    set_sources: sdf::PathMap<HashMap<String, SetSources>>,
     /// Reverse of it: the clip sets each layer identifier feeds. A synthesized
     /// manifest needs no registration of its own — it is generated from the very
     /// clips its set already names, and only for a set that authors no manifest

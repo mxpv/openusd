@@ -1,6 +1,6 @@
 //! Binary file format (`usdc`) implementation.
 
-use std::{borrow::Cow, collections::HashMap, fmt::Debug, fs, io, mem, path::Path, str};
+use std::{borrow::Cow, fmt::Debug, fs, io, mem, path::Path, str};
 
 use layout::ValueRep;
 
@@ -12,6 +12,8 @@ mod writer;
 pub use layout::{Version, version};
 pub use reader::CrateFile;
 pub use writer::CrateWriter;
+
+use rustc_hash::FxBuildHasher;
 
 use crate::{ar, sdf, tf};
 
@@ -178,7 +180,7 @@ impl Spec {
 /// and `tf::Token` are, which the schema registry waits on too.
 pub struct CrateData {
     file: CrateFile,
-    data: HashMap<sdf::Path, Spec>,
+    data: sdf::PathMap<Spec>,
 }
 
 impl CrateData {
@@ -200,7 +202,7 @@ impl CrateData {
         // its fieldset. The fields themselves stay in the file's compact,
         // deduplicated arrays and are resolved on demand.
         let specs = mem::take(&mut file.specs);
-        let mut data = HashMap::with_capacity(specs.len());
+        let mut data = sdf::PathMap::with_capacity_and_hasher(specs.len(), FxBuildHasher);
 
         for spec in &specs {
             let path = file.paths[spec.path_index].clone();
@@ -421,6 +423,7 @@ const CRATE_PROPERTY_CHILDREN: &str = "properties";
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::*;

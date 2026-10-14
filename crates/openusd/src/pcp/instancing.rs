@@ -16,7 +16,7 @@
 //! without the seeding instance's root-level overrides leaking in.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::sdf;
 use crate::sdf::Path;
@@ -268,7 +268,7 @@ impl PrototypeRegistry {
     /// is removed, since the table entries are the edges to the deeper
     /// prototypes.
     fn remove_affected(&mut self, changed: &[Path]) -> Vec<Path> {
-        let mut affected: HashSet<Path> = HashSet::new();
+        let mut affected = sdf::PathSet::default();
         let mut worklist: Vec<&Path> = changed.iter().collect();
         while let Some(p) = worklist.pop() {
             let roots = self.by_root.ancestors(p).chain(self.by_root.subtree(p));

@@ -15,9 +15,9 @@
 //! [`subtree`]: PathTable::subtree
 //! [`remove_subtree`]: PathTable::remove_subtree
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
-use crate::sdf::Path;
+use crate::sdf::{Path, PathMap};
 
 /// A map from [`Path`] to `V` that also tracks the namespace parent/child
 /// hierarchy, supporting efficient subtree queries and erasure. Keys are
@@ -31,7 +31,7 @@ use crate::sdf::Path;
 /// value-bearing entries.
 #[derive(Debug, Clone)]
 pub struct PathTable<V> {
-    nodes: HashMap<Path, Node<V>>,
+    nodes: PathMap<Node<V>>,
     len: usize,
 }
 
@@ -47,7 +47,7 @@ struct Node<V> {
 impl<V> Default for PathTable<V> {
     fn default() -> Self {
         Self {
-            nodes: HashMap::new(),
+            nodes: PathMap::default(),
             len: 0,
         }
     }

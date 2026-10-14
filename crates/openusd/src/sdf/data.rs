@@ -3,12 +3,9 @@
 //! Parallels C++ `SdfData`. A flat map from [`Path`] to [`SpecData`] that can
 //! be populated programmatically and then handed to a writer.
 
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-};
+use std::{borrow::Cow, collections::HashSet};
 
-use crate::sdf::{Path, SpecData, SpecType, Value};
+use crate::sdf::{Path, PathMap, SpecData, SpecType, Value};
 
 /// The scene-description storage interface, mirroring C++ `SdfAbstractData`.
 ///
@@ -139,7 +136,7 @@ pub enum DataError {
 /// In-memory mutable layer data.
 #[derive(Default, Debug, Clone)]
 pub struct Data {
-    specs: HashMap<Path, SpecData>,
+    specs: PathMap<SpecData>,
 }
 
 impl Data {
@@ -150,7 +147,7 @@ impl Data {
 
     /// Build a container from a map of pre-parsed spec records, the form a
     /// reader (e.g. the usda parser) produces.
-    pub fn from_specs(specs: HashMap<Path, SpecData>) -> Self {
+    pub fn from_specs(specs: PathMap<SpecData>) -> Self {
         Self { specs }
     }
 
@@ -332,7 +329,7 @@ pub struct CowData<T: AbstractData> {
     base: T,
     /// Per-spec staged changes keyed by path; see [`Patch`]. Empty until a write
     /// stages a change, so every read passes straight through to `base`.
-    overlay: HashMap<Path, Patch>,
+    overlay: PathMap<Patch>,
 }
 
 /// A staged change to one spec in a [`CowData`] overlay.
@@ -374,7 +371,7 @@ impl<T: AbstractData> CowData<T> {
     pub fn new(base: T) -> Self {
         Self {
             base,
-            overlay: HashMap::new(),
+            overlay: PathMap::default(),
         }
     }
 
@@ -441,7 +438,7 @@ impl<T: AbstractData> CowData<T> {
     /// [`ChangeList::from_overlay`](super::ChangeList::from_overlay), which
     /// derives a composition-invalidation record by reading each [`Patch`]
     /// against the still-pristine [`base`](Self::base).
-    pub fn overlay(&self) -> &HashMap<Path, Patch> {
+    pub fn overlay(&self) -> &PathMap<Patch> {
         &self.overlay
     }
 

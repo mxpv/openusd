@@ -376,6 +376,8 @@ Key external dependencies:
 - `num-traits` - Numeric traits
 - `regex-lite` - Lightweight regex engine for the `matches_regex` expression
   function
+- `rustc-hash` - The hasher behind `sdf::PathMap` and `sdf::PathSet`, whose
+  keys carry a hash of their own
 - `strum` - Enum derive macros (Display, EnumIs, EnumTryAs, IntoStaticStr, etc.)
 - `thiserror` - Error type derive macros behind every error type, from the
   per-module errors (`sdf::AuthoringError`, `pcp::QueryError`) up to the root
