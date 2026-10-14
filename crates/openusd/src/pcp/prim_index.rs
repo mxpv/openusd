@@ -14,6 +14,7 @@ use crate::sdf::{self, LayerOffset, Path, Value};
 use super::diagnostics::Diagnostics;
 use super::index_store::PrimRevision;
 use super::layer_stack::LayerStackId;
+use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite, extend_reversed};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
 use super::{LayerGraph, LayerId, QueryError, VariantFallbackMap};
@@ -57,6 +58,45 @@ pub struct PrimIndex {
     /// path. Computed alongside [`spec_stack`](Self::spec_stack), whose walk
     /// visits exactly the sites a clip opinion can live at.
     authors_clips: bool,
+    /// The sites of the culled nodes [`cull`](Self::cull) erased from the
+    /// graph (C++ `PcpCulledDependency`). A spec authored at one of them can
+    /// bring the node back, so change processing still reaches this prim
+    /// through them.
+    culled: Vec<CulledDependency>,
+}
+
+/// A culled node erased from its [`PrimIndex`]: the site it read and what a
+/// change there translates through (C++ `PcpCulledDependency`).
+#[derive(Debug, Clone)]
+pub(crate) struct CulledDependency {
+    /// The layer stack the node composed against.
+    pub(crate) layer_stack: LayerStackId,
+    /// The node's path in that stack.
+    pub(crate) site: Path,
+    /// The path a change at [`site`](Self::site) is re-anchored on before it
+    /// maps to the root: the site itself, or for a
+    /// [`Propagated`](RelocateKind::Propagated) relocate, the path of the
+    /// first ancestor that is not one (C++ `unrelocatedSitePath`).
+    anchor: Path,
+    /// The `map_to_root` of the node the [`anchor`](Self::anchor) belongs to.
+    map_to_root: MapFunction,
+    /// How many of the kept nodes were stronger than this one: its place in
+    /// the strength order, for a query about its site.
+    pub(crate) rank: usize,
+}
+
+impl CulledDependency {
+    /// The composed path a change at `changed`, at or below
+    /// [`site`](Self::site), lands on; `None` when the node's namespace cannot
+    /// carry it.
+    pub(crate) fn translate(&self, changed: &Path) -> Option<Path> {
+        let path = if self.anchor == self.site {
+            Cow::Borrowed(changed)
+        } else {
+            Cow::Owned(changed.replace_prefix(&self.site, &self.anchor)?)
+        };
+        self.map_to_root.translate_to_target(&path)
+    }
 }
 
 /// The cache's per-prim composition record: the composed [`PrimIndex`], the
@@ -225,7 +265,7 @@ impl PrimIndex {
     /// Returns `true` if no layers contribute opinions for this prim.
     ///
     /// A prim with no opinions still owns the synthetic, inert tree root, and
-    /// may own culled arc nodes kept only for structure, so emptiness is the
+    /// may own culled nodes kept for structure, so emptiness is the
     /// absence of any node that contributes to value resolution. A node carrying
     /// its full site stack but authoring no spec at its path (an ancestral site
     /// cloned to a child with no local opinion) likewise contributes nothing.
@@ -259,14 +299,75 @@ impl PrimIndex {
         self.all_nodes().filter(|node| !node.is_culled())
     }
 
-    /// Iterates every retained node in strength order, including culled arc
-    /// nodes (an arc whose target authors no spec). Skips inert nodes — the
+    /// Iterates every retained node in strength order, including the culled
+    /// nodes the index keeps. Skips inert nodes — the
     /// synthetic root and the non-contributing class placeholders implied-class
     /// propagation adds. Used for composition introspection and change tracking,
     /// where the full arc structure matters even where it contributes no
     /// opinions; value resolution uses [`nodes`](Self::nodes) instead.
     pub fn all_nodes(&self) -> impl DoubleEndedIterator<Item = Node<'_>> + Clone {
         self.ordered_nodes().filter(|node| !node.is_inert())
+    }
+
+    /// Culls the subtrees that contribute no opinion and erases them from the
+    /// graph, recording the site of each erased node a change must still reach
+    /// in [`culled`](Self::culled_dependencies) (C++
+    /// `_CullSubtreesWithNoOpinions`, `Pcp_AddCulledDependencies` and the
+    /// erasure in `PcpPrimIndex_Graph::Finalize`).
+    ///
+    /// Runs before the spec stack is built, which names nodes by handle.
+    fn cull(&mut self) {
+        self.graph.cull_subtrees_without_opinions();
+        let erasable = self.graph.erasable();
+        if !erasable.contains(&true) {
+            return;
+        }
+        let mut rank = vec![0; erasable.len()];
+        let mut kept = 0;
+        for &id in self.graph.strength_order() {
+            rank[id.idx()] = kept;
+            kept += usize::from(!erasable[id.idx()]);
+        }
+        for node in self.graph.nodes() {
+            if !erasable[node.id().idx()] || !tracks_dependency(node) {
+                continue;
+            }
+            // A propagated relocate holds the identity map: a change steps out
+            // to the first ancestor that is not one and maps through it, as
+            // `translate_dependency_path` does for a live node.
+            let mut anchor = node;
+            while anchor.relocate_kind() == Some(RelocateKind::Propagated) {
+                let Some(parent) = anchor.parent() else {
+                    break;
+                };
+                anchor = self.graph.node(parent);
+            }
+            self.culled.push(CulledDependency {
+                layer_stack: node.layer_stack_id(),
+                site: node.path().clone(),
+                anchor: anchor.path().clone(),
+                map_to_root: anchor.map_to_root().clone(),
+                rank: rank[node.id().idx()],
+            });
+        }
+        self.graph.erase(&erasable);
+    }
+
+    /// Each node's place in the strength order, by [`NodeId`]; `usize::MAX`
+    /// for a node the order omits.
+    pub(crate) fn strength_ranks(&self) -> Vec<usize> {
+        let mut rank = vec![usize::MAX; self.graph.len()];
+        for (at, &id) in self.graph.strength_order().iter().enumerate() {
+            rank[id.idx()] = at;
+        }
+        rank
+    }
+
+    /// The sites of the culled nodes erased from this index, which change
+    /// processing reaches the prim through alongside its
+    /// [`dependency_nodes`](Self::dependency_nodes).
+    pub(crate) fn culled_dependencies(&self) -> &[CulledDependency] {
+        &self.culled
     }
 
     /// Iterates the nodes whose sites must be tracked as dependencies of this
@@ -536,6 +637,14 @@ impl PrimIndex {
             refresh.arc_specs_changed |= node.arc() != ArcType::Root && node.has_specs() != has_specs;
             self.graph.set_has_specs(id, has_specs);
         }
+        // A culled node the graph erased that the spec fills in composes again
+        // only through a rebuild (C++ `PcpChanges::DidChangeSpecs` marking the
+        // prim in `didChangePrims`).
+        refresh.needs_rebuild |= self.culled.iter().any(|culled| {
+            culled.site == *path
+                && graph.stack_contains(culled.layer_stack, layer)
+                && stack_has_spec(graph, culled.layer_stack, path)
+        });
         refresh
     }
 
@@ -1001,7 +1110,15 @@ impl PrimIndex {
             graph,
             spec_stack: Vec::new(),
             authors_clips: false,
+            culled: Vec::new(),
         };
+        // A stage prim drops the subtrees that contribute nothing, as C++
+        // `PcpComputePrimIndex` does; its children seed from what remains.
+        // A value clip on the prim or an ancestor can hold opinions for a site
+        // with no spec, so such a prim keeps every node.
+        if ambient == LayerStackId::ROOT && !ctx.may_have_clips {
+            index.cull();
+        }
         // Build the memoized spec stack here, the single seam every freshly
         // composed index passes through, so value resolution and the spec-tier
         // refresh read it without a separate finalize step. The later permission
@@ -1473,17 +1590,15 @@ def \"B\" { custom double y = 2 }
         let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&mut stack, "/A");
 
-        // The empty target is retained as a culled node so an editor sees the
-        // arc, but value resolution skips it and the prim is not composed.
+        // The empty target is culled and erased, and its site recorded so a
+        // spec authored there later recomposes the prim.
         assert!(
-            index
-                .all_nodes()
-                .any(|n| n.arc() == ArcType::Reference && n.is_culled()),
-            "empty reference target kept as a culled node"
+            index.all_nodes().all(|n| n.arc() != ArcType::Reference),
+            "empty reference target erased"
         );
         assert!(
-            index.nodes().all(|n| n.arc() != ArcType::Reference),
-            "culled reference contributes no opinion to resolution"
+            index.culled_dependencies().iter().any(|c| c.site.as_str() == "/Empty"),
+            "empty reference target's site recorded"
         );
         assert!(
             !index.has_composition_arc(),
@@ -1499,15 +1614,17 @@ def \"B\" { custom double y = 2 }
         let root = parse_usda("#usda 1.0\ndef \"A\" ( inherits = </_class_Missing> ) {\n  custom double x = 1\n}\n");
         let index = build(&mut one_layer_stack(root), "/A");
 
-        // The empty class is retained as a culled node so an editor sees the arc,
-        // but value resolution skips it and the prim is not composed.
+        // The empty class is culled and erased, and its site recorded.
         assert!(
-            index.all_nodes().any(|n| n.arc() == ArcType::Inherit && n.is_culled()),
-            "empty inherit target kept as a culled node"
+            index.all_nodes().all(|n| n.arc() != ArcType::Inherit),
+            "empty inherit target erased"
         );
         assert!(
-            index.nodes().all(|n| n.arc() != ArcType::Inherit),
-            "culled inherit contributes no opinion to resolution"
+            index
+                .culled_dependencies()
+                .iter()
+                .any(|c| c.site.as_str() == "/_class_Missing"),
+            "empty inherit target's site recorded"
         );
         assert!(
             !index.has_composition_arc(),
@@ -1524,14 +1641,15 @@ def \"B\" { custom double y = 2 }
         let index = build(&mut one_layer_stack(root), "/A");
 
         assert!(
-            index
-                .all_nodes()
-                .any(|n| n.arc() == ArcType::Specialize && n.is_culled()),
-            "empty specialize target kept as a culled node"
+            index.all_nodes().all(|n| n.arc() != ArcType::Specialize),
+            "empty specialize target erased"
         );
         assert!(
-            index.nodes().all(|n| n.arc() != ArcType::Specialize),
-            "culled specialize contributes no opinion to resolution"
+            index
+                .culled_dependencies()
+                .iter()
+                .any(|c| c.site.as_str() == "/_class_Missing"),
+            "empty specialize target's site recorded"
         );
         assert!(
             !index.has_composition_arc(),
@@ -1551,12 +1669,15 @@ def \"B\" { custom double y = 2 }
         let index = build(&mut one_layer_stack(root), "/A");
 
         assert!(
-            index.all_nodes().any(|n| n.arc() == ArcType::Variant && n.is_culled()),
-            "empty variant target kept as a culled node"
+            index.all_nodes().all(|n| n.arc() != ArcType::Variant),
+            "empty variant target erased"
         );
         assert!(
-            index.nodes().all(|n| n.arc() != ArcType::Variant),
-            "culled variant contributes no opinion to resolution"
+            index
+                .culled_dependencies()
+                .iter()
+                .any(|c| c.site.as_str() == "/A{v=missing}"),
+            "empty variant target's site recorded"
         );
         assert!(
             !index.has_composition_arc(),

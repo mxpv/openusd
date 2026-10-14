@@ -2244,12 +2244,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
     }
 
-    /// Marks `node` as a culled empty arc target (C++ culling): it stays in the
-    /// graph for change tracking and dependency registration but contributes no
-    /// opinions to value resolution. The target authors no spec, so recording
-    /// `has_specs = false` lets a later spec at the site be detected as a
-    /// `has_specs` flip by the spec-tier rescan, which then un-culls the arc and
-    /// grafts the target's subtree.
+    /// Marks `node` as a culled empty arc target (C++ culling): it contributes
+    /// no opinions to value resolution. A stage prim's index erases it and
+    /// records its site ([`PrimIndex::culled_dependencies`](super::PrimIndex)),
+    /// so a later spec there rebuilds the prim, which grafts the target's
+    /// subtree. The target authors no spec, so `has_specs` is `false`.
     fn cull_empty(&mut self, node: NodeId) {
         self.output.mark(node, NodeFlags::CULLED);
         self.output.set_has_specs(node, false);
@@ -3013,9 +3012,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(());
         }
 
-        // An arc target authoring no spec is kept as a culled node (C++
-        // culling): visible to change tracking and dependency registration, but
-        // contributing no opinions to value resolution. The unresolved-prim-path
+        // An arc target authoring no spec is culled (C++ culling): it
+        // contributes no opinions to value resolution. The unresolved-prim-path
         // task reports it.
         let empty = !self.stack_has_spec(target_stack, &source);
         let new_node = self
@@ -4056,7 +4054,8 @@ mod tests {
 
     /// A child build rescans the inert specializes placeholder its parent's
     /// graph seeds, so the placeholder deepened to a site with no spec drops the
-    /// flag the parent's site earned (C++ `_ConvertNodeForChild`).
+    /// flag the parent's site earned (C++ `_ConvertNodeForChild`) and is culled
+    /// with the rest of its spec-less subtree.
     #[test]
     fn inert_seed_rescanned() {
         let mut s = stack(
@@ -4083,12 +4082,10 @@ def "World" (
             "the parent's inert placeholder at /C has a spec"
         );
         let child = compose_chain(&mut s, "/World/Child");
-        let deepened: Vec<_> = child.nodes().filter(|n| n.path().as_str() == "/C/Child").collect();
         assert!(
-            deepened.iter().any(|n| n.is_inert()),
-            "the placeholder is deepened to /C/Child"
+            !child.nodes().any(|n| n.path().as_str() == "/C/Child" && n.has_specs()),
+            "no layer authors /C/Child"
         );
-        assert!(deepened.iter().all(|n| !n.has_specs()), "no layer authors /C/Child");
     }
 
     /// Composes `path` and every namespace ancestor as the cache does, returning

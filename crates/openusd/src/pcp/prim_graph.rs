@@ -1437,6 +1437,206 @@ impl PrimIndexGraph {
         self.finalized = !self.shallow_parent;
     }
 
+    /// Marks culled every subtree that contributes no opinion to the prim (C++
+    /// `_CullSubtreesWithNoOpinions`), children before their parents, so a
+    /// node whose subtree is all culled culls in turn. See
+    /// [`can_cull`](Self::can_cull) for the nodes that stay.
+    ///
+    /// Runs on a finalized graph: the walk reads the sorted child links.
+    pub(crate) fn cull_subtrees_without_opinions(&mut self) {
+        let root = self.shared.root;
+        let local = self.local_root();
+        if !root.is_valid() || !local.is_valid() {
+            return;
+        }
+        let root_stack = self.shared.nodes[local.idx()].layer_stack;
+        for id in self.walk().into_iter().rev() {
+            if id != root && self.can_cull(id, root_stack) {
+                self.sites[id.idx()].flags |= NodeFlags::CULLED;
+            }
+        }
+    }
+
+    /// Whether `id` contributes nothing to the prim and can be culled (C++
+    /// `_NodeCanBeCulled`). A node stays when it:
+    ///
+    /// - is a [`Root`](ArcType::Root) node;
+    /// - introduces its arc at this prim, so the arc stays discoverable for
+    ///   dependencies even with an empty target;
+    /// - is a subroot inherit in the root layer stack, which the composed
+    ///   scene still holds as a base;
+    /// - has a child that was not culled;
+    /// - authors a spec it can contribute.
+    ///
+    /// C++ also keeps a node with symmetry, which this port does not compose,
+    /// and one with value clips, which the caller rules out for the whole prim.
+    fn can_cull(&self, id: NodeId, root_stack: LayerStackId) -> bool {
+        let site = &self.sites[id.idx()];
+        if site.flags.contains(NodeFlags::CULLED) {
+            return true;
+        }
+        let data = &self.shared.nodes[id.idx()];
+        if data.arc == ArcType::Root || self.depth_below_introduction(id) == 0 {
+            return false;
+        }
+        if data.arc == ArcType::Inherit && data.layer_stack == root_stack {
+            // The origin's introduction is what decides: an implied inherit
+            // propagated from an ancestral one sits at a subroot path even when
+            // the inherit it came from names a root prim.
+            let origin = if data.origin == data.parent {
+                id
+            } else {
+                self.origin_root_node(id).0
+            };
+            if !self.path_at_introduction(origin).is_root_prim() {
+                return false;
+            }
+        }
+        if self
+            .children(id)
+            .any(|child| !self.sites[child.idx()].flags.contains(NodeFlags::CULLED))
+        {
+            return false;
+        }
+        !site.has_specs || site.flags.contains(NodeFlags::INERT)
+    }
+
+    /// Which nodes [`erase`](Self::erase) may drop, by [`NodeId`]: the culled
+    /// ones, less any a live node's origin chain reaches, and the parents of
+    /// those (C++ `_ComputeEraseCulledNodeIndexMapping`). Strength ordering
+    /// follows origins, so a chain that leads from a live node must stay whole.
+    ///
+    /// A culled node that authors specs stays too, with its ancestors: content
+    /// a relocation masks is culled where it is elided, and the namespace
+    /// editor reads it to tell a masking relocate target.
+    pub(crate) fn erasable(&self) -> Vec<bool> {
+        let mut erasable: Vec<bool> = self
+            .sites
+            .iter()
+            .map(|site| site.flags.contains(NodeFlags::CULLED) && !site.has_specs)
+            .collect();
+        if !erasable.contains(&true) {
+            return erasable;
+        }
+        for (id, site) in self.sites.iter().enumerate() {
+            if site.flags.contains(NodeFlags::CULLED) && site.has_specs {
+                let mut parent = self.parent_of(NodeId(id as u32));
+                while parent.is_valid() && erasable[parent.idx()] {
+                    erasable[parent.idx()] = false;
+                    parent = self.parent_of(parent);
+                }
+            }
+        }
+        for id in 0..self.len() {
+            if self.shared.nodes[id].origin.is_valid() {
+                self.keep_origin_chain(NodeId(id as u32), &mut erasable);
+            }
+        }
+        erasable
+    }
+
+    /// Clears `erasable` along the origin chain from `id` from the first live
+    /// node on, together with the culled parents of each node it clears.
+    fn keep_origin_chain(&self, id: NodeId, erasable: &mut [bool]) {
+        let mut keep_rest = false;
+        let mut at = id;
+        loop {
+            if !erasable[at.idx()] {
+                keep_rest = true;
+            } else if keep_rest {
+                let mut parent = at;
+                while parent.is_valid() && erasable[parent.idx()] {
+                    erasable[parent.idx()] = false;
+                    // A node kept for its child keeps its own origins too.
+                    if parent != at {
+                        self.keep_origin_chain(parent, erasable);
+                    }
+                    parent = self.parent_of(parent);
+                }
+            }
+            let origin = self.origin_of(at);
+            if !origin.is_valid() || origin == self.parent_of(at) {
+                break;
+            }
+            at = origin;
+        }
+    }
+
+    /// Drops the nodes `erase` marks, renumbering the rest in arena order and
+    /// rewriting every link and the strength order to the new handles (C++
+    /// `PcpPrimIndex_Graph::Finalize`'s culled-node erasure). The graph takes
+    /// its own shared half.
+    ///
+    /// The kept nodes stay sorted: a parent's children keep their relative
+    /// order, and the strength order is the old one with the dropped handles
+    /// removed. A kept node's parent and origin are kept, which
+    /// [`erasable`](Self::erasable) and the culling rule guarantee.
+    pub(crate) fn erase(&mut self, erase: &[bool]) {
+        let mut remap = vec![NodeId::INVALID; self.len()];
+        let mut next = 0u32;
+        for (old, &drop) in erase.iter().enumerate() {
+            if !drop {
+                remap[old] = NodeId(next);
+                next += 1;
+            }
+        }
+        let map = |id: NodeId| if id.is_valid() { remap[id.idx()] } else { id };
+        let shared = &*self.shared;
+        let mut nodes: Vec<NodeData> = Vec::with_capacity(next as usize);
+        for (old, data) in shared.nodes.iter().enumerate() {
+            if erase[old] {
+                continue;
+            }
+            debug_assert!(
+                !data.parent.is_valid() || !erase[data.parent.idx()],
+                "a kept node's parent is erased"
+            );
+            debug_assert!(
+                !data.origin.is_valid() || !erase[data.origin.idx()],
+                "a kept node's origin is erased"
+            );
+            let mut data = data.clone();
+            data.parent = map(data.parent);
+            data.origin = map(data.origin);
+            data.first_child = NodeId::INVALID;
+            data.last_child = NodeId::INVALID;
+            data.next_sibling = NodeId::INVALID;
+            nodes.push(data);
+        }
+        // Relink each kept parent's kept children in their old order.
+        for (old, &drop) in erase.iter().enumerate() {
+            if drop {
+                continue;
+            }
+            let parent = remap[old];
+            let mut prev = NodeId::INVALID;
+            for child in self.children(NodeId(old as u32)).filter(|child| !erase[child.idx()]) {
+                let child = remap[child.idx()];
+                if prev.is_valid() {
+                    nodes[prev.idx()].next_sibling = child;
+                } else {
+                    nodes[parent.idx()].first_child = child;
+                }
+                nodes[parent.idx()].last_child = child;
+                prev = child;
+            }
+        }
+        let strength_order = shared
+            .strength_order
+            .iter()
+            .filter(|id| !erase[id.idx()])
+            .map(|&id| remap[id.idx()])
+            .collect();
+        let root = map(shared.root);
+        let mut kept = erase.iter();
+        self.sites.retain(|_| !kept.next().copied().unwrap_or(false));
+        self.shared = Arc::new(GraphData {
+            nodes,
+            strength_order,
+            root,
+        });
+    }
+
     /// Gives back the room this graph's vectors hold beyond their nodes, for
     /// a graph that is done growing. Node data another graph also holds is
     /// left as it is.
