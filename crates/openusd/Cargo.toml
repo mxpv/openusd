@@ -36,7 +36,7 @@ rustc-hash = "2.1"
 serde = { workspace = true, optional = true }
 strum.workspace = true
 thiserror.workspace = true
-zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
 
 # The access control a replaced file keeps on Windows, which only the Win32
 # security API reaches.
