@@ -1151,7 +1151,9 @@ fn tracks_dependency(node: Node<'_>) -> bool {
 /// prim's own path, which the site map skips to stay compact (C++
 /// `PcpDependencyTypeRoot`) while the root stack's users still count it.
 /// Shared by the registration walk and the lookup, so a site can never be
-/// re-found that was never registered.
+/// re-found that was never registered. A spec change at an unregistered inert
+/// node's site therefore never refreshes that node's `has_specs`, which a child
+/// index seeded from the cached graph inherits.
 pub(super) fn registers_site(node: Node<'_>, prim_path: &Path) -> bool {
     tracks_dependency(node) && !(node.arc() == ArcType::Root && node.path() == prim_path)
 }

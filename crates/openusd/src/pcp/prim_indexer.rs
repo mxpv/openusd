@@ -762,7 +762,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // re-evaluates through the queue (C++ `AddTasksForRootNode`'s recursive
         // `_ScanArcs`). Deepening keeps each node's full site layer stack; the
         // set of layers that author a spec changes at the deeper path, so
-        // `scan_and_enqueue` recomputes `has_specs` for every node that had one.
+        // `scan_and_enqueue` recomputes `has_specs` for every node that had one,
+        // inert placeholders included.
         self.output = if self.frame.is_none() && self.site.ambient == LayerStackId::ROOT {
             let Some(parent_index) = self.inputs.cached_indices.get(&parent).map(|e| &e.index) else {
                 return Ok(false);
@@ -1065,10 +1066,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Some(grafted_root)
     }
 
-    /// Computes `has_specs` at each non-inert node's path and enqueues the
-    /// expressed-arc tasks for the spec-bearing nodes (C++ `AddTasksForRootNode`
-    /// → `_AddTasksForNodeRecursively`, restricted to the ported tasks). A node
-    /// with no spec at its path authors no arc, so it gets no task.
+    /// Recomputes `has_specs` at the path of each seeded node that had a spec at
+    /// the parent's path, leaving the rest false, and enqueues the expressed-arc
+    /// tasks for the non-inert spec-bearing nodes (C++ `_ConvertNodeForChild`,
+    /// then `AddTasksForRootNode` → `_AddTasksForNodeRecursively`, restricted to
+    /// the ported tasks). A node with no spec at its path authors no arc, so it
+    /// gets no task.
     ///
     /// Only the expressed-arc tasks are enqueued, not implied-class/specializes
     /// propagation: the seed is the already-composed ancestor graph
@@ -1079,15 +1082,22 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn scan_and_enqueue(&mut self) {
         for i in 0..self.output.len() {
             let node = NodeId(i as u32);
-            if self.node(node).is_inert() {
-                continue;
-            }
+            let n = self.node(node);
+            let (inert, had_specs) = (n.is_inert(), n.has_specs());
             // A node that authored no spec at the parent's path authors none at
             // the child's: a prim spec lives under its parent's spec in the
-            // same layer (C++ `_ConvertNodeForChild`).
-            let has_specs = self.node(node).has_specs()
-                && self.stack_has_spec(self.node(node).layer_stack_id(), self.node(node).path());
-            self.output.set_has_specs(node, has_specs);
+            // same layer (C++ `_ConvertNodeForChild`). `sdf` authoring keeps
+            // that nesting, but `sdf::AbstractData` does not check it, so a
+            // layer holding a child spec without its parent's composes without
+            // the child's opinions. Inert placeholders are rescanned too, so
+            // none keeps a flag its parent's site earned.
+            let has_specs = had_specs && self.stack_has_spec(n.layer_stack_id(), n.path());
+            if had_specs && !has_specs {
+                self.output.set_has_specs(node, false);
+            }
+            if inert {
+                continue;
+            }
             if has_specs {
                 self.add_expressed_arc_tasks(node);
             }
@@ -4042,6 +4052,43 @@ mod tests {
                 .any(|n| n.path().as_str() == "/A/Child" && n.arc() == ArcType::Reference && n.has_specs()),
             "the ancestral reference contributes the child's opinion at the deepened site"
         );
+    }
+
+    /// A child build rescans the inert specializes placeholder its parent's
+    /// graph seeds, so the placeholder deepened to a site with no spec drops the
+    /// flag the parent's site earned (C++ `_ConvertNodeForChild`).
+    #[test]
+    fn inert_seed_rescanned() {
+        let mut s = stack(
+            r#"#usda 1.0
+class "C" {
+}
+def "Ref" (
+    specializes = </C>
+) {
+    def "Child" {
+    }
+}
+def "World" (
+    references = </Ref>
+) {
+}
+"#,
+        );
+        let parent = compose_chain(&mut s, "/World");
+        assert!(
+            parent
+                .nodes()
+                .any(|n| n.is_inert() && n.path().as_str() == "/C" && n.has_specs()),
+            "the parent's inert placeholder at /C has a spec"
+        );
+        let child = compose_chain(&mut s, "/World/Child");
+        let deepened: Vec<_> = child.nodes().filter(|n| n.path().as_str() == "/C/Child").collect();
+        assert!(
+            deepened.iter().any(|n| n.is_inert()),
+            "the placeholder is deepened to /C/Child"
+        );
+        assert!(deepened.iter().all(|n| !n.has_specs()), "no layer authors /C/Child");
     }
 
     /// Composes `path` and every namespace ancestor as the cache does, returning
