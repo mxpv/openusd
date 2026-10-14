@@ -3466,6 +3466,9 @@ impl IndexCache {
 /// A site's names are its prim spec's `propertyChildren`, which lists every
 /// property spec the prim owns.
 fn contested_property_names(graph: &LayerGraph, index: &PrimIndex) -> Vec<Token> {
+    if index.live_spec_sites().nth(1).is_none() {
+        return Vec::new();
+    }
     let field = ChildrenKey::PropertyChildren.as_str();
     let lists: Vec<_> = index
         .live_spec_sites()
