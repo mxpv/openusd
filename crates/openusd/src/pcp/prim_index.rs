@@ -777,8 +777,8 @@ impl PrimIndex {
                 // The local site (and the synthetic root) is always instance-local.
                 ArcType::Root => true,
                 _ => {
-                    self.graph.depth_below_introduction(NodeId(i as u32)) > below_instance
-                        && node.parent().is_some_and(|p| local[p.idx()])
+                    node.parent().is_some_and(|p| local[p.idx()])
+                        && self.graph.depth_below_introduction(NodeId(i as u32)) > below_instance
                 }
             };
         }
@@ -818,14 +818,16 @@ impl PrimIndex {
     /// instance (C++ `Pcp_PrimIndexIsInstanceable`): it has an instanceable
     /// node ([`has_instanceable_node`](Self::has_instanceable_node)), and its
     /// composed `instanceable` metadata is `true`.
+    ///
+    /// The metadata is read first: few prims author it, and the node test
+    /// partitions the whole graph. A failed read counts only for an index
+    /// that has an instanceable node.
     pub(crate) fn is_instanceable(&self, graph: &LayerGraph, depth: u16) -> Result<bool, QueryError> {
-        if !self.has_instanceable_node(depth) {
-            return Ok(false);
+        match self.resolve_field(FieldKey::Instanceable.as_str(), graph, None) {
+            Ok(Some(Value::Bool(true))) => Ok(self.has_instanceable_node(depth)),
+            Err(error) if self.has_instanceable_node(depth) => Err(error),
+            Ok(_) | Err(_) => Ok(false),
         }
-        Ok(matches!(
-            self.resolve_field(FieldKey::Instanceable.as_str(), graph, None)?,
-            Some(Value::Bool(true))
-        ))
     }
 
     /// Inerts the instance-namespace opinions on a prim composed inside an
