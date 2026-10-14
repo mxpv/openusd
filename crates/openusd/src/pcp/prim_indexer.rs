@@ -460,6 +460,16 @@ struct Site {
     path: Path,
 }
 
+/// A node that authors a selection for the variant set a build is resolving.
+struct VariantOpinions {
+    node: NodeId,
+    /// Where the node stores the selection, in its own namespace.
+    site: Path,
+    /// The layers that author one and what they author, strongest first. A
+    /// failed read ends the list.
+    authored: Vec<BuildResult<(LayerId, String)>>,
+}
+
 /// Composes a single prim by draining a task queue over a composition graph
 /// grown node-by-node (C++ `Pcp_PrimIndexer`).
 ///
@@ -1894,18 +1904,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // The strongest node the set path maps to, and the path in its namespace
         // (C++ `Pcp_TranslatePathFromNodeToRootOrClosestNode`).
         let (start, path_in_start) = self.translate_path_to_root_or_closest(origin, vset_path);
-        // TODO(perf): this rebuilds and re-sorts the subtree node list (each
-        // `compare_node_strength` walks parent chains) for every authored-variant
-        // task. A prim with several variant sets re-sorts once per set; the order
-        // is stable between grafts, so it could be computed once per drain pass.
-        let mut nodes: Vec<NodeId> = self
-            .subtree_nodes(start)
-            .into_iter()
-            .filter(|&n| !self.node(n).is_inert())
-            .collect();
-        nodes.sort_by(|&a, &b| self.output.compare_node_strength(a, b));
-        for n in nodes {
+        // The nodes with an opinion about the set, each with its opinions
+        // strongest layer first. Few nodes author one, so they are found
+        // before any ordering and only they are ranked.
+        let stack = self.inputs.stack;
+        let mut opinionated: Vec<VariantOpinions> = Vec::new();
+        for n in self.subtree_nodes(start) {
             let node = self.node(n);
+            if node.is_inert() {
+                continue;
+            }
             // Each candidate's site is the set path mapped from `start` down the
             // arc chain to that candidate (C++ `_ComposeVariantSelectionAcrossNodes`).
             // The per-arc walk drops a path that leaves any arc's co-domain, so a
@@ -1931,43 +1939,69 @@ impl<'a, 'f> Indexer<'a, 'f> {
             } else {
                 path_in_node
             };
-            let node_stack = node.layer_stack_id();
-            let stack = self.inputs.stack;
-            for &(layer, _) in stack.layer_stack(node_stack).iter() {
-                let Some(value) = stack
+            // A site that is the node's own and holds no spec holds no field.
+            if site == *node.path() && !node.has_specs() {
+                continue;
+            }
+            let mut authored = Vec::new();
+            for &(layer, _) in stack.layer_stack(node.layer_stack_id()).iter() {
+                match stack
                     .layer(layer)
                     .data()
-                    .try_field(&site, FieldKey::VariantSelection.as_str())?
-                else {
-                    continue;
-                };
-                if let Value::VariantSelectionMap(map) = value.into_owned()
-                    && let Some(sel) = map.get(vset)
+                    .try_field(&site, FieldKey::VariantSelection.as_str())
                 {
-                    // Evaluate against the reading node's own stack
-                    // variables (C++ `PcpComposeSiteVariantSelection`);
-                    // indexing time is the sole diagnostic emitter. An
-                    // accepted selection — including the empty one an
-                    // expression-language `None` yields, which defers to
-                    // the fallback — stops the search; only a failed
-                    // evaluation falls through to the next-weaker opinion,
-                    // its read names recorded all the same (a later edit to
-                    // one can flip the result).
-                    let mut used_vars = HashSet::new();
-                    let selection = evaluate_expression(
-                        sel,
-                        stack.stack_variables(node_stack),
-                        ExpressionContext::Variant,
-                        stack.identifier(layer),
-                        &site,
-                        Some(&mut self.errors),
-                        Some(&mut used_vars),
-                    )
-                    .into_selection();
-                    self.expr_var_deps.record(node_stack, used_vars);
-                    if let Some(selection) = selection {
-                        return Ok(Some(selection));
+                    Ok(None) => {}
+                    Ok(Some(value)) => {
+                        if let Value::VariantSelectionMap(map) = value.as_ref()
+                            && let Some(sel) = map.get(vset)
+                        {
+                            authored.push(Ok((layer, sel.clone())));
+                        }
                     }
+                    // The read fails the build only if the search gets this far.
+                    Err(error) => {
+                        authored.push(Err(error.into()));
+                        break;
+                    }
+                }
+            }
+            if !authored.is_empty() {
+                opinionated.push(VariantOpinions {
+                    node: n,
+                    site,
+                    authored,
+                });
+            }
+        }
+        opinionated.sort_by(|a, b| self.output.compare_node_strength(a.node, b.node));
+
+        for VariantOpinions { node, site, authored } in opinionated {
+            let node_stack = self.node(node).layer_stack_id();
+            for opinion in authored {
+                let (layer, sel) = opinion?;
+                // Evaluate against the reading node's own stack
+                // variables (C++ `PcpComposeSiteVariantSelection`);
+                // indexing time is the sole diagnostic emitter. An
+                // accepted selection — including the empty one an
+                // expression-language `None` yields, which defers to
+                // the fallback — stops the search; only a failed
+                // evaluation falls through to the next-weaker opinion,
+                // its read names recorded all the same (a later edit to
+                // one can flip the result).
+                let mut used_vars = HashSet::new();
+                let selection = evaluate_expression(
+                    &sel,
+                    stack.stack_variables(node_stack),
+                    ExpressionContext::Variant,
+                    stack.identifier(layer),
+                    &site,
+                    Some(&mut self.errors),
+                    Some(&mut used_vars),
+                )
+                .into_selection();
+                self.expr_var_deps.record(node_stack, used_vars);
+                if let Some(selection) = selection {
+                    return Ok(Some(selection));
                 }
             }
         }
