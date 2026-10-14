@@ -562,6 +562,15 @@ impl IndexStore {
                     .iter()
                     .filter_map(|&node| index.translate_dependency_path(node, site_path)),
             );
+            // A culled node the index erased registered its site too, and
+            // translates through what it recorded.
+            out.extend(
+                index
+                    .culled_dependencies()
+                    .iter()
+                    .filter(|culled| culled.site == *site && graph.stack_contains(culled.layer_stack, layer_id))
+                    .filter_map(|culled| culled.translate(site_path)),
+            );
         }
         out
     }

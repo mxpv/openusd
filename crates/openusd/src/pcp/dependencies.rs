@@ -139,9 +139,10 @@ impl Dependencies {
         // the whole cache per prim; `prims_for_stack` answers for it with the
         // pseudo-root instead.
         let mut stacks: HashSet<LayerStackId> = HashSet::new();
-        // Include culled arc nodes (empty targets) and inert relocation-source
+        // Include the culled nodes the graph keeps and inert relocation-source
         // nodes: authoring a spec at such a site must invalidate this prim so the
-        // node un-culls / re-relocates on recomposition.
+        // node un-culls / re-relocates on recomposition. The culled nodes the
+        // graph erased register below.
         for node in index.dependency_nodes() {
             let stack = node.layer_stack_id();
             if stack == LayerStackId::ROOT {
@@ -167,6 +168,26 @@ impl Dependencies {
                 .entry(stack)
                 .or_default()
                 .get_or_insert_default(node.path())
+                .push(prim_index_path.clone());
+        }
+        // A culled node erased from the graph still read its site: a spec
+        // authored there can bring it back (C++ `PcpCulledDependency`).
+        for culled in index.culled_dependencies() {
+            let stack = culled.layer_stack;
+            if stack == LayerStackId::ROOT {
+                root_user = true;
+            } else {
+                stacks.insert(stack);
+            }
+            let key = (stack, culled.site.clone());
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            registered.push(key);
+            self.per_stack
+                .entry(stack)
+                .or_default()
+                .get_or_insert_default(&culled.site)
                 .push(prim_index_path.clone());
         }
         if root_user {
