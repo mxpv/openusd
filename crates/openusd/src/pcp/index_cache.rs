@@ -1286,17 +1286,11 @@ impl IndexCache {
     /// the previous composition recorded.
     ///
     /// A prim the round left uncached needs nothing: its next build reports from
-    /// scratch. Recomposing the property names can fail (a demanded layer that
-    /// is not loaded), in which case the entry keeps what it had rather than
-    /// being left silently empty — the next build or query reports again.
+    /// scratch.
     fn refresh_property_type_conflicts(&mut self, graph: &LayerGraph, path: &Path) {
-        if !self.is_indexed(path) {
-            return;
+        if self.is_indexed(path) {
+            self.report_property_type_conflicts(graph, path);
         }
-        let Ok(names) = self.composed_property_names(graph, path) else {
-            return;
-        };
-        self.report_property_type_conflicts(graph, path, &names);
     }
 
     /// Invalidates what a change to the clip or manifest layer `identifier`
@@ -3069,13 +3063,17 @@ impl IndexCache {
     /// again from its own walk and reports it into the transient channel; the
     /// two owners are folded through one collection, so the diagnostic reads
     /// once however many passes found it.
-    fn report_property_type_conflicts(&mut self, graph: &LayerGraph, prim_path: &Path, names: &[Token]) {
+    ///
+    /// Only a name that two of the prim's spec sites author can mix kinds
+    /// ([`contested_property_names`]), so a prim whose properties each come
+    /// from one site is done after reading its sites' property lists.
+    fn report_property_type_conflicts(&mut self, graph: &LayerGraph, prim_path: &Path) {
         let Some(index) = self.store.index_at(prim_path) else {
             return;
         };
         let mut conflicts = Diagnostics::default();
-        for name in names {
-            let Ok(prop_path) = prim_path.append_property(name) else {
+        for name in contested_property_names(graph, index) {
+            let Ok(prop_path) = prim_path.append_property(&name) else {
                 continue;
             };
             conflicts.extend(Self::property_type_conflicts(graph, index, prim_path, &prop_path));
@@ -3401,14 +3399,9 @@ impl IndexCache {
         self.store.seed_instanceable(path, is_instance);
         // Report inconsistent property types at prim composition (C++
         // `PcpErrorInconsistentPropertyType`) so the conflict is visible without
-        // anyone asking for a property stack. Composed property names read back
-        // through the store, so this runs after the entry is cached and reports
-        // onto it.
-        // TODO(perf): this composes property names on every prim build to find a
-        // rare conflict; gate it on a cheaper signal (e.g. a node carrying both
-        // attribute and relationship specs) before scanning.
-        let names = self.composed_property_names(graph, path)?;
-        self.report_property_type_conflicts(graph, path, &names);
+        // anyone asking for a property stack. The conflicts are recorded on the
+        // entry, so this runs after it is cached.
+        self.report_property_type_conflicts(graph, path);
         Ok(())
     }
 
@@ -3465,6 +3458,45 @@ impl IndexCache {
 
         Ok(result)
     }
+}
+
+/// The property names more than one of `index`'s live spec sites authors, in
+/// the order a second site is found for each. A property spec of one kind and
+/// one of the other need two sites, so these are the names whose specs can
+/// disagree (C++ `PcpErrorInconsistentPropertyType`).
+///
+/// A site's names are its prim spec's `propertyChildren`, which lists every
+/// property spec the prim owns.
+fn contested_property_names(graph: &LayerGraph, index: &PrimIndex) -> Vec<Token> {
+    let field = ChildrenKey::PropertyChildren.as_str();
+    let lists: Vec<_> = index
+        .live_spec_sites()
+        .filter_map(|(site, node)| graph.layer(site.layer).data().try_field(node.path(), field).ok()?)
+        .collect();
+    let mut contested = Vec::new();
+    if lists.len() < 2 {
+        return contested;
+    }
+    // Whether each name seen so far has been found at a second site.
+    let mut names: HashMap<&Token, bool> = HashMap::new();
+    for list in &lists {
+        let Value::TokenVec(list) = list.as_ref() else {
+            continue;
+        };
+        for name in list {
+            match names.get_mut(name) {
+                Some(repeated) => {
+                    if !mem::replace(repeated, true) {
+                        contested.push(name.clone());
+                    }
+                }
+                None => {
+                    names.insert(name, false);
+                }
+            }
+        }
+    }
+    contested
 }
 
 /// Appends a layer's not-yet-seen `field` children (`primChildren` /
@@ -4023,8 +4055,7 @@ def \"R\" {
 
         let model = graph.all_ids()[1];
         let cl = edit_layer(&mut graph.get_mut(model).unwrap().layer, |e| {
-            e.data_mut()
-                .create_spec(sdf::path("/R.x").unwrap(), sdf::SpecType::Relationship);
+            sdf::RelationshipSpec::new(e.data_mut(), "/R.x", sdf::Variability::Varying, false)?;
             Ok(())
         })?;
         let mut changes = Changes::new();
@@ -4036,6 +4067,39 @@ def \"R\" {
             1,
             "the new spec conflicts with the root's attribute"
         );
+        Ok(())
+    }
+
+    /// A spec authored through the raw data calls conflicts like any other once
+    /// its prim lists it in `propertyChildren`.
+    #[test]
+    fn conflict_from_raw_spec() -> Result<()> {
+        let (mut graph, mut cache) = two_layer_stack(
+            CONFLICT_ROOT,
+            "#usda 1.0
+def \"R\" {
+}
+",
+        );
+        cache.ensure_index(&graph, &sdf::path("/P")?)?;
+        assert_eq!(conflict_count(&cache), 0, "nothing conflicts yet");
+
+        let model = graph.all_ids()[1];
+        let cl = edit_layer(&mut graph.get_mut(model).unwrap().layer, |e| {
+            let data = e.data_mut();
+            data.create_spec(sdf::path("/R.x").unwrap(), sdf::SpecType::Relationship);
+            data.set_field(
+                &sdf::path("/R").unwrap(),
+                ChildrenKey::PropertyChildren.as_str(),
+                Value::TokenVec(vec![Token::from("x")]),
+            );
+            Ok(())
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(model, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert_eq!(conflict_count(&cache), 1, "the listed raw spec conflicts");
         Ok(())
     }
 

@@ -65,6 +65,12 @@ pub trait AbstractData {
     /// Creates an empty spec of type `ty` at `path`, replacing any existing
     /// spec there. Mirrors C++ `SdfAbstractData::CreateSpec`. Fields are
     /// authored separately via [`set_field`](Self::set_field).
+    ///
+    /// Only the spec record is written. The caller also lists the new spec in
+    /// its parent's children field (`primChildren`, `propertyChildren` and
+    /// the like), which is how name enumeration, the text writer and
+    /// composition find it. The typed spec constructors
+    /// ([`PrimSpec::new`](crate::sdf::PrimSpec::new) and friends) do both.
     fn create_spec(&mut self, path: Path, ty: SpecType);
 
     /// Removes the spec at `path` along with all its fields. Mirrors C++

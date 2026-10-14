@@ -904,6 +904,10 @@ impl LayerEdit<'_> {
     /// the copy-on-write overlay and commits with the enclosing edit. The typed
     /// spec constructors ([`PrimSpec::new`](crate::sdf::PrimSpec::new) and friends)
     /// write through this.
+    ///
+    /// A caller writing specs through the raw [`AbstractData`] methods keeps
+    /// each parent's children field in step itself
+    /// ([`AbstractData::create_spec`]).
     pub fn data_mut(&mut self) -> &mut dyn AbstractData {
         &mut self.layer.data
     }
