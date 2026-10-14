@@ -57,20 +57,6 @@ pub struct PrimIndex {
     /// path. Computed alongside [`spec_stack`](Self::spec_stack), whose walk
     /// visits exactly the sites a clip opinion can live at.
     authors_clips: bool,
-    /// Arena handles sorted by node path: the spec-tier refresh's site index.
-    /// Every node sitting at a given path forms one contiguous run, found by
-    /// binary search in [`nodes_at`](Self::nodes_at), so
-    /// [`refresh_has_specs_at`](Self::refresh_has_specs_at) reaches a changed
-    /// site's nodes without scanning the whole arena. A permutation of handles
-    /// like the graph's strength order, holding [`NodeId`]s only — it clones no
-    /// paths, so it stays cheap against the heap-backed [`Path`](crate::sdf::Path).
-    /// Built once per composition by [`build_path_order`](Self::build_path_order)
-    /// and carried with the index; the spec-tier refresh changes only flags, never
-    /// structure, so it stays valid across an in-place refresh. Lists every arena
-    /// node — inert, culled, and the synthetic root — so the refresh sees each
-    /// site's full candidate set. Like [`spec_stack`](Self::spec_stack), it is kept
-    /// off [`PrimIndexGraph`], which a child's build seeds from.
-    path_order: Vec<NodeId>,
 }
 
 /// The cache's per-prim composition record: the composed [`PrimIndex`], the
@@ -303,8 +289,8 @@ impl PrimIndex {
     /// serves a whole change round.
     ///
     /// Ordered strongest-first, matching the node range C++ rescans
-    /// (`PcpPrimIndex::GetNodeRange`). The site index is in path order, whose
-    /// ties fall in arena order — a different permutation.
+    /// (`PcpPrimIndex::GetNodeRange`). The candidates come in arena order, a
+    /// different permutation.
     pub(crate) fn dependency_nodes_at(
         &self,
         prim_path: &Path,
@@ -322,7 +308,7 @@ impl PrimIndex {
         // several nodes is rare and each run is short, so a rank table on the
         // graph would cost more than it saves here.
         let rank = |id: NodeId| self.graph.strength_order().iter().position(|&s| s == id);
-        out.extend(self.nodes_at(path).iter().copied().filter(|&id| {
+        out.extend(self.nodes_at(path).filter(|&id| {
             let node = self.graph.node(id);
             registers_site(node, prim_path) && graph.stack_contains(node.layer_stack_id(), layer) && rank(id).is_some()
         }));
@@ -499,10 +485,6 @@ impl PrimIndex {
     /// contributing arc target that loses its last spec (it must cull to match an
     /// always-empty target, so a later re-add takes the un-cull path).
     //
-    // Reaches the site's nodes through the [`path_order`](Self::path_order) site
-    // index ([`nodes_at`](Self::nodes_at)), so its cost scales with the number of
-    // nodes at the site.
-    //
     // Each node's `layer_stack` handle is resolved against the live `graph`,
     // which is sound because this rescan runs only on the spec-tier
     // (non-significant) change path: an inert spec add/remove never edits
@@ -517,9 +499,9 @@ impl PrimIndex {
         runs: &mut NodeRuns,
     ) -> SpecRefresh {
         let mut refresh = SpecRefresh::default();
-        // `to_vec` copies the small candidate run of handles, releasing the
-        // `path_order` borrow so the loop can write the graph in place.
-        for id in self.nodes_at(path).to_vec() {
+        // Collected first, releasing the graph borrow so the loop can write
+        // it in place.
+        for id in self.nodes_at(path).collect::<Vec<_>>() {
             let node = self.graph.node(id);
             let stack = node.layer_stack_id();
             if !graph.layer_stack(stack).iter().any(|&(li, _)| li == layer) {
@@ -557,16 +539,11 @@ impl PrimIndex {
         refresh
     }
 
-    /// Arena handles of every node sitting at `path`, in path order (empty when
-    /// none) — the spec-tier refresh's candidate set. Binary-searches the
-    /// [`path_order`](Self::path_order) projection for the contiguous run of nodes
-    /// at the site.
-    fn nodes_at(&self, path: &Path) -> &[NodeId] {
-        let lo = self.path_order.partition_point(|&id| self.graph.node(id).path() < path);
-        let hi = self
-            .path_order
-            .partition_point(|&id| self.graph.node(id).path() <= path);
-        &self.path_order[lo..hi]
+    /// Arena handles of every node sitting at `path`, in arena order — the
+    /// candidate set of a change at that site. Lists every arena node there:
+    /// inert, culled, and the synthetic root.
+    fn nodes_at<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = NodeId> + 'a {
+        self.graph.nodes().filter(move |node| node.path() == path).map(Node::id)
     }
 
     /// Installs the spec stack and clip flag this index composes, replacing
@@ -706,26 +683,6 @@ impl PrimIndex {
     /// [`CompositionContext::may_have_clips`] answers.
     pub(crate) fn authors_clips(&self) -> bool {
         self.authors_clips
-    }
-
-    /// Builds [`path_order`](Self::path_order) from the finalized arena: arena
-    /// handles sorted by their node's path, so the nodes at any path form a
-    /// contiguous, binary-searchable run. The sort is stable, so equal-path nodes
-    /// keep their arena order. Run once per composition alongside
-    /// [`finalize_spec_stack`](Self::finalize_spec_stack); the spec-tier refresh
-    /// changes only flags, so it reuses this projection unchanged.
-    ///
-    /// TODO(perf): built eagerly per composition (like `strength_order` and the
-    /// spec stack), so a read-only stage that never runs a spec-tier refresh — and
-    /// the common single-node prim — still pays the `Vec<NodeId>` and the sort. It
-    /// could build lazily on the first
-    /// [`refresh_has_specs_at`](Self::refresh_has_specs_at) (an empty order on a
-    /// node-bearing index signals "not yet built"), or skip the projection for
-    /// arenas small enough that a linear scan over the arena wins.
-    fn build_path_order(&mut self) {
-        let mut order: Vec<NodeId> = self.graph.nodes().map(Node::id).collect();
-        order.sort_by(|&a, &b| self.graph.node(a).path().cmp(self.graph.node(b).path()));
-        self.path_order = order;
     }
 
     /// Classifies each node as instance-local (`true`) or shared (`false`) for an
@@ -1044,17 +1001,15 @@ impl PrimIndex {
             graph,
             spec_stack: Vec::new(),
             authors_clips: false,
-            path_order: Vec::new(),
         };
-        // Build the memoized spec stack and the path-order site index here, the
-        // single seam every freshly composed index passes through, so value
-        // resolution and the spec-tier refresh read them without a separate
-        // finalize step. The later permission / instance-local inerting only flips
-        // flags (which consumers filter live) and `rebase_root` retargets maps
-        // without moving node paths, so both projections stay valid; a
-        // materialized prototype clones an index that already carries them.
+        // Build the memoized spec stack here, the single seam every freshly
+        // composed index passes through, so value resolution and the spec-tier
+        // refresh read it without a separate finalize step. The later permission
+        // / instance-local inerting only flips flags (which consumers filter
+        // live) and `rebase_root` retargets maps without moving node paths, so
+        // the stack stays valid; a materialized prototype clones an index that
+        // already carries it.
         index.finalize_spec_stack(stack);
-        index.build_path_order();
         Ok((index, errors, pending_loads, expr_var_deps, nodes_copied))
     }
 
@@ -1233,15 +1188,7 @@ pub(crate) mod tests {
         /// with the arena order. Production composition appends through
         /// [`PrimIndexGraph::add_child`], which links the node to a parent.
         fn push(&mut self, node: NodeDesc, strongest: bool) {
-            // Keep `path_order` a valid sorted projection so a synthetic index
-            // drives `nodes_at` and the spec-tier refresh the same way a composed
-            // one does. The new handle is the highest arena index, so it sorts
-            // after any equal-path node, matching the stable `build_path_order`.
-            let at = self
-                .path_order
-                .partition_point(|&nid| *self.graph.node(nid).path() <= node.path);
-            let id = self.graph.push_detached(node, strongest);
-            self.path_order.insert(at, id);
+            self.graph.push_detached(node, strongest);
         }
 
         /// Appends a node to the end of the composition graph, weakest in
@@ -1473,54 +1420,45 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// The path-order site index resolves each site to exactly the arena nodes at
-    /// that path, including a path holding several nodes (the prim site carries the
-    /// synthetic root and the local root) and the reference target at its own
-    /// namespace path, and nothing for an absent path.
+    /// A site resolves to every arena node at its path: several for the prim
+    /// site (the synthetic root and the local root), the reference target at
+    /// its own namespace path, and none for an absent path.
     #[test]
-    fn path_order_resolves_sites() -> Result<()> {
-        let root = parse_usda("#usda 1.0\ndef \"A\" ( references = @base.usd@</B> ) {\n  custom double x = 1\n}\n");
-        let base = parse_usda("#usda 1.0\ndef \"B\" { custom double y = 2 }\n");
+    fn nodes_at_resolves_sites() -> Result<()> {
+        let root = parse_usda(
+            "#usda 1.0
+def \"A\" ( references = @base.usd@</B> ) {
+  custom double x = 1
+}
+",
+        );
+        let base = parse_usda(
+            "#usda 1.0
+def \"B\" { custom double y = 2 }
+",
+        );
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
         let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&mut stack, "/A");
 
-        // For every site, the index must resolve exactly the arena nodes whose path
-        // matches; a direct arena filter is the ground truth. An off-by-one in the
-        // binary-search bounds would drop a node from the run or pull in one from an
-        // adjacent path, and the exact set comparison catches either.
-        for p in ["/A", "/B"].into_iter().map(|s| Path::new(s).unwrap()) {
-            let mut expected: Vec<NodeId> = index
-                .arena()
-                .enumerate()
-                .filter(|(_, n)| *n.path() == p)
-                .map(|(i, _)| NodeId(i as u32))
-                .collect();
-            let mut got = index.nodes_at(&p).to_vec();
-            expected.sort();
-            got.sort();
-            assert_eq!(got, expected, "site index resolves {p} to its arena nodes");
-        }
-
-        // The prim site holds more than one node (the synthetic root and the local
-        // root), so the loop above exercised the contiguous multi-node run the
-        // two-bound binary search exists to return — not just single-node sites.
+        let prim = Path::new("/A").unwrap();
+        let at_prim: Vec<NodeId> = index.nodes_at(&prim).collect();
         assert!(
-            index.nodes_at(&Path::new("/A").unwrap()).len() >= 2,
+            at_prim.len() >= 2,
             "the prim's own site carries the synthetic root and the local root"
         );
+        assert!(at_prim.iter().all(|&id| *index.node(id).path() == prim));
 
         // The reference target keeps its own namespace path /B.
         assert!(
             index
                 .nodes_at(&Path::new("/B").unwrap())
-                .iter()
-                .any(|&id| index.node(id).arc() == ArcType::Reference),
+                .any(|id| index.node(id).arc() == ArcType::Reference),
             "the reference node is indexed at its target path"
         );
 
         // An absent path resolves to no nodes.
-        assert!(index.nodes_at(&Path::new("/Nope").unwrap()).is_empty());
+        assert_eq!(index.nodes_at(&Path::new("/Nope").unwrap()).count(), 0);
         Ok(())
     }
 
