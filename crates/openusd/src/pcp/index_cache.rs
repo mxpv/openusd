@@ -1449,7 +1449,7 @@ impl IndexCache {
         // Clips are consulted only where they can exist: without the presence
         // flag the walk visits the spec stack alone, and never composes an
         // ancestor's `clips` metadata.
-        let consults_clips = mode.consults_clips() && self.may_have_clips(prim);
+        let consults_clips = self.consults_clips(mode, prim);
         if consults_clips {
             // The clip tier composes each anchor prim's clip sets out of that
             // prim's index while the site walk holds the store, so the indices
@@ -1635,19 +1635,22 @@ impl IndexCache {
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
         accepts: Option<fn(sdf::ValueKind) -> bool>,
     ) -> Result<TimedValue, QueryError> {
-        let (prim, suffix) = attr_path.split_prim();
-        let prim = self.effective_prim(graph, &prim)?;
+        let (owner, suffix) = attr_path.split_prim();
+        let prim = self.effective_prim(graph, &owner)?;
         self.ensure_index(graph, &prim)?;
         // The spec-stack walk finds no opinion for an attribute no layer
         // authors, which resolves to the fallback. A value clip answers at sites
         // beyond the spec stack. Where clips are in reach, only an attribute
         // some layer authors takes a value from them.
         let mode = ResolveMode::at(time);
-        if mode.consults_clips()
-            && self.may_have_clips(&prim)
-            && !self.has_spec_at(graph, &Path::from_string_unchecked([prim.as_str(), suffix].concat()))?
-        {
-            return Ok(TimedValue::Fallback);
+        if self.consults_clips(mode, &prim) {
+            let redirected = match prim == owner {
+                true => Cow::Borrowed(attr_path),
+                false => Cow::Owned(Path::from_string_unchecked([prim.as_str(), suffix].concat())),
+            };
+            if !self.has_spec_at(graph, &redirected)? {
+                return Ok(TimedValue::Fallback);
+            }
         }
         let mut resolver = ValueAtResolver {
             time,
@@ -1944,6 +1947,12 @@ impl IndexCache {
     /// namespace, so this asks one prim rather than walking the chain.
     fn may_have_clips(&self, path: &Path) -> bool {
         self.store.context_at(path).is_some_and(|ctx| ctx.may_have_clips)
+    }
+
+    /// Whether a walk in `mode` over `prim`'s sites consults value clips: the
+    /// mode reads them and clip metadata is in reach of the prim.
+    fn consults_clips(&self, mode: ResolveMode, prim: &Path) -> bool {
+        mode.consults_clips() && self.may_have_clips(prim)
     }
 
     /// Returns `true` if a composed prim index is currently cached at `path`.
@@ -2362,29 +2371,23 @@ impl IndexCache {
         Ok(self.store.index_at(path).is_some_and(|idx| !idx.is_empty()))
     }
 
-    /// Returns the spec type at a composed path from the strongest contributing layer.
+    /// Returns the spec type at a composed path from the strongest site of the
+    /// owning prim's spec stack ([`PrimIndex::live_spec_sites`]).
     ///
-    /// For a property path the type is read live from the owning prim's
-    /// composition nodes (see [`Self::find_property_node`]) rather than from a
-    /// property-keyed index, so a property spec added after this path was first
-    /// queried is picked up instead of a stale cached `None`.
+    /// For a property path the type is read live from those layers (see
+    /// [`Self::find_property_node`]), so a property spec authored after this
+    /// path was first queried is found.
     pub fn spec_type(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<SpecType>, QueryError> {
         let path = &self.effective_path(graph, path)?;
         if path.is_property() {
             return self.find_property_node(graph, path, |layer, p| layer.data().spec_type(p));
         }
         self.ensure_index(graph, path)?;
-        let Some(index) = self.store.index_at(path) else {
-            return Ok(None);
-        };
-        for node in index.nodes() {
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-                if let Some(ty) = graph.layer(layer).data().spec_type(node.path()) {
-                    return Ok(Some(ty));
-                }
-            }
-        }
-        Ok(None)
+        Ok(self.store.index_at(path).and_then(|index| {
+            index
+                .live_spec_sites()
+                .find_map(|(site, node)| graph.layer(site.layer).data().spec_type(node.path()))
+        }))
     }
 
     /// Returns `true` if the composed prim index contains any non-local arc.
@@ -3492,8 +3495,7 @@ impl IndexCache {
         // `seen` dedups names in O(1) while `result` preserves the
         // weakest-position order.
         fold_property_children(index, graph, |name, _, _| {
-            if !seen.contains(name) {
-                seen.insert(name.clone());
+            if seen.insert(name.clone()) {
                 result.push(name.clone());
             }
         });

@@ -2506,6 +2506,68 @@ fn inherit_from_class() -> Result<()> {
     Ok(())
 }
 
+// --- Property specs ---
+
+fn attr_paths(stage: &Stage, path: impl sdf::IntoPath) -> Result<Vec<String>> {
+    Ok(stage
+        .prim(path)?
+        .attributes()?
+        .iter()
+        .map(|attr| attr.path().as_str().to_owned())
+        .collect())
+}
+
+/// A property authored in a layer that held no spec for its prim is listed
+/// and read once the prim's spec stack gains that layer, and removing it falls
+/// back to the sublayer's opinion.
+#[test]
+fn attr_in_new_layer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("weak.usda"), "#usda 1.0\ndef \"A\" { double x = 1 }\n")?;
+    let stage = open_text(&dir, "#usda 1.0\n(\n    subLayers = [@./weak.usda@]\n)\n")?;
+    assert_eq!(attr_paths(&stage, "/A")?, ["/A.x"]);
+    assert_eq!(stage.attribute("/A.x")?.get::<f64>()?, Some(1.0));
+
+    // The root layer gains `over "A"` with both opinions.
+    stage.prim("/A")?.create_attribute("y", "double")?.set(2.0)?;
+    stage.attribute("/A.x")?.set(3.0)?;
+    assert_eq!(attr_paths(&stage, "/A")?, ["/A.x", "/A.y"]);
+    assert_eq!(stage.attribute("/A.x")?.get::<f64>()?, Some(3.0));
+    assert_eq!(stage.attribute("/A.y")?.get::<f64>()?, Some(2.0));
+
+    assert!(stage.remove_property("/A.y")?);
+    assert!(stage.remove_property("/A.x")?);
+    assert_eq!(attr_paths(&stage, "/A")?, ["/A.x"]);
+    assert_eq!(stage.attribute("/A.x")?.get::<f64>()?, Some(1.0));
+    assert_eq!(stage.attribute("/A.y")?.get::<f64>()?, None);
+    Ok(())
+}
+
+/// A name the weaker layer authors as an attribute and the stronger as a
+/// relationship lists as a relationship only: the strongest spec decides the
+/// kind.
+#[test]
+fn strongest_kind_wins() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        "#usda 1.0\ndef \"A\" {\n    double p = 1\n    double q = 1\n}\n",
+    )?;
+    let stage = open_text(
+        &dir,
+        "#usda 1.0\n(\n    subLayers = [@./weak.usda@]\n)\nover \"A\" {\n    rel p\n}\n",
+    )?;
+    assert_eq!(attr_paths(&stage, "/A")?, ["/A.q"]);
+    let relationships: Vec<String> = stage
+        .prim("/A")?
+        .relationships()?
+        .iter()
+        .map(|rel| rel.path().as_str().to_owned())
+        .collect();
+    assert_eq!(relationships, ["/A.p"]);
+    Ok(())
+}
+
 // --- Payload composition ---
 
 /// Vendor test: `payload_same_folder.usda` has a payload to _stage.usda.
