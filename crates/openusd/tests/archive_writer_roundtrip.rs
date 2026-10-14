@@ -32,7 +32,7 @@ fn archive_contains_entries_stored() {
     let mut archive = ZipArchive::new(Cursor::new(&buf)).expect("valid zip");
     assert_eq!(archive.len(), 2);
 
-    let entry_names: Vec<String> = archive.file_names().map(String::from).collect();
+    let entry_names: Vec<String> = archive.file_names().map(|name| name.unwrap().into_owned()).collect();
     assert!(entry_names.contains(&"root.usdc".to_string()));
     assert!(entry_names.contains(&"alt.usda".to_string()));
 
@@ -43,7 +43,7 @@ fn archive_contains_entries_stored() {
             file.compression(),
             zip::CompressionMethod::Stored,
             "entry {} is compressed",
-            file.name()
+            file.name().unwrap()
         );
     }
 }
@@ -61,7 +61,7 @@ fn file_data_is_64_byte_aligned() {
     let mut archive = ZipArchive::new(Cursor::new(&buf)).expect("valid zip");
     for i in 0..archive.len() {
         let file = archive.by_index_raw(i).unwrap();
-        let name = file.name().to_owned();
+        let name = file.name().unwrap().into_owned();
         let data_start = file.data_start().expect("data_start known after reading");
         assert!(
             data_start.is_multiple_of(64),
@@ -98,7 +98,7 @@ fn create_method_writes_to_disk_and_reads_back() {
     }
 
     let mut archive = Archive::open(&tmp).unwrap();
-    assert_eq!(archive.first_layer_name().as_deref(), Some("scene.usdc"));
+    assert_eq!(archive.first_layer_name().unwrap().as_deref(), Some("scene.usdc"));
     let layer = archive.read("scene.usdc").unwrap();
     assert!(layer.has_spec(&sdf::Path::abs_root()));
 }

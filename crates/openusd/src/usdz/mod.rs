@@ -169,7 +169,7 @@ impl sdf::FileFormat for UsdzFileFormat {
         // holds for the entry reads that follow.
         let first = open_package(resolver, resolved)
             .ok()
-            .and_then(|package| package.with(|archive| archive.first_layer_name()));
+            .and_then(|package| package.with(|archive| archive.first_layer_name().ok().flatten()));
         Some(match first {
             Some(first) => ar::ResolvedPath::new(ar::nest_packaged_path(&package, &first)),
             None => resolved.clone(),
@@ -436,7 +436,7 @@ pub(crate) mod tests {
         assert!(archive.contains("root.usda"));
         assert!(archive.contains("texture.bin"));
         assert!(!archive.contains("missing.usda"));
-        assert_eq!(archive.first_layer_name().as_deref(), Some("root.usda"));
+        assert_eq!(archive.first_layer_name().unwrap().as_deref(), Some("root.usda"));
         let probed = read.load(Ordering::Relaxed);
         assert!(probed < size / 4, "the probes read {probed} of {size} bytes");
 
