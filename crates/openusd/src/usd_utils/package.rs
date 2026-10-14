@@ -2,6 +2,7 @@
 //! [`discover`] finds, each given one entry, rewritten to reach each other
 //! there, and written out.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
@@ -197,7 +198,11 @@ fn rebuild_package(graph: &pcp::LayerGraph, bytes: Vec<u8>, inside: &Discovery<'
         return Ok(bytes);
     }
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).map_err(usdz::ArchiveError::from)?;
-    let reserved = archive.file_names().map(str::to_owned).collect();
+    let reserved = archive
+        .file_names()
+        .map(|name| name.map(Cow::into_owned))
+        .collect::<Result<_, _>>()
+        .map_err(usdz::ArchiveError::from)?;
     let entries = assign_entries(inside, "", reserved);
     let existing: HashMap<&str, usize> = inside
         .sources
@@ -211,7 +216,7 @@ fn rebuild_package(graph: &pcp::LayerGraph, bytes: Vec<u8>, inside: &Discovery<'
     let mut rebuilt = usdz::ArchiveWriter::new(Cursor::new(Vec::new()));
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(usdz::ArchiveError::from)?;
-        let name = entry.name().to_owned();
+        let name = entry.name().map_err(usdz::ArchiveError::from)?.into_owned();
         let mut contents = Vec::new();
         entry.read_to_end(&mut contents)?;
         let contents = match existing.get(name.as_str()) {
@@ -299,7 +304,7 @@ mod tests {
         let mut texts = HashMap::new();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).unwrap();
-            let name = entry.name().to_owned();
+            let name = entry.name().unwrap().into_owned();
             if name.ends_with(".usda") {
                 let mut text = String::new();
                 entry.read_to_string(&mut text).unwrap();
@@ -323,7 +328,7 @@ mod tests {
         let mut texts = HashMap::new();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).unwrap();
-            let name = entry.name().to_owned();
+            let name = entry.name().unwrap().into_owned();
             if name.ends_with(".usda") {
                 let mut text = String::new();
                 entry.read_to_string(&mut text).unwrap();

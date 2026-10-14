@@ -1844,7 +1844,7 @@ mod tests {
 
         // The usdz should contain an entry we can read back.
         let archive = crate::usdz::Archive::open(&usdz_path)?;
-        let name = archive.first_layer_name().expect("usdz has a layer");
+        let name = archive.first_layer_name()?.expect("usdz has a layer");
         assert!(name.ends_with(".usdc"));
         Ok(())
     }

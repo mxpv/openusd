@@ -57,16 +57,21 @@ impl Archive {
     /// Per the [USDZ specification](https://openusd.org/release/spec_usdz.html),
     /// the first file in a USDZ package must be a native USD file (`.usda`, `.usdc`,
     /// or `.usd`) and serves as the root layer of the composed stage.
-    pub fn first_layer_name(&self) -> Option<String> {
-        self.archive
-            .file_names()
-            .find(|name| is_layer_name(name))
-            .map(String::from)
+    ///
+    /// Fails when an entry name before the first layer cannot be decoded.
+    pub fn first_layer_name(&self) -> Result<Option<String>, ArchiveError> {
+        for name in self.archive.file_names() {
+            let name = name?;
+            if is_layer_name(&name) {
+                return Ok(Some(name.into_owned()));
+            }
+        }
+        Ok(None)
     }
 
     /// Opens the first (root) layer from the archive.
     pub fn read_first_layer(&mut self) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
-        let name = self.first_layer_name().ok_or(ArchiveError::NoDefaultLayer)?;
+        let name = self.first_layer_name()?.ok_or(ArchiveError::NoDefaultLayer)?;
         self.read(&name)
     }
 
