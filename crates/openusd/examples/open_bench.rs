@@ -46,7 +46,19 @@
 //! abstract prims. `--mmap` opens the scene through a resolver that maps
 //! files (the `mmap` feature), which asks that nothing write the scene's
 //! files while the benchmark runs. `--until <phase>` ends the run after the
-//! phase named (`open`, `metadata`, `arrays`, `mute` or `save`).
+//! phase named (`open`, `metadata`, `retraverse`, `edit`, `arrays`, `mute`
+//! or `save`).
+//!
+//! `--retraverse` adds a phase that runs the metadata traversal again on the
+//! same stage, reading what the first one composed and cached. `--edit` adds
+//! a phase that authors `active = true` on the first traversed prim, in the
+//! session layer when the stage has one, and traverses again: the edit
+//! clears the stage's population answers, so the traversal recomputes them.
+//! `--status <file>` writes each prim the metadata phase traverses with its
+//! active, loaded, defined, abstract, instance and instance-proxy bits, read
+//! through the `Prim` queries, so two builds can be compared with `diff`.
+//! `--load-none` opens with no payload loaded, and each `--load <path>` then
+//! loads that prim but none of its descendants.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(not(feature = "mmap"))]
@@ -58,14 +70,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use std::{env, fs};
 
-use openusd::usd::{PrimPredicate, Stage, TimeCode};
+use openusd::usd::{EditTarget, InitialLoadSet, LoadPolicy, PrimPredicate, Stage, TimeCode};
 use openusd::{Error, Result, ar, sdf, usdz};
 
 fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
         eprintln!(
-            "usage: open_bench [--time <t>] [--save] [--mute] [--no-heap] [--no-arrays] [--proxies | --all] [--mmap] \
-             [--until <phase>] <root.usd[a|c|z]>"
+            "usage: open_bench [--time <t>] [--save] [--mute] [--retraverse] [--edit] [--no-heap] [--no-arrays] \
+             [--proxies | --all] [--mmap] [--status <file>] [--load-none] [--load <path>]... [--until <phase>] \
+             <root.usd[a|c|z]>"
         );
         process::exit(2);
     };
@@ -79,19 +92,44 @@ fn main() -> Result<()> {
 
     let resolver = resolver(args.mmap)?;
     let phase = Phase::start("open");
-    let stage = Stage::builder().resolver(resolver).open(root)?;
+    let load_set = if args.load_none {
+        InitialLoadSet::LoadNone
+    } else {
+        InitialLoadSet::LoadAll
+    };
+    let stage = Stage::builder().resolver(resolver).load(load_set).open(root)?;
+    for path in &args.load {
+        stage.load(path.as_str(), LoadPolicy::WithoutDescendants)?;
+    }
     phase.end("");
 
     let mut prims = Vec::new();
     if args.runs("metadata") {
         let phase = Phase::start("metadata");
-        // One cache scope over the traversal, as over the array reads below.
-        let _scope = ar::CacheScope::begin();
-        stage.traverse(args.predicate, |path| prims.push(path.clone()))?;
-        for path in &prims {
-            stage.prim(path.clone())?.type_name()?;
-        }
+        prims = traverse(&stage, args.predicate)?;
         phase.end(&format!("prims: {}", prims.len()));
+        if let Some(file) = &args.status {
+            write_status(&stage, &prims, file)?;
+        }
+    }
+
+    if args.retraverse && args.runs("retraverse") {
+        let phase = Phase::start("retraverse");
+        let count = traverse(&stage, args.predicate)?.len();
+        phase.end(&format!("prims: {count}"));
+    }
+
+    if args.edit && args.runs("edit") {
+        let phase = Phase::start("edit");
+        if let Some(prim) = prims.first() {
+            let session = stage.session_layer().map(|layer| layer.identifier().to_owned());
+            if let Some(session) = session {
+                stage.set_edit_target(EditTarget::for_layer(session))?;
+            }
+            stage.override_prim(prim.clone())?.set_active(true)?;
+        }
+        let count = traverse(&stage, args.predicate)?.len();
+        phase.end(&format!("prims: {count}"));
     }
 
     if !args.no_arrays && args.runs("arrays") {
@@ -174,6 +212,13 @@ struct Args {
     no_arrays: bool,
     predicate: PrimPredicate,
     mmap: bool,
+    retraverse: bool,
+    edit: bool,
+    /// Where to write the traversed prims' status bits.
+    status: Option<PathBuf>,
+    load_none: bool,
+    /// The prims loaded after the stage opens.
+    load: Vec<String>,
     /// The last phase to run, every phase when `None`.
     until: Option<String>,
 }
@@ -191,6 +236,11 @@ impl Args {
             no_arrays: false,
             predicate: PrimPredicate::DEFAULT,
             mmap: false,
+            retraverse: false,
+            edit: false,
+            status: None,
+            load_none: false,
+            load: Vec::new(),
             until: None,
         };
         while let Some(arg) = args.next() {
@@ -203,6 +253,11 @@ impl Args {
                 "--proxies" => parsed.predicate = PrimPredicate::DEFAULT_PROXIES,
                 "--all" => parsed.predicate = PrimPredicate::ALL,
                 "--mmap" => parsed.mmap = true,
+                "--retraverse" => parsed.retraverse = true,
+                "--edit" => parsed.edit = true,
+                "--status" => parsed.status = Some(PathBuf::from(args.next()?)),
+                "--load-none" => parsed.load_none = true,
+                "--load" => parsed.load.push(args.next()?),
                 "--until" => parsed.until = Some(args.next().filter(|phase| PHASES.contains(&phase.as_str()))?),
                 _ => parsed.root = PathBuf::from(arg),
             }
@@ -221,7 +276,41 @@ impl Args {
 }
 
 /// The phases, in the order they run.
-const PHASES: [&str; 5] = ["open", "metadata", "arrays", "mute", "save"];
+const PHASES: [&str; 7] = ["open", "metadata", "retraverse", "edit", "arrays", "mute", "save"];
+
+/// Traverses `stage` under `predicate` and reads each prim's type name,
+/// returning the prims visited.
+fn traverse(stage: &Stage, predicate: PrimPredicate) -> Result<Vec<sdf::Path>> {
+    // One cache scope over the traversal, as over the array reads.
+    let _scope = ar::CacheScope::begin();
+    let mut prims = Vec::new();
+    stage.traverse(predicate, |path| prims.push(path.clone()))?;
+    for path in &prims {
+        stage.prim(path.clone())?.type_name()?;
+    }
+    Ok(prims)
+}
+
+/// Writes one line per prim in `prims` to `file`: the path, then `1` or `0`
+/// for active, loaded, defined, abstract, instance and instance proxy.
+fn write_status(stage: &Stage, prims: &[sdf::Path], file: &Path) -> Result<()> {
+    let bit = |value: bool| if value { '1' } else { '0' };
+    let mut out = String::new();
+    for path in prims {
+        let prim = stage.prim(path.clone())?;
+        out.push_str(&format!(
+            "{path} {}{}{}{}{}{}\n",
+            bit(prim.is_active()?),
+            bit(prim.is_loaded()?),
+            bit(prim.is_defined()?),
+            bit(prim.is_abstract()?),
+            bit(prim.is_instance()?),
+            bit(prim.is_instance_proxy()?),
+        ));
+    }
+    fs::write(file, out)?;
+    Ok(())
+}
 
 /// The resolver the stage opens through, mapping files when `mmap` is set.
 #[cfg(feature = "mmap")]
