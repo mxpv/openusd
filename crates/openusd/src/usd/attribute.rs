@@ -4586,6 +4586,51 @@ def \"M\"
         Ok(())
     }
 
+    /// The same holds inside a prototype: an instance proxy's grandchild
+    /// composes from the prototype, whose index erased the reference node
+    /// for want of a spec, and a stronger inherit can shadow it.
+    #[test]
+    fn shadow_below_specless_prototype_site() -> Result<()> {
+        let referenced = (
+            "ref.usda",
+            "def \"R\"
+{
+}",
+        );
+        let root = |decl: &str| {
+            format!(
+                "class \"Cls\"
+{{
+    def \"Child\"
+    {{
+        def \"Grand\"
+        {{
+            {decl}
+        }}
+    }}
+}}
+def \"P\" (
+    instanceable = true
+    inherits = </Cls>
+    references = @ref.usda@</R>
+)
+{{
+}}"
+            )
+        };
+        for (decl, expected) in [
+            ("custom double x", None),
+            ("custom double x = 1", Some("root.usda/Cls/Child/Grand.x")),
+        ] {
+            let (_dir, stage) = scene(&[("root.usda", root(decl).as_str()), referenced])?;
+            stage.set_edit_target(stage.edit_target_for_node(&sdf::Path::new("/P")?, EditTargetArc::Reference)?)?;
+            let site = stage.attribute("/P/Child/Grand.x")?.shadowing_opinion()?;
+            let named = site.map(|site| format!("{}{}", file_name(&site.layer), site.path));
+            assert_eq!(named.as_deref(), expected, "declared as {decl:?}");
+        }
+        Ok(())
+    }
+
     /// A blocked `timeSamples` field leaves a default to answer and
     /// withholds a sample authored beneath it.
     #[test]

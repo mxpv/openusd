@@ -3343,16 +3343,13 @@ impl IndexCache {
 
     /// The `(layer, path)` sites stronger than `spec_path` in `layer` among
     /// `prim`'s opinions, read from `prim`'s index composed with every node
-    /// its namespace ancestors' indices culled. `None` when that index holds no
-    /// live node at the site either, or composing it needs a layer that is
-    /// not loaded.
+    /// its namespace ancestors' indices culled ([`Self::compose_unculled`]).
+    /// `None` when that index holds no live node at the site either, or
+    /// composing it needs a layer that is not loaded.
     ///
     /// Culling drops only nodes that author no spec and keeps the strength
     /// order of the rest, so a site of the cached index is stronger than the
     /// one asked about exactly when the set holds it.
-    // TODO: a prim in a prototype namespace composes from its canonical
-    // instance's re-anchored index, which this chain does not reproduce, so
-    // such a prim answers `None`.
     fn sites_above_erased(
         &self,
         graph: &LayerGraph,
@@ -3361,47 +3358,9 @@ impl IndexCache {
         spec_path: &Path,
         suffix: &str,
     ) -> Result<Option<HashSet<(LayerId, Path)>>, QueryError> {
-        if super::instancing::is_prototype_namespace(prim) {
-            return Ok(None);
-        }
-        let mut chain: Vec<Path> = prim.ancestors_below_root().collect();
-        chain.reverse();
         let mut built = sdf::PathTable::<PrimEntry>::new();
-        for path in chain {
-            let parent_ctx = path
-                .parent()
-                .and_then(|parent| self.store.context_at(&parent))
-                .copied()
-                .unwrap_or_default();
-            let (mut index, _errors, demands, _deps, _copied) = PrimIndex::build_with_cache_in(
-                &path,
-                graph,
-                &parent_ctx,
-                &self.variant_fallbacks,
-                &built,
-                LayerStackId::ROOT,
-                self.is_loaded(&path),
-                false,
-            )?;
-            if !demands.is_empty() {
-                return Ok(None);
-            }
-            if let Some(depth) = parent_ctx.instance_depth {
-                index.mark_instance_local_inert(path.prim_element_count() as u16, depth);
-            }
-            let context = self.store.context_at(&path).copied().unwrap_or_default();
-            built.insert(
-                path,
-                PrimEntry {
-                    index,
-                    context,
-                    errors: Diagnostics::default(),
-                    property_errors: Diagnostics::default(),
-                    resolved_targets: HashMap::new(),
-                    instanceable: None,
-                    revision: PrimRevision::placeholder(),
-                },
-            );
+        if !self.compose_unculled(graph, prim, &mut built)? {
+            return Ok(None);
         }
         let Some(entry) = built.get(prim) else {
             return Ok(None);
@@ -3415,6 +3374,66 @@ impl IndexCache {
             stronger.insert((site_layer, query_path));
         }
         Ok(None)
+    }
+
+    /// Composes `prim` and its namespace ancestors into `built` without
+    /// culling, each from its parent's entry there, as the cache composed
+    /// them. A prim in a prototype namespace composes below the prototype
+    /// root, which is derived from its canonical instance's chain as when the
+    /// prototype was materialized. Returns `false` when composing needs a
+    /// layer that is not loaded, or `prim` names an unregistered prototype.
+    fn compose_unculled(
+        &self,
+        graph: &LayerGraph,
+        prim: &Path,
+        built: &mut sdf::PathTable<PrimEntry>,
+    ) -> Result<bool, QueryError> {
+        let mut chain: Vec<Path> = prim.ancestors_below_root().collect();
+        chain.reverse();
+        if super::instancing::is_prototype_namespace(prim) {
+            let Some(root) = self.prototype_root_of(prim) else {
+                return Ok(false);
+            };
+            let Some(canonical) = self.prototypes.canonical_of(&root) else {
+                return Ok(false);
+            };
+            if !self.compose_unculled(graph, &canonical, built)? {
+                return Ok(false);
+            }
+            let canonical_index = &built
+                .get(&canonical)
+                .expect("the canonical instance was just composed")
+                .index;
+            let (index, context, _) = super::instancing::prototype_root_index(canonical_index, &canonical, &root);
+            built.insert(root.clone(), unculled_entry(index, context));
+            chain.retain(|path| path.has_prefix(&root) && *path != root);
+        }
+        for path in chain {
+            let parent_ctx = path
+                .parent()
+                .and_then(|parent| self.store.context_at(&parent))
+                .copied()
+                .unwrap_or_default();
+            let (mut index, _errors, demands, _deps, _copied) = PrimIndex::build_with_cache_in(
+                &path,
+                graph,
+                &parent_ctx,
+                &self.variant_fallbacks,
+                built,
+                LayerStackId::ROOT,
+                self.is_loaded(&path),
+                false,
+            )?;
+            if !demands.is_empty() {
+                return Ok(false);
+            }
+            if let Some(depth) = parent_ctx.instance_depth {
+                index.mark_instance_local_inert(path.prim_element_count() as u16, depth);
+            }
+            let context = self.store.context_at(&path).copied().unwrap_or_default();
+            built.insert(path, unculled_entry(index, context));
+        }
+        Ok(true)
     }
 
     /// Returns the variant selections composed onto a prim, as `(set,
@@ -3764,6 +3783,20 @@ fn target_prim_inherits_class(
 /// Whether `payload` names a target, by asset path or prim path.
 fn payload_has_target(payload: &sdf::Payload) -> bool {
     !payload.asset_path.is_empty() || !payload.prim_path.is_empty()
+}
+
+/// An entry for [`IndexCache::compose_unculled`]'s private table: `index`
+/// with `context`, and none of the state a cached entry accumulates.
+fn unculled_entry(index: PrimIndex, context: CompositionContext) -> PrimEntry {
+    PrimEntry {
+        index,
+        context,
+        errors: Diagnostics::default(),
+        property_errors: Diagnostics::default(),
+        resolved_targets: HashMap::new(),
+        instanceable: None,
+        revision: PrimRevision::placeholder(),
+    }
 }
 
 #[cfg(test)]

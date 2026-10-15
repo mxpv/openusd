@@ -236,11 +236,8 @@ impl PrototypeRegistry {
 
     /// The canonical instance backing the prototype at `prototype` — the first
     /// registered, which seeded its materialization — or `None` for an unknown
-    /// path. Used by registry tests to assert a prototype's presence; production
-    /// composition reaches the prototype directly through
-    /// [`register`](Self::register)'s return.
-    #[cfg(test)]
-    fn canonical_of(&self, prototype: &Path) -> Option<Path> {
+    /// path.
+    pub(super) fn canonical_of(&self, prototype: &Path) -> Option<Path> {
         self.by_root.get(prototype).and_then(|p| p.instances.first().cloned())
     }
 
@@ -359,6 +356,31 @@ pub(crate) fn is_prototype_namespace(path: &Path) -> bool {
         && path
             .root_prim_name()
             .is_some_and(|name| name.starts_with(PROTOTYPE_PREFIX))
+}
+
+/// The index a prototype root at `prototype` composes from `canonical`'s
+/// index, `canonical` being the instance that minted it, with the child
+/// context the root hands its descendants and the number of nodes the copy
+/// made. The instance-local nodes are inerted at the instance root's own
+/// depth, so only the arcs introduced at the instance and their subtrees
+/// contribute.
+pub(super) fn prototype_root_index(
+    canonical_index: &PrimIndex,
+    canonical: &Path,
+    prototype: &Path,
+) -> (PrimIndex, CompositionContext, usize) {
+    let mut index = canonical_index.clone();
+    let depth = canonical.prim_element_count() as u16;
+    index.mark_instance_local_inert(depth, depth);
+    // Re-anchor the seeding instance's composed namespace onto the prototype
+    // root so the root's own target translation lands in the prototype
+    // namespace, not the canonical instance's.
+    let nodes_copied = index.rebase_root(canonical, prototype);
+    // Seeded from a namespace root, so the prototype inherits nothing from
+    // where its instance sits: its clip presence comes from the arcs the
+    // instanceable prim brings in (spec 11.3.3).
+    let context = index.context_for_children(&CompositionContext::default());
+    (index, context, nodes_copied)
 }
 
 /// Computes the instancing key for an already-built instance index (C++
@@ -715,20 +737,8 @@ impl IndexCache {
     // off the `&mut self` path first (compose into per-prototype results, then
     // insert) and the shared `LayerGraph` handed to workers as `&`/`Arc`.
     fn materialize_prototype(&mut self, graph: &LayerGraph, canonical: &Path, prototype: &Path) {
-        let mut index = self.cached(canonical).clone();
-        let depth = canonical.prim_element_count() as u16;
-        index.mark_instance_local_inert(depth, depth);
-        // Re-anchor the seeding instance's composed namespace onto the prototype
-        // root so the root's own target translation lands in the prototype
-        // namespace, not the canonical instance's.
-        let nodes_copied = index.rebase_root(canonical, prototype);
+        let (index, context, nodes_copied) = prototype_root_index(self.cached(canonical), canonical, prototype);
         self.count_copy(nodes_copied);
-
-        // Seeded from a namespace root, so the prototype inherits nothing from
-        // where its instance sits: its clip presence comes from the arcs the
-        // instanceable prim brings in (spec 11.3.3).
-        let context = index.context_for_children(&CompositionContext::default());
-
         self.cache_index(
             graph,
             prototype,
