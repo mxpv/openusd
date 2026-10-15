@@ -3387,6 +3387,35 @@ fn lazy_reference_loads_on_demand() -> Result<()> {
     Ok(())
 }
 
+/// A prim below a reference whose target is not loaded yet is asked about
+/// first: composing its parent demands the target, so the answers found
+/// before the load lands are not kept, and the prim reads as it composes
+/// once the target is in.
+#[test]
+fn deep_query_before_reference_load() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"P\" (\n    references = @./t.usda@</T>\n)\n{\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("t.usda"),
+        "#usda 1.0\ndef \"T\" {\n    def \"Child\" {\n        def \"Leaf\" {}\n    }\n}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(stage.layer_count(), 1, "the reference target loads on demand");
+
+    let leaf = stage.prim("/P/Child/Leaf")?;
+    assert!(leaf.is_valid()?, "the leaf composes from the loaded target");
+    assert!(leaf.is_defined()?);
+    assert!(leaf.is_active()?);
+    let mut visited = Vec::new();
+    stage.traverse(PrimPredicate::DEFAULT, |path| visited.push(path.clone()))?;
+    assert!(visited.contains(&sdf::path("/P/Child/Leaf")?));
+    Ok(())
+}
+
 /// Opening a stage reads its root and session layers once each: the read that
 /// composes their expression variables is the one their stacks are built from.
 #[test]

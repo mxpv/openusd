@@ -24,7 +24,7 @@ use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
 use super::diagnostics::Diagnostics;
 use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
-use super::instancing::PrototypeRegistry;
+use super::instancing::{Answer, PrimRecord, PrototypeRegistry};
 use super::layer_graph::{LayerGraph, LayerStackIdentifier, MuteChange};
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::load_rules::LoadRules;
@@ -101,34 +101,22 @@ pub struct IndexCache {
     /// [`Self::invalidate_prototypes`] on a prim-level change, or through
     /// [`Self::invalidate_layers`] on a layer-stack edit.
     pub(super) prototypes: PrototypeRegistry,
-    /// Memoized instance-proxy / prototype-descendant redirections (spec
-    /// 11.3.3): a prim path mapped to the path that actually composes it
-    /// ([`effective_path`](Self::effective_path) walks the namespace to find an
-    /// enclosing instance, which is otherwise repeated on every descendant
-    /// query). A non-redirected prim caches an identity entry, so the common
-    /// non-instanced case skips the walk too. An entry holds only while the
-    /// prototype registry that produced it is unchanged: it is cleared wholesale
-    /// when prototypes are invalidated ([`Self::invalidate_prototypes`]), and the
-    /// subtree under a freshly
-    /// minted `/__Prototype_N` is dropped at registration (a synthetic
-    /// descendant queried before the mint cached an identity that must now
-    /// redirect into the prototype namespace).
+    /// One [`PrimRecord`] per queried path: where the prim composes, whether
+    /// the population reaches it, whether it is an instance, and its own
+    /// status inputs (spec 11.3.3). The population and instancing answers are
+    /// defined over the parent's, so a top-down traversal computes each
+    /// prim's in O(1), and a query reads its answer with one lookup. An
+    /// answer that depends on a layer still loading, or that names an
+    /// unregistered prototype namespace, is not recorded
+    /// ([`Self::provisional`]). Cleared wholesale with the
+    /// population ([`Self::invalidate_population`]) and whenever prototypes
+    /// are invalidated ([`Self::invalidate_prototypes`]).
     //
     // TODO(rayon): a per-prim parallel composition driver would share this map
     // read-mostly; the entries are write-once until invalidation, so a
     // concurrent reader needs only a shared snapshot rather than a lock on the
     // hot path. Keep population off the critical section when that lands.
-    pub(super) redirected_prims: sdf::PathMap<Path>,
-    /// Memoized population eligibility (see [`Self::is_populated`]): whether the
-    /// mask exposes a prim, it exists, and it and every ancestor are active.
-    /// Defined recursively over the parent, so the memo turns a per-query
-    /// O(depth) ancestor walk into O(1) amortized. Retired alongside
-    /// `redirected_prims` by [`Self::invalidate_population`].
-    pub(super) populated_prims: sdf::PathMap<bool>,
-    /// Memoized nearest enclosing instance of a path (see
-    /// [`Self::enclosing_instance`]), defined over the parent's. Retired
-    /// alongside `redirected_prims` by [`Self::invalidate_population`].
-    pub(super) enclosing_instances: sdf::PathMap<Option<Path>>,
+    pub(super) records: sdf::PathMap<PrimRecord>,
     /// Advanced whenever the composed population may differ — see
     /// [`Self::invalidate_population`]. Distinct from
     /// [`revision`](Self::revision), which every edit batch advances: a
@@ -1210,9 +1198,7 @@ impl IndexCache {
             population_mask,
             clip_cache: ClipCache::default(),
             prototypes: PrototypeRegistry::default(),
-            redirected_prims: sdf::PathMap::default(),
-            populated_prims: sdf::PathMap::default(),
-            enclosing_instances: sdf::PathMap::default(),
+            records: sdf::PathMap::default(),
             population_epoch: 0,
             type_opinion_epoch: 0,
             copies: 0,
@@ -1418,9 +1404,7 @@ impl IndexCache {
     /// namespace it owned — without saying anything about the stage's
     /// population having moved.
     pub(super) fn clear_population_memos(&mut self) {
-        self.populated_prims.clear();
-        self.redirected_prims.clear();
-        self.enclosing_instances.clear();
+        self.records.clear();
     }
 
     /// Returns the recoverable composition errors encountered so far: the
@@ -1750,7 +1734,7 @@ impl IndexCache {
         let queried = attr_path.prim_path();
         let prim = prim.unwrap_or_else(|| queried.clone());
         // The redirect that took an instance proxy to its prototype is memoized
-        // per population epoch (`redirected_prims`), so a stamp anchored at a
+        // per population epoch (`records`), so a stamp anchored at a
         // path the query did not name must re-check that epoch too.
         let redirect_epoch = (prim != queried).then(|| self.population_epoch());
         StampedValueSource {
@@ -2265,7 +2249,23 @@ impl IndexCache {
     /// path nothing composes: the inputs a caller combines with the parent's
     /// status as C++ `Usd_PrimData::_ComposeAndCacheFlags` does, read in one
     /// borrow after one redirection onto the index that composes the prim.
+    ///
+    /// Recorded on the prim's [`PrimRecord`] under the rule
+    /// [`Self::is_populated`] follows.
     pub(crate) fn own_status(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<OwnStatus>, QueryError> {
+        if let Some(hit) = self.records.get(path).and_then(|record| record.own.known().copied()) {
+            return Ok(hit);
+        }
+        let pending_before = self.pending_loads.len();
+        let own = self.compose_own_status(graph, path)?;
+        if !self.provisional(path, pending_before) {
+            self.record_mut(path).own = Answer::Known(own);
+        }
+        Ok(own)
+    }
+
+    /// [`own_status`](Self::own_status) composed afresh.
+    fn compose_own_status(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<OwnStatus>, QueryError> {
         let at = &self.effective_path(graph, path)?;
         if !self.has_spec_at(graph, at)? {
             return Ok(None);
@@ -5752,6 +5752,43 @@ def "Model" (
         for p in ["/A/Mid", "/B/Mid", "/A/Mid/Leaf", "/B/Mid/Leaf"] {
             assert!(!cache.is_indexed(&sdf::path(p)?), "{p} must not be indexed literally");
         }
+        Ok(())
+    }
+
+    /// A path the population mask hides is not populated, and answering that
+    /// composes nothing, not even the parent the mask exposes.
+    #[test]
+    fn masked_path_composes_nothing() -> Result<()> {
+        let (graph, _) = in_memory_stack("#usda 1.0\ndef \"Keep\" {\n    def \"Sub\" {}\n    def \"Other\" {}\n}\n");
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::all(),
+            PopulationMask::new(["/Keep/Sub"])?,
+            Diagnostics::default(),
+        );
+        assert!(!cache.is_populated(&graph, &sdf::path("/Keep/Other")?)?);
+        for path in ["/Keep", "/Keep/Other"] {
+            assert!(!cache.is_indexed(&sdf::path(path)?), "{path} must not compose");
+        }
+        Ok(())
+    }
+
+    /// A prototype-namespace path asked about before any instance registers
+    /// its prototype composes nothing, and the answer is not kept: once
+    /// `/A/Mid` registers the prototype, the same queries see its content.
+    #[test]
+    fn prototype_path_before_registration() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_deep.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let mid = sdf::path("/__Prototype_0/Mid")?;
+        assert!(!cache.is_populated(&graph, &mid)?);
+        assert_eq!(cache.effective_prim(&graph, &mid)?, mid);
+        assert!(cache.own_status(&graph, &mid)?.is_none());
+
+        assert_eq!(cache.effective_prim(&graph, &sdf::path("/A/Mid")?)?, mid);
+        assert!(cache.is_populated(&graph, &mid)?, "the registered prototype holds Mid");
+        assert_eq!(cache.effective_prim(&graph, &mid)?, mid);
+        assert!(cache.own_status(&graph, &mid)?.is_some_and(|own| own.active));
         Ok(())
     }
 

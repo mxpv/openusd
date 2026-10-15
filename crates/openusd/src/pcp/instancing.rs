@@ -23,7 +23,7 @@ use crate::sdf::Path;
 use crate::tf::Token;
 
 use super::diagnostics::Diagnostics;
-use super::index_cache::IndexCache;
+use super::index_cache::{IndexCache, OwnStatus};
 use super::layer_graph::LayerGraph;
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
@@ -136,6 +136,49 @@ struct InstanceArc {
     layer_stack: LayerStackId,
     path: String,
     layer_offset_bits: (u64, u64),
+}
+
+/// What an [`IndexCache`] has answered about one path's place in the stage's
+/// population, the per-prim record C++ `Usd_PrimData` keeps. Each answer is
+/// filled on its own, by the query that asks for it, so a query reads no
+/// more of the prim than its answer needs.
+#[derive(Default)]
+pub(super) struct PrimRecord {
+    /// The nearest strict ancestor that is an instance
+    /// ([`IndexCache::enclosing_instance`]).
+    pub(super) enclosing: Answer<Option<Path>>,
+    /// The prim whose index composes this one: itself, or the prototype prim
+    /// an instance proxy reads ([`IndexCache::effective_prim`]).
+    pub(super) composed: Answer<Path>,
+    /// Whether the population reaches the prim and the prim exists and is
+    /// active ([`IndexCache::is_populated`]).
+    pub(super) populated: Answer<bool>,
+    /// Whether the prim is an instance ([`IndexCache::is_instance`]).
+    pub(super) instance: Answer<bool>,
+    /// The prim's own status inputs, `None` when nothing composes there
+    /// ([`IndexCache::own_status`]).
+    pub(super) own: Answer<Option<OwnStatus>>,
+}
+
+/// One answer in a [`PrimRecord`].
+#[derive(Default)]
+pub(super) enum Answer<T> {
+    /// No query has asked yet, or every answer so far was provisional
+    /// ([`IndexCache::provisional`]).
+    #[default]
+    Unasked,
+    /// The answer, valid until the record is cleared.
+    Known(T),
+}
+
+impl<T> Answer<T> {
+    /// The answer, if one is known.
+    pub(super) fn known(&self) -> Option<&T> {
+        match self {
+            Answer::Unasked => None,
+            Answer::Known(answer) => Some(answer),
+        }
+    }
 }
 
 impl PrototypeRegistry {
@@ -426,9 +469,9 @@ impl IndexCache {
     /// is ever composed or loaded: the mask test is pure, the parent is settled
     /// before the prim itself, and only then does `path` compose.
     ///
-    /// Memoized in `populated_prims`, which makes the recursion O(1) amortized
-    /// rather than an ancestor walk per query — the ancestors settle first, so
-    /// each is a hit by the time a deeper query asks. As in
+    /// Recorded on the path's [`PrimRecord`], which makes the recursion O(1)
+    /// amortized — the ancestors settle first, so each is a hit by the time a
+    /// deeper query asks. As in
     /// [`Self::effective_path`], a result reached while a build demanded a
     /// not-yet-loaded layer is provisional and left unmemoized, and a path in an
     /// unregistered synthetic prototype namespace is never memoized at all,
@@ -442,19 +485,32 @@ impl IndexCache {
         if path.is_abs_root() {
             return Ok(true);
         }
-        if let Some(hit) = self.populated_prims.get(path) {
-            return Ok(*hit);
+        // The mask is decided first, so no record, the path's own or an
+        // ancestor's, is read or built for a path it hides.
+        if !self.mask_includes(path) {
+            return Ok(false);
+        }
+        if let Some(hit) = self
+            .records
+            .get(path)
+            .and_then(|record| record.populated.known().copied())
+        {
+            return Ok(hit);
         }
         let pending_before = self.pending_loads.len();
         // Short-circuiting is what orders the steps: neither the prim nor its
         // own `active` is reached until the population is known to reach it.
-        // The redirect is resolved once and both reads take it.
-        let populated = self.population_reaches(graph, path)? && {
-            let composed = self.effective_path(graph, path)?;
-            self.has_spec_at(graph, &composed)? && self.active_at(graph, &composed)?
-        };
+        // The redirect is resolved once and both reads take it, unless the
+        // prim's own status already answered them.
+        let populated = self.population_reaches(graph, path)?
+            && if let Some(own) = self.records.get(path).and_then(|record| record.own.known().copied()) {
+                own.is_some_and(|own| own.active)
+            } else {
+                let composed = self.effective_path(graph, path)?;
+                self.has_spec_at(graph, &composed)? && self.active_at(graph, &composed)?
+            };
         if !self.provisional(path, pending_before) {
-            self.populated_prims.insert(path.clone(), populated);
+            self.record_mut(path).populated = Answer::Known(populated);
         }
         Ok(populated)
     }
@@ -568,15 +624,26 @@ impl IndexCache {
         if path.is_abs_root() || self.is_prototype(path) {
             return Ok(false);
         }
+        if let Some(hit) = self
+            .records
+            .get(path)
+            .and_then(|record| record.instance.known().copied())
+        {
+            return Ok(hit);
+        }
+        let pending_before = self.pending_loads.len();
         // The stage populates no prim the mask excludes or an inactive ancestor
         // buries, and C++ composes the instance flag only for the prims it
         // populated — so nothing else can register a prototype either.
-        if !self.is_populated(graph, path)? {
-            return Ok(false);
+        let instance = self.is_populated(graph, path)? && {
+            let composed = self.effective_path(graph, path)?;
+            self.ensure_index(graph, &composed)?;
+            self.cached_instanceable(graph, &composed)?
+        };
+        if !self.provisional(path, pending_before) {
+            self.record_mut(path).instance = Answer::Known(instance);
         }
-        let composed = self.effective_path(graph, path)?;
-        self.ensure_index(graph, &composed)?;
-        self.cached_instanceable(graph, &composed)
+        Ok(instance)
     }
 
     /// Composes `instance`'s shared subtree, registers it against its prototype,
@@ -852,16 +919,20 @@ impl IndexCache {
     ///
     /// The answer is the parent when the parent is an instance, and the
     /// parent's own answer otherwise. C++ `Usd_MoveToChild` carries a prim's
-    /// instance-proxy state to its child the same way. Answers are memoized in
-    /// `enclosing_instances` except a provisional one, as in
+    /// instance-proxy state to its child the same way. The answer is recorded
+    /// on the path's [`PrimRecord`] unless it is provisional, as in
     /// [`Self::is_populated`], so a top-down traversal answers each prim in
     /// O(1).
     pub(crate) fn enclosing_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>, QueryError> {
         let Some(parent) = path.parent().filter(|parent| !parent.is_abs_root()) else {
             return Ok(None);
         };
-        if let Some(hit) = self.enclosing_instances.get(path) {
-            return Ok(hit.clone());
+        if let Some(hit) = self
+            .records
+            .get(path)
+            .and_then(|record| record.enclosing.known().cloned())
+        {
+            return Ok(hit);
         }
         let pending_before = self.pending_loads.len();
         let enclosing = if self.is_instance(graph, &parent)? {
@@ -870,7 +941,7 @@ impl IndexCache {
             self.enclosing_instance(graph, &parent)?
         };
         if !self.provisional(path, pending_before) {
-            self.enclosing_instances.insert(path.clone(), enclosing.clone());
+            self.record_mut(path).enclosing = Answer::Known(enclosing.clone());
         }
         Ok(enclosing)
     }
@@ -921,11 +992,10 @@ impl IndexCache {
     /// query entry point so an instance proxy's subtree is served from the
     /// shared prototype rather than recomposed per instance.
     ///
-    /// The prim-level redirection is memoized in `redirected_prims` (including
-    /// the identity result for a non-redirected prim, the common case), so the
-    /// ancestor walk that finds an enclosing instance runs once per prim path
-    /// rather than once per query; the memo is cleared whenever the prototype
-    /// registry is invalidated.
+    /// The prim-level redirection is recorded on the prim's [`PrimRecord`]
+    /// (including the identity result for a non-redirected prim, the common
+    /// case), so the enclosing instance is looked up once per prim path; the
+    /// record is cleared whenever the prototype registry is invalidated.
     pub(super) fn effective_path(&mut self, graph: &LayerGraph, path: &Path) -> Result<Path, QueryError> {
         let prim = path.prim_path();
         let redirected = self.effective_prim(graph, &prim)?;
@@ -940,15 +1010,25 @@ impl IndexCache {
     /// The prim-path half of [`Self::effective_path`]: `prim` itself, or the
     /// prototype prim serving it when it is an instance proxy.
     pub(super) fn effective_prim(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Path, QueryError> {
-        if let Some(hit) = self.redirected_prims.get(prim) {
-            return Ok(hit.clone());
+        if let Some(hit) = self
+            .records
+            .get(prim)
+            .and_then(|record| record.composed.known().cloned())
+        {
+            return Ok(hit);
         }
         let pending_before = self.pending_loads.len();
         let redirected = self.redirect_prim(graph, prim)?;
         if !self.provisional(prim, pending_before) {
-            self.redirected_prims.insert(prim.clone(), redirected.clone());
+            self.record_mut(prim).composed = Answer::Known(redirected.clone());
         }
         Ok(redirected)
+    }
+
+    /// The record of `path`, created empty when the cache has answered nothing
+    /// about it yet.
+    pub(super) fn record_mut(&mut self, path: &Path) -> &mut PrimRecord {
+        self.records.entry(path.clone()).or_default()
     }
 }
 

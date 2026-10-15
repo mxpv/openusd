@@ -215,6 +215,40 @@ def "Inst" (
     Ok(())
 }
 
+/// Turning an ancestor's `def` into an `over` undefines a descendant a
+/// traversal already composed, and turning it back defines it again.
+#[test]
+fn specifier_flips_defined() -> Result<()> {
+    let stage = open_in_memory();
+    for path in ["/A", "/A/B", "/A/B/C"] {
+        stage.define_prim(path)?;
+    }
+    let mut visited = Vec::new();
+    stage.traverse(usd::PrimPredicate::DEFAULT, |path| visited.push(path.clone()))?;
+    assert!(visited.contains(&sdf::path("/A/B/C")?));
+    assert!(stage.prim("/A/B/C")?.is_defined()?);
+
+    let root = stage.root_layer().identifier().to_owned();
+    let set_specifier = |specifier| -> Result<()> {
+        stage.layer_mut(&root).expect("the root layer is live").edit(|edit| {
+            edit.prim_mut(&sdf::path("/A")?)?
+                .expect("the prim is authored")
+                .set_specifier(specifier);
+            Ok(())
+        })?;
+        Ok(())
+    };
+    set_specifier(sdf::Specifier::Over)?;
+    assert!(!stage.prim("/A/B/C")?.is_defined()?, "an over ancestor undefines it");
+
+    set_specifier(sdf::Specifier::Def)?;
+    assert!(
+        stage.prim("/A/B/C")?.is_defined()?,
+        "and a def ancestor defines it again"
+    );
+    Ok(())
+}
+
 /// `kind` is a spec-only metadata change on an existing prim — the cached
 /// index survives, and the new opinion is still visible (live read).
 #[test]
