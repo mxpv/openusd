@@ -4748,6 +4748,60 @@ def "A" (
         Ok(())
     }
 
+    /// The implied inherit of a referenced sub-root inherit searches for the
+    /// ancestral `/Group` selection from the root node. The reference arc
+    /// cannot map `/Group`, so the selection the referenced layer authors
+    /// there is not read, and the implied site stays unselected.
+    #[test]
+    fn variant_unmapped_reference() -> Result<()> {
+        let root_text = r#"#usda 1.0
+over "Group" (
+    variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "y" { over "Model" { custom double x = 2 } }
+    }
+}
+def "Ref" (
+    references = @group.usd@</SubrootInherit>
+)
+{
+}
+"#;
+        let group_text = r#"#usda 1.0
+def "Group" (
+    variants = { string v = "y" }
+    variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "y" { over "Model" { } }
+    }
+}
+def "SubrootInherit" (
+    inherits = </Group/Model>
+)
+{
+}
+"#;
+        let mut graph = LayerGraph::from_layers(
+            vec![
+                parse_named_layer("root.usd", root_text),
+                parse_named_layer("group.usd", group_text),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let mut cache = fresh_cache();
+        assert_eq!(
+            settled_value_at(&mut graph, &mut cache, &sdf::path("/Ref.x")?, 0.0)?,
+            TimedValue::Fallback,
+            "the reference cannot map /Group, so its selection is not read"
+        );
+        Ok(())
+    }
+
     /// A selection expression authored on the referencing prim evaluates
     /// against the referencing stack's variables and selects inside the
     /// referenced target (spec 12.2 — the stronger site's opinion wins).

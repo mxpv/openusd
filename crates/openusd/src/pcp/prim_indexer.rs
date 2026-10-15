@@ -1962,21 +1962,29 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // before any ordering and only they are ranked.
         let stack = self.inputs.stack;
         let mut opinionated: Vec<VariantOpinions> = Vec::new();
-        for n in self.subtree_nodes(start) {
+        // Each candidate's site is the set path mapped from `start` down the
+        // arc chain to that candidate (C++
+        // `_ComposeVariantSelectionAcrossNodes`), one arc's reverse map
+        // (`map_target_to_source`) per step. A path that leaves an arc's
+        // co-domain drops that node's whole subtree, as C++ `PruneChildren`
+        // does, so an ancestral selection does not cross a reference boundary
+        // that cannot map the set path. Inert nodes are not read but still
+        // pass the mapped path to their children.
+        let mut pending = vec![(start, path_in_start)];
+        while let Some((n, site)) = pending.pop() {
             let node = self.node(n);
+            pending.extend(node.children().filter_map(|child| {
+                let child_node = self.node(child);
+                // An inert leaf neither holds an opinion nor passes a path on.
+                if child_node.is_inert() && child_node.children().next().is_none() {
+                    return None;
+                }
+                let in_child = child_node.map_to_parent().map_target_to_source(&site)?;
+                Some((child, in_child))
+            }));
             if node.is_inert() {
                 continue;
             }
-            // Each candidate's site is the set path mapped from `start` down the
-            // arc chain to that candidate (C++ `_ComposeVariantSelectionAcrossNodes`).
-            // The per-arc walk drops a path that leaves any arc's co-domain, so a
-            // stronger frame's ancestral selection cannot leak across a reference
-            // boundary the way a shortcut through the composed `map_to_root`
-            // catch-all would (the reason `translate_path_to_root_or_closest`
-            // likewise walks arc-by-arc).
-            let Some(site) = self.map_path_down(start, n, &path_in_start) else {
-                continue;
-            };
             // The mapped path may carry an enclosing variant's `{set=sel}`
             // qualifier; the storage site is
             // computed from the variant-free path (C++
@@ -2103,26 +2111,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             cur_path = p;
         }
         (cur_node, cur_path)
-    }
-
-    /// Maps `path` (in `ancestor`'s namespace) down into `descendant`'s namespace
-    /// by applying each arc's reverse map (`map_target_to_source`) along the
-    /// chain from `ancestor` to `descendant`. Returns `None` if the path leaves
-    /// any arc's co-domain. Scopes a variant-set search to the start node's frame:
-    /// the per-arc walk blocks a path a reference/payload boundary excludes, which
-    /// a shortcut through the composed `map_to_root` catch-all would let through.
-    fn map_path_down(&self, ancestor: NodeId, descendant: NodeId, path: &Path) -> Option<Path> {
-        let mut chain = Vec::new();
-        let mut cur = descendant;
-        while cur != ancestor {
-            chain.push(cur);
-            cur = self.node(cur).parent()?;
-        }
-        let mut p = path.clone();
-        for &node in chain.iter().rev() {
-            p = self.node(node).map_to_parent().map_target_to_source(&p)?;
-        }
-        Some(p)
     }
 
     /// Collects `root` and all its descendants (C++ `Pcp_GetSubtreeRange`).
