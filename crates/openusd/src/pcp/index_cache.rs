@@ -1486,16 +1486,23 @@ impl IndexCache {
         // weaker site (a `ValueBlock` blocks weaker opinions for any field).
         let mut samples_blocked = false;
 
-        // TODO(perf): the query path is rebuilt per site though it depends only
-        // on the node, and under `EveryLayer` it is built even for the layers the
-        // spec gate below rejects. `live_sites` is node-major in both scopes, so
-        // yielding a node with its layers would build it once per node.
+        // The query path depends only on the node, and `live_sites` yields a
+        // node's layers together, so each node's is built once.
+        let mut node_query: Option<(NodeId, Path)> = None;
         for (node, layer, offset) in index.live_sites(graph, scope) {
+            let query_path = match &node_query {
+                Some((id, path)) if *id == node.id() => path.clone(),
+                _ => {
+                    let path = PrimIndex::query_path(node, Some(suffix)).into_owned();
+                    node_query = Some((node.id(), path.clone()));
+                    path
+                }
+            };
             let site = OpinionSite {
                 node,
                 layer,
                 offset,
-                query_path: PrimIndex::query_path(node, Some(suffix)).into_owned(),
+                query_path,
             };
 
             if resolver.on_site(&site).stop() {
