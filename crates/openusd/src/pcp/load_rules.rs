@@ -187,6 +187,11 @@ impl LoadRules {
     /// ancestor between it and the nearest governing rule, even one with its
     /// own explicit `None`.
     pub fn effective_rule(&self, path: &Path) -> Rule {
+        // An empty table loads everything, which C++ answers before it
+        // searches for a prefix.
+        if self.rules.is_empty() {
+            return Rule::All;
+        }
         let Some((prefix_path, prefix_rule)) = self.nearest_prefix_entry(path) else {
             return Rule::All;
         };
