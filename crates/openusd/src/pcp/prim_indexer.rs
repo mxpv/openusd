@@ -173,25 +173,6 @@ fn find_containing_variant_selection(path: &Path) -> Option<Path> {
     }
 }
 
-/// The variant-bearing ancestor of `node_path` (a path that carries `{set=sel}`
-/// selections) whose stripped form equals `stripped`, i.e. the storage site for
-/// an opinion at the namespace path `stripped` within this variant node.
-///
-/// A variant node's selection is authored under its `{set=sel}` segment, so a
-/// selection read at an ancestor namespace level (`/Ref` while the node is
-/// `/Ref{v1=a}Model`) lives at the variant-deepened site (`/Ref{v1=a}`). Walks
-/// `node_path` up, dropping a component each step, until the variant selections
-/// strip away to `stripped`.
-fn variant_storage_site(node_path: &Path, stripped: &Path) -> Option<Path> {
-    let mut p = node_path.clone();
-    loop {
-        if p.strip_variant_selections() == *stripped {
-            return Some(p);
-        }
-        p = p.parent()?;
-    }
-}
-
 /// Maps a class-arc parent site back across the arc to the site to inherit (C++
 /// `_DetermineInheritPath`), returning `None` when the parent is outside the
 /// arc's co-domain.
@@ -935,6 +916,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         map: MapFunction,
         origin: NodeId,
         sibling: u16,
+        depth: Option<u16>,
         flags: NodeFlags,
     ) -> BuildResult<GraftOutcome> {
         let out = self.compose_subindex(target, ambient, skip, true, arc)?;
@@ -942,7 +924,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let Some(sub) = self.merge_subindex(out) else {
             return Ok(GraftOutcome { node: None, hit_cycle });
         };
-        let Some(grafted) = self.graft_subindex(&sub, parent, arc, map, origin, sibling, flags) else {
+        let Some(grafted) = self.graft_subindex(&sub, parent, arc, map, origin, sibling, depth, flags) else {
             return Ok(GraftOutcome { node: None, hit_cycle });
         };
         self.add_grafted_subtree_tasks(grafted);
@@ -981,11 +963,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// Grafts a composed sub-index under `parent` (C++ `InsertChildSubgraph`).
     ///
     /// The source's local root becomes the arc node, carrying `root_map`,
-    /// `origin`, `sibling`, `root_flags`, and the parent site's namespace depth;
-    /// every internal node keeps its own arc, map-to-parent, and strength metadata,
-    /// with node handles remapped into this graph. Returns the grafted arc node,
-    /// or `None` when the source has no single local root to graft (an extra
-    /// root-level arc a later phase grafts individually).
+    /// `origin`, `sibling`, `root_flags`, and the namespace depth `depth` (the
+    /// parent site's when `None`); every internal node keeps its own arc,
+    /// map-to-parent, and strength metadata, with node handles remapped into
+    /// this graph. Returns the grafted arc node, or `None` when the source has
+    /// no single local root to graft (an extra root-level arc a later phase
+    /// grafts individually).
     // One argument per property of the arc the grafted root takes.
     #[allow(clippy::too_many_arguments)]
     fn graft_subindex(
@@ -996,6 +979,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         root_map: MapFunction,
         origin: NodeId,
         sibling: u16,
+        depth: Option<u16>,
         root_flags: NodeFlags,
     ) -> Option<NodeId> {
         let local_root = source.local_root();
@@ -1017,7 +1001,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `HAS_SPECIALIZES`; the source composed it as an ordinary sub-index, so
         // its nodes do not carry the flag yet.
         let weak = arc == ArcType::Specialize;
-        let parent_depth = self.node(parent).path().prim_element_count() as u16;
+        let root_depth = depth.unwrap_or_else(|| self.node(parent).path().prim_element_count() as u16);
         let mut remap: Vec<Option<NodeId>> = vec![None; source.len()];
         let mut grafted_root = NodeId::INVALID;
         self.output.reserve(source.len());
@@ -1034,7 +1018,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // graph.
             let (struct_parent, node_map, node_arc, node_sibling, node_depth, node_origin) = if sid == local_root.idx()
             {
-                (parent, root_map.clone(), arc, sibling, parent_depth, Some(origin))
+                (parent, root_map.clone(), arc, sibling, root_depth, Some(origin))
             } else {
                 let grafted_parent = node.parent().and_then(|p| remap[p.idx()]).unwrap_or(parent);
                 let grafted_origin = node.origin().and_then(|o| remap[o.idx()]).or(Some(grafted_parent));
@@ -1481,9 +1465,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // sub-index excludes this same relocate from its internal arc folds (see
         // `fold_relocates_into`), so the shift is applied once, here.
         let map = MapFunction::from_pair_identity(source.clone(), node_path);
-        let Some(grafted) =
-            self.graft_subindex(&sub, node, ArcType::Relocate, map, node, 0, NodeFlags::RELOCATE_SOURCE)
-        else {
+        let Some(grafted) = self.graft_subindex(
+            &sub,
+            node,
+            ArcType::Relocate,
+            map,
+            node,
+            0,
+            None,
+            NodeFlags::RELOCATE_SOURCE,
+        ) else {
             return Ok(());
         };
         if let Some(layer) = opinion_layer {
@@ -1968,35 +1959,44 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // (`map_target_to_source`) per step. A path that leaves an arc's
         // co-domain drops that node's whole subtree, as C++ `PruneChildren`
         // does, so an ancestral selection does not cross a reference boundary
-        // that cannot map the set path. Inert nodes are not read but still
-        // pass the mapped path to their children.
+        // that cannot map the set path. A node restricted from contributing at
+        // the set path is not read but still passes the mapped path to its
+        // children.
         let mut pending = vec![(start, path_in_start)];
         while let Some((n, site)) = pending.pop() {
             let node = self.node(n);
             pending.extend(node.children().filter_map(|child| {
                 let child_node = self.node(child);
-                // An inert leaf neither holds an opinion nor passes a path on.
-                if child_node.is_inert() && child_node.children().next().is_none() {
+                // A leaf restricted at every prim path (inert with no recorded
+                // depth, or restricted at depth 1) neither holds an opinion nor
+                // passes a path on.
+                let restricted = match child_node.restriction_depth() {
+                    0 => child_node.is_inert(),
+                    depth => depth == 1,
+                };
+                if restricted && child_node.children().next().is_none() {
                     return None;
                 }
                 let in_child = child_node.map_to_parent().map_target_to_source(&site)?;
                 Some((child, in_child))
             }));
-            if node.is_inert() {
+            // The mapped path may carry an enclosing variant's `{set=sel}`
+            // qualifier; the namespace path is its variant-free form.
+            let path_in_node = site.strip_variant_selections();
+            if !self.node_can_contribute_ancestral(n, &path_in_node) {
                 continue;
             }
-            // The mapped path may carry an enclosing variant's `{set=sel}`
-            // qualifier; the storage site is
-            // computed from the variant-free path (C++
-            // `_ComposeVariantSelectionAcrossNodes`'s `info.sitePath`). A class or
-            // reference node reads its selection at that plain path. A variant
-            // node re-inserts its own selection, so a selection authored inside
-            // one variant (`/Ref{v1=a}` authoring `v2`) is read at the `{set=sel}`
-            // site: walk the node's variant-bearing path up to the ancestor whose
-            // stripped form is `path_in_node`.
-            let path_in_node = site.strip_variant_selections();
+            // The storage site (C++ `_ComposeVariantSelectionAcrossNodes`'s
+            // `info.sitePath`): a class or reference node reads its selection
+            // at the namespace path. A variant node inserts the selections of
+            // its path at introduction, so a selection authored inside one
+            // variant (`/Ref{v1=a}` authoring `v2`) is read at the `{set=sel}`
+            // site.
             let site = if node.arc() == ArcType::Variant {
-                variant_storage_site(node.path(), &path_in_node).unwrap_or(path_in_node)
+                let intro = self.output.path_at_introduction(n);
+                path_in_node
+                    .replace_prefix(&intro.strip_variant_selections(), &intro)
+                    .unwrap_or(path_in_node)
             } else {
                 path_in_node
             };
@@ -2193,7 +2193,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Inserts an ancestral variant selection at `vt.vset_path` with the node's
     /// deeper path below it and grafts it as a sub-index carrying ancestral
-    /// opinions (C++ `_AddAncestralVariantArc`).
+    /// opinions (C++ `_AddAncestralVariantArc`). The arc's namespace depth is
+    /// the set path's prim-element count (C++
+    /// `PcpNode_GetNonVariantPathElementCount(vsetPath)`), so the node's path
+    /// at introduction is the `{set=sel}` site.
     fn add_ancestral_variant_arc(&mut self, node: NodeId, vt: &VariantTask, vsel: &str) -> BuildResult<()> {
         let n = self.node(node);
         let node_path = n.path().clone();
@@ -2235,6 +2238,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 map,
                 node,
                 vt.vset_num,
+                Some(vt.vset_path.prim_element_count() as u16),
                 NodeFlags::empty(),
             )?
             .node;
@@ -2415,6 +2419,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     inherit_map,
                     origin,
                     arc_num,
+                    None,
                     if implied {
                         NodeFlags::IMPLIED_CLASS
                     } else {
@@ -2745,6 +2750,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     map,
                     src,
                     sibling,
+                    None,
                     NodeFlags::empty(),
                 )?
                 .node);
@@ -3041,6 +3047,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 map,
                 parent,
                 0,
+                None,
                 NodeFlags::empty(),
             )?;
             // A grafted target is checked by the unresolved-prim-path task. One
