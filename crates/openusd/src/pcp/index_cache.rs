@@ -125,6 +125,10 @@ pub struct IndexCache {
     /// O(depth) ancestor walk into O(1) amortized. Retired alongside
     /// `redirected_prims` by [`Self::invalidate_population`].
     pub(super) populated_prims: sdf::PathMap<bool>,
+    /// Memoized nearest enclosing instance of a path (see
+    /// [`Self::enclosing_instance`]), defined over the parent's. Retired
+    /// alongside `redirected_prims` by [`Self::invalidate_population`].
+    pub(super) enclosing_instances: sdf::PathMap<Option<Path>>,
     /// Advanced whenever the composed population may differ — see
     /// [`Self::invalidate_population`]. Distinct from
     /// [`revision`](Self::revision), which every edit batch advances: a
@@ -1208,6 +1212,7 @@ impl IndexCache {
             prototypes: PrototypeRegistry::default(),
             redirected_prims: sdf::PathMap::default(),
             populated_prims: sdf::PathMap::default(),
+            enclosing_instances: sdf::PathMap::default(),
             population_epoch: 0,
             type_opinion_epoch: 0,
             copies: 0,
@@ -1415,6 +1420,7 @@ impl IndexCache {
     pub(super) fn clear_population_memos(&mut self) {
         self.populated_prims.clear();
         self.redirected_prims.clear();
+        self.enclosing_instances.clear();
     }
 
     /// Returns the recoverable composition errors encountered so far: the

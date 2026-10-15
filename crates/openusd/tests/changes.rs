@@ -181,6 +181,40 @@ fn set_instanceable_invalidates_owner() {
     );
 }
 
+/// Authoring `instanceable` on an ancestor turns an already queried
+/// descendant into an instance proxy, and clearing it turns the descendant
+/// back.
+#[test]
+fn instanceable_flips_proxy() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "Asset" {
+    def "Child" {
+        def "Leaf" {}
+    }
+}
+def "Inst" (
+    references = </Asset>
+)
+{
+}
+"#,
+    )?;
+    let stage = usd::Stage::open(root.to_str().unwrap())?;
+    let leaf = || stage.prim("/Inst/Child/Leaf");
+    assert!(!leaf()?.is_instance_proxy()?);
+
+    stage.override_prim("/Inst")?.set_instanceable(true)?;
+    assert!(leaf()?.is_instance_proxy()?, "the leaf now sits under an instance");
+
+    stage.override_prim("/Inst")?.set_instanceable(false)?;
+    assert!(!leaf()?.is_instance_proxy()?, "and leaves it again");
+    Ok(())
+}
+
 /// `kind` is a spec-only metadata change on an existing prim — the cached
 /// index survives, and the new opinion is still visible (live read).
 #[test]

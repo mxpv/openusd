@@ -559,12 +559,11 @@ impl IndexCache {
     /// Reads `instanceable` off the index that actually composes `path` — for an
     /// instance proxy that is the shared `/__Prototype_N` index, reached through
     /// [`Self::effective_path`], not a throwaway per-instance copy. So checking
-    /// instance-ness while walking a deep proxy subtree (every ancestor is tested
-    /// by [`Self::enclosing_instance`]) composes the shared subtree once instead
-    /// of a literal index per instance. `effective_path` re-enters `is_instance`
-    /// on a strict ancestor to find the enclosing instance, but each step moves
-    /// to a shorter path and bottoms out at the root, so the recursion
-    /// terminates.
+    /// instance-ness while walking a deep proxy subtree composes the shared
+    /// subtree once instead of a literal index per instance. `effective_path`
+    /// re-enters `is_instance` on the parent to find the enclosing instance
+    /// ([`Self::enclosing_instance`]), but each step moves to a shorter path
+    /// and bottoms out at the root, so the recursion terminates.
     pub(crate) fn is_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
         if path.is_abs_root() || self.is_prototype(path) {
             return Ok(false);
@@ -850,24 +849,30 @@ impl IndexCache {
     /// Returns the nearest strict ancestor of `path` that resolves as an
     /// instance prim (spec 11.3.3), or `None` when `path` is not inside an
     /// instance.
-    //
-    // TODO(perf): each [`is_instance`](Self::is_instance) here itself redirects
-    // through `effective_path`, which walks back up via this function — so a cold
-    // first query on a depth-d path is O(d²) (cheap path/hashmap ops, no extra
-    // composition). The `redirected_prims` memo collapses it to O(d) once the
-    // ancestors are warm, which a top-down traversal keeps it.
+    ///
+    /// The answer is the parent when the parent is an instance, and the
+    /// parent's own answer otherwise. C++ `Usd_MoveToChild` carries a prim's
+    /// instance-proxy state to its child the same way. Answers are memoized in
+    /// `enclosing_instances` except a provisional one, as in
+    /// [`Self::is_populated`], so a top-down traversal answers each prim in
+    /// O(1).
     pub(crate) fn enclosing_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>, QueryError> {
-        let mut ancestor = path.parent();
-        while let Some(current) = ancestor {
-            if current.is_abs_root() {
-                break;
-            }
-            if self.is_instance(graph, &current)? {
-                return Ok(Some(current));
-            }
-            ancestor = current.parent();
+        let Some(parent) = path.parent().filter(|parent| !parent.is_abs_root()) else {
+            return Ok(None);
+        };
+        if let Some(hit) = self.enclosing_instances.get(path) {
+            return Ok(hit.clone());
         }
-        Ok(None)
+        let pending_before = self.pending_loads.len();
+        let enclosing = if self.is_instance(graph, &parent)? {
+            Some(parent)
+        } else {
+            self.enclosing_instance(graph, &parent)?
+        };
+        if !self.provisional(path, pending_before) {
+            self.enclosing_instances.insert(path.clone(), enclosing.clone());
+        }
+        Ok(enclosing)
     }
 
     /// Maps a prim path to the path that actually composes it. An instance proxy
