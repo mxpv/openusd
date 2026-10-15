@@ -53,6 +53,14 @@ pub trait AbstractData {
     /// Returns the field names for a given path in authored order.
     fn list_fields(&self, path: &Path) -> Option<Vec<String>>;
 
+    /// Which of `fields` the spec at `path` authors: bit `i` is set when
+    /// `fields[i]` is, for up to 32 names. Zero when there is no spec. One
+    /// query asks about several fields of a spec at once, as composition does
+    /// to learn which arcs a site authors.
+    fn field_mask(&self, path: &Path, fields: &[&str]) -> u32 {
+        mask_of(fields, |field| self.has_field(path, field))
+    }
+
     /// Returns every authored path, sorted lexicographically.
     ///
     /// The order is deterministic and stable across repeated calls. Emitters
@@ -239,6 +247,12 @@ impl AbstractData for Data {
             .map(|spec| spec.fields.iter().map(|(k, _)| k.clone()).collect())
     }
 
+    fn field_mask(&self, path: &Path, fields: &[&str]) -> u32 {
+        self.specs
+            .get(path)
+            .map_or(0, |spec| mask_of(fields, |field| spec.contains(field)))
+    }
+
     fn spec_paths(&self) -> Vec<Path> {
         let mut paths: Vec<Path> = self.specs.keys().cloned().collect();
         paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -286,6 +300,10 @@ impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
 
     fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
         (**self).list_fields(path)
+    }
+
+    fn field_mask(&self, path: &Path, fields: &[&str]) -> u32 {
+        (**self).field_mask(path, fields)
     }
 
     fn spec_paths(&self) -> Vec<Path> {
@@ -626,6 +644,17 @@ impl<T: AbstractData> AbstractData for CowData<T> {
     }
 }
 
+/// The [`AbstractData::field_mask`] of `fields`, given which one a spec
+/// authors.
+pub(crate) fn mask_of(fields: &[&str], mut authors: impl FnMut(&str) -> bool) -> u32 {
+    fields
+        .iter()
+        .take(32)
+        .enumerate()
+        .filter(|&(_, field)| authors(field))
+        .fold(0, |mask, (bit, _)| mask | 1 << bit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +676,24 @@ mod tests {
 
         let value = data.field(&root, "primChildren").unwrap().into_owned();
         assert_eq!(value, Value::TokenVec(vec!["child".into()]));
+    }
+
+    /// Bit `i` of the mask stands for the `i`th field asked about.
+    #[test]
+    fn field_mask_bits() {
+        let mut data = Data::new();
+        let root = path("/Root").unwrap();
+        data.create_spec(root.clone(), SpecType::Prim);
+        data.spec_mut(&root)
+            .unwrap()
+            .add("references", Value::TokenVec(Vec::new()));
+        data.spec_mut(&root)
+            .unwrap()
+            .add("specializes", Value::TokenVec(Vec::new()));
+
+        let fields = ["references", "payload", "specializes"];
+        assert_eq!(data.field_mask(&root, &fields), 0b101);
+        assert_eq!(data.field_mask(&path("/Other").unwrap(), &fields), 0);
     }
 
     #[test]

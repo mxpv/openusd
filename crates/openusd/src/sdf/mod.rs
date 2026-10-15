@@ -45,6 +45,7 @@ pub use copy::{
     should_copy_children, should_copy_value,
 };
 pub(crate) use copy::{author_spec, is_children_field};
+pub(crate) use data::mask_of;
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub use expr::{Evaluation, EvaluationValue, Expr, ExprError, StringEvaluation, StringSegment};
 pub use file_format::{FileFormat, FileFormatCaps, FormatError, WriteSeek, Written};

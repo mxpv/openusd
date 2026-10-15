@@ -239,6 +239,15 @@ impl<'a> Node<'a> {
         self.site().has_specs
     }
 
+    /// How many of the node's stack's strongest layers are known to author no
+    /// spec at its path: the position of the first that does, when the
+    /// indexer found [`has_specs`](Self::has_specs) by probing them in order,
+    /// and 0 otherwise. A layer before it holds no field at the path either.
+    pub(crate) fn spec_from(self) -> u16 {
+        let site = self.site();
+        if site.has_specs { site.spec_from } else { 0 }
+    }
+
     /// Namespace depth at which this node's spec contribution was restricted
     /// (C++ `PcpNode::GetSpecContributionRestrictedDepth`), or 0 when
     /// unrestricted.
@@ -330,6 +339,9 @@ pub(crate) struct NodeDesc {
     pub(crate) sibling_num_at_origin: u16,
     /// Whether a layer of the stack authors a spec at the path.
     pub(crate) has_specs: bool,
+    /// How many of the stack's strongest layers are known to author no spec
+    /// at the path ([`Node::spec_from`]).
+    pub(crate) spec_from: u16,
     /// The depth the node's spec contribution is restricted at, 0 for none.
     pub(crate) restriction_depth: u16,
     /// The node's state bits, of either half.
@@ -355,6 +367,7 @@ impl NodeDesc {
             namespace_depth: None,
             sibling_num_at_origin: 0,
             has_specs: true,
+            spec_from: 0,
             restriction_depth: 0,
             flags: NodeFlags::empty(),
         }
@@ -450,6 +463,10 @@ struct NodeSite {
     /// counted by [`is_empty`](crate::pcp::PrimIndex::is_empty). A culled node
     /// standing in for an empty arc target likewise carries `false`.
     has_specs: bool,
+    /// How many of the stack's strongest layers are known to author no spec
+    /// at [`path`](Self::path), where [`has_specs`](Self::has_specs) was
+    /// established by probing them in order ([`Node::spec_from`]).
+    spec_from: u16,
     /// The bits of [`NodeFlags`] inside [`PER_PRIM`].
     flags: NodeFlags,
 }
@@ -703,9 +720,19 @@ impl PrimIndexGraph {
         self.sites[id.idx()].flags |= flags;
     }
 
-    /// Records whether a layer of the node's stack authors a spec at its path.
+    /// Records whether a layer of the node's stack authors a spec at its path,
+    /// without recording which, so a reader probes the stack from its
+    /// strongest layer.
     pub(crate) fn set_has_specs(&mut self, id: NodeId, has_specs: bool) {
-        self.sites[id.idx()].has_specs = has_specs;
+        self.set_first_spec(id, has_specs.then_some(0));
+    }
+
+    /// Records the position in the node's stack of the strongest layer that
+    /// authors a spec at its path, `None` when no layer does.
+    pub(crate) fn set_first_spec(&mut self, id: NodeId, first: Option<u16>) {
+        let site = &mut self.sites[id.idx()];
+        site.has_specs = first.is_some();
+        site.spec_from = first.unwrap_or(0);
     }
 
     /// Records the depth the node's spec contribution is restricted at.
@@ -917,6 +944,7 @@ impl PrimIndexGraph {
             path: desc.path,
             restriction_depth: desc.restriction_depth,
             has_specs: desc.has_specs,
+            spec_from: desc.spec_from,
             flags: desc.flags & PER_PRIM,
         });
         id

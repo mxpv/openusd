@@ -180,7 +180,9 @@ where
         // once, at its strongest occurrence (C++ `GetLayerOffsetForLayer` is
         // single-valued per layer).
         let mut seen_layers: HashSet<LayerId> = HashSet::new();
-        for &(layer, sub) in graph.layer_stack(node.layer_stack_id()).iter() {
+        // The layers before the node's first spec hold no field at its path.
+        let stack = graph.layer_stack(node.layer_stack_id());
+        for &(layer, sub) in stack.iter().skip(usize::from(node.spec_from())) {
             if !seen_layers.insert(layer) {
                 continue;
             }

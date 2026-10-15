@@ -239,6 +239,32 @@ impl sdf::AbstractData for CrateData {
         }
     }
 
+    fn field_mask(&self, path: &sdf::Path, fields: &[&str]) -> u32 {
+        let Some(spec) = self.data.get(path) else {
+            return 0;
+        };
+        // One pass over the crate fieldset finds every listed name; an
+        // authored override then decides its own field.
+        let mut mask = match spec.fieldset {
+            Some(start) => {
+                let mut mask = 0;
+                for (name, _) in crate_fields(&self.file, start) {
+                    mask |= sdf::mask_of(fields, |field| field == name);
+                }
+                mask
+            }
+            None => 0,
+        };
+        for (bit, field) in fields.iter().take(32).enumerate() {
+            match spec.authored(field) {
+                Some(Some(_)) => mask |= 1 << bit,
+                Some(None) => mask &= !(1 << bit),
+                None => {}
+            }
+        }
+        mask
+    }
+
     #[inline]
     fn spec_type(&self, path: &sdf::Path) -> Option<sdf::SpecType> {
         self.data.get(path).map(|spec| spec.ty)
@@ -617,6 +643,26 @@ mod tests {
         data.erase_field(&root, "customLayerData");
         assert!(!data.has_field(&root, "customLayerData"));
         assert!(data.try_field(&root, "customLayerData").unwrap().is_none());
+    }
+
+    /// The mask reads the crate's fields with their authored overrides: an
+    /// erased crate field drops out and a newly set one counts. A name asked
+    /// about twice sets both its bits.
+    #[test]
+    fn field_mask_overrides() {
+        let mut data = read_file("fixtures/fields.usdc").unwrap();
+        let root = sdf::Path::abs_root();
+        let fields = ["missing", "customLayerData", "added", "customLayerData"];
+        assert_eq!(
+            data.field_mask(&root, &fields),
+            0b1010,
+            "a repeated name sets each of its bits"
+        );
+
+        data.erase_field(&root, "customLayerData");
+        data.set_field(&root, "added", sdf::Value::Token("a".into()));
+        assert_eq!(data.field_mask(&root, &fields), 0b0100);
+        assert_eq!(data.field_mask(&sdf::path("/nowhere").unwrap(), &fields), 0);
     }
 
     #[test]

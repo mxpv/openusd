@@ -104,7 +104,7 @@ use super::layer_graph::{ExternalStack, LoadFailure};
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeDesc, NodeFlags, NodeId, PrimIndexGraph, is_class_based_arc};
-use super::prim_index::{CompositionContext, Demand, PrimEntry, stack_has_spec};
+use super::prim_index::{CompositionContext, Demand, PrimEntry, first_spec_layer, stack_has_spec};
 use super::{
     CompositionDiagnostic, CycleChain, CycleHop, ExpressionContext, LayerGraph, LayerId, QueryError, VariantFallbackMap,
 };
@@ -112,6 +112,15 @@ use super::{
 /// Maximum composition-arc nesting before the prim is abandoned as a cycle,
 /// composing to an empty prim index. Matches C++ `MAX_COMPOSITION_DEPTH`.
 const MAX_DEPTH: usize = 100;
+
+/// Each expressed-arc task with the field it composes at a node's site.
+const EXPRESSED_ARCS: [(TaskKind, &str); 5] = [
+    (TaskKind::EvalNodeReferences, FieldKey::References.as_str()),
+    (TaskKind::EvalNodePayloads, FieldKey::Payload.as_str()),
+    (TaskKind::EvalNodeInherits, FieldKey::InheritPaths.as_str()),
+    (TaskKind::EvalNodeSpecializes, FieldKey::Specializes.as_str()),
+    (TaskKind::EvalNodeVariantSets, ChildrenKey::VariantSetChildren.as_str()),
+];
 
 pub(crate) type BuildResult<T> = Result<T, QueryError>;
 
@@ -1046,6 +1055,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 node_map,
             );
             desc.has_specs = node.has_specs();
+            desc.spec_from = node.spec_from();
             desc.flags = node.flags();
             desc.restriction_depth = node.restriction_depth();
             if weak {
@@ -1091,9 +1101,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // layer holding a child spec without its parent's composes without
             // the child's opinions. Inert placeholders are rescanned too, so
             // none keeps a flag its parent's site earned.
-            let has_specs = had_specs && self.stack_has_spec(n.layer_stack_id(), n.path());
-            if had_specs && !has_specs {
-                self.output.set_has_specs(node, false);
+            let first_spec = match had_specs {
+                true => first_spec_layer(self.inputs.stack, n.layer_stack_id(), n.path()),
+                false => None,
+            };
+            let has_specs = first_spec.is_some();
+            if had_specs {
+                self.output.set_first_spec(node, first_spec);
             }
             if inert {
                 continue;
@@ -1112,21 +1126,44 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// inherits, specializes, and — at the top level — the node's own variant
     /// sets. The implied-class/specializes tasks are added separately by
     /// [`add_tasks_for_node`](Self::add_tasks_for_node) when an arc is composed.
+    ///
+    /// A task is enqueued only for a field some layer of the node's stack
+    /// authors at its site: a task reading no field composes nothing.
     fn add_expressed_arc_tasks(&mut self, node: NodeId) {
-        self.tasks.push(Task::new(TaskKind::EvalNodeReferences, node));
-        if self.inputs.load_payloads {
-            self.tasks.push(Task::new(TaskKind::EvalNodePayloads, node));
+        let authored = self.authored_arc_fields(node);
+        for (bit, &(kind, _)) in EXPRESSED_ARCS.iter().enumerate() {
+            let runs = match kind {
+                TaskKind::EvalNodePayloads => self.inputs.load_payloads,
+                // The node's own (local) variant sets. A recursive sub-build
+                // defers variants to the top-level build (C++
+                // `evaluateVariantsAndDynamicPayloads == false`), so a node
+                // composed inside a frame enqueues no variant work. Ancestral
+                // variant sets are added only when a sub-index is grafted (C++
+                // `_AddArc`'s `includeAncestralOpinions` branch), not here.
+                TaskKind::EvalNodeVariantSets => self.frame.is_none(),
+                _ => true,
+            };
+            if runs && authored & (1 << bit) != 0 {
+                self.tasks.push(Task::new(kind, node));
+            }
         }
-        self.tasks.push(Task::new(TaskKind::EvalNodeInherits, node));
-        self.tasks.push(Task::new(TaskKind::EvalNodeSpecializes, node));
-        // The node's own (local) variant sets. A recursive sub-build defers
-        // variants to the top-level build (C++ `evaluateVariantsAndDynamicPayloads
-        // == false`), so a node composed inside a frame enqueues no variant work.
-        // Ancestral variant sets are added only when a sub-index is grafted (C++
-        // `_AddArc`'s `includeAncestralOpinions` branch), not here.
-        if self.frame.is_none() {
-            self.tasks.push(Task::new(TaskKind::EvalNodeVariantSets, node));
-        }
+    }
+
+    /// Which [`EXPRESSED_ARCS`] fields the layers of `node`'s stack author at
+    /// its site, bit `i` for entry `i`
+    /// ([`AbstractData::field_mask`](sdf::AbstractData::field_mask)). The
+    /// layers before the node's first spec author none.
+    fn authored_arc_fields(&self, node: NodeId) -> u32 {
+        let fields = EXPRESSED_ARCS.map(|(_, field)| field);
+        let n = self.node(node);
+        self.inputs
+            .stack
+            .layer_stack(n.layer_stack_id())
+            .iter()
+            .skip(usize::from(n.spec_from()))
+            .fold(0, |mask, &(layer, _)| {
+                mask | self.inputs.stack.layer(layer).data().field_mask(n.path(), &fields)
+            })
     }
 
     /// Enqueues a newly-composed node's implied-class/specializes propagation
@@ -1528,7 +1565,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // its origin. Its site is exactly `(gp_layers, gp_reloc_source)`, so
         // `has_specs` is composed from those before they move into the node.
         let (gp_stack, gp_rep) = self.node_site(gp);
-        let has_specs = self.stack_has_spec(gp_stack, &gp_reloc_source);
+        let first_spec = first_spec_layer(self.inputs.stack, gp_stack, &gp_reloc_source);
+        let has_specs = first_spec.is_some();
         let mut desc = NodeDesc::new(
             gp_stack,
             gp_rep,
@@ -1545,6 +1583,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `SetSpecContributionRestrictedDepth(1)`).
         desc.restriction_depth = 1;
         desc.has_specs = has_specs;
+        desc.spec_from = first_spec.unwrap_or(0);
         let new_node = self.output.add_child(gp, desc);
         // Cascade: the placeholder is itself a relocate node, so the relocation
         // keeps propagating up the next ancestor arc (C++ `AddTasksForNode` keeps
@@ -1958,7 +1997,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 continue;
             }
             let mut authored = Vec::new();
-            for &(layer, _) in stack.layer_stack(node.layer_stack_id()).iter() {
+            // The layers before the node's first spec hold no field at its own
+            // site.
+            let from = match site == *node.path() {
+                true => usize::from(node.spec_from()),
+                false => 0,
+            };
+            for &(layer, _) in stack.layer_stack(node.layer_stack_id()).iter().skip(from) {
                 match stack
                     .layer(layer)
                     .data()
@@ -2133,7 +2178,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
             });
             return Ok(());
         };
-        let has_specs = self.stack_has_spec(stack_id, &var_path);
+        let first_spec = first_spec_layer(self.inputs.stack, stack_id, &var_path);
+        let has_specs = first_spec.is_some();
         // A variant does not remap the scenegraph namespace — it branches into
         // a different section of layer storage — so its map is the
         // whole-namespace identity (C++ `_AddVariantArc`). The `{vset=vsel}`
@@ -2144,6 +2190,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let mut desc = NodeDesc::new(stack_id, rep, var_path, ArcType::Variant, map);
         desc.sibling_num_at_origin = vt.vset_num;
         desc.has_specs = has_specs;
+        desc.spec_from = first_spec.unwrap_or(0);
         let new_node = self.output.add_child(node, desc);
         // A selected variant whose `{vset=vsel}` site authors no spec is culled
         // like an empty reference/payload target so a later inert spec at the site
@@ -2320,11 +2367,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if arc == ArcType::Specialize {
             let add_placeholder = parent != self.output.local_root() || self.frame.is_some();
             if add_placeholder {
-                let has_specs = self.stack_has_spec(parent_stack, &inherit_path);
+                let first_spec = first_spec_layer(self.inputs.stack, parent_stack, &inherit_path);
+                let has_specs = first_spec.is_some();
                 let mut desc = NodeDesc::new(parent_stack, rep, inherit_path, arc, inherit_map);
                 desc.origin = Some(origin);
                 desc.sibling_num_at_origin = arc_num;
                 desc.has_specs = has_specs;
+                desc.spec_from = first_spec.unwrap_or(0);
                 desc.flags = NodeFlags::HAS_SPECIALIZES | NodeFlags::INERT;
                 if implied {
                     desc.flags |= NodeFlags::IMPLIED_CLASS;
@@ -2388,11 +2437,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(grafted);
         }
 
-        let has_specs = self.stack_has_spec(parent_stack, &inherit_path);
+        let first_spec = first_spec_layer(self.inputs.stack, parent_stack, &inherit_path);
+        let has_specs = first_spec.is_some();
         let mut desc = NodeDesc::new(parent_stack, rep, inherit_path, arc, inherit_map);
         desc.origin = Some(origin);
         desc.sibling_num_at_origin = arc_num;
         desc.has_specs = has_specs;
+        desc.spec_from = first_spec.unwrap_or(0);
         if arc == ArcType::Specialize {
             desc.flags |= NodeFlags::HAS_SPECIALIZES;
         }
@@ -2711,11 +2762,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 .node);
         }
 
-        let has_specs = self.stack_has_spec(src_stack, &src_path);
+        let first_spec = first_spec_layer(self.inputs.stack, src_stack, &src_path);
+        let has_specs = first_spec.is_some();
         let mut desc = NodeDesc::new(src_stack, rep, src_path, ArcType::Specialize, map);
         desc.origin = Some(src);
         desc.sibling_num_at_origin = sibling;
         desc.has_specs = has_specs;
+        desc.spec_from = first_spec.unwrap_or(0);
         desc.flags = NodeFlags::HAS_SPECIALIZES;
         let new_node = self.output.add_child(root, desc);
         // An empty specialize target is culled like an empty reference/payload
@@ -3366,7 +3419,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// gather a site's variant set names and a set's variant options.
     fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<Token>> {
         let mut out: Vec<Token> = Vec::new();
-        for &(layer, _) in self.inputs.stack.layer_stack(self.node(node).layer_stack_id()).iter() {
+        let n = self.node(node);
+        // The layers before the node's first spec hold no field at its own
+        // site.
+        let from = match path == n.path() {
+            true => usize::from(n.spec_from()),
+            false => 0,
+        };
+        for &(layer, _) in self.inputs.stack.layer_stack(n.layer_stack_id()).iter().skip(from) {
             let Some(value) = self.inputs.stack.layer(layer).data().try_field(path, key.as_str())? else {
                 continue;
             };

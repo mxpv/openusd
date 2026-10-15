@@ -626,7 +626,7 @@ impl PrimIndex {
             // stack are the common shape, and each is a site of its own.
             let Some(run) = runs.record_with(id, || {
                 let mut run = Vec::new();
-                push_node_run(graph, node, id, &mut run, None);
+                push_node_run(graph, node, id, 0, &mut run, None);
                 run
             }) else {
                 continue;
@@ -760,10 +760,8 @@ impl PrimIndex {
     /// subLayers/offsets (those drop the index), and a rebase re-anchors only the
     /// path side of each map, leaving `map_to_root().time_offset()` intact.
     ///
-    /// TODO(perf): re-reads `has_spec` per member, duplicating the indexer's own
-    /// `has_specs` pass — the build could emit the spec-authoring layers it
-    /// already scans, and the clip probes with them, which every stage pays
-    /// whether or not it uses value clips.
+    /// A node's members are probed from its [`spec_from`](Node::spec_from):
+    /// the indexer already found the stronger ones to author no spec.
     fn build_spec_stack(&self, graph: &LayerGraph) -> (Vec<SpecSite>, bool) {
         let mut stack = Vec::new();
         let mut authors_clips = false;
@@ -772,7 +770,14 @@ impl PrimIndex {
             if !node.has_specs() {
                 continue;
             }
-            push_node_run(graph, node, id, &mut stack, Some(&mut authors_clips));
+            push_node_run(
+                graph,
+                node,
+                id,
+                usize::from(node.spec_from()),
+                &mut stack,
+                Some(&mut authors_clips),
+            );
         }
         (stack, authors_clips)
     }
@@ -1261,11 +1266,12 @@ fn push_node_run(
     graph: &LayerGraph,
     node: Node<'_>,
     id: NodeId,
+    from: usize,
     out: &mut Vec<SpecSite>,
     mut clips: Option<&mut bool>,
 ) {
     let arc_offset = node.map_to_root().time_offset();
-    for &(layer, sub) in graph.layer_stack(node.layer_stack_id()).iter() {
+    for &(layer, sub) in graph.layer_stack(node.layer_stack_id()).iter().skip(from) {
         let data = graph.layer(layer).data();
         if !data.has_spec(node.path()) {
             continue;
@@ -1312,10 +1318,20 @@ pub(super) fn registers_site(node: Node<'_>, prim_path: &Path) -> bool {
 /// Short-circuits on the first member that answers yes, which is all its callers
 /// want.
 pub(super) fn stack_has_spec(graph: &LayerGraph, stack: LayerStackId, path: &Path) -> bool {
-    graph
+    first_spec_layer(graph, stack, path).is_some()
+}
+
+/// The position in `stack` of the strongest layer that authors a spec at
+/// `path`, the probe behind [`stack_has_spec`] for a caller that records
+/// where it stopped ([`Node::spec_from`]).
+pub(super) fn first_spec_layer(graph: &LayerGraph, stack: LayerStackId, path: &Path) -> Option<u16> {
+    let position = graph
         .layer_stack(stack)
         .iter()
-        .any(|&(li, _)| graph.layer(li).data().has_spec(path))
+        .position(|&(li, _)| graph.layer(li).data().has_spec(path))?;
+    // A stack too deep to record the position probes from its strongest
+    // layer, which is always correct.
+    Some(u16::try_from(position).unwrap_or(0))
 }
 
 #[cfg(test)]
