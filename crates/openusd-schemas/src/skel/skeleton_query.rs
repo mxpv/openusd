@@ -51,8 +51,8 @@ impl SkeletonResolver {
     ///
     /// A `bindTransforms` or `restTransforms` array whose length differs from
     /// the joint count counts as no bind or rest pose. Joints with a singular
-    /// bind transform get the identity as their inverse, where C++
-    /// `GfMatrix4d::GetInverse` answers `FLT_MAX` times the identity.
+    /// bind transform invert as [`gf::Mat4d::inverse_or_max`] does (C++
+    /// `GfMatrix4d::GetInverse`).
     pub fn from_skeleton(skeleton: &Skeleton) -> Result<Option<Self>> {
         let joints = skeleton.joint_paths()?;
         let topology = Topology::from_joint_paths(&joints);
@@ -113,7 +113,7 @@ impl SkeletonResolver {
     /// `UsdSkelConcatJointTransforms`). `None` unless `local` holds one
     /// transform per joint.
     pub fn joint_local_to_skel_space(&self, local: &[gf::Mat4d]) -> Option<Vec<gf::Mat4d>> {
-        joint_local_to_skel_space(local, &self.topology)
+        joint_local_to_skel_space(local, &self.topology, None)
     }
 
     /// The joint-local transforms of this skeleton posed by an animation (C++

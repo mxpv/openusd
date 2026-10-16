@@ -66,7 +66,7 @@ mod skinning_query;
 mod topology;
 
 pub use anim_mapper::{AnimMapper, MISSING};
-pub use anim_query::{AnimQuery, JointTransformComponents};
+pub use anim_query::AnimQuery;
 pub use binding::{SkelBinding, discover_bindings, is_skinnable};
 pub use decode::{INBETWEENS_NAMESPACE, Inbetween};
 pub use skeleton_query::SkeletonResolver;

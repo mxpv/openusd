@@ -1145,10 +1145,7 @@ impl FromValueCast for Vec<gf::Quatf> {
     fn cast_from(value: Value) -> Result<Self, CastError> {
         match value {
             Value::QuatfVec(v) => Ok(v),
-            Value::QuatdVec(v) => Ok(v
-                .into_iter()
-                .map(|d| gf::quatf(d.w as f32, d.x as f32, d.y as f32, d.z as f32))
-                .collect()),
+            Value::QuatdVec(v) => Ok(v.into_iter().map(gf::Quatd::to_f32).collect()),
             Value::QuathVec(v) => Ok(v
                 .into_iter()
                 .map(|h| gf::quatf(f32::from(h.w), f32::from(h.x), f32::from(h.y), f32::from(h.z)))

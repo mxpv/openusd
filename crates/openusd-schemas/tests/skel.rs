@@ -6,7 +6,7 @@
 use openusd::Result;
 use openusd::gf::{self, Mat4d, Quatf, Vec3f};
 use openusd::sdf::{self, Value};
-use openusd::usd::{PrimPredicate, SchemaBase, Stage};
+use openusd::usd::{PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::BoundableSchema;
 use openusd_schemas::skel::{
@@ -334,7 +334,7 @@ fn skel_anim_query_orderings() -> Result<()> {
 }
 
 /// The times an animation is authored at: the joint transform samples are the
-/// union over translations, rotations and the unauthored scales, and the
+/// union over translations, rotations and the default-only scales, and the
 /// blend-shape weights have their own.
 #[test]
 fn skel_anim_query_time_samples() -> Result<()> {
@@ -353,9 +353,11 @@ fn skel_anim_query_time_samples() -> Result<()> {
 fn skel_anim_query_components_at_start_frame() -> Result<()> {
     let stage = open()?;
     let q = anim_query(&stage)?;
-    let (t, r, s) = q.joint_transform_components(0.0)?;
-    // Authored at t=0: hip is at (0, 1, 0), all rotations identity, scales
-    // unauthored so they default to unit.
+    let (t, r, s) = q
+        .joint_transform_components(TimeCode::new(0.0))?
+        .expect("authored components");
+    // Authored at t=0: hip is at (0, 1, 0), all rotations identity, and the
+    // default-only scales are unit.
     assert_eq!(t[1], Vec3f { x: 0.0, y: 1.0, z: 0.0 });
     assert_eq!(r[1], Quatf::IDENTITY);
     assert_eq!(s[1], Vec3f { x: 1.0, y: 1.0, z: 1.0 });
@@ -366,7 +368,9 @@ fn skel_anim_query_components_at_start_frame() -> Result<()> {
 fn skel_anim_query_components_lerp_at_midframe() -> Result<()> {
     let stage = open()?;
     let q = anim_query(&stage)?;
-    let (t, r, _) = q.joint_transform_components(5.0)?;
+    let (t, r, _) = q
+        .joint_transform_components(TimeCode::new(5.0))?
+        .expect("authored components");
     // Hip translation lerps from (0,1,0) at t=0 to (0,1.5,0) at t=10.
     assert!((t[1].y - 1.25).abs() < 1e-5, "hip y at t=5: got {}", t[1].y);
     // Hip rotation slerps from identity to ~45° about +Z; at t=5 ~22.5°.
@@ -381,10 +385,10 @@ fn skel_anim_query_components_lerp_at_midframe() -> Result<()> {
 fn skel_anim_query_blend_shape_weights_lerp() -> Result<()> {
     let stage = open()?;
     let q = anim_query(&stage)?;
-    assert_eq!(q.blend_shape_weights(0.0)?, vec![0.0]);
-    let w_mid = q.blend_shape_weights(5.0)?;
+    assert_eq!(q.blend_shape_weights(TimeCode::new(0.0))?, Some(vec![0.0]));
+    let w_mid = q.blend_shape_weights(TimeCode::new(5.0))?.expect("authored weights");
     assert!((w_mid[0] - 0.5).abs() < 1e-5, "midpoint weight: {}", w_mid[0]);
-    assert_eq!(q.blend_shape_weights(10.0)?, vec![1.0]);
+    assert_eq!(q.blend_shape_weights(TimeCode::new(10.0))?, Some(vec![1.0]));
     Ok(())
 }
 
@@ -395,7 +399,9 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
     let resolver = SkeletonResolver::from_skeleton(&skl)?.expect("valid topology");
 
-    let locals = q.joint_local_transforms(0.0)?;
+    let locals = q
+        .joint_local_transforms(TimeCode::new(0.0))?
+        .expect("authored components");
     assert_eq!(locals.len(), 3);
     // Hip's local at t=0 carries the (0,1,0) translation (row-major [12..15]).
     assert_eq!(locals[1].0[12..15], [0.0, 1.0, 0.0]);
@@ -812,5 +818,60 @@ def SkelRoot "R" {
     let resolver = SkinningResolver::new(&binding)?;
     assert_eq!(resolver.joint_order_len(), 0);
     assert!(resolver.rigid_transform(&[Mat4d::IDENTITY]).is_none());
+    Ok(())
+}
+
+/// The animation's arrays have no fallbacks, so a component with no value,
+/// one of the wrong type, or arrays that do not hold one entry per joint
+/// leave nothing to compose.
+#[test]
+fn anim_query_missing_components() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelAnimation "NoScales" {
+    uniform token[] joints = ["A", "A/B"]
+    float3[] translations = [(0, 0, 0), (0, 1, 0)]
+    quatf[] rotations = [(1, 0, 0, 0), (1, 0, 0, 0)]
+}
+def SkelAnimation "Blocked" {
+    uniform token[] joints = ["A", "A/B"]
+    float3[] translations = [(0, 0, 0), (0, 1, 0)]
+    quatf[] rotations = None
+    half3[] scales = [(1, 1, 1), (1, 1, 1)]
+}
+def SkelAnimation "Short" {
+    uniform token[] joints = ["A", "A/B"]
+    float3[] translations = [(0, 0, 0)]
+    quatf[] rotations = [(1, 0, 0, 0)]
+    half3[] scales = [(1, 1, 1)]
+}
+def SkelAnimation "Mismatched" {
+    uniform token[] joints = ["A", "A/B"]
+    float3[] translations = [(0, 0, 0), (0, 1, 0)]
+    quatf[] rotations = [(1, 0, 0, 0), (1, 0, 0, 0)]
+    half3[] scales = [(1, 1, 1)]
+    float[] blendShapeWeights = [0.5, 0.25, 1]
+}
+"#,
+    )?;
+    let query = |path: &str| -> Result<AnimQuery> {
+        let anim = Animation::get(&stage, path)?.expect("SkelAnimation");
+        Ok(AnimQuery::new(anim)?.expect("joints authored"))
+    };
+    for path in ["/NoScales", "/Blocked"] {
+        let q = query(path)?;
+        assert!(q.joint_transform_components(None)?.is_none(), "{path}");
+        assert!(q.joint_local_transforms(None)?.is_none(), "{path}");
+    }
+    // Components that read but do not hold one entry per joint compose
+    // nothing, though they are answered as authored.
+    let short = query("/Short")?;
+    assert!(short.joint_transform_components(None)?.is_some());
+    assert!(short.joint_local_transforms(None)?.is_none());
+    let mismatched = query("/Mismatched")?;
+    assert!(mismatched.joint_local_transforms(None)?.is_none());
+    // Weights are answered as authored; unauthored weights are `None`.
+    assert_eq!(mismatched.blend_shape_weights(None)?, Some(vec![0.5, 0.25, 1.0]));
+    assert!(short.blend_shape_weights(None)?.is_none());
     Ok(())
 }

@@ -142,6 +142,17 @@ impl Quatd {
             z: out[3],
         }
     }
+
+    /// The quaternion in single precision, each component rounded to the
+    /// nearest `f32`.
+    pub fn to_f32(self) -> Quatf {
+        Quatf {
+            w: self.w as f32,
+            x: self.x as f32,
+            y: self.y as f32,
+            z: self.z as f32,
+        }
+    }
 }
 
 impl From<[f64; 4]> for Quatd {

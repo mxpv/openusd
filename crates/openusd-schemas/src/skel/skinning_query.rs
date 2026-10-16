@@ -20,7 +20,7 @@ use openusd::{Error, Result, gf, sdf};
 
 use super::anim_mapper::AnimMapper;
 use super::binding::SkelBinding;
-use super::skinning::{rigid_skinning_transform, skin_normals_lbs, skin_points_lbs};
+use super::skinning::{has_shape, skin_normals, skin_points, skin_transform};
 use super::{InfluenceInterpolation, SkinningMethod};
 use crate::SchemaError;
 use crate::geom::{self, Primvar};
@@ -127,9 +127,8 @@ impl SkinningResolver {
     }
 
     /// Authored skinning method. Spec default is
-    /// [`SkinningMethod::ClassicLinear`]; consumers without dual-quaternion
-    /// support typically fall back to classic LBS even when the prim authors
-    /// `dualQuaternion`.
+    /// [`SkinningMethod::ClassicLinear`]. The skinning methods answer `None`
+    /// for `dualQuaternion`, which is not ported yet.
     pub fn skinning_method(&self) -> SkinningMethod {
         self.skinning_method
     }
@@ -153,19 +152,19 @@ impl SkinningResolver {
     /// `None` where the influences cannot skin `points`: they are not bound,
     /// their arrays do not fit `points`, or an index names no joint. `None`
     /// also when `skel_skinning_xforms` holds other than one transform per
-    /// skeleton joint.
+    /// skeleton joint, and for a `dualQuaternion` skinning method.
     pub fn skinned_points(&self, points: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Option<Vec<gf::Vec3f>> {
         let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
-        in_range(&self.joint_indices, &mesh_xforms)?;
         let (indices, weights) = self.varying_influences(points.len())?;
-        Some(skin_points_lbs(
+        skin_points(
+            self.skinning_method,
             points,
             &indices,
             &weights,
             self.influences_per_component(),
             self.geom_bind_transform,
             &mesh_xforms,
-        ))
+        )
     }
 
     /// Skin `normals` through the same influences as
@@ -174,38 +173,39 @@ impl SkinningResolver {
     /// transform. Each result is normalised.
     pub fn skinned_normals(&self, normals: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Option<Vec<gf::Vec3f>> {
         let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
-        in_range(&self.joint_indices, &mesh_xforms)?;
         let (indices, weights) = self.varying_influences(normals.len())?;
-        Some(skin_normals_lbs(
+        skin_normals(
+            self.skinning_method,
             normals,
             &indices,
             &weights,
             self.influences_per_component(),
             self.geom_bind_transform,
             &mesh_xforms,
-        ))
+        )
     }
 
     /// The single 4×4 to apply to a rigidly deformed prim's local-to-world
     /// transform (C++ `ComputeSkinnedTransform`).
     ///
     /// `None` for a prim whose influences are not constant, not bound, sized to
-    /// other than one element, or name a joint that does not exist, and when
+    /// other than one element, or name a joint that does not exist, when
     /// `skel_skinning_xforms` holds other than one transform per skeleton
-    /// joint.
+    /// joint, and for a `dualQuaternion` skinning method. The transform is
+    /// skinned as [`skin_transform_lbs`](super::skinning::skin_transform_lbs)
+    /// describes.
     pub fn rigid_transform(&self, skel_skinning_xforms: &[gf::Mat4d]) -> Option<gf::Mat4d> {
-        let (InfluenceInterpolation::Constant, element_size) = self.joint_influences()? else {
+        let (InfluenceInterpolation::Constant, _) = self.joint_influences()? else {
             return None;
         };
         let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
-        in_range(&self.joint_indices, &mesh_xforms)?;
-        Some(rigid_skinning_transform(
+        skin_transform(
+            self.skinning_method,
             &self.joint_indices,
             &self.joint_weights,
-            element_size,
             self.geom_bind_transform,
             &mesh_xforms,
-        ))
+        )
     }
 
     /// The bound influences, where their arrays agree in length, hold whole
@@ -215,7 +215,7 @@ impl SkinningResolver {
         let (interpolation, element_size) = self.influences?;
         let len = self.joint_indices.len();
         let fits = len == self.joint_weights.len()
-            && len.is_multiple_of(element_size)
+            && has_shape(len, element_size)
             && (interpolation == InfluenceInterpolation::Vertex || len == element_size);
         fits.then_some((interpolation, element_size))
     }
@@ -225,6 +225,9 @@ impl SkinningResolver {
     /// `ComputeVaryingJointInfluences`), or `None` where they do not fit.
     fn varying_influences(&self, count: usize) -> Option<Influences<'_>> {
         match self.joint_influences()? {
+            // TODO(perf): constant influences skin every point through one
+            // blended transform; expanding them repeats the same blend per
+            // point.
             (InfluenceInterpolation::Constant, _) => Some((
                 Cow::Owned(self.joint_indices.repeat(count)),
                 Cow::Owned(self.joint_weights.repeat(count)),
@@ -240,14 +243,6 @@ impl SkinningResolver {
 
 /// Joint indices and weights, one run of `elementSize` pairs per point.
 type Influences<'a> = (Cow<'a, [i32]>, Cow<'a, [f32]>);
-
-/// `Some` when every index in `indices` names one of `xforms`.
-fn in_range(indices: &[i32], xforms: &[gf::Mat4d]) -> Option<()> {
-    indices
-        .iter()
-        .all(|&index| usize::try_from(index).is_ok_and(|index| index < xforms.len()))
-        .then_some(())
-}
 
 /// The interpolation and `elementSize` the joint-influence primvars share, or
 /// `None` when either is unbound or the two disagree, the element size is not

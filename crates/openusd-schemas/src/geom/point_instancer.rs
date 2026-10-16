@@ -1112,8 +1112,7 @@ mod tests {
         instancer
             .create_scales_attr()?
             .set_at(vec![gf::vec3f(2.0, 2.0, 2.0); 2], START)?;
-        let quarter = gf::Rotation::new(gf::Vec3d::Z_AXIS, 90.0).quat();
-        let quarter = gf::quatf(quarter.w as f32, quarter.x as f32, quarter.y as f32, quarter.z as f32);
+        let quarter = gf::Rotation::new(gf::Vec3d::Z_AXIS, 90.0).quat().to_f32();
         instancer.create_orientationsf_attr()?.set_at(vec![quarter; 2], START)?;
         let placed = |position: [f64; 3], degrees: f64| {
             gf::Mat4d::scale([2.0, 2.0, 2.0])

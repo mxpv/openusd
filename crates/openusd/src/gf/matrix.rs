@@ -353,6 +353,13 @@ impl Mat4d {
         self.inverse_above(Self::SINGULAR_DETERMINANT)
     }
 
+    /// The inverse, or `f32::MAX` times the identity for a matrix whose
+    /// determinant is zero (C++ `GetInverse` at its default `eps` of zero).
+    pub fn inverse_or_max(self) -> Mat4d {
+        self.inverse_above(0.0)
+            .unwrap_or_else(|| Mat4d::scale([f64::from(f32::MAX); 3]))
+    }
+
     /// The inverse of a matrix whose determinant is greater than `epsilon`
     /// in magnitude, by cofactor expansion, and `None` for any other (C++
     /// `GetInverse` with its `eps` argument).

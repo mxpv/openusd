@@ -10,9 +10,8 @@
 //! sample.
 //!
 //! Built once over the prim, then queried at whatever stage times the
-//! consumer needs. Defaults for unauthored components match Pixar's
-//! reference: identity translation, identity quaternion, unit scale,
-//! zero blend-shape weight.
+//! consumer needs. The schema gives the animation's arrays no fallbacks, so a
+//! read answers `None` where an array has no value, as C++ answers `false`.
 //
 // TODO(perf): every read builds its attribute handle afresh and resolves
 // the value source again. C++ holds a `UsdAttributeQuery` per attribute,
@@ -26,12 +25,8 @@ use openusd::gf;
 use openusd::sdf::{self, Value};
 use openusd::usd::{Attribute, TimeCode};
 
+use super::skinning::{JointTransformComponents, make_transforms};
 use super::{Animation, AnimationSchema};
-
-/// Decomposed joint-local transforms at a stage time: one entry per
-/// joint, holding translation, rotation, and scale. Returned by
-/// [`AnimQuery::joint_transform_components`].
-pub type JointTransformComponents = (Vec<gf::Vec3f>, Vec<gf::Quatf>, Vec<gf::Vec3f>);
 
 /// Pre-resolved description of one `Animation` prim: the view itself,
 /// and the joint and blend-shape orderings as authored on it.
@@ -106,33 +101,42 @@ impl AnimQuery {
         ]
     }
 
-    /// Returns `(translations, rotations, scales)` at `time`. Each
-    /// vector has `joints.len()` entries. Components fall back to
-    /// the spec's identity values when not authored: zero translation,
-    /// identity quaternion `(w=1, x=y=z=0)`, unit scale.
-    pub fn joint_transform_components(&self, time: impl Into<TimeCode>) -> Result<JointTransformComponents> {
+    /// Returns `(translations, rotations, scales)` at `time`, `None` being
+    /// the default time (C++ `ComputeJointLocalTransformComponents`). `None`
+    /// when any of the three has no value at `time`: unauthored, blocked, or
+    /// not decodable as its declared array type. A component authored at
+    /// another precision of its type decodes, scales widened from `half3`.
+    /// The arrays are answered as authored, of whatever lengths.
+    pub fn joint_transform_components(
+        &self,
+        time: impl Into<Option<TimeCode>>,
+    ) -> Result<Option<JointTransformComponents>> {
         let time = time.into();
-        let n = self.joints.len();
-        let translations = array_at(&self.anim.translations_attr(), time, n, gf::Vec3f::default())?;
-        let rotations = array_at(&self.anim.rotations_attr(), time, n, gf::Quatf::IDENTITY)?;
-        let scales = array_at(&self.anim.scales_attr(), time, n, gf::vec3f(1.0, 1.0, 1.0))?;
-        Ok((translations, rotations, scales))
+        let Some(translations) = array_at(&self.anim.translations_attr(), time)? else {
+            return Ok(None);
+        };
+        let Some(rotations) = array_at(&self.anim.rotations_attr(), time)? else {
+            return Ok(None);
+        };
+        let Some(scales) = array_at(&self.anim.scales_attr(), time)? else {
+            return Ok(None);
+        };
+        Ok(Some((translations, rotations, scales)))
     }
 
-    /// Returns the joint-local 4×4 transform per joint at `time`, in the
-    /// animation's joint order, composed `scale · rotation · translation` in
-    /// USD's row-major convention.
-    /// [`super::SkeletonResolver::joint_local_transforms`] maps the result
-    /// onto a skeleton's joint order, ready for
-    /// [`super::SkeletonResolver::skinning_transforms_from_local`].
-    pub fn joint_local_transforms(&self, time: impl Into<TimeCode>) -> Result<Vec<gf::Mat4d>> {
-        let (translations, rotations, scales) = self.joint_transform_components(time.into())?;
-        Ok(translations
-            .iter()
-            .zip(rotations.iter())
-            .zip(scales.iter())
-            .map(|((t, r), s)| gf::Mat4d::from_trs(*t, *r, *s))
-            .collect())
+    /// Returns the joint-local 4×4 transform per joint at `time`,
+    /// composed `scale · rotation · translation` in USD's row-major
+    /// convention (C++ `ComputeJointLocalTransforms`). `None` when the
+    /// components have no value, differ in length, or do not hold one entry
+    /// per joint of [`joint_order`](Self::joint_order). The transforms are in
+    /// the animation's joint order.
+    pub fn joint_local_transforms(&self, time: impl Into<Option<TimeCode>>) -> Result<Option<Vec<gf::Mat4d>>> {
+        Ok(self
+            .joint_transform_components(time)?
+            .filter(|(translations, _, _)| translations.len() == self.joints.len())
+            .and_then(|(translations, rotations, scales): JointTransformComponents| {
+                make_transforms(&translations, &rotations, &scales)
+            }))
     }
 
     /// Every time at which a joint transform component is authored, across
@@ -160,31 +164,25 @@ impl AnimQuery {
         self.anim.blend_shape_weights_attr().time_samples_in(interval)
     }
 
-    /// Blend-shape weight per entry in
-    /// [`blend_shape_order`](Self::blend_shape_order) at `time`. Unauthored
-    /// weights default to zero (no contribution).
-    pub fn blend_shape_weights(&self, time: impl Into<TimeCode>) -> Result<Vec<f32>> {
-        array_at(
-            &self.anim.blend_shape_weights_attr(),
-            time.into(),
-            self.blend_shapes.len(),
-            0.0,
-        )
+    /// The blend-shape weights at `time`, as authored (C++
+    /// `ComputeBlendShapeWeights`). `None` when the weights have no value at
+    /// `time`. Their length is checked against
+    /// [`blend_shape_order`](Self::blend_shape_order) where they are remapped,
+    /// as in C++.
+    pub fn blend_shape_weights(&self, time: impl Into<Option<TimeCode>>) -> Result<Option<Vec<f32>>> {
+        array_at(&self.anim.blend_shape_weights_attr(), time.into())
     }
 }
 
-/// `attribute`'s value at `time` as `n` entries of `T`, whatever precision it
-/// was authored at, or `n` copies of `default` where it holds nothing of that
-/// shape.
-fn array_at<T: Clone>(attribute: &Attribute, time: TimeCode, n: usize, default: T) -> Result<Vec<T>>
+/// `attribute`'s value at `time` as an array of `T`, whatever precision it
+/// was authored at, or `None` where it holds no value of that shape.
+fn array_at<T>(attribute: &Attribute, time: Option<TimeCode>) -> Result<Option<Vec<T>>>
 where
     Vec<T>: sdf::FromValueCast,
 {
-    let array = attribute
+    Ok(attribute
         .get_at::<Value>(time)?
-        .and_then(|value| value.cast::<Vec<T>>().ok())
-        .filter(|array| array.len() == n);
-    Ok(array.unwrap_or_else(|| vec![default; n]))
+        .and_then(|value| value.cast::<Vec<T>>().ok()))
 }
 
 #[cfg(test)]
