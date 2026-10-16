@@ -339,9 +339,9 @@ fn array_len<T>(values: Option<Vec<T>>) -> usize {
 
 /// Visit the prim at `path` and then each of its ancestors below the
 /// pseudo-root, seen through `view`, and return the first `Some` that `visit`
-/// answers for a prim `view` sees. The walk the inherited `UsdGeom` queries
-/// share, each with the schema whose opinions it reads.
-fn nearest<V, T>(
+/// answers for a prim `view` sees. The walk the inherited `UsdGeom` and
+/// `UsdSkel` queries share, each with the schema whose opinions it reads.
+pub(crate) fn nearest<V, T>(
     stage: &usd::Stage,
     path: &sdf::Path,
     view: impl Fn(usd::Prim) -> Result<Option<V>>,

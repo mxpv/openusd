@@ -7,18 +7,40 @@
 use openusd::Result;
 use openusd::gf;
 use openusd::sdf::{self, Value};
-use openusd::tf;
-use openusd::usd::{SchemaBase, Stage};
+use openusd::usd::{Prim, Relationship, SchemaBase};
 
 use super::tokens;
-use super::{Animation, AnimationSchema, BindingAPI, BlendShape, InfluenceInterpolation, Skeleton, SkeletonSchema};
-use crate::geom::Primvar;
+use super::{Animation, AnimationSchema, BindingAPI, BlendShape, Skeleton, SkeletonSchema};
+use crate::geom;
 
 /// The namespace an inbetween shape is authored under (C++'s own
 /// `inbetweensPrefix`), which names no property and so has no token. The
 /// primvar metadata beside it does: `interpolation` and `elementSize` are
 /// `usdGeom`'s, which this family builds on.
 pub const INBETWEENS_NAMESPACE: &str = "inbetweens:";
+
+/// What a binding relationship (`skel:skeleton`, `skel:animationSource`)
+/// authors on one prim (C++ `UsdSkelBindingAPI::GetSkeleton` and
+/// `GetAnimationSource`). `Unauthored` is their `false` answer.
+pub(super) enum Bound<T> {
+    /// The relationship authors no targets. An ancestor's binding reaches the
+    /// prim.
+    Unauthored,
+    /// The relationship authors targets, and binds the prim its first target
+    /// names where that is a valid `T`. An empty target list, or a target that
+    /// is not a `T`, binds nothing and still overrides an ancestor's binding.
+    Authored(Option<T>),
+}
+
+impl<T> Bound<T> {
+    /// The bound `T`, or `None` where the relationship binds nothing.
+    fn into_bound(self) -> Option<T> {
+        match self {
+            Bound::Unauthored => None,
+            Bound::Authored(bound) => bound,
+        }
+    }
+}
 impl Skeleton {
     /// The `joints` paths as text, which the topology is read from; empty when
     /// unauthored.
@@ -118,29 +140,45 @@ impl BlendShape {
 }
 
 impl BindingAPI {
-    /// The `skel:skeleton` target authored directly on this prim (C++
-    /// `GetSkeleton`), or `None` when only inherited.
-    pub fn skeleton(&self) -> Result<Option<sdf::Path>> {
-        Ok(self.skeleton_rel().targets()?.into_iter().next())
+    /// The skeleton `skel:skeleton` binds on this prim itself (C++
+    /// `GetSkeleton`): `None` when nothing is authored here, when the authored
+    /// target list is empty, or when its first target is not a valid
+    /// [`Skeleton`].
+    pub fn skeleton(&self) -> Result<Option<Skeleton>> {
+        Ok(self.bound_skeleton()?.into_bound())
     }
 
-    /// The `skel:animationSource` target authored directly on this prim
-    /// (C++ `GetAnimationSource`), or `None` when only inherited.
-    pub fn animation_source(&self) -> Result<Option<sdf::Path>> {
-        Ok(self.animation_source_rel().targets()?.into_iter().next())
+    /// The animation `skel:animationSource` binds on this prim itself (C++
+    /// `GetAnimationSource`), under the same rules as
+    /// [`skeleton`](Self::skeleton).
+    pub fn animation_source(&self) -> Result<Option<Animation>> {
+        Ok(self.bound_animation_source()?.into_bound())
     }
 
-    /// Resolve the inherited `skel:skeleton` by walking this prim and its
-    /// ancestors for the nearest authored binding (C++
-    /// `UsdSkelBindingAPI::GetInheritedSkeleton` via `UsdSkelCache`).
-    pub fn inherited_skeleton(&self) -> Result<Option<sdf::Path>> {
-        inherited_rel(self.stage(), self.path(), tokens::SKEL_SKELETON)
+    /// The skeleton bound on the nearest of this prim and its ancestors that
+    /// carries `BindingAPI` and authors `skel:skeleton` (C++
+    /// `GetInheritedSkeleton`). An authored binding that names no valid
+    /// skeleton stops the walk and answers `None`.
+    pub fn inherited_skeleton(&self) -> Result<Option<Skeleton>> {
+        inherited(self, BindingAPI::bound_skeleton)
     }
 
-    /// Resolve the inherited `skel:animationSource`; same rules as
-    /// [`Self::inherited_skeleton`].
-    pub fn inherited_animation_source(&self) -> Result<Option<sdf::Path>> {
-        inherited_rel(self.stage(), self.path(), tokens::SKEL_ANIMATION_SOURCE)
+    /// The animation bound on the nearest of this prim and its ancestors that
+    /// carries `BindingAPI` and authors `skel:animationSource` (C++
+    /// `GetInheritedAnimationSource`), under the same rules as
+    /// [`inherited_skeleton`](Self::inherited_skeleton).
+    pub fn inherited_animation_source(&self) -> Result<Option<Animation>> {
+        inherited(self, BindingAPI::bound_animation_source)
+    }
+
+    /// The `skel:skeleton` binding authored on this prim.
+    pub(super) fn bound_skeleton(&self) -> Result<Bound<Skeleton>> {
+        bound(&self.skeleton_rel(), Skeleton::from_prim)
+    }
+
+    /// The `skel:animationSource` binding authored on this prim.
+    fn bound_animation_source(&self) -> Result<Bound<Animation>> {
+        bound(&self.animation_source_rel(), Animation::from_prim)
     }
 
     /// Decoded `skel:joints` subset (empty when unauthored).
@@ -152,22 +190,6 @@ impl BindingAPI {
     pub fn blend_shape_targets(&self) -> Result<Vec<sdf::Path>> {
         self.blend_shape_targets_rel().targets()
     }
-
-    /// `elementSize` on the joint-influence primvars — the number of
-    /// `(joint, weight)` pairs per element; 1 where none is authored.
-    pub fn element_size(&self) -> Result<i32> {
-        Primvar::new(self.joint_indices_attr()).element_size()
-    }
-
-    /// `interpolation` on the joint-influence primvars, which is
-    /// [`InfluenceInterpolation::Constant`] where none is authored, as it is
-    /// for every primvar.
-    pub fn interpolation(&self) -> Result<InfluenceInterpolation> {
-        Ok(self
-            .joint_indices_attr()
-            .metadata::<InfluenceInterpolation>(crate::geom::tokens::INTERPOLATION)?
-            .unwrap_or_default())
-    }
 }
 
 impl Animation {
@@ -178,22 +200,29 @@ impl Animation {
     }
 }
 
-/// Walk `prim` and its ancestors for the nearest authored `rel_name` target.
-/// `skel:skeleton` / `skel:animationSource` inherit down namespace regardless
-/// of where `BindingAPI` is formally applied.
-fn inherited_rel(stage: &Stage, prim: &sdf::Path, rel_name: impl Into<tf::Token>) -> Result<Option<sdf::Path>> {
-    let rel_name = rel_name.into();
-    let mut cur = prim.clone();
-    loop {
-        let rel = cur.append_property(&rel_name)?;
-        if let Some(target) = stage.relationship(rel)?.targets()?.into_iter().next() {
-            return Ok(Some(target));
-        }
-        match cur.parent() {
-            Some(p) if !cur.is_abs_root() => cur = p,
-            _ => return Ok(None),
-        }
+/// The binding `rel` authors, its first forwarded target viewed through `view`
+/// (C++ `_GetFirstTargetPrimForRel`).
+fn bound<T>(rel: &Relationship, view: fn(Prim) -> Result<Option<T>>) -> Result<Bound<T>> {
+    if !rel.has_authored_targets()? {
+        return Ok(Bound::Unauthored);
     }
+    let Some(target) = rel.forwarded_targets()?.into_iter().next().filter(sdf::Path::is_prim) else {
+        return Ok(Bound::Authored(None));
+    };
+    let prim = rel.stage().prim(target)?;
+    Ok(Bound::Authored(if prim.is_valid()? { view(prim)? } else { None }))
+}
+
+/// The binding `bound` reads off the nearest of `binding`'s prim and its
+/// ancestors that carries `BindingAPI` and authors one.
+fn inherited<T>(binding: &BindingAPI, bound: fn(&BindingAPI) -> Result<Bound<T>>) -> Result<Option<T>> {
+    let found = geom::nearest(binding.stage(), binding.path(), BindingAPI::from_prim, |ancestor| {
+        Ok(match bound(ancestor)? {
+            Bound::Authored(found) => Some(found),
+            Bound::Unauthored => None,
+        })
+    })?;
+    Ok(found.flatten())
 }
 
 #[cfg(test)]
@@ -212,6 +241,7 @@ mod tests {
         // applied to a prim, so both exist before it is.
         stage.define_prim("/Char")?;
         stage.define_prim("/Char/Body")?;
+        Skeleton::define(&stage, "/Char/Rig")?;
         let root = BindingAPI::apply(&stage.prim("/Char")?)?;
         root.create_skeleton_rel()?.add_target("/Char/Rig")?;
 
@@ -223,32 +253,12 @@ mod tests {
         let body = BindingAPI::get(&stage, "/Char/Body")?.expect("BindingAPI");
         assert!(body.skeleton()?.is_none()); // not authored directly
         assert_eq!(
-            body.inherited_skeleton()?.map(|p| p.as_str().to_string()),
-            Some("/Char/Rig".to_string())
+            body.inherited_skeleton()?.map(|s| s.path().clone()),
+            Some(sdf::path("/Char/Rig")?)
         );
         assert_eq!(body.joint_indices()?, Some(vec![0, 1]));
         assert_eq!(body.joint_weights()?, Some(vec![1.0, 1.0]));
         assert_eq!(body.skinning_method()?, Some(SkinningMethod::ClassicLinear));
-        Ok(())
-    }
-
-    /// The joint influences are primvars, so with nothing authored they are
-    /// constant and one value per element, and the authored metadata reads
-    /// back.
-    #[test]
-    fn unauthored_interpolation_constant() -> Result<()> {
-        let stage = crate::tests::stage("anon.usda")?;
-        stage.define_prim("/Body")?;
-        let body = BindingAPI::apply(&stage.prim("/Body")?)?;
-        let indices = body.create_joint_indices_attr()?.set(Value::IntVec(vec![0, 1]))?;
-        assert_eq!(body.interpolation()?, InfluenceInterpolation::Constant);
-        assert_eq!(body.element_size()?, 1);
-
-        indices
-            .set_metadata(crate::geom::tokens::INTERPOLATION, InfluenceInterpolation::Vertex)?
-            .set_metadata(crate::geom::tokens::ELEMENT_SIZE, Value::Int(2))?;
-        assert_eq!(body.interpolation()?, InfluenceInterpolation::Vertex);
-        assert_eq!(body.element_size()?, 2);
         Ok(())
     }
 

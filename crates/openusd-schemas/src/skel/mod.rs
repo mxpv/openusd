@@ -24,7 +24,8 @@
 //! The static resolvers ([`SkeletonResolver`] / [`SkinningResolver`]) take
 //! pre-evaluated joint poses, so callers typically wire `AnimQuery` into
 //! them at each frame. [`discover_bindings`] walks a `Root` subtree and
-//! resolves every skinnable prim's inherited skeleton + animation source
+//! resolves every skinnable prim's inherited skeleton and binding properties,
+//! with the animation bound to that skeleton
 //! (C++ `UsdSkelCache::ComputeSkelBindings`).
 //!
 //! # Conventions
@@ -66,7 +67,7 @@ mod topology;
 
 pub use anim_mapper::{AnimMapper, MISSING};
 pub use anim_query::{AnimQuery, JointTransformComponents};
-pub use binding::{SkelBinding, discover_bindings};
+pub use binding::{SkelBinding, discover_bindings, is_skinnable};
 pub use decode::{INBETWEENS_NAMESPACE, Inbetween};
 pub use skeleton_query::SkeletonResolver;
 pub use skinning_query::SkinningResolver;

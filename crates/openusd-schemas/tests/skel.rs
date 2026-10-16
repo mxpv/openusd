@@ -7,11 +7,15 @@ use openusd::Result;
 use openusd::gf::{self, Mat4d, Quatf, Vec3f};
 use openusd::sdf::{self, Value};
 use openusd::usd::{PrimPredicate, SchemaBase, Stage};
+use openusd_schemas::SchemaError;
 use openusd_schemas::geom::BoundableSchema;
 use openusd_schemas::skel::{
-    AnimMapper, AnimQuery, Animation, BindingAPI, BlendShape, BlendShapeSchema, InfluenceInterpolation, NO_PARENT,
-    Root, Skeleton, SkeletonResolver, SkeletonSchema, SkinningMethod, SkinningResolver, Topology, discover_bindings,
+    AnimMapper, AnimQuery, Animation, BindingAPI, BlendShape, BlendShapeSchema, NO_PARENT, Root, SkelBinding, Skeleton,
+    SkeletonResolver, SkeletonSchema, SkinningMethod, SkinningResolver, Topology, discover_bindings,
 };
+
+mod common;
+use common::from_usda;
 
 const FIXTURE: &str = "fixtures/usdSkel_scene.usda";
 
@@ -146,8 +150,6 @@ fn reads_skel_binding_on_mesh() -> Result<()> {
     assert_eq!(bind.joint_subset()?, vec!["Root/Hip", "Root/Hip/Knee"]);
     assert_eq!(bind.joint_indices()?, Some(vec![0, 0, 1, 1]));
     assert_eq!(bind.joint_weights()?, Some(vec![1.0, 1.0, 1.0, 1.0]));
-    assert_eq!(bind.element_size()?, 1);
-    assert_eq!(bind.interpolation()?, InfluenceInterpolation::Vertex);
     assert_eq!(bind.blend_shapes()?.expect("authored"), vec!["smile"]);
     assert_eq!(bind.blend_shape_targets()?, vec![sdf::path("/World/Character/Smile")?]);
     assert!(bind.geom_bind_transform()?.is_some());
@@ -161,12 +163,12 @@ fn resolves_inherited_skeleton_and_animation_source() -> Result<()> {
     let bind = BindingAPI::get(&stage, "/World/Character/Body")?.expect("BindingAPI");
 
     assert_eq!(
-        bind.inherited_skeleton()?.map(|p| p.as_str().to_string()),
-        Some("/World/Character/Rig".to_string())
+        bind.inherited_skeleton()?.map(|s| s.path().clone()),
+        Some(sdf::path("/World/Character/Rig")?)
     );
     assert_eq!(
-        bind.inherited_animation_source()?.map(|p| p.as_str().to_string()),
-        Some("/World/Character/Anim".to_string())
+        bind.inherited_animation_source()?.map(|a| a.path().clone()),
+        Some(sdf::path("/World/Character/Anim")?)
     );
     Ok(())
 }
@@ -181,23 +183,29 @@ fn finds_skel_roots_on_stage() -> Result<()> {
 #[test]
 fn discover_bindings_walks_skel_root_subtree() -> Result<()> {
     let stage = open()?;
-    let bindings = discover_bindings(&stage, &sdf::path("/World/Character")?)?;
-    // The Root itself + the Body mesh both carry BindingAPI.
-    assert_eq!(bindings.len(), 2);
-
-    let body = bindings
-        .iter()
-        .find(|b| b.prim == "/World/Character/Body")
-        .expect("Body binding");
-    // The Body itself doesn't author skel:skeleton — it's inherited from the
-    // Root.
-    assert!(body.binding.skeleton()?.is_none());
-    assert_eq!(body.skeleton.as_ref().map(|p| p.as_str()), Some("/World/Character/Rig"));
+    let bindings = discover_bindings(&root(&stage, "/World/Character")?)?;
+    // The Root carries BindingAPI too, but only the Body mesh is skinnable.
+    assert_eq!(bindings.len(), 1);
+    let body = &bindings[0];
+    assert_eq!(body.prim.path().as_str(), "/World/Character/Body");
+    // The Body doesn't author skel:skeleton; it's inherited from the Root.
+    assert_eq!(body.skeleton.path().as_str(), "/World/Character/Rig");
     assert_eq!(
-        body.animation_source.as_ref().map(|p| p.as_str()),
+        body.animation_source.as_ref().map(|a| a.path().as_str()),
         Some("/World/Character/Anim")
     );
     Ok(())
+}
+
+fn root(stage: &Stage, path: &str) -> Result<Root> {
+    Ok(Root::get(stage, path)?.expect("Root"))
+}
+
+/// The binding `discover_bindings` finds for `prim` beneath the Root at
+/// `root_path`.
+fn binding_of(stage: &Stage, root_path: &str, prim: &str) -> Result<Option<SkelBinding>> {
+    let bindings = discover_bindings(&root(stage, root_path)?)?;
+    Ok(bindings.into_iter().find(|b| b.prim.path().as_str() == prim))
 }
 
 #[test]
@@ -220,11 +228,10 @@ fn skeleton_resolver_pre_computes_inverse_bind() -> Result<()> {
 }
 
 #[test]
-fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<()> {
+fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<(), SchemaError> {
     let stage = open()?;
-    let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
-    let binding = BindingAPI::get(&stage, "/World/Character/Body")?.unwrap();
-    let resolver = SkinningResolver::from_binding(&binding, &skl.joint_paths()?)?;
+    let binding = binding_of(&stage, "/World/Character", "/World/Character/Body")?.expect("Body binding");
+    let resolver = SkinningResolver::new(&binding)?;
 
     assert!(!resolver.is_rigidly_deformed());
     assert!(resolver.has_joint_influences());
@@ -243,11 +250,10 @@ fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<()> {
 }
 
 #[test]
-fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<()> {
+fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(), SchemaError> {
     let stage = open()?;
-    let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
-    let binding = BindingAPI::get(&stage, "/World/Character/Body")?.unwrap();
-    let resolver = SkinningResolver::from_binding(&binding, &skl.joint_paths()?)?;
+    let binding = binding_of(&stage, "/World/Character", "/World/Character/Body")?.expect("Body binding");
+    let resolver = SkinningResolver::new(&binding)?;
 
     let pts = [
         Vec3f {
@@ -269,7 +275,9 @@ fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(
     ];
     let identity = Mat4d::IDENTITY;
     let skel_xforms = vec![identity; 3];
-    let out = resolver.skinned_points(&pts, &skel_xforms);
+    let out = resolver
+        .skinned_points(&pts, &skel_xforms)
+        .expect("per-vertex influences");
     // Identity geom-bind + identity joints + weight 1.0 = no movement.
     for (i, p) in out.iter().enumerate() {
         let want = pts[i];
@@ -442,5 +450,260 @@ fn skeleton_roundtrip_and_topology() -> Result<()> {
     assert_eq!(skel.joint_parent_indices()?, vec![None, Some(0), Some(1)]);
     assert_eq!(skel.joint_short_names()?, vec!["Root", "Hip", "Knee"]);
     assert_eq!(skel.map_anim_joints(&["Root/Hip".to_string()])?, vec![Some(1)]);
+    Ok(())
+}
+
+#[test]
+fn binding_props_inherit() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A", "A/B"]
+    }
+    def Xform "G" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        uniform token[] skel:joints = ["A/B"]
+        matrix4d primvars:skel:geomBindTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) )
+        int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
+        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+        def Mesh "M" {}
+    }
+}
+"#,
+    )?;
+    let binding = binding_of(&stage, "/R", "/R/G/M")?.expect("M binding");
+    assert_eq!(binding.skeleton.path().as_str(), "/R/Rig");
+    let resolver = SkinningResolver::new(&binding)?;
+    assert!(resolver.has_joint_influences());
+    assert!(resolver.is_rigidly_deformed());
+    assert_eq!(resolver.joint_order_len(), 1);
+    assert_eq!(resolver.geom_bind_transform(), Mat4d::translation([1.0, 0.0, 0.0]));
+
+    // Joint `A/B` is skeleton joint 1; the constant influence applies to every
+    // point, after the geom bind transform.
+    let xforms = [Mat4d::IDENTITY, Mat4d::translation([0.0, 2.0, 0.0])];
+    let rigid = resolver.rigid_transform(&xforms).expect("constant influences");
+    assert_eq!(rigid, Mat4d::translation([1.0, 2.0, 0.0]));
+    let points = resolver
+        .skinned_points(&[Vec3f::default(), gf::vec3f(1.0, 0.0, 0.0)], &xforms)
+        .expect("constant influences");
+    assert_eq!(points, vec![gf::vec3f(1.0, 2.0, 0.0), gf::vec3f(2.0, 2.0, 0.0)]);
+    Ok(())
+}
+
+#[test]
+fn binding_above_root_ignored() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def Xform "W" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:skeleton = </W/Rig>
+    def Skeleton "Rig" {}
+    def SkelRoot "R" {
+        def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {}
+    }
+}
+"#,
+    )?;
+    // The inherited lookup walks to the pseudo-root; discovery starts at the
+    // Root.
+    let mesh = BindingAPI::get(&stage, "/W/R/M")?.expect("BindingAPI");
+    assert_eq!(
+        mesh.inherited_skeleton()?.map(|s| s.path().clone()),
+        Some(sdf::path("/W/Rig")?)
+    );
+    assert!(discover_bindings(&root(&stage, "/W/R")?)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn empty_skeleton_rel_blocks() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:skeleton = </R/Rig>
+    def Skeleton "Rig" {}
+    def Xform "G" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = []
+        def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {}
+    }
+}
+"#,
+    )?;
+    let mesh = BindingAPI::get(&stage, "/R/G/M")?.expect("BindingAPI");
+    assert!(mesh.inherited_skeleton()?.is_none());
+    assert!(discover_bindings(&root(&stage, "/R")?)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn non_api_rel_ignored() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:skeleton = </R/Rig>
+    def Skeleton "Rig" {}
+    def Skeleton "Other" {}
+    def Xform "G" {
+        rel skel:skeleton = </R/Other>
+        def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {}
+    }
+}
+"#,
+    )?;
+    let mesh = BindingAPI::get(&stage, "/R/G/M")?.expect("BindingAPI");
+    assert_eq!(
+        mesh.inherited_skeleton()?.map(|s| s.path().clone()),
+        Some(sdf::path("/R/Rig")?)
+    );
+    let binding = binding_of(&stage, "/R", "/R/G/M")?.expect("M binding");
+    assert_eq!(binding.skeleton.path().as_str(), "/R/Rig");
+    Ok(())
+}
+
+#[test]
+fn discovery_prunes_subtrees() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:skeleton = </R/Rig>
+    def Skeleton "Rig" {}
+    def Mesh "M" {
+        def Mesh "Nested" {}
+    }
+    def "Untyped" {
+        def Mesh "Hidden" {}
+    }
+    def Scope "S" {
+        def Mesh "Found" {}
+    }
+}
+"#,
+    )?;
+    let bindings = discover_bindings(&root(&stage, "/R")?)?;
+    let prims: Vec<_> = bindings.iter().map(|b| b.prim.path().as_str().to_string()).collect();
+    assert_eq!(prims, vec!["/R/M", "/R/S/Found"]);
+    Ok(())
+}
+
+#[test]
+fn inactive_skeleton_skipped() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:skeleton = </R/Rig>
+    def Skeleton "Rig" (active = false) {}
+    def Mesh "M" {}
+}
+"#,
+    )?;
+    assert!(discover_bindings(&root(&stage, "/R")?)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mismatched_influences_rejected() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A"]
+    }
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        int[] primvars:skel:jointIndices = [0, 0] (interpolation = "vertex" elementSize = 1)
+        float[] primvars:skel:jointWeights = [1, 0] (interpolation = "vertex" elementSize = 2)
+    }
+}
+"#,
+    )?;
+    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    let resolver = SkinningResolver::new(&binding)?;
+    assert!(!resolver.has_joint_influences());
+    assert!(resolver.is_rigidly_deformed());
+    assert!(resolver.rigid_transform(&[Mat4d::IDENTITY]).is_none());
+    assert!(
+        resolver
+            .skinned_points(&[Vec3f::default(); 2], &[Mat4d::IDENTITY])
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn unknown_interpolation_rejected() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A"]
+    }
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        int[] primvars:skel:jointIndices = [0] (interpolation = "bogus")
+        float[] primvars:skel:jointWeights = [1] (interpolation = "bogus")
+    }
+}
+"#,
+    )?;
+    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    assert!(!SkinningResolver::new(&binding)?.has_joint_influences());
+    Ok(())
+}
+
+#[test]
+fn bad_joint_index_skips() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A"]
+    }
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        int[] primvars:skel:jointIndices = [0, 3] (interpolation = "vertex")
+        float[] primvars:skel:jointWeights = [1, 1] (interpolation = "vertex")
+    }
+}
+"#,
+    )?;
+    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    let resolver = SkinningResolver::new(&binding)?;
+    assert!(resolver.has_joint_influences());
+    assert!(
+        resolver
+            .skinned_points(&[Vec3f::default(); 2], &[Mat4d::IDENTITY])
+            .is_none()
+    );
+    // The influences fit three points no better than they name joints.
+    assert!(
+        resolver
+            .skinned_points(&[Vec3f::default(); 3], &[Mat4d::IDENTITY; 4])
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn anim_source_from_skeleton() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:skeleton = </R/Rig>
+    rel skel:animationSource = </R/MeshAnim>
+    def Skeleton "Rig" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:animationSource = </R/RigAnim>
+    }
+    def SkelAnimation "MeshAnim" {}
+    def SkelAnimation "RigAnim" {}
+    def Mesh "M" {}
+}
+"#,
+    )?;
+    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    assert_eq!(
+        binding.animation_source.as_ref().map(|a| a.path().as_str()),
+        Some("/R/RigAnim")
+    );
     Ok(())
 }

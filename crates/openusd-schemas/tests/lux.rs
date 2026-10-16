@@ -16,23 +16,15 @@ use openusd_schemas::lux::{
     TextureFormat,
 };
 
+mod common;
+use common::from_usda;
+
 const FIXTURE: &str = "fixtures/usdLux_scene.usda";
 
 fn open() -> Result<Stage> {
     Stage::builder()
         .schema_registry(openusd_schemas::schema_registry())
         .open(FIXTURE)
-}
-
-/// Open an in-memory stage from `usda` source for the API / animation tests.
-fn from_usda(usda: &str) -> Result<Stage> {
-    // Persist the tempdir so it outlives the stage; the process exits at test
-    // end, so the OS reclaims it.
-    let path = tempfile::tempdir()?.keep().join("scene.usda");
-    std::fs::write(&path, usda)?;
-    Stage::builder()
-        .schema_registry(openusd_schemas::schema_registry())
-        .open(path.to_str().unwrap())
 }
 
 #[test]

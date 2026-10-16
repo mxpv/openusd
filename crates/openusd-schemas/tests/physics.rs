@@ -12,23 +12,15 @@ use openusd_schemas::physics::{
     RevoluteJointSchema, RigidBodyAPI, Scene, SceneSchema, SphericalJointSchema,
 };
 
+mod common;
+use common::from_usda;
+
 const FIXTURE: &str = "fixtures/usdPhysics_scene.usda";
 
 fn open() -> Result<usd::Stage> {
     usd::Stage::builder()
         .schema_registry(openusd_schemas::schema_registry())
         .open(FIXTURE)
-}
-
-/// A stage opened from `usda` source, for the scenes a fixture does not carry.
-fn from_usda(usda: &str) -> Result<Stage> {
-    // Persist the tempdir so it outlives the stage; the process exits at test
-    // end, so the OS reclaims it.
-    let path = tempfile::tempdir()?.keep().join("scene.usda");
-    std::fs::write(&path, usda)?;
-    Stage::builder()
-        .schema_registry(openusd_schemas::schema_registry())
-        .open(path.to_str().unwrap())
 }
 
 #[test]
